@@ -56,11 +56,13 @@ func getBinaryLiteral(value string) types.BinaryLiteral {
 
 func getUnsignedFieldType() *types.FieldType {
 	tp := types.NewFieldType(mysql.TypeLonglong)
-	tp.AddFlag(mysql.UnsignedFlag)
+	tp.Flag |= mysql.UnsignedFlag
 	return tp
 }
 
 func TestCalcFraction(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		lower    types.Datum
 		upper    types.Datum
@@ -177,6 +179,8 @@ func TestCalcFraction(t *testing.T) {
 }
 
 func TestEnumRangeValues(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		low         types.Datum
 		high        types.Datum

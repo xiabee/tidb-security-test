@@ -30,7 +30,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/testkit/testutil"
+	"github.com/pingcap/tidb/testkit/trequire"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/mock"
@@ -40,6 +40,7 @@ import (
 )
 
 func TestDate(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tblDate := []struct {
 		Input  interface{}
@@ -107,7 +108,7 @@ func TestDate(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Expect"][0], v)
+		trequire.DatumEqual(t, c["Expect"][0], v)
 	}
 
 	// test year, month and day
@@ -137,42 +138,42 @@ func TestDate(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Year"][0], v)
+		trequire.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Month"][0], v)
+		trequire.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["MonthName"][0], v)
+		trequire.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
+		trequire.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
+		trequire.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfYear"][0], v)
+		trequire.DatumEqual(t, c["DayOfYear"][0], v)
 
 		fc = funcs[ast.Weekday]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
@@ -180,35 +181,35 @@ func TestDate(t *testing.T) {
 		require.NotNil(t, f)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekDay"][0], v)
+		trequire.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayName"][0], v)
+		trequire.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Week"][0], v, fmt.Sprintf("no.%d", ith))
+		trequire.DatumEqual(t, c["Week"][0], v, fmt.Sprintf("no.%d", ith))
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
+		trequire.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["YearWeek"][0], v, fmt.Sprintf("no.%d", ith))
+		trequire.DatumEqual(t, c["YearWeek"][0], v, fmt.Sprintf("no.%d", ith))
 	}
 
 	// test nil
@@ -238,42 +239,42 @@ func TestDate(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Year"][0], v)
+		trequire.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Month"][0], v)
+		trequire.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["MonthName"][0], v)
+		trequire.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
+		trequire.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
+		trequire.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfYear"][0], v)
+		trequire.DatumEqual(t, c["DayOfYear"][0], v)
 
 		fc = funcs[ast.Weekday]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
@@ -281,35 +282,35 @@ func TestDate(t *testing.T) {
 		require.NotNil(t, f)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekDay"][0], v)
+		trequire.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayName"][0], v)
+		trequire.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Week"][0], v)
+		trequire.DatumEqual(t, c["Week"][0], v)
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
+		trequire.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["YearWeek"][0], v)
+		trequire.DatumEqual(t, c["YearWeek"][0], v)
 	}
 
 	// test nil with 'NO_ZERO_DATE' set in sql_mode
@@ -341,42 +342,42 @@ func TestDate(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Year"][0], v)
+		trequire.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Month"][0], v)
+		trequire.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["MonthName"][0], v)
+		trequire.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
+		trequire.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
+		trequire.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayOfYear"][0], v)
+		trequire.DatumEqual(t, c["DayOfYear"][0], v)
 
 		fc = funcs[ast.Weekday]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
@@ -384,39 +385,40 @@ func TestDate(t *testing.T) {
 		require.NotNil(t, f)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekDay"][0], v)
+		trequire.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["DayName"][0], v)
+		trequire.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Week"][0], v)
+		trequire.DatumEqual(t, c["Week"][0], v)
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
+		trequire.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["YearWeek"][0], v)
+		trequire.DatumEqual(t, c["YearWeek"][0], v)
 	}
 }
 
 func TestMonthName(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -453,6 +455,7 @@ func TestMonthName(t *testing.T) {
 }
 
 func TestDayName(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -491,6 +494,7 @@ func TestDayName(t *testing.T) {
 }
 
 func TestDayOfWeek(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -527,6 +531,7 @@ func TestDayOfWeek(t *testing.T) {
 }
 
 func TestDayOfMonth(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -563,6 +568,7 @@ func TestDayOfMonth(t *testing.T) {
 }
 
 func TestDayOfYear(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -599,6 +605,7 @@ func TestDayOfYear(t *testing.T) {
 }
 
 func TestDateFormat(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// Test case for https://github.com/pingcap/tidb/issues/2908
 	// SELECT DATE_FORMAT(null,'%Y-%M-%D')
@@ -640,11 +647,12 @@ func TestDateFormat(t *testing.T) {
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		comment := fmt.Sprintf("no.%d\nobtain:%v\nexpect:%v\n", i, v.GetValue(), c["Expect"][0].GetValue())
-		testutil.DatumEqual(t, c["Expect"][0], v, comment)
+		trequire.DatumEqual(t, c["Expect"][0], v, comment)
 	}
 }
 
 func TestClock(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// test hour, minute, second, micro second
 
@@ -668,35 +676,35 @@ func TestClock(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Hour"][0], v)
+		trequire.DatumEqual(t, c["Hour"][0], v)
 
 		fc = funcs[ast.Minute]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Minute"][0], v)
+		trequire.DatumEqual(t, c["Minute"][0], v)
 
 		fc = funcs[ast.Second]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Second"][0], v)
+		trequire.DatumEqual(t, c["Second"][0], v)
 
 		fc = funcs[ast.MicroSecond]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["MicroSecond"][0], v)
+		trequire.DatumEqual(t, c["MicroSecond"][0], v)
 
 		fc = funcs[ast.Time]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, c["Time"][0], v)
+		trequire.DatumEqual(t, c["Time"][0], v)
 	}
 
 	// nil
@@ -777,6 +785,7 @@ func TestClock(t *testing.T) {
 }
 
 func TestTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	cases := []struct {
 		args     interface{}
@@ -796,11 +805,11 @@ func TestTime(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Time, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 		tp := f.GetType()
-		require.Equal(t, mysql.TypeDuration, tp.GetType())
-		require.Equal(t, charset.CharsetBin, tp.GetCharset())
-		require.Equal(t, charset.CollationBin, tp.GetCollate())
-		require.Equal(t, mysql.BinaryFlag, tp.GetFlag()&mysql.BinaryFlag)
-		require.Equal(t, c.flen, tp.GetFlen())
+		require.Equal(t, mysql.TypeDuration, tp.Tp)
+		require.Equal(t, charset.CharsetBin, tp.Charset)
+		require.Equal(t, charset.CollationBin, tp.Collate)
+		require.Equal(t, mysql.BinaryFlag, tp.Flag&mysql.BinaryFlag)
+		require.Equal(t, c.flen, tp.Flen)
 		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
@@ -823,6 +832,7 @@ func resetStmtContext(ctx sessionctx.Context) {
 }
 
 func TestNowAndUTCTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	gotime := func(typ types.Time, l *time.Location) time.Time {
 		tt, err := typ.GoTime(l)
@@ -889,6 +899,7 @@ func TestNowAndUTCTimestamp(t *testing.T) {
 }
 
 func TestIsDuration(t *testing.T) {
+	t.Parallel()
 	tbl := []struct {
 		Input  string
 		expect bool
@@ -910,6 +921,7 @@ func TestIsDuration(t *testing.T) {
 }
 
 func TestAddTimeSig(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		Input         string
@@ -927,7 +939,6 @@ func TestAddTimeSig(t *testing.T) {
 		{"2018-08-16 20:21:01", "00:00:00.000001", "2018-08-16 20:21:01.000001"},
 		{"1", "xxcvadfgasd", ""},
 		{"xxcvadfgasd", "1", ""},
-		{"2020-05-13 14:01:24", "2020-04-29 05:11:19", ""},
 	}
 	fc := funcs[ast.AddTime]
 	for _, c := range tbl {
@@ -948,7 +959,7 @@ func TestAddTimeSig(t *testing.T) {
 	require.NoError(t, err)
 	res, _, err := du.add(ctx, now, "1", "MICROSECOND")
 	require.NoError(t, err)
-	require.Equal(t, 6, res.Fsp())
+	require.Equal(t, int8(6), res.Fsp())
 
 	tbl = []struct {
 		Input         string
@@ -1026,6 +1037,7 @@ func TestAddTimeSig(t *testing.T) {
 }
 
 func TestSubTimeSig(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		Input         string
@@ -1036,8 +1048,6 @@ func TestSubTimeSig(t *testing.T) {
 		{"110:00:00", "1 02:00:00", "84:00:00"},
 		{"2017-01-01 01:01:01.11", "01:01:01.11111", "2016-12-31 23:59:59.998890"},
 		{"2007-12-31 23:59:59.999999", "1 1:1:1.000002", "2007-12-30 22:58:58.999997"},
-		{"1000-01-01 01:00:00.000000", "00:00:00.000001", "1000-01-01 00:59:59.999999"},
-		{"1000-01-01 01:00:00.000001", "00:00:00.000001", "1000-01-01 01:00:00"},
 		{"1", "xxcvadfgasd", ""},
 		{"xxcvadfgasd", "1", ""},
 	}
@@ -1126,6 +1136,7 @@ func TestSubTimeSig(t *testing.T) {
 }
 
 func TestSysDate(t *testing.T) {
+	t.Parallel()
 	fc := funcs[ast.Sysdate]
 	ctx := mock.NewContext()
 	ctx.GetSessionVars().StmtCtx.TimeZone = timeutil.SystemLocation()
@@ -1182,13 +1193,13 @@ func TestSysDate(t *testing.T) {
 	require.Error(t, err)
 }
 
-func convertToTimeWithFsp(sc *stmtctx.StatementContext, arg types.Datum, tp byte, fsp int) (d types.Datum, err error) {
+func convertToTimeWithFsp(sc *stmtctx.StatementContext, arg types.Datum, tp byte, fsp int8) (d types.Datum, err error) {
 	if fsp > types.MaxFsp {
 		fsp = types.MaxFsp
 	}
 
 	f := types.NewFieldType(tp)
-	f.SetDecimal(fsp)
+	f.Decimal = int(fsp)
 
 	d, err = arg.ConvertTo(sc, f)
 	if err != nil {
@@ -1230,6 +1241,7 @@ func builtinDateFormat(ctx sessionctx.Context, args []types.Datum) (d types.Datu
 }
 
 func TestFromUnixTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		isDecimal      bool
@@ -1266,7 +1278,7 @@ func TestFromUnixTime(t *testing.T) {
 		if len(c.format) == 0 {
 			constants := datumsToConstants([]types.Datum{timestamp})
 			if !c.isDecimal {
-				constants[0].GetType().SetDecimal(0)
+				constants[0].GetType().Decimal = 0
 			}
 
 			f, err := fc.getFunction(ctx, constants)
@@ -1280,7 +1292,7 @@ func TestFromUnixTime(t *testing.T) {
 			format := types.NewStringDatum(c.format)
 			constants := datumsToConstants([]types.Datum{timestamp, format})
 			if !c.isDecimal {
-				constants[0].GetType().SetDecimal(0)
+				constants[0].GetType().Decimal = 0
 			}
 			f, err := fc.getFunction(ctx, constants)
 			require.NoError(t, err)
@@ -1306,6 +1318,7 @@ func TestFromUnixTime(t *testing.T) {
 }
 
 func TestCurrentDate(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	last := time.Now()
 	fc := funcs[ast.CurrentDate]
@@ -1319,6 +1332,7 @@ func TestCurrentDate(t *testing.T) {
 }
 
 func TestCurrentTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tfStr := "15:04:05"
 
@@ -1359,6 +1373,7 @@ func TestCurrentTime(t *testing.T) {
 }
 
 func TestUTCTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	last := time.Now().UTC()
 	tfStr := "00:00:00"
@@ -1400,6 +1415,7 @@ func TestUTCTime(t *testing.T) {
 }
 
 func TestUTCDate(t *testing.T) {
+	t.Parallel()
 	last := time.Now().UTC()
 	fc := funcs[ast.UTCDate]
 	f, err := fc.getFunction(mock.NewContext(), datumsToConstants(nil))
@@ -1412,6 +1428,7 @@ func TestUTCDate(t *testing.T) {
 }
 
 func TestStrToDate(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// If you want to add test cases for `strToDate` but not the builtin function,
 	// adding cases in `types.format_test.go` `TestStrToDate` maybe more clear and easier
@@ -1484,6 +1501,7 @@ func TestStrToDate(t *testing.T) {
 }
 
 func TestFromDays(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
 	origin := stmtCtx.IgnoreTruncate
@@ -1494,23 +1512,20 @@ func TestFromDays(t *testing.T) {
 	tests := []struct {
 		day    int64
 		expect string
-		isNil  bool
 	}{
-		{-140, "0000-00-00", false},   // mysql FROM_DAYS returns 0000-00-00 for any day <= 365.
-		{140, "0000-00-00", false},    // mysql FROM_DAYS returns 0000-00-00 for any day <= 365.
-		{735000, "2012-05-12", false}, // Leap year.
-		{735030, "2012-06-11", false},
-		{735130, "2012-09-19", false},
-		{734909, "2012-02-11", false},
-		{734878, "2012-01-11", false},
-		{734927, "2012-02-29", false},
-		{734634, "2011-05-12", false}, // Non Leap year.
-		{734664, "2011-06-11", false},
-		{734764, "2011-09-19", false},
-		{734544, "2011-02-11", false},
-		{734513, "2011-01-11", false},
-		{3652424, "9999-12-31", false},
-		{3652425, "", true},
+		{-140, "0000-00-00"},   // mysql FROM_DAYS returns 0000-00-00 for any day <= 365.
+		{140, "0000-00-00"},    // mysql FROM_DAYS returns 0000-00-00 for any day <= 365.
+		{735000, "2012-05-12"}, // Leap year.
+		{735030, "2012-06-11"},
+		{735130, "2012-09-19"},
+		{734909, "2012-02-11"},
+		{734878, "2012-01-11"},
+		{734927, "2012-02-29"},
+		{734634, "2011-05-12"}, // Non Leap year.
+		{734664, "2011-06-11"},
+		{734764, "2011-09-19"},
+		{734544, "2011-02-11"},
+		{734513, "2011-01-11"},
 	}
 
 	fc := funcs[ast.FromDays]
@@ -1523,11 +1538,7 @@ func TestFromDays(t *testing.T) {
 		result, err := evalBuiltinFunc(f, chunk.Row{})
 
 		require.NoError(t, err)
-		if test.isNil {
-			require.True(t, result.IsNull())
-		} else {
-			require.Equal(t, test.expect, result.GetMysqlTime().String())
-		}
+		require.Equal(t, test.expect, result.GetMysqlTime().String())
 	}
 
 	stringTests := []struct {
@@ -1552,6 +1563,7 @@ func TestFromDays(t *testing.T) {
 }
 
 func TestDateDiff(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// Test cases from https://dev.mysql.com/doc/refman/5.7/en/date-and-time-functions.html#function_datediff
 	tests := []struct {
@@ -1605,6 +1617,7 @@ func TestDateDiff(t *testing.T) {
 }
 
 func TestTimeDiff(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -1613,7 +1626,7 @@ func TestTimeDiff(t *testing.T) {
 		args       []interface{}
 		expectStr  string
 		isNil      bool
-		fsp        int
+		fsp        int8
 		flen       int
 		getWarning bool
 	}{
@@ -1623,7 +1636,6 @@ func TestTimeDiff(t *testing.T) {
 		{[]interface{}{"10:10:10", "10:9:0"}, "00:01:10", false, 0, 10, false},
 		{[]interface{}{"2016-12-00 12:00:00", "10:9:0"}, "", true, 0, 10, false},
 		{[]interface{}{"2016-12-00 12:00:00", ""}, "", true, 0, 10, true},
-		{[]interface{}{"00:00:00.000000", "00:00:00.000001"}, "-00:00:00.000001", false, 6, 17, false},
 	}
 
 	for _, c := range tests {
@@ -1631,11 +1643,11 @@ func TestTimeDiff(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.TimeDiff, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
 		tp := f.GetType()
-		require.Equal(t, mysql.TypeDuration, tp.GetType())
-		require.Equal(t, charset.CharsetBin, tp.GetCharset())
-		require.Equal(t, charset.CollationBin, tp.GetCollate())
-		require.Equal(t, mysql.BinaryFlag, tp.GetFlag())
-		require.Equal(t, c.flen, tp.GetFlen())
+		require.Equal(t, mysql.TypeDuration, tp.Tp)
+		require.Equal(t, charset.CharsetBin, tp.Charset)
+		require.Equal(t, charset.CollationBin, tp.Collate)
+		require.Equal(t, mysql.BinaryFlag, tp.Flag)
+		require.Equal(t, c.flen, tp.Flen)
 		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
@@ -1655,6 +1667,7 @@ func TestTimeDiff(t *testing.T) {
 }
 
 func TestWeek(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// Test cases from https://dev.mysql.com/doc/refman/5.7/en/date-and-time-functions.html#function_week
 	tests := []struct {
@@ -1679,6 +1692,7 @@ func TestWeek(t *testing.T) {
 }
 
 func TestWeekWithoutModeSig(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		t      string
@@ -1709,6 +1723,7 @@ func TestWeekWithoutModeSig(t *testing.T) {
 	}
 }
 func TestYearWeek(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -1740,6 +1755,7 @@ func TestYearWeek(t *testing.T) {
 }
 
 func TestTimestampDiff(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		unit   string
@@ -1788,6 +1804,7 @@ func TestTimestampDiff(t *testing.T) {
 }
 
 func TestUnixTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// Test UNIX_TIMESTAMP().
 	fc := funcs[ast.UnixTimestamp]
@@ -1864,7 +1881,7 @@ func TestUnixTimestamp(t *testing.T) {
 
 	for _, test := range tests {
 		expr := datumsToConstants([]types.Datum{test.input})
-		expr[0].GetType().SetDecimal(test.inputDecimal)
+		expr[0].GetType().Decimal = test.inputDecimal
 		resetStmtContext(ctx)
 		f, err := fc.getFunction(ctx, expr)
 		require.NoErrorf(t, err, "%+v", test)
@@ -1878,6 +1895,7 @@ func TestUnixTimestamp(t *testing.T) {
 }
 
 func TestDateArithFuncs(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	date := []string{"2016-12-31", "2017-01-01"}
 	fcAdd := funcs[ast.DateAdd]
@@ -2005,7 +2023,7 @@ func TestDateArithFuncs(t *testing.T) {
 	testDurations := []struct {
 		fc       functionClass
 		dur      string
-		fsp      int
+		fsp      int8
 		unit     string
 		format   interface{}
 		expected string
@@ -2114,6 +2132,7 @@ func TestDateArithFuncs(t *testing.T) {
 }
 
 func TestTimestamp(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		t      []types.Datum
@@ -2166,6 +2185,7 @@ func TestTimestamp(t *testing.T) {
 }
 
 func TestMakeDate(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	cases := []struct {
 		args     []interface{}
@@ -2197,11 +2217,11 @@ func TestMakeDate(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.MakeDate, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
 		tp := f.GetType()
-		require.Equal(t, mysql.TypeDate, tp.GetType())
-		require.Equal(t, charset.CharsetBin, tp.GetCharset())
-		require.Equal(t, charset.CollationBin, tp.GetCollate())
-		require.Equal(t, mysql.BinaryFlag, tp.GetFlag())
-		require.Equal(t, mysql.MaxDateWidth, tp.GetFlen())
+		require.Equal(t, mysql.TypeDate, tp.Tp)
+		require.Equal(t, charset.CharsetBin, tp.Charset)
+		require.Equal(t, charset.CollationBin, tp.Collate)
+		require.Equal(t, mysql.BinaryFlag, tp.Flag)
+		require.Equal(t, mysql.MaxDateWidth, tp.Flen)
 		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
@@ -2220,6 +2240,7 @@ func TestMakeDate(t *testing.T) {
 }
 
 func TestMakeTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		Args []interface{}
@@ -2293,7 +2314,13 @@ func TestMakeTime(t *testing.T) {
 	}
 
 	// MAKETIME(CAST(-1 AS UNSIGNED),0,0);
-	tp1 := types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlag(mysql.UnsignedFlag).SetFlen(mysql.MaxIntWidth).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin).BuildP()
+	tp1 := &types.FieldType{
+		Tp:      mysql.TypeLonglong,
+		Flag:    mysql.UnsignedFlag,
+		Charset: charset.CharsetBin,
+		Collate: charset.CollationBin,
+		Flen:    mysql.MaxIntWidth,
+	}
 	f := BuildCastFunction(ctx, &Constant{Value: types.NewDatum("-1"), RetType: types.NewFieldType(mysql.TypeString)}, tp1)
 	res, err := f.Eval(chunk.Row{})
 	require.NoError(t, err)
@@ -2324,6 +2351,7 @@ func TestMakeTime(t *testing.T) {
 }
 
 func TestQuarter(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -2365,6 +2393,7 @@ func TestQuarter(t *testing.T) {
 }
 
 func TestGetFormat(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		unit     string
@@ -2403,6 +2432,7 @@ func TestGetFormat(t *testing.T) {
 }
 
 func TestToSeconds(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -2444,6 +2474,7 @@ func TestToSeconds(t *testing.T) {
 }
 
 func TestToDays(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreZeroInDate = true
@@ -2486,6 +2517,7 @@ func TestToDays(t *testing.T) {
 }
 
 func TestTimestampAdd(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		unit     string
@@ -2512,6 +2544,7 @@ func TestTimestampAdd(t *testing.T) {
 }
 
 func TestPeriodAdd(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		Period  int64
@@ -2548,6 +2581,7 @@ func TestPeriodAdd(t *testing.T) {
 }
 
 func TestTimeFormat(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	// SELECT TIME_FORMAT(null,'%H %k %h %I %l')
 	args := []types.Datum{types.NewDatum(nil), types.NewStringDatum(`%H %k %h %I %l`)}
@@ -2581,11 +2615,12 @@ func TestTimeFormat(t *testing.T) {
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		comment := fmt.Sprintf("no.%d\nobtain:%v\nexpect:%v\n", i, v.GetValue(), c["Expect"][0].GetValue())
-		testutil.DatumEqual(t, c["Expect"][0], v, comment)
+		trequire.DatumEqual(t, c["Expect"][0], v, comment)
 	}
 }
 
 func TestTimeToSec(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.TimeToSec]
 
@@ -2631,6 +2666,7 @@ func TestTimeToSec(t *testing.T) {
 }
 
 func TestSecToTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
 	origin := stmtCtx.IgnoreTruncate
@@ -2669,7 +2705,7 @@ func TestSecToTime(t *testing.T) {
 	for _, test := range tests {
 		comment := fmt.Sprintf("%+v", test)
 		expr := datumsToConstants([]types.Datum{test.input})
-		expr[0].GetType().SetDecimal(test.inputDecimal)
+		expr[0].GetType().Decimal = test.inputDecimal
 		f, err := fc.getFunction(ctx, expr)
 		require.NoError(t, err, comment)
 		d, err := evalBuiltinFunc(f, chunk.Row{})
@@ -2680,6 +2716,7 @@ func TestSecToTime(t *testing.T) {
 }
 
 func TestConvertTz(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	loc1, _ := time.LoadLocation("Europe/Tallinn")
 	loc2, _ := time.LoadLocation("Local")
@@ -2755,6 +2792,7 @@ func TestConvertTz(t *testing.T) {
 }
 
 func TestPeriodDiff(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		Period1 int64
@@ -2828,6 +2866,7 @@ func TestPeriodDiff(t *testing.T) {
 }
 
 func TestLastDay(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tests := []struct {
 		param  interface{}
@@ -2883,6 +2922,7 @@ func TestLastDay(t *testing.T) {
 }
 
 func TestWithTimeZone(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	sv := ctx.GetSessionVars()
 	originTZ := sv.Location()
@@ -2927,6 +2967,7 @@ func TestWithTimeZone(t *testing.T) {
 }
 
 func TestTidbParseTso(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	ctx.GetSessionVars().TimeZone = time.UTC
 	tests := []struct {
@@ -2965,6 +3006,7 @@ func TestTidbParseTso(t *testing.T) {
 }
 
 func TestTiDBBoundedStaleness(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	t1, err := time.Parse(types.TimeFormat, "2015-09-21 09:53:04")
 	require.NoError(t, err)
@@ -3060,6 +3102,7 @@ func TestTiDBBoundedStaleness(t *testing.T) {
 }
 
 func TestGetIntervalFromDecimal(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	du := baseDateArithmetical{}
 

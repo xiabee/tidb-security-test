@@ -62,6 +62,8 @@ func testGroupToString(t *testing.T, input []string, output []struct {
 }
 
 func TestAggPushDownGather(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
 		memo.OperandAggregation: {
@@ -114,6 +116,8 @@ func TestAggPushDownGather(t *testing.T) {
 }
 
 func TestPredicatePushDown(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(
 		TransformationRuleBatch{ // TiDB layer
@@ -155,6 +159,8 @@ func TestPredicatePushDown(t *testing.T) {
 }
 
 func TestTopNRules(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(
 		TransformationRuleBatch{ // TiDB layer
@@ -194,6 +200,8 @@ func TestTopNRules(t *testing.T) {
 }
 
 func TestProjectionElimination(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
 		memo.OperandProjection: {
@@ -214,6 +222,8 @@ func TestProjectionElimination(t *testing.T) {
 }
 
 func TestEliminateMaxMin(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandAggregation: {
@@ -233,6 +243,8 @@ func TestEliminateMaxMin(t *testing.T) {
 }
 
 func TestMergeAggregationProjection(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandAggregation: {
@@ -252,6 +264,8 @@ func TestMergeAggregationProjection(t *testing.T) {
 }
 
 func TestMergeAdjacentTopN(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandLimit: {
@@ -278,6 +292,8 @@ func TestMergeAdjacentTopN(t *testing.T) {
 }
 
 func TestMergeAdjacentLimit(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
 		memo.OperandLimit: {
@@ -298,6 +314,8 @@ func TestMergeAdjacentLimit(t *testing.T) {
 }
 
 func TestTransformLimitToTableDual(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
 		memo.OperandLimit: {
@@ -317,6 +335,8 @@ func TestTransformLimitToTableDual(t *testing.T) {
 }
 
 func TestPostTransformationRules(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
 		memo.OperandLimit: {
@@ -336,6 +356,8 @@ func TestPostTransformationRules(t *testing.T) {
 }
 
 func TestPushLimitDownTiKVSingleGather(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandLimit: {
@@ -361,6 +383,8 @@ func TestPushLimitDownTiKVSingleGather(t *testing.T) {
 }
 
 func TestEliminateOuterJoin(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandAggregation: {
@@ -383,6 +407,8 @@ func TestEliminateOuterJoin(t *testing.T) {
 }
 
 func TestTransformAggregateCaseToSelection(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandAggregation: {
@@ -402,6 +428,8 @@ func TestTransformAggregateCaseToSelection(t *testing.T) {
 }
 
 func TestTransformAggToProj(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandAggregation: {
@@ -424,6 +452,8 @@ func TestTransformAggToProj(t *testing.T) {
 }
 
 func TestDecorrelate(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandApply: {
@@ -444,6 +474,8 @@ func TestDecorrelate(t *testing.T) {
 }
 
 func TestInjectProj(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandLimit: {

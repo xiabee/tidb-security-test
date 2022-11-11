@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
+// +build !codes
 
 package testkit
 
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"testing"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,7 +52,7 @@ func NewAsyncTestKit(t *testing.T, store kv.Storage) *AsyncTestKit {
 
 // OpenSession opens new session ctx if no exists one and use db.
 func (tk *AsyncTestKit) OpenSession(ctx context.Context, db string) context.Context {
-	if TryRetrieveSession(ctx) == nil {
+	if tryRetrieveSession(ctx) == nil {
 		se, err := session.CreateSession4Test(tk.store)
 		tk.require.NoError(err)
 		se.SetConnectionID(asyncTestKitIDGenerator.Inc())
@@ -64,18 +64,9 @@ func (tk *AsyncTestKit) OpenSession(ctx context.Context, db string) context.Cont
 
 // CloseSession closes exists session from ctx.
 func (tk *AsyncTestKit) CloseSession(ctx context.Context) {
-	se := TryRetrieveSession(ctx)
+	se := tryRetrieveSession(ctx)
 	tk.require.NotNil(se)
 	se.Close()
-}
-
-// GetStack gets the stacktrace.
-func GetStack() []byte {
-	const size = 4096
-	buf := make([]byte, size)
-	stackSize := runtime.Stack(buf, false)
-	buf = buf[:stackSize]
-	return buf
 }
 
 // ConcurrentRun run test in current.
@@ -104,7 +95,7 @@ func (tk *AsyncTestKit) ConcurrentRun(
 		go func() {
 			defer func() {
 				r := recover()
-				tk.require.Nil(r, string(GetStack()))
+				tk.require.Nil(r, string(util.GetStack()))
 				doneList[w]()
 			}()
 
@@ -143,7 +134,7 @@ func (tk *AsyncTestKit) ConcurrentRun(
 
 // Exec executes a sql statement.
 func (tk *AsyncTestKit) Exec(ctx context.Context, sql string, args ...interface{}) (sqlexec.RecordSet, error) {
-	se := TryRetrieveSession(ctx)
+	se := tryRetrieveSession(ctx)
 	tk.require.NotNil(se)
 
 	if len(args) == 0 {
@@ -199,7 +190,7 @@ func (tk *AsyncTestKit) MustQuery(ctx context.Context, sql string, args ...inter
 // resultSetToResult converts ast.RecordSet to testkit.Result.
 // It is used to check results of execute statement in binary mode.
 func (tk *AsyncTestKit) resultSetToResult(ctx context.Context, rs sqlexec.RecordSet, comment string) *Result {
-	rows, err := session.GetRows4Test(context.Background(), TryRetrieveSession(ctx), rs)
+	rows, err := session.GetRows4Test(context.Background(), tryRetrieveSession(ctx), rs)
 	tk.require.NoError(err, comment)
 
 	err = rs.Close()
@@ -227,8 +218,7 @@ type sessionCtxKeyType struct{}
 
 var sessionKey = sessionCtxKeyType{}
 
-// TryRetrieveSession tries retrieve session from context.
-func TryRetrieveSession(ctx context.Context) session.Session {
+func tryRetrieveSession(ctx context.Context) session.Session {
 	s := ctx.Value(sessionKey)
 	if s == nil {
 		return nil

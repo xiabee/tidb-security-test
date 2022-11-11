@@ -16,13 +16,12 @@ package ddl
 
 import (
 	"context"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -118,9 +117,9 @@ func (tc *TestDDLCallback) OnWatched(ctx context.Context) {
 	tc.BaseCallback.OnWatched(ctx)
 }
 
-func TestCallback(t *testing.T) {
+func (s *testDDLSuite) TestCallback(c *C) {
 	cb := &BaseCallback{}
-	require.Nil(t, cb.OnChanged(nil))
+	c.Assert(cb.OnChanged(nil), IsNil)
 	cb.OnJobRunBefore(nil)
 	cb.OnJobUpdated(nil)
 	cb.OnWatched(context.TODO())

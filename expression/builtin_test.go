@@ -25,25 +25,26 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/stretchr/testify/require"
 )
 
 func evalBuiltinFuncConcurrent(f builtinFunc, row chunk.Row) (d types.Datum, err error) {
-	var wg util.WaitGroupWrapper
+	wg := sync.WaitGroup{}
 	concurrency := 10
+	wg.Add(concurrency)
 	var lock sync.Mutex
 	err = nil
 	for i := 0; i < concurrency; i++ {
-		wg.Run(func() {
+		go func() {
+			defer wg.Done()
 			di, erri := evalBuiltinFunc(f, chunk.Row{})
 			lock.Lock()
 			if err == nil {
 				d, err = di, erri
 			}
 			lock.Unlock()
-		})
+		}()
 	}
 	wg.Wait()
 	return
@@ -58,7 +59,7 @@ func evalBuiltinFunc(f builtinFunc, row chunk.Row) (d types.Datum, err error) {
 	case types.ETInt:
 		var intRes int64
 		intRes, isNull, err = f.evalInt(row)
-		if mysql.HasUnsignedFlag(f.getRetTp().GetFlag()) {
+		if mysql.HasUnsignedFlag(f.getRetTp().Flag) {
 			res = uint64(intRes)
 		} else {
 			res = intRes
@@ -121,6 +122,7 @@ func makeDatums(i interface{}) []types.Datum {
 }
 
 func TestIsNullFunc(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.IsNull]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(1)))
@@ -137,16 +139,17 @@ func TestIsNullFunc(t *testing.T) {
 }
 
 func TestLock(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	lock := funcs[ast.GetLock]
-	f, err := lock.getFunction(ctx, datumsToConstants(types.MakeDatums("mylock", 1)))
+	f, err := lock.getFunction(ctx, datumsToConstants(types.MakeDatums(nil, 1)))
 	require.NoError(t, err)
 	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, int64(1), v.GetInt64())
 
 	releaseLock := funcs[ast.ReleaseLock]
-	f, err = releaseLock.getFunction(ctx, datumsToConstants(types.MakeDatums("mylock")))
+	f, err = releaseLock.getFunction(ctx, datumsToConstants(types.MakeDatums(1)))
 	require.NoError(t, err)
 	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
@@ -154,6 +157,7 @@ func TestLock(t *testing.T) {
 }
 
 func TestDisplayName(t *testing.T) {
+	t.Parallel()
 	require.Equal(t, "=", GetDisplayName(ast.EQ))
 	require.Equal(t, "<=>", GetDisplayName(ast.NullEQ))
 	require.Equal(t, "IS TRUE", GetDisplayName(ast.IsTruthWithoutNull))
@@ -183,15 +187,7 @@ func newFunctionForTest(ctx sessionctx.Context, funcName string, args ...Express
 
 var (
 	// MySQL int8.
-	int8Con = &Constant{RetType: types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin).BuildP()}
+	int8Con = &Constant{RetType: &types.FieldType{Tp: mysql.TypeLonglong, Charset: charset.CharsetBin, Collate: charset.CollationBin}}
 	// MySQL varchar.
-	varcharCon = &Constant{RetType: types.NewFieldTypeBuilder().SetType(mysql.TypeVarchar).SetCharset(charset.CharsetUTF8).SetCollate(charset.CollationUTF8).BuildP()}
+	varcharCon = &Constant{RetType: &types.FieldType{Tp: mysql.TypeVarchar, Charset: charset.CharsetUTF8, Collate: charset.CollationUTF8}}
 )
-
-func getInt8Con() Expression {
-	return int8Con.Clone()
-}
-
-func getVarcharCon() Expression {
-	return varcharCon.Clone()
-}

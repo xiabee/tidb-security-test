@@ -15,8 +15,7 @@
 package core
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser"
@@ -24,11 +23,17 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/stretchr/testify/require"
 )
 
-func TestCanBePrune(t *testing.T) {
+var _ = SerialSuites(&testPartitionPruningSuite{})
+
+type testPartitionPruningSuite struct {
+	partitionProcessor
+}
+
+func (s *testPartitionPruningSuite) TestCanBePrune(c *C) {
 	// For the following case:
 	// CREATE TABLE t1 ( recdate  DATETIME NOT NULL )
 	// PARTITION BY RANGE( TO_DAYS(recdate) ) (
@@ -38,17 +43,20 @@ func TestCanBePrune(t *testing.T) {
 	// SELECT * FROM t1 WHERE recdate < '2007-03-08 00:00:00';
 	// SELECT * FROM t1 WHERE recdate > '2018-03-08 00:00:00';
 
-	tc := prepareTestCtx(t, "create table t (d datetime not null)", "to_days(d)")
+	tc := prepareTestCtx(c,
+		"create table t (d datetime not null)",
+		"to_days(d)",
+	)
 	lessThan := lessThanDataInt{data: []int64{733108, 733132}, maxvalue: false}
-	pruner := &rangePruner{lessThan, tc.col, tc.fn, monotoneModeNonStrict}
+	prunner := &rangePruner{lessThan, tc.col, tc.fn, monotoneModeNonStrict}
 
 	queryExpr := tc.expr("d < '2000-03-08 00:00:00'")
-	result := partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
-	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{0, 1}}))
+	result := partitionRangeForCNFExpr(tc.sctx, queryExpr, prunner, fullRange(len(lessThan.data)))
+	c.Assert(equalPartitionRangeOR(result, partitionRangeOR{{0, 1}}), IsTrue)
 
 	queryExpr = tc.expr("d > '2018-03-08 00:00:00'")
-	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
-	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{}))
+	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, prunner, fullRange(len(lessThan.data)))
+	c.Assert(equalPartitionRangeOR(result, partitionRangeOR{}), IsTrue)
 
 	// For the following case:
 	// CREATE TABLE quarterly_report_status (
@@ -61,24 +69,27 @@ func TestCanBePrune(t *testing.T) {
 	// 	PARTITION p2 VALUES LESS THAN (UNIX_TIMESTAMP('2010-01-01 00:00:00')),
 	// 	PARTITION p3 VALUES LESS THAN (MAXVALUE)
 	// );
-	tc = prepareTestCtx(t, "create table t (report_updated timestamp)", "unix_timestamp(report_updated)")
+	tc = prepareTestCtx(c,
+		"create table t (report_updated timestamp)",
+		"unix_timestamp(report_updated)",
+	)
 	lessThan = lessThanDataInt{data: []int64{1199145600, 1207008000, 1262304000, 0}, maxvalue: true}
-	pruner = &rangePruner{lessThan, tc.col, tc.fn, monotoneModeStrict}
+	prunner = &rangePruner{lessThan, tc.col, tc.fn, monotoneModeStrict}
 
 	queryExpr = tc.expr("report_updated > '2008-05-01 00:00:00'")
-	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
-	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}))
+	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, prunner, fullRange(len(lessThan.data)))
+	c.Assert(equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}), IsTrue)
 
 	queryExpr = tc.expr("report_updated > unix_timestamp('2008-05-01 00:00:00')")
-	partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
+	partitionRangeForCNFExpr(tc.sctx, queryExpr, prunner, fullRange(len(lessThan.data)))
 	// TODO: Uncomment the check after fixing issue https://github.com/pingcap/tidb/issues/12028
-	// require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}))
+	// c.Assert(equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}), IsTrue)
 	// report_updated > unix_timestamp('2008-05-01 00:00:00') is converted to gt(t.t.report_updated, <nil>)
 	// Because unix_timestamp('2008-05-01 00:00:00') is fold to constant int 1564761600, and compare it with timestamp (report_updated)
 	// need to convert 1564761600 to a timestamp, during that step, an error happen and the result is set to <nil>
 }
 
-func TestPruneUseBinarySearch(t *testing.T) {
+func (s *testPartitionPruningSuite) TestPruneUseBinarySearch(c *C) {
 	lessThan := lessThanDataInt{data: []int64{4, 7, 11, 14, 17, 0}, maxvalue: true}
 	cases := []struct {
 		input  dataForPrune
@@ -111,13 +122,13 @@ func TestPruneUseBinarySearch(t *testing.T) {
 
 	for i, ca := range cases {
 		start, end := pruneUseBinarySearch(lessThan, ca.input, false)
-		require.Equalf(t, ca.result.start, start, "fail = %d", i)
-		require.Equalf(t, ca.result.end, end, "fail = %d", i)
+		c.Assert(ca.result.start, Equals, start, Commentf("fail = %d", i))
+		c.Assert(ca.result.end, Equals, end, Commentf("fail = %d", i))
 	}
 }
 
 type testCtx struct {
-	require *require.Assertions
+	c       *C
 	sctx    sessionctx.Context
 	schema  *expression.Schema
 	columns []*expression.Column
@@ -126,21 +137,21 @@ type testCtx struct {
 	fn      *expression.ScalarFunction
 }
 
-func prepareTestCtx(t *testing.T, createTable string, partitionExpr string) *testCtx {
+func prepareTestCtx(c *C, createTable string, partitionExpr string) *testCtx {
 	p := parser.New()
 	stmt, err := p.ParseOneStmt(createTable, "", "")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	sctx := mock.NewContext()
 	tblInfo, err := ddl.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	columns, names, err := expression.ColumnInfos2ColumnsAndNames(sctx, model.NewCIStr("t"), tblInfo.Name, tblInfo.Cols(), tblInfo)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	schema := expression.NewSchema(columns...)
 
 	col, fn, _, err := makePartitionByFnCol(sctx, columns, names, partitionExpr)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	return &testCtx{
-		require: require.New(t),
+		c:       c,
 		sctx:    sctx,
 		schema:  schema,
 		columns: columns,
@@ -152,12 +163,15 @@ func prepareTestCtx(t *testing.T, createTable string, partitionExpr string) *tes
 
 func (tc *testCtx) expr(expr string) []expression.Expression {
 	res, err := expression.ParseSimpleExprsWithNames(tc.sctx, expr, tc.schema, tc.names)
-	tc.require.NoError(err)
+	tc.c.Assert(err, IsNil)
 	return res
 }
 
-func TestPartitionRangeForExpr(t *testing.T) {
-	tc := prepareTestCtx(t, "create table t (a int)", "a")
+func (s *testPartitionPruningSuite) TestPartitionRangeForExpr(c *C) {
+	tc := prepareTestCtx(c,
+		"create table t (a int)",
+		"a",
+	)
 	lessThan := lessThanDataInt{data: []int64{4, 7, 11, 14, 17, 0}, maxvalue: true}
 	prunner := &rangePruner{lessThan, tc.columns[0], nil, monotoneModeInvalid}
 	cases := []struct {
@@ -180,10 +194,10 @@ func TestPartitionRangeForExpr(t *testing.T) {
 
 	for _, ca := range cases {
 		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		result := fullRange(lessThan.length())
 		result = partitionRangeForExpr(tc.sctx, expr[0], prunner, result)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("unexpected:", ca.input))
 	}
 }
 
@@ -199,7 +213,7 @@ func equalPartitionRangeOR(x, y partitionRangeOR) bool {
 	return true
 }
 
-func TestPartitionRangeOperation(t *testing.T) {
+func (s *testPartitionPruningSuite) TestPartitionRangeOperation(c *C) {
 	testIntersectionRange := []struct {
 		input1 partitionRangeOR
 		input2 partitionRange
@@ -217,7 +231,7 @@ func TestPartitionRangeOperation(t *testing.T) {
 	}
 	for i, ca := range testIntersectionRange {
 		result := ca.input1.intersectionRange(ca.input2.start, ca.input2.end)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "fail = %d", i)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("failed %d", i))
 	}
 
 	testIntersection := []struct {
@@ -237,7 +251,7 @@ func TestPartitionRangeOperation(t *testing.T) {
 	}
 	for i, ca := range testIntersection {
 		result := ca.input1.intersection(ca.input2)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "fail = %d", i)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("failed %d", i))
 	}
 
 	testUnion := []struct {
@@ -257,21 +271,24 @@ func TestPartitionRangeOperation(t *testing.T) {
 	}
 	for i, ca := range testUnion {
 		result := ca.input1.union(ca.input2)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "fail = %d", i)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("failed %d", i))
 	}
 }
 
-func TestPartitionRangePrunner2VarChar(t *testing.T) {
-	tc := prepareTestCtx(t, "create table t (a varchar(32))", "a")
+func (s *testPartitionPruningSuite) TestPartitionRangePrunner2VarChar(c *C) {
+	tc := prepareTestCtx(c,
+		"create table t (a varchar(32))",
+		"a",
+	)
 	lessThanDataInt := []string{"'c'", "'f'", "'h'", "'l'", "'t'"}
 	lessThan := make([]expression.Expression, len(lessThanDataInt)+1) // +1 for maxvalue
 	for i, str := range lessThanDataInt {
 		tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		lessThan[i] = tmp[0]
 	}
 
-	pruner := &rangeColumnsPruner{lessThan, tc.columns[0], true}
+	prunner := &rangeColumnsPruner{lessThan, tc.columns[0], true}
 	cases := []struct {
 		input  string
 		result partitionRangeOR
@@ -293,15 +310,17 @@ func TestPartitionRangePrunner2VarChar(t *testing.T) {
 
 	for _, ca := range cases {
 		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		result := fullRange(len(lessThan))
-		result = partitionRangeForExpr(tc.sctx, expr[0], pruner, result)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
+		result = partitionRangeForExpr(tc.sctx, expr[0], prunner, result)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("unexpected:", ca.input))
 	}
 }
 
-func TestPartitionRangePrunner2CharWithCollation(t *testing.T) {
-	tc := prepareTestCtx(t,
+func (s *testPartitionPruningSuite) TestPartitionRangePrunner2CharWithCollation(c *C) {
+	collate.SetNewCollationEnabledForTest(true)
+	defer collate.SetNewCollationEnabledForTest(false)
+	tc := prepareTestCtx(c,
 		"create table t (a char(32) collate utf8mb4_unicode_ci)",
 		"a",
 	)
@@ -309,7 +328,7 @@ func TestPartitionRangePrunner2CharWithCollation(t *testing.T) {
 	lessThan := make([]expression.Expression, len(lessThanDataInt)+1) // +1 for maxvalue
 	for i, str := range lessThanDataInt {
 		tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		lessThan[i] = tmp[0]
 	}
 
@@ -337,15 +356,15 @@ func TestPartitionRangePrunner2CharWithCollation(t *testing.T) {
 
 	for _, ca := range cases {
 		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		result := fullRange(len(lessThan))
 		result = partitionRangeForExpr(tc.sctx, expr[0], prunner, result)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("unexpected:", ca.input))
 	}
 }
 
-func TestPartitionRangePrunner2Date(t *testing.T) {
-	tc := prepareTestCtx(t,
+func (s *testPartitionPruningSuite) TestPartitionRangePrunner2Date(c *C) {
+	tc := prepareTestCtx(c,
 		"create table t (a date)",
 		"a",
 	)
@@ -359,7 +378,7 @@ func TestPartitionRangePrunner2Date(t *testing.T) {
 	lessThan := make([]expression.Expression, len(lessThanDataInt))
 	for i, str := range lessThanDataInt {
 		tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		lessThan[i] = tmp[0]
 	}
 
@@ -384,9 +403,9 @@ func TestPartitionRangePrunner2Date(t *testing.T) {
 
 	for _, ca := range cases {
 		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		result := fullRange(len(lessThan))
 		result = partitionRangeForExpr(tc.sctx, expr[0], prunner, result)
-		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
+		c.Assert(equalPartitionRangeOR(ca.result, result), IsTrue, Commentf("unexpected:", ca.input))
 	}
 }

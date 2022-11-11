@@ -2,19 +2,17 @@ package backend_test
 
 import (
 	"context"
-	"database/sql/driver"
 	"testing"
 	"time"
 
-	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/mock"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
 
@@ -25,24 +23,30 @@ type backendSuite struct {
 	ts          uint64
 }
 
-func createBackendSuite(c gomock.TestReporter) *backendSuite {
-	controller := gomock.NewController(c)
-	mockBackend := mock.NewMockBackend(controller)
-	return &backendSuite{
-		controller:  controller,
-		mockBackend: mockBackend,
-		backend:     backend.MakeBackend(mockBackend),
-		ts:          oracle.ComposeTS(time.Now().Unix()*1000, 0),
-	}
+var _ = Suite(&backendSuite{})
+
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+// FIXME: Cannot use the real SetUpTest/TearDownTest to set up the mock
+// otherwise the mock error will be ignored.
+
+func (s *backendSuite) setUpTest(c gomock.TestReporter) {
+	s.controller = gomock.NewController(c)
+	s.mockBackend = mock.NewMockBackend(s.controller)
+	s.backend = backend.MakeBackend(s.mockBackend)
+	s.ts = oracle.ComposeTS(time.Now().Unix()*1000, 0)
 }
 
 func (s *backendSuite) tearDownTest() {
 	s.controller.Finish()
 }
 
-func TestOpenCloseImportCleanUpEngine(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestOpenCloseImportCleanUpEngine(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
+
 	ctx := context.Background()
 	engineUUID := uuid.MustParse("902efee3-a3f9-53d4-8c82-f12fb1900cd1")
 
@@ -54,7 +58,7 @@ func TestOpenCloseImportCleanUpEngine(t *testing.T) {
 		Return(nil).
 		After(openCall)
 	importCall := s.mockBackend.EXPECT().
-		ImportEngine(ctx, engineUUID, gomock.Any(), gomock.Any()).
+		ImportEngine(ctx, engineUUID, gomock.Any()).
 		Return(nil).
 		After(closeCall)
 	s.mockBackend.EXPECT().
@@ -63,17 +67,17 @@ func TestOpenCloseImportCleanUpEngine(t *testing.T) {
 		After(importCall)
 
 	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	closedEngine, err := engine.Close(ctx, nil)
-	require.NoError(t, err)
-	err = closedEngine.Import(ctx, 1, 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
+	err = closedEngine.Import(ctx, 1)
+	c.Assert(err, IsNil)
 	err = closedEngine.Cleanup(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestUnsafeCloseEngine(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestUnsafeCloseEngine(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -88,13 +92,13 @@ func TestUnsafeCloseEngine(t *testing.T) {
 		After(closeCall)
 
 	closedEngine, err := s.backend.UnsafeCloseEngine(ctx, nil, "`db`.`table`", -1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = closedEngine.Cleanup(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestUnsafeCloseEngineWithUUID(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestUnsafeCloseEngineWithUUID(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -109,13 +113,13 @@ func TestUnsafeCloseEngineWithUUID(t *testing.T) {
 		After(closeCall)
 
 	closedEngine, err := s.backend.UnsafeCloseEngineWithUUID(ctx, nil, "some_tag", engineUUID)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = closedEngine.Cleanup(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestWriteEngine(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestWriteEngine(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -141,19 +145,19 @@ func TestWriteEngine(t *testing.T) {
 		Return(nil)
 
 	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = writer.WriteRows(ctx, []string{"c1", "c2"}, rows1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = writer.WriteRows(ctx, []string{"c1", "c2"}, rows2)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	_, err = writer.Close(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestWriteToEngineWithNothing(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestWriteToEngineWithNothing(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -166,17 +170,17 @@ func TestWriteToEngineWithNothing(t *testing.T) {
 	s.mockBackend.EXPECT().LocalWriter(ctx, &backend.LocalWriterConfig{}, gomock.Any()).Return(mockWriter, nil)
 
 	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = writer.WriteRows(ctx, nil, emptyRows)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	_, err = writer.Close(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestOpenEngineFailed(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestOpenEngineFailed(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -185,11 +189,11 @@ func TestOpenEngineFailed(t *testing.T) {
 		Return(errors.New("fake unrecoverable open error"))
 
 	_, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.EqualError(t, err, "fake unrecoverable open error")
+	c.Assert(err, ErrorMatches, "fake unrecoverable open error")
 }
 
-func TestWriteEngineFailed(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestWriteEngineFailed(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -205,18 +209,17 @@ func TestWriteEngineFailed(t *testing.T) {
 	mockWriter.EXPECT().Close(ctx).Return(nil, nil)
 
 	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = writer.WriteRows(ctx, nil, rows)
-	require.Error(t, err)
-	require.Regexp(t, "^fake unrecoverable write error", err.Error())
+	c.Assert(err, ErrorMatches, "fake unrecoverable write error.*")
 	_, err = writer.Close(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestWriteBatchSendFailedWithRetry(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestWriteBatchSendFailedWithRetry(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
@@ -232,78 +235,75 @@ func TestWriteBatchSendFailedWithRetry(t *testing.T) {
 	mockWriter.EXPECT().Close(ctx).Return(nil, nil).MinTimes(1)
 
 	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	err = writer.WriteRows(ctx, nil, rows)
-	require.Error(t, err)
-	require.Regexp(t, "fake recoverable write batch error$", err.Error())
+	c.Assert(err, ErrorMatches, ".*fake recoverable write batch error")
 	_, err = writer.Close(ctx)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestImportFailedNoRetry(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestImportFailedNoRetry(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
 
 	s.mockBackend.EXPECT().CloseEngine(ctx, nil, gomock.Any()).Return(nil)
 	s.mockBackend.EXPECT().
-		ImportEngine(ctx, gomock.Any(), gomock.Any(), gomock.Any()).
+		ImportEngine(ctx, gomock.Any(), gomock.Any()).
 		Return(errors.Annotate(context.Canceled, "fake unrecoverable import error"))
 
 	closedEngine, err := s.backend.UnsafeCloseEngine(ctx, nil, "`db`.`table`", 1)
-	require.NoError(t, err)
-	err = closedEngine.Import(ctx, 1, 1)
-	require.Error(t, err)
-	require.Regexp(t, "^fake unrecoverable import error", err.Error())
+	c.Assert(err, IsNil)
+	err = closedEngine.Import(ctx, 1)
+	c.Assert(err, ErrorMatches, "fake unrecoverable import error.*")
 }
 
-func TestImportFailedWithRetry(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestImportFailedWithRetry(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
 
 	s.mockBackend.EXPECT().CloseEngine(ctx, nil, gomock.Any()).Return(nil)
 	s.mockBackend.EXPECT().
-		ImportEngine(ctx, gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(errors.Annotate(driver.ErrBadConn, "fake recoverable import error")).
+		ImportEngine(ctx, gomock.Any(), gomock.Any()).
+		Return(errors.New("fake recoverable import error")).
 		MinTimes(2)
 	s.mockBackend.EXPECT().RetryImportDelay().Return(time.Duration(0)).AnyTimes()
 
 	closedEngine, err := s.backend.UnsafeCloseEngine(ctx, nil, "`db`.`table`", 1)
-	require.NoError(t, err)
-	err = closedEngine.Import(ctx, 1, 1)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "fake recoverable import error")
+	c.Assert(err, IsNil)
+	err = closedEngine.Import(ctx, 1)
+	c.Assert(err, ErrorMatches, ".*fake recoverable import error")
 }
 
-func TestImportFailedRecovered(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestImportFailedRecovered(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	ctx := context.Background()
 
 	s.mockBackend.EXPECT().CloseEngine(ctx, nil, gomock.Any()).Return(nil)
 	s.mockBackend.EXPECT().
-		ImportEngine(ctx, gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(gmysql.ErrInvalidConn)
+		ImportEngine(ctx, gomock.Any(), gomock.Any()).
+		Return(errors.New("fake recoverable import error"))
 	s.mockBackend.EXPECT().
-		ImportEngine(ctx, gomock.Any(), gomock.Any(), gomock.Any()).
+		ImportEngine(ctx, gomock.Any(), gomock.Any()).
 		Return(nil)
 	s.mockBackend.EXPECT().RetryImportDelay().Return(time.Duration(0)).AnyTimes()
 
 	closedEngine, err := s.backend.UnsafeCloseEngine(ctx, nil, "`db`.`table`", 1)
-	require.NoError(t, err)
-	err = closedEngine.Import(ctx, 1, 1)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
+	err = closedEngine.Import(ctx, 1)
+	c.Assert(err, IsNil)
 }
 
 //nolint:interfacer // change test case signature causes check panicking.
-func TestClose(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestClose(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	s.mockBackend.EXPECT().Close().Return()
@@ -311,17 +311,18 @@ func TestClose(t *testing.T) {
 	s.backend.Close()
 }
 
-func TestMakeEmptyRows(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestMakeEmptyRows(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	rows := mock.NewMockRows(s.controller)
 	s.mockBackend.EXPECT().MakeEmptyRows().Return(rows)
-	require.Equal(t, rows, s.mockBackend.MakeEmptyRows())
+
+	c.Assert(s.mockBackend.MakeEmptyRows(), Equals, rows)
 }
 
-func TestNewEncoder(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestNewEncoder(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	encoder := mock.NewMockEncoder(s.controller)
@@ -329,12 +330,12 @@ func TestNewEncoder(t *testing.T) {
 	s.mockBackend.EXPECT().NewEncoder(nil, options).Return(encoder, nil)
 
 	realEncoder, err := s.mockBackend.NewEncoder(nil, options)
-	require.Equal(t, realEncoder, encoder)
-	require.NoError(t, err)
+	c.Assert(realEncoder, Equals, encoder)
+	c.Assert(err, IsNil)
 }
 
-func TestCheckDiskQuota(t *testing.T) {
-	s := createBackendSuite(t)
+func (s *backendSuite) TestCheckDiskQuota(c *C) {
+	s.setUpTest(c)
 	defer s.tearDownTest()
 
 	uuid1 := uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -380,29 +381,29 @@ func TestCheckDiskQuota(t *testing.T) {
 
 	// No quota exceeded
 	le, iple, ds, ms := s.backend.CheckDiskQuota(30000)
-	require.Len(t, le, 0)
-	require.Equal(t, 0, iple)
-	require.Equal(t, int64(9000), ds)
-	require.Equal(t, int64(16000), ms)
+	c.Assert(le, HasLen, 0)
+	c.Assert(iple, Equals, 0)
+	c.Assert(ds, Equals, int64(9000))
+	c.Assert(ms, Equals, int64(16000))
 
 	// Quota exceeded, the largest one is out
 	le, iple, ds, ms = s.backend.CheckDiskQuota(20000)
-	require.Equal(t, []uuid.UUID{uuid9}, le)
-	require.Equal(t, 0, iple)
-	require.Equal(t, int64(9000), ds)
-	require.Equal(t, int64(16000), ms)
+	c.Assert(le, DeepEquals, []uuid.UUID{uuid9})
+	c.Assert(iple, Equals, 0)
+	c.Assert(ds, Equals, int64(9000))
+	c.Assert(ms, Equals, int64(16000))
 
 	// Quota exceeded, the importing one should be ranked least priority
 	le, iple, ds, ms = s.backend.CheckDiskQuota(12000)
-	require.Equal(t, []uuid.UUID{uuid5, uuid9}, le)
-	require.Equal(t, 0, iple)
-	require.Equal(t, int64(9000), ds)
-	require.Equal(t, int64(16000), ms)
+	c.Assert(le, DeepEquals, []uuid.UUID{uuid5, uuid9})
+	c.Assert(iple, Equals, 0)
+	c.Assert(ds, Equals, int64(9000))
+	c.Assert(ms, Equals, int64(16000))
 
 	// Quota exceeded, the importing ones should not be visible
 	le, iple, ds, ms = s.backend.CheckDiskQuota(5000)
-	require.Equal(t, []uuid.UUID{uuid1, uuid5, uuid9}, le)
-	require.Equal(t, 1, iple)
-	require.Equal(t, int64(9000), ds)
-	require.Equal(t, int64(16000), ms)
+	c.Assert(le, DeepEquals, []uuid.UUID{uuid1, uuid5, uuid9})
+	c.Assert(iple, Equals, 1)
+	c.Assert(ds, Equals, int64(9000))
+	c.Assert(ms, Equals, int64(16000))
 }

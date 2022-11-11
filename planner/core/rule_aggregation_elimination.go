@@ -16,7 +16,6 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"math"
 
 	"github.com/pingcap/tidb/expression"
@@ -38,7 +37,7 @@ type aggregationEliminateChecker struct {
 // e.g. select min(b) from t group by a. If a is a unique key, then this sql is equal to `select b from t group by a`.
 // For count(expr), sum(expr), avg(expr), count(distinct expr, [expr...]) we may need to rewrite the expr. Details are shown below.
 // If we can eliminate agg successful, we return a projection. Else we return a nil pointer.
-func (a *aggregationEliminateChecker) tryToEliminateAggregation(agg *LogicalAggregation, opt *logicalOptimizeOp) *LogicalProjection {
+func (a *aggregationEliminateChecker) tryToEliminateAggregation(agg *LogicalAggregation) *LogicalProjection {
 	for _, af := range agg.AggFuncs {
 		// TODO(issue #9968): Actually, we can rewrite GROUP_CONCAT when all the
 		// arguments it accepts are promised to be NOT-NULL.
@@ -55,11 +54,9 @@ func (a *aggregationEliminateChecker) tryToEliminateAggregation(agg *LogicalAggr
 	}
 	schemaByGroupby := expression.NewSchema(agg.GetGroupByCols()...)
 	coveredByUniqueKey := false
-	var uniqueKey expression.KeyInfo
 	for _, key := range agg.children[0].Schema().Keys {
 		if schemaByGroupby.ColumnsIndices(key) != nil {
 			coveredByUniqueKey = true
-			uniqueKey = key
 			break
 		}
 	}
@@ -67,16 +64,13 @@ func (a *aggregationEliminateChecker) tryToEliminateAggregation(agg *LogicalAggr
 		// GroupByCols has unique key, so this aggregation can be removed.
 		if ok, proj := ConvertAggToProj(agg, agg.schema); ok {
 			proj.SetChildren(agg.children[0])
-			appendAggregationEliminateTraceStep(agg, proj, uniqueKey, opt)
 			return proj
 		}
 	}
 	return nil
 }
 
-// tryToEliminateDistinct will eliminate distinct in the aggregation function if the aggregation args
-// have unique key column. see detail example in https://github.com/pingcap/tidb/issues/23436
-func (a *aggregationEliminateChecker) tryToEliminateDistinct(agg *LogicalAggregation, opt *logicalOptimizeOp) {
+func (a *aggregationEliminateChecker) tryToEliminateDistinct(agg *LogicalAggregation) {
 	for _, af := range agg.AggFuncs {
 		if af.HasDistinct {
 			cols := make([]*expression.Column, 0, len(af.Args))
@@ -92,50 +86,24 @@ func (a *aggregationEliminateChecker) tryToEliminateDistinct(agg *LogicalAggrega
 			if canEliminate {
 				distinctByUniqueKey := false
 				schemaByDistinct := expression.NewSchema(cols...)
-				var uniqueKey expression.KeyInfo
 				for _, key := range agg.children[0].Schema().Keys {
 					if schemaByDistinct.ColumnsIndices(key) != nil {
 						distinctByUniqueKey = true
-						uniqueKey = key
 						break
 					}
 				}
 				for _, key := range agg.children[0].Schema().UniqueKeys {
 					if schemaByDistinct.ColumnsIndices(key) != nil {
 						distinctByUniqueKey = true
-						uniqueKey = key
 						break
 					}
 				}
 				if distinctByUniqueKey {
 					af.HasDistinct = false
-					appendDistinctEliminateTraceStep(agg, uniqueKey, af, opt)
 				}
 			}
 		}
 	}
-}
-
-func appendAggregationEliminateTraceStep(agg *LogicalAggregation, proj *LogicalProjection, uniqueKey expression.KeyInfo, opt *logicalOptimizeOp) {
-	reason := func() string {
-		return fmt.Sprintf("%s is a unique key", uniqueKey.String())
-	}
-	action := func() string {
-		return fmt.Sprintf("%v_%v is simplified to a %v_%v", agg.TP(), agg.ID(), proj.TP(), proj.ID())
-	}
-
-	opt.appendStepToCurrent(agg.ID(), agg.TP(), reason, action)
-}
-
-func appendDistinctEliminateTraceStep(agg *LogicalAggregation, uniqueKey expression.KeyInfo, af *aggregation.AggFuncDesc,
-	opt *logicalOptimizeOp) {
-	reason := func() string {
-		return fmt.Sprintf("%s is a unique key", uniqueKey.String())
-	}
-	action := func() string {
-		return fmt.Sprintf("%s(distinct ...) is simplified to %s(...)", af.Name, af.Name)
-	}
-	opt.appendStepToCurrent(agg.ID(), agg.TP(), reason, action)
 }
 
 // ConvertAggToProj convert aggregation to projection.
@@ -160,7 +128,7 @@ func rewriteExpr(ctx sessionctx.Context, aggFunc *aggregation.AggFuncDesc) (bool
 	case ast.AggFuncCount:
 		if aggFunc.Mode == aggregation.FinalMode &&
 			len(aggFunc.Args) == 1 &&
-			mysql.HasNotNullFlag(aggFunc.Args[0].GetType().GetFlag()) {
+			mysql.HasNotNullFlag(aggFunc.Args[0].GetType().Flag) {
 			return true, wrapCastFunction(ctx, aggFunc.Args[0], aggFunc.RetTp)
 		}
 		return true, rewriteCount(ctx, aggFunc.Args, aggFunc.RetTp)
@@ -179,7 +147,7 @@ func rewriteCount(ctx sessionctx.Context, exprs []expression.Expression, targetT
 	// If is count(expr not null), we will change it to constant 1.
 	isNullExprs := make([]expression.Expression, 0, len(exprs))
 	for _, expr := range exprs {
-		if mysql.HasNotNullFlag(expr.GetType().GetFlag()) {
+		if mysql.HasNotNullFlag(expr.GetType().Flag) {
 			isNullExprs = append(isNullExprs, expression.NewZero())
 		} else {
 			isNullExpr := expression.NewFunctionInternal(ctx, ast.IsNull, types.NewFieldType(mysql.TypeTiny), expr)
@@ -213,10 +181,10 @@ func wrapCastFunction(ctx sessionctx.Context, arg expression.Expression, targetT
 	return expression.BuildCastFunction(ctx, arg, targetTp)
 }
 
-func (a *aggregationEliminator) optimize(ctx context.Context, p LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (a *aggregationEliminator) optimize(ctx context.Context, p LogicalPlan) (LogicalPlan, error) {
 	newChildren := make([]LogicalPlan, 0, len(p.Children()))
 	for _, child := range p.Children() {
-		newChild, err := a.optimize(ctx, child, opt)
+		newChild, err := a.optimize(ctx, child)
 		if err != nil {
 			return nil, err
 		}
@@ -227,8 +195,8 @@ func (a *aggregationEliminator) optimize(ctx context.Context, p LogicalPlan, opt
 	if !ok {
 		return p, nil
 	}
-	a.tryToEliminateDistinct(agg, opt)
-	if proj := a.tryToEliminateAggregation(agg, opt); proj != nil {
+	a.tryToEliminateDistinct(agg)
+	if proj := a.tryToEliminateAggregation(agg); proj != nil {
 		return proj, nil
 	}
 	return p, nil

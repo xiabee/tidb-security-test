@@ -24,6 +24,8 @@ import (
 )
 
 func TestSimpleCases(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		sql string
 		db  string

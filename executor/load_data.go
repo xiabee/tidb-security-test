@@ -58,7 +58,10 @@ func (e *LoadDataExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if !e.IsLocal {
 		return errors.New("Load Data: don't support load data without local field")
 	}
-	e.loadDataInfo.OnDuplicate = e.OnDuplicate
+	// TODO: support load data with replace field.
+	if e.OnDuplicate == ast.OnDuplicateKeyHandlingReplace {
+		return errors.New("Load Data: don't support load data with replace field")
+	}
 	// TODO: support lines terminated is "".
 	if len(e.loadDataInfo.LinesInfo.Terminated) == 0 {
 		return errors.New("Load Data: don't support load data terminated is nil")
@@ -120,43 +123,12 @@ type LoadDataInfo struct {
 	commitTaskQueue chan CommitTask
 	StopCh          chan struct{}
 	QuitCh          chan struct{}
-	OnDuplicate     ast.OnDuplicateKeyHandlingType
 }
 
 // FieldMapping inticates the relationship between input field and table column or user variable
 type FieldMapping struct {
 	Column  *table.Column
 	UserVar *ast.VariableExpr
-}
-
-// reorderColumns reorder the e.insertColumns according to the order of columnNames
-// Note: We must ensure there must be one-to-one mapping between e.insertColumns and columnNames in terms of column name.
-func (e *LoadDataInfo) reorderColumns(columnNames []string) error {
-	cols := e.insertColumns
-
-	if len(cols) != len(columnNames) {
-		return ErrColumnsNotMatched
-	}
-
-	reorderedColumns := make([]*table.Column, len(cols))
-
-	if columnNames == nil {
-		return nil
-	}
-
-	mapping := make(map[string]int)
-	for idx, colName := range columnNames {
-		mapping[strings.ToLower(colName)] = idx
-	}
-
-	for _, col := range cols {
-		idx := mapping[col.Name.L]
-		reorderedColumns[idx] = col
-	}
-
-	e.insertColumns = reorderedColumns
-
-	return nil
 }
 
 // initLoadColumns sets columns which the input fields loaded to.
@@ -185,19 +157,12 @@ func (e *LoadDataInfo) initLoadColumns(columnNames []string) error {
 		}
 		if col.Name.L == model.ExtraHandleName.L {
 			if !e.ctx.GetSessionVars().AllowWriteRowID {
-				return errors.Errorf("load data statement for _tidb_rowid are not supported")
+				return errors.Errorf("load data statement for _tidb_rowid are not supported.")
 			}
 			e.hasExtraHandle = true
 			break
 		}
 	}
-
-	// e.insertColumns is appended according to the original tables' column sequence.
-	// We have to reorder it to follow the use-specified column order which is shown in the columnNames.
-	if err = e.reorderColumns(columnNames); err != nil {
-		return err
-	}
-
 	e.rowLen = len(e.insertColumns)
 	// Check column whether is specified only once.
 	err = table.CheckOnce(cols)
@@ -596,13 +561,7 @@ func (e *LoadDataInfo) CheckAndInsertOneBatch(ctx context.Context, rows [][]type
 		return err
 	}
 	e.ctx.GetSessionVars().StmtCtx.AddRecordRows(cnt)
-
-	replace := false
-	if e.OnDuplicate == ast.OnDuplicateKeyHandlingReplace {
-		replace = true
-	}
-
-	err = e.batchCheckAndInsert(ctx, rows[0:cnt], e.addRecordLD, replace)
+	err = e.batchCheckAndInsert(ctx, rows[0:cnt], e.addRecordLD)
 	if err != nil {
 		return err
 	}
@@ -614,7 +573,7 @@ func (e *LoadDataInfo) CheckAndInsertOneBatch(ctx context.Context, rows [][]type
 func (e *LoadDataInfo) SetMessage() {
 	stmtCtx := e.ctx.GetSessionVars().StmtCtx
 	numRecords := stmtCtx.RecordRows()
-	numDeletes := stmtCtx.DeletedRows()
+	numDeletes := 0
 	numSkipped := numRecords - stmtCtx.CopiedRows()
 	numWarnings := stmtCtx.WarningCount()
 	msg := fmt.Sprintf(mysql.MySQLErrName[mysql.ErrLoadInfo].Raw, numRecords, numDeletes, numSkipped, numWarnings)
@@ -623,27 +582,18 @@ func (e *LoadDataInfo) SetMessage() {
 
 func (e *LoadDataInfo) colsToRow(ctx context.Context, cols []field) []types.Datum {
 	row := make([]types.Datum, 0, len(e.insertColumns))
-	sessionVars := e.Ctx.GetSessionVars()
-	setVar := func(name string, col *field) {
-		sessionVars.UsersLock.Lock()
-		if col == nil || col.isNull() {
-			sessionVars.UnsetUserVar(name)
-		} else {
-			sessionVars.SetUserVar(name, string(col.str), mysql.DefaultCollationName)
-		}
-		sessionVars.UsersLock.Unlock()
-	}
 
 	for i := 0; i < len(e.FieldMappings); i++ {
 		if i >= len(cols) {
 			if e.FieldMappings[i].Column == nil {
-				setVar(e.FieldMappings[i].UserVar.Name, nil)
+				sessionVars := e.Ctx.GetSessionVars()
+				sessionVars.SetUserVar(e.FieldMappings[i].UserVar.Name, "", mysql.DefaultCollationName)
 				continue
 			}
 
 			// If some columns is missing and their type is time and has not null flag, they should be set as current time.
-			if types.IsTypeTime(e.FieldMappings[i].Column.GetType()) && mysql.HasNotNullFlag(e.FieldMappings[i].Column.GetFlag()) {
-				row = append(row, types.NewTimeDatum(types.CurrentTime(e.FieldMappings[i].Column.GetType())))
+			if types.IsTypeTime(e.FieldMappings[i].Column.Tp) && mysql.HasNotNullFlag(e.FieldMappings[i].Column.Flag) {
+				row = append(row, types.NewTimeDatum(types.CurrentTime(e.FieldMappings[i].Column.Tp)))
 				continue
 			}
 
@@ -652,11 +602,14 @@ func (e *LoadDataInfo) colsToRow(ctx context.Context, cols []field) []types.Datu
 		}
 
 		if e.FieldMappings[i].Column == nil {
-			setVar(e.FieldMappings[i].UserVar.Name, &cols[i])
+			sessionVars := e.Ctx.GetSessionVars()
+			sessionVars.SetUserVar(e.FieldMappings[i].UserVar.Name, string(cols[i].str), mysql.DefaultCollationName)
 			continue
 		}
 
-		if cols[i].isNull() {
+		// The field with only "\N" in it is handled as NULL in the csv file.
+		// See http://dev.mysql.com/doc/refman/5.7/en/load-data.html
+		if cols[i].maybeNull && string(cols[i].str) == "N" {
 			row = append(row, types.NewDatum(nil))
 			continue
 		}
@@ -699,12 +652,6 @@ type field struct {
 	str       []byte
 	maybeNull bool
 	enclosed  bool
-}
-
-func (f *field) isNull() bool {
-	// The field with only "\N" in it is handled as NULL in the csv file.
-	// See http://dev.mysql.com/doc/refman/5.7/en/load-data.html
-	return f.maybeNull && len(f.str) == 1 && f.str[0] == 'N'
 }
 
 type fieldWriter struct {

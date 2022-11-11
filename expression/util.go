@@ -166,184 +166,6 @@ func extractColumns(result []*Column, expr Expression, filter func(*Column) bool
 	return result
 }
 
-// ExtractEquivalenceColumns detects the equivalence from CNF exprs.
-func ExtractEquivalenceColumns(result [][]Expression, exprs []Expression) [][]Expression {
-	// exprs are CNF expressions, EQ condition only make sense in the top level of every expr.
-	for _, expr := range exprs {
-		result = extractEquivalenceColumns(result, expr)
-	}
-	return result
-}
-
-func extractEquivalenceColumns(result [][]Expression, expr Expression) [][]Expression {
-	switch v := expr.(type) {
-	case *ScalarFunction:
-		// a==b, a<=>b, the latter one is evaluated to true when a,b are both null.
-		if v.FuncName.L == ast.EQ || v.FuncName.L == ast.NullEQ {
-			args := v.GetArgs()
-			if len(args) == 2 {
-				col1, ok1 := args[0].(*Column)
-				col2, ok2 := args[1].(*Column)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col1, col2})
-				}
-				col, ok1 := args[0].(*Column)
-				scl, ok2 := args[1].(*ScalarFunction)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col, scl})
-				}
-				col, ok1 = args[1].(*Column)
-				scl, ok2 = args[0].(*ScalarFunction)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col, scl})
-				}
-			}
-			return result
-		}
-		if v.FuncName.L == ast.In {
-			args := v.GetArgs()
-			// only `col in (only 1 element)`, can we build an equivalence here.
-			if len(args[1:]) == 1 {
-				col1, ok1 := args[0].(*Column)
-				col2, ok2 := args[1].(*Column)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col1, col2})
-				}
-				col, ok1 := args[0].(*Column)
-				scl, ok2 := args[1].(*ScalarFunction)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col, scl})
-				}
-				col, ok1 = args[1].(*Column)
-				scl, ok2 = args[0].(*ScalarFunction)
-				if ok1 && ok2 {
-					result = append(result, []Expression{col, scl})
-				}
-			}
-			return result
-		}
-		// For Non-EQ function, we don't have to traverse down.
-		// eg: (a=b or c=d) doesn't make any definitely equivalence assertion.
-	}
-	return result
-}
-
-// extractColumnsAndCorColumns extracts columns and correlated columns from `expr` and append them to `result`.
-func extractColumnsAndCorColumns(result []*Column, expr Expression) []*Column {
-	switch v := expr.(type) {
-	case *Column:
-		result = append(result, v)
-	case *CorrelatedColumn:
-		result = append(result, &v.Column)
-	case *ScalarFunction:
-		for _, arg := range v.GetArgs() {
-			result = extractColumnsAndCorColumns(result, arg)
-		}
-	}
-	return result
-}
-
-// ExtractConstantEqColumnsOrScalar detects the constant equal relationship from CNF exprs.
-func ExtractConstantEqColumnsOrScalar(ctx sessionctx.Context, result []Expression, exprs []Expression) []Expression {
-	// exprs are CNF expressions, EQ condition only make sense in the top level of every expr.
-	for _, expr := range exprs {
-		result = extractConstantEqColumnsOrScalar(ctx, result, expr)
-	}
-	return result
-}
-
-func extractConstantEqColumnsOrScalar(ctx sessionctx.Context, result []Expression, expr Expression) []Expression {
-	switch v := expr.(type) {
-	case *ScalarFunction:
-		if v.FuncName.L == ast.EQ || v.FuncName.L == ast.NullEQ {
-			args := v.GetArgs()
-			if len(args) == 2 {
-				col, ok1 := args[0].(*Column)
-				_, ok2 := args[1].(*Constant)
-				if ok1 && ok2 {
-					result = append(result, col)
-				}
-				col, ok1 = args[1].(*Column)
-				_, ok2 = args[0].(*Constant)
-				if ok1 && ok2 {
-					result = append(result, col)
-				}
-				// take the correlated column as constant here.
-				col, ok1 = args[0].(*Column)
-				_, ok2 = args[1].(*CorrelatedColumn)
-				if ok1 && ok2 {
-					result = append(result, col)
-				}
-				col, ok1 = args[1].(*Column)
-				_, ok2 = args[0].(*CorrelatedColumn)
-				if ok1 && ok2 {
-					result = append(result, col)
-				}
-				scl, ok1 := args[0].(*ScalarFunction)
-				_, ok2 = args[1].(*Constant)
-				if ok1 && ok2 {
-					result = append(result, scl)
-				}
-				scl, ok1 = args[1].(*ScalarFunction)
-				_, ok2 = args[0].(*Constant)
-				if ok1 && ok2 {
-					result = append(result, scl)
-				}
-				// take the correlated column as constant here.
-				scl, ok1 = args[0].(*ScalarFunction)
-				_, ok2 = args[1].(*CorrelatedColumn)
-				if ok1 && ok2 {
-					result = append(result, scl)
-				}
-				scl, ok1 = args[1].(*ScalarFunction)
-				_, ok2 = args[0].(*CorrelatedColumn)
-				if ok1 && ok2 {
-					result = append(result, scl)
-				}
-			}
-			return result
-		}
-		if v.FuncName.L == ast.In {
-			args := v.GetArgs()
-			allArgsIsConst := true
-			// only `col in (all same const)`, can col be the constant column.
-			// eg: a in (1, "1") does, while a in (1, '2') doesn't.
-			guard := args[1]
-			for i, v := range args[1:] {
-				if _, ok := v.(*Constant); !ok {
-					allArgsIsConst = false
-					break
-				}
-				if i == 0 {
-					continue
-				}
-				if !guard.Equal(ctx, v) {
-					allArgsIsConst = false
-					break
-				}
-			}
-			if allArgsIsConst {
-				if col, ok := args[0].(*Column); ok {
-					result = append(result, col)
-				} else if scl, ok := args[0].(*ScalarFunction); ok {
-					result = append(result, scl)
-				}
-			}
-			return result
-		}
-		// For Non-EQ function, we don't have to traverse down.
-	}
-	return result
-}
-
-// ExtractColumnsAndCorColumnsFromExpressions extracts columns and correlated columns from expressions and append them to `result`.
-func ExtractColumnsAndCorColumnsFromExpressions(result []*Column, list []Expression) []*Column {
-	for _, expr := range list {
-		result = extractColumnsAndCorColumns(result, expr)
-	}
-	return result
-}
-
 // ExtractColumnSet extracts the different values of `UniqueId` for columns in expressions.
 func ExtractColumnSet(exprs ...Expression) *intsets.Sparse {
 	set := &intsets.Sparse{}
@@ -428,7 +250,7 @@ func ColumnSubstituteImpl(expr Expression, schema *Schema, newExprs []Expression
 					_ = append(append(append(tmpArgs, refExprArr.Result()[0:idx]...), refExprArr.Result()[idx+1:]...), newFuncExpr)
 					_, newColl := DeriveCollationFromExprs(v.GetCtx(), append(v.GetArgs(), newFuncExpr)...)
 					if coll == newColl {
-						changed = checkCollationStrictness(coll, newFuncExpr.GetType().GetCollate())
+						changed = checkCollationStrictness(coll, newFuncExpr.GetType().Collate)
 					}
 				}
 			}
@@ -693,41 +515,6 @@ func PushDownNot(ctx sessionctx.Context, expr Expression) Expression {
 	return newExpr
 }
 
-// ContainOuterNot checks if there is an outer `not`.
-func ContainOuterNot(expr Expression) bool {
-	return containOuterNot(expr, false)
-}
-
-// containOuterNot checks if there is an outer `not`.
-// Input `not` means whether there is `not` outside `expr`
-//
-// eg.
-//    not(0+(t.a == 1 and t.b == 2)) returns true
-//    not(t.a) and not(t.b) returns false
-func containOuterNot(expr Expression, not bool) bool {
-	if f, ok := expr.(*ScalarFunction); ok {
-		switch f.FuncName.L {
-		case ast.UnaryNot:
-			return containOuterNot(f.GetArgs()[0], true)
-		case ast.IsTruthWithNull, ast.IsNull:
-			return containOuterNot(f.GetArgs()[0], not)
-		default:
-			if not {
-				return true
-			}
-			hasNot := false
-			for _, expr := range f.GetArgs() {
-				hasNot = hasNot || containOuterNot(expr, not)
-				if hasNot {
-					return hasNot
-				}
-			}
-			return hasNot
-		}
-	}
-	return false
-}
-
 // Contains tests if `exprs` contains `e`.
 func Contains(exprs []Expression, e Expression) bool {
 	for _, expr := range exprs {
@@ -904,44 +691,24 @@ func PopRowFirstArg(ctx sessionctx.Context, e Expression) (ret Expression, err e
 // DatumToConstant generates a Constant expression from a Datum.
 func DatumToConstant(d types.Datum, tp byte, flag uint) *Constant {
 	t := types.NewFieldType(tp)
-	t.AddFlag(flag)
+	t.Flag |= flag
 	return &Constant{Value: d, RetType: t}
 }
 
 // ParamMarkerExpression generate a getparam function expression.
-func ParamMarkerExpression(ctx sessionctx.Context, v *driver.ParamMarkerExpr, needParam bool) (*Constant, error) {
+func ParamMarkerExpression(ctx sessionctx.Context, v *driver.ParamMarkerExpr) (Expression, error) {
 	useCache := ctx.GetSessionVars().StmtCtx.UseCache
 	isPointExec := ctx.GetSessionVars().StmtCtx.PointExec
 	tp := types.NewFieldType(mysql.TypeUnspecified)
 	types.DefaultParamTypeForValue(v.GetValue(), tp)
 	value := &Constant{Value: v.Datum, RetType: tp}
-	if useCache || isPointExec || needParam {
+	if useCache || isPointExec {
 		value.ParamMarker = &ParamMarker{
 			order: v.Order,
 			ctx:   ctx,
 		}
 	}
 	return value, nil
-}
-
-// ParamMarkerInPrepareChecker checks whether the given ast tree has paramMarker and is in prepare statement.
-type ParamMarkerInPrepareChecker struct {
-	InPrepareStmt bool
-}
-
-// Enter implements Visitor Interface.
-func (pc *ParamMarkerInPrepareChecker) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
-	switch v := in.(type) {
-	case *driver.ParamMarkerExpr:
-		pc.InPrepareStmt = !v.InExecute
-		return v, true
-	}
-	return in, false
-}
-
-// Leave implements Visitor Interface.
-func (pc *ParamMarkerInPrepareChecker) Leave(in ast.Node) (out ast.Node, ok bool) {
-	return in, true
 }
 
 // DisableParseJSONFlag4Expr disables ParseToJSONFlag for `expr` except Column.
@@ -957,7 +724,7 @@ func DisableParseJSONFlag4Expr(expr Expression) {
 	if _, isCorCol := expr.(*CorrelatedColumn); isCorCol {
 		return
 	}
-	expr.GetType().SetFlag(expr.GetType().GetFlag() & ^mysql.ParseToJSONFlag)
+	expr.GetType().Flag &= ^mysql.ParseToJSONFlag
 }
 
 // ConstructPositionExpr constructs PositionExpr with the given ParamMarkerExpr.
@@ -970,7 +737,7 @@ func PosFromPositionExpr(ctx sessionctx.Context, v *ast.PositionExpr) (int, bool
 	if v.P == nil {
 		return v.N, false, nil
 	}
-	value, err := ParamMarkerExpression(ctx, v.P.(*driver.ParamMarkerExpr), false)
+	value, err := ParamMarkerExpression(ctx, v.P.(*driver.ParamMarkerExpr))
 	if err != nil {
 		return 0, true, err
 	}
@@ -1032,42 +799,6 @@ func IsRuntimeConstExpr(expr Expression) bool {
 		return false
 	case *Constant, *CorrelatedColumn:
 		return true
-	}
-	return false
-}
-
-// CheckNonDeterministic checks whether the current expression contains a non-deterministic func.
-func CheckNonDeterministic(e Expression) bool {
-	switch x := e.(type) {
-	case *Constant, *Column, *CorrelatedColumn:
-		return false
-	case *ScalarFunction:
-		if _, ok := unFoldableFunctions[x.FuncName.L]; ok {
-			return true
-		}
-		for _, arg := range x.GetArgs() {
-			if CheckNonDeterministic(arg) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// CheckFuncInExpr checks whether there's a given function in the expression.
-func CheckFuncInExpr(e Expression, funcName string) bool {
-	switch x := e.(type) {
-	case *Constant, *Column, *CorrelatedColumn:
-		return false
-	case *ScalarFunction:
-		if x.FuncName.L == funcName {
-			return true
-		}
-		for _, arg := range x.GetArgs() {
-			if CheckFuncInExpr(arg, funcName) {
-				return true
-			}
-		}
 	}
 	return false
 }
@@ -1189,7 +920,12 @@ func ContainCorrelatedColumn(exprs []Expression) bool {
 // TODO: Do more careful check here.
 func MaybeOverOptimized4PlanCache(ctx sessionctx.Context, exprs []Expression) bool {
 	// If we do not enable plan cache, all the optimization can work correctly.
-	if !ctx.GetSessionVars().StmtCtx.UseCache || ctx.GetSessionVars().StmtCtx.SkipPlanCache {
+	if !ctx.GetSessionVars().StmtCtx.UseCache {
+		return false
+	}
+	if ctx.GetSessionVars().StmtCtx.MaybeOverOptimized4PlanCache {
+		// If the current statement can not be cached. We should remove the mutable constant.
+		RemoveMutableConst(ctx, exprs)
 		return false
 	}
 	return containMutableConst(ctx, exprs)
@@ -1391,7 +1127,11 @@ func (r *SQLDigestTextRetriever) runFetchDigestQuery(ctx context.Context, sctx s
 		stmt += " where digest in (" + strings.Repeat("%?,", len(inValues)-1) + "%?)"
 	}
 
-	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, stmt, inValues...)
+	stmtNode, err := exec.ParseWithParams(ctx, stmt, inValues...)
+	if err != nil {
+		return nil, err
+	}
+	rows, _, err := exec.ExecRestrictedStmt(ctx, stmtNode)
 	if err != nil {
 		return nil, err
 	}

@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/diagnosticspb"
@@ -30,14 +29,11 @@ import (
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/privilege/privileges"
 	"github.com/pingcap/tidb/session"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
-	"github.com/pingcap/tidb/util/topsql"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/peer"
 )
 
@@ -50,15 +46,7 @@ func NewRPCServer(config *config.Config, dom *domain.Domain, sm util.SessionMana
 		}
 	}()
 
-	s := grpc.NewServer(
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    time.Duration(config.Status.GRPCKeepAliveTime) * time.Second,
-			Timeout: time.Duration(config.Status.GRPCKeepAliveTimeout) * time.Second,
-		}),
-		grpc.MaxConcurrentStreams(uint32(config.Status.GRPCConcurrentStreams)),
-		grpc.InitialWindowSize(int32(config.Status.GRPCInitialWindowSize)),
-		grpc.MaxSendMsgSize(config.Status.GRPCMaxSendMsgSize),
-	)
+	s := grpc.NewServer()
 	rpcSrv := &rpcServer{
 		DiagnosticsServer: sysutil.NewDiagnosticsServer(config.Log.File.Filename),
 		dom:               dom,
@@ -66,7 +54,6 @@ func NewRPCServer(config *config.Config, dom *domain.Domain, sm util.SessionMana
 	}
 	diagnosticspb.RegisterDiagnosticsServer(s, rpcSrv)
 	tikvpb.RegisterTikvServer(s, rpcSrv)
-	topsql.RegisterPubSubServer(s)
 	return s
 }
 
@@ -224,8 +211,9 @@ func (s *rpcServer) createSession() (session.Session, error) {
 	vars.SetHashAggFinalConcurrency(1)
 	vars.StmtCtx.InitMemTracker(memory.LabelForSQLText, vars.MemQuotaQuery)
 	vars.StmtCtx.MemTracker.AttachToGlobalTracker(executor.GlobalMemoryUsageTracker)
-	switch variable.OOMAction.Load() {
-	case variable.OOMActionCancel:
+	globalConfig := config.GetGlobalConfig()
+	switch globalConfig.OOMAction {
+	case config.OOMActionCancel:
 		action := &memory.PanicOnExceed{}
 		action.SetLogHook(domain.GetDomain(se).ExpensiveQueryHandle().LogOnQueryExceedMemQuota)
 		vars.StmtCtx.MemTracker.SetActionOnExceed(action)

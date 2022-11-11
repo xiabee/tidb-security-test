@@ -18,32 +18,43 @@ import (
 	"errors"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/require"
 )
 
-func TestReadCounter(t *testing.T) {
+type testMetricSuite struct{}
+
+func (s *testMetricSuite) SetUpSuite(c *C)    {}
+func (s *testMetricSuite) TearDownSuite(c *C) {}
+
+var _ = Suite(&testMetricSuite{})
+
+func TestMetric(t *testing.T) {
+	TestingT(t)
+}
+
+func (s *testMetricSuite) TestReadCounter(c *C) {
 	counter := prometheus.NewCounter(prometheus.CounterOpts{})
 	counter.Add(1256.0)
 	counter.Add(2214.0)
-	require.Equal(t, 3470.0, metric.ReadCounter(counter))
+	c.Assert(metric.ReadCounter(counter), Equals, 3470.0)
 }
 
-func TestReadHistogramSum(t *testing.T) {
+func (s *testMetricSuite) TestReadHistogramSum(c *C) {
 	histogram := prometheus.NewHistogram(prometheus.HistogramOpts{})
 	histogram.Observe(11131.5)
 	histogram.Observe(15261.0)
-	require.Equal(t, 26392.5, metric.ReadHistogramSum(histogram))
+	c.Assert(metric.ReadHistogramSum(histogram), Equals, 26392.5)
 }
 
-func TestRecordEngineCount(t *testing.T) {
+func (s *testMetricSuite) TestRecordEngineCount(c *C) {
 	metric.RecordEngineCount("table1", nil)
 	metric.RecordEngineCount("table1", errors.New("mock error"))
 	successCounter, err := metric.ProcessedEngineCounter.GetMetricWithLabelValues("table1", "success")
-	require.NoError(t, err)
-	require.Equal(t, 1.0, metric.ReadCounter(successCounter))
+	c.Assert(err, IsNil)
+	c.Assert(metric.ReadCounter(successCounter), Equals, 1.0)
 	failureCount, err := metric.ProcessedEngineCounter.GetMetricWithLabelValues("table1", "failure")
-	require.NoError(t, err)
-	require.Equal(t, 1.0, metric.ReadCounter(failureCount))
+	c.Assert(err, IsNil)
+	c.Assert(metric.ReadCounter(failureCount), Equals, 1.0)
 }

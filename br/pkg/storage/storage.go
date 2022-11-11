@@ -32,11 +32,6 @@ const (
 type WalkOption struct {
 	// walk on SubDir of specify directory
 	SubDir string
-	// ObjPrefix used fo prefix search in storage.
-	// it can save lots of time when we want find specify prefix objects in storage.
-	// For example. we have 10000 <Hash>.sst files and 10 backupmeta.(\d+) files.
-	// we can use ObjPrefix = "backupmeta" to retrieve all meta files quickly.
-	ObjPrefix string
 	// ListCount is the number of entries per page.
 	//
 	// In cloud storages such as S3 and GCS, the files listed and sent in pages.
@@ -76,7 +71,7 @@ type Writer interface {
 
 // ExternalStorage represents a kind of file system storage.
 type ExternalStorage interface {
-	// WriteFile writes a complete file to storage, similar to os.WriteFile, but WriteFile should be atomic
+	// WriteFile writes a complete file to storage, similar to os.WriteFile
 	WriteFile(ctx context.Context, name string, data []byte) error
 	// ReadFile reads a complete file from storage, similar to os.ReadFile
 	ReadFile(ctx context.Context, name string) ([]byte, error)
@@ -99,8 +94,6 @@ type ExternalStorage interface {
 
 	// Create opens a file writer by path. path is relative path to storage base path
 	Create(ctx context.Context, path string) (ExternalFileWriter, error)
-	// Rename file name from oldFileName to newFileName
-	Rename(ctx context.Context, oldFileName, newFileName string) error
 }
 
 // ExternalFileReader represents the streaming external file reader.
@@ -172,8 +165,6 @@ func New(ctx context.Context, backend *backuppb.StorageBackend, opts *ExternalSt
 			return nil, errors.Annotate(berrors.ErrStorageInvalidConfig, "GCS config not found")
 		}
 		return newGCSStorage(ctx, backend.Gcs, opts)
-	case *backuppb.StorageBackend_AzureBlobStorage:
-		return newAzureBlobStorage(ctx, backend.AzureBlobStorage, opts)
 	default:
 		return nil, errors.Annotatef(berrors.ErrStorageInvalidConfig, "storage %T is not supported yet", backend)
 	}

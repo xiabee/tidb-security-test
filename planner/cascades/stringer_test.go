@@ -29,6 +29,8 @@ import (
 )
 
 func TestGroupStringer(t *testing.T) {
+	t.Parallel()
+
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
 		memo.OperandSelection: {

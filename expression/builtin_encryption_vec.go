@@ -33,6 +33,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/encrypt"
+	"github.com/pingcap/tidb/util/hack"
 )
 
 func (b *builtinAesDecryptSig) vectorized() bool {
@@ -421,15 +422,14 @@ func (b *builtinMD5Sig) vecEvalString(input *chunk.Chunk, result *chunk.Column) 
 		return err
 	}
 	result.ReserveString(n)
-
 	digest := md5.New() // #nosec G401
 	for i := 0; i < n; i++ {
 		if buf.IsNull(i) {
 			result.AppendNull()
 			continue
 		}
-		cryptBytes := buf.GetBytes(i)
-		_, err = digest.Write(cryptBytes)
+		cryptByte := buf.GetBytes(i)
+		_, err := digest.Write(cryptByte)
 		if err != nil {
 			return err
 		}
@@ -562,15 +562,15 @@ func (b *builtinCompressSig) vecEvalString(input *chunk.Chunk, result *chunk.Col
 			continue
 		}
 
-		strBytes := buf.GetBytes(i)
+		str := buf.GetString(i)
 
 		// According to doc: Empty strings are stored as empty strings.
-		if len(strBytes) == 0 {
+		if len(str) == 0 {
 			result.AppendString("")
 			continue
 		}
 
-		compressed, err := deflate(strBytes)
+		compressed, err := deflate(hack.Slice(str))
 		if err != nil {
 			result.AppendNull()
 			continue
@@ -588,7 +588,7 @@ func (b *builtinCompressSig) vecEvalString(input *chunk.Chunk, result *chunk.Col
 		defer deallocateByteSlice(buffer)
 		buffer = buffer[:resultLength]
 
-		binary.LittleEndian.PutUint32(buffer, uint32(len(strBytes)))
+		binary.LittleEndian.PutUint32(buffer, uint32(len(str)))
 		copy(buffer[4:], compressed)
 
 		if shouldAppendSuffix {
@@ -687,18 +687,16 @@ func (b *builtinPasswordSig) vecEvalString(input *chunk.Chunk, result *chunk.Col
 			result.AppendString("")
 			continue
 		}
-
-		passBytes := buf.GetBytes(i)
-		if len(passBytes) == 0 {
+		pass := buf.GetString(i)
+		if len(pass) == 0 {
 			result.AppendString("")
 			continue
 		}
-
 		// We should append a warning here because function "PASSWORD" is deprecated since MySQL 5.7.6.
 		// See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_password
 		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errDeprecatedSyntaxNoReplacement.GenWithStackByArgs("PASSWORD"))
 
-		result.AppendString(auth.EncodePasswordBytes(passBytes))
+		result.AppendString(auth.EncodePassword(pass))
 	}
 	return nil
 }

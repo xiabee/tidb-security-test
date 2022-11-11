@@ -60,7 +60,7 @@ func TestBaseFunc_InferAggRetType(t *testing.T) {
 
 	for _, dataType := range dataTypes {
 		notNullType := dataType.Clone()
-		notNullType.AddFlag(mysql.NotNullFlag)
+		notNullType.Flag |= mysql.NotNullFlag
 		col := &expression.Column{
 			UniqueID: 0,
 			RetType:  notNullType,

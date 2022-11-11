@@ -17,15 +17,27 @@ package common_test
 import (
 	"context"
 	"sync"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func assertUnblocksBetween(t *testing.T, wg *sync.WaitGroup, min, max time.Duration) {
+// unblocksAfter is a checker which ensures the WaitGroup's Wait() method
+// returns between the given durations.
+var unblocksBetween Checker = &unblocksChecker{
+	&CheckerInfo{Name: "unblocksBetween", Params: []string{"waitGroupPtr", "min", "max"}},
+}
+
+type unblocksChecker struct {
+	*CheckerInfo
+}
+
+func (checker *unblocksChecker) Check(params []interface{}, names []string) (bool, string) {
+	wg := params[0].(*sync.WaitGroup)
+	min := params[1].(time.Duration)
+	max := params[2].(time.Duration)
+
 	ch := make(chan time.Duration)
 	start := time.Now()
 	go func() {
@@ -35,19 +47,24 @@ func assertUnblocksBetween(t *testing.T, wg *sync.WaitGroup, min, max time.Durat
 	select {
 	case dur := <-ch:
 		if dur < min {
-			t.Fatal("WaitGroup unblocked before minimum duration, it was " + dur.String())
+			return false, "WaitGroup unblocked before minimum duration, it was " + dur.String()
 		}
+		return true, ""
 	case <-time.After(max):
 		select {
 		case dur := <-ch:
-			t.Fatal("WaitGroup did not unblock after maximum duration, it was " + dur.String())
+			return false, "WaitGroup did not unblock after maximum duration, it was " + dur.String()
 		case <-time.After(1 * time.Second):
-			t.Fatal("WaitGroup did not unblock after maximum duration")
+			return false, "WaitGroup did not unblock after maximum duration"
 		}
 	}
 }
 
-func TestPause(t *testing.T) {
+var _ = Suite(&pauseSuite{})
+
+type pauseSuite struct{}
+
+func (s *pauseSuite) TestPause(c *C) {
 	var wg sync.WaitGroup
 	p := common.NewPauser()
 
@@ -58,12 +75,12 @@ func TestPause(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			err := p.Wait(context.Background())
-			assert.NoError(t, err)
+			c.Assert(err, IsNil)
 		}()
 	}
 
 	// Give them more time to unblock in case of time exceeding due to high pressure of CI.
-	assertUnblocksBetween(t, &wg, 0*time.Millisecond, 100*time.Millisecond)
+	c.Assert(&wg, unblocksBetween, 0*time.Millisecond, 100*time.Millisecond)
 
 	// after calling Pause(), these should be blocking...
 
@@ -74,7 +91,7 @@ func TestPause(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			err := p.Wait(context.Background())
-			require.NoError(t, err)
+			c.Assert(err, IsNil)
 		}()
 	}
 
@@ -86,7 +103,7 @@ func TestPause(t *testing.T) {
 	}()
 
 	// Give them more time to unblock in case of time exceeding due to high pressure of CI.
-	assertUnblocksBetween(t, &wg, 500*time.Millisecond, 800*time.Millisecond)
+	c.Assert(&wg, unblocksBetween, 500*time.Millisecond, 800*time.Millisecond)
 
 	// if the context is canceled, Wait() should immediately unblock...
 
@@ -99,13 +116,13 @@ func TestPause(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			err := p.Wait(ctx)
-			require.ErrorIs(t, err, context.Canceled)
+			c.Assert(err, Equals, context.Canceled)
 		}()
 	}
 
 	cancel()
 	// Give them more time to unblock in case of time exceeding due to high pressure of CI.
-	assertUnblocksBetween(t, &wg, 0*time.Millisecond, 100*time.Millisecond)
+	c.Assert(&wg, unblocksBetween, 0*time.Millisecond, 100*time.Millisecond)
 
 	// canceling the context does not affect the state of the pauser
 
@@ -113,7 +130,7 @@ func TestPause(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		err := p.Wait(context.Background())
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 	}()
 
 	go func() {
@@ -122,29 +139,29 @@ func TestPause(t *testing.T) {
 	}()
 
 	// Give them more time to unblock in case of time exceeding due to high pressure of CI.
-	assertUnblocksBetween(t, &wg, 500*time.Millisecond, 800*time.Millisecond)
+	c.Assert(&wg, unblocksBetween, 500*time.Millisecond, 800*time.Millisecond)
 }
 
 // Run `go test github.com/pingcap/tidb/br/pkg/lightning/common -check.b -test.v` to get benchmark result.
-func BenchmarkWaitNoOp(b *testing.B) {
+func (s *pauseSuite) BenchmarkWaitNoOp(c *C) {
 	p := common.NewPauser()
 	ctx := context.Background()
-	for i := 0; i < b.N; i++ {
+	for i := 0; i < c.N; i++ {
 		_ = p.Wait(ctx)
 	}
 }
 
-func BenchmarkWaitCtxCanceled(b *testing.B) {
+func (s *pauseSuite) BenchmarkWaitCtxCanceled(c *C) {
 	p := common.NewPauser()
 	p.Pause()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	for i := 0; i < b.N; i++ {
+	for i := 0; i < c.N; i++ {
 		_ = p.Wait(ctx)
 	}
 }
 
-func BenchmarkWaitContended(b *testing.B) {
+func (s *pauseSuite) BenchmarkWaitContended(c *C) {
 	p := common.NewPauser()
 
 	done := make(chan struct{})
@@ -167,7 +184,7 @@ func BenchmarkWaitContended(b *testing.B) {
 	}()
 
 	ctx := context.Background()
-	for i := 0; i < b.N; i++ {
+	for i := 0; i < c.N; i++ {
 		_ = p.Wait(ctx)
 	}
 }

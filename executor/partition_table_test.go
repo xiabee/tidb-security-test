@@ -18,26 +18,19 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
-	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/domain"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/testkit/external"
-	"github.com/pingcap/tidb/testkit/testdata"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/israce"
+	"github.com/pingcap/tidb/util/testkit"
+	"github.com/pingcap/tidb/util/testutil"
 )
 
-func TestFourReader(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestFourReader(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop table if exists pt")
 	tk.MustExec(`create table pt (id int, c int, key i_id(id), key i_c(c)) partition by range (c) (
 partition p0 values less than (4),
@@ -58,7 +51,7 @@ partition p2 values less than (10))`)
 	tk.MustQuery("select c from pt").Sort().Check(testkit.Rows("0", "2", "4", "6", "7", "9", "<nil>"))
 	tk.MustQuery("select c from pt where c > 10").Check(testkit.Rows())
 	tk.MustQuery("select c from pt where c > 8").Check(testkit.Rows("9"))
-	tk.MustQuery("select c from pt where c < 2 or c >= 9").Sort().Check(testkit.Rows("0", "9"))
+	tk.MustQuery("select c from pt where c < 2 or c >= 9").Check(testkit.Rows("0", "9"))
 
 	// Index lookup
 	tk.MustQuery("select /*+ use_index(pt, i_id) */ * from pt").Sort().Check(testkit.Rows("0 0", "2 2", "4 4", "6 6", "7 7", "9 9", "<nil> <nil>"))
@@ -71,12 +64,8 @@ partition p2 values less than (10))`)
 	tk.MustQuery("select /*+ use_index(i_c, i_id) */ * from pt where id = 4 or c < 7").Sort().Check(testkit.Rows("0 0", "2 2", "4 4", "6 6"))
 }
 
-func TestPartitionIndexJoin(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestPartitionIndexJoin(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("set @@session.tidb_enable_table_partition = 1")
 	tk.MustExec("set @@session.tidb_enable_list_partition = 1")
 	for i := 0; i < 3; i++ {
@@ -109,14 +98,9 @@ func TestPartitionIndexJoin(t *testing.T) {
 	}
 }
 
-func TestPartitionUnionScanIndexJoin(t *testing.T) {
+func (s *partitionTableSuite) TestPartitionUnionScanIndexJoin(c *C) {
 	// For issue https://github.com/pingcap/tidb/issues/19152
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("create table t1  (c_int int, c_str varchar(40), primary key (c_int)) partition by range (c_int) ( partition p0 values less than (10), partition p1 values less than maxvalue)")
 	tk.MustExec("create table t2  (c_int int, c_str varchar(40), primary key (c_int, c_str)) partition by hash (c_int) partitions 4")
@@ -129,12 +113,11 @@ func TestPartitionUnionScanIndexJoin(t *testing.T) {
 	tk.MustExec("commit")
 }
 
-func TestPointGetwithRangeAndListPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestPointGetwithRangeAndListPartitionTable(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_pointget_list_hash")
 	tk.MustExec("use test_pointget_list_hash")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -177,38 +160,35 @@ func TestPointGetwithRangeAndListPartitionTable(t *testing.T) {
 		// select a from t where a={x}; // the result is {x}
 		x := rand.Intn(100) + 1
 		queryRange1 := fmt.Sprintf("select a from trange1 where a=%v", x)
-		require.True(t, tk.HasPlan(queryRange1, "Point_Get")) // check if PointGet is used
+		c.Assert(tk.HasPlan(queryRange1, "Point_Get"), IsTrue) // check if PointGet is used
 		tk.MustQuery(queryRange1).Check(testkit.Rows(fmt.Sprintf("%v", x)))
 
 		queryRange2 := fmt.Sprintf("select a from trange1 where a=%v", x)
-		require.True(t, tk.HasPlan(queryRange2, "Point_Get")) // check if PointGet is used
+		c.Assert(tk.HasPlan(queryRange2, "Point_Get"), IsTrue) // check if PointGet is used
 		tk.MustQuery(queryRange2).Check(testkit.Rows(fmt.Sprintf("%v", x)))
 
 		y := rand.Intn(12) + 1
 		queryList := fmt.Sprintf("select a from tlist where a=%v", y)
-		require.True(t, tk.HasPlan(queryList, "Point_Get")) // check if PointGet is used
+		c.Assert(tk.HasPlan(queryList, "Point_Get"), IsTrue) // check if PointGet is used
 		tk.MustQuery(queryList).Check(testkit.Rows(fmt.Sprintf("%v", y)))
 	}
 
 	// test table dual
 	queryRange1 := "select a from trange1 where a=200"
-	require.True(t, tk.HasPlan(queryRange1, "TableDual")) // check if TableDual is used
+	c.Assert(tk.HasPlan(queryRange1, "TableDual"), IsTrue) // check if TableDual is used
 	tk.MustQuery(queryRange1).Check(testkit.Rows())
 
 	queryRange2 := "select a from trange2 where a=200"
-	require.True(t, tk.HasPlan(queryRange2, "TableDual")) // check if TableDual is used
+	c.Assert(tk.HasPlan(queryRange2, "TableDual"), IsTrue) // check if TableDual is used
 	tk.MustQuery(queryRange2).Check(testkit.Rows())
 
 	queryList := "select a from tlist where a=200"
-	require.True(t, tk.HasPlan(queryList, "TableDual")) // check if TableDual is used
+	c.Assert(tk.HasPlan(queryList, "TableDual"), IsTrue) // check if TableDual is used
 	tk.MustQuery(queryList).Check(testkit.Rows())
 }
 
-func TestPartitionReaderUnderApply(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestPartitionReaderUnderApply(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("use test")
 
 	// For issue 19458.
@@ -224,7 +204,7 @@ func TestPartitionReaderUnderApply(t *testing.T) {
 		  c_double double DEFAULT NULL,
 		  c_decimal decimal(12,6) DEFAULT NULL,
 		  PRIMARY KEY (c_int,c_str,c_datetime)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 		 PARTITION BY RANGE (c_int)
 		(PARTITION p0 VALUES LESS THAN (2) ENGINE = InnoDB,
 		 PARTITION p1 VALUES LESS THAN (4) ENGINE = InnoDB,
@@ -264,11 +244,8 @@ func TestPartitionReaderUnderApply(t *testing.T) {
 		"5 naughty swartz 9.524000"))
 }
 
-func TestImproveCoverage(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestImproveCoverage(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`create table coverage_rr (
 pk1 varchar(35) NOT NULL,
@@ -283,11 +260,8 @@ PRIMARY KEY (pk1,pk2)) partition by hash(pk2) partitions 4;`)
 	tk.MustQuery("select /*+ INL_MERGE_JOIN(dt, rr) */ * from coverage_dt dt join coverage_rr rr on (dt.pk1 = rr.pk1 and dt.pk2 = rr.pk2);").Sort().Check(testkit.Rows("ios 3 ios 3 2", "linux 5 linux 5 1"))
 }
 
-func TestPartitionInfoDisable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestPartitionInfoDisable(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t_info_null")
 	tk.MustExec(`CREATE TABLE t_info_null (
@@ -312,9 +286,9 @@ func TestPartitionInfoDisable(t *testing.T) {
   PARTITION p202010 VALUES LESS THAN ("2020-11-01"),
   PARTITION p202011 VALUES LESS THAN ("2020-12-01")
 )`)
-	is := tk.Session().GetInfoSchema().(infoschema.InfoSchema)
+	is := tk.Se.GetInfoSchema().(infoschema.InfoSchema)
 	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t_info_null"))
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	tbInfo := tbl.Meta()
 	// Mock for a case that the tableInfo.Partition is not nil, but tableInfo.Partition.Enable is false.
@@ -330,12 +304,12 @@ func TestPartitionInfoDisable(t *testing.T) {
 	tk.MustQuery("select * from t_info_null where (date = '2020-10-02' or date = '2020-10-06') and app = 'xxx' and media = '19003006'").Check(testkit.Rows())
 }
 
-func TestOrderByandLimit(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestOrderByandLimit(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_orderby_limit")
 	tk.MustExec("use test_orderby_limit")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -369,7 +343,7 @@ func TestOrderByandLimit(t *testing.T) {
 		y := rand.Intn(2000) + 1
 		queryPartition := fmt.Sprintf("select * from trange use index(idx_a) where a > %v order by a, b limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select * from tregular use index(idx_a) where a > %v order by a, b limit %v;", x, y)
-		require.True(t, tk.HasPlan(queryPartition, "IndexLookUp")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition, "IndexLookUp"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	}
 
@@ -381,7 +355,7 @@ func TestOrderByandLimit(t *testing.T) {
 		y := rand.Intn(2000) + 1
 		queryPartition := fmt.Sprintf("select * from trange ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select * from tregular ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
-		require.True(t, tk.HasPlan(queryPartition, "TableReader")) // check if tableReader is used
+		c.Assert(tk.HasPlan(queryPartition, "TableReader"), IsTrue) // check if tableReader is used
 		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	}
 
@@ -393,7 +367,7 @@ func TestOrderByandLimit(t *testing.T) {
 		y := rand.Intn(2000) + 1
 		queryPartition := fmt.Sprintf("select a from trange use index(idx_a) where a > %v order by a limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select a from tregular use index(idx_a) where a > %v order by a limit %v;", x, y)
-		require.True(t, tk.HasPlan(queryPartition, "IndexReader")) // check if indexReader is used
+		c.Assert(tk.HasPlan(queryPartition, "IndexReader"), IsTrue) // check if indexReader is used
 		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	}
 
@@ -404,18 +378,17 @@ func TestOrderByandLimit(t *testing.T) {
 		y := rand.Intn(2000) + 1
 		queryPartition := fmt.Sprintf("select /*+ use_index_merge(thash) */ * from thash where a > 2 or b < 5 order by a, b limit %v;", y)
 		queryRegular := fmt.Sprintf("select * from tregular where a > 2 or b < 5 order by a, b limit %v;", y)
-		require.True(t, tk.HasPlan(queryPartition, "IndexMerge")) // check if indexMerge is used
+		c.Assert(tk.HasPlan(queryPartition, "IndexMerge"), IsTrue) // check if indexMerge is used
 		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	}
 }
 
-func TestBatchGetandPointGetwithHashPartition(t *testing.T) {
+func (s *partitionTableSuite) TestBatchGetandPointGetwithHashPartition(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_batchget_pointget")
 	tk.MustExec("use test_batchget_pointget")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -440,14 +413,14 @@ func TestBatchGetandPointGetwithHashPartition(t *testing.T) {
 		// select a from t where a={x}; // the result is {x}
 		x := rand.Intn(100) + 1
 		queryHash := fmt.Sprintf("select a from thash where a=%v", x)
-		queryRegular := fmt.Sprintf("select a from tregular where a=%v", x)
-		require.True(t, tk.HasPlan(queryHash, "Point_Get")) // check if PointGet is used
+		queryRegular := fmt.Sprintf("select a from thash where a=%v", x)
+		c.Assert(tk.HasPlan(queryHash, "Point_Get"), IsTrue) // check if PointGet is used
 		tk.MustQuery(queryHash).Check(tk.MustQuery(queryRegular).Rows())
 	}
 
 	// test empty PointGet
 	queryHash := "select a from thash where a=200"
-	require.True(t, tk.HasPlan(queryHash, "Point_Get")) // check if PointGet is used
+	c.Assert(tk.HasPlan(queryHash, "Point_Get"), IsTrue) // check if PointGet is used
 	tk.MustQuery(queryHash).Check(testkit.Rows())
 
 	// test BatchGet
@@ -462,17 +435,17 @@ func TestBatchGetandPointGetwithHashPartition(t *testing.T) {
 
 		queryHash := fmt.Sprintf("select a from thash where a in (%v)", strings.Join(points, ","))
 		queryRegular := fmt.Sprintf("select a from tregular where a in (%v)", strings.Join(points, ","))
-		require.True(t, tk.HasPlan(queryHash, "Point_Get")) // check if PointGet is used
+		c.Assert(tk.HasPlan(queryHash, "Point_Get"), IsTrue) // check if PointGet is used
 		tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	}
 }
 
-func TestView(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestView(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_view")
 	tk.MustExec("use test_view")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -539,12 +512,12 @@ func TestView(t *testing.T) {
 	}
 }
 
-func TestDirectReadingwithIndexJoin(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestDirectReadingwithIndexJoin(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_dr_join")
 	tk.MustExec("use test_dr_join")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -552,10 +525,10 @@ func TestDirectReadingwithIndexJoin(t *testing.T) {
 	// hash and range partition
 	tk.MustExec("create table thash (a int, b int, c int, primary key(a), index idx_b(b)) partition by hash(a) partitions 4;")
 	tk.MustExec(`create table trange (a int, b int, c int, primary key(a), index idx_b(b)) partition by range(a) (
-		 partition p0 values less than(1000),
-		 partition p1 values less than(2000),
-		 partition p2 values less than(3000),
-		 partition p3 values less than(4000));`)
+		  partition p0 values less than(1000),
+		  partition p1 values less than(2000),
+		  partition p2 values less than(3000),
+		  partition p3 values less than(4000));`)
 
 	// regualr table
 	tk.MustExec(`create table tnormal (a int, b int, c int, primary key(a), index idx_b(b));`)
@@ -652,12 +625,12 @@ func TestDirectReadingwithIndexJoin(t *testing.T) {
 	tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 }
 
-func TestDynamicPruningUnderIndexJoin(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestDynamicPruningUnderIndexJoin(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 
 	tk.MustExec("create database pruing_under_index_join")
 	tk.MustExec("use pruing_under_index_join")
@@ -712,12 +685,12 @@ func TestDynamicPruningUnderIndexJoin(t *testing.T) {
 		tk.MustQuery(`select /*+ INL_JOIN(touter, tnormal) */ tnormal.* from touter join tnormal use index(idx_b) on touter.b = tnormal.b`).Sort().Rows())
 }
 
-func TestIssue25527(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestIssue25527(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_issue_25527")
 	tk.MustExec("use test_issue_25527")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -751,12 +724,8 @@ func TestIssue25527(t *testing.T) {
 	tk.MustQuery(`select a from t2 where a in (5)`).Check(testkit.Rows("5"))
 }
 
-func TestIssue25598(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestIssue25598(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_issue_25598")
 	tk.MustExec("use test_issue_25598")
 	tk.MustExec(`CREATE TABLE UK_HP16726 (
@@ -778,12 +747,11 @@ func TestIssue25598(t *testing.T) {
 	tk.MustExec(`explain select t1. col1, t2. col1 from UK_HP16726 as t1 inner join UK_HP16726 as t2 on t1.col1 = t2.col1 where t1.col1 > -9223372036854775808 group by t1.col1, t2.col1 having t1.col1 != 9223372036854775807`)
 }
 
-func TestBatchGetforRangeandListPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestBatchGetforRangeandListPartitionTable(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_pointget")
 	tk.MustExec("use test_pointget")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -833,11 +801,11 @@ func TestBatchGetforRangeandListPartitionTable(t *testing.T) {
 		queryRegular1 := fmt.Sprintf("select a from tregular1 where a in (%v)", strings.Join(points, ","))
 
 		queryHash := fmt.Sprintf("select a from thash where a in (%v)", strings.Join(points, ","))
-		require.True(t, tk.HasPlan(queryHash, "Batch_Point_Get")) // check if BatchGet is used
+		c.Assert(tk.HasPlan(queryHash, "Batch_Point_Get"), IsTrue) // check if BatchGet is used
 		tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryRange := fmt.Sprintf("select a from trange where a in (%v)", strings.Join(points, ","))
-		require.True(t, tk.HasPlan(queryRange, "Batch_Point_Get")) // check if BatchGet is used
+		c.Assert(tk.HasPlan(queryRange, "Batch_Point_Get"), IsTrue) // check if BatchGet is used
 		tk.MustQuery(queryRange).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		points = make([]string, 0, 10)
@@ -847,7 +815,7 @@ func TestBatchGetforRangeandListPartitionTable(t *testing.T) {
 		}
 		queryRegular2 := fmt.Sprintf("select a from tregular2 where a in (%v)", strings.Join(points, ","))
 		queryList := fmt.Sprintf("select a from tlist where a in (%v)", strings.Join(points, ","))
-		require.True(t, tk.HasPlan(queryList, "Batch_Point_Get")) // check if BatchGet is used
+		c.Assert(tk.HasPlan(queryList, "Batch_Point_Get"), IsTrue) // check if BatchGet is used
 		tk.MustQuery(queryList).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 	}
 
@@ -877,16 +845,16 @@ func TestBatchGetforRangeandListPartitionTable(t *testing.T) {
 	}
 	queryRegular := fmt.Sprintf("select a from tregular3 where a in (%v)", strings.Join(points, ","))
 	queryRange := fmt.Sprintf("select a from trange3 where a in (%v)", strings.Join(points, ","))
-	require.True(t, tk.HasPlan(queryRange, "Batch_Point_Get")) // check if BatchGet is used
+	c.Assert(tk.HasPlan(queryRange, "Batch_Point_Get"), IsTrue) // check if BatchGet is used
 	tk.MustQuery(queryRange).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 }
 
-func TestGlobalStatsAndSQLBinding(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestGlobalStatsAndSQLBinding(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_global_stats")
 	tk.MustExec("use test_global_stats")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -899,12 +867,12 @@ func TestGlobalStatsAndSQLBinding(t *testing.T) {
 		partition p2 values less than (600),
 		partition p3 values less than (800),
 		partition p4 values less than (1001))`)
-	tk.MustExec(`create table tlist (a int, b int, key(a)) partition by list (a) (
+	tk.MustExec(`create table tlist(a int, b int, key(a)) partition by list (a) (
 		partition p0 values in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
-		partition p1 values in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
-		partition p2 values in (20, 21, 22, 23, 24, 25, 26, 27, 28, 29),
-		partition p3 values in (30, 31, 32, 33, 34, 35, 36, 37, 38, 39),
-		partition p4 values in (40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50))`)
+		partition p0 values in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+		partition p0 values in (20, 21, 22, 23, 24, 25, 26, 27, 28, 29),
+		partition p0 values in (30, 31, 32, 33, 34, 35, 36, 37, 38, 39),
+		partition p0 values in (40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50))`)
 
 	// construct some special data distribution
 	vals := make([]string, 0, 1000)
@@ -925,9 +893,9 @@ func TestGlobalStatsAndSQLBinding(t *testing.T) {
 	tk.MustExec("insert into tlist values " + strings.Join(listVals, ","))
 
 	// before analyzing, the planner will choose TableScan to access the 1% of records
-	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
-	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
-	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
+	c.Assert(tk.HasPlan("select * from thash where a<100", "TableFullScan"), IsTrue)
+	c.Assert(tk.HasPlan("select * from trange where a<100", "TableFullScan"), IsTrue)
+	c.Assert(tk.HasPlan("select * from tlist where a<1", "TableFullScan"), IsTrue)
 
 	tk.MustExec("analyze table thash")
 	tk.MustExec("analyze table trange")
@@ -944,9 +912,9 @@ func TestGlobalStatsAndSQLBinding(t *testing.T) {
 	tk.MustExec("create session binding for select * from tlist where a<100 using select * from tlist ignore index(a) where a<100")
 
 	// use TableScan again since the Index(a) is ignored
-	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
-	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
-	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
+	c.Assert(tk.HasPlan("select * from thash where a<100", "TableFullScan"), IsTrue)
+	c.Assert(tk.HasPlan("select * from trange where a<100", "TableFullScan"), IsTrue)
+	c.Assert(tk.HasPlan("select * from tlist where a<1", "TableFullScan"), IsTrue)
 
 	// drop SQL bindings
 	tk.MustExec("drop session binding for select * from thash where a<100")
@@ -959,12 +927,12 @@ func TestGlobalStatsAndSQLBinding(t *testing.T) {
 	tk.MustIndexLookup("select * from tlist where a<1")
 }
 
-func TestPartitionTableWithDifferentJoin(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestPartitionTableWithDifferentJoin(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_partition_joins")
 	tk.MustExec("use test_partition_joins")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -1005,78 +973,78 @@ func TestPartitionTableWithDifferentJoin(t *testing.T) {
 	// hash_join range partition and hash partition
 	queryHash := fmt.Sprintf("select /*+ hash_join(trange, thash) */ * from trange, thash where trange.b=thash.b and thash.a = %v and trange.a > %v;", x1, x2)
 	queryRegular := fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.b=tregular1.b and tregular1.a = %v and tregular2.a > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, thash) */ * from trange, thash where trange.a=thash.a and thash.a > %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.a > %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, thash) */ * from trange, thash where trange.a=thash.a and trange.b = thash.b and thash.a > %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.b = tregular2.b and tregular1.a > %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, thash) */ * from trange, thash where trange.a=thash.a and thash.a = %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.a = %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// group 2
 	// hash_join range partition and regular table
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and trange.a >= %v and tregular1.a > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular2.a >= %v and tregular1.a > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and trange.a in (%v, %v, %v);", x1, x2, x3)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular2.a in (%v, %v, %v);", x1, x2, x3)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ hash_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and tregular1.a >= %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ hash_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular1.a >= %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "HashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "HashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// group 3
 	// merge_join range partition and hash partition
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, thash) */ * from trange, thash where trange.b=thash.b and thash.a = %v and trange.a > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.b=tregular1.b and tregular1.a = %v and tregular2.a > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, thash) */ * from trange, thash where trange.a=thash.a and thash.a > %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.a > %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, thash) */ * from trange, thash where trange.a=thash.a and trange.b = thash.b and thash.a > %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.b = tregular2.b and tregular1.a > %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, thash) */ * from trange, thash where trange.a=thash.a and thash.a = %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a=tregular1.a and tregular1.a = %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// group 4
 	// merge_join range partition and regular table
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and trange.a >= %v and tregular1.a > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular2.a >= %v and tregular1.a > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and trange.a in (%v, %v, %v);", x1, x2, x3)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular2.a in (%v, %v, %v);", x1, x2, x3)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ merge_join(trange, tregular1) */ * from trange, tregular1 where trange.a = tregular1.a and tregular1.a >= %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ merge_join(tregular2, tregular1) */ * from tregular2, tregular1 where tregular2.a = tregular1.a and tregular1.a >= %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "MergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "MergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// new table instances
@@ -1110,86 +1078,86 @@ func TestPartitionTableWithDifferentJoin(t *testing.T) {
 	// Currently don't support index merge join on two partition tables. Only test warning.
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, trange2) */ * from trange, trange2 where trange.a=trange2.a and trange.a > %v;", x1)
 	// queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v;", x1)
-	// require.True(t,tk.HasPlan(queryHash, "IndexMergeJoin"))
+	// c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	// tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	tk.MustQuery(queryHash)
-	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
+	tk.MustQuery("show warnings").Check(testutil.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, trange2) */ * from trange, trange2 where trange.a=trange2.a and trange.a > %v and trange2.a > %v;", x1, x2)
 	// queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular4.a > %v;", x1, x2)
-	// require.True(t,tk.HasPlan(queryHash, "IndexMergeJoin"))
+	// c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	// tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	tk.MustQuery(queryHash)
-	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
+	tk.MustQuery("show warnings").Check(testutil.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, trange2) */ * from trange, trange2 where trange.a=trange2.a and trange.a > %v and trange.b > %v;", x1, x2)
 	// queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular2.b > %v;", x1, x2)
-	// require.True(t,tk.HasPlan(queryHash, "IndexMergeJoin"))
+	// c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	// tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	tk.MustQuery(queryHash)
-	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
+	tk.MustQuery("show warnings").Check(testutil.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, trange2) */ * from trange, trange2 where trange.a=trange2.a and trange.a > %v and trange2.b > %v;", x1, x2)
 	// queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular4.b > %v;", x1, x2)
-	// require.True(t,tk.HasPlan(queryHash, "IndexMergeJoin"))
+	// c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	// tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 	tk.MustQuery(queryHash)
-	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
+	tk.MustQuery("show warnings").Check(testutil.RowsWithSep("|", "Warning|1815|Optimizer Hint /*+ INL_MERGE_JOIN(trange, trange2) */ is inapplicable"))
 
 	// group 6
 	// index_merge_join range partition and regualr table
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, tregular4) */ * from trange, tregular4 where trange.a=tregular4.a and trange.a > %v;", x1)
 	queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v;", x1)
-	require.True(t, tk.HasPlan(queryHash, "IndexMergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, tregular4) */ * from trange, tregular4 where trange.a=tregular4.a and trange.a > %v and tregular4.a > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular4.a > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexMergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, tregular4) */ * from trange, tregular4 where trange.a=tregular4.a and trange.a > %v and trange.b > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular2.b > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexMergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_merge_join(trange, tregular4) */ * from trange, tregular4 where trange.a=tregular4.a and trange.a > %v and tregular4.b > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_merge_join(tregular2, tregular4) */ * from tregular2, tregular4 where tregular2.a=tregular4.a and tregular2.a > %v and tregular4.b > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexMergeJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexMergeJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// group 7
 	// index_hash_join hash partition and hash partition
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, thash2) */ * from thash, thash2 where thash.a = thash2.a and thash.a in (%v, %v);", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a in (%v, %v);", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, thash2) */ * from thash, thash2 where thash.a = thash2.a and thash.a in (%v, %v) and thash2.a in (%v, %v);", x1, x2, x3, x4)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a in (%v, %v) and tregular3.a in (%v, %v);", x1, x2, x3, x4)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, thash2) */ * from thash, thash2 where thash.a = thash2.a and thash.a > %v and thash2.b > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a > %v and tregular3.b > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	// group 8
 	// index_hash_join hash partition and hash partition
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, tregular3) */ * from thash, tregular3 where thash.a = tregular3.a and thash.a in (%v, %v);", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a in (%v, %v);", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, tregular3) */ * from thash, tregular3 where thash.a = tregular3.a and thash.a in (%v, %v) and tregular3.a in (%v, %v);", x1, x2, x3, x4)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a in (%v, %v) and tregular3.a in (%v, %v);", x1, x2, x3, x4)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 
 	queryHash = fmt.Sprintf("select /*+ inl_hash_join(thash, tregular3) */ * from thash, tregular3 where thash.a = tregular3.a and thash.a > %v and tregular3.b > %v;", x1, x2)
 	queryRegular = fmt.Sprintf("select /*+ inl_hash_join(tregular1, tregular3) */ * from tregular1, tregular3 where tregular1.a = tregular3.a and tregular1.a > %v and tregular3.b > %v;", x1, x2)
-	require.True(t, tk.HasPlan(queryHash, "IndexHashJoin"))
+	c.Assert(tk.HasPlan(queryHash, "IndexHashJoin"), IsTrue)
 	tk.MustQuery(queryHash).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
 }
 
@@ -1211,12 +1179,8 @@ type testData4Expression struct {
 	partitions []string
 }
 
-func TestDateColWithUnequalExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestDateColWithUnequalExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_datetime_unequal_expression")
 	tk.MustExec("create database db_datetime_unequal_expression")
 	tk.MustExec("use db_datetime_unequal_expression")
@@ -1246,12 +1210,8 @@ func TestDateColWithUnequalExpression(t *testing.T) {
 	}
 }
 
-func TestToDaysColWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestToDaysColWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_to_days_expression")
 	tk.MustExec("create database db_to_days_expression")
 	tk.MustExec("use db_to_days_expression")
@@ -1281,12 +1241,8 @@ func TestToDaysColWithExpression(t *testing.T) {
 	}
 }
 
-func TestWeekdayWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestWeekdayWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_weekday_expression")
 	tk.MustExec("create database db_weekday_expression")
 	tk.MustExec("use db_weekday_expression")
@@ -1320,12 +1276,8 @@ func TestWeekdayWithExpression(t *testing.T) {
 	}
 }
 
-func TestFloorUnixTimestampAndIntColWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestFloorUnixTimestampAndIntColWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_floor_unix_timestamp_int_expression")
 	tk.MustExec("create database db_floor_unix_timestamp_int_expression")
 	tk.MustExec("use db_floor_unix_timestamp_int_expression")
@@ -1355,12 +1307,8 @@ func TestFloorUnixTimestampAndIntColWithExpression(t *testing.T) {
 	}
 }
 
-func TestUnixTimestampAndIntColWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestUnixTimestampAndIntColWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_unix_timestamp_int_expression")
 	tk.MustExec("create database db_unix_timestamp_int_expression")
 	tk.MustExec("use db_unix_timestamp_int_expression")
@@ -1390,12 +1338,8 @@ func TestUnixTimestampAndIntColWithExpression(t *testing.T) {
 	}
 }
 
-func TestDatetimeColAndIntColWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestDatetimeColAndIntColWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_datetime_int_expression")
 	tk.MustExec("create database db_datetime_int_expression")
 	tk.MustExec("use db_datetime_int_expression")
@@ -1425,12 +1369,8 @@ func TestDatetimeColAndIntColWithExpression(t *testing.T) {
 	}
 }
 
-func TestVarcharColAndIntColWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestVarcharColAndIntColWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_varchar_int_expression")
 	tk.MustExec("create database db_varchar_int_expression")
 	tk.MustExec("use db_varchar_int_expression")
@@ -1464,12 +1404,8 @@ func TestVarcharColAndIntColWithExpression(t *testing.T) {
 	}
 }
 
-func TestDynamicPruneModeWithExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestDynamicPruneModeWithExpression(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop database if exists db_equal_expression")
 	tk.MustExec("create database db_equal_expression")
 	tk.MustExec("use db_equal_expression")
@@ -1756,12 +1692,12 @@ func TestDynamicPruneModeWithExpression(t *testing.T) {
 	}
 }
 
-func TestAddDropPartitions(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestAddDropPartitions(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_add_drop_partition")
 	tk.MustExec("use test_add_drop_partition")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -1790,67 +1726,26 @@ func TestAddDropPartitions(t *testing.T) {
 	tk.MustPartition(`select * from t where a < 20`, "p1,p2,p3").Sort().Check(testkit.Rows("12", "15", "7"))
 }
 
-func TestMPPQueryExplainInfo(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("create database tiflash_partition_test")
-	tk.MustExec("use tiflash_partition_test")
-	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
-
-	tk.MustExec(`create table t(a int) partition by range(a) (
-		  partition p0 values less than (5),
-		  partition p1 values less than (10),
-		  partition p2 values less than (15))`)
-	tb := external.GetTableByName(t, tk, "tiflash_partition_test", "t")
-	for _, partition := range tb.Meta().GetPartitionInfo().Definitions {
-		err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), partition.ID, true)
-		require.NoError(t, err)
+func (s *partitionTableSuite) PartitionPruningInTransaction(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
 	}
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
-	tk.MustExec(`insert into t values (2), (7), (12)`)
-	tk.MustExec("set tidb_enforce_mpp=1")
-	tk.MustPartition(`select * from t where a < 3`, "p0").Sort().Check(testkit.Rows("2"))
-	tk.MustPartition(`select * from t where a < 8`, "p0,p1").Sort().Check(testkit.Rows("2", "7"))
-	tk.MustPartition(`select * from t where a < 20`, "all").Sort().Check(testkit.Rows("12", "2", "7"))
-	tk.MustPartition(`select * from t where a < 5 union all select * from t where a > 10`, "p0").Sort().Check(testkit.Rows("12", "2"))
-	tk.MustPartition(`select * from t where a < 5 union all select * from t where a > 10`, "p2").Sort().Check(testkit.Rows("12", "2"))
-}
 
-func TestPartitionPruningInTransaction(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_pruning_transaction")
 	defer tk.MustExec(`drop database test_pruning_transaction`)
 	tk.MustExec("use test_pruning_transaction")
-	tk.MustExec(`create table t(a int, b int) partition by range(a) (partition p0 values less than(3), partition p1 values less than (5), partition p2 values less than(11))`)
-	tk.MustExec("set @@tidb_partition_prune_mode = 'static'")
-	tk.MustExec(`begin`)
-	tk.MustPartitionByList(`select * from t`, []string{"p0", "p1", "p2"})
-	tk.MustPartitionByList(`select * from t where a > 3`, []string{"p1", "p2"}) // partition pruning can work in transactions
-	tk.MustPartitionByList(`select * from t where a > 7`, []string{"p2"})
-	tk.MustExec(`rollback`)
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
+	tk.MustExec(`create table t(a int, b int) partition by range(a) (partition p0 values less than(3), partition p1 values less than (5), partition p2 values less than(11))`)
 	tk.MustExec(`begin`)
 	tk.MustPartition(`select * from t`, "all")
-	tk.MustPartition(`select * from t where a > 3`, "p1,p2") // partition pruning can work in transactions
+	tk.MustPartition(`select * from t where a > 4`, "p1,p2") // partition pruning can work in transactions
 	tk.MustPartition(`select * from t where a > 7`, "p2")
 	tk.MustExec(`rollback`)
-	tk.MustExec("set @@tidb_partition_prune_mode = default")
 }
 
-func TestIssue25253(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestIssue25253(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database issue25253")
 	defer tk.MustExec("drop database issue25253")
 	tk.MustExec("use issue25253")
@@ -1880,12 +1775,12 @@ func TestIssue25253(t *testing.T) {
 	tk.MustQuery(`select * from t`).Check(testkit.Rows())
 }
 
-func TestDML(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestDML(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_DML")
 	defer tk.MustExec(`drop database test_DML`)
 	tk.MustExec("use test_DML")
@@ -1941,12 +1836,12 @@ func TestDML(t *testing.T) {
 	}
 }
 
-func TestUnion(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestUnion(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_union")
 	defer tk.MustExec(`drop database test_union`)
 	tk.MustExec("use test_union")
@@ -1992,12 +1887,12 @@ func TestUnion(t *testing.T) {
 	}
 }
 
-func TestSubqueries(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestSubqueries(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_subquery")
 	defer tk.MustExec(`drop database test_subquery`)
 	tk.MustExec("use test_subquery")
@@ -2058,12 +1953,12 @@ func TestSubqueries(t *testing.T) {
 	}
 }
 
-func TestSplitRegion(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestSplitRegion(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_split_region")
 	tk.MustExec("use test_split_region")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2095,12 +1990,12 @@ func TestSplitRegion(t *testing.T) {
 	tk.MustPartition(`select * from thash where a in (1, 10001, 20001)`, "p1").Sort().Check(result)
 }
 
-func TestParallelApply(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestParallelApply(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_parallel_apply")
 	tk.MustExec("use test_parallel_apply")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2235,12 +2130,12 @@ func TestParallelApply(t *testing.T) {
 	}
 }
 
-func TestDirectReadingWithUnionScan(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestDirectReadingWithUnionScan(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_unionscan")
 	defer tk.MustExec(`drop database test_unionscan`)
 	tk.MustExec("use test_unionscan")
@@ -2310,12 +2205,8 @@ func TestDirectReadingWithUnionScan(t *testing.T) {
 	tk.MustExec(`rollback`)
 }
 
-func TestIssue25030(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestIssue25030(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_issue_25030")
 	tk.MustExec("use test_issue_25030")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2339,12 +2230,12 @@ func TestIssue25030(t *testing.T) {
 		Check(testkit.Rows()) // can work properly without any error or panic
 }
 
-func TestUnsignedPartitionColumn(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestUnsignedPartitionColumn(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_unsigned_partition")
 	tk.MustExec("use test_unsigned_partition")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2388,7 +2279,7 @@ func TestUnsignedPartitionColumn(t *testing.T) {
 		for tid, tbl := range []string{"tnormal_pk", "trange_pk", "thash_pk"} {
 			// unsigned + TableReader
 			scanSQL := fmt.Sprintf("select * from %v use index(primary) where %v", tbl, scanCond)
-			require.True(t, tk.HasPlan(scanSQL, "TableReader"))
+			c.Assert(tk.HasPlan(scanSQL, "TableReader"), IsTrue)
 			r := tk.MustQuery(scanSQL).Sort()
 			if tid == 0 {
 				rScan = r.Rows()
@@ -2408,7 +2299,7 @@ func TestUnsignedPartitionColumn(t *testing.T) {
 
 			// unsigned + BatchGet on PK
 			batchSQL := fmt.Sprintf("select * from %v where %v", tbl, batchCond)
-			require.True(t, tk.HasPlan(batchSQL, "Batch_Point_Get"))
+			c.Assert(tk.HasPlan(batchSQL, "Batch_Point_Get"), IsTrue)
 			r = tk.MustQuery(batchSQL).Sort()
 			if tid == 0 {
 				rBatch = r.Rows()
@@ -2422,7 +2313,7 @@ func TestUnsignedPartitionColumn(t *testing.T) {
 		for tid, tbl := range []string{"tnormal_uniq", "trange_uniq", "thash_uniq"} {
 			// unsigned + IndexReader
 			scanSQL := fmt.Sprintf("select a from %v use index(a) where %v", tbl, scanCond)
-			require.True(t, tk.HasPlan(scanSQL, "IndexReader"))
+			c.Assert(tk.HasPlan(scanSQL, "IndexReader"), IsTrue)
 			r := tk.MustQuery(scanSQL).Sort()
 			if tid == 0 {
 				rScan = r.Rows()
@@ -2452,7 +2343,7 @@ func TestUnsignedPartitionColumn(t *testing.T) {
 
 			// unsigned + BatchGet on UniqueIndex
 			batchSQL := fmt.Sprintf("select * from %v where %v", tbl, batchCond)
-			require.True(t, tk.HasPlan(batchSQL, "Batch_Point_Get"))
+			c.Assert(tk.HasPlan(batchSQL, "Batch_Point_Get"), IsTrue)
 			r = tk.MustQuery(batchSQL).Sort()
 			if tid == 0 {
 				rBatch = r.Rows()
@@ -2463,12 +2354,12 @@ func TestUnsignedPartitionColumn(t *testing.T) {
 	}
 }
 
-func TestDirectReadingWithAgg(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestDirectReadingWithAgg(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_dr_agg")
 	tk.MustExec("use test_dr_agg")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2520,12 +2411,12 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from trange where a > %v group by a;", x)
 		queryRegular1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular1 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition1, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from trange where a > %v group by a;", x)
 		queryRegular2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular1 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition2, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 
 		y := rand.Intn(1099)
@@ -2533,12 +2424,12 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from trange where a in(%v, %v, %v) group by a;", x, y, z)
 		queryRegular3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular1 where a in(%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition3, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition3, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition3).Sort().Check(tk.MustQuery(queryRegular3).Sort().Rows())
 
 		queryPartition4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from trange where a in (%v, %v, %v) group by a;", x, y, z)
 		queryRegular4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular1 where a in (%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition4, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition4, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition4).Sort().Check(tk.MustQuery(queryRegular4).Sort().Rows())
 	}
 
@@ -2552,12 +2443,12 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from thash where a > %v group by a;", x)
 		queryRegular1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular1 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition1, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from thash where a > %v group by a;", x)
 		queryRegular2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular1 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition2, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 
 		y := rand.Intn(1099)
@@ -2565,12 +2456,12 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from thash where a in(%v, %v, %v) group by a;", x, y, z)
 		queryRegular3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular1 where a in(%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition3, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition3, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition3).Sort().Check(tk.MustQuery(queryRegular3).Sort().Rows())
 
 		queryPartition4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from thash where a in (%v, %v, %v) group by a;", x, y, z)
 		queryRegular4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular1 where a in (%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition4, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition4, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition4).Sort().Check(tk.MustQuery(queryRegular4).Sort().Rows())
 	}
 
@@ -2584,12 +2475,12 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tlist where a > %v group by a;", x)
 		queryRegular1 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular2 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition1, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tlist where a > %v group by a;", x)
 		queryRegular2 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular2 where a > %v group by a;", x)
-		require.True(t, tk.HasPlan(queryPartition2, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 
 		y := rand.Intn(12) + 1
@@ -2597,22 +2488,18 @@ func TestDirectReadingWithAgg(t *testing.T) {
 
 		queryPartition3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tlist where a in(%v, %v, %v) group by a;", x, y, z)
 		queryRegular3 := fmt.Sprintf("select /*+ stream_agg() */ count(*), sum(b), max(b), a from tregular2 where a in(%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition3, "StreamAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition3, "StreamAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition3).Sort().Check(tk.MustQuery(queryRegular3).Sort().Rows())
 
 		queryPartition4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tlist where a in (%v, %v, %v) group by a;", x, y, z)
 		queryRegular4 := fmt.Sprintf("select /*+ hash_agg() */ count(*), sum(b), max(b), a from tregular2 where a in (%v, %v, %v) group by a;", x, y, z)
-		require.True(t, tk.HasPlan(queryPartition4, "HashAgg")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition4, "HashAgg"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition4).Sort().Check(tk.MustQuery(queryRegular4).Sort().Rows())
 	}
 }
 
-func TestDynamicModeByDefault(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestDynamicModeByDefault(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_dynamic_by_default")
 
 	tk.MustExec(`create table trange(a int, b int, primary key(a) clustered, index idx_b(b)) partition by range(a) (
@@ -2626,17 +2513,13 @@ func TestDynamicModeByDefault(t *testing.T) {
 		"explain select * from thash where a>=100",
 	} {
 		for _, r := range tk.MustQuery(q).Rows() {
-			require.NotContains(t, strings.ToLower(r[0].(string)), "partitionunion")
+			c.Assert(strings.Contains(strings.ToLower(r[0].(string)), "partitionunion"), IsFalse)
 		}
 	}
 }
 
-func TestIssue24636(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestIssue24636(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_issue_24636")
 	tk.MustExec("use test_issue_24636")
 
@@ -2671,12 +2554,12 @@ func TestIssue24636(t *testing.T) {
 	tk.MustQuery(`select c,j,l from test_partition where c='428ff6a1-bb37-42ac-9883-33d7a29961e6' and a='aaa' limit 0, 200`).Check(testkit.Rows("428ff6a1-bb37-42ac-9883-33d7a29961e6 9 0"))
 }
 
-func TestIdexMerge(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *partitionTableSuite) TestIdexMerge(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
 
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_idx_merge")
 	tk.MustExec("use test_idx_merge")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2725,12 +2608,12 @@ func TestIdexMerge(t *testing.T) {
 
 		queryPartition1 := fmt.Sprintf("select /*+ use_index_merge(trange) */ * from trange where a > %v or b < %v;", x1, x2)
 		queryRegular1 := fmt.Sprintf("select /*+ use_index_merge(tregular1) */ * from tregular1 where a > %v or b < %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition1, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ use_index_merge(trange) */ * from trange where a > %v or b > %v;", x1, x2)
 		queryRegular2 := fmt.Sprintf("select /*+ use_index_merge(tregular1) */ * from tregular1 where a > %v or b > %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition2, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 	}
 
@@ -2741,12 +2624,12 @@ func TestIdexMerge(t *testing.T) {
 
 		queryPartition1 := fmt.Sprintf("select /*+ use_index_merge(thash) */ * from thash where a > %v or b < %v;", x1, x2)
 		queryRegular1 := fmt.Sprintf("select /*+ use_index_merge(tregualr1) */ * from tregular1 where a > %v or b < %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition1, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ use_index_merge(thash) */ * from thash where a > %v or b > %v;", x1, x2)
 		queryRegular2 := fmt.Sprintf("select /*+ use_index_merge(tregular1) */ * from tregular1 where a > %v or b > %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition2, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 	}
 
@@ -2756,22 +2639,18 @@ func TestIdexMerge(t *testing.T) {
 		x2 := rand.Intn(12) + 1
 		queryPartition1 := fmt.Sprintf("select /*+ use_index_merge(tlist) */ * from tlist where a > %v or b < %v;", x1, x2)
 		queryRegular1 := fmt.Sprintf("select /*+ use_index_merge(tregular2) */ * from tregular2 where a > %v or b < %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition1, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition1, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition1).Sort().Check(tk.MustQuery(queryRegular1).Sort().Rows())
 
 		queryPartition2 := fmt.Sprintf("select /*+ use_index_merge(tlist) */ * from tlist where a > %v or b > %v;", x1, x2)
 		queryRegular2 := fmt.Sprintf("select /*+ use_index_merge(tregular2) */ * from tregular2 where a > %v or b > %v;", x1, x2)
-		require.True(t, tk.HasPlan(queryPartition2, "IndexMerge")) // check if IndexLookUp is used
+		c.Assert(tk.HasPlan(queryPartition2, "IndexMerge"), IsTrue) // check if IndexLookUp is used
 		tk.MustQuery(queryPartition2).Sort().Check(tk.MustQuery(queryRegular2).Sort().Rows())
 	}
 }
 
-func TestIssue25309(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *partitionTableSuite) TestIssue25309(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("create database test_issue_25309")
 	tk.MustExec("use test_issue_25309")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
@@ -2806,17 +2685,8 @@ func TestIssue25309(t *testing.T) {
 	tk.MustQuery(`select tbl_5.* from tbl_500 tbl_5 where col_24 in ( select col_62 from tbl_600 where tbl_5.col_26 < 'hSvHLdQeGBNIyOFXStV' )`).Check(testkit.Rows())
 }
 
-func TestGlobalIndexScan(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	restoreConfig := config.RestoreFunc()
-	defer restoreConfig()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.EnableGlobalIndex = true
-	})
-	tk.MustExec("use test")
+func (s *globalIndexSuite) TestGlobalIndexScan(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop table if exists p")
 	tk.MustExec(`create table p (id int, c int) partition by range (c) (
 partition p0 values less than (4),
@@ -2827,17 +2697,8 @@ partition p2 values less than (10))`)
 	tk.MustQuery("select id from p use index (idx)").Check(testkit.Rows("1", "3", "5", "7"))
 }
 
-func TestGlobalIndexDoubleRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	restoreConfig := config.RestoreFunc()
-	defer restoreConfig()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.EnableGlobalIndex = true
-	})
-	tk.MustExec("use test")
+func (s *globalIndexSuite) TestGlobalIndexDoubleRead(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop table if exists p")
 	tk.MustExec(`create table p (id int, c int) partition by range (c) (
 partition p0 values less than (4),
@@ -2845,14 +2706,11 @@ partition p1 values less than (7),
 partition p2 values less than (10))`)
 	tk.MustExec("alter table p add unique idx(id)")
 	tk.MustExec("insert into p values (1,3), (3,4), (5,6), (7,9)")
-	tk.MustQuery("select * from p use index (idx)").Sort().Check(testkit.Rows("1 3", "3 4", "5 6", "7 9"))
+	tk.MustQuery("select * from p use index (idx)").Check(testkit.Rows("1 3", "3 4", "5 6", "7 9"))
 }
 
-func TestIssue20028(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestIssue20028(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("set @@tidb_partition_prune_mode='static-only'")
@@ -2878,11 +2736,8 @@ partition p3 values less than maxvalue)`)
 	tk.MustExec("rollback")
 }
 
-func TestSelectLockOnPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestSelectLockOnPartitionTable(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists pt")
 	tk.MustExec(`create table pt (id int primary key, k int, c int, index(k))
@@ -2891,7 +2746,7 @@ partition p0 values less than (4),
 partition p1 values less than (7),
 partition p2 values less than (11))`)
 
-	tk2 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(c, s.store)
 	tk2.MustExec("use test")
 
 	optimisticTableReader := func() {
@@ -2901,7 +2756,7 @@ partition p2 values less than (11))`)
 		tk.MustQuery("select id, k from pt ignore index (k) where k = 5 for update").Check(testkit.Rows("5 5"))
 		tk2.MustExec("update pt set c = c + 1 where k = 5")
 		_, err := tk.Exec("commit")
-		require.Error(t, err) // Write conflict
+		c.Assert(err, NotNil) // Write conflict
 	}
 
 	optimisticIndexReader := func() {
@@ -2912,7 +2767,7 @@ partition p2 values less than (11))`)
 		tk.MustQuery("select k from pt where k = 5 for update").Check(testkit.Rows("5"))
 		tk2.MustExec("update pt set c = c + 1 where k = 5")
 		_, err := tk.Exec("commit")
-		require.Error(t, err)
+		c.Assert(err, NotNil)
 	}
 
 	optimisticIndexLookUp := func() {
@@ -2922,7 +2777,7 @@ partition p2 values less than (11))`)
 		tk.MustQuery("select c, k from pt use index (k) where k = 5 for update").Check(testkit.Rows("5 5"))
 		tk2.MustExec("update pt set c = c + 1 where k = 5")
 		_, err := tk.Exec("commit")
-		require.Error(t, err)
+		c.Assert(err, NotNil)
 	}
 
 	pessimisticTableReader := func() {
@@ -2940,7 +2795,7 @@ partition p2 values less than (11))`)
 
 		// Check the operation in the goroutine is blocked, if not the first result in
 		// the channel should be 1.
-		require.Equal(t, 2, <-ch)
+		c.Assert(<-ch, Equals, 2)
 
 		tk.MustExec("commit")
 		<-ch
@@ -2962,7 +2817,7 @@ partition p2 values less than (11))`)
 		ch <- 2
 
 		// Check the operation in the goroutine is blocked,
-		require.Equal(t, 2, <-ch)
+		c.Assert(<-ch, Equals, 2)
 
 		tk.MustExec("commit")
 		<-ch
@@ -2983,7 +2838,7 @@ partition p2 values less than (11))`)
 		ch <- 2
 
 		// Check the operation in the goroutine is blocked,
-		require.Equal(t, 2, <-ch)
+		c.Assert(<-ch, Equals, 2)
 
 		tk.MustExec("commit")
 		<-ch
@@ -2991,8 +2846,8 @@ partition p2 values less than (11))`)
 	}
 
 	partitionModes := []string{
-		"'dynamic'",
-		"'static'",
+		"'dynamic-only'",
+		"'static-only'",
 	}
 	testCases := []func(){
 		optimisticTableReader,
@@ -3012,15 +2867,9 @@ partition p2 values less than (11))`)
 	}
 }
 
-func TestIssue21731(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
+func (s *globalIndexSuite) TestIssue21731(c *C) {
+	tk := testkit.NewTestKitWithInit(c, s.store)
 	tk.MustExec("drop table if exists p, t")
-	tk.MustExec("set @@tidb_enable_list_partition = OFF")
-	// Notice that this does not really test the issue #21731
 	tk.MustExec("create table t (a int, b int, unique index idx(a)) partition by list columns(b) (partition p0 values in (1), partition p1 values in (2));")
 }
 
@@ -3030,17 +2879,17 @@ type testOutput struct {
 	Res  []string
 }
 
-func verifyPartitionResult(tk *testkit.TestKit, input []string, output []testOutput) {
+func (s *testSuiteWithData) verifyPartitionResult(tk *testkit.TestKit, input []string, output []testOutput) {
 	for i, tt := range input {
-		var isSelect = false
+		var isSelect bool = false
 		if strings.HasPrefix(strings.ToLower(tt), "select ") {
 			isSelect = true
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 			if isSelect {
-				output[i].Plan = testdata.ConvertRowsToStrings(tk.UsedPartitions(tt).Rows())
-				output[i].Res = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Sort().Rows())
+				output[i].Plan = s.testData.ConvertRowsToStrings(tk.UsedPartitions(tt).Rows())
+				output[i].Res = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Sort().Rows())
 			} else {
 				// Just verify SELECT (also avoid double INSERTs during record)
 				output[i].Res = nil
@@ -3056,11 +2905,8 @@ func verifyPartitionResult(tk *testkit.TestKit, input []string, output []testOut
 	}
 }
 
-func TestRangePartitionBoundariesEq(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesEq(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("SET @@tidb_partition_prune_mode = 'dynamic'")
 	tk.MustExec("CREATE DATABASE TestRangePartitionBoundaries")
@@ -3077,15 +2923,12 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestRangePartitionBoundariesNe(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesNe(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("SET @@tidb_partition_prune_mode = 'dynamic'")
 	tk.MustExec("CREATE DATABASE TestRangePartitionBoundariesNe")
@@ -3105,15 +2948,12 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestRangePartitionBoundariesBetweenM(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesBetweenM(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("CREATE DATABASE IF NOT EXISTS TestRangePartitionBoundariesBetweenM")
 	defer tk.MustExec("DROP DATABASE TestRangePartitionBoundariesBetweenM")
@@ -3128,15 +2968,13 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestRangePartitionBoundariesBetweenS(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesBetweenS(c *C) {
+	c.Skip("unstable, skip it and fix it before 20210624")
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("CREATE DATABASE IF NOT EXISTS TestRangePartitionBoundariesBetweenS")
 	defer tk.MustExec("DROP DATABASE TestRangePartitionBoundariesBetweenS")
@@ -3155,15 +2993,12 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestRangePartitionBoundariesLtM(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesLtM(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
 	tk.MustExec("create database TestRangePartitionBoundariesLtM")
@@ -3179,15 +3014,12 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestRangePartitionBoundariesLtS(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteWithData) TestRangePartitionBoundariesLtS(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
 	tk.MustExec("create database TestRangePartitionBoundariesLtS")
@@ -3207,15 +3039,12 @@ PARTITION BY RANGE (a) (
 
 	var input []string
 	var output []testOutput
-	executorSuiteData.GetTestCases(t, &input, &output)
-	verifyPartitionResult(tk, input, output)
+	s.testData.GetTestCases(c, &input, &output)
+	s.verifyPartitionResult(tk, input, output)
 }
 
-func TestIssue25528(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *partitionTableSuite) TestIssue25528(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("set @@tidb_partition_prune_mode = 'static'")
 	tk.MustExec("use test")
 	tk.MustExec("create table issue25528 (id int primary key, balance DECIMAL(10, 2), balance2 DECIMAL(10, 2) GENERATED ALWAYS AS (-balance) VIRTUAL, created_at TIMESTAMP) PARTITION BY HASH(id) PARTITIONS 8")
@@ -3229,23 +3058,15 @@ func TestIssue25528(t *testing.T) {
 	tk.MustQuery("select * from issue25528 where c1 in (3, 4) order by c2 for update;").Check(testkit.Rows("3 3 3 3", "4 4 4 4"))
 }
 
-func TestIssue26251(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk1 := testkit.NewTestKit(t, store)
-	restoreConfig := config.RestoreFunc()
-	defer restoreConfig()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.EnableGlobalIndex = true
-	})
+func (s *partitionTableSuite) TestIssue26251(c *C) {
+	tk1 := testkit.NewTestKit(c, s.store)
 	tk1.MustExec("use test")
 	tk1.MustExec("create table tp (id int primary key) partition by range (id) (partition p0 values less than (100));")
 	tk1.MustExec("create table tn (id int primary key);")
 	tk1.MustExec("insert into tp values(1),(2);")
 	tk1.MustExec("insert into tn values(1),(2);")
 
-	tk2 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(c, s.store)
 	tk2.MustExec("use test")
 
 	tk1.MustExec("begin pessimistic")
@@ -3265,353 +3086,6 @@ func TestIssue26251(t *testing.T) {
 		tk1.MustExec("rollback")
 	case <-ch:
 		// Unexpected, test fail.
-		t.Fail()
+		c.Fail()
 	}
-
-	// Clean up
-	<-ch
-	tk2.MustExec("rollback")
-}
-
-func TestLeftJoinForUpdate(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk1 := testkit.NewTestKit(t, store)
-	tk1.MustExec("create database TestLeftJoinForUpdate")
-	defer tk1.MustExec("drop database TestLeftJoinForUpdate")
-	tk1.MustExec("use TestLeftJoinForUpdate")
-	tk2 := testkit.NewTestKit(t, store)
-	tk2.MustExec("use TestLeftJoinForUpdate")
-	tk3 := testkit.NewTestKit(t, store)
-	tk3.MustExec("use TestLeftJoinForUpdate")
-
-	tk1.MustExec("drop table if exists nt, pt")
-	tk1.MustExec("create table nt (id int, col varchar(32), primary key (id))")
-	tk1.MustExec("create table pt (id int, col varchar(32), primary key (id)) partition by hash(id) partitions 4")
-
-	resetData := func() {
-		tk1.MustExec("truncate table nt")
-		tk1.MustExec("truncate table pt")
-		tk1.MustExec("insert into nt values (1, 'hello')")
-		tk1.MustExec("insert into pt values (2, 'test')")
-	}
-
-	// ========================== First round of test ==================
-	// partition table left join normal table.
-	// =================================================================
-	resetData()
-	ch := make(chan int, 10)
-	tk1.MustExec("begin pessimistic")
-	// No union scan
-	tk1.MustQuery("select * from pt left join nt on pt.id = nt.id for update").Check(testkit.Rows("2 test <nil> <nil>"))
-	go func() {
-		// Check the key is locked.
-		tk2.MustExec("update pt set col = 'xxx' where id = 2")
-		ch <- 2
-	}()
-
-	// Union scan
-	tk1.MustExec("insert into pt values (1, 'world')")
-	tk1.MustQuery("select * from pt left join nt on pt.id = nt.id for update").Sort().Check(testkit.Rows("1 world 1 hello", "2 test <nil> <nil>"))
-	go func() {
-		// Check the key is locked.
-		tk3.MustExec("update nt set col = 'yyy' where id = 1")
-		ch <- 3
-	}()
-
-	// Give chance for the goroutines to run first.
-	time.Sleep(80 * time.Millisecond)
-	ch <- 1
-	tk1.MustExec("rollback")
-
-	checkOrder := func() {
-		require.Equal(t, <-ch, 1)
-		v1 := <-ch
-		v2 := <-ch
-		require.True(t, (v1 == 2 && v2 == 3) || (v1 == 3 && v2 == 2))
-	}
-	checkOrder()
-
-	// ========================== Another round of test ==================
-	// normal table left join partition table.
-	// ===================================================================
-	resetData()
-	tk1.MustExec("begin pessimistic")
-	// No union scan
-	tk1.MustQuery("select * from nt left join pt on pt.id = nt.id for update").Check(testkit.Rows("1 hello <nil> <nil>"))
-
-	// Union scan
-	tk1.MustExec("insert into pt values (1, 'world')")
-	tk1.MustQuery("select * from nt left join pt on pt.id = nt.id for update").Check(testkit.Rows("1 hello 1 world"))
-	go func() {
-		tk2.MustExec("replace into pt values (1, 'aaa')")
-		ch <- 2
-	}()
-	go func() {
-		tk3.MustExec("update nt set col = 'bbb' where id = 1")
-		ch <- 3
-	}()
-	time.Sleep(80 * time.Millisecond)
-	ch <- 1
-	tk1.MustExec("rollback")
-	checkOrder()
-}
-
-func TestIssue31024(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk1 := testkit.NewTestKit(t, store)
-	tk1.MustExec("create database TestIssue31024")
-	defer tk1.MustExec("drop database TestIssue31024")
-	tk1.MustExec("use TestIssue31024")
-	tk1.MustExec("create table t1 (c_datetime datetime, c1 int, c2 int, primary key (c_datetime), key(c1), key(c2))" +
-		" partition by range (to_days(c_datetime)) " +
-		"( partition p0 values less than (to_days('2020-02-01'))," +
-		" partition p1 values less than (to_days('2020-04-01'))," +
-		" partition p2 values less than (to_days('2020-06-01'))," +
-		" partition p3 values less than maxvalue)")
-	tk1.MustExec("create table t2 (c_datetime datetime, unique key(c_datetime))")
-	tk1.MustExec("insert into t1 values ('2020-06-26 03:24:00', 1, 1), ('2020-02-21 07:15:33', 2, 2), ('2020-04-27 13:50:58', 3, 3)")
-	tk1.MustExec("insert into t2 values ('2020-01-10 09:36:00'), ('2020-02-04 06:00:00'), ('2020-06-12 03:45:18')")
-	tk1.MustExec("SET GLOBAL tidb_txn_mode = 'pessimistic'")
-
-	tk2 := testkit.NewTestKit(t, store)
-	tk2.MustExec("use TestIssue31024")
-
-	ch := make(chan int, 10)
-	tk1.MustExec("set @@tidb_partition_prune_mode='dynamic'")
-	tk1.MustExec("begin pessimistic")
-	tk1.MustQuery("select /*+ use_index_merge(t1) */ * from t1 join t2 on t1.c_datetime >= t2.c_datetime where t1.c1 < 10 or t1.c2 < 10 for update")
-
-	go func() {
-		// Check the key is locked.
-		tk2.MustExec("set @@tidb_partition_prune_mode='dynamic'")
-		tk2.MustExec("begin pessimistic")
-		tk2.MustExec("update t1 set c_datetime = '2020-06-26 03:24:00' where c1 = 1")
-		ch <- 2
-	}()
-
-	// Give chance for the goroutines to run first.
-	time.Sleep(80 * time.Millisecond)
-	ch <- 1
-	tk1.MustExec("rollback")
-
-	require.Equal(t, <-ch, 1)
-	require.Equal(t, <-ch, 2)
-
-	tk2.MustExec("rollback")
-}
-
-func TestIssue27346(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk1 := testkit.NewTestKit(t, store)
-	tk1.MustExec("create database TestIssue27346")
-	defer tk1.MustExec("drop database TestIssue27346")
-	tk1.MustExec("use TestIssue27346")
-
-	tk1.MustExec("set @@tidb_enable_index_merge=1,@@tidb_partition_prune_mode='dynamic'")
-
-	tk1.MustExec("DROP TABLE IF EXISTS `tbl_18`")
-	tk1.MustExec("CREATE TABLE `tbl_18` (`col_119` binary(16) NOT NULL DEFAULT 'skPoKiwYUi',`col_120` int(10) unsigned NOT NULL,`col_121` timestamp NOT NULL,`col_122` double NOT NULL DEFAULT '3937.1887880628115',`col_123` bigint(20) NOT NULL DEFAULT '3550098074891542725',PRIMARY KEY (`col_123`,`col_121`,`col_122`,`col_120`) CLUSTERED,UNIQUE KEY `idx_103` (`col_123`,`col_119`,`col_120`),UNIQUE KEY `idx_104` (`col_122`,`col_120`),UNIQUE KEY `idx_105` (`col_119`,`col_120`),KEY `idx_106` (`col_121`,`col_120`,`col_122`,`col_119`),KEY `idx_107` (`col_121`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_general_ci PARTITION BY HASH( `col_120` ) PARTITIONS 3")
-	tk1.MustExec("INSERT INTO tbl_18 (`col_119`, `col_120`, `col_121`, `col_122`, `col_123`) VALUES (X'736b506f4b6977595569000000000000', 672436701, '1974-02-24 00:00:00', 3937.1887880628115e0, -7373106839136381229), (X'736b506f4b6977595569000000000000', 2637316689, '1993-10-29 00:00:00', 3937.1887880628115e0, -4522626077860026631), (X'736b506f4b6977595569000000000000', 831809724, '1995-11-20 00:00:00', 3937.1887880628115e0, -4426441253940231780), (X'736b506f4b6977595569000000000000', 1588592628, '2001-03-28 00:00:00', 3937.1887880628115e0, 1329207475772244999), (X'736b506f4b6977595569000000000000', 3908038471, '2031-06-06 00:00:00', 3937.1887880628115e0, -6562815696723135786), (X'736b506f4b6977595569000000000000', 1674237178, '2001-10-24 00:00:00', 3937.1887880628115e0, -6459065549188938772), (X'736b506f4b6977595569000000000000', 3507075493, '2010-03-25 00:00:00', 3937.1887880628115e0, -4329597025765326929), (X'736b506f4b6977595569000000000000', 1276461709, '2019-07-20 00:00:00', 3937.1887880628115e0, 3550098074891542725)")
-
-	tk1.MustQuery("select col_120,col_122,col_123 from tbl_18 where tbl_18.col_122 = 4763.320888074281 and not( tbl_18.col_121 in ( '2032-11-01' , '1975-05-21' , '1994-05-16' , '1984-01-15' ) ) or not( tbl_18.col_121 >= '2008-10-24' ) order by tbl_18.col_119,tbl_18.col_120,tbl_18.col_121,tbl_18.col_122,tbl_18.col_123 limit 919 for update").Sort().Check(testkit.Rows(
-		"1588592628 3937.1887880628115 1329207475772244999",
-		"1674237178 3937.1887880628115 -6459065549188938772",
-		"2637316689 3937.1887880628115 -4522626077860026631",
-		"672436701 3937.1887880628115 -7373106839136381229",
-		"831809724 3937.1887880628115 -4426441253940231780"))
-	tk1.MustQuery("select /*+ use_index_merge( tbl_18 ) */ col_120,col_122,col_123 from tbl_18 where tbl_18.col_122 = 4763.320888074281 and not( tbl_18.col_121 in ( '2032-11-01' , '1975-05-21' , '1994-05-16' , '1984-01-15' ) ) or not( tbl_18.col_121 >= '2008-10-24' ) order by tbl_18.col_119,tbl_18.col_120,tbl_18.col_121,tbl_18.col_122,tbl_18.col_123 limit 919 for update").Sort().Check(testkit.Rows(
-		"1588592628 3937.1887880628115 1329207475772244999",
-		"1674237178 3937.1887880628115 -6459065549188938772",
-		"2637316689 3937.1887880628115 -4522626077860026631",
-		"672436701 3937.1887880628115 -7373106839136381229",
-		"831809724 3937.1887880628115 -4426441253940231780"))
-}
-
-func TestPartitionTableExplain(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("create database TestPartitionTableExplain")
-	tk.MustExec("use TestPartitionTableExplain")
-	tk.MustExec("set @@tidb_partition_prune_mode = 'static'")
-	tk.MustExec(`create table t (a int primary key, b int, key (b)) partition by hash(a) (partition P0, partition p1, partition P2)`)
-	tk.MustExec(`create table t2 (a int, b int)`)
-	tk.MustExec(`insert into t values (1,1),(2,2),(3,3)`)
-	tk.MustExec(`insert into t2 values (1,1),(2,2),(3,3)`)
-	tk.MustExec(`analyze table t`)
-	tk.MustExec(`analyze table t2`)
-	tk.MustQuery(`explain format = 'brief' select * from t`).Check(testkit.Rows(
-		"PartitionUnion 3.00 root  ",
-		"├─TableReader 1.00 root  data:TableFullScan",
-		"│ └─TableFullScan 1.00 cop[tikv] table:t, partition:P0 keep order:false",
-		"├─TableReader 1.00 root  data:TableFullScan",
-		"│ └─TableFullScan 1.00 cop[tikv] table:t, partition:p1 keep order:false",
-		"└─TableReader 1.00 root  data:TableFullScan",
-		"  └─TableFullScan 1.00 cop[tikv] table:t, partition:P2 keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition(P0,p1)`).Check(testkit.Rows(
-		"PartitionUnion 2.00 root  ",
-		"├─TableReader 1.00 root  data:TableFullScan",
-		"│ └─TableFullScan 1.00 cop[tikv] table:t, partition:P0 keep order:false",
-		"└─TableReader 1.00 root  data:TableFullScan",
-		"  └─TableFullScan 1.00 cop[tikv] table:t, partition:p1 keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 1`).Check(testkit.Rows("Point_Get 1.00 root table:t, partition:p1 handle:1"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 2`).Check(testkit.Rows("Point_Get 1.00 root table:t, partition:P2 handle:2"))
-	// above ^^ is enough for Issue32719, the below vv for completeness
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 1 OR a = 2`).Check(testkit.Rows(
-		"PartitionUnion 2.00 root  ",
-		"├─Batch_Point_Get 1.00 root table:t handle:[1 2], keep order:false, desc:false",
-		"└─Batch_Point_Get 1.00 root table:t handle:[1 2], keep order:false, desc:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a IN (2,3,4)`).Check(testkit.Rows("Batch_Point_Get 3.00 root table:t handle:[2 3 4], keep order:false, desc:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a IN (2,3)`).Check(testkit.Rows("Batch_Point_Get 2.00 root table:t handle:[2 3], keep order:false, desc:false"))
-	// above ^^ is for completeness, the below vv is enough for Issue32719
-	tk.MustQuery(`explain format = 'brief' select * from t where b = 1`).Check(testkit.Rows(
-		"PartitionUnion 1.00 root  ",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) range:[1,1], keep order:false",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) range:[1,1], keep order:false",
-		"└─IndexReader 1.00 root  index:IndexRangeScan",
-		"  └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) range:[1,1], keep order:false"))
-	// The below vvv is for completeness
-	tk.MustQuery(`explain format = 'brief' select * from t where b = 2`).Check(testkit.Rows(
-		"PartitionUnion 1.00 root  ",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) range:[2,2], keep order:false",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) range:[2,2], keep order:false",
-		"└─IndexReader 1.00 root  index:IndexRangeScan",
-		"  └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) range:[2,2], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b = 1 OR b = 2`).Check(testkit.Rows(
-		"PartitionUnion 2.00 root  ",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) range:[1,2], keep order:false",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) range:[1,2], keep order:false",
-		"└─IndexReader 1.00 root  index:IndexRangeScan",
-		"  └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) range:[1,2], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b IN (2,3,4)`).Check(testkit.Rows(
-		"PartitionUnion 2.00 root  ",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) range:[2,2], [3,3], [4,4], keep order:false",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) range:[2,2], [3,3], [4,4], keep order:false",
-		"└─IndexReader 1.00 root  index:IndexRangeScan",
-		"  └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) range:[2,2], [3,3], [4,4], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b IN (2,3)`).Check(testkit.Rows(
-		"PartitionUnion 2.00 root  ",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) range:[2,2], [3,3], keep order:false",
-		"├─IndexReader 1.00 root  index:IndexRangeScan",
-		"│ └─IndexRangeScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) range:[2,2], [3,3], keep order:false",
-		"└─IndexReader 1.00 root  index:IndexRangeScan",
-		"  └─IndexRangeScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) range:[2,2], [3,3], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t,t2 where t2.a = 1 and t2.b = t.b`).Check(testkit.Rows(
-		"Projection 1.00 root  testpartitiontableexplain.t.a, testpartitiontableexplain.t.b, testpartitiontableexplain.t2.a, testpartitiontableexplain.t2.b",
-		"└─HashJoin 1.00 root  inner join, equal:[eq(testpartitiontableexplain.t2.b, testpartitiontableexplain.t.b)]",
-		"  ├─TableReader(Build) 1.00 root  data:Selection",
-		"  │ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"  │   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"  └─PartitionUnion(Probe) 3.00 root  ",
-		"    ├─IndexReader 1.00 root  index:IndexFullScan",
-		"    │ └─IndexFullScan 1.00 cop[tikv] table:t, partition:P0, index:b(b) keep order:false",
-		"    ├─IndexReader 1.00 root  index:IndexFullScan",
-		"    │ └─IndexFullScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) keep order:false",
-		"    └─IndexReader 1.00 root  index:IndexFullScan",
-		"      └─IndexFullScan 1.00 cop[tikv] table:t, partition:P2, index:b(b) keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition (p1),t2 where t2.a = 1 and t2.b = t.b`).Check(testkit.Rows(
-		"HashJoin 1.00 root  inner join, equal:[eq(testpartitiontableexplain.t.b, testpartitiontableexplain.t2.b)]",
-		"├─TableReader(Build) 1.00 root  data:Selection",
-		"│ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"│   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"└─IndexReader(Probe) 1.00 root  index:IndexFullScan",
-		"  └─IndexFullScan 1.00 cop[tikv] table:t, partition:p1, index:b(b) keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t,t2 where t2.a = 1 and t2.b = t.b and t.a = 1`).Check(testkit.Rows(
-		"HashJoin 1.00 root  inner join, equal:[eq(testpartitiontableexplain.t.b, testpartitiontableexplain.t2.b)]",
-		"├─TableReader(Build) 1.00 root  data:Selection",
-		"│ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"│   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"└─Selection(Probe) 1.00 root  not(isnull(testpartitiontableexplain.t.b))",
-		"  └─Point_Get 1.00 root table:t, partition:p1 handle:1"))
-
-	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
-	tk.MustExec(`analyze table t`)
-	tk.MustQuery(`explain format = 'brief' select * from t`).Check(testkit.Rows(
-		"TableReader 3.00 root partition:all data:TableFullScan",
-		"└─TableFullScan 3.00 cop[tikv] table:t keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition(P0,p1)`).Check(testkit.Rows(
-		"TableReader 3.00 root partition:P0,p1 data:TableFullScan",
-		"└─TableFullScan 3.00 cop[tikv] table:t keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 1`).Check(testkit.Rows("Point_Get 1.00 root table:t, partition:p1 handle:1"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 2`).Check(testkit.Rows("Point_Get 1.00 root table:t, partition:P2 handle:2"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a = 1 OR a = 2`).Check(testkit.Rows(
-		"TableReader 2.00 root partition:p1,P2 data:TableRangeScan",
-		"└─TableRangeScan 2.00 cop[tikv] table:t range:[1,1], [2,2], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a IN (2,3,4)`).Check(testkit.Rows("Batch_Point_Get 3.00 root table:t handle:[2 3 4], keep order:false, desc:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where a IN (2,3)`).Check(testkit.Rows("Batch_Point_Get 2.00 root table:t handle:[2 3], keep order:false, desc:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b = 1`).Check(testkit.Rows(
-		"IndexReader 1.00 root partition:all index:IndexRangeScan",
-		"└─IndexRangeScan 1.00 cop[tikv] table:t, index:b(b) range:[1,1], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition (P0,p1) where b = 1`).Check(testkit.Rows(
-		"IndexReader 1.00 root partition:P0,p1 index:IndexRangeScan",
-		"└─IndexRangeScan 1.00 cop[tikv] table:t, index:b(b) range:[1,1], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b = 1 OR b = 2`).Check(testkit.Rows(
-		"IndexReader 2.00 root partition:all index:IndexRangeScan",
-		"└─IndexRangeScan 2.00 cop[tikv] table:t, index:b(b) range:[1,2], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition (p1,P2) where b = 1 OR b = 2`).Check(testkit.Rows(
-		"IndexReader 2.00 root partition:p1,P2 index:IndexRangeScan",
-		"└─IndexRangeScan 2.00 cop[tikv] table:t, index:b(b) range:[1,2], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b IN (2,3,4)`).Check(testkit.Rows(
-		"IndexReader 2.00 root partition:all index:IndexRangeScan",
-		"└─IndexRangeScan 2.00 cop[tikv] table:t, index:b(b) range:[2,2], [3,3], [4,4], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t where b IN (2,3)`).Check(testkit.Rows(
-		"IndexReader 2.00 root partition:all index:IndexRangeScan",
-		"└─IndexRangeScan 2.00 cop[tikv] table:t, index:b(b) range:[2,2], [3,3], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t,t2 where t2.a = 1 and t2.b = t.b`).Check(testkit.Rows(
-		"Projection 1.00 root  testpartitiontableexplain.t.a, testpartitiontableexplain.t.b, testpartitiontableexplain.t2.a, testpartitiontableexplain.t2.b",
-		"└─IndexJoin 1.00 root  inner join, inner:IndexReader, outer key:testpartitiontableexplain.t2.b, inner key:testpartitiontableexplain.t.b, equal cond:eq(testpartitiontableexplain.t2.b, testpartitiontableexplain.t.b)",
-		"  ├─TableReader(Build) 1.00 root  data:Selection",
-		"  │ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"  │   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"  └─IndexReader(Probe) 1.00 root partition:all index:Selection",
-		"    └─Selection 1.00 cop[tikv]  not(isnull(testpartitiontableexplain.t.b))",
-		"      └─IndexRangeScan 1.00 cop[tikv] table:t, index:b(b) range: decided by [eq(testpartitiontableexplain.t.b, testpartitiontableexplain.t2.b)], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t partition (p1),t2 where t2.a = 1 and t2.b = t.b`).Check(testkit.Rows(
-		"Projection 1.00 root  testpartitiontableexplain.t.a, testpartitiontableexplain.t.b, testpartitiontableexplain.t2.a, testpartitiontableexplain.t2.b",
-		"└─IndexJoin 1.00 root  inner join, inner:IndexReader, outer key:testpartitiontableexplain.t2.b, inner key:testpartitiontableexplain.t.b, equal cond:eq(testpartitiontableexplain.t2.b, testpartitiontableexplain.t.b)",
-		"  ├─TableReader(Build) 1.00 root  data:Selection",
-		"  │ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"  │   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"  └─IndexReader(Probe) 1.00 root partition:p1 index:Selection",
-		"    └─Selection 1.00 cop[tikv]  not(isnull(testpartitiontableexplain.t.b))",
-		"      └─IndexRangeScan 1.00 cop[tikv] table:t, index:b(b) range: decided by [eq(testpartitiontableexplain.t.b, testpartitiontableexplain.t2.b)], keep order:false"))
-	tk.MustQuery(`explain format = 'brief' select * from t,t2 where t2.a = 1 and t2.b = t.b and t.a = 1`).Check(testkit.Rows(
-		"HashJoin 1.00 root  inner join, equal:[eq(testpartitiontableexplain.t.b, testpartitiontableexplain.t2.b)]",
-		"├─TableReader(Build) 1.00 root  data:Selection",
-		"│ └─Selection 1.00 cop[tikv]  eq(testpartitiontableexplain.t2.a, 1), not(isnull(testpartitiontableexplain.t2.b))",
-		"│   └─TableFullScan 3.00 cop[tikv] table:t2 keep order:false",
-		"└─TableReader(Probe) 1.00 root partition:p1 data:Selection",
-		"  └─Selection 1.00 cop[tikv]  not(isnull(testpartitiontableexplain.t.b))",
-		"    └─TableRangeScan 1.00 cop[tikv] table:t range:[1,1], keep order:false"))
-}
-
-func TestIssue35181(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("create database TestIssue35181")
-	tk.MustExec("use TestIssue35181")
-	tk.MustExec("CREATE TABLE `t` (`a` int(11) DEFAULT NULL, `b` int(11) DEFAULT NULL) PARTITION BY RANGE (`a`) (PARTITION `p0` VALUES LESS THAN (2021), PARTITION `p1` VALUES LESS THAN (3000))")
-
-	tk.MustExec("set @@tidb_partition_prune_mode = 'static'")
-	tk.MustExec(`insert into t select * from t where a=3000`)
-	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
-	tk.MustExec(`insert into t select * from t where a=3000`)
 }

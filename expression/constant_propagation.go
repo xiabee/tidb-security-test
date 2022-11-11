@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/disjointset"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
@@ -60,8 +59,7 @@ func (s *basePropConstSolver) tryToUpdateEQList(col *Column, con *Constant) (boo
 	id := s.getColID(col)
 	oldCon := s.eqList[id]
 	if oldCon != nil {
-		res, err := oldCon.Value.Compare(s.ctx.GetSessionVars().StmtCtx, &con.Value, collate.GetCollator(col.GetType().GetCollate()))
-		return false, res != 0 || err != nil
+		return false, !oldCon.Equal(s.ctx, con)
 	}
 	s.eqList[id] = con
 	return true, false
@@ -91,7 +89,7 @@ func validEqualCondHelper(ctx sessionctx.Context, eq *ScalarFunction, colIsLeft 
 	if MaybeOverOptimized4PlanCache(ctx, []Expression{con}) {
 		return nil, nil
 	}
-	if col.GetType().GetCollate() != con.GetType().GetCollate() {
+	if col.GetType().Collate != con.GetType().Collate {
 		return nil, nil
 	}
 	return col, con
@@ -123,7 +121,7 @@ func validEqualCond(ctx sessionctx.Context, cond Expression) (*Column, *Constant
 //  for 'a, b, sin(a) + cos(a) = 5', it returns 'true, false, returns sin(b) + cos(b) = 5'
 //  for 'a, b, cast(a) < rand()', it returns 'false, true, cast(a) < rand()'
 func tryToReplaceCond(ctx sessionctx.Context, src *Column, tgt *Column, cond Expression, nullAware bool) (bool, bool, Expression) {
-	if src.RetType.GetType() != tgt.RetType.GetType() {
+	if src.RetType.Tp != tgt.RetType.Tp {
 		return false, false, cond
 	}
 	sf, ok := cond.(*ScalarFunction)
@@ -154,8 +152,8 @@ func tryToReplaceCond(ctx sessionctx.Context, src *Column, tgt *Column, cond Exp
 	}
 	for idx, expr := range sf.GetArgs() {
 		if src.Equal(nil, expr) {
-			_, coll := cond.CharsetAndCollation()
-			if tgt.GetType().GetCollate() != coll {
+			_, coll := cond.CharsetAndCollation(ctx)
+			if tgt.GetType().Collate != coll {
 				continue
 			}
 			replaced = true
@@ -242,7 +240,7 @@ func (s *propConstSolver) propagateColumnEQ() {
 			lCol, lOk := fun.GetArgs()[0].(*Column)
 			rCol, rOk := fun.GetArgs()[1].(*Column)
 			// TODO: Enable hybrid types in ConstantPropagate.
-			if lOk && rOk && lCol.GetType().GetCollate() == rCol.GetType().GetCollate() && !lCol.GetType().Hybrid() && !rCol.GetType().Hybrid() {
+			if lOk && rOk && lCol.GetType().Collate == rCol.GetType().Collate && !lCol.GetType().Hybrid() && !rCol.GetType().Hybrid() {
 				lID := s.getColID(lCol)
 				rID := s.getColID(rCol)
 				s.unionSet.Union(lID, rID)
@@ -494,7 +492,7 @@ func (s *propOuterJoinConstSolver) validColEqualCond(cond Expression) (*Column, 
 	if fun, ok := cond.(*ScalarFunction); ok && fun.FuncName.L == ast.EQ {
 		lCol, lOk := fun.GetArgs()[0].(*Column)
 		rCol, rOk := fun.GetArgs()[1].(*Column)
-		if lOk && rOk && lCol.GetType().GetCollate() == rCol.GetType().GetCollate() {
+		if lOk && rOk && lCol.GetType().Collate == rCol.GetType().Collate {
 			return s.colsFromOuterAndInner(lCol, rCol)
 		}
 	}
@@ -561,7 +559,7 @@ func (s *propOuterJoinConstSolver) propagateColumnEQ() {
 			// rows with t2.b is null would impact whether LeftOuterSemiJoin should output 0 or null if there
 			// is no row satisfying t2.b = t1.a
 			childCol := s.innerSchema.RetrieveColumn(innerCol)
-			if !mysql.HasNotNullFlag(childCol.RetType.GetFlag()) {
+			if !mysql.HasNotNullFlag(childCol.RetType.Flag) {
 				notNullExpr := BuildNotNullExpr(s.ctx, childCol)
 				s.joinConds = append(s.joinConds, notNullExpr)
 			}

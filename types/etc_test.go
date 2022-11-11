@@ -36,6 +36,8 @@ func testIsTypeChar(t *testing.T, tp byte, expect bool) {
 }
 
 func TestIsType(t *testing.T) {
+	t.Parallel()
+
 	testIsTypeBlob(t, mysql.TypeTinyBlob, true)
 	testIsTypeBlob(t, mysql.TypeMediumBlob, true)
 	testIsTypeBlob(t, mysql.TypeBlob, true)
@@ -58,6 +60,8 @@ func testTypeToStr(t *testing.T, tp byte, charset string, expect string) {
 }
 
 func TestTypeToStr(t *testing.T) {
+	t.Parallel()
+
 	testTypeStr(t, mysql.TypeYear, "year")
 	testTypeStr(t, 0xdd, "")
 
@@ -94,6 +98,8 @@ func TestTypeToStr(t *testing.T) {
 }
 
 func TestEOFAsNil(t *testing.T) {
+	t.Parallel()
+
 	err := EOFAsNil(io.EOF)
 	require.NoError(t, err)
 	err = EOFAsNil(errors.New("test"))
@@ -101,6 +107,8 @@ func TestEOFAsNil(t *testing.T) {
 }
 
 func TestMaxFloat(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		flen    int
 		decimal int
@@ -118,6 +126,8 @@ func TestMaxFloat(t *testing.T) {
 }
 
 func TestRoundFloat(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input  float64
 		expect float64
@@ -139,6 +149,8 @@ func TestRoundFloat(t *testing.T) {
 }
 
 func TestRound(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input  float64
 		dec    int
@@ -158,6 +170,8 @@ func TestRound(t *testing.T) {
 }
 
 func TestTruncateFloat(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input   float64
 		flen    int
@@ -180,6 +194,8 @@ func TestTruncateFloat(t *testing.T) {
 }
 
 func TestIsTypeTemporal(t *testing.T) {
+	t.Parallel()
+
 	res := IsTypeTemporal(mysql.TypeDuration)
 	require.True(t, res)
 	res = IsTypeTemporal(mysql.TypeDatetime)
@@ -195,49 +211,57 @@ func TestIsTypeTemporal(t *testing.T) {
 }
 
 func TestIsBinaryStr(t *testing.T) {
-	in := &FieldType{}
-	in.SetType(mysql.TypeBit)
-	in.SetFlag(mysql.UnsignedFlag)
-	in.SetFlen(1)
-	in.SetDecimal(0)
-	in.SetCharset(charset.CharsetUTF8)
-	in.SetCollate(charset.CollationUTF8)
+	t.Parallel()
 
-	in.SetCollate(charset.CollationUTF8)
-	res := IsBinaryStr(in)
+	in := FieldType{
+		Tp:      mysql.TypeBit,
+		Flag:    mysql.UnsignedFlag,
+		Flen:    1,
+		Decimal: 0,
+		Charset: charset.CharsetUTF8,
+		Collate: charset.CollationUTF8,
+	}
+	in.Collate = charset.CollationUTF8
+	res := IsBinaryStr(&in)
 	require.False(t, res)
 
-	in.SetCollate(charset.CollationBin)
-	res = IsBinaryStr(in)
+	in.Collate = charset.CollationBin
+	res = IsBinaryStr(&in)
 	require.False(t, res)
 
-	in.SetType(mysql.TypeBlob)
-	res = IsBinaryStr(in)
+	in.Tp = mysql.TypeBlob
+	res = IsBinaryStr(&in)
 	require.True(t, res)
 }
 
 func TestIsNonBinaryStr(t *testing.T) {
-	in := NewFieldType(mysql.TypeBit)
-	in.SetFlag(mysql.UnsignedFlag)
-	in.SetFlen(1)
-	in.SetDecimal(0)
-	in.SetCharset(charset.CharsetUTF8)
-	in.SetCollate(charset.CollationUTF8)
+	t.Parallel()
 
-	in.SetCollate(charset.CollationBin)
-	res := IsBinaryStr(in)
+	in := FieldType{
+		Tp:      mysql.TypeBit,
+		Flag:    mysql.UnsignedFlag,
+		Flen:    1,
+		Decimal: 0,
+		Charset: charset.CharsetUTF8,
+		Collate: charset.CollationUTF8,
+	}
+
+	in.Collate = charset.CollationBin
+	res := IsBinaryStr(&in)
 	require.False(t, res)
 
-	in.SetCollate(charset.CollationUTF8)
-	res = IsBinaryStr(in)
+	in.Collate = charset.CollationUTF8
+	res = IsBinaryStr(&in)
 	require.False(t, res)
 
-	in.SetType(mysql.TypeBlob)
-	res = IsBinaryStr(in)
+	in.Tp = mysql.TypeBlob
+	res = IsBinaryStr(&in)
 	require.False(t, res)
 }
 
 func TestIsTemporalWithDate(t *testing.T) {
+	t.Parallel()
+
 	res := IsTemporalWithDate(mysql.TypeDatetime)
 	require.True(t, res)
 
@@ -252,6 +276,8 @@ func TestIsTemporalWithDate(t *testing.T) {
 }
 
 func TestIsTypePrefixable(t *testing.T) {
+	t.Parallel()
+
 	res := IsTypePrefixable('t')
 	require.False(t, res)
 
@@ -260,6 +286,8 @@ func TestIsTypePrefixable(t *testing.T) {
 }
 
 func TestIsTypeFractionable(t *testing.T) {
+	t.Parallel()
+
 	res := IsTypeFractionable(mysql.TypeDatetime)
 	require.True(t, res)
 
@@ -274,6 +302,8 @@ func TestIsTypeFractionable(t *testing.T) {
 }
 
 func TestIsTypeNumeric(t *testing.T) {
+	t.Parallel()
+
 	res := IsTypeNumeric(mysql.TypeBit)
 	require.True(t, res)
 

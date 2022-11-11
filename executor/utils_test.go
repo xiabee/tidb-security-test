@@ -15,13 +15,11 @@
 package executor
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
-	"github.com/stretchr/testify/require"
 )
 
-func TestBatchRetrieverHelper(t *testing.T) {
+func (s *pkgTestSuite) TestBatchRetrieverHelper(c *C) {
 	rangeStarts := make([]int, 0)
 	rangeEnds := make([]int, 0)
 	collect := func(start, end int) error {
@@ -32,9 +30,9 @@ func TestBatchRetrieverHelper(t *testing.T) {
 
 	r := &batchRetrieverHelper{}
 	err := r.nextBatch(collect)
-	require.NoError(t, err)
-	require.Equal(t, rangeStarts, []int{})
-	require.Equal(t, rangeEnds, []int{})
+	c.Assert(err, IsNil)
+	c.Assert(rangeStarts, DeepEquals, []int{})
+	c.Assert(rangeEnds, DeepEquals, []int{})
 
 	r = &batchRetrieverHelper{
 		retrieved: true,
@@ -42,9 +40,9 @@ func TestBatchRetrieverHelper(t *testing.T) {
 		totalRows: 10,
 	}
 	err = r.nextBatch(collect)
-	require.NoError(t, err)
-	require.Equal(t, rangeStarts, []int{})
-	require.Equal(t, rangeEnds, []int{})
+	c.Assert(err, IsNil)
+	c.Assert(rangeStarts, DeepEquals, []int{})
+	c.Assert(rangeEnds, DeepEquals, []int{})
 
 	r = &batchRetrieverHelper{
 		batchSize: 3,
@@ -53,8 +51,8 @@ func TestBatchRetrieverHelper(t *testing.T) {
 	err = r.nextBatch(func(start, end int) error {
 		return errors.New("some error")
 	})
-	require.Error(t, err)
-	require.True(t, r.retrieved)
+	c.Assert(err, NotNil)
+	c.Assert(r.retrieved, IsTrue)
 
 	r = &batchRetrieverHelper{
 		batchSize: 3,
@@ -62,10 +60,10 @@ func TestBatchRetrieverHelper(t *testing.T) {
 	}
 	for !r.retrieved {
 		err = r.nextBatch(collect)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 	}
-	require.Equal(t, rangeStarts, []int{0, 3, 6, 9})
-	require.Equal(t, rangeEnds, []int{3, 6, 9, 10})
+	c.Assert(rangeStarts, DeepEquals, []int{0, 3, 6, 9})
+	c.Assert(rangeEnds, DeepEquals, []int{3, 6, 9, 10})
 	rangeStarts = rangeStarts[:0]
 	rangeEnds = rangeEnds[:0]
 
@@ -75,10 +73,10 @@ func TestBatchRetrieverHelper(t *testing.T) {
 	}
 	for !r.retrieved {
 		err = r.nextBatch(collect)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 	}
-	require.Equal(t, rangeStarts, []int{0, 3, 6})
-	require.Equal(t, rangeEnds, []int{3, 6, 9})
+	c.Assert(rangeStarts, DeepEquals, []int{0, 3, 6})
+	c.Assert(rangeEnds, DeepEquals, []int{3, 6, 9})
 	rangeStarts = rangeStarts[:0]
 	rangeEnds = rangeEnds[:0]
 
@@ -88,8 +86,8 @@ func TestBatchRetrieverHelper(t *testing.T) {
 	}
 	for !r.retrieved {
 		err = r.nextBatch(collect)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 	}
-	require.Equal(t, rangeStarts, []int{0})
-	require.Equal(t, rangeEnds, []int{10})
+	c.Assert(rangeStarts, DeepEquals, []int{0})
+	c.Assert(rangeEnds, DeepEquals, []int{10})
 }

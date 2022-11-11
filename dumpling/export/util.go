@@ -10,9 +10,8 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 
-	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 )
 
@@ -76,6 +75,6 @@ func string2Map(a, b []string) map[string]string {
 	return a2b
 }
 
-func needRepeatableRead(serverType version.ServerType, consistency string) bool {
-	return consistency != consistencyTypeSnapshot || serverType != version.ServerTypeTiDB
+func needRepeatableRead(serverType ServerType, consistency string) bool {
+	return consistency != consistencyTypeSnapshot || serverType != ServerTypeTiDB
 }

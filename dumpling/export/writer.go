@@ -29,7 +29,7 @@ type Writer struct {
 
 	receivedTaskCount int
 
-	rebuildConnFn       func(*sql.Conn, bool) (*sql.Conn, error)
+	rebuildConnFn       func(*sql.Conn) (*sql.Conn, error)
 	finishTaskCallBack  func(Task)
 	finishTableCallBack func(Task)
 }
@@ -99,10 +99,6 @@ func (w *Writer) handleTask(task Task) error {
 		return w.WriteTableMeta(t.DatabaseName, t.TableName, t.CreateTableSQL)
 	case *TaskViewMeta:
 		return w.WriteViewMeta(t.DatabaseName, t.ViewName, t.CreateTableSQL, t.CreateViewSQL)
-	case *TaskSequenceMeta:
-		return w.WriteSequenceMeta(t.DatabaseName, t.SequenceName, t.CreateSequenceSQL)
-	case *TaskPolicyMeta:
-		return w.WritePolicyMeta(t.PolicyName, t.CreatePolicySQL)
 	case *TaskTableData:
 		err := w.WriteTableData(t.Meta, t.Data, t.ChunkIndex)
 		if err != nil {
@@ -116,16 +112,6 @@ func (w *Writer) handleTask(task Task) error {
 		w.tctx.L().Warn("unsupported writer task type", zap.String("type", fmt.Sprintf("%T", t)))
 		return nil
 	}
-}
-
-// WritePolicyMeta writes database meta to a file
-func (w *Writer) WritePolicyMeta(policy, createSQL string) error {
-	tctx, conf := w.tctx, w.conf
-	fileName, err := (&outputFileNamer{Policy: policy}).render(conf.OutputFileTemplate, outputFileTemplatePolicy)
-	if err != nil {
-		return err
-	}
-	return writeMetaToFile(tctx, "placement-policy", createSQL, w.extStorage, fileName+".sql", conf.CompressType)
 }
 
 // WriteDatabaseMeta writes database meta to a file
@@ -166,16 +152,6 @@ func (w *Writer) WriteViewMeta(db, view, createTableSQL, createViewSQL string) e
 	return writeMetaToFile(tctx, db, createViewSQL, w.extStorage, fileNameView+".sql", conf.CompressType)
 }
 
-// WriteSequenceMeta writes sequence meta to a file
-func (w *Writer) WriteSequenceMeta(db, sequence, createSQL string) error {
-	tctx, conf := w.tctx, w.conf
-	fileName, err := (&outputFileNamer{DB: db, Table: sequence}).render(conf.OutputFileTemplate, outputFileTemplateSequence)
-	if err != nil {
-		return err
-	}
-	return writeMetaToFile(tctx, db, createSQL, w.extStorage, fileName+".sql", conf.CompressType)
-}
-
 // WriteTableData writes table data to a file with retry
 func (w *Writer) WriteTableData(meta TableMeta, ir TableDataIR, currentChunk int) error {
 	tctx, conf, conn := w.tctx, w.conf, w.conn
@@ -193,7 +169,7 @@ func (w *Writer) WriteTableData(meta TableMeta, ir TableDataIR, currentChunk int
 			zap.String("table", meta.TableName()), zap.Int("chunkIndex", currentChunk), zap.NamedError("lastError", lastErr))
 		// don't rebuild connection when dump for the first time
 		if retryTime > 1 {
-			conn, err = w.rebuildConnFn(conn, true)
+			conn, err = w.rebuildConnFn(conn)
 			w.conn = conn
 			if err != nil {
 				return
@@ -211,7 +187,7 @@ func (w *Writer) WriteTableData(meta TableMeta, ir TableDataIR, currentChunk int
 		}
 		defer ir.Close()
 		return w.tryToWriteTableData(tctx, meta, ir, currentChunk)
-	}, newRebuildConnBackOffer(canRebuildConn(conf.Consistency, conf.TransactionalConsistency)))
+	}, newDumpChunkBackoffer(canRebuildConn(conf.Consistency, conf.TransactionalConsistency)))
 }
 
 func (w *Writer) tryToWriteTableData(tctx *tcontext.Context, meta TableMeta, ir TableDataIR, curChkIdx int) error {
@@ -278,7 +254,6 @@ func writeMetaToFile(tctx *tcontext.Context, target, metaSQL string, s storage.E
 type outputFileNamer struct {
 	ChunkIndex int
 	FileIndex  int
-	Policy     string
 	DB         string
 	Table      string
 	format     string

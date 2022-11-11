@@ -18,13 +18,11 @@ import (
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/collate"
 )
 
 type maxMinFunction struct {
 	aggFunction
 	isMax bool
-	ctor  collate.Collator
 }
 
 // GetResult implements Aggregation interface.
@@ -51,7 +49,7 @@ func (mmf *maxMinFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.State
 		return nil
 	}
 	var c int
-	c, err = evalCtx.Value.Compare(sc, &value, mmf.ctor)
+	c, err = evalCtx.Value.CompareDatum(sc, &value)
 	if err != nil {
 		return err
 	}

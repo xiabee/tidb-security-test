@@ -28,15 +28,6 @@ var (
 			Name:      "panic_total",
 			Help:      "Counter of panic.",
 		}, []string{LblType})
-
-	// MemoryUsage measures the usage gauge of memory.
-	MemoryUsage = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: "tidb",
-			Subsystem: "server",
-			Name:      "memory_usage",
-			Help:      "Memory Usage",
-		}, []string{LblType})
 )
 
 // metrics labels.
@@ -105,10 +96,6 @@ func RegisterMetrics() {
 	prometheus.MustRegister(HandleJobHistogram)
 	prometheus.MustRegister(SignificantFeedbackCounter)
 	prometheus.MustRegister(FastAnalyzeHistogram)
-	prometheus.MustRegister(SyncLoadCounter)
-	prometheus.MustRegister(SyncLoadTimeoutCounter)
-	prometheus.MustRegister(SyncLoadHistogram)
-	prometheus.MustRegister(ReadStatsHistogram)
 	prometheus.MustRegister(JobsGauge)
 	prometheus.MustRegister(KeepAliveCounter)
 	prometheus.MustRegister(LoadPrivilegeCounter)
@@ -120,9 +107,8 @@ func RegisterMetrics() {
 	prometheus.MustRegister(OwnerHandleSyncerHistogram)
 	prometheus.MustRegister(PanicCounter)
 	prometheus.MustRegister(PlanCacheCounter)
-	prometheus.MustRegister(PlanCacheMissCounter)
 	prometheus.MustRegister(PseudoEstimation)
-	prometheus.MustRegister(PacketIOCounter)
+	prometheus.MustRegister(PacketIOHistogram)
 	prometheus.MustRegister(QueryDurationHistogram)
 	prometheus.MustRegister(QueryTotalCounter)
 	prometheus.MustRegister(SchemaLeaseErrorCounter)
@@ -153,6 +139,7 @@ func RegisterMetrics() {
 	prometheus.MustRegister(GCJobFailureCounter)
 	prometheus.MustRegister(GCRegionTooManyLocksCounter)
 	prometheus.MustRegister(GCWorkerCounter)
+	prometheus.MustRegister(GCUnsafeDestroyRangeFailuresCounterVec)
 	prometheus.MustRegister(TotalQueryProcHistogram)
 	prometheus.MustRegister(TotalCopProcHistogram)
 	prometheus.MustRegister(TotalCopWaitHistogram)
@@ -170,16 +157,6 @@ func RegisterMetrics() {
 	prometheus.MustRegister(TopSQLIgnoredCounter)
 	prometheus.MustRegister(TopSQLReportDurationHistogram)
 	prometheus.MustRegister(TopSQLReportDataHistogram)
-	prometheus.MustRegister(PDAPIExecutionHistogram)
-	prometheus.MustRegister(PDAPIRequestCounter)
-	prometheus.MustRegister(CPUProfileCounter)
-	prometheus.MustRegister(ReadFromTableCacheCounter)
-	prometheus.MustRegister(LoadTableCacheDurationHistogram)
-	prometheus.MustRegister(NonTransactionalDeleteCount)
-	prometheus.MustRegister(MemoryUsage)
-	prometheus.MustRegister(StatsCacheLRUCounter)
-	prometheus.MustRegister(StatsCacheLRUGauge)
-	prometheus.MustRegister(StatsHealthyGauge)
 
 	tikvmetrics.InitMetrics(TiDB, TiKVClient)
 	tikvmetrics.RegisterMetrics()

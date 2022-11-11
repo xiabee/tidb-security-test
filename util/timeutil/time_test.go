@@ -28,6 +28,8 @@ import (
 )
 
 func TestGetTZNameFromFileName(t *testing.T) {
+	t.Parallel()
+
 	tz, err := inferTZNameFromFileName("/usr/share/zoneinfo/Asia/Shanghai")
 
 	require.NoError(t, err)
@@ -40,6 +42,8 @@ func TestGetTZNameFromFileName(t *testing.T) {
 }
 
 func TestLocal(t *testing.T) {
+	t.Parallel()
+
 	os.Setenv("TZ", "Asia/Shanghai")
 	systemTZ.Store(InferSystemTZ())
 	loc := SystemLocation()
@@ -61,6 +65,8 @@ func TestLocal(t *testing.T) {
 }
 
 func TestInferOneStepLinkForPath(t *testing.T) {
+	t.Parallel()
+
 	os.Remove(filepath.Join(os.TempDir(), "testlink1"))
 	os.Remove(filepath.Join(os.TempDir(), "testlink2"))
 	os.Remove(filepath.Join(os.TempDir(), "testlink3"))

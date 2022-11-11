@@ -22,6 +22,8 @@ import (
 )
 
 func TestDumpColumn(t *testing.T) {
+	t.Parallel()
+
 	info := ColumnInfo{
 		Schema:             "testSchema",
 		Table:              "testTable",
@@ -50,6 +52,8 @@ func TestDumpColumn(t *testing.T) {
 }
 
 func TestColumnNameLimit(t *testing.T) {
+	t.Parallel()
+
 	aLongName := make([]byte, 0, 300)
 	for i := 0; i < 300; i++ {
 		aLongName = append(aLongName, 'a')

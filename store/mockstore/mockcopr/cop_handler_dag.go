@@ -29,7 +29,6 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
@@ -176,7 +175,7 @@ func (h coprHandler) buildExec(ctx *dagContext, curr *tipb.Executor) (executor, 
 		childExec = curr.Limit.Child
 	default:
 		// TODO: Support other types.
-		err = errors.Errorf("this exec type %v doesn't support yet", curr.GetTp())
+		err = errors.Errorf("this exec type %v doesn't support yet.", curr.GetTp())
 	}
 
 	return currExec, childExec, errors.Trace(err)
@@ -396,17 +395,12 @@ func (h coprHandler) buildStreamAgg(ctx *dagContext, executor *tipb.Executor) (*
 	for _, agg := range aggs {
 		aggCtxs = append(aggCtxs, agg.CreateContext(ctx.evalCtx.sc))
 	}
-	groupByCollators := make([]collate.Collator, 0, len(groupBys))
-	for _, expr := range groupBys {
-		groupByCollators = append(groupByCollators, collate.GetCollator(expr.GetType().GetCollate()))
-	}
 
 	return &streamAggExec{
 		evalCtx:           ctx.evalCtx,
 		aggExprs:          aggs,
 		aggCtxs:           aggCtxs,
 		groupByExprs:      groupBys,
-		groupByCollators:  groupByCollators,
 		currGroupByValues: make([][]byte, 0),
 		relatedColOffsets: relatedColOffsets,
 		row:               make([]types.Datum, len(ctx.evalCtx.columnInfos)),
@@ -927,14 +921,12 @@ func extractOffsetsInExpr(expr *tipb.Expr, columns []*tipb.ColumnInfo, collector
 
 // fieldTypeFromPBColumn creates a types.FieldType from tipb.ColumnInfo.
 func fieldTypeFromPBColumn(col *tipb.ColumnInfo) *types.FieldType {
-	charsetStr, collationStr, _ := charset.GetCharsetInfoByID(int(collate.RestoreCollationIDIfNeeded(col.GetCollation())))
-	ft := &types.FieldType{}
-	ft.SetType(byte(col.GetTp()))
-	ft.SetFlag(uint(col.GetFlag()))
-	ft.SetFlen(int(col.GetColumnLen()))
-	ft.SetDecimal(int(col.GetDecimal()))
-	ft.SetElems(col.Elems)
-	ft.SetCharset(charsetStr)
-	ft.SetCollate(collationStr)
-	return ft
+	return &types.FieldType{
+		Tp:      byte(col.GetTp()),
+		Flag:    uint(col.Flag),
+		Flen:    int(col.GetColumnLen()),
+		Decimal: int(col.GetDecimal()),
+		Elems:   col.Elems,
+		Collate: collate.CollationID2Name(collate.RestoreCollationIDIfNeeded(col.GetCollation())),
+	}
 }

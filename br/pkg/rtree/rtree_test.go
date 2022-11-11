@@ -18,6 +18,7 @@ func newRange(start, end []byte) *rtree.Range {
 }
 
 func TestRangeTree(t *testing.T) {
+	t.Parallel()
 	rangeTree := rtree.NewRangeTree()
 	require.Nil(t, rangeTree.Get(newRange([]byte(""), []byte(""))))
 
@@ -122,6 +123,7 @@ func TestRangeTree(t *testing.T) {
 }
 
 func TestRangeIntersect(t *testing.T) {
+	t.Parallel()
 	rg := newRange([]byte("a"), []byte("c"))
 
 	start, end, isIntersect := rg.Intersect([]byte(""), []byte(""))

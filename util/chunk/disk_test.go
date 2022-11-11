@@ -25,12 +25,13 @@ import (
 	"strings"
 	"testing"
 
-	errors2 "github.com/pingcap/errors"
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
-	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/checksum"
+	"github.com/pingcap/tidb/util/encrypt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,21 +66,23 @@ func initChunks(numChk, numRow int) ([]*Chunk, []*types.FieldType) {
 }
 
 func TestListInDisk(t *testing.T) {
+	t.Parallel()
+
 	numChk, numRow := 2, 2
 	chks, fields := initChunks(numChk, numRow)
 	l := NewListInDisk(fields)
 	defer func() {
 		err := l.Close()
 		require.NoError(t, err)
-		require.NotNil(t, l.dataFile.disk)
-		_, err = os.Stat(l.dataFile.disk.Name())
+		require.NotNil(t, l.disk)
+		_, err = os.Stat(l.disk.Name())
 		require.True(t, os.IsNotExist(err))
 	}()
 	for _, chk := range chks {
 		err := l.Add(chk)
 		assert.NoError(t, err)
 	}
-	require.True(t, strings.HasPrefix(l.dataFile.disk.Name(), filepath.Join(os.TempDir(), "oom-use-tmp-storage")))
+	require.True(t, strings.HasPrefix(l.disk.Name(), filepath.Join(os.TempDir(), "oom-use-tmp-storage")))
 	assert.Equal(t, numChk, l.NumChunks())
 	assert.Greater(t, l.GetDiskTracker().BytesConsumed(), int64(0))
 
@@ -143,47 +146,25 @@ type listInDiskWriteDisk struct {
 	ListInDisk
 }
 
-func (l *diskFileReaderWriter) flushForTest() (err error) {
-	err = l.disk.Close()
-	if err != nil {
-		return
-	}
-	l.w = nil
-	// the l.disk is the underlying object of the l.w, it will be closed
-	// after calling l.w.Close, we need to reopen it before reading rows.
-	l.disk, err = os.Open(l.disk.Name())
-	if err != nil {
-		return errors2.Trace(err)
-	}
-	return nil
-}
-
 func newListInDiskWriteDisk(fieldTypes []*types.FieldType) (*listInDiskWriteDisk, error) {
 	l := listInDiskWriteDisk{*NewListInDisk(fieldTypes)}
 	disk, err := os.CreateTemp(config.GetGlobalConfig().TempStoragePath, strconv.Itoa(l.diskTracker.Label()))
 	if err != nil {
 		return nil, err
 	}
-	l.dataFile.disk = disk
-	l.dataFile.w = disk
-
-	disk2, err := os.CreateTemp(config.GetGlobalConfig().TempStoragePath, "offset"+strconv.Itoa(l.diskTracker.Label()))
-	if err != nil {
-		return nil, err
-	}
-	l.offsetFile.disk = disk2
-	l.offsetFile.w = disk2
+	l.disk = disk
+	l.w = disk
 	return &l, nil
 }
 
 func (l *listInDiskWriteDisk) GetRow(ptr RowPtr) (row Row, err error) {
-	err = l.flushForTest()
-	off, err := l.getOffset(ptr.ChkIdx, ptr.RowIdx)
+	err = l.flush()
 	if err != nil {
 		return
 	}
+	off := l.offsets[ptr.ChkIdx][ptr.RowIdx]
 
-	r := io.NewSectionReader(l.dataFile.disk, off, l.dataFile.offWrite-off)
+	r := io.NewSectionReader(l.disk, off, l.offWrite-off)
 	format := rowInDisk{numCol: len(l.fieldTypes)}
 	_, err = format.ReadFrom(r)
 	if err != nil {
@@ -191,14 +172,6 @@ func (l *listInDiskWriteDisk) GetRow(ptr RowPtr) (row Row, err error) {
 	}
 	row = format.toMutRow(l.fieldTypes).ToRow()
 	return row, err
-}
-
-func (l *listInDiskWriteDisk) flushForTest() (err error) {
-	err = l.dataFile.flushForTest()
-	if err != nil {
-		return err
-	}
-	return l.offsetFile.flushForTest()
 }
 
 func checkRow(t *testing.T, row1, row2 Row) {
@@ -212,6 +185,8 @@ func checkRow(t *testing.T, row1, row2 Row) {
 }
 
 func testListInDisk(t *testing.T) {
+	t.Parallel()
+
 	numChk, numRow := 10, 1000
 	chks, fields := initChunks(numChk, numRow)
 	lChecksum := NewListInDisk(fields)
@@ -281,6 +256,8 @@ func TestListInDiskWithChecksumAndEncrypt(t *testing.T) {
 // |      |                                          | |                             |
 // +------+------------------------------------------+ +-----------------------------+
 func testReaderWithCache(t *testing.T) {
+	t.Parallel()
+
 	testData := "0123456789"
 	buf := bytes.NewBuffer(nil)
 	for i := 0; i < 102; i++ {
@@ -300,7 +277,11 @@ func testReaderWithCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, chk.GetRow(0).GetDatumRow(field), row.GetDatumRow(field))
 
-	checksumReader := l.dataFile.getReader()
+	var underlying io.ReaderAt = l.disk
+	if l.ctrCipher != nil {
+		underlying = NewReaderWithCache(encrypt.NewReader(l.disk, l.ctrCipher), l.cipherWriter.GetCache(), l.cipherWriter.GetCacheDataOffset())
+	}
+	checksumReader := NewReaderWithCache(checksum.NewReader(underlying), l.checksumWriter.GetCache(), l.checksumWriter.GetCacheDataOffset())
 
 	// Read all data.
 	data := make([]byte, 1024)
@@ -356,6 +337,8 @@ func testReaderWithCache(t *testing.T) {
 
 // Here we test situations where size of data is small, so no data is flushed to disk.
 func testReaderWithCacheNoFlush(t *testing.T) {
+	t.Parallel()
+
 	testData := "0123456789"
 
 	field := []*types.FieldType{types.NewFieldType(mysql.TypeString)}
@@ -369,13 +352,18 @@ func testReaderWithCacheNoFlush(t *testing.T) {
 	row, err := l.GetRow(RowPtr{0, 0})
 	require.NoError(t, err)
 	require.Equal(t, chk.GetRow(0).GetDatumRow(field), row.GetDatumRow(field))
-	checksumReader := l.dataFile.getReader()
+
+	var underlying io.ReaderAt = l.disk
+	if l.ctrCipher != nil {
+		underlying = NewReaderWithCache(encrypt.NewReader(l.disk, l.ctrCipher), l.cipherWriter.GetCache(), l.cipherWriter.GetCacheDataOffset())
+	}
+	checksumReader := NewReaderWithCache(checksum.NewReader(underlying), l.checksumWriter.GetCache(), l.checksumWriter.GetCacheDataOffset())
 
 	// Read all data.
 	data := make([]byte, 1024)
 	// Offset is 8, because we want to ignore col length.
 	readCnt, err := checksumReader.ReadAt(data, 8)
 	require.Equal(t, io.EOF, err)
-	require.Len(t, testData, readCnt)
+	require.Equal(t, len(testData), readCnt)
 	require.Equal(t, []byte(testData), data[:10])
 }

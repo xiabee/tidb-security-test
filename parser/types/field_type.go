@@ -14,7 +14,6 @@
 package types
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -39,104 +38,24 @@ var (
 
 // FieldType records field type information.
 type FieldType struct {
-	tp      byte
-	flag    uint
-	flen    int
-	decimal int
-	charset string
-	collate string
-	// elems is the element list for enum and set type.
-	elems []string
+	Tp      byte
+	Flag    uint
+	Flen    int
+	Decimal int
+	Charset string
+	Collate string
+	// Elems is the element list for enum and set type.
+	Elems []string
 }
 
 // NewFieldType returns a FieldType,
 // with a type and other information about field type.
 func NewFieldType(tp byte) *FieldType {
 	return &FieldType{
-		tp:      tp,
-		flen:    UnspecifiedLength,
-		decimal: UnspecifiedLength,
+		Tp:      tp,
+		Flen:    UnspecifiedLength,
+		Decimal: UnspecifiedLength,
 	}
-}
-
-func (ft *FieldType) GetType() byte {
-	return ft.tp
-}
-
-func (ft *FieldType) GetFlag() uint {
-	return ft.flag
-}
-
-func (ft *FieldType) GetFlen() int {
-	return ft.flen
-}
-
-func (ft *FieldType) GetDecimal() int {
-	return ft.decimal
-}
-
-func (ft *FieldType) GetCharset() string {
-	return ft.charset
-}
-
-func (ft *FieldType) GetCollate() string {
-	return ft.collate
-}
-
-func (ft *FieldType) GetElems() []string {
-	return ft.elems
-}
-
-func (ft *FieldType) SetType(tp byte) {
-	ft.tp = tp
-}
-
-func (ft *FieldType) SetFlag(flag uint) {
-	ft.flag = flag
-}
-
-func (ft *FieldType) AddFlag(flag uint) {
-	ft.flag |= flag
-}
-
-func (ft *FieldType) AndFlag(flag uint) {
-	ft.flag &= flag
-}
-
-func (ft *FieldType) ToggleFlag(flag uint) {
-	ft.flag ^= flag
-}
-
-func (ft *FieldType) DelFlag(flag uint) {
-	ft.flag &= ^flag
-}
-
-func (ft *FieldType) SetFlen(flen int) {
-	ft.flen = flen
-}
-
-func (ft *FieldType) SetDecimal(decimal int) {
-	ft.decimal = decimal
-}
-
-func (ft *FieldType) SetCharset(charset string) {
-	ft.charset = charset
-}
-
-func (ft *FieldType) SetCollate(collate string) {
-	ft.collate = collate
-}
-
-func (ft *FieldType) SetElems(elems []string) {
-	ft.elems = elems
-}
-
-func (ft *FieldType) SetElem(idx int, element string) {
-	ft.elems[idx] = element
-}
-
-func (ft *FieldType) GetElem(idx int) string {
-	return ft.elems[idx]
 }
 
 // Clone returns a copy of itself.
@@ -147,25 +66,25 @@ func (ft *FieldType) Clone() *FieldType {
 
 // Equal checks whether two FieldType objects are equal.
 func (ft *FieldType) Equal(other *FieldType) bool {
-	// We do not need to compare whole `ft.flag == other.flag` when wrapping cast upon an Expression.
-	// but need compare unsigned_flag of ft.flag.
-	// When tp is float or double with decimal unspecified, do not check whether flen is equal,
-	// because flen for them is useless.
-	// The decimal field can be ignored if the type is int or string.
-	tpEqual := (ft.tp == other.tp) || (ft.tp == mysql.TypeVarchar && other.tp == mysql.TypeVarString) || (ft.tp == mysql.TypeVarString && other.tp == mysql.TypeVarchar)
-	flenEqual := ft.flen == other.flen || (ft.EvalType() == ETReal && ft.decimal == UnspecifiedLength)
+	// We do not need to compare whole `ft.Flag == other.Flag` when wrapping cast upon an Expression.
+	// but need compare unsigned_flag of ft.Flag.
+	// When Tp is float or double with Decimal unspecified, do not check whether Flen is equal,
+	// because Flen for them is useless.
+	// The Decimal field can be ignored if the type is int or string.
+	tpEqual := (ft.Tp == other.Tp) || (ft.Tp == mysql.TypeVarchar && other.Tp == mysql.TypeVarString) || (ft.Tp == mysql.TypeVarString && other.Tp == mysql.TypeVarchar)
+	flenEqual := ft.Flen == other.Flen || (ft.EvalType() == ETReal && ft.Decimal == UnspecifiedLength)
 	ignoreDecimal := ft.EvalType() == ETInt || ft.EvalType() == ETString
 	partialEqual := tpEqual &&
-		(ignoreDecimal || ft.decimal == other.decimal) &&
-		ft.charset == other.charset &&
-		ft.collate == other.collate &&
+		(ignoreDecimal || ft.Decimal == other.Decimal) &&
+		ft.Charset == other.Charset &&
+		ft.Collate == other.Collate &&
 		flenEqual &&
-		mysql.HasUnsignedFlag(ft.flag) == mysql.HasUnsignedFlag(other.flag)
-	if !partialEqual || len(ft.elems) != len(other.elems) {
+		mysql.HasUnsignedFlag(ft.Flag) == mysql.HasUnsignedFlag(other.Flag)
+	if !partialEqual || len(ft.Elems) != len(other.Elems) {
 		return false
 	}
-	for i := range ft.elems {
-		if ft.elems[i] != other.elems[i] {
+	for i := range ft.Elems {
+		if ft.Elems[i] != other.Elems[i] {
 			return false
 		}
 	}
@@ -174,7 +93,7 @@ func (ft *FieldType) Equal(other *FieldType) bool {
 
 // EvalType gets the type in evaluation.
 func (ft *FieldType) EvalType() EvalType {
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong,
 		mysql.TypeBit, mysql.TypeYear:
 		return ETInt
@@ -191,7 +110,7 @@ func (ft *FieldType) EvalType() EvalType {
 	case mysql.TypeJSON:
 		return ETJson
 	case mysql.TypeEnum, mysql.TypeSet:
-		if ft.flag&mysql.EnumSetAsIntFlag > 0 {
+		if ft.Flag&mysql.EnumSetAsIntFlag > 0 {
 			return ETInt
 		}
 	}
@@ -200,27 +119,27 @@ func (ft *FieldType) EvalType() EvalType {
 
 // Hybrid checks whether a type is a hybrid type, which can represent different types of value in specific context.
 func (ft *FieldType) Hybrid() bool {
-	return ft.tp == mysql.TypeEnum || ft.tp == mysql.TypeBit || ft.tp == mysql.TypeSet
+	return ft.Tp == mysql.TypeEnum || ft.Tp == mysql.TypeBit || ft.Tp == mysql.TypeSet
 }
 
 // Init initializes the FieldType data.
 func (ft *FieldType) Init(tp byte) {
-	ft.tp = tp
-	ft.flen = UnspecifiedLength
-	ft.decimal = UnspecifiedLength
+	ft.Tp = tp
+	ft.Flen = UnspecifiedLength
+	ft.Decimal = UnspecifiedLength
 }
 
-// CompactStr only considers tp/CharsetBin/flen/Deimal.
+// CompactStr only considers Tp/CharsetBin/Flen/Deimal.
 // This is used for showing column type in infoschema.
 func (ft *FieldType) CompactStr() string {
-	ts := TypeToStr(ft.tp, ft.charset)
+	ts := TypeToStr(ft.Tp, ft.Charset)
 	suffix := ""
 
-	defaultFlen, defaultDecimal := mysql.GetDefaultFieldLengthAndDecimal(ft.tp)
-	isDecimalNotDefault := ft.decimal != defaultDecimal && ft.decimal != 0 && ft.decimal != UnspecifiedLength
+	defaultFlen, defaultDecimal := mysql.GetDefaultFieldLengthAndDecimal(ft.Tp)
+	isDecimalNotDefault := ft.Decimal != defaultDecimal && ft.Decimal != 0 && ft.Decimal != UnspecifiedLength
 
 	// displayFlen and displayDecimal are flen and decimal values with `-1` substituted with default value.
-	displayFlen, displayDecimal := ft.flen, ft.decimal
+	displayFlen, displayDecimal := ft.Flen, ft.Decimal
 	if displayFlen == UnspecifiedLength {
 		displayFlen = defaultFlen
 	}
@@ -228,11 +147,11 @@ func (ft *FieldType) CompactStr() string {
 		displayDecimal = defaultDecimal
 	}
 
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeEnum, mysql.TypeSet:
 		// Format is ENUM ('e1', 'e2') or SET ('e1', 'e2')
-		es := make([]string, 0, len(ft.elems))
-		for _, e := range ft.elems {
+		es := make([]string, 0, len(ft.Elems))
+		for _, e := range ft.Elems {
 			e = format.OutputFormat(e)
 			es = append(es, e)
 		}
@@ -242,10 +161,10 @@ func (ft *FieldType) CompactStr() string {
 			suffix = fmt.Sprintf("(%d)", displayDecimal)
 		}
 	case mysql.TypeDouble, mysql.TypeFloat:
-		// 1. flen Not Default, decimal Not Default -> Valid
-		// 2. flen Not Default, decimal Default (-1) -> Invalid
-		// 3. flen Default, decimal Not Default -> Valid
-		// 4. flen Default, decimal Default -> Valid (hide)
+		// 1. Flen Not Default, Decimal Not Default -> Valid
+		// 2. Flen Not Default, Decimal Default (-1) -> Invalid
+		// 3. Flen Default, Decimal Not Default -> Valid
+		// 4. Flen Default, Decimal Default -> Valid (hide)
 		if isDecimalNotDefault {
 			suffix = fmt.Sprintf("(%d,%d)", displayFlen, displayDecimal)
 		}
@@ -260,7 +179,7 @@ func (ft *FieldType) CompactStr() string {
 			suffix = fmt.Sprintf("(%d)", displayFlen)
 		}
 	case mysql.TypeYear:
-		suffix = fmt.Sprintf("(%d)", ft.flen)
+		suffix = fmt.Sprintf("(%d)", ft.Flen)
 	}
 	return ts + suffix
 }
@@ -269,7 +188,7 @@ func (ft *FieldType) CompactStr() string {
 // returns a string.
 func (ft *FieldType) InfoSchemaStr() string {
 	suffix := ""
-	if mysql.HasUnsignedFlag(ft.flag) {
+	if mysql.HasUnsignedFlag(ft.Flag) {
 		suffix = " unsigned"
 	}
 	return ft.CompactStr() + suffix
@@ -279,22 +198,22 @@ func (ft *FieldType) InfoSchemaStr() string {
 // Note: when flen or decimal is unspecified, this function will use the default value instead of -1.
 func (ft *FieldType) String() string {
 	strs := []string{ft.CompactStr()}
-	if mysql.HasUnsignedFlag(ft.flag) {
+	if mysql.HasUnsignedFlag(ft.Flag) {
 		strs = append(strs, "UNSIGNED")
 	}
-	if mysql.HasZerofillFlag(ft.flag) {
+	if mysql.HasZerofillFlag(ft.Flag) {
 		strs = append(strs, "ZEROFILL")
 	}
-	if mysql.HasBinaryFlag(ft.flag) && ft.tp != mysql.TypeString {
+	if mysql.HasBinaryFlag(ft.Flag) && ft.Tp != mysql.TypeString {
 		strs = append(strs, "BINARY")
 	}
 
-	if IsTypeChar(ft.tp) || IsTypeBlob(ft.tp) {
-		if ft.charset != "" && ft.charset != charset.CharsetBin {
-			strs = append(strs, fmt.Sprintf("CHARACTER SET %s", ft.charset))
+	if IsTypeChar(ft.Tp) || IsTypeBlob(ft.Tp) {
+		if ft.Charset != "" && ft.Charset != charset.CharsetBin {
+			strs = append(strs, fmt.Sprintf("CHARACTER SET %s", ft.Charset))
 		}
-		if ft.collate != "" && ft.collate != charset.CharsetBin {
-			strs = append(strs, fmt.Sprintf("COLLATE %s", ft.collate))
+		if ft.Collate != "" && ft.Collate != charset.CharsetBin {
+			strs = append(strs, fmt.Sprintf("COLLATE %s", ft.Collate))
 		}
 	}
 
@@ -303,15 +222,15 @@ func (ft *FieldType) String() string {
 
 // Restore implements Node interface.
 func (ft *FieldType) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord(TypeToStr(ft.tp, ft.charset))
+	ctx.WriteKeyWord(TypeToStr(ft.Tp, ft.Charset))
 
 	precision := UnspecifiedLength
 	scale := UnspecifiedLength
 
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeEnum, mysql.TypeSet:
 		ctx.WritePlain("(")
-		for i, e := range ft.elems {
+		for i, e := range ft.Elems {
 			if i != 0 {
 				ctx.WritePlain(",")
 			}
@@ -319,12 +238,12 @@ func (ft *FieldType) Restore(ctx *format.RestoreCtx) error {
 		}
 		ctx.WritePlain(")")
 	case mysql.TypeTimestamp, mysql.TypeDatetime, mysql.TypeDuration:
-		precision = ft.decimal
+		precision = ft.Decimal
 	case mysql.TypeUnspecified, mysql.TypeFloat, mysql.TypeDouble, mysql.TypeNewDecimal:
-		precision = ft.flen
-		scale = ft.decimal
+		precision = ft.Flen
+		scale = ft.Decimal
 	default:
-		precision = ft.flen
+		precision = ft.Flen
 	}
 
 	if precision != UnspecifiedLength {
@@ -335,23 +254,23 @@ func (ft *FieldType) Restore(ctx *format.RestoreCtx) error {
 		ctx.WritePlain(")")
 	}
 
-	if mysql.HasUnsignedFlag(ft.flag) {
+	if mysql.HasUnsignedFlag(ft.Flag) {
 		ctx.WriteKeyWord(" UNSIGNED")
 	}
-	if mysql.HasZerofillFlag(ft.flag) {
+	if mysql.HasZerofillFlag(ft.Flag) {
 		ctx.WriteKeyWord(" ZEROFILL")
 	}
-	if mysql.HasBinaryFlag(ft.flag) && ft.charset != charset.CharsetBin {
+	if mysql.HasBinaryFlag(ft.Flag) && ft.Charset != charset.CharsetBin {
 		ctx.WriteKeyWord(" BINARY")
 	}
 
-	if IsTypeChar(ft.tp) || IsTypeBlob(ft.tp) {
-		if ft.charset != "" && ft.charset != charset.CharsetBin {
-			ctx.WriteKeyWord(" CHARACTER SET " + ft.charset)
+	if IsTypeChar(ft.Tp) || IsTypeBlob(ft.Tp) {
+		if ft.Charset != "" && ft.Charset != charset.CharsetBin {
+			ctx.WriteKeyWord(" CHARACTER SET " + ft.Charset)
 		}
-		if ft.collate != "" && ft.collate != charset.CharsetBin {
+		if ft.Collate != "" && ft.Collate != charset.CharsetBin {
 			ctx.WriteKeyWord(" COLLATE ")
-			ctx.WritePlain(ft.collate)
+			ctx.WritePlain(ft.Collate)
 		}
 	}
 
@@ -360,49 +279,49 @@ func (ft *FieldType) Restore(ctx *format.RestoreCtx) error {
 
 // RestoreAsCastType is used for write AST back to string.
 func (ft *FieldType) RestoreAsCastType(ctx *format.RestoreCtx, explicitCharset bool) {
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeVarString:
 		skipWriteBinary := false
-		if ft.charset == charset.CharsetBin && ft.collate == charset.CollationBin {
+		if ft.Charset == charset.CharsetBin && ft.Collate == charset.CollationBin {
 			ctx.WriteKeyWord("BINARY")
 			skipWriteBinary = true
 		} else {
 			ctx.WriteKeyWord("CHAR")
 		}
-		if ft.flen != UnspecifiedLength {
-			ctx.WritePlainf("(%d)", ft.flen)
+		if ft.Flen != UnspecifiedLength {
+			ctx.WritePlainf("(%d)", ft.Flen)
 		}
 		if !explicitCharset {
 			return
 		}
-		if !skipWriteBinary && ft.flag&mysql.BinaryFlag != 0 {
+		if !skipWriteBinary && ft.Flag&mysql.BinaryFlag != 0 {
 			ctx.WriteKeyWord(" BINARY")
 		}
-		if ft.charset != charset.CharsetBin && ft.charset != mysql.DefaultCharset {
+		if ft.Charset != charset.CharsetBin && ft.Charset != mysql.DefaultCharset {
 			ctx.WriteKeyWord(" CHARSET ")
-			ctx.WriteKeyWord(ft.charset)
+			ctx.WriteKeyWord(ft.Charset)
 		}
 	case mysql.TypeDate:
 		ctx.WriteKeyWord("DATE")
 	case mysql.TypeDatetime:
 		ctx.WriteKeyWord("DATETIME")
-		if ft.decimal > 0 {
-			ctx.WritePlainf("(%d)", ft.decimal)
+		if ft.Decimal > 0 {
+			ctx.WritePlainf("(%d)", ft.Decimal)
 		}
 	case mysql.TypeNewDecimal:
 		ctx.WriteKeyWord("DECIMAL")
-		if ft.flen > 0 && ft.decimal > 0 {
-			ctx.WritePlainf("(%d, %d)", ft.flen, ft.decimal)
-		} else if ft.flen > 0 {
-			ctx.WritePlainf("(%d)", ft.flen)
+		if ft.Flen > 0 && ft.Decimal > 0 {
+			ctx.WritePlainf("(%d, %d)", ft.Flen, ft.Decimal)
+		} else if ft.Flen > 0 {
+			ctx.WritePlainf("(%d)", ft.Flen)
 		}
 	case mysql.TypeDuration:
 		ctx.WriteKeyWord("TIME")
-		if ft.decimal > 0 {
-			ctx.WritePlainf("(%d)", ft.decimal)
+		if ft.Decimal > 0 {
+			ctx.WritePlainf("(%d)", ft.Decimal)
 		}
 	case mysql.TypeLonglong:
-		if ft.flag&mysql.UnsignedFlag != 0 {
+		if ft.Flag&mysql.UnsignedFlag != 0 {
 			ctx.WriteKeyWord("UNSIGNED")
 		} else {
 			ctx.WriteKeyWord("SIGNED")
@@ -431,7 +350,7 @@ const VarStorageLen = -1
 
 // StorageLength is the length of stored value for the type.
 func (ft *FieldType) StorageLength() int {
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong,
 		mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeFloat, mysql.TypeYear, mysql.TypeDuration,
 		mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp, mysql.TypeEnum, mysql.TypeSet,
@@ -439,7 +358,7 @@ func (ft *FieldType) StorageLength() int {
 		// This may not be the accurate length, because we may encode them as varint.
 		return 8
 	case mysql.TypeNewDecimal:
-		precision, frac := ft.flen-ft.decimal, ft.decimal
+		precision, frac := ft.Flen-ft.Decimal, ft.Decimal
 		return precision/digitsPerWord*wordSize + dig2bytes[precision%digitsPerWord] + frac/digitsPerWord*wordSize + dig2bytes[frac%digitsPerWord]
 	default:
 		return VarStorageLen
@@ -449,50 +368,12 @@ func (ft *FieldType) StorageLength() int {
 // HasCharset indicates if a COLUMN has an associated charset. Returning false here prevents some information
 // statements(like `SHOW CREATE TABLE`) from attaching a CHARACTER SET clause to the column.
 func HasCharset(ft *FieldType) bool {
-	switch ft.tp {
+	switch ft.Tp {
 	case mysql.TypeVarchar, mysql.TypeString, mysql.TypeVarString, mysql.TypeBlob,
 		mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob:
-		return !mysql.HasBinaryFlag(ft.flag)
+		return !mysql.HasBinaryFlag(ft.Flag)
 	case mysql.TypeEnum, mysql.TypeSet:
 		return true
 	}
 	return false
-}
-
-// for json
-type jsonFieldType struct {
-	Tp      byte
-	Flag    uint
-	Flen    int
-	Decimal int
-	Charset string
-	Collate string
-	Elems   []string
-}
-
-func (ft *FieldType) UnmarshalJSON(data []byte) error {
-	var r jsonFieldType
-	err := json.Unmarshal(data, &r)
-	if err == nil {
-		ft.tp = r.Tp
-		ft.flag = r.Flag
-		ft.flen = r.Flen
-		ft.decimal = r.Decimal
-		ft.charset = r.Charset
-		ft.collate = r.Collate
-		ft.elems = r.Elems
-	}
-	return err
-}
-
-func (ft *FieldType) MarshalJSON() ([]byte, error) {
-	var r jsonFieldType
-	r.Tp = ft.tp
-	r.Flag = ft.flag
-	r.Flen = ft.flen
-	r.Decimal = ft.decimal
-	r.Charset = ft.charset
-	r.Collate = ft.collate
-	r.Elems = ft.elems
-	return json.Marshal(r)
 }

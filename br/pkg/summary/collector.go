@@ -3,13 +3,11 @@
 package summary
 
 import (
-	"context"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/docker/go-units"
-	berror "github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 )
@@ -47,13 +45,11 @@ type LogCollector interface {
 	SetSuccessStatus(success bool)
 
 	Summary(name string)
-
-	Log(msg string, fields ...zap.Field)
 }
 
 type logFunc func(msg string, fields ...zap.Field)
 
-var collector = NewLogCollector(log.Info)
+var collector LogCollector = NewLogCollector(log.Info)
 
 // InitCollector initilize global collector instance.
 func InitCollector( // revive:disable-line:flag-parameter
@@ -192,16 +188,9 @@ func (tc *logCollector) Summary(name string) {
 	}
 
 	if len(tc.failureReasons) != 0 || !tc.successStatus {
-		var canceledUnits int
 		for unitName, reason := range tc.failureReasons {
-			if berror.Cause(reason) != context.Canceled {
-				logFields = append(logFields, zap.String("unit-name", unitName), zap.Error(reason))
-			} else {
-				canceledUnits++
-			}
+			logFields = append(logFields, zap.String("unit-name", unitName), zap.Error(reason))
 		}
-		// only print total number of cancel unit
-		log.Info("units canceled", zap.Int("cancel-unit", canceledUnits))
 		tc.log(name+" failed summary", logFields...)
 		return
 	}
@@ -237,10 +226,6 @@ func (tc *logCollector) Summary(name string) {
 	}
 
 	tc.log(name+" success summary", logFields...)
-}
-
-func (tc *logCollector) Log(msg string, fields ...zap.Field) {
-	tc.log(msg, fields...)
 }
 
 // SetLogCollector allow pass LogCollector outside.

@@ -22,6 +22,7 @@ import (
 )
 
 func TestCopRanges(t *testing.T) {
+	t.Parallel()
 	ranges := []kv.KeyRange{
 		{StartKey: []byte("a"), EndKey: []byte("b")},
 		{StartKey: []byte("c"), EndKey: []byte("d")},
@@ -35,6 +36,7 @@ func TestCopRanges(t *testing.T) {
 }
 
 func TestCopRangeSplit(t *testing.T) {
+	t.Parallel()
 	first := &kv.KeyRange{StartKey: []byte("a"), EndKey: []byte("b")}
 	mid := []kv.KeyRange{
 		{StartKey: []byte("c"), EndKey: []byte("d")},

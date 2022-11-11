@@ -50,12 +50,14 @@ func init() {
 }
 
 func TestSelection(t *testing.T) {
+	t.Parallel()
 	data := testSlice{1, 2, 3, 4, 5}
 	index := Select(data, 3)
 	require.Equal(t, 3, data[index])
 }
 
 func TestSelectionWithDuplicate(t *testing.T) {
+	t.Parallel()
 	data := testSlice{1, 2, 3, 3, 5}
 	index := Select(data, 3)
 	require.Equal(t, 3, data[index])
@@ -64,6 +66,7 @@ func TestSelectionWithDuplicate(t *testing.T) {
 }
 
 func TestSelectionWithRandomCase(t *testing.T) {
+	t.Parallel()
 	data := randomTestCase(1000000)
 	index := Select(data, 500000)
 	actual := data[index]
@@ -73,6 +76,7 @@ func TestSelectionWithRandomCase(t *testing.T) {
 }
 
 func TestSelectionWithSerialCase(t *testing.T) {
+	t.Parallel()
 	data := serialTestCase(1000000)
 	sort.Sort(sort.Reverse(data))
 	index := Select(data, 500000)

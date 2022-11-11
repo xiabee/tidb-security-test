@@ -20,6 +20,7 @@ import (
 )
 
 func TestFlags(t *testing.T) {
+	t.Parallel()
 	require.True(t, HasNotNullFlag(NotNullFlag))
 	require.True(t, HasUniKeyFlag(UniqueKeyFlag))
 	require.True(t, HasNotNullFlag(NotNullFlag))

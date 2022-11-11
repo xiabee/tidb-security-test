@@ -18,28 +18,32 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"testing"
-	"time"
+	gotime "time"
 
 	"github.com/pingcap/tidb/infoschema"
+	"github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/mock"
+
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/planner/core"
-	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util"
-	"github.com/pingcap/tidb/util/mock"
-	"github.com/stretchr/testify/require"
 )
 
-func TestGlueGetVersion(t *testing.T) {
+type testBRIESuite struct{}
+
+var _ = Suite(&testBRIESuite{})
+
+func (s *testBRIESuite) TestGlueGetVersion(c *C) {
 	g := tidbGlueSession{}
 	version := g.GetVersion()
-	require.Contains(t, version, `Release Version`)
-	require.Contains(t, version, `Git Commit Hash`)
-	require.Contains(t, version, `GoVersion`)
+	c.Assert(version, Matches, `(.|\n)*Release Version(.|\n)*`)
+	c.Assert(version, Matches, `(.|\n)*Git Commit Hash(.|\n)*`)
+	c.Assert(version, Matches, `(.|\n)*GoVersion(.|\n)*`)
 }
 
 func brieTaskInfoToResult(info *brieTaskInfo) string {
@@ -59,13 +63,13 @@ func brieTaskInfoToResult(info *brieTaskInfo) string {
 	return strings.Join(arr, ", ") + "\n"
 }
 
-func fetchShowBRIEResult(t *testing.T, e *ShowExec, brieColTypes []*types.FieldType) string {
+func fetchShowBRIEResult(c *C, e *ShowExec, brieColTypes []*types.FieldType) string {
 	e.result = newFirstChunk(e)
-	require.NoError(t, e.fetchShowBRIE(ast.BRIEKindBackup))
+	c.Assert(e.fetchShowBRIE(ast.BRIEKindBackup), IsNil)
 	return e.result.ToString(brieColTypes)
 }
 
-func TestFetchShowBRIE(t *testing.T) {
+func (s *testBRIESuite) TestFetchShowBRIE(c *C) {
 	// Compose a mocked session manager.
 	ps := make([]*util.ProcessInfo, 0, 1)
 	pi := &util.ProcessInfo{
@@ -91,9 +95,9 @@ func TestFetchShowBRIE(t *testing.T) {
 	p := parser.New()
 	p.SetParserConfig(parser.ParserConfig{EnableWindowFunction: true, EnableStrictDoubleTypeCheck: true})
 	stmt, err := p.ParseOneStmt("show backups", "", "")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	plan, _, err := core.BuildLogicalPlanForTest(ctx, sctx, stmt, infoschema.MockInfoSchema([]*model.TableInfo{core.MockSignedTable(), core.MockUnsignedTable(), core.MockView()}))
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	schema := plan.Schema()
 
 	// Compose executor.
@@ -101,10 +105,10 @@ func TestFetchShowBRIE(t *testing.T) {
 		baseExecutor: newBaseExecutor(sctx, schema, 0),
 		Tp:           ast.ShowBackups,
 	}
-	require.NoError(t, e.Open(ctx))
+	c.Assert(e.Open(ctx), IsNil)
 
 	tp := mysql.TypeDatetime
-	lateTime := types.NewTime(types.FromGoTime(time.Now().Add(-outdatedDuration.Duration+1)), tp, 0)
+	lateTime := types.NewTime(types.FromGoTime(gotime.Now().Add(-outdatedDuration.Duration+1)), tp, 0)
 	brieColTypes := make([]*types.FieldType, 0, len(schema.Columns))
 	for _, col := range schema.Columns {
 		brieColTypes = append(brieColTypes, col.RetType)
@@ -123,20 +127,20 @@ func TestFetchShowBRIE(t *testing.T) {
 	info1Res := brieTaskInfoToResult(info1)
 
 	globalBRIEQueue.registerTask(ctx, info1)
-	require.Equal(t, info1Res, fetchShowBRIEResult(t, e, brieColTypes))
+	c.Assert(fetchShowBRIEResult(c, e, brieColTypes), Equals, info1Res)
 
 	// Query again, this info should already have been cleaned
-	require.Len(t, fetchShowBRIEResult(t, e, brieColTypes), 0)
+	c.Assert(fetchShowBRIEResult(c, e, brieColTypes), HasLen, 0)
 
 	// Register this task again, we should be able to fetch this info
 	globalBRIEQueue.registerTask(ctx, info1)
-	require.Equal(t, info1Res, fetchShowBRIEResult(t, e, brieColTypes))
+	c.Assert(fetchShowBRIEResult(c, e, brieColTypes), Equals, info1Res)
 
 	// Query again, we should be able to fetch this info again, because we have cleared in last clearInterval
-	require.Equal(t, info1Res, fetchShowBRIEResult(t, e, brieColTypes))
+	c.Assert(fetchShowBRIEResult(c, e, brieColTypes), Equals, info1Res)
 
 	// Reset clear time, we should only fetch info2 this time.
-	globalBRIEQueue.lastClearTime = time.Now().Add(-clearInterval - time.Second)
+	globalBRIEQueue.lastClearTime = gotime.Now().Add(-clearInterval - gotime.Second)
 	currTime := types.CurrentTime(tp)
 	info2 := &brieTaskInfo{
 		kind:       ast.BRIEKindBackup,
@@ -150,5 +154,5 @@ func TestFetchShowBRIE(t *testing.T) {
 	info2Res := brieTaskInfoToResult(info2)
 	globalBRIEQueue.registerTask(ctx, info2)
 	globalBRIEQueue.clearTask(e.ctx.GetSessionVars().StmtCtx)
-	require.Equal(t, info2Res, fetchShowBRIEResult(t, e, brieColTypes))
+	c.Assert(fetchShowBRIEResult(c, e, brieColTypes), Equals, info2Res)
 }

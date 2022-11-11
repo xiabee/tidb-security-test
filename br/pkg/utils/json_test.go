@@ -1,10 +1,16 @@
 package utils
 
 import (
-	"testing"
+	"encoding/json"
+	"fmt"
+	"reflect"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+type testJSONSuite struct{}
+
+var _ = Suite(&testJSONSuite{})
 
 var testMetaJSONs = [][]byte{
 	[]byte(`{
@@ -54,13 +60,13 @@ var testMetaJSONs = [][]byte{
             "origin_default_bit": null,
             "state": 5,
             "type": {
-              "charset": "utf8mb4",
-              "collate": "utf8mb4_bin",
-              "decimal": 0,
-              "elems": null,
-              "flag": 4099,
-              "flen": 256,
-              "tp": 15
+              "Charset": "utf8mb4",
+              "Collate": "utf8mb4_bin",
+              "Decimal": 0,
+              "Elems": null,
+              "Flag": 4099,
+              "Flen": 256,
+              "Tp": 15
             },
             "version": 2
           }
@@ -206,12 +212,40 @@ var testMetaJSONs = [][]byte{
 }`),
 }
 
-func TestEncodeAndDecode(t *testing.T) {
+type jsonEquals struct{}
+
+func (j jsonEquals) Info() *CheckerInfo {
+	return &CheckerInfo{
+		Name:   "JSONEquals",
+		Params: []string{"lhs", "rhs"},
+	}
+}
+
+func (j jsonEquals) Check(params []interface{}, _ []string) (result bool, error string) {
+	lhs := params[0].([]byte)
+	rhs := params[1].([]byte)
+
+	lhsMap := map[string]interface{}{}
+	rhsMap := map[string]interface{}{}
+
+	if err := json.Unmarshal(lhs, &lhsMap); err != nil {
+		return false, fmt.Sprintf("failed to unmarshal lhs: %s", error)
+	}
+	if err := json.Unmarshal(rhs, &rhsMap); err != nil {
+		return false, fmt.Sprintf("failed to unmarshal rhs: %s", error)
+	}
+	if !reflect.DeepEqual(lhsMap, rhsMap) {
+		return false, fmt.Sprintf("lhs %s not equals rhs %s", lhsMap, rhsMap)
+	}
+	return true, ""
+}
+
+func (testJSONSuite) TestEncodeAndDecode(c *C) {
 	for _, testMetaJSON := range testMetaJSONs {
 		meta, err := UnmarshalBackupMeta(testMetaJSON)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		metaJSON, err := MarshalBackupMeta(meta)
-		require.NoError(t, err)
-		require.JSONEq(t, string(testMetaJSON), string(metaJSON))
+		c.Assert(err, IsNil)
+		c.Assert(metaJSON, jsonEquals{}, testMetaJSON)
 	}
 }

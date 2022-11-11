@@ -28,6 +28,8 @@ import (
 )
 
 func TestScalarFunction(t *testing.T) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 	a := &Column{
 		UniqueID: 1,
@@ -47,7 +49,7 @@ func TestScalarFunction(t *testing.T) {
 	newSf, ok := sf.Clone().(*ScalarFunction)
 	require.True(t, ok)
 	require.Equal(t, "values", newSf.FuncName.O)
-	require.Equal(t, mysql.TypeLonglong, newSf.RetType.GetType())
+	require.Equal(t, mysql.TypeLonglong, newSf.RetType.Tp)
 	require.Equal(t, sf.Coercibility(), newSf.Coercibility())
 	require.Equal(t, sf.Repertoire(), newSf.Repertoire())
 	_, ok = newSf.Function.(*builtinValuesIntSig)
@@ -55,22 +57,25 @@ func TestScalarFunction(t *testing.T) {
 }
 
 func TestIssue23309(t *testing.T) {
+	t.Parallel()
+
 	a := &Column{
 		UniqueID: 1,
 		RetType:  types.NewFieldType(mysql.TypeDouble),
 	}
-
-	a.RetType.SetFlag(a.RetType.GetFlag() | mysql.NotNullFlag)
+	a.RetType.Flag |= mysql.NotNullFlag
 	null := NewNull()
 	null.RetType = types.NewFieldType(mysql.TypeNull)
 	sf, _ := newFunction(ast.NE, a, null).(*ScalarFunction)
 	v, err := sf.GetArgs()[1].Eval(chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, v.IsNull())
-	require.False(t, mysql.HasNotNullFlag(sf.GetArgs()[1].GetType().GetFlag()))
+	require.False(t, mysql.HasNotNullFlag(sf.GetArgs()[1].GetType().Flag))
 }
 
 func TestScalarFuncs2Exprs(t *testing.T) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 	a := &Column{
 		UniqueID: 1,

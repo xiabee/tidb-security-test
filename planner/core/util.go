@@ -128,16 +128,13 @@ func (s *logicalSchemaProducer) setSchemaAndNames(schema *expression.Schema, nam
 }
 
 // inlineProjection prunes unneeded columns inline a executor.
-func (s *logicalSchemaProducer) inlineProjection(parentUsedCols []*expression.Column, opt *logicalOptimizeOp) {
-	prunedColumns := make([]*expression.Column, 0)
+func (s *logicalSchemaProducer) inlineProjection(parentUsedCols []*expression.Column) {
 	used := expression.GetUsedList(parentUsedCols, s.Schema())
 	for i := len(used) - 1; i >= 0; i-- {
 		if !used[i] {
-			prunedColumns = append(prunedColumns, s.Schema().Columns[i])
 			s.schema.Columns = append(s.Schema().Columns[:i], s.Schema().Columns[i+1:]...)
 		}
 	}
-	appendColumnPruneTraceStep(s.self, prunedColumns, opt)
 }
 
 // physicalSchemaProducer stores the schema for the physical plans who can produce schema directly.
@@ -298,15 +295,6 @@ func extractStringFromStringSet(set set.StringSet) string {
 	return strings.Join(l, ",")
 }
 
-// extractStringFromStringSlice helps extract string info from []string.
-func extractStringFromStringSlice(ss []string) string {
-	if len(ss) < 1 {
-		return ""
-	}
-	sort.Strings(ss)
-	return strings.Join(ss, ",")
-}
-
 // extractStringFromUint64Slice helps extract string info from uint64 slice.
 func extractStringFromUint64Slice(slice []uint64) string {
 	if len(slice) < 1 {
@@ -315,19 +303,6 @@ func extractStringFromUint64Slice(slice []uint64) string {
 	l := make([]string, 0, len(slice))
 	for _, k := range slice {
 		l = append(l, fmt.Sprintf(`%d`, k))
-	}
-	sort.Strings(l)
-	return strings.Join(l, ",")
-}
-
-// extractStringFromBoolSlice helps extract string info from bool slice.
-func extractStringFromBoolSlice(slice []bool) string {
-	if len(slice) < 1 {
-		return ""
-	}
-	l := make([]string, 0, len(slice))
-	for _, k := range slice {
-		l = append(l, fmt.Sprintf(`%t`, k))
 	}
 	sort.Strings(l)
 	return strings.Join(l, ",")

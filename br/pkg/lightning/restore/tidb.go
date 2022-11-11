@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	tmysql "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
@@ -35,8 +36,8 @@ import (
 	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	"go.uber.org/zap"
-	"golang.org/x/exp/maps"
 )
 
 // defaultImportantVariables is used in ObtainImportantVariables to retrieve the system
@@ -62,6 +63,24 @@ var defaultImportVariablesTiDB = map[string]string{
 type TiDBManager struct {
 	db     *sql.DB
 	parser *parser.Parser
+}
+
+// getSQLErrCode returns error code if err is a mysql error
+func getSQLErrCode(err error) (terror.ErrCode, bool) {
+	mysqlErr, ok := errors.Cause(err).(*tmysql.MySQLError)
+	if !ok {
+		return -1, false
+	}
+
+	return terror.ErrCode(mysqlErr.Number), true
+}
+
+func isUnknownSystemVariableErr(err error) bool {
+	code, ok := getSQLErrCode(err)
+	if !ok {
+		return strings.Contains(err.Error(), "Unknown system variable")
+	}
+	return code == mysql.ErrUnknownSystemVariable
 }
 
 func DBFromConfig(ctx context.Context, dsn config.DBStore) (*sql.DB, error) {
@@ -93,12 +112,12 @@ func DBFromConfig(ctx context.Context, dsn config.DBStore) (*sql.DB, error) {
 		"tidb_opt_write_row_id": "1",
 		// always set auto-commit to ON
 		"autocommit": "1",
-		// alway set transaction mode to optimistic
-		"tidb_txn_mode": "optimistic",
 	}
 
 	if dsn.Vars != nil {
-		maps.Copy(vars, dsn.Vars)
+		for k, v := range dsn.Vars {
+			vars[k] = v
+		}
 	}
 
 	for k, v := range vars {
@@ -185,7 +204,7 @@ loopCreate:
 func createIfNotExistsStmt(p *parser.Parser, createTable, dbName, tblName string) ([]string, error) {
 	stmts, _, err := p.ParseSQL(createTable)
 	if err != nil {
-		return []string{}, common.ErrInvalidSchemaStmt.Wrap(err).GenWithStackByArgs(createTable)
+		return []string{}, err
 	}
 
 	var res strings.Builder
@@ -210,7 +229,7 @@ func createIfNotExistsStmt(p *parser.Parser, createTable, dbName, tblName string
 			node.IfExists = true
 		}
 		if err := stmt.Restore(ctx); err != nil {
-			return []string{}, common.ErrInvalidSchemaStmt.Wrap(err).GenWithStackByArgs(createTable)
+			return []string{}, err
 		}
 		ctx.WritePlain(";")
 		retStmts = append(retStmts, res.String())
@@ -253,7 +272,7 @@ func LoadSchemaInfo(
 		for _, tbl := range schema.Tables {
 			tblInfo, ok := tableMap[strings.ToLower(tbl.Name)]
 			if !ok {
-				return nil, common.ErrSchemaNotExists.GenWithStackByArgs(tbl.DB, tbl.Name)
+				return nil, errors.Errorf("table '%s' schema not found", tbl.Name)
 			}
 			tableName := tblInfo.Name.String()
 			if tblInfo.State != model.StatePublic {

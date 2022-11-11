@@ -29,7 +29,6 @@ import (
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/hack"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/set"
 	"github.com/pingcap/tidb/util/stringutil"
 )
@@ -269,7 +268,7 @@ func (e *countOriginalWithDistinct4String) AppendFinalResult2Chunk(sctx sessionc
 
 func (e *countOriginalWithDistinct4String) UpdatePartialResult(sctx sessionctx.Context, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
 	p := (*partialResult4CountDistinctString)(pr)
-	collator := collate.GetCollator(e.args[0].GetType().GetCollate())
+	collator := collate.GetCollator(e.args[0].GetType().Collate)
 
 	for _, row := range rowsInGroup {
 		input, isNull, err := e.args[0].EvalString(sctx, row)
@@ -323,9 +322,9 @@ func (e *countOriginalWithDistinct) UpdatePartialResult(sctx sessionctx.Context,
 	encodedBytes := make([]byte, 0)
 	collators := make([]collate.Collator, 0, len(e.args))
 	for _, arg := range e.args {
-		collators = append(collators, collate.GetCollator(arg.GetType().GetCollate()))
+		collators = append(collators, collate.GetCollator(arg.GetType().Collate))
 	}
-	// decimal struct is the biggest type we will use.
+	// Decimal struct is the biggest type we will use.
 	buf := make([]byte, types.MyDecimalStructSize)
 
 	for _, row := range rowsInGroup {
@@ -541,6 +540,14 @@ func (p *partialResult4ApproxCountDistinct) reset() {
 	p.alloc(uniquesHashSetInitialSizeDegree)
 }
 
+func max(a, b uint8) uint8 {
+	if a > b {
+		return a
+	}
+
+	return b
+}
+
 func (p *partialResult4ApproxCountDistinct) bufSize() uint32 {
 	return uint32(1) << p.sizeDegree
 }
@@ -594,7 +601,7 @@ func (p *partialResult4ApproxCountDistinct) readAndMerge(rb []byte) error {
 	}
 
 	if p.bufSize() < uint32(rhsSize) {
-		newSizeDegree := mathutil.Max(uniquesHashSetInitialSizeDegree, uint8(math.Log2(float64(rhsSize-1)))+2)
+		newSizeDegree := max(uniquesHashSetInitialSizeDegree, uint8(math.Log2(float64(rhsSize-1)))+2)
 		p.resize(newSizeDegree)
 	}
 
@@ -780,11 +787,11 @@ type approxCountDistinctOriginal struct {
 func (e *approxCountDistinctOriginal) UpdatePartialResult(sctx sessionctx.Context, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
 	p := (*partialResult4ApproxCountDistinct)(pr)
 	encodedBytes := make([]byte, 0)
-	// decimal struct is the biggest type we will use.
+	// Decimal struct is the biggest type we will use.
 	buf := make([]byte, types.MyDecimalStructSize)
 	collators := make([]collate.Collator, 0, len(e.args))
 	for _, arg := range e.args {
-		collators = append(collators, collate.GetCollator(arg.GetType().GetCollate()))
+		collators = append(collators, collate.GetCollator(arg.GetType().Collate))
 	}
 
 	for _, row := range rowsInGroup {

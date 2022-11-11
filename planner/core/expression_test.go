@@ -22,7 +22,7 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/testkit/testutil"
+	"github.com/pingcap/tidb/testkit/trequire"
 	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +52,7 @@ func runTests(t *testing.T, tests []testCase) {
 }
 
 func TestBetween(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{exprStr: "1 between 2 and 3", resultStr: "0"},
 		{exprStr: "1 not between 2 and 3", resultStr: "1"},
@@ -63,6 +64,7 @@ func TestBetween(t *testing.T) {
 }
 
 func TestCaseWhen(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{
 			exprStr:   "case 1 when 1 then 'str1' when 2 then 'str2' end",
@@ -101,6 +103,7 @@ func TestCaseWhen(t *testing.T) {
 }
 
 func TestCast(t *testing.T) {
+	t.Parallel()
 	f := types.NewFieldType(mysql.TypeLonglong)
 
 	expr := &ast.FuncCastExpr{
@@ -115,22 +118,22 @@ func TestCast(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, types.NewDatum(int64(1)), v)
 
-	f.AddFlag(mysql.UnsignedFlag)
+	f.Flag |= mysql.UnsignedFlag
 	v, err = evalAstExpr(ctx, expr)
 	require.NoError(t, err)
 	require.Equal(t, types.NewDatum(uint64(1)), v)
 
-	f.SetType(mysql.TypeString)
-	f.SetCharset(charset.CharsetBin)
+	f.Tp = mysql.TypeString
+	f.Charset = charset.CharsetBin
 	v, err = evalAstExpr(ctx, expr)
 	require.NoError(t, err)
-	testutil.DatumEqual(t, types.NewDatum([]byte("1")), v)
+	trequire.DatumEqual(t, types.NewDatum([]byte("1")), v)
 
-	f.SetType(mysql.TypeString)
-	f.SetCharset(charset.CharsetUTF8)
+	f.Tp = mysql.TypeString
+	f.Charset = charset.CharsetUTF8
 	v, err = evalAstExpr(ctx, expr)
 	require.NoError(t, err)
-	testutil.DatumEqual(t, types.NewDatum([]byte("1")), v)
+	trequire.DatumEqual(t, types.NewDatum([]byte("1")), v)
 
 	expr.Expr = ast.NewValueExpr(nil, "", "")
 	v, err = evalAstExpr(ctx, expr)
@@ -139,6 +142,7 @@ func TestCast(t *testing.T) {
 }
 
 func TestPatternIn(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{
 			exprStr:   "1 not in (1, 2, 3)",
@@ -185,6 +189,7 @@ func TestPatternIn(t *testing.T) {
 }
 
 func TestIsNull(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{
 			exprStr:   "1 IS NULL",
@@ -207,6 +212,7 @@ func TestIsNull(t *testing.T) {
 }
 
 func TestCompareRow(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{
 			exprStr:   "row(1,2,3)=row(1,2,3)",
@@ -249,6 +255,7 @@ func TestCompareRow(t *testing.T) {
 }
 
 func TestIsTruth(t *testing.T) {
+	t.Parallel()
 	tests := []testCase{
 		{
 			exprStr:   "1 IS TRUE",

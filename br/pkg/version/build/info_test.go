@@ -6,20 +6,28 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestInfo(t *testing.T) {
-	info := Info()
-	lines := strings.Split(info, "\n")
-	require.Regexp(t, "^Release Version", lines[0])
-	require.Regexp(t, "^Git Commit Hash", lines[1])
-	require.Regexp(t, "^Git Branch", lines[2])
-	require.Regexp(t, "^Go Version", lines[3])
-	require.Regexp(t, "^UTC Build Time", lines[4])
+type infoSuite struct{}
+
+var _ = Suite(&infoSuite{})
+
+func TestT(t *testing.T) {
+	TestingT(t)
 }
 
-func TestLogInfo(t *testing.T) {
+func (*infoSuite) TestInfo(c *C) {
+	info := Info()
+	lines := strings.Split(info, "\n")
+	c.Assert(lines[0], Matches, "Release Version.*")
+	c.Assert(lines[1], Matches, "Git Commit Hash.*")
+	c.Assert(lines[2], Matches, "Git Branch.*")
+	c.Assert(lines[3], Matches, "Go Version.*")
+	c.Assert(lines[4], Matches, "UTC Build Time.*")
+}
+
+func (*infoSuite) TestLogInfo(c *C) {
 	LogInfo(BR)
 	LogInfo(Lightning)
 }

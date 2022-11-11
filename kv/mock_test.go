@@ -22,6 +22,8 @@ import (
 )
 
 func TestInterface(t *testing.T) {
+	t.Parallel()
+
 	storage := newMockStorage()
 	storage.GetClient()
 	storage.UUID()

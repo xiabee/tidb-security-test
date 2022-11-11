@@ -14,11 +14,9 @@
 
 package membuf
 
-const (
-	defaultPoolSize            = 1024
-	defaultBlockSize           = 1 << 20 // 1M
-	defaultLargeAllocThreshold = 1 << 16 // 64K
-)
+const bigValueSize = 1 << 16 // 64K
+
+var allocBufLen = 1 << 20 // 1M
 
 // Allocator is the abstract interface for allocating and freeing memory.
 type Allocator interface {
@@ -40,71 +38,30 @@ func (stdAllocator) Free(_ []byte) {}
 // garbage collector which always release the memory so late. Use a fixed size chan to reuse
 // can decrease the memory usage to 1/3 compare with sync.Pool.
 type Pool struct {
-	allocator           Allocator
-	blockSize           int
-	blockCache          chan []byte
-	largeAllocThreshold int
-}
-
-// Option configures a pool.
-type Option func(p *Pool)
-
-// WithPoolSize configures how many blocks cached by this pool.
-func WithPoolSize(size int) Option {
-	return func(p *Pool) {
-		p.blockCache = make(chan []byte, size)
-	}
-}
-
-// WithBlockSize configures the size of each block.
-func WithBlockSize(size int) Option {
-	return func(p *Pool) {
-		p.blockSize = size
-	}
-}
-
-// WithAllocator specifies the allocator used by pool to allocate and free memory.
-func WithAllocator(allocator Allocator) Option {
-	return func(p *Pool) {
-		p.allocator = allocator
-	}
-}
-
-// WithLargeAllocThreshold configures the threshold for large allocation of a Buffer.
-// If allocate size is larger than this threshold, bytes will be allocated directly
-// by the make built-in function and won't be tracked by the pool.
-func WithLargeAllocThreshold(threshold int) Option {
-	return func(p *Pool) {
-		p.largeAllocThreshold = threshold
-	}
+	allocator Allocator
+	recycleCh chan []byte
 }
 
 // NewPool creates a new pool.
-func NewPool(opts ...Option) *Pool {
-	p := &Pool{
-		allocator:           stdAllocator{},
-		blockSize:           defaultBlockSize,
-		blockCache:          make(chan []byte, defaultPoolSize),
-		largeAllocThreshold: defaultLargeAllocThreshold,
+func NewPool(size int, allocator Allocator) *Pool {
+	return &Pool{
+		allocator: allocator,
+		recycleCh: make(chan []byte, size),
 	}
-	for _, opt := range opts {
-		opt(p)
-	}
-	return p
 }
 
 func (p *Pool) acquire() []byte {
 	select {
-	case b := <-p.blockCache:
+	case b := <-p.recycleCh:
 		return b
 	default:
-		return p.allocator.Alloc(p.blockSize)
+		return p.allocator.Alloc(allocBufLen)
 	}
 }
 
 func (p *Pool) release(b []byte) {
 	select {
-	case p.blockCache <- b:
+	case p.recycleCh <- b:
 	default:
 		p.allocator.Free(b)
 	}
@@ -115,12 +72,10 @@ func (p *Pool) NewBuffer() *Buffer {
 	return &Buffer{pool: p, bufs: make([][]byte, 0, 128), curBufIdx: -1}
 }
 
-func (p *Pool) Destroy() {
-	close(p.blockCache)
-	for b := range p.blockCache {
-		p.allocator.Free(b)
-	}
-}
+var globalPool = NewPool(1024, stdAllocator{})
+
+// NewBuffer creates a new buffer in global pool.
+func NewBuffer() *Buffer { return globalPool.NewBuffer() }
 
 // Buffer represents the reuse buffer.
 type Buffer struct {
@@ -168,12 +123,12 @@ func (b *Buffer) Destroy() {
 
 // TotalSize represents the total memory size of this Buffer.
 func (b *Buffer) TotalSize() int64 {
-	return int64(len(b.bufs) * b.pool.blockSize)
+	return int64(len(b.bufs) * allocBufLen)
 }
 
 // AllocBytes allocates bytes with the given length.
 func (b *Buffer) AllocBytes(n int) []byte {
-	if n > b.pool.largeAllocThreshold {
+	if n > bigValueSize {
 		return make([]byte, n)
 	}
 	if b.curIdx+n > b.curBufLen {

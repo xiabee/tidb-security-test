@@ -59,7 +59,7 @@ func (k Key) PrefixNext() Key {
 	}
 	if i == -1 {
 		copy(buf, k)
-		buf = append(buf, 0) // nozero
+		buf = append(buf, 0)
 	}
 	return buf
 }
@@ -157,8 +157,6 @@ type Handle interface {
 	Data() ([]types.Datum, error)
 	// String implements the fmt.Stringer interface.
 	String() string
-	// MemUsage returns the memory usage of a handle.
-	MemUsage() int64
 }
 
 // IntHandle implement the Handle interface for int64 type handle.
@@ -228,11 +226,6 @@ func (ih IntHandle) Data() ([]types.Datum, error) {
 // String implements the Handle interface.
 func (ih IntHandle) String() string {
 	return strconv.FormatInt(int64(ih), 10)
-}
-
-// MemUsage implements the Handle interface.
-func (ih IntHandle) MemUsage() int64 {
-	return 8
 }
 
 // CommonHandle implements the Handle interface for non-int64 type handle.
@@ -354,11 +347,6 @@ func (ch *CommonHandle) String() string {
 	return fmt.Sprintf("{%s}", strings.Join(strs, ", "))
 }
 
-// MemUsage implements the Handle interface.
-func (ch *CommonHandle) MemUsage() int64 {
-	return int64(cap(ch.encoded)) + int64(cap(ch.colEndOffsets))*2
-}
-
 // HandleMap is the map for Handle.
 type HandleMap struct {
 	ints map[int64]interface{}
@@ -467,9 +455,4 @@ func (ph PartitionHandle) Compare(h Handle) int {
 		return ph.Handle.Compare(ph2.Handle)
 	}
 	panic("PartitonHandle compares to non-parition Handle")
-}
-
-// MemUsage implements the Handle interface.
-func (ph PartitionHandle) MemUsage() int64 {
-	return ph.Handle.MemUsage() + 8
 }

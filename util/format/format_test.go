@@ -16,7 +16,6 @@ package format
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"testing"
 
@@ -32,6 +31,8 @@ func checkFormat(t *testing.T, f Formatter, buf *bytes.Buffer, str, expect strin
 }
 
 func TestFormat(t *testing.T) {
+	t.Parallel()
+
 	str := "abc%d%%e%i\nx\ny\n%uz\n"
 	buf := &bytes.Buffer{}
 	f := IndentFormatter(buf, "\t")
@@ -48,7 +49,6 @@ z
 	expect = "abc3%e x y z\n "
 	checkFormat(t, f, buf, str, expect)
 
-	str1 := fmt.Sprintf("%c%c%s%c%c%s", '\'', '\000', "abc", '\n', '\r', "def")
-	str2 := OutputFormat(str1)
-	assert.Equal(t, str2, "''\\0abc\\n\\rdef")
+	str2 := OutputFormat(`\'\000abc\n\rdef`)
+	assert.Equal(t, str2, "\\''\\000abc\\n\\rdef")
 }

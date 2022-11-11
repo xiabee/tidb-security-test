@@ -17,10 +17,16 @@ package mydump
 import (
 	"io"
 	"os"
-	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
+
+var _ = Suite(&testCharsetConvertorSuite{})
+
+type testCharsetConvertorSuite struct{}
+
+func (s *testCharsetConvertorSuite) SetUpSuite(c *C)    {}
+func (s *testCharsetConvertorSuite) TearDownSuite(c *C) {}
 
 const (
 	testUTF8DataFile = "./csv/utf8_test_file.csv"
@@ -34,28 +40,28 @@ var (
 	invalidChar       = []byte{0xff}                                                                                                       // Invalid gb18030 char
 )
 
-func TestCharsetConvertor(t *testing.T) {
+func (s testCharsetConvertorSuite) TestCharsetConvertor(c *C) {
 	utf8Reader, err := os.Open(testUTF8DataFile)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	utf8Data, err := io.ReadAll(utf8Reader)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gbkReader, err := os.Open(testGBKDataFile)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gbkData, err := io.ReadAll(gbkReader)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	cc, err := NewCharsetConvertor("gb18030", "\ufffd")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gbkToUTF8Data, err := cc.Decode(string(gbkData))
-	require.NoError(t, err)
-	require.Equal(t, string(utf8Data), gbkToUTF8Data)
+	c.Assert(err, IsNil)
+	c.Assert(gbkToUTF8Data, DeepEquals, string(utf8Data))
 
 	utf8ToGBKData, err := cc.Encode(string(normalCharUTF8MB4))
-	require.NoError(t, err)
-	require.Equal(t, string(normalCharGB18030), utf8ToGBKData)
+	c.Assert(err, IsNil)
+	c.Assert(utf8ToGBKData, DeepEquals, string(normalCharGB18030))
 }
 
-func TestInvalidCharReplace(t *testing.T) {
+func (s testCharsetConvertorSuite) TestInvalidCharReplace(c *C) {
 	dataInvalidCharReplace := "😅😅😅"
 	// Input: 你好invalid char你好
 	inputData := append(normalCharGB18030, invalidChar...)
@@ -65,16 +71,16 @@ func TestInvalidCharReplace(t *testing.T) {
 	expectedData = append(expectedData, normalCharUTF8MB4...)
 
 	// Prepare the file data.
-	require.NoError(t, os.WriteFile(testTempDataFile, inputData, 0666))
-	defer func() { require.NoError(t, os.Remove(testTempDataFile)) }()
+	c.Assert(os.WriteFile(testTempDataFile, inputData, 0666), IsNil)
+	defer func() { c.Assert(os.Remove(testTempDataFile), IsNil) }()
 
 	gbkReader, err := os.Open(testTempDataFile)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gbkData, err := io.ReadAll(gbkReader)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	cc, err := NewCharsetConvertor("gb18030", dataInvalidCharReplace)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gbkToUTF8Data, err := cc.Decode(string(gbkData))
-	require.NoError(t, err)
-	require.Equal(t, string(expectedData), gbkToUTF8Data)
+	c.Assert(err, IsNil)
+	c.Assert(gbkToUTF8Data, DeepEquals, string(expectedData))
 }

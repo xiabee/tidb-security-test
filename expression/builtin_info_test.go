@@ -22,7 +22,7 @@ import (
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/testkit/testutil"
+	"github.com/pingcap/tidb/testkit/trequire"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
@@ -32,6 +32,7 @@ import (
 )
 
 func TestDatabase(t *testing.T) {
+	t.Parallel()
 	fc := funcs[ast.Database]
 	ctx := mock.NewContext()
 	f, err := fc.getFunction(ctx, nil)
@@ -57,6 +58,7 @@ func TestDatabase(t *testing.T) {
 }
 
 func TestFoundRows(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sessionVars := ctx.GetSessionVars()
 	sessionVars.LastFoundRows = 2
@@ -70,6 +72,7 @@ func TestFoundRows(t *testing.T) {
 }
 
 func TestUser(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sessionVars := ctx.GetSessionVars()
 	sessionVars.User = &auth.UserIdentity{Username: "root", Hostname: "localhost"}
@@ -84,6 +87,7 @@ func TestUser(t *testing.T) {
 }
 
 func TestCurrentUser(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sessionVars := ctx.GetSessionVars()
 	sessionVars.User = &auth.UserIdentity{Username: "root", Hostname: "localhost", AuthUsername: "root", AuthHostname: "localhost"}
@@ -98,6 +102,7 @@ func TestCurrentUser(t *testing.T) {
 }
 
 func TestCurrentRole(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	fc := funcs[ast.CurrentRole]
 	f, err := fc.getFunction(ctx, nil)
@@ -123,6 +128,7 @@ func TestCurrentRole(t *testing.T) {
 }
 
 func TestConnectionID(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sessionVars := ctx.GetSessionVars()
 	sessionVars.ConnectionID = uint64(1)
@@ -137,6 +143,7 @@ func TestConnectionID(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.Version]
 	f, err := fc.getFunction(ctx, nil)
@@ -148,6 +155,7 @@ func TestVersion(t *testing.T) {
 }
 
 func TestBenchMark(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	cases := []struct {
 		LoopCount  int
@@ -189,15 +197,16 @@ func TestBenchMark(t *testing.T) {
 }
 
 func TestCharset(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.Charset]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
-	require.NotNil(t, f)
-	require.NoError(t, err)
-	require.Equal(t, 64, f.getRetTp().GetFlen())
+	require.Nil(t, f)
+	require.Regexp(t, ".*FUNCTION CHARSET does not exist", err.Error())
 }
 
 func TestCoercibility(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.Coercibility]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
@@ -206,15 +215,17 @@ func TestCoercibility(t *testing.T) {
 }
 
 func TestCollation(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	fc := funcs[ast.Collation]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NotNil(t, f)
 	require.NoError(t, err)
-	require.Equal(t, 64, f.getRetTp().GetFlen())
+	require.Equal(t, 64, f.getRetTp().Flen)
 }
 
 func TestRowCount(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sessionVars := ctx.GetSessionVars()
 	sessionVars.StmtCtx.PrevAffectedRows = 10
@@ -234,6 +245,7 @@ func TestRowCount(t *testing.T) {
 
 // TestTiDBVersion for tidb_server().
 func TestTiDBVersion(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	f, err := newFunctionForTest(ctx, ast.TiDBVersion, primitiveValsToConstants(ctx, []interface{}{})...)
 	require.NoError(t, err)
@@ -243,6 +255,7 @@ func TestTiDBVersion(t *testing.T) {
 }
 
 func TestLastInsertID(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	maxUint64 := uint64(math.MaxUint64)
 	cases := []struct {
@@ -276,11 +289,11 @@ func TestLastInsertID(t *testing.T) {
 		}
 		tp := f.GetType()
 		require.NoError(t, err)
-		require.Equal(t, mysql.TypeLonglong, tp.GetType())
-		require.Equal(t, charset.CharsetBin, tp.GetCharset())
-		require.Equal(t, charset.CollationBin, tp.GetCollate())
-		require.Equal(t, mysql.BinaryFlag, tp.GetFlag()&mysql.BinaryFlag)
-		require.Equal(t, mysql.MaxIntWidth, tp.GetFlen())
+		require.Equal(t, mysql.TypeLonglong, tp.Tp)
+		require.Equal(t, charset.CharsetBin, tp.Charset)
+		require.Equal(t, charset.CollationBin, tp.Collate)
+		require.Equal(t, mysql.BinaryFlag, tp.Flag&mysql.BinaryFlag)
+		require.Equal(t, mysql.MaxIntWidth, tp.Flen)
 		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
@@ -299,6 +312,7 @@ func TestLastInsertID(t *testing.T) {
 }
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		Arg interface{}
@@ -323,11 +337,12 @@ func TestFormatBytes(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, tt["Ret"][0], v)
+		trequire.DatumEqual(t, tt["Ret"][0], v)
 	}
 }
 
 func TestFormatNanoTime(t *testing.T) {
+	t.Parallel()
 	ctx := createContext(t)
 	tbl := []struct {
 		Arg interface{}
@@ -352,6 +367,6 @@ func TestFormatNanoTime(t *testing.T) {
 		require.NoError(t, err)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		testutil.DatumEqual(t, tt["Ret"][0], v)
+		trequire.DatumEqual(t, tt["Ret"][0], v)
 	}
 }

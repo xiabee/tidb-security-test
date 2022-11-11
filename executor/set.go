@@ -89,7 +89,8 @@ func (e *SetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 			}
 			sessionVars.UsersLock.Lock()
 			if value.IsNull() {
-				sessionVars.UnsetUserVar(name)
+				delete(sessionVars.Users, name)
+				delete(sessionVars.UserVarTypes, name)
 			} else {
 				sessionVars.Users[name] = value
 				sessionVars.UserVarTypes[name] = v.Expr.GetType()
@@ -114,14 +115,6 @@ func (e *SetExecutor) setSysVariable(ctx context.Context, name string, v *expres
 		}
 		return variable.ErrUnknownSystemVar.GenWithStackByArgs(name)
 	}
-
-	if sysVar.HasInstanceScope() && !v.IsGlobal && sessionVars.EnableLegacyInstanceScope {
-		// For backward compatibility we will change the v.IsGlobal to true,
-		// and append a warning saying this will not be supported in future.
-		v.IsGlobal = true
-		sessionVars.StmtCtx.AppendWarning(ErrInstanceScope.GenWithStackByArgs(sysVar.Name))
-	}
-
 	if v.IsGlobal {
 		valStr, err := e.getVarValue(v, sysVar)
 		if err != nil {

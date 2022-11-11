@@ -17,14 +17,14 @@ type FilterCore struct {
 	filters []string
 }
 
-// NewFilterCore returns a FilterCore, only logs under allowPackages will be written.
+// NewFilterCore returns a FilterCore.
 //
-// Example, only write br's log and ignore any other, `NewFilterCore(core, "github.com/pingcap/tidb/br/")`.
+// Example, filter TiDB's log, `NewFilterCore(core, "github.com/pingcap/tidb/")`.
 // Note, must set AddCaller() to the logger.
-func NewFilterCore(core zapcore.Core, allowPackages ...string) *FilterCore {
+func NewFilterCore(core zapcore.Core, filteredPackages ...string) *FilterCore {
 	return &FilterCore{
 		Core:    core,
-		filters: allowPackages,
+		filters: filteredPackages,
 	}
 }
 
@@ -50,8 +50,8 @@ func (f *FilterCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 	for i := range f.filters {
 		// Caller.Function is a package path-qualified function name.
 		if strings.Contains(entry.Caller.Function, f.filters[i]) {
-			return f.Core.Write(entry, fields)
+			return nil
 		}
 	}
-	return nil
+	return f.Core.Write(entry, fields)
 }

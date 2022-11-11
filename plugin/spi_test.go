@@ -24,6 +24,7 @@ import (
 )
 
 func TestExportManifest(t *testing.T) {
+	t.Parallel()
 	callRecorder := struct {
 		OnInitCalled      bool
 		NotifyEventCalled bool

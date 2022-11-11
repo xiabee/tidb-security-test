@@ -21,6 +21,7 @@ import (
 )
 
 func TestIntSet(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	set := NewIntSet()
@@ -43,6 +44,7 @@ func TestIntSet(t *testing.T) {
 }
 
 func TestInt64Set(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	set := NewInt64Set()

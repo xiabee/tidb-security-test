@@ -221,10 +221,6 @@ func (bj BinaryJSON) Extract(pathExprList []PathExpression) (ret BinaryJSON, fou
 		// even if len(pathExprList) equals to 1.
 		found = true
 		ret = buf[0]
-		// Fix https://github.com/pingcap/tidb/issues/30352
-		if pathExprList[0].ContainsAnyAsterisk() {
-			ret = buildBinaryArray(buf)
-		}
 	} else {
 		found = true
 		ret = buildBinaryArray(buf)
@@ -992,8 +988,8 @@ func ContainsBinary(obj, target BinaryJSON) bool {
 	switch obj.TypeCode {
 	case TypeCodeObject:
 		if target.TypeCode == TypeCodeObject {
-			elemCount := target.GetElemCount()
-			for i := 0; i < elemCount; i++ {
+			len := target.GetElemCount()
+			for i := 0; i < len; i++ {
 				key := target.objectGetKey(i)
 				val := target.objectGetVal(i)
 				if exp, exists := obj.objectSearchKey(key); !exists || !ContainsBinary(exp, val) {
@@ -1005,16 +1001,16 @@ func ContainsBinary(obj, target BinaryJSON) bool {
 		return false
 	case TypeCodeArray:
 		if target.TypeCode == TypeCodeArray {
-			elemCount := target.GetElemCount()
-			for i := 0; i < elemCount; i++ {
+			len := target.GetElemCount()
+			for i := 0; i < len; i++ {
 				if !ContainsBinary(obj, target.arrayGetElem(i)) {
 					return false
 				}
 			}
 			return true
 		}
-		elemCount := obj.GetElemCount()
-		for i := 0; i < elemCount; i++ {
+		len := obj.GetElemCount()
+		for i := 0; i < len; i++ {
 			if ContainsBinary(obj.arrayGetElem(i), target) {
 				return true
 			}
@@ -1038,9 +1034,9 @@ func ContainsBinary(obj, target BinaryJSON) bool {
 func (bj BinaryJSON) GetElemDepth() int {
 	switch bj.TypeCode {
 	case TypeCodeObject:
-		elemCount := bj.GetElemCount()
+		len := bj.GetElemCount()
 		maxDepth := 0
-		for i := 0; i < elemCount; i++ {
+		for i := 0; i < len; i++ {
 			obj := bj.objectGetVal(i)
 			depth := obj.GetElemDepth()
 			if depth > maxDepth {
@@ -1049,9 +1045,9 @@ func (bj BinaryJSON) GetElemDepth() int {
 		}
 		return maxDepth + 1
 	case TypeCodeArray:
-		elemCount := bj.GetElemCount()
+		len := bj.GetElemCount()
 		maxDepth := 0
-		for i := 0; i < elemCount; i++ {
+		for i := 0; i < len; i++ {
 			obj := bj.arrayGetElem(i)
 			depth := obj.GetElemDepth()
 			if depth > maxDepth {

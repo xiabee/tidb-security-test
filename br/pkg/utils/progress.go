@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,9 +24,7 @@ type ProgressPrinter struct {
 	redirectLog bool
 	progress    int64
 
-	closeMu sync.Mutex
-	closeCh chan struct{}
-	closed  chan struct{}
+	cancel context.CancelFunc
 }
 
 // NewProgressPrinter returns a new progress printer.
@@ -40,6 +37,9 @@ func NewProgressPrinter(
 		name:        name,
 		total:       total,
 		redirectLog: redirectLog,
+		cancel: func() {
+			log.Warn("canceling non-started progress printer")
+		},
 	}
 }
 
@@ -50,18 +50,7 @@ func (pp *ProgressPrinter) Inc() {
 
 // Close closes the current progress bar.
 func (pp *ProgressPrinter) Close() {
-	pp.closeMu.Lock()
-	defer pp.closeMu.Unlock()
-
-	if pp.closeCh != nil {
-		select {
-		case pp.closeCh <- struct{}{}:
-		default:
-		}
-		<-pp.closed
-	} else {
-		log.Warn("closing no-started progress printer")
-	}
+	pp.cancel()
 }
 
 // goPrintProgress starts a gorouinte and prints progress.
@@ -70,6 +59,8 @@ func (pp *ProgressPrinter) goPrintProgress(
 	logFuncImpl logFunc,
 	testWriter io.Writer, // Only for tests
 ) {
+	cctx, cancel := context.WithCancel(ctx)
+	pp.cancel = cancel
 	bar := pb.New64(pp.total)
 	if pp.redirectLog || testWriter != nil {
 		tmpl := `{"P":"{{percent .}}","C":"{{counters . }}","E":"{{etime .}}","R":"{{rtime .}}","S":"{{speed .}}"}`
@@ -95,27 +86,20 @@ func (pp *ProgressPrinter) goPrintProgress(
 	}
 	bar.Start()
 
-	closeCh := make(chan struct{}, 1)
-	closed := make(chan struct{})
-	pp.closeMu.Lock()
-	pp.closeCh = closeCh
-	pp.closed = closed
-	pp.closeMu.Unlock()
 	go func() {
-		defer close(closed)
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		defer bar.Finish()
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-cctx.Done():
 				// a hacky way to adapt the old behavior:
-				// when canceled by the context, leave the progress unchanged.
-				return
-			case <-closeCh:
-				// a hacky way to adapt the old behavior:
+				// when canceled by the outer context, leave the progress unchanged.
 				// when canceled by Close method (the 'internal' way), push the progress to 100%.
+				if ctx.Err() != nil {
+					return
+				}
 				bar.SetCurrent(pp.total)
 				return
 			case <-t.C:

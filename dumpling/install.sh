@@ -17,7 +17,7 @@ cd $pwd/tidb-lightning && make
 cd $pwd
 mv tidb-lightning/bin/tidb-lightning bin/
 
-TIDB_TAG="master"
+TIDB_TAG="v4.0.4"
 # download tidb-server
 git clone -b $TIDB_TAG https://github.com/pingcap/tidb
 cd $pwd/tidb && make
@@ -27,6 +27,3 @@ mv tidb/bin/tidb-server bin/
 # download minio
 wget https://dl.min.io/server/minio/release/linux-amd64/minio -O bin/minio
 chmod a+x bin/minio
-
-wget https://dl.minio.io/client/mc/release/linux-amd64/mc -O bin/mc
-chmod a+x bin/mc

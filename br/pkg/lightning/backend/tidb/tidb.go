@@ -308,19 +308,9 @@ func (enc *tidbEncoder) Encode(logger log.Logger, row []types.Datum, _ int64, co
 	// See: tests/generated_columns/data/gencol.various_types.0.sql this sql has no columns, so encodeLoop will fill the
 	// column permutation with default, thus enc.columnCnt > len(row).
 	if len(row) < enc.columnCnt {
-		// 1. if len(row) < enc.columnCnt: data in row cannot populate the insert statement, because
-		// there are enc.columnCnt elements to insert but fewer columns in row
 		logger.Error("column count mismatch", zap.Ints("column_permutation", columnPermutation),
 			zap.Array("data", kv.RowArrayMarshaler(row)))
 		return emptyTiDBRow, errors.Errorf("column count mismatch, expected %d, got %d", enc.columnCnt, len(row))
-	}
-
-	if len(row) > len(enc.columnIdx) {
-		// 2. if len(row) > len(columnIdx): raw row data has more columns than those
-		// in the table
-		logger.Error("column count mismatch", zap.Ints("column_count", enc.columnIdx),
-			zap.Array("data", kv.RowArrayMarshaler(row)))
-		return emptyTiDBRow, errors.Errorf("column count mismatch, at most %d but got %d", len(enc.columnIdx), len(row))
 	}
 
 	var encoded strings.Builder
@@ -361,10 +351,7 @@ func EncodeRowForRecord(encTable table.Table, sqlMode mysql.SQLMode, row []types
 	}
 	resRow, err := enc.Encode(log.L(), row, 0, columnPermutation, "", 0)
 	if err != nil {
-		// if encode can't succeed, fallback to record the raw input strings
-		// ignore the error since it can only happen if the datum type is unknown, this can't happen here.
-		datumStr, _ := types.DatumsToString(row, true)
-		return datumStr
+		return fmt.Sprintf("/* ERROR: %s */", err)
 	}
 	return resRow.(tidbRow).insertStmt
 }
@@ -432,7 +419,7 @@ func (be *tidbBackend) ResolveDuplicateRows(ctx context.Context, tbl table.Table
 	return nil
 }
 
-func (be *tidbBackend) ImportEngine(context.Context, uuid.UUID, int64, int64) error {
+func (be *tidbBackend) ImportEngine(context.Context, uuid.UUID, int64) error {
 	return nil
 }
 
@@ -446,9 +433,9 @@ rowLoop:
 			switch {
 			case err == nil:
 				continue rowLoop
-			case common.IsRetryableError(err):
+			case utils.IsRetryableError(err):
 				// retry next loop
-			case be.errorMgr.TypeErrorsRemain() > 0:
+			default:
 				// WriteBatchRowsToDB failed in the batch mode and can not be retried,
 				// we need to redo the writing row-by-row to find where the error locates (and skip it correctly in future).
 				if err = be.WriteRowsToDB(ctx, tableName, columnNames, r); err != nil {
@@ -456,9 +443,6 @@ rowLoop:
 					// For now, we will treat like maxErrorCount is always 0. So we will just return if any error occurs.
 					return errors.Annotatef(err, "[%s] write rows reach max error count %d", tableName, 0)
 				}
-				continue rowLoop
-			default:
-				return err
 			}
 		}
 		return errors.Annotatef(err, "[%s] batch write rows reach max retry %d and still failed", tableName, writeRowsMaxRetryTimes)
@@ -562,7 +546,7 @@ func (be *tidbBackend) execStmts(ctx context.Context, stmtTasks []stmtTask, tabl
 					return errors.Trace(err)
 				}
 				// Retry the non-batch insert here if this is not the last retry.
-				if common.IsRetryableError(err) && i != writeRowsMaxRetryTimes-1 {
+				if utils.IsRetryableError(err) && i != writeRowsMaxRetryTimes-1 {
 					continue
 				}
 				firstRow := stmtTask.rows[0]
@@ -637,14 +621,13 @@ func (be *tidbBackend) FetchRemoteTableModels(ctx context.Context, schemaName st
 			if strings.Contains(columnExtra, "auto_increment") {
 				flag |= mysql.AutoIncrementFlag
 			}
-
-			ft := types.FieldType{}
-			ft.SetFlag(flag)
 			curTable.Columns = append(curTable.Columns, &model.ColumnInfo{
-				Name:                model.NewCIStr(columnName),
-				Offset:              curColOffset,
-				State:               model.StatePublic,
-				FieldType:           ft,
+				Name:   model.NewCIStr(columnName),
+				Offset: curColOffset,
+				State:  model.StatePublic,
+				FieldType: types.FieldType{
+					Flag: flag,
+				},
 				GeneratedExprString: generationExpr,
 			})
 			curColOffset++
@@ -670,9 +653,9 @@ func (be *tidbBackend) FetchRemoteTableModels(ctx context.Context, schemaName st
 					if col.Name.O == info.Column {
 						switch info.Type {
 						case "AUTO_INCREMENT":
-							col.AddFlag(mysql.AutoIncrementFlag)
+							col.Flag |= mysql.AutoIncrementFlag
 						case "AUTO_RANDOM":
-							col.AddFlag(mysql.PriKeyFlag)
+							col.Flag |= mysql.PriKeyFlag
 							tbl.PKIsHandle = true
 							// set a stub here, since we don't really need the real value
 							tbl.AutoRandomBits = 1

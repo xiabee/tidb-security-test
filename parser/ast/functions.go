@@ -279,7 +279,6 @@ const (
 	IsIPv4Mapped    = "is_ipv4_mapped"
 	IsIPv6          = "is_ipv6"
 	IsUsedLock      = "is_used_lock"
-	IsUUID          = "is_uuid"
 	MasterPosWait   = "master_pos_wait"
 	NameConst       = "name_const"
 	ReleaseAllLocks = "release_all_locks"
@@ -289,9 +288,10 @@ const (
 	UUIDToBin       = "uuid_to_bin"
 	BinToUUID       = "bin_to_uuid"
 	VitessHash      = "vitess_hash"
-	TiDBShard       = "tidb_shard"
-	GetLock         = "get_lock"
-	ReleaseLock     = "release_lock"
+	// get_lock() and release_lock() is parsed but do nothing.
+	// It is used for preventing error in Ruby's activerecord migrations.
+	GetLock     = "get_lock"
+	ReleaseLock = "release_lock"
 
 	// encryption and compression functions
 	AesDecrypt               = "aes_decrypt"

@@ -35,14 +35,15 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	split "github.com/pingcap/tidb/br/pkg/restore"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/mathutil"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
+	SplitRetryTimes       = 8
 	retrySplitMaxWaitTime = 4 * time.Second
 )
 
@@ -55,8 +56,6 @@ var (
 	// the base exponential backoff time
 	// the variable is only changed in unit test for running test faster.
 	splitRegionBaseBackOffTime = time.Second
-	// the max retry times to split regions.
-	splitRetryTimes = 8
 )
 
 // SplitAndScatterRegionInBatches splits&scatter regions in batches.
@@ -108,7 +107,7 @@ func (local *local) SplitAndScatterRegionByRanges(
 	var retryKeys [][]byte
 	waitTime := splitRegionBaseBackOffTime
 	skippedKeys := 0
-	for i := 0; i < splitRetryTimes; i++ {
+	for i := 0; i < SplitRetryTimes; i++ {
 		log.L().Info("split and scatter region",
 			logutil.Key("minKey", minKey),
 			logutil.Key("maxKey", maxKey),
@@ -208,7 +207,7 @@ func (local *local) SplitAndScatterRegionByRanges(
 
 		var syncLock sync.Mutex
 		// TODO, make this size configurable
-		size := mathutil.Min(len(splitKeyMap), runtime.GOMAXPROCS(0))
+		size := utils.MinInt(len(splitKeyMap), runtime.GOMAXPROCS(0))
 		ch := make(chan *splitInfo, size)
 		eg, splitCtx := errgroup.WithContext(ctx)
 
@@ -452,7 +451,7 @@ func (local *local) waitForScatterRegion(ctx context.Context, regionInfo *split.
 			return
 		}
 		if err != nil {
-			if !common.IsRetryableError(err) {
+			if !utils.IsRetryableError(err) {
 				log.L().Warn("wait for scatter region encountered non-retryable error", logutil.Region(regionInfo.Region), zap.Error(err))
 				return
 			}

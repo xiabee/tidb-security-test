@@ -16,7 +16,6 @@ package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tikv/client-go/v2/metrics"
 )
 
 // Metrics for the GC worker.
@@ -70,9 +69,11 @@ var (
 			Help:      "Counter of gc scan lock request more than once in the same region.",
 		})
 
-	GCUnsafeDestroyRangeFailuresCounterVec *prometheus.CounterVec
+	GCUnsafeDestroyRangeFailuresCounterVec = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "tidb",
+			Subsystem: "tikvclient",
+			Name:      "gc_unsafe_destroy_range_failures",
+			Help:      "Counter of unsafe destroyrange failures",
+		}, []string{"type"})
 )
-
-func init() {
-	GCUnsafeDestroyRangeFailuresCounterVec = metrics.TiKVUnsafeDestroyRangeFailuresCounterVec
-}

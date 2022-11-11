@@ -23,6 +23,8 @@ import (
 )
 
 func TestSystimeMonitor(t *testing.T) {
+	t.Parallel()
+
 	errTriggered := atomic.NewBool(false)
 	nowTriggered := atomic.NewBool(false)
 	go StartMonitor(

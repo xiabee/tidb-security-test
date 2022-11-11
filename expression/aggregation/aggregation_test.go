@@ -50,6 +50,7 @@ func createAggFuncSuite() (s *mockAggFuncSuite) {
 }
 
 func TestAvg(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -94,6 +95,7 @@ func TestAvg(t *testing.T) {
 }
 
 func TestAvgFinalMode(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	rows := make([][]types.Datum, 0, 100)
 	for i := 1; i <= 100; i++ {
@@ -124,6 +126,7 @@ func TestAvgFinalMode(t *testing.T) {
 }
 
 func TestSum(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -166,6 +169,7 @@ func TestSum(t *testing.T) {
 }
 
 func TestBitAnd(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -245,6 +249,7 @@ func TestBitAnd(t *testing.T) {
 }
 
 func TestBitOr(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -332,6 +337,7 @@ func TestBitOr(t *testing.T) {
 }
 
 func TestBitXor(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -411,6 +417,7 @@ func TestBitXor(t *testing.T) {
 }
 
 func TestCount(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -452,6 +459,7 @@ func TestCount(t *testing.T) {
 }
 
 func TestConcat(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -509,6 +517,7 @@ func TestConcat(t *testing.T) {
 }
 
 func TestFirstRow(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,
@@ -537,6 +546,7 @@ func TestFirstRow(t *testing.T) {
 }
 
 func TestMaxMin(t *testing.T) {
+	t.Parallel()
 	s := createAggFuncSuite()
 	col := &expression.Column{
 		Index:   0,

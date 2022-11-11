@@ -15,21 +15,24 @@
 package executor
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/stretchr/testify/require"
 )
 
-func TestPartitionRangeSplitter(t *testing.T) {
+var _ = SerialSuites(&testPartitionSuite{})
+
+type testPartitionSuite struct {
+}
+
+func (s *testPartitionSuite) TestPartitionRangeSplitter(c *C) {
 	ctx := mock.NewContext()
 	concurrency := 2
 
-	tp := types.NewFieldTypeBuilder().SetType(mysql.TypeVarchar).BuildP()
+	tp := &types.FieldType{Tp: mysql.TypeVarchar}
 	col0 := &expression.Column{
 		RetType: tp,
 		Index:   0,
@@ -57,9 +60,9 @@ func TestPartitionRangeSplitter(t *testing.T) {
 
 	splitter := buildPartitionRangeSplitter(ctx, concurrency, byItems)
 	obtained, err := splitter.split(ctx, input, obtained)
-	require.NoError(t, err)
-	require.Len(t, obtained, len(expected))
+	c.Assert(err, IsNil)
+	c.Assert(len(obtained), Equals, len(expected))
 	for i := 0; i < len(obtained); i++ {
-		require.Equal(t, expected[i], obtained[i])
+		c.Assert(obtained[i], Equals, expected[i])
 	}
 }

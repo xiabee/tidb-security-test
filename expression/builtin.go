@@ -114,7 +114,7 @@ func newBaseBuiltinFunc(ctx sessionctx.Context, funcName string, args []Expressi
 
 // newBaseBuiltinFuncWithTp creates a built-in function signature with specified types of arguments and the return type of the function.
 // argTps indicates the types of the args, retType indicates the return type of the built-in function.
-// Every built-in function needs to be determined argTps and retType when we create it.
+// Every built-in function needs determined argTps and retType when we create it.
 func newBaseBuiltinFuncWithTp(ctx sessionctx.Context, funcName string, args []Expression, retType types.EvalType, argTps ...types.EvalType) (bf baseBuiltinFunc, err error) {
 	if len(args) != len(argTps) {
 		panic("unexpected length of args and argTps")
@@ -140,7 +140,6 @@ func newBaseBuiltinFuncWithTp(ctx sessionctx.Context, funcName string, args []Ex
 			args[i] = WrapWithCastAsDecimal(ctx, args[i])
 		case types.ETString:
 			args[i] = WrapWithCastAsString(ctx, args[i])
-			args[i] = HandleBinaryLiteral(ctx, args[i], ec, funcName)
 		case types.ETDatetime:
 			args[i] = WrapWithCastAsTime(ctx, args[i], types.NewFieldType(mysql.TypeDatetime))
 		case types.ETTimestamp:
@@ -155,28 +154,70 @@ func newBaseBuiltinFuncWithTp(ctx sessionctx.Context, funcName string, args []Ex
 	var fieldType *types.FieldType
 	switch retType {
 	case types.ETInt:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxIntWidth).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeLonglong,
+			Flen:    mysql.MaxIntWidth,
+			Decimal: 0,
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETReal:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDouble).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxRealWidth).SetDecimal(types.UnspecifiedLength).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeDouble,
+			Flen:    mysql.MaxRealWidth,
+			Decimal: types.UnspecifiedLength,
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETDecimal:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeNewDecimal).SetFlag(mysql.BinaryFlag).SetFlen(11).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeNewDecimal,
+			Flen:    11,
+			Decimal: 0,
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETString:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeVarString).SetFlen(types.UnspecifiedLength).SetDecimal(types.UnspecifiedLength).SetCharset(ec.Charset).SetCollate(ec.Collation).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeVarString,
+			Decimal: types.UnspecifiedLength,
+			Charset: ec.Charset,
+			Collate: ec.Collation,
+			Flen:    types.UnspecifiedLength,
+		}
 	case types.ETDatetime:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDatetime).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeDatetime,
+			Flen:    mysql.MaxDatetimeWidthWithFsp,
+			Decimal: int(types.MaxFsp),
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETTimestamp:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeTimestamp).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeTimestamp,
+			Flen:    mysql.MaxDatetimeWidthWithFsp,
+			Decimal: int(types.MaxFsp),
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETDuration:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDuration).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDurationWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeDuration,
+			Flen:    mysql.MaxDurationWidthWithFsp,
+			Decimal: int(types.MaxFsp),
+			Flag:    mysql.BinaryFlag,
+		}
 	case types.ETJson:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeJSON).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxBlobWidth).SetCharset(mysql.DefaultCharset).SetCollate(mysql.DefaultCollationName).BuildP()
+		fieldType = &types.FieldType{
+			Tp:      mysql.TypeJSON,
+			Flen:    mysql.MaxBlobWidth,
+			Decimal: 0,
+			Charset: mysql.DefaultCharset,
+			Collate: mysql.DefaultCollationName,
+			Flag:    mysql.BinaryFlag,
+		}
 	}
-	if mysql.HasBinaryFlag(fieldType.GetFlag()) && fieldType.GetType() != mysql.TypeJSON {
-		fieldType.SetCharset(charset.CharsetBin)
-		fieldType.SetCollate(charset.CollationBin)
+	if mysql.HasBinaryFlag(fieldType.Flag) && fieldType.Tp != mysql.TypeJSON {
+		fieldType.Charset, fieldType.Collate = charset.CharsetBin, charset.CollationBin
 	}
 	if _, ok := booleanFunctions[funcName]; ok {
-		fieldType.AddFlag(mysql.IsBooleanFlag)
+		fieldType.Flag |= mysql.IsBooleanFlag
 	}
 	bf = baseBuiltinFunc{
 		bufAllocator:           newLocalColumnPool(),
@@ -209,8 +250,8 @@ func newBaseBuiltinFuncWithFieldType(ctx sessionctx.Context, tp *types.FieldType
 		ctx:  ctx,
 		tp:   types.NewFieldType(mysql.TypeUnspecified),
 	}
-	bf.SetCharsetAndCollation(tp.GetCharset(), tp.GetCollate())
-	bf.setCollator(collate.GetCollator(tp.GetCollate()))
+	bf.SetCharsetAndCollation(tp.Charset, tp.Collate)
+	bf.setCollator(collate.GetCollator(tp.Collate))
 	return bf, nil
 }
 
@@ -315,15 +356,13 @@ func (b *baseBuiltinFunc) isChildrenVectorized() bool {
 func (b *baseBuiltinFunc) getRetTp() *types.FieldType {
 	switch b.tp.EvalType() {
 	case types.ETString:
-		if b.tp.GetFlen() >= mysql.MaxBlobWidth {
-			b.tp.SetType(mysql.TypeLongBlob)
-		} else if b.tp.GetFlen() >= 65536 {
-			b.tp.SetType(mysql.TypeMediumBlob)
+		if b.tp.Flen >= mysql.MaxBlobWidth {
+			b.tp.Tp = mysql.TypeLongBlob
+		} else if b.tp.Flen >= 65536 {
+			b.tp.Tp = mysql.TypeMediumBlob
 		}
-		if len(b.tp.GetCharset()) <= 0 {
-			charset, collate := charset.GetDefaultCharsetAndCollate()
-			b.tp.SetCharset(charset)
-			b.tp.SetCollate(collate)
+		if len(b.tp.Charset) <= 0 {
+			b.tp.Charset, b.tp.Collate = charset.GetDefaultCharsetAndCollate()
 		}
 	}
 	return b.tp
@@ -732,7 +771,6 @@ var funcs = map[string]functionClass{
 	ast.IsIPv4Mapped:    &isIPv4MappedFunctionClass{baseFunctionClass{ast.IsIPv4Mapped, 1, 1}},
 	ast.IsIPv6:          &isIPv6FunctionClass{baseFunctionClass{ast.IsIPv6, 1, 1}},
 	ast.IsUsedLock:      &isUsedLockFunctionClass{baseFunctionClass{ast.IsUsedLock, 1, 1}},
-	ast.IsUUID:          &isUUIDFunctionClass{baseFunctionClass{ast.IsUUID, 1, 1}},
 	ast.MasterPosWait:   &masterPosWaitFunctionClass{baseFunctionClass{ast.MasterPosWait, 2, 4}},
 	ast.NameConst:       &nameConstFunctionClass{baseFunctionClass{ast.NameConst, 2, 2}},
 	ast.ReleaseAllLocks: &releaseAllLocksFunctionClass{baseFunctionClass{ast.ReleaseAllLocks, 0, 0}},
@@ -741,8 +779,9 @@ var funcs = map[string]functionClass{
 	ast.VitessHash:      &vitessHashFunctionClass{baseFunctionClass{ast.VitessHash, 1, 1}},
 	ast.UUIDToBin:       &uuidToBinFunctionClass{baseFunctionClass{ast.UUIDToBin, 1, 2}},
 	ast.BinToUUID:       &binToUUIDFunctionClass{baseFunctionClass{ast.BinToUUID, 1, 2}},
-	ast.TiDBShard:       &tidbShardFunctionClass{baseFunctionClass{ast.TiDBShard, 1, 1}},
 
+	// get_lock() and release_lock() are parsed but do nothing.
+	// It is used for preventing error in Ruby's activerecord migrations.
 	ast.GetLock:     &lockFunctionClass{baseFunctionClass{ast.GetLock, 2, 2}},
 	ast.ReleaseLock: &releaseLockFunctionClass{baseFunctionClass{ast.ReleaseLock, 1, 1}},
 
@@ -887,25 +926,25 @@ func GetBuiltinList() []string {
 }
 
 func (b *baseBuiltinFunc) setDecimalAndFlenForDatetime(fsp int) {
-	b.tp.SetDecimal(fsp)
-	b.tp.SetFlen(mysql.MaxDatetimeWidthNoFsp + fsp)
+	b.tp.Decimal = fsp
+	b.tp.Flen = mysql.MaxDatetimeWidthNoFsp + fsp
 	if fsp > 0 {
 		// Add the length for `.`.
-		b.tp.SetFlen(b.tp.GetFlen() + 1)
+		b.tp.Flen++
 	}
 }
 
 func (b *baseBuiltinFunc) setDecimalAndFlenForDate() {
-	b.tp.SetDecimal(0)
-	b.tp.SetFlen(mysql.MaxDateWidth)
-	b.tp.SetType(mysql.TypeDate)
+	b.tp.Decimal = 0
+	b.tp.Flen = mysql.MaxDateWidth
+	b.tp.Tp = mysql.TypeDate
 }
 
 func (b *baseBuiltinFunc) setDecimalAndFlenForTime(fsp int) {
-	b.tp.SetDecimal(fsp)
-	b.tp.SetFlen(mysql.MaxDurationWidthNoFsp + fsp)
+	b.tp.Decimal = fsp
+	b.tp.Flen = mysql.MaxDurationWidthNoFsp + fsp
 	if fsp > 0 {
 		// Add the length for `.`.
-		b.tp.SetFlen(b.tp.GetFlen() + 1)
+		b.tp.Flen++
 	}
 }

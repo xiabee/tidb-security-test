@@ -16,16 +16,18 @@ package config_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
-	"testing"
 
 	"github.com/BurntSushi/toml"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
-	"github.com/stretchr/testify/require"
 )
 
-func TestByteSizeTOMLDecode(t *testing.T) {
+type byteSizeTestSuite struct{}
+
+var _ = Suite(&byteSizeTestSuite{})
+
+func (s *byteSizeTestSuite) TestByteSizeTOMLDecode(c *C) {
 	testCases := []struct {
 		input  string
 		output config.ByteSize
@@ -98,20 +100,19 @@ func TestByteSizeTOMLDecode(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		comment := fmt.Sprintf("input: `%s`", tc.input)
+		comment := Commentf("input: `%s`", tc.input)
 		var output struct{ X config.ByteSize }
 		err := toml.Unmarshal([]byte(tc.input), &output)
 		if tc.err != "" {
-			require.Error(t, err)
-			require.Regexp(t, tc.err, err.Error(), comment)
+			c.Assert(err, ErrorMatches, tc.err, comment)
 		} else {
-			require.NoError(t, err)
-			require.Equal(t, tc.output, output.X, comment)
+			c.Assert(err, IsNil, comment)
+			c.Assert(output.X, Equals, tc.output, comment)
 		}
 	}
 }
 
-func TestByteSizeTOMLAndJSONEncode(t *testing.T) {
+func (s *byteSizeTestSuite) TestByteSizeTOMLAndJSONEncode(c *C) {
 	var input struct {
 		X config.ByteSize `toml:"x" json:"x"`
 	}
@@ -119,10 +120,10 @@ func TestByteSizeTOMLAndJSONEncode(t *testing.T) {
 
 	var output strings.Builder
 	err := toml.NewEncoder(&output).Encode(input)
-	require.NoError(t, err)
-	require.Equal(t, "x = 1048576\n", output.String())
+	c.Assert(err, IsNil)
+	c.Assert(output.String(), Equals, "x = 1048576\n")
 
 	js, err := json.Marshal(input)
-	require.NoError(t, err)
-	require.Equal(t, `{"x":1048576}`, string(js))
+	c.Assert(err, IsNil)
+	c.Assert(string(js), Equals, `{"x":1048576}`)
 }

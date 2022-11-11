@@ -47,6 +47,7 @@ func TestValueExprRestore(t *testing.T) {
 		// copy iterator variable into a new variable, see issue #27779
 		test := test
 		t.Run(test.expect, func(t *testing.T) {
+			t.Parallel()
 			var sb strings.Builder
 			expr := &ValueExpr{Datum: test.datum}
 			err := expr.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))

@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbterror"
@@ -44,24 +43,22 @@ import (
 )
 
 type domainMap struct {
-	mu      sync.Mutex
 	domains map[string]*domain.Domain
+	mu      sync.Mutex
 }
 
 func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	if store == nil {
-		for _, d := range dm.domains {
-			// return available domain if any
-			return d, nil
+	// If this is the only domain instance, and the caller doesn't provide store.
+	if len(dm.domains) == 1 && store == nil {
+		for _, r := range dm.domains {
+			return r, nil
 		}
-		return nil, errors.New("can not find available domain for a nil store")
 	}
 
 	key := store.UUID()
-
 	d = dm.domains[key]
 	if d != nil {
 		return
@@ -95,7 +92,6 @@ func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 	if err != nil {
 		return nil, err
 	}
-
 	dm.domains[key] = d
 
 	return
@@ -296,7 +292,7 @@ func checkStmtLimit(ctx context.Context, se *session) error {
 			return errors.Errorf("statement count %d exceeds the transaction limitation, autocommit = %t",
 				history.Count(), sessVars.IsAutocommit())
 		}
-		err = sessiontxn.NewTxn(ctx, se)
+		err = se.NewTxn(ctx)
 		// The transaction does not committed yet, we need to keep it in transaction.
 		// The last history could not be "commit"/"rollback" statement.
 		// It means it is impossible to start a new transaction at the end of the transaction.
@@ -323,7 +319,7 @@ func GetRows4Test(ctx context.Context, sctx sessionctx.Context, rs sqlexec.Recor
 		return nil, nil
 	}
 	var rows []chunk.Row
-	req := rs.NewChunk(nil)
+	req := rs.NewChunk()
 	// Must reuse `req` for imitating server.(*clientConn).writeChunks
 	for {
 		err := rs.Next(ctx, req)

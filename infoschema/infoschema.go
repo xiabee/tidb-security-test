@@ -51,10 +51,12 @@ type InfoSchema interface {
 	// TableIsSequence indicates whether the schema.table is a sequence.
 	TableIsSequence(schema, table model.CIStr) bool
 	FindTableByPartitionID(partitionID int64) (table.Table, *model.DBInfo, *model.PartitionDefinition)
-	// PlacementBundleByPhysicalTableID is used to get a rule bundle.
-	PlacementBundleByPhysicalTableID(id int64) (*placement.Bundle, bool)
-	// AllPlacementBundles is used to get all placement bundles
-	AllPlacementBundles() []*placement.Bundle
+	// BundleByName is used to get a rule bundle.
+	BundleByName(name string) (*placement.Bundle, bool)
+	// SetBundle is used internally to update rule bundles or mock tests.
+	SetBundle(*placement.Bundle)
+	// RuleBundles will return a copy of all rule bundles.
+	RuleBundles() []*placement.Bundle
 	// AllPlacementPolicies returns all placement policies
 	AllPlacementPolicies() []*model.PolicyInfo
 }
@@ -92,7 +94,8 @@ const bucketCount = 512
 
 type infoSchema struct {
 	// ruleBundleMap stores all placement rules
-	ruleBundleMap map[int64]*placement.Bundle
+	ruleBundleMutex sync.RWMutex
+	ruleBundleMap   map[string]*placement.Bundle
 
 	// policyMap stores all placement policies.
 	policyMutex sync.RWMutex
@@ -112,7 +115,7 @@ func MockInfoSchema(tbList []*model.TableInfo) InfoSchema {
 	result := &infoSchema{}
 	result.schemaMap = make(map[string]*schemaTables)
 	result.policyMap = make(map[string]*model.PolicyInfo)
-	result.ruleBundleMap = make(map[int64]*placement.Bundle)
+	result.ruleBundleMap = make(map[string]*placement.Bundle)
 	result.sortedTablesBuckets = make([]sortedTables, bucketCount)
 	dbInfo := &model.DBInfo{ID: 0, Name: model.NewCIStr("test"), Tables: tbList}
 	tableNames := &schemaTables{
@@ -137,7 +140,7 @@ func MockInfoSchemaWithSchemaVer(tbList []*model.TableInfo, schemaVer int64) Inf
 	result := &infoSchema{}
 	result.schemaMap = make(map[string]*schemaTables)
 	result.policyMap = make(map[string]*model.PolicyInfo)
-	result.ruleBundleMap = make(map[int64]*placement.Bundle)
+	result.ruleBundleMap = make(map[string]*placement.Bundle)
 	result.sortedTablesBuckets = make([]sortedTables, bucketCount)
 	dbInfo := &model.DBInfo{ID: 0, Name: model.NewCIStr("test"), Tables: tbList}
 	tableNames := &schemaTables{
@@ -358,7 +361,7 @@ func init() {
 // HasAutoIncrementColumn checks whether the table has auto_increment columns, if so, return true and the column name.
 func HasAutoIncrementColumn(tbInfo *model.TableInfo) (bool, string) {
 	for _, col := range tbInfo.Columns {
-		if mysql.HasAutoIncrementFlag(col.GetFlag()) {
+		if mysql.HasAutoIncrementFlag(col.Flag) {
 			return true, col.Name.L
 		}
 	}
@@ -384,12 +387,16 @@ func (is *infoSchema) AllPlacementPolicies() []*model.PolicyInfo {
 	return policies
 }
 
-func (is *infoSchema) PlacementBundleByPhysicalTableID(id int64) (*placement.Bundle, bool) {
-	t, r := is.ruleBundleMap[id]
+func (is *infoSchema) BundleByName(name string) (*placement.Bundle, bool) {
+	is.ruleBundleMutex.RLock()
+	defer is.ruleBundleMutex.RUnlock()
+	t, r := is.ruleBundleMap[name]
 	return t, r
 }
 
-func (is *infoSchema) AllPlacementBundles() []*placement.Bundle {
+func (is *infoSchema) RuleBundles() []*placement.Bundle {
+	is.ruleBundleMutex.RLock()
+	defer is.ruleBundleMutex.RUnlock()
 	bundles := make([]*placement.Bundle, 0, len(is.ruleBundleMap))
 	for _, bundle := range is.ruleBundleMap {
 		bundles = append(bundles, bundle)
@@ -407,6 +414,47 @@ func (is *infoSchema) deletePolicy(name string) {
 	is.policyMutex.Lock()
 	defer is.policyMutex.Unlock()
 	delete(is.policyMap, name)
+}
+
+func (is *infoSchema) SetBundle(bundle *placement.Bundle) {
+	is.ruleBundleMutex.Lock()
+	defer is.ruleBundleMutex.Unlock()
+	is.ruleBundleMap[bundle.ID] = bundle
+}
+
+func (is *infoSchema) deleteBundle(id string) {
+	is.ruleBundleMutex.Lock()
+	defer is.ruleBundleMutex.Unlock()
+	delete(is.ruleBundleMap, id)
+}
+
+// GetBundle get the first available bundle by array of IDs, possibly fallback to the default.
+// If fallback to the default, only rules applied to all regions(empty keyrange) will be returned.
+// If the default bundle is unavailable, an empty bundle with an GroupID(ids[0]) is returned.
+func GetBundle(h InfoSchema, ids []int64) *placement.Bundle {
+	for _, id := range ids {
+		b, ok := h.BundleByName(placement.GroupID(id))
+		if ok {
+			return b.Clone()
+		}
+	}
+
+	newRules := []*placement.Rule{}
+
+	b, ok := h.BundleByName(placement.PDBundleID)
+	if ok {
+		for _, rule := range b.Rules {
+			if rule.StartKeyHex == "" && rule.EndKeyHex == "" {
+				newRules = append(newRules, rule.Clone())
+			}
+		}
+	}
+
+	id := int64(-1)
+	if len(ids) > 0 {
+		id = ids[0]
+	}
+	return &placement.Bundle{ID: placement.GroupID(id), Rules: newRules}
 }
 
 // LocalTemporaryTables store local temporary tables

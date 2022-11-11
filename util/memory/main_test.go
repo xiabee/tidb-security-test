@@ -15,14 +15,22 @@
 package memory
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
-	"github.com/pingcap/tidb/testkit/testsetup"
+	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/testbridge"
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	testsetup.SetupForCommonTest()
-
+	testbridge.WorkaroundGoCheckFlags()
+	logLevel := os.Getenv("log_level")
+	err := logutil.InitLogger(logutil.NewLogConfig(logLevel, logutil.DefaultLogFormat, "", logutil.EmptyFileLogConfig, false))
+	if err != nil {
+		fmt.Fprint(os.Stderr, err.Error())
+		os.Exit(1)
+	}
 	goleak.VerifyTestMain(m)
 }

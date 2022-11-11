@@ -26,7 +26,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"go.uber.org/zap"
 )
 
@@ -154,7 +154,7 @@ func MakeTableRegions(
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	concurrency := mathutil.Max(cfg.App.RegionConcurrency, 2)
+	concurrency := utils.MaxInt(cfg.App.RegionConcurrency, 2)
 	fileChan := make(chan FileInfo, concurrency)
 	resultChan := make(chan fileRegionRes, concurrency)
 	var wg sync.WaitGroup
@@ -169,7 +169,6 @@ func MakeTableRegions(
 					break
 				}
 				if err != nil {
-					log.L().Error("make source file region error", zap.Error(err), zap.String("file_path", info.FileMeta.Path))
 					break
 				}
 			}

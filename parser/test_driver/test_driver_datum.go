@@ -11,8 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-// +build !codes
+//+build !codes
 
 package test_driver
 
@@ -167,12 +166,12 @@ func (d *Datum) SetBinaryLiteral(b BinaryLiteral) {
 	d.b = b
 }
 
-// GetMysqlDecimal gets decimal value
+// GetMysqlDecimal gets Decimal value
 func (d *Datum) GetMysqlDecimal() *MyDecimal {
 	return d.x.(*MyDecimal)
 }
 
-// SetMysqlDecimal sets decimal value
+// SetMysqlDecimal sets Decimal value
 func (d *Datum) SetMysqlDecimal(b *MyDecimal) {
 	d.k = KindMysqlDecimal
 	d.x = b
@@ -419,9 +418,9 @@ func (b HexLiteral) ToString() string {
 
 // SetBinChsClnFlag sets charset, collation as 'binary' and adds binaryFlag to FieldType.
 func SetBinChsClnFlag(ft *types.FieldType) {
-	ft.SetCharset(charset.CharsetBin)
-	ft.SetCollate(charset.CollationBin)
-	ft.AddFlag(mysql.BinaryFlag)
+	ft.Charset = charset.CharsetBin
+	ft.Collate = charset.CollationBin
+	ft.Flag |= mysql.BinaryFlag
 }
 
 // DefaultFsp is the default digit of fractional seconds part.
@@ -432,82 +431,81 @@ const DefaultFsp = int8(0)
 func DefaultTypeForValue(value interface{}, tp *types.FieldType, charset string, collate string) {
 	switch x := value.(type) {
 	case nil:
-		tp.SetType(mysql.TypeNull)
-		tp.SetFlen(0)
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeNull
+		tp.Flen = 0
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
 	case bool:
-		tp.SetType(mysql.TypeLonglong)
-		tp.SetFlen(1)
-		tp.SetDecimal(0)
-		tp.AddFlag(mysql.IsBooleanFlag)
+		tp.Tp = mysql.TypeLonglong
+		tp.Flen = 1
+		tp.Decimal = 0
+		tp.Flag |= mysql.IsBooleanFlag
 		SetBinChsClnFlag(tp)
 	case int:
-		tp.SetType(mysql.TypeLonglong)
-		tp.SetFlen(StrLenOfInt64Fast(int64(x)))
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeLonglong
+		tp.Flen = StrLenOfInt64Fast(int64(x))
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
 	case int64:
-		tp.SetType(mysql.TypeLonglong)
-		tp.SetFlen(StrLenOfInt64Fast(x))
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeLonglong
+		tp.Flen = StrLenOfInt64Fast(x)
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
 	case uint64:
-		tp.SetType(mysql.TypeLonglong)
-		tp.AddFlag(mysql.UnsignedFlag)
-		tp.SetFlen(StrLenOfUint64Fast(x))
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeLonglong
+		tp.Flag |= mysql.UnsignedFlag
+		tp.Flen = StrLenOfUint64Fast(x)
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
 	case string:
-		tp.SetType(mysql.TypeVarString)
-		// TODO: tp.flen should be len(x) * 3 (max bytes length of CharsetUTF8)
-		tp.SetFlen(len(x))
-		tp.SetDecimal(types.UnspecifiedLength)
-		tp.SetCharset(charset)
-		tp.SetCollate(collate)
+		tp.Tp = mysql.TypeVarString
+		// TODO: tp.Flen should be len(x) * 3 (max bytes length of CharsetUTF8)
+		tp.Flen = len(x)
+		tp.Decimal = types.UnspecifiedLength
+		tp.Charset, tp.Collate = charset, collate
 	case float32:
-		tp.SetType(mysql.TypeFloat)
+		tp.Tp = mysql.TypeFloat
 		s := strconv.FormatFloat(float64(x), 'f', -1, 32)
-		tp.SetFlen(len(s))
-		tp.SetDecimal(types.UnspecifiedLength)
+		tp.Flen = len(s)
+		tp.Decimal = types.UnspecifiedLength
 		SetBinChsClnFlag(tp)
 	case float64:
-		tp.SetType(mysql.TypeDouble)
+		tp.Tp = mysql.TypeDouble
 		s := strconv.FormatFloat(x, 'f', -1, 64)
-		tp.SetFlen(len(s))
-		tp.SetDecimal(types.UnspecifiedLength)
+		tp.Flen = len(s)
+		tp.Decimal = types.UnspecifiedLength
 		SetBinChsClnFlag(tp)
 	case []byte:
-		tp.SetType(mysql.TypeBlob)
-		tp.SetFlen(len(x))
-		tp.SetDecimal(types.UnspecifiedLength)
+		tp.Tp = mysql.TypeBlob
+		tp.Flen = len(x)
+		tp.Decimal = types.UnspecifiedLength
 		SetBinChsClnFlag(tp)
 	case BitLiteral:
-		tp.SetType(mysql.TypeVarString)
-		tp.SetFlen(len(x))
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeVarString
+		tp.Flen = len(x)
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
 	case HexLiteral:
-		tp.SetType(mysql.TypeVarString)
-		tp.SetFlen(len(x) * 3)
-		tp.SetDecimal(0)
-		tp.AddFlag(mysql.UnsignedFlag)
+		tp.Tp = mysql.TypeVarString
+		tp.Flen = len(x) * 3
+		tp.Decimal = 0
+		tp.Flag |= mysql.UnsignedFlag
 		SetBinChsClnFlag(tp)
 	case BinaryLiteral:
-		tp.SetType(mysql.TypeBit)
-		tp.SetFlen(len(x) * 8)
-		tp.SetDecimal(0)
+		tp.Tp = mysql.TypeBit
+		tp.Flen = len(x) * 8
+		tp.Decimal = 0
 		SetBinChsClnFlag(tp)
-		tp.DelFlag(mysql.BinaryFlag)
-		tp.AddFlag(mysql.UnsignedFlag)
+		tp.Flag &= ^mysql.BinaryFlag
+		tp.Flag |= mysql.UnsignedFlag
 	case *MyDecimal:
-		tp.SetType(mysql.TypeNewDecimal)
-		tp.SetFlen(len(x.ToString()))
-		tp.SetDecimal(int(x.digitsFrac))
+		tp.Tp = mysql.TypeNewDecimal
+		tp.Flen = len(x.ToString())
+		tp.Decimal = int(x.digitsFrac)
 		SetBinChsClnFlag(tp)
 	default:
-		tp.SetType(mysql.TypeUnspecified)
-		tp.SetFlen(types.UnspecifiedLength)
-		tp.SetDecimal(types.UnspecifiedLength)
+		tp.Tp = mysql.TypeUnspecified
+		tp.Flen = types.UnspecifiedLength
+		tp.Decimal = types.UnspecifiedLength
 	}
 }

@@ -23,6 +23,8 @@ import (
 )
 
 func TestAdd(t *testing.T) {
+	t.Parallel()
+
 	tblUint64 := []struct {
 		lsh      uint64
 		rsh      uint64
@@ -98,6 +100,8 @@ func TestAdd(t *testing.T) {
 }
 
 func TestSub(t *testing.T) {
+	t.Parallel()
+
 	tblUint64 := []struct {
 		lsh      uint64
 		rsh      uint64
@@ -196,6 +200,8 @@ func TestSub(t *testing.T) {
 }
 
 func TestMul(t *testing.T) {
+	t.Parallel()
+
 	tblUint64 := []struct {
 		lsh      uint64
 		rsh      uint64
@@ -269,6 +275,8 @@ func TestMul(t *testing.T) {
 }
 
 func TestDiv(t *testing.T) {
+	t.Parallel()
+
 	tblInt64 := []struct {
 		lsh      int64
 		rsh      int64

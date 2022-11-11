@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tipb/go-tipb"
@@ -39,6 +38,7 @@ type handleRange struct {
 }
 
 func TestTableHandlesToKVRanges(t *testing.T) {
+	t.Parallel()
 	handles := []kv.Handle{
 		kv.IntHandle(0),
 		kv.IntHandle(2),
@@ -71,36 +71,32 @@ func TestTableHandlesToKVRanges(t *testing.T) {
 }
 
 func TestTableRangesToKVRanges(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(2)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(2)},
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(2)},
 			HighVal:     []types.Datum{types.NewIntDatum(4)},
 			LowExclude:  true,
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(4)},
 			HighVal:     []types.Datum{types.NewIntDatum(19)},
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(19)},
 			HighVal:    []types.Datum{types.NewIntDatum(32)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(34)},
 			HighVal:    []types.Datum{types.NewIntDatum(34)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 	}
 
@@ -133,36 +129,32 @@ func TestTableRangesToKVRanges(t *testing.T) {
 }
 
 func TestIndexRangesToKVRanges(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(2)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(2)},
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(2)},
 			HighVal:     []types.Datum{types.NewIntDatum(4)},
 			LowExclude:  true,
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(4)},
 			HighVal:     []types.Datum{types.NewIntDatum(19)},
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(19)},
 			HighVal:    []types.Datum{types.NewIntDatum(32)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(34)},
 			HighVal:    []types.Datum{types.NewIntDatum(34)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 	}
 
@@ -197,36 +189,32 @@ func TestIndexRangesToKVRanges(t *testing.T) {
 }
 
 func TestRequestBuilder1(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(2)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(2)},
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(2)},
 			HighVal:     []types.Datum{types.NewIntDatum(4)},
 			LowExclude:  true,
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(4)},
 			HighVal:     []types.Datum{types.NewIntDatum(19)},
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(19)},
 			HighVal:    []types.Datum{types.NewIntDatum(32)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(34)},
 			HighVal:    []types.Datum{types.NewIntDatum(34)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 	}
 
@@ -270,45 +258,41 @@ func TestRequestBuilder1(t *testing.T) {
 		IsolationLevel:   0,
 		Priority:         0,
 		NotFillCache:     false,
+		SyncLog:          false,
 		Streaming:        false,
 		ReplicaRead:      kv.ReplicaReadLeader,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
-	actual.ResourceGroupTagger = nil
 	require.Equal(t, expect, actual)
 }
 
 func TestRequestBuilder2(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(2)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(2)},
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(2)},
 			HighVal:     []types.Datum{types.NewIntDatum(4)},
 			LowExclude:  true,
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:      []types.Datum{types.NewIntDatum(4)},
 			HighVal:     []types.Datum{types.NewIntDatum(19)},
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(19)},
 			HighVal:    []types.Datum{types.NewIntDatum(32)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 		{
 			LowVal:     []types.Datum{types.NewIntDatum(34)},
 			HighVal:    []types.Datum{types.NewIntDatum(34)},
 			LowExclude: true,
-			Collators:  collate.GetBinaryCollatorSlice(1),
 		},
 	}
 
@@ -352,15 +336,16 @@ func TestRequestBuilder2(t *testing.T) {
 		IsolationLevel:   0,
 		Priority:         0,
 		NotFillCache:     false,
+		SyncLog:          false,
 		Streaming:        false,
 		ReplicaRead:      kv.ReplicaReadLeader,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
-	actual.ResourceGroupTagger = nil
 	require.Equal(t, expect, actual)
 }
 
 func TestRequestBuilder3(t *testing.T) {
+	t.Parallel()
 	handles := []kv.Handle{kv.IntHandle(0), kv.IntHandle(2), kv.IntHandle(3), kv.IntHandle(4),
 		kv.IntHandle(5), kv.IntHandle(10), kv.IntHandle(11), kv.IntHandle(100)}
 
@@ -400,15 +385,16 @@ func TestRequestBuilder3(t *testing.T) {
 		IsolationLevel:   0,
 		Priority:         0,
 		NotFillCache:     false,
+		SyncLog:          false,
 		Streaming:        false,
 		ReplicaRead:      kv.ReplicaReadLeader,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
-	actual.ResourceGroupTagger = nil
 	require.Equal(t, expect, actual)
 }
 
 func TestRequestBuilder4(t *testing.T) {
+	t.Parallel()
 	keyRanges := []kv.KeyRange{
 		{
 			StartKey: kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
@@ -449,14 +435,15 @@ func TestRequestBuilder4(t *testing.T) {
 		Priority:         0,
 		Streaming:        true,
 		NotFillCache:     false,
+		SyncLog:          false,
 		ReplicaRead:      kv.ReplicaReadLeader,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
-	actual.ResourceGroupTagger = nil
 	require.Equal(t, expect, actual)
 }
 
 func TestRequestBuilder5(t *testing.T) {
+	t.Parallel()
 	keyRanges := []kv.KeyRange{
 		{
 			StartKey: kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
@@ -493,6 +480,7 @@ func TestRequestBuilder5(t *testing.T) {
 		IsolationLevel:   kv.RC,
 		Priority:         1,
 		NotFillCache:     true,
+		SyncLog:          false,
 		Streaming:        false,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
@@ -500,6 +488,7 @@ func TestRequestBuilder5(t *testing.T) {
 }
 
 func TestRequestBuilder6(t *testing.T) {
+	t.Parallel()
 	keyRanges := []kv.KeyRange{
 		{
 			StartKey: kv.Key{0x00, 0x01},
@@ -523,6 +512,7 @@ func TestRequestBuilder6(t *testing.T) {
 		IsolationLevel:   0,
 		Priority:         0,
 		NotFillCache:     true,
+		SyncLog:          false,
 		Streaming:        false,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
@@ -541,6 +531,7 @@ func TestRequestBuilder7(t *testing.T) {
 		// copy iterator variable into a new variable, see issue #27779
 		replicaRead := replicaRead
 		t.Run(replicaRead.src, func(t *testing.T) {
+			t.Parallel()
 			vars := variable.NewSessionVars()
 			vars.SetReplicaRead(replicaRead.replicaReadType)
 
@@ -559,17 +550,18 @@ func TestRequestBuilder7(t *testing.T) {
 				IsolationLevel:   0,
 				Priority:         0,
 				NotFillCache:     false,
+				SyncLog:          false,
 				Streaming:        false,
 				ReplicaRead:      replicaRead.replicaReadType,
 				ReadReplicaScope: kv.GlobalReplicaScope,
 			}
-			actual.ResourceGroupTagger = nil
 			require.Equal(t, expect, actual)
 		})
 	}
 }
 
 func TestRequestBuilder8(t *testing.T) {
+	t.Parallel()
 	sv := variable.NewSessionVars()
 	actual, err := (&RequestBuilder{}).
 		SetFromSessionVars(sv).
@@ -586,16 +578,15 @@ func TestRequestBuilder8(t *testing.T) {
 		SchemaVar:        0,
 		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
-	actual.ResourceGroupTagger = nil
 	require.Equal(t, expect, actual)
 }
 
 func TestTableRangesToKVRangesWithFbs(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(4)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(4)},
 		},
 	}
 	fb := newTestFb()
@@ -613,11 +604,11 @@ func TestTableRangesToKVRangesWithFbs(t *testing.T) {
 }
 
 func TestIndexRangesToKVRangesWithFbs(t *testing.T) {
+	t.Parallel()
 	ranges := []*ranger.Range{
 		{
-			LowVal:    []types.Datum{types.NewIntDatum(1)},
-			HighVal:   []types.Datum{types.NewIntDatum(4)},
-			Collators: collate.GetBinaryCollatorSlice(1),
+			LowVal:  []types.Datum{types.NewIntDatum(1)},
+			HighVal: []types.Datum{types.NewIntDatum(4)},
 		},
 	}
 	fb := newTestFb()
@@ -650,6 +641,7 @@ func TestScanLimitConcurrency(t *testing.T) {
 		// copy iterator variable into a new variable, see issue #27779
 		tt := tt
 		t.Run(tt.src, func(t *testing.T) {
+			t.Parallel()
 			firstExec := &tipb.Executor{Tp: tt.tp}
 			switch tt.tp {
 			case tipb.ExecType_TypeTableScan:

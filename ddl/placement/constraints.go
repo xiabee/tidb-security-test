@@ -84,8 +84,7 @@ func (constraints *Constraints) Restore() (string, error) {
 func (constraints *Constraints) Add(label Constraint) error {
 	pass := true
 
-	for i := range *constraints {
-		cnst := (*constraints)[i]
+	for _, cnst := range *constraints {
 		res := label.CompatibleWith(&cnst)
 		if res == ConstraintCompatible {
 			continue

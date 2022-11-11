@@ -31,6 +31,8 @@ import (
 )
 
 func TestImplGroupZeroCost(t *testing.T) {
+	t.Parallel()
+
 	p := parser.New()
 	ctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
@@ -55,6 +57,8 @@ func TestImplGroupZeroCost(t *testing.T) {
 }
 
 func TestInitGroupSchema(t *testing.T) {
+	t.Parallel()
+
 	p := parser.New()
 	ctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
@@ -77,6 +81,8 @@ func TestInitGroupSchema(t *testing.T) {
 }
 
 func TestFillGroupStats(t *testing.T) {
+	t.Parallel()
+
 	p := parser.New()
 	ctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
@@ -98,6 +104,8 @@ func TestFillGroupStats(t *testing.T) {
 }
 
 func TestPreparePossibleProperties(t *testing.T) {
+	t.Parallel()
+
 	p := parser.New()
 	ctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
@@ -190,6 +198,8 @@ func (rule *fakeTransformation) OnTransform(old *memo.ExprIter) (newExprs []*mem
 }
 
 func TestAppliedRuleSet(t *testing.T) {
+	t.Parallel()
+
 	p := parser.New()
 	ctx := plannercore.MockContext()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})

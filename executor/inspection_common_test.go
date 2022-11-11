@@ -16,19 +16,16 @@ package executor_test
 
 import (
 	"context"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/session"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/testkit"
 )
 
-func TestInspectionRules(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+func (s *inspectionSummarySuite) TestInspectionRules(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
-	tk := testkit.NewTestKit(t, store)
 	inspectionCount := len(executor.InspectionRules)
 	summaryCount := len(executor.InspectionSummaryRules)
 	var cases = []struct {
@@ -55,10 +52,10 @@ func TestInspectionRules(t *testing.T) {
 
 	for _, ca := range cases {
 		rs, err := tk.Exec(ca.sql)
-		require.NoError(t, err)
-		rules, err := session.ResultSetToStringSlice(context.Background(), tk.Session(), rs)
-		require.NoError(t, err)
-		require.Len(t, rules, ca.ruleCount)
-		require.NoError(t, rs.Close())
+		c.Assert(err, IsNil)
+		rules, err := session.ResultSetToStringSlice(context.Background(), tk.Se, rs)
+		c.Assert(err, IsNil)
+		c.Assert(len(rules), Equals, ca.ruleCount)
+		c.Assert(rs.Close(), IsNil)
 	}
 }

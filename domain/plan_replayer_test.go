@@ -29,16 +29,14 @@ func TestPlanReplayerGC(t *testing.T) {
 	time := startTime.UnixNano()
 	fileName := fmt.Sprintf("replayer_single_xxxxxx_%v.zip", time)
 	err := os.MkdirAll(GetPlanReplayerDirName(), os.ModePerm)
-	require.NoError(t, err)
+	require.Nil(t, err)
 	path := filepath.Join(GetPlanReplayerDirName(), fileName)
 	zf, err := os.Create(path)
-	require.NoError(t, err)
+	require.Nil(t, err)
 	zf.Close()
 
-	handler := &dumpFileGcChecker{
-		paths: []string{GetPlanReplayerDirName()},
-	}
-	handler.gcDumpFiles(0)
+	handler := &planReplayer{}
+	handler.planReplayerGC(0)
 
 	_, err = os.Stat(path)
 	require.NotNil(t, err)
@@ -49,7 +47,7 @@ func TestPlanReplayerParseTime(t *testing.T) {
 	nowTime := time.Now()
 	name1 := fmt.Sprintf("replayer_single_xxxxxx_%v.zip", nowTime.UnixNano())
 	pt, err := parseTime(name1)
-	require.NoError(t, err)
+	require.Nil(t, err)
 	require.True(t, pt.Equal(nowTime))
 
 	name2 := fmt.Sprintf("replayer_single_xxxxxx_%v1.zip", nowTime.UnixNano())

@@ -24,6 +24,8 @@ import (
 )
 
 func TestIncInt64(t *testing.T) {
+	t.Parallel()
+
 	mb := newMockMap()
 	key := Key("key")
 	v, err := IncInt64(mb, key, 1)
@@ -51,6 +53,8 @@ func TestIncInt64(t *testing.T) {
 }
 
 func TestGetInt64(t *testing.T) {
+	t.Parallel()
+
 	mb := newMockMap()
 	key := Key("key")
 	v, err := GetInt64(context.TODO(), mb, key)

@@ -28,7 +28,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -185,7 +184,6 @@ type Locker struct {
 }
 
 // generateLocks sends Prewrite requests to TiKV to generate locks, without committing and rolling back.
-//nolint:gosec
 func (c *Locker) generateLocks(pctx context.Context) error {
 	log.Info("genLock started")
 
@@ -341,12 +339,11 @@ func (c *Locker) lockBatch(ctx context.Context, keys [][]byte, primary []byte) (
 	}
 }
 
-//nolint:gosec
 func randStr() string {
 	length := rand.Intn(128)
 	res := ""
 	for i := 0; i < length; i++ {
-		res += strconv.Itoa(rand.Intn(10))
+		res += fmt.Sprint(rand.Intn(10))
 	}
 	return res
 }

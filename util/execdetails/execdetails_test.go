@@ -26,6 +26,7 @@ import (
 )
 
 func TestString(t *testing.T) {
+	t.Parallel()
 	detail := &ExecDetails{
 		CopTime:      time.Second + 3*time.Millisecond,
 		BackoffTime:  time.Second,
@@ -86,6 +87,7 @@ func mockExecutorExecutionSummaryForTiFlash(TimeProcessedNs, NumProducedRows, Nu
 }
 
 func TestCopRuntimeStats(t *testing.T) {
+	t.Parallel()
 	stats := NewRuntimeStatsColl(nil)
 	tableScanID := 1
 	aggID := 2
@@ -138,6 +140,7 @@ func TestCopRuntimeStats(t *testing.T) {
 }
 
 func TestCopRuntimeStatsForTiFlash(t *testing.T) {
+	t.Parallel()
 	stats := NewRuntimeStatsColl(nil)
 	tableScanID := 1
 	aggID := 2
@@ -176,6 +179,7 @@ func TestCopRuntimeStatsForTiFlash(t *testing.T) {
 }
 
 func TestRuntimeStatsWithCommit(t *testing.T) {
+	t.Parallel()
 	commitDetail := &util.CommitDetails{
 		GetCommitTsTime: time.Second,
 		PrewriteTime:    time.Second,
@@ -226,6 +230,7 @@ func TestRuntimeStatsWithCommit(t *testing.T) {
 }
 
 func TestRootRuntimeStats(t *testing.T) {
+	t.Parallel()
 	basic1 := &BasicRuntimeStats{}
 	basic2 := &BasicRuntimeStats{}
 	basic1.Record(time.Second, 20)
@@ -255,6 +260,7 @@ func TestRootRuntimeStats(t *testing.T) {
 }
 
 func TestFormatDurationForExplain(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		t string
 		s string
@@ -294,7 +300,7 @@ func TestFormatDurationForExplain(t *testing.T) {
 	}
 	for _, ca := range cases {
 		d, err := time.ParseDuration(ca.t)
-		require.NoError(t, err)
+		require.Nil(t, err)
 
 		result := FormatDuration(d)
 		require.Equal(t, ca.s, result)

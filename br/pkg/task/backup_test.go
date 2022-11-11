@@ -6,52 +6,56 @@ import (
 	"testing"
 	"time"
 
-	backup "github.com/pingcap/kvproto/pkg/brpb"
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
+	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 )
 
-func TestParseTSString(t *testing.T) {
+var _ = Suite(&testBackupSuite{})
+
+func TestT(t *testing.T) {
+	TestingT(t)
+}
+
+type testBackupSuite struct{}
+
+func (s *testBackupSuite) TestParseTSString(c *C) {
 	var (
 		ts  uint64
 		err error
 	)
 
-	ts, err = ParseTSString("")
-	require.NoError(t, err)
-	require.Zero(t, ts)
+	ts, err = parseTSString("")
+	c.Assert(err, IsNil)
+	c.Assert(int(ts), Equals, 0)
 
-	ts, err = ParseTSString("400036290571534337")
-	require.NoError(t, err)
-	require.Equal(t, uint64(400036290571534337), ts)
+	ts, err = parseTSString("400036290571534337")
+	c.Assert(err, IsNil)
+	c.Assert(int(ts), Equals, 400036290571534337)
 
-	ts, err = ParseTSString("2021-01-01 01:42:23")
-	require.NoError(t, err)
-	localTime := time.Date(2021, time.Month(1), 1, 1, 42, 23, 0, time.Local)
-
-	localTimestamp := localTime.Unix()
-	localTSO := uint64((localTimestamp << 18) * 1000)
-	require.Equal(t, localTSO, ts)
+	_, offset := time.Now().Local().Zone()
+	ts, err = parseTSString("2018-05-11 01:42:23")
+	c.Assert(err, IsNil)
+	c.Assert(int(ts), Equals, 400032515489792000-(offset*1000)<<18)
 }
 
-func TestParseCompressionType(t *testing.T) {
+func (s *testBackupSuite) TestParseCompressionType(c *C) {
 	var (
-		ct  backup.CompressionType
+		ct  backuppb.CompressionType
 		err error
 	)
 	ct, err = parseCompressionType("lz4")
-	require.NoError(t, err)
-	require.Equal(t, 1, int(ct))
+	c.Assert(err, IsNil)
+	c.Assert(int(ct), Equals, 1)
 
 	ct, err = parseCompressionType("snappy")
-	require.NoError(t, err)
-	require.Equal(t, 2, int(ct))
+	c.Assert(err, IsNil)
+	c.Assert(int(ct), Equals, 2)
 
 	ct, err = parseCompressionType("zstd")
-	require.NoError(t, err)
-	require.Equal(t, 3, int(ct))
+	c.Assert(err, IsNil)
+	c.Assert(int(ct), Equals, 3)
 
 	ct, err = parseCompressionType("Other Compression (strings)")
-	require.Error(t, err)
-	require.Regexp(t, "invalid compression.*", err.Error())
-	require.Zero(t, ct)
+	c.Assert(err, ErrorMatches, "invalid compression.*")
+	c.Assert(int(ct), Equals, 0)
 }

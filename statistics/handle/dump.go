@@ -15,10 +15,6 @@
 package handle
 
 import (
-	"bytes"
-	"compress/gzip"
-	"encoding/json"
-	"io/ioutil"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -300,18 +296,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *J
 			}
 			hist := statistics.HistogramFromProto(jsonCol.Histogram)
 			sc := &stmtctx.StatementContext{TimeZone: time.UTC}
-			tmpFT := colInfo.FieldType
-			// For new collation data, when storing the bounds of the histogram, we store the collate key instead of the
-			// original value.
-			// But there's additional conversion logic for new collation data, and the collate key might be longer than
-			// the FieldType.flen.
-			// If we use the original FieldType here, there might be errors like "Invalid utf8mb4 character string"
-			// or "Data too long".
-			// So we change it to TypeBlob to bypass those logics here.
-			if colInfo.FieldType.EvalType() == types.ETString && colInfo.FieldType.GetType() != mysql.TypeEnum && colInfo.FieldType.GetType() != mysql.TypeSet {
-				tmpFT = *types.NewFieldType(mysql.TypeBlob)
-			}
-			hist, err := hist.ConvertTo(sc, &tmpFT)
+			hist, err := hist.ConvertTo(sc, &colInfo.FieldType)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -331,9 +316,8 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *J
 				TopN:       topN,
 				FMSketch:   fms,
 				Info:       colInfo,
-				IsHandle:   tableInfo.PKIsHandle && mysql.HasPriKeyFlag(colInfo.GetFlag()),
+				IsHandle:   tableInfo.PKIsHandle && mysql.HasPriKeyFlag(colInfo.Flag),
 				StatsVer:   statsVer,
-				Loaded:     true,
 			}
 			col.Count = int64(col.TotalRowCount())
 			tbl.Columns[col.ID] = col
@@ -341,59 +325,4 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *J
 	}
 	tbl.ExtendedStats = extendedStatsFromJSON(jsonTbl.ExtStats)
 	return tbl, nil
-}
-
-// JSONTableToBlocks convert JSONTable to json, then compresses it to blocks by gzip.
-func JSONTableToBlocks(jsTable *JSONTable, blockSize int) ([][]byte, error) {
-	data, err := json.Marshal(jsTable)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	var gzippedData bytes.Buffer
-	gzipWriter := gzip.NewWriter(&gzippedData)
-	if _, err := gzipWriter.Write(data); err != nil {
-		return nil, errors.Trace(err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		return nil, errors.Trace(err)
-	}
-	blocksNum := gzippedData.Len() / blockSize
-	if gzippedData.Len()%blockSize != 0 {
-		blocksNum = blocksNum + 1
-	}
-	blocks := make([][]byte, blocksNum)
-	for i := 0; i < blocksNum-1; i++ {
-		blocks[i] = gzippedData.Bytes()[blockSize*i : blockSize*(i+1)]
-	}
-	blocks[blocksNum-1] = gzippedData.Bytes()[blockSize*(blocksNum-1):]
-	return blocks, nil
-}
-
-// BlocksToJSONTable convert gzip-compressed blocks to JSONTable
-func BlocksToJSONTable(blocks [][]byte) (*JSONTable, error) {
-	if len(blocks) == 0 {
-		return nil, errors.New("Block empty error")
-	}
-	data := blocks[0]
-	for i := 1; i < len(blocks); i++ {
-		data = append(data, blocks[i]...)
-	}
-	gzippedData := bytes.NewReader(data)
-	gzipReader, err := gzip.NewReader(gzippedData)
-	if err != nil {
-		return nil, err
-	}
-	if err := gzipReader.Close(); err != nil {
-		return nil, err
-	}
-	jsonStr, err := ioutil.ReadAll(gzipReader)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	jsonTbl := JSONTable{}
-	err = json.Unmarshal(jsonStr, &jsonTbl)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return &jsonTbl, nil
 }

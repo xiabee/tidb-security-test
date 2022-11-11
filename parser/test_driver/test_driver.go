@@ -11,8 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-// +build !codes
+//+build !codes
 
 package test_driver
 
@@ -63,7 +62,7 @@ func (n *ValueExpr) Restore(ctx *format.RestoreCtx) error {
 	case KindNull:
 		ctx.WriteKeyWord("NULL")
 	case KindInt64:
-		if n.Type.GetFlag()&mysql.IsBooleanFlag != 0 {
+		if n.Type.Flag&mysql.IsBooleanFlag != 0 {
 			if n.GetInt64() > 0 {
 				ctx.WriteKeyWord("TRUE")
 			} else {
@@ -79,9 +78,9 @@ func (n *ValueExpr) Restore(ctx *format.RestoreCtx) error {
 	case KindFloat64:
 		ctx.WritePlain(strconv.FormatFloat(n.GetFloat64(), 'e', -1, 64))
 	case KindString:
-		if n.Type.GetCharset() != "" {
+		if n.Type.Charset != "" {
 			ctx.WritePlain("_")
-			ctx.WriteKeyWord(n.Type.GetCharset())
+			ctx.WriteKeyWord(n.Type.Charset)
 		}
 		ctx.WriteString(n.GetString())
 	case KindBytes:
@@ -89,12 +88,12 @@ func (n *ValueExpr) Restore(ctx *format.RestoreCtx) error {
 	case KindMysqlDecimal:
 		ctx.WritePlain(n.GetMysqlDecimal().String())
 	case KindBinaryLiteral:
-		if n.Type.GetCharset() != "" && n.Type.GetCharset() != mysql.DefaultCharset &&
-			n.Type.GetCharset() != charset.CharsetBin {
+		if n.Type.Charset != "" && n.Type.Charset != mysql.DefaultCharset &&
+			n.Type.Charset != charset.CharsetBin {
 			ctx.WritePlain("_")
-			ctx.WriteKeyWord(n.Type.GetCharset() + " ")
+			ctx.WriteKeyWord(n.Type.Charset + " ")
 		}
-		if n.Type.GetFlag()&mysql.UnsignedFlag != 0 {
+		if n.Type.Flag&mysql.UnsignedFlag != 0 {
 			ctx.WritePlainf("x'%x'", n.GetBytes())
 		} else {
 			ctx.WritePlain(n.GetBinaryLiteral().ToBitLiteralString(true))
@@ -123,7 +122,7 @@ func (n *ValueExpr) Format(w io.Writer) {
 	case KindNull:
 		s = "NULL"
 	case KindInt64:
-		if n.Type.GetFlag()&mysql.IsBooleanFlag != 0 {
+		if n.Type.Flag&mysql.IsBooleanFlag != 0 {
 			if n.GetInt64() > 0 {
 				s = "TRUE"
 			} else {
@@ -143,7 +142,7 @@ func (n *ValueExpr) Format(w io.Writer) {
 	case KindMysqlDecimal:
 		s = n.GetMysqlDecimal().String()
 	case KindBinaryLiteral:
-		if n.Type.GetFlag()&mysql.UnsignedFlag != 0 {
+		if n.Type.Flag&mysql.UnsignedFlag != 0 {
 			s = fmt.Sprintf("x'%x'", n.GetBytes())
 		} else {
 			s = n.GetBinaryLiteral().ToBitLiteralString(true)

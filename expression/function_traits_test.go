@@ -15,13 +15,11 @@
 package expression
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/stretchr/testify/require"
 )
 
-func TestUnfoldableFuncs(t *testing.T) {
+func (s *testEvaluatorSuite) TestUnfoldableFuncs(c *C) {
 	_, ok := unFoldableFunctions[ast.Sysdate]
-	require.True(t, ok)
+	c.Assert(ok, IsTrue)
 }

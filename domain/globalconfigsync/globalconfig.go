@@ -17,39 +17,58 @@ package globalconfigsync
 import (
 	"context"
 
+	"github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/util/logutil"
-	pd "github.com/tikv/pd/client"
+	"go.etcd.io/etcd/clientv3"
 	"go.uber.org/zap"
 )
 
-// GlobalConfigSyncer is used to sync pd global config.
+const (
+	globalConfigPath     = "/global/config/"
+	keyOpDefaultRetryCnt = 5
+)
+
+// GlobalConfigSyncer stores global config into etcd.
 type GlobalConfigSyncer struct {
-	pd       pd.Client
-	NotifyCh chan pd.GlobalConfigItem
+	etcdCli  *clientv3.Client
+	NotifyCh chan ConfigEntry
 }
 
-// NewGlobalConfigSyncer creates a GlobalConfigSyncer.
-func NewGlobalConfigSyncer(p pd.Client) *GlobalConfigSyncer {
+// NewGlobalConfigSyncer returns a new GlobalConfigSyncer.
+func NewGlobalConfigSyncer(etcdCli *clientv3.Client) *GlobalConfigSyncer {
 	return &GlobalConfigSyncer{
-		pd:       p,
-		NotifyCh: make(chan pd.GlobalConfigItem, 8),
+		etcdCli:  etcdCli,
+		NotifyCh: make(chan ConfigEntry, 8),
 	}
 }
 
-// StoreGlobalConfig is used to store global config.
-func (s *GlobalConfigSyncer) StoreGlobalConfig(ctx context.Context, item pd.GlobalConfigItem) error {
-	if s.pd == nil {
+// ConfigEntry contain the global config Name and Value.
+type ConfigEntry struct {
+	Name  string
+	Value string
+}
+
+// Notify sends the config entry into notify channel.
+func (c *GlobalConfigSyncer) Notify(name, value string) {
+	c.NotifyCh <- ConfigEntry{Name: name, Value: value}
+}
+
+// StoreGlobalConfig stores the global config into etcd.
+func (c *GlobalConfigSyncer) StoreGlobalConfig(ctx context.Context, entry ConfigEntry) error {
+	if c.etcdCli == nil {
 		return nil
 	}
-	err := s.pd.StoreGlobalConfig(ctx, []pd.GlobalConfigItem{item})
+
+	key := globalConfigPath + entry.Name
+	err := util.PutKVToEtcd(ctx, c.etcdCli, keyOpDefaultRetryCnt, key, entry.Value)
 	if err != nil {
 		return err
 	}
-	logutil.BgLogger().Info("store global config", zap.String("name", item.Name), zap.String("value", item.Value))
+	logutil.BgLogger().Info("store global config", zap.String("Name", entry.Name), zap.String("Value", entry.Value))
 	return nil
 }
 
-// Notify pushes global config to internal channel and will be sync into pd's GlobalConfig.
-func (s *GlobalConfigSyncer) Notify(globalConfigItem pd.GlobalConfigItem) {
-	s.NotifyCh <- globalConfigItem
+// SetEtcdClient exports for testing.
+func (c *GlobalConfigSyncer) SetEtcdClient(etcdCli *clientv3.Client) {
+	c.etcdCli = etcdCli
 }

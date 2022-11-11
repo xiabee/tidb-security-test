@@ -47,8 +47,8 @@ import (
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/admin"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/logutil"
 	tikverr "github.com/tikv/client-go/v2/error"
 	tikvstore "github.com/tikv/client-go/v2/kv"
@@ -698,9 +698,6 @@ func (w *GCWorker) deleteRanges(ctx context.Context, safePoint uint64, concurren
 		return errors.Trace(err)
 	}
 
-	// Cache table ids on which placement rules have been GC-ed, to avoid redundantly GC the same table id multiple times.
-	gcPlacementRuleCache := make(map[int64]interface{}, len(ranges))
-
 	logutil.Logger(ctx).Info("[gc worker] start delete ranges",
 		zap.String("uuid", w.uuid),
 		zap.Int("ranges", len(ranges)))
@@ -733,7 +730,7 @@ func (w *GCWorker) deleteRanges(ctx context.Context, safePoint uint64, concurren
 			metrics.GCUnsafeDestroyRangeFailuresCounterVec.WithLabelValues("save").Inc()
 		}
 
-		if err := w.doGCPlacementRules(safePoint, r, gcPlacementRuleCache); err != nil {
+		if err := w.doGCPlacementRules(r); err != nil {
 			logutil.Logger(ctx).Error("[gc worker] gc placement rules failed on range",
 				zap.String("uuid", w.uuid),
 				zap.Int64("jobID", r.JobID),
@@ -1124,9 +1121,9 @@ retryScanAndResolve:
 			return stat, errors.Errorf("unexpected scanlock error: %s", locksResp)
 		}
 		locksInfo := locksResp.GetLocks()
-		locks := make([]*txnlock.Lock, 0, len(locksInfo))
-		for _, li := range locksInfo {
-			locks = append(locks, txnlock.NewLock(li))
+		locks := make([]*txnlock.Lock, len(locksInfo))
+		for i := range locksInfo {
+			locks[i] = txnlock.NewLock(locksInfo[i])
 		}
 		if w.testingKnobs.scanLocks != nil {
 			locks = append(locks, w.testingKnobs.scanLocks(key, loc.Region.GetID())...)
@@ -1829,7 +1826,7 @@ func (w *GCWorker) loadValueFromSysTable(key string) (string, error) {
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	req := rs.NewChunk(nil)
+	req := rs.NewChunk()
 	err = rs.Next(ctx, req)
 	if err != nil {
 		return "", errors.Trace(err)
@@ -1865,7 +1862,7 @@ func (w *GCWorker) saveValueToSysTable(key, value string) error {
 // GC placement rules when the partitions are removed by the GC worker.
 // Placement rules cannot be removed immediately after drop table / truncate table,
 // because the tables can be flashed back or recovered.
-func (w *GCWorker) doGCPlacementRules(safePoint uint64, dr util.DelRangeTask, gcPlacementRuleCache map[int64]interface{}) (err error) {
+func (w *GCWorker) doGCPlacementRules(dr util.DelRangeTask) (err error) {
 	// Get the job from the job history
 	var historyJob *model.Job
 	failpoint.Inject("mockHistoryJobForGC", func(v failpoint.Value) {
@@ -1876,7 +1873,6 @@ func (w *GCWorker) doGCPlacementRules(safePoint uint64, dr util.DelRangeTask, gc
 		historyJob = &model.Job{
 			ID:      dr.JobID,
 			Type:    model.ActionDropTable,
-			TableID: int64(v.(int)),
 			RawArgs: args,
 		}
 	})
@@ -1891,54 +1887,27 @@ func (w *GCWorker) doGCPlacementRules(safePoint uint64, dr util.DelRangeTask, gc
 			return
 		}
 		if historyJob == nil {
-			return dbterror.ErrDDLJobNotFound.GenWithStackByArgs(dr.JobID)
+			return admin.ErrDDLJobNotFound.GenWithStackByArgs(dr.JobID)
 		}
 	}
 
-	// Notify PD to drop the placement rules of partition-ids and table-id, even if there may be no placement rules.
-	var physicalTableIDs []int64
+	// Get the partition ID from the job and DelRangeTask.
 	switch historyJob.Type {
 	case model.ActionDropTable, model.ActionTruncateTable:
+		var physicalTableIDs []int64
 		var startKey kv.Key
 		if err = historyJob.DecodeArgs(&startKey, &physicalTableIDs); err != nil {
 			return
 		}
+		// Notify PD to drop the placement rules of partition-ids and table-id, even if there may be no placement rules.
 		physicalTableIDs = append(physicalTableIDs, historyJob.TableID)
-	case model.ActionDropSchema, model.ActionDropTablePartition, model.ActionTruncateTablePartition:
-		if err = historyJob.DecodeArgs(&physicalTableIDs); err != nil {
-			return
+		bundles := make([]*placement.Bundle, 0, len(physicalTableIDs))
+		for _, id := range physicalTableIDs {
+			bundles = append(bundles, placement.NewBundle(id))
 		}
+		err = infosync.PutRuleBundles(context.TODO(), bundles)
 	}
-
-	if len(physicalTableIDs) == 0 {
-		return
-	}
-
-	bundles := make([]*placement.Bundle, 0, len(physicalTableIDs))
-	for _, id := range physicalTableIDs {
-		bundles = append(bundles, placement.NewBundle(id))
-	}
-
-	for _, id := range physicalTableIDs {
-		// Skip table ids that's already successfully deleted.
-		if _, ok := gcPlacementRuleCache[id]; ok {
-			continue
-		}
-		// Delete pd rule
-		failpoint.Inject("gcDeletePlacementRuleCounter", func() {})
-		logutil.BgLogger().Info("try delete TiFlash pd rule",
-			zap.Int64("tableID", id), zap.String("endKey", string(dr.EndKey)), zap.Uint64("safePoint", safePoint))
-		ruleID := fmt.Sprintf("table-%v-r", id)
-		if err := infosync.DeleteTiFlashPlacementRule(context.Background(), "tiflash", ruleID); err != nil {
-			// If DeletePlacementRule fails here, the rule will be deleted in `HandlePlacementRuleRoutine`.
-			logutil.BgLogger().Error("delete TiFlash pd rule failed when gc",
-				zap.Error(err), zap.String("ruleID", ruleID), zap.Uint64("safePoint", safePoint))
-		} else {
-			// Cache the table id if its related rule are deleted successfully.
-			gcPlacementRuleCache[id] = struct{}{}
-		}
-	}
-	return infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
+	return
 }
 
 func (w *GCWorker) doGCLabelRules(dr util.DelRangeTask) (err error) {
@@ -1966,7 +1935,7 @@ func (w *GCWorker) doGCLabelRules(dr util.DelRangeTask) (err error) {
 			return
 		}
 		if historyJob == nil {
-			return dbterror.ErrDDLJobNotFound.GenWithStackByArgs(dr.JobID)
+			return admin.ErrDDLJobNotFound.GenWithStackByArgs(dr.JobID)
 		}
 	}
 

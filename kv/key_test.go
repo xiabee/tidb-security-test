@@ -22,7 +22,7 @@ import (
 
 	. "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/testkit/testutil"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/assert"
@@ -30,16 +30,18 @@ import (
 )
 
 func TestPartialNext(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	// keyA represents a multi column index.
 	keyA, err := codec.EncodeValue(sc, nil, types.NewDatum("abc"), types.NewDatum("def"))
-	require.NoError(t, err)
+	require.Nil(t, err)
 	keyB, err := codec.EncodeValue(sc, nil, types.NewDatum("abca"), types.NewDatum("def"))
-	require.NoError(t, err)
+	require.Nil(t, err)
 
 	// We only use first column value to seek.
 	seekKey, err := codec.EncodeValue(sc, nil, types.NewDatum("abc"))
-	require.NoError(t, err)
+	require.Nil(t, err)
 
 	nextKey := Key(seekKey).Next()
 	cmp := bytes.Compare(nextKey, keyA)
@@ -55,6 +57,8 @@ func TestPartialNext(t *testing.T) {
 }
 
 func TestIsPoint(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		start   []byte
 		end     []byte
@@ -107,12 +111,16 @@ func TestIsPoint(t *testing.T) {
 }
 
 func TestBasicFunc(t *testing.T) {
+	t.Parallel()
+
 	assert.False(t, IsTxnRetryableError(nil))
 	assert.True(t, IsTxnRetryableError(ErrTxnRetryable))
 	assert.False(t, IsTxnRetryableError(errors.New("test")))
 }
 
 func TestHandle(t *testing.T) {
+	t.Parallel()
+
 	ih := IntHandle(100)
 	assert.True(t, ih.IsInt())
 
@@ -125,7 +133,7 @@ func TestHandle(t *testing.T) {
 	assert.Equal(t, -1, ih.Compare(ih2))
 	assert.Equal(t, "100", ih.String())
 
-	ch := testutil.MustNewCommonHandle(t, 100, "abc")
+	ch := testkit.MustNewCommonHandle(t, 100, "abc")
 	assert.False(t, ch.IsInt())
 
 	ch2 := ch.Next()
@@ -145,6 +153,8 @@ func TestHandle(t *testing.T) {
 }
 
 func TestPaddingHandle(t *testing.T) {
+	t.Parallel()
+
 	dec := types.NewDecFromInt(1)
 	encoded, err := codec.EncodeKey(new(stmtctx.StatementContext), nil, types.NewDecimalDatum(dec))
 	assert.Nil(t, err)
@@ -161,6 +171,8 @@ func TestPaddingHandle(t *testing.T) {
 }
 
 func TestHandleMap(t *testing.T) {
+	t.Parallel()
+
 	m := NewHandleMap()
 	h := IntHandle(1)
 
@@ -174,7 +186,7 @@ func TestHandleMap(t *testing.T) {
 	assert.False(t, ok)
 	assert.Nil(t, v)
 
-	ch := testutil.MustNewCommonHandle(t, 100, "abc")
+	ch := testkit.MustNewCommonHandle(t, 100, "abc")
 	m.Set(ch, "a")
 	v, ok = m.Get(ch)
 	assert.True(t, ok)
@@ -186,9 +198,9 @@ func TestHandleMap(t *testing.T) {
 	assert.Nil(t, v)
 
 	m.Set(ch, "a")
-	ch2 := testutil.MustNewCommonHandle(t, 101, "abc")
+	ch2 := testkit.MustNewCommonHandle(t, 101, "abc")
 	m.Set(ch2, "b")
-	ch3 := testutil.MustNewCommonHandle(t, 99, "def")
+	ch3 := testkit.MustNewCommonHandle(t, 99, "def")
 	m.Set(ch3, "c")
 	assert.Equal(t, 3, m.Len())
 

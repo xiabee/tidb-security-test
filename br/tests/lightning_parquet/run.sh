@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # Copyright 2019 PingCAP, Inc.
 #
@@ -21,7 +21,7 @@ check_row_count() {
     check_contains "count(*): $2"
 }
 
-for BACKEND in local tidb; do
+for BACKEND in local importer tidb; do
     if [ "$BACKEND" = 'local' ]; then
         check_cluster_version 4 0 0 'local backend' || continue
     fi
@@ -40,7 +40,6 @@ for BACKEND in local tidb; do
     check_row_count orders 100
     check_row_count stock 50
     check_row_count warehouse 1
-    check_row_count special_col_name 1
 
     run_sql 'select sum(c_id) from test.customer;'
     check_contains "sum(c_id): 210"

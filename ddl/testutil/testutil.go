@@ -22,15 +22,14 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/session"
-	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/types"
 )
 
 // SessionExecInGoroutine export for testing.
-func SessionExecInGoroutine(s kv.Storage, dbName, sql string, done chan error) {
-	ExecMultiSQLInGoroutine(s, dbName, []string{sql}, done)
+func SessionExecInGoroutine(s kv.Storage, sql string, done chan error) {
+	ExecMultiSQLInGoroutine(s, "test_db", []string{sql}, done)
 }
 
 // ExecMultiSQLInGoroutine exports for testing.
@@ -54,7 +53,7 @@ func ExecMultiSQLInGoroutine(s kv.Storage, dbName string, multiSQL []string, don
 				return
 			}
 			if rs != nil {
-				done <- errors.Errorf("RecordSet should be empty")
+				done <- errors.Errorf("RecordSet should be empty.")
 				return
 			}
 			done <- nil
@@ -69,7 +68,7 @@ func ExtractAllTableHandles(se session.Session, dbName, tbName string) ([]int64,
 	if err != nil {
 		return nil, err
 	}
-	err = sessiontxn.NewTxn(context.Background(), se)
+	err = se.NewTxn(context.Background())
 	if err != nil {
 		return nil, err
 	}

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build ignore
 // +build ignore
 
 package main
@@ -101,7 +100,11 @@ func (b *builtin{{ .compare.CompareName }}{{ .type.TypeName }}Sig) vecEvalInt(in
 {{- else if eq .type.ETName "Decimal" }}
 		val := arg0[i].Compare(&arg1[i])
 {{- end }}
-		i64s[i] = boolToInt64(val {{ .compare.Operator }} 0)
+		if val {{ .compare.Operator }} 0 {
+			i64s[i] = 1
+		} else {
+			i64s[i] = 0
+		}
 	}
 	return nil
 }

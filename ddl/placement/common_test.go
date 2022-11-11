@@ -17,11 +17,19 @@ package placement
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestGroup(t *testing.T) {
-	require.Equal(t, "TiDB_DDL_1", GroupID(1))
-	require.Equal(t, "TiDB_DDL_90", GroupID(90))
-	require.Equal(t, "TiDB_DDL_-1", GroupID(-1))
+func TestT(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&testCommonSuite{})
+
+type testCommonSuite struct{}
+
+func (t *testCommonSuite) TestGroup(c *C) {
+	c.Assert(GroupID(1), Equals, "TiDB_DDL_1")
+	c.Assert(GroupID(90), Equals, "TiDB_DDL_90")
+	c.Assert(GroupID(-1), Equals, "TiDB_DDL_-1")
 }

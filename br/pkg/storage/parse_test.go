@@ -8,38 +8,43 @@ import (
 	"path/filepath"
 	"testing"
 
+	. "github.com/pingcap/check"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
-	"github.com/stretchr/testify/require"
 )
 
-func TestCreateStorage(t *testing.T) {
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+type testStorageSuite struct{}
+
+var _ = Suite(&testStorageSuite{})
+
+func (r *testStorageSuite) TestCreateStorage(c *C) {
 	_, err := ParseBackend("1invalid:", nil)
-	require.Error(t, err)
-	require.Regexp(t, "parse (.*)1invalid:(.*): first path segment in URL cannot contain colon", err.Error())
+	c.Assert(err, ErrorMatches, "parse (.*)1invalid:(.*): first path segment in URL cannot contain colon")
 
 	_, err = ParseBackend("net:storage", nil)
-	require.Error(t, err)
-	require.Regexp(t, "storage net not support yet.*", err.Error())
+	c.Assert(err, ErrorMatches, "storage net not support yet.*")
 
 	s, err := ParseBackend("local:///tmp/storage", nil)
-	require.NoError(t, err)
-	require.Equal(t, "/tmp/storage", s.GetLocal().GetPath())
+	c.Assert(err, IsNil)
+	c.Assert(s.GetLocal().GetPath(), Equals, "/tmp/storage")
 
 	s, err = ParseBackend("file:///tmp/storage", nil)
-	require.NoError(t, err)
-	require.Equal(t, "/tmp/storage", s.GetLocal().GetPath())
+	c.Assert(err, IsNil)
+	c.Assert(s.GetLocal().GetPath(), Equals, "/tmp/storage")
 
 	s, err = ParseBackend("noop://", nil)
-	require.NoError(t, err)
-	require.NotNil(t, s.GetNoop())
+	c.Assert(err, IsNil)
+	c.Assert(s.GetNoop(), NotNil)
 
 	s, err = ParseBackend("hdfs://127.0.0.1:1231/backup", nil)
-	require.NoError(t, err)
-	require.Equal(t, "hdfs://127.0.0.1:1231/backup", s.GetHdfs().GetRemote())
+	c.Assert(err, IsNil)
+	c.Assert(s.GetHdfs().GetRemote(), Equals, "hdfs://127.0.0.1:1231/backup")
 
 	_, err = ParseBackend("s3:///bucket/more/prefix/", &BackendOptions{})
-	require.Error(t, err)
-	require.Regexp(t, `please specify the bucket for s3 in s3:///bucket/more/prefix/.*`, err.Error())
+	c.Assert(err, ErrorMatches, `please specify the bucket for s3 in s3:///bucket/more/prefix/.*`)
 
 	s3opt := &BackendOptions{
 		S3: S3BackendOptions{
@@ -47,36 +52,36 @@ func TestCreateStorage(t *testing.T) {
 		},
 	}
 	s, err = ParseBackend("s3://bucket2/prefix/", s3opt)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	s3 := s.GetS3()
-	require.NotNil(t, s3)
-	require.Equal(t, "bucket2", s3.Bucket)
-	require.Equal(t, "prefix", s3.Prefix)
-	require.Equal(t, "https://s3.example.com", s3.Endpoint)
-	require.False(t, s3.ForcePathStyle)
+	c.Assert(s3, NotNil)
+	c.Assert(s3.Bucket, Equals, "bucket2")
+	c.Assert(s3.Prefix, Equals, "prefix")
+	c.Assert(s3.Endpoint, Equals, "https://s3.example.com")
+	c.Assert(s3.ForcePathStyle, IsFalse)
 
 	// nolint:lll
 	s, err = ParseBackend(`s3://bucket3/prefix/path?endpoint=https://127.0.0.1:9000&force_path_style=0&SSE=aws:kms&sse-kms-key-id=TestKey&xyz=abc`, nil)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	s3 = s.GetS3()
-	require.NotNil(t, s3)
-	require.Equal(t, "bucket3", s3.Bucket)
-	require.Equal(t, "prefix/path", s3.Prefix)
-	require.Equal(t, "https://127.0.0.1:9000", s3.Endpoint)
-	require.False(t, s3.ForcePathStyle)
-	require.Equal(t, "aws:kms", s3.Sse)
-	require.Equal(t, "TestKey", s3.SseKmsKeyId)
+	c.Assert(s3, NotNil)
+	c.Assert(s3.Bucket, Equals, "bucket3")
+	c.Assert(s3.Prefix, Equals, "prefix/path")
+	c.Assert(s3.Endpoint, Equals, "https://127.0.0.1:9000")
+	c.Assert(s3.ForcePathStyle, IsFalse)
+	c.Assert(s3.Sse, Equals, "aws:kms")
+	c.Assert(s3.SseKmsKeyId, Equals, "TestKey")
 
 	// special character in access keys
 	s, err = ParseBackend(`s3://bucket4/prefix/path?access-key=NXN7IPIOSAAKDEEOLMAF&secret-access-key=nREY/7Dt+PaIbYKrKlEEMMF/ExCiJEX=XMLPUANw`, nil)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	s3 = s.GetS3()
-	require.NotNil(t, s3)
-	require.Equal(t, "bucket4", s3.Bucket)
-	require.Equal(t, "prefix/path", s3.Prefix)
-	require.Equal(t, "NXN7IPIOSAAKDEEOLMAF", s3.AccessKey)
-	require.Equal(t, "nREY/7Dt+PaIbYKrKlEEMMF/ExCiJEX=XMLPUANw", s3.SecretAccessKey)
-	require.True(t, s3.ForcePathStyle)
+	c.Assert(s3, NotNil)
+	c.Assert(s3.Bucket, Equals, "bucket4")
+	c.Assert(s3.Prefix, Equals, "prefix/path")
+	c.Assert(s3.AccessKey, Equals, "NXN7IPIOSAAKDEEOLMAF")
+	c.Assert(s3.SecretAccessKey, Equals, "nREY/7Dt+PaIbYKrKlEEMMF/ExCiJEX=XMLPUANw")
+	c.Assert(s3.ForcePathStyle, IsTrue)
 
 	gcsOpt := &BackendOptions{
 		GCS: GCSBackendOptions{
@@ -84,84 +89,74 @@ func TestCreateStorage(t *testing.T) {
 		},
 	}
 	s, err = ParseBackend("gcs://bucket2/prefix/", gcsOpt)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gcs := s.GetGcs()
-	require.NotNil(t, gcs)
-	require.Equal(t, "bucket2", gcs.Bucket)
-	require.Equal(t, "prefix", gcs.Prefix)
-	require.Equal(t, "https://gcs.example.com/", gcs.Endpoint)
-	require.Equal(t, "", gcs.CredentialsBlob)
+	c.Assert(gcs, NotNil)
+	c.Assert(gcs.Bucket, Equals, "bucket2")
+	c.Assert(gcs.Prefix, Equals, "prefix")
+	c.Assert(gcs.Endpoint, Equals, "https://gcs.example.com/")
+	c.Assert(gcs.CredentialsBlob, Equals, "")
 
 	s, err = ParseBackend("gcs://bucket2", gcsOpt)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gcs = s.GetGcs()
-	require.NotNil(t, gcs)
-	require.Equal(t, "bucket2", gcs.Bucket)
-	require.Equal(t, "", gcs.Prefix)
-	require.Equal(t, "https://gcs.example.com/", gcs.Endpoint)
-	require.Equal(t, "", gcs.CredentialsBlob)
+	c.Assert(gcs, NotNil)
+	c.Assert(gcs.Bucket, Equals, "bucket2")
+	c.Assert(gcs.Prefix, Equals, "")
+	c.Assert(gcs.Endpoint, Equals, "https://gcs.example.com/")
+	c.Assert(gcs.CredentialsBlob, Equals, "")
 
-	var credFilePerm os.FileMode = 0o600
-	fakeCredentialsFile := filepath.Join(t.TempDir(), "fakeCredentialsFile")
-	err = os.WriteFile(fakeCredentialsFile, []byte("fakeCredentials"), credFilePerm)
-	require.NoError(t, err)
+	var credFeilPerm os.FileMode = 0o600
+	fakeCredentialsFile := filepath.Join(c.MkDir(), "fakeCredentialsFile")
+	err = os.WriteFile(fakeCredentialsFile, []byte("fakeCredentials"), credFeilPerm)
+	c.Assert(err, IsNil)
 
 	gcsOpt.GCS.CredentialsFile = fakeCredentialsFile
 
 	s, err = ParseBackend("gcs://bucket/more/prefix/", gcsOpt)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gcs = s.GetGcs()
-	require.NotNil(t, gcs)
-	require.Equal(t, "bucket", gcs.Bucket)
-	require.Equal(t, "more/prefix", gcs.Prefix)
-	require.Equal(t, "https://gcs.example.com/", gcs.Endpoint)
-	require.Equal(t, "fakeCredentials", gcs.CredentialsBlob)
+	c.Assert(gcs, NotNil)
+	c.Assert(gcs.Bucket, Equals, "bucket")
+	c.Assert(gcs.Prefix, Equals, "more/prefix")
+	c.Assert(gcs.Endpoint, Equals, "https://gcs.example.com/")
+	c.Assert(gcs.CredentialsBlob, Equals, "fakeCredentials")
 
-	err = os.WriteFile(fakeCredentialsFile, []byte("fakeCreds2"), credFilePerm)
-	require.NoError(t, err)
+	err = os.WriteFile(fakeCredentialsFile, []byte("fakeCreds2"), credFeilPerm)
+	c.Assert(err, IsNil)
 	s, err = ParseBackend("gs://bucket4/backup/?credentials-file="+url.QueryEscape(fakeCredentialsFile), nil)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	gcs = s.GetGcs()
-	require.NotNil(t, gcs)
-	require.Equal(t, "bucket4", gcs.Bucket)
-	require.Equal(t, "backup", gcs.Prefix)
-	require.Equal(t, "fakeCreds2", gcs.CredentialsBlob)
-
-	s, err = ParseBackend(`azure://bucket1/prefix/path?account-name=user&account-key=cGFzc3dk&endpoint=http://127.0.0.1/user`, nil)
-	require.NoError(t, err)
-	azblob := s.GetAzureBlobStorage()
-	require.NotNil(t, azblob)
-	require.Equal(t, "bucket1", azblob.Bucket)
-	require.Equal(t, "prefix/path", azblob.Prefix)
-	require.Equal(t, "http://127.0.0.1/user", azblob.Endpoint)
-	require.Equal(t, "user", azblob.AccountName)
-	require.Equal(t, "cGFzc3dk", azblob.SharedKey)
+	c.Assert(gcs, NotNil)
+	c.Assert(gcs.Bucket, Equals, "bucket4")
+	c.Assert(gcs.Prefix, Equals, "backup")
+	c.Assert(gcs.CredentialsBlob, Equals, "fakeCreds2")
 
 	s, err = ParseBackend("/test", nil)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	local := s.GetLocal()
-	require.NotNil(t, local)
+	c.Assert(local, NotNil)
 	expectedLocalPath, err := filepath.Abs("/test")
-	require.NoError(t, err)
-	require.Equal(t, expectedLocalPath, local.GetPath())
+	c.Assert(err, IsNil)
+	c.Assert(local.GetPath(), Equals, expectedLocalPath)
 }
 
-func TestFormatBackendURL(t *testing.T) {
-	backendURL := FormatBackendURL(&backuppb.StorageBackend{
+func (r *testStorageSuite) TestFormatBackendURL(c *C) {
+	url := FormatBackendURL(&backuppb.StorageBackend{
 		Backend: &backuppb.StorageBackend_Local{
 			Local: &backuppb.Local{Path: "/tmp/file"},
 		},
 	})
-	require.Equal(t, "local:///tmp/file", backendURL.String())
+	c.Assert(url.String(), Equals, "local:///tmp/file")
 
-	backendURL = FormatBackendURL(&backuppb.StorageBackend{
+	url = FormatBackendURL(&backuppb.StorageBackend{
 		Backend: &backuppb.StorageBackend_Noop{
 			Noop: &backuppb.Noop{},
 		},
 	})
-	require.Equal(t, "noop:///", backendURL.String())
+	c.Assert(url.String(), Equals, "noop:///")
 
-	backendURL = FormatBackendURL(&backuppb.StorageBackend{
+	url = FormatBackendURL(&backuppb.StorageBackend{
 		Backend: &backuppb.StorageBackend_S3{
 			S3: &backuppb.S3{
 				Bucket:   "bucket",
@@ -170,9 +165,9 @@ func TestFormatBackendURL(t *testing.T) {
 			},
 		},
 	})
-	require.Equal(t, "s3://bucket/some%20prefix/", backendURL.String())
+	c.Assert(url.String(), Equals, "s3://bucket/some%20prefix/")
 
-	backendURL = FormatBackendURL(&backuppb.StorageBackend{
+	url = FormatBackendURL(&backuppb.StorageBackend{
 		Backend: &backuppb.StorageBackend_Gcs{
 			Gcs: &backuppb.GCS{
 				Bucket:   "bucket",
@@ -181,62 +176,5 @@ func TestFormatBackendURL(t *testing.T) {
 			},
 		},
 	})
-	require.Equal(t, "gcs://bucket/some%20prefix/", backendURL.String())
-
-	backendURL = FormatBackendURL(&backuppb.StorageBackend{
-		Backend: &backuppb.StorageBackend_AzureBlobStorage{
-			AzureBlobStorage: &backuppb.AzureBlobStorage{
-				Bucket:   "bucket",
-				Prefix:   "/some prefix/",
-				Endpoint: "https://azure.example.com/",
-			},
-		},
-	})
-	require.Equal(t, "azure://bucket/some%20prefix/", backendURL.String())
-}
-
-func TestParseRawURL(t *testing.T) {
-	cases := []struct {
-		url             string
-		schema          string
-		host            string
-		path            string
-		accessKey       string
-		secretAccessKey string
-	}{
-		{
-			url:             `s3://bucket/prefix/path?access-key=NXN7IPIOSAAKDEEOLMAF&secret-access-key=nREY/7DtPaIbYKrKlEEMMF/ExCiJEX=XMLPUANw`,
-			schema:          "s3",
-			host:            "bucket",
-			path:            "/prefix/path",
-			accessKey:       "NXN7IPIOSAAKDEEOLMAF",                    // fake ak/sk
-			secretAccessKey: "nREY/7DtPaIbYKrKlEEMMF/ExCiJEX=XMLPUANw", // w/o "+"
-		},
-		{
-			url:             `s3://bucket/prefix/path?access-key=NXN7IPIOSAAKDEEOLMAF&secret-access-key=nREY/7Dt+PaIbYKrKlEEMMF/ExCiJEX=XMLPUANw`,
-			schema:          "s3",
-			host:            "bucket",
-			path:            "/prefix/path",
-			accessKey:       "NXN7IPIOSAAKDEEOLMAF",                     // fake ak/sk
-			secretAccessKey: "nREY/7Dt+PaIbYKrKlEEMMF/ExCiJEX=XMLPUANw", // with "+"
-		},
-	}
-
-	for _, c := range cases {
-		storageRawURL := c.url
-		storageURL, err := ParseRawURL(storageRawURL)
-		require.NoError(t, err)
-
-		require.Equal(t, c.schema, storageURL.Scheme)
-		require.Equal(t, c.host, storageURL.Host)
-		require.Equal(t, c.path, storageURL.Path)
-
-		require.Equal(t, 1, len(storageURL.Query()["access-key"]))
-		accessKey := storageURL.Query()["access-key"][0]
-		require.Equal(t, c.accessKey, accessKey)
-
-		require.Equal(t, 1, len(storageURL.Query()["secret-access-key"]))
-		secretAccessKey := storageURL.Query()["secret-access-key"][0]
-		require.Equal(t, c.secretAccessKey, secretAccessKey)
-	}
+	c.Assert(url.String(), Equals, "gcs://bucket/some%20prefix/")
 }

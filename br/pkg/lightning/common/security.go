@@ -17,62 +17,91 @@ package common
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/httputil"
-	"github.com/pingcap/tidb/util"
 	"github.com/tikv/client-go/v2/config"
 	pd "github.com/tikv/pd/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
+// TLS
 type TLS struct {
-	caPath    string
-	certPath  string
-	keyPath   string
-	caBytes   []byte
-	certBytes []byte
-	keyBytes  []byte
-	inner     *tls.Config
-	client    *http.Client
-	url       string
+	caPath   string
+	certPath string
+	keyPath  string
+	inner    *tls.Config
+	client   *http.Client
+	url      string
+}
+
+// ToTLSConfig constructs a `*tls.Config` from the CA, certification and key
+// paths.
+//
+// If the CA path is empty, returns nil.
+func ToTLSConfig(caPath, certPath, keyPath string) (*tls.Config, error) {
+	if len(caPath) == 0 {
+		return nil, nil
+	}
+
+	// Load the client certificates from disk
+	var certificates []tls.Certificate
+	if len(certPath) != 0 && len(keyPath) != 0 {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, errors.Annotate(err, "could not load client key pair")
+		}
+		certificates = []tls.Certificate{cert}
+	}
+
+	// Create a certificate pool from CA
+	certPool := x509.NewCertPool()
+	ca, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, errors.Annotate(err, "could not read ca certificate")
+	}
+
+	// Append the certificates from the CA
+	if !certPool.AppendCertsFromPEM(ca) {
+		return nil, errors.New("failed to append ca certs")
+	}
+
+	return &tls.Config{
+		Certificates: certificates,
+		RootCAs:      certPool,
+		NextProtos:   []string{"h2", "http/1.1"}, // specify `h2` to let Go use HTTP/2.
+	}, nil
 }
 
 // NewTLS constructs a new HTTP client with TLS configured with the CA,
 // certificate and key paths.
-func NewTLS(caPath, certPath, keyPath, host string, caBytes, certBytes, keyBytes []byte) (*TLS, error) {
-	inner, err := util.NewTLSConfig(
-		util.WithCAPath(caPath),
-		util.WithCertAndKeyPath(certPath, keyPath),
-		util.WithCAContent(caBytes),
-		util.WithCertAndKeyContent(certBytes, keyBytes),
-	)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	if inner == nil {
+//
+// If the CA path is empty, returns an instance where TLS is disabled.
+func NewTLS(caPath, certPath, keyPath, host string) (*TLS, error) {
+	if len(caPath) == 0 {
 		return &TLS{
 			inner:  nil,
 			client: &http.Client{},
 			url:    "http://" + host,
 		}, nil
 	}
-
+	inner, err := ToTLSConfig(caPath, certPath, keyPath)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	return &TLS{
-		caPath:    caPath,
-		certPath:  certPath,
-		keyPath:   keyPath,
-		caBytes:   caBytes,
-		certBytes: certBytes,
-		keyBytes:  keyBytes,
-		inner:     inner,
-		client:    httputil.NewClient(inner),
-		url:       "https://" + host,
+		caPath:   caPath,
+		certPath: certPath,
+		keyPath:  keyPath,
+		inner:    inner,
+		client:   httputil.NewClient(inner),
+		url:      "https://" + host,
 	}, nil
 }
 
@@ -94,9 +123,11 @@ func (tc *TLS) WithHost(host string) *TLS {
 	} else {
 		url = "http://" + host
 	}
-	shallowClone := *tc
-	shallowClone.url = url
-	return &shallowClone
+	return &TLS{
+		inner:  tc.inner,
+		client: tc.client,
+		url:    url,
+	}
 }
 
 // ToGRPCDialOption constructs a gRPC dial option.
@@ -119,20 +150,14 @@ func (tc *TLS) GetJSON(ctx context.Context, path string, v interface{}) error {
 	return GetJSON(ctx, tc.client, tc.url+path, v)
 }
 
-// ToPDSecurityOption converts the TLS configuration to a PD security option.
 func (tc *TLS) ToPDSecurityOption() pd.SecurityOption {
 	return pd.SecurityOption{
-		CAPath:       tc.caPath,
-		CertPath:     tc.certPath,
-		KeyPath:      tc.keyPath,
-		SSLCABytes:   tc.caBytes,
-		SSLCertBytes: tc.certBytes,
-		SSLKEYBytes:  tc.keyBytes,
+		CAPath:   tc.caPath,
+		CertPath: tc.certPath,
+		KeyPath:  tc.keyPath,
 	}
 }
 
-// ToTiKVSecurityConfig converts the TLS configuration to a TiKV security config.
-// TODO: TiKV does not support pass in content.
 func (tc *TLS) ToTiKVSecurityConfig() config.Security {
 	return config.Security{
 		ClusterSSLCA:    tc.caPath,

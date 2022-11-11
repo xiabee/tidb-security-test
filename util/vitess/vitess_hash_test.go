@@ -25,6 +25,8 @@ import (
 )
 
 func TestVitessHash(t *testing.T) {
+	t.Parallel()
+
 	hashed, err := HashUint64(30375298039)
 	require.NoError(t, err)
 	require.Equal(t, "031265661E5F1133", toHex(hashed))

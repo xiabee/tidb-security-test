@@ -17,7 +17,6 @@ package memory
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/util/dbterror"
@@ -41,16 +40,11 @@ type ActionOnExceed interface {
 	GetFallback() ActionOnExceed
 	// GetPriority get the priority of the Action.
 	GetPriority() int64
-	// SetFinished sets the finished state of the Action.
-	SetFinished()
-	// IsFinished returns the finished state of the Action.
-	IsFinished() bool
 }
 
 // BaseOOMAction manages the fallback action for all Action.
 type BaseOOMAction struct {
 	fallbackAction ActionOnExceed
-	finished       int32
 }
 
 // SetFallback sets a fallback action which will be triggered if itself has
@@ -59,21 +53,8 @@ func (b *BaseOOMAction) SetFallback(a ActionOnExceed) {
 	b.fallbackAction = a
 }
 
-// SetFinished sets the finished state of the Action.
-func (b *BaseOOMAction) SetFinished() {
-	atomic.StoreInt32(&b.finished, 1)
-}
-
-// IsFinished returns the finished state of the Action.
-func (b *BaseOOMAction) IsFinished() bool {
-	return atomic.LoadInt32(&b.finished) == 1
-}
-
-// GetFallback get the fallback action and remove finished fallback.
+// GetFallback get the fallback action of the Action.
 func (b *BaseOOMAction) GetFallback() ActionOnExceed {
-	for b.fallbackAction != nil && b.fallbackAction.IsFinished() {
-		b.SetFallback(b.fallbackAction.GetFallback())
-	}
 	return b.fallbackAction
 }
 
@@ -107,7 +88,7 @@ func (a *LogOnExceed) Action(t *Tracker) {
 		a.acted = true
 		if a.logHook == nil {
 			logutil.BgLogger().Warn("memory exceeds quota",
-				zap.Error(errMemExceedThreshold.GenWithStackByArgs(t.label, t.BytesConsumed(), t.GetBytesLimit(), t.String())))
+				zap.Error(errMemExceedThreshold.GenWithStackByArgs(t.label, t.BytesConsumed(), t.bytesHardLimit, t.String())))
 			return
 		}
 		a.logHook(a.ConnID)

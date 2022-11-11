@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
@@ -28,6 +27,8 @@ import (
 )
 
 func TestColumn(t *testing.T) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 	col := &Column{RetType: types.NewFieldType(mysql.TypeLonglong), UniqueID: 1}
 
@@ -99,6 +100,8 @@ func TestColumn(t *testing.T) {
 }
 
 func TestColumnHashCode(t *testing.T) {
+	t.Parallel()
+
 	col1 := &Column{
 		UniqueID: 12,
 	}
@@ -111,6 +114,8 @@ func TestColumnHashCode(t *testing.T) {
 }
 
 func TestColumn2Expr(t *testing.T) {
+	t.Parallel()
+
 	cols := make([]*Column, 0, 5)
 	for i := 0; i < 5; i++ {
 		cols = append(cols, &Column{UniqueID: int64(i)})
@@ -123,6 +128,8 @@ func TestColumn2Expr(t *testing.T) {
 }
 
 func TestColInfo2Col(t *testing.T) {
+	t.Parallel()
+
 	col0, col1 := &Column{ID: 0}, &Column{ID: 1}
 	cols := []*Column{col0, col1}
 	colInfo := &model.ColumnInfo{ID: 0}
@@ -135,6 +142,8 @@ func TestColInfo2Col(t *testing.T) {
 }
 
 func TestIndexInfo2Cols(t *testing.T) {
+	t.Parallel()
+
 	col0 := &Column{UniqueID: 0, ID: 0, RetType: types.NewFieldType(mysql.TypeLonglong)}
 	col1 := &Column{UniqueID: 1, ID: 1, RetType: types.NewFieldType(mysql.TypeLonglong)}
 	colInfo0 := &model.ColumnInfo{ID: 0, Name: model.NewCIStr("0")}
@@ -165,6 +174,8 @@ func TestIndexInfo2Cols(t *testing.T) {
 }
 
 func TestColHybird(t *testing.T) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 
 	// bit
@@ -228,38 +239,4 @@ func TestColHybird(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, result.GetString(i), v)
 	}
-}
-
-func TestInColumnArray(t *testing.T) {
-	// normal case, col is in column array
-	col0, col1 := &Column{ID: 0, UniqueID: 0}, &Column{ID: 1, UniqueID: 1}
-	cols := []*Column{col0, col1}
-	require.True(t, col0.InColumnArray(cols))
-
-	// abnormal case, col is not in column array
-	require.False(t, col0.InColumnArray([]*Column{col1}))
-
-	// abnormal case, input is nil
-	require.False(t, col0.InColumnArray(nil))
-}
-
-func TestGcColumnExprIsTidbShard(t *testing.T) {
-	ctx := mock.NewContext()
-
-	// abnormal case
-	// nil, not tidb_shard
-	require.False(t, GcColumnExprIsTidbShard(nil))
-
-	// `a = 1`, not tidb_shard
-	ft := types.NewFieldType(mysql.TypeLonglong)
-	col := &Column{RetType: ft, Index: 0}
-	d1 := types.NewDatum(1)
-	con := &Constant{Value: d1, RetType: ft}
-	expr := NewFunctionInternal(ctx, ast.EQ, ft, col, con)
-	require.False(t, GcColumnExprIsTidbShard(expr))
-
-	// normal case
-	// tidb_shard(a) = 1
-	shardExpr := NewFunctionInternal(ctx, ast.TiDBShard, ft, col)
-	require.True(t, GcColumnExprIsTidbShard(shardExpr))
 }

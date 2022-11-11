@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/store/mockstore"
-	"github.com/pingcap/tidb/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -194,7 +193,7 @@ func TestConcurrentAllocSequence(t *testing.T) {
 	require.NoError(t, err)
 
 	var mu sync.Mutex
-	var wg util.WaitGroupWrapper
+	wg := sync.WaitGroup{}
 	m := map[int64]struct{}{}
 	count := 10
 	errCh := make(chan error, count)
@@ -227,11 +226,12 @@ func TestConcurrentAllocSequence(t *testing.T) {
 		}
 	}
 	for i := 0; i < count; i++ {
-		num := i
-		wg.Run(func() {
+		wg.Add(1)
+		go func(num int) {
 			time.Sleep(time.Duration(num%10) * time.Microsecond)
 			allocSequence()
-		})
+			wg.Done()
+		}(i)
 	}
 	wg.Wait()
 

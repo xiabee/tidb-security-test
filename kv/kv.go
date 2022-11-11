@@ -30,8 +30,6 @@ import (
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikvrpc"
-	pd "github.com/tikv/pd/client"
 )
 
 // UnCommitIndexKVFlag uses to indicate the index key/value is no need to commit.
@@ -183,7 +181,6 @@ type LockCtx = tikvstore.LockCtx
 // This is not thread safe.
 type Transaction interface {
 	RetrieverMutator
-	AssertionProto
 	// Size returns sum of keys and values length.
 	Size() int
 	// Len returns the number of entries in the DB.
@@ -235,14 +232,6 @@ type Transaction interface {
 	SetDiskFullOpt(level kvrpcpb.DiskFullOpt)
 	// clear allowed flag
 	ClearDiskFullOpt()
-}
-
-// AssertionProto is an interface defined for the assertion protocol.
-type AssertionProto interface {
-	// SetAssertion sets an assertion for an operation on the key.
-	// TODO: Use a special type instead of `FlagsOp`. Otherwise there's risk that the assertion flag is incorrectly used
-	// in other places like `MemBuffer.SetWithFlags`.
-	SetAssertion(key []byte, assertion ...FlagsOp) error
 }
 
 // Client is used to send request to KV layer.
@@ -313,9 +302,6 @@ type Request struct {
 	Data      []byte
 	KeyRanges []KeyRange
 
-	// For PartitionTableScan used by tiflash.
-	PartitionIDAndRanges []PartitionIDAndRanges
-
 	// Concurrency is 1, if it only sends the request to a single storage unit when
 	// ResponseIterator.Next is called. If concurrency is greater than 1, the request will be
 	// sent to multiple storage units concurrently.
@@ -332,6 +318,8 @@ type Request struct {
 	Desc bool
 	// NotFillCache makes this request do not touch the LRU cache of the underlying storage.
 	NotFillCache bool
+	// SyncLog decides whether the WAL(write-ahead log) of this request should be synchronized.
+	SyncLog bool
 	// Streaming indicates using streaming API for this request, result in that one Next()
 	// call would not corresponds to a whole region result.
 	Streaming bool
@@ -355,16 +343,8 @@ type Request struct {
 	IsStaleness bool
 	// MatchStoreLabels indicates the labels the store should be matched
 	MatchStoreLabels []*metapb.StoreLabel
-	// ResourceGroupTagger indicates the kv request task group tagger.
-	ResourceGroupTagger tikvrpc.ResourceGroupTagger
-	// Paging indicates whether the request is a paging request.
-	Paging bool
-}
-
-// PartitionIDAndRanges used by PartitionTableScan in tiflash.
-type PartitionIDAndRanges struct {
-	ID        int64
-	KeyRanges []KeyRange
+	// ResourceGroupTag indicates the kv request task group.
+	ResourceGroupTag []byte
 }
 
 const (
@@ -433,7 +413,9 @@ type Driver interface {
 // Isolation should be at least SI(SNAPSHOT ISOLATION)
 type Storage interface {
 	// Begin a global transaction
-	Begin(opts ...tikv.TxnOption) (Transaction, error)
+	Begin() (Transaction, error)
+	// BeginWithOption begins a transaction with given option
+	BeginWithOption(option tikv.StartTSOption) (Transaction, error)
 	// GetSnapshot gets a snapshot that is able to read any data which data is <= ver.
 	// if ver is MaxVersion or > current max committed version, we will use current version for this snapshot.
 	GetSnapshot(ver Version) Snapshot
@@ -472,11 +454,6 @@ type EtcdBackend interface {
 	StartGCWorker() error
 }
 
-// StorageWithPD is used to get pd client.
-type StorageWithPD interface {
-	GetPDClient() pd.Client
-}
-
 // FnKeyCmp is the function for iterator the keys
 type FnKeyCmp func(key Key) bool
 
@@ -511,6 +488,4 @@ const (
 	SI IsoLevel = iota
 	// RC stands for 'read committed'.
 	RC
-	// RCCheckTS stands for 'read consistency read with ts check'.
-	RCCheckTS
 )

@@ -25,9 +25,9 @@ import (
 
 type buildKeySolver struct{}
 
-func (s *buildKeySolver) optimize(ctx context.Context, p LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
-	buildKeyInfo(p)
-	return p, nil
+func (s *buildKeySolver) optimize(ctx context.Context, lp LogicalPlan) (LogicalPlan, error) {
+	buildKeyInfo(lp)
+	return lp, nil
 }
 
 // buildKeyInfo recursively calls LogicalPlan's BuildKeyInfo method.
@@ -48,10 +48,6 @@ func (la *LogicalAggregation) BuildKeyInfo(selfSchema *expression.Schema, childS
 		return
 	}
 	la.logicalSchemaProducer.BuildKeyInfo(selfSchema, childSchema)
-	la.buildSelfKeyInfo(selfSchema)
-}
-
-func (la *LogicalAggregation) buildSelfKeyInfo(selfSchema *expression.Schema) {
 	groupByCols := la.GetGroupByCols()
 	if len(groupByCols) == len(la.GroupByItems) && len(la.GroupByItems) > 0 {
 		indices := selfSchema.ColumnsIndices(groupByCols)
@@ -241,7 +237,7 @@ func checkIndexCanBeKey(idx *model.IndexInfo, columns []*model.ColumnInfo, schem
 				uniqueKey = append(uniqueKey, schema.Columns[i])
 				findUniqueKey = true
 				if newKeyOK {
-					if !mysql.HasNotNullFlag(col.GetFlag()) {
+					if !mysql.HasNotNullFlag(col.Flag) {
 						newKeyOK = false
 						break
 					}
@@ -297,7 +293,7 @@ func (ds *DataSource) BuildKeyInfo(selfSchema *expression.Schema, childSchema []
 	}
 	if ds.tableInfo.PKIsHandle {
 		for i, col := range ds.Columns {
-			if mysql.HasPriKeyFlag(col.GetFlag()) {
+			if mysql.HasPriKeyFlag(col.Flag) {
 				selfSchema.Keys = append(selfSchema.Keys, []*expression.Column{selfSchema.Columns[i]})
 				break
 			}

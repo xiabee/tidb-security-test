@@ -18,10 +18,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/pingcap/tidb/testkit/testsetup"
+	"github.com/pingcap/tidb/util/testbridge"
 )
 
 func TestMain(m *testing.M) {
-	testsetup.SetupForCommonTest()
+	testbridge.WorkaroundGoCheckFlags()
 	os.Exit(m.Run())
 }

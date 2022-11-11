@@ -66,7 +66,7 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 	if err != nil {
 		return err
 	}
-	setOptionForTopSQL(sessVars.StmtCtx, txn)
+	setResourceGroupTagForTxn(sessVars.StmtCtx, txn)
 	txnSize := txn.Size()
 	sessVars.StmtCtx.AddRecordRows(uint64(len(rows)))
 	// If you use the IGNORE keyword, duplicate-key error that occurs while executing the INSERT statement are ignored.
@@ -82,7 +82,7 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 			return err
 		}
 	} else if ignoreErr {
-		err := e.batchCheckAndInsert(ctx, rows, e.addRecord, false)
+		err := e.batchCheckAndInsert(ctx, rows, e.addRecord)
 		if err != nil {
 			return err
 		}
@@ -199,7 +199,7 @@ func (e *InsertExec) updateDupRow(ctx context.Context, idxInBatch int, txn kv.Tr
 		extraCols = e.ctx.GetSessionVars().CurrInsertBatchExtraCols[idxInBatch]
 	}
 
-	err = e.doDupRowUpdate(ctx, handle, oldRow, row.row, extraCols, e.OnDuplicate, idxInBatch)
+	err = e.doDupRowUpdate(ctx, handle, oldRow, row.row, extraCols, e.OnDuplicate)
 	if e.ctx.GetSessionVars().StmtCtx.DupKeyAsWarning && kv.ErrKeyExists.Equal(err) {
 		e.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
 		return nil
@@ -374,7 +374,7 @@ func (e *InsertExec) initEvalBuffer4Dup() {
 
 // doDupRowUpdate updates the duplicate row.
 func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRow []types.Datum, newRow []types.Datum,
-	extraCols []types.Datum, cols []*expression.Assignment, idxInBatch int) error {
+	extraCols []types.Datum, cols []*expression.Assignment) error {
 	assignFlag := make([]bool, len(e.Table.WritableCols()))
 	// See http://dev.mysql.com/doc/refman/5.7/en/miscellaneous-functions.html#function_values
 	e.curInsertVals.SetDatums(newRow...)
@@ -390,29 +390,14 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 
 	// Update old row when the key is duplicated.
 	e.evalBuffer4Dup.SetDatums(e.row4Update...)
-	sc := e.ctx.GetSessionVars().StmtCtx
-	warnCnt := int(sc.WarningCount())
 	for _, col := range cols {
-		if col.LazyErr != nil {
-			return col.LazyErr
-		}
 		val, err1 := col.Expr.Eval(e.evalBuffer4Dup.ToRow())
 		if err1 != nil {
 			return err1
 		}
-		c := col.Col.ToInfo()
-		c.Name = col.ColName
-		e.row4Update[col.Col.Index], err1 = table.CastValue(e.ctx, val, c, false, false)
+		e.row4Update[col.Col.Index], err1 = table.CastValue(e.ctx, val, col.Col.ToInfo(), false, false)
 		if err1 != nil {
 			return err1
-		}
-		if newWarnings := sc.TruncateWarnings(warnCnt); len(newWarnings) > 0 {
-			for k := range newWarnings {
-				// Use `idxInBatch` here for simplicity, since the offset of the batch is unknown under the current context.
-				newWarnings[k].Err = completeInsertErr(c, &val, idxInBatch, newWarnings[k].Err)
-			}
-			sc.AppendWarnings(newWarnings)
-			warnCnt += len(newWarnings)
 		}
 		e.evalBuffer4Dup.SetDatum(col.Col.Index, e.row4Update[col.Col.Index])
 		assignFlag[col.Col.Index] = true

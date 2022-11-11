@@ -64,8 +64,8 @@ func buildRegionInfos(storeCount, regionCount, replicaNum int) []RegionInfo {
 		return storeIDs
 	}
 
+	var regionInfos []RegionInfo
 	var startKey string
-	regionInfos := make([]RegionInfo, 0, len(ss))
 	for i, s := range ss {
 		var ri RegionInfo
 		ri.Region = tikv.NewRegionVerID(uint64(i), 1, 1)
@@ -95,6 +95,8 @@ func calcReginCount(tasks []*batchCopTask) int {
 }
 
 func TestBalanceBatchCopTaskWithContinuity(t *testing.T) {
+	t.Parallel()
+
 	for replicaNum := 1; replicaNum < 6; replicaNum++ {
 		storeCount := 10
 		regionCount := 100000

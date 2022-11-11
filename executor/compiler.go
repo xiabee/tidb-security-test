@@ -16,6 +16,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/failpoint"
@@ -26,8 +27,6 @@ import (
 	"github.com/pingcap/tidb/planner"
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessiontxn"
-	"github.com/pingcap/tidb/sessiontxn/staleread"
 )
 
 var (
@@ -58,33 +57,23 @@ func (c *Compiler) Compile(ctx context.Context, stmtNode ast.StmtNode) (*ExecStm
 
 	ret := &plannercore.PreprocessorReturn{}
 	pe := &plannercore.PreprocessExecuteISUpdate{ExecuteInfoSchemaUpdate: planner.GetExecuteForUpdateReadIS, Node: stmtNode}
-	err := plannercore.Preprocess(c.Ctx,
-		stmtNode,
-		plannercore.WithPreprocessorReturn(ret),
-		plannercore.WithExecuteInfoSchemaUpdate(pe),
-		plannercore.InitTxnContextProvider,
-	)
+	err := plannercore.Preprocess(c.Ctx, stmtNode, plannercore.WithPreprocessorReturn(ret), plannercore.WithExecuteInfoSchemaUpdate(pe))
 	if err != nil {
 		return nil, err
 	}
+	stmtNode = plannercore.TryAddExtraLimit(c.Ctx, stmtNode)
 
-	failpoint.Inject("assertTxnManagerInCompile", func() {
-		sessiontxn.RecordAssert(c.Ctx, "assertTxnManagerInCompile", true)
-		sessiontxn.AssertTxnManagerInfoSchema(c.Ctx, ret.InfoSchema)
-		if ret.LastSnapshotTS != 0 {
-			staleread.AssertStmtStaleness(c.Ctx, true)
-			sessiontxn.AssertTxnManagerReadTS(c.Ctx, ret.LastSnapshotTS)
-		}
-	})
-
-	is := sessiontxn.GetTxnManager(c.Ctx).GetTxnInfoSchema()
-	finalPlan, names, err := planner.Optimize(ctx, c.Ctx, stmtNode, is)
+	finalPlan, names, err := planner.Optimize(ctx, c.Ctx, stmtNode, ret.InfoSchema)
 	if err != nil {
 		return nil, err
 	}
 
 	failpoint.Inject("assertStmtCtxIsStaleness", func(val failpoint.Value) {
-		staleread.AssertStmtStaleness(c.Ctx, val.(bool))
+		expected := val.(bool)
+		got := c.Ctx.GetSessionVars().StmtCtx.IsStaleness
+		if got != expected {
+			panic(fmt.Sprintf("stmtctx isStaleness wrong, expected:%v, got:%v", expected, got))
+		}
 	})
 
 	CountStmtNode(stmtNode, c.Ctx.GetSessionVars().InRestrictedSQL)
@@ -94,8 +83,10 @@ func (c *Compiler) Compile(ctx context.Context, stmtNode ast.StmtNode) (*ExecStm
 	}
 	return &ExecStmt{
 		GoCtx:            ctx,
+		SnapshotTS:       ret.LastSnapshotTS,
+		IsStaleness:      ret.IsStaleness,
 		ReplicaReadScope: ret.ReadReplicaScope,
-		InfoSchema:       is,
+		InfoSchema:       ret.InfoSchema,
 		Plan:             finalPlan,
 		LowerPriority:    lowerPriority,
 		Text:             stmtNode.Text(),
@@ -341,8 +332,6 @@ func GetStmtLabel(stmtNode ast.StmtNode) string {
 		return "Change"
 	case *ast.CommitStmt:
 		return "Commit"
-	case *ast.CompactTableStmt:
-		return "CompactTable"
 	case *ast.CreateDatabaseStmt:
 		return "CreateDatabase"
 	case *ast.CreateIndexStmt:
@@ -365,13 +354,7 @@ func GetStmtLabel(stmtNode ast.StmtNode) string {
 		}
 		return "DropTable"
 	case *ast.ExplainStmt:
-		if _, ok := x.Stmt.(*ast.ShowStmt); ok {
-			return "DescTable"
-		}
-		if x.Analyze {
-			return "ExplainAnalyzeSQL"
-		}
-		return "ExplainSQL"
+		return "Explain"
 	case *ast.InsertStmt:
 		if x.IsReplace {
 			return "Replace"
@@ -380,7 +363,7 @@ func GetStmtLabel(stmtNode ast.StmtNode) string {
 	case *ast.LoadDataStmt:
 		return "LoadData"
 	case *ast.RollbackStmt:
-		return "Rollback"
+		return "RollBack"
 	case *ast.SelectStmt:
 		return "Select"
 	case *ast.SetStmt, *ast.SetPwdStmt:

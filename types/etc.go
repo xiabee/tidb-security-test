@@ -66,11 +66,6 @@ func IsTypeTime(tp byte) bool {
 	return tp == mysql.TypeDatetime || tp == mysql.TypeDate || tp == mysql.TypeTimestamp
 }
 
-// IsTypeFloat indicates whether the type is TypeFloat
-func IsTypeFloat(tp byte) bool {
-	return tp == mysql.TypeFloat
-}
-
 // IsTypeInteger returns a boolean indicating whether the tp is integer type.
 func IsTypeInteger(tp byte) bool {
 	switch tp {
@@ -99,13 +94,13 @@ func IsTemporalWithDate(tp byte) bool {
 // IsBinaryStr returns a boolean indicating
 // whether the field type is a binary string type.
 func IsBinaryStr(ft *FieldType) bool {
-	return ft.GetCollate() == charset.CollationBin && IsString(ft.GetType())
+	return ft.Collate == charset.CollationBin && IsString(ft.Tp)
 }
 
 // IsNonBinaryStr returns a boolean indicating
 // whether the field type is a non-binary string type.
 func IsNonBinaryStr(ft *FieldType) bool {
-	if ft.GetCollate() != charset.CollationBin && IsString(ft.GetType()) {
+	if ft.Collate != charset.CollationBin && IsString(ft.Tp) {
 		return true
 	}
 	return false
@@ -116,7 +111,7 @@ func IsNonBinaryStr(ft *FieldType) bool {
 func NeedRestoredData(ft *FieldType) bool {
 	if collate.NewCollationEnabled() &&
 		IsNonBinaryStr(ft) &&
-		!(collate.IsBinCollation(ft.GetCollate()) && !IsTypeVarchar(ft.GetType())) {
+		!(collate.IsBinCollation(ft.Collate) && !IsTypeVarchar(ft.Tp)) {
 		return true
 	}
 	return false

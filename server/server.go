@@ -32,8 +32,8 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"flag"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -57,7 +57,6 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/plugin"
-	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/session/txninfo"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util"
@@ -90,6 +89,7 @@ func init() {
 	if err != nil {
 		osVersion = ""
 	}
+	RunInGoTest = flag.Lookup("test.v") != nil || flag.Lookup("check.v") != nil
 }
 
 var (
@@ -104,7 +104,6 @@ var (
 	errMultiStatementDisabled  = dbterror.ClassServer.NewStd(errno.ErrMultiStatementDisabled)
 	errNewAbortingConnection   = dbterror.ClassServer.NewStd(errno.ErrNewAbortingConnection)
 	errNotSupportedAuthMode    = dbterror.ClassServer.NewStd(errno.ErrNotSupportedAuthMode)
-	errNetPacketTooLarge       = dbterror.ClassServer.NewStd(errno.ErrNetPacketTooLarge)
 )
 
 // DefaultCapability is the capability of the server when it is created using the default configuration.
@@ -134,9 +133,6 @@ type Server struct {
 	statusServer   *http.Server
 	grpcServer     *grpc.Server
 	inShutdownMode bool
-
-	sessionMapMutex  sync.Mutex
-	internalSessions map[interface{}]struct{}
 }
 
 // ConnectionCount gets current connection count.
@@ -168,7 +164,10 @@ func (s *Server) SetDomain(dom *domain.Domain) {
 
 // InitGlobalConnID initialize global connection id.
 func (s *Server) InitGlobalConnID(serverIDGetter func() uint64) {
-	s.globalConnID = util.NewGlobalConnIDWithGetter(serverIDGetter, true)
+	s.globalConnID = util.GlobalConnID{
+		ServerIDGetter: serverIDGetter,
+		Is64bits:       true,
+	}
 }
 
 // newConn creates a new *clientConn from a net.Conn.
@@ -195,8 +194,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		driver:            driver,
 		concurrentLimiter: NewTokenLimiter(cfg.TokenLimit),
 		clients:           make(map[uint64]*clientConn),
-		globalConnID:      util.NewGlobalConnID(0, true),
-		internalSessions:  make(map[interface{}]struct{}, 100),
+		globalConnID:      util.GlobalConnID{ServerID: 0, Is64bits: true},
 	}
 	s.capability = defaultCapability
 	setTxnScope()
@@ -205,14 +203,6 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 	tlsConfig, autoReload, err := util.LoadTLSCertificates(
 		s.cfg.Security.SSLCA, s.cfg.Security.SSLKey, s.cfg.Security.SSLCert,
 		s.cfg.Security.AutoTLS, s.cfg.Security.RSAKeySize)
-
-	// LoadTLSCertificates will auto generate certificates if autoTLS is enabled.
-	// It only returns an error if certificates are specified and invalid.
-	// In which case, we should halt server startup as a misconfiguration could
-	// lead to a connection downgrade.
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 
 	// Automatically reload auto-generated certificates.
 	// The certificates are re-created every 30 days and are valid for 90 days.
@@ -231,12 +221,17 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		}()
 	}
 
+	if err != nil {
+		logutil.BgLogger().Error("secure connection cert/key/ca load fail", zap.Error(err))
+	}
 	if tlsConfig != nil {
 		setSSLVariable(s.cfg.Security.SSLCA, s.cfg.Security.SSLKey, s.cfg.Security.SSLCert)
 		atomic.StorePointer(&s.tlsConfig, unsafe.Pointer(tlsConfig))
-		logutil.BgLogger().Info("mysql protocol server secure connection is enabled",
-			zap.Bool("client verification enabled", len(variable.GetSysVar("ssl_ca").Value) > 0))
+		logutil.BgLogger().Info("mysql protocol server secure connection is enabled", zap.Bool("client verification enabled", len(variable.GetSysVar("ssl_ca").Value) > 0))
+	} else if cfg.Security.RequireSecureTransport {
+		return nil, errSecureTransportRequired.FastGenByArgs()
 	}
+
 	if s.tlsConfig != nil {
 		s.capability |= mysql.ClientSSL
 	}
@@ -257,7 +252,9 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 	}
 
 	if s.cfg.Socket != "" {
-		if err := cleanupStaleSocket(s.cfg.Socket); err != nil {
+
+		err := cleanupStaleSocket(s.cfg.Socket)
+		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
@@ -277,23 +274,24 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		if proxyTarget == nil {
 			proxyTarget = s.socket
 		}
-		ppListener, err := proxyprotocol.NewListener(proxyTarget, s.cfg.ProxyProtocol.Networks,
+		pplistener, err := proxyprotocol.NewListener(proxyTarget, s.cfg.ProxyProtocol.Networks,
 			int(s.cfg.ProxyProtocol.HeaderTimeout))
 		if err != nil {
 			logutil.BgLogger().Error("ProxyProtocol networks parameter invalid")
 			return nil, errors.Trace(err)
 		}
 		if s.listener != nil {
-			s.listener = ppListener
+			s.listener = pplistener
 			logutil.BgLogger().Info("server is running MySQL protocol (through PROXY protocol)", zap.String("host", s.cfg.Host))
 		} else {
-			s.socket = ppListener
+			s.socket = pplistener
 			logutil.BgLogger().Info("server is running MySQL protocol (through PROXY protocol)", zap.String("socket", s.cfg.Socket))
 		}
 	}
 
 	if s.cfg.Status.ReportStatus {
-		if err = s.listenStatusHTTPServer(); err != nil {
+		err = s.listenStatusHTTPServer()
+		if err != nil {
 			return nil, errors.Trace(err)
 		}
 	}
@@ -308,24 +306,25 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 
 func cleanupStaleSocket(socket string) error {
 	sockStat, err := os.Stat(socket)
-	if err != nil {
-		return nil
-	}
+	if err == nil {
+		if sockStat.Mode().Type() != os.ModeSocket {
+			return fmt.Errorf(
+				"the specified socket file %s is a %s instead of a socket file",
+				socket, sockStat.Mode().String())
+		}
 
-	if sockStat.Mode().Type() != os.ModeSocket {
-		return fmt.Errorf(
-			"the specified socket file %s is a %s instead of a socket file",
-			socket, sockStat.Mode().String())
+		_, err = net.Dial("unix", socket)
+		if err != nil {
+			logutil.BgLogger().Warn("Unix socket exists and is nonfunctional, removing it",
+				zap.String("socket", socket), zap.Error(err))
+			err = os.Remove(socket)
+			if err != nil {
+				return fmt.Errorf("failed to remove socket file %s", socket)
+			}
+		} else {
+			return fmt.Errorf("unix socket %s exists and is functional, not removing it", socket)
+		}
 	}
-
-	if _, err = net.Dial("unix", socket); err == nil {
-		return fmt.Errorf("unix socket %s exists and is functional, not removing it", socket)
-	}
-
-	if err2 := os.Remove(socket); err2 != nil {
-		return fmt.Errorf("failed to cleanup stale Unix socket file %s: %w", socket, err)
-	}
-
 	return nil
 }
 
@@ -352,6 +351,7 @@ func setTxnScope() {
 // Export config-related metrics
 func (s *Server) reportConfig() {
 	metrics.ConfigStatus.WithLabelValues("token-limit").Set(float64(s.cfg.TokenLimit))
+	metrics.ConfigStatus.WithLabelValues("mem-quota-query").Set(float64(s.cfg.MemQuotaQuery))
 	metrics.ConfigStatus.WithLabelValues("max-server-connections").Set(float64(s.cfg.MaxServerConnections))
 }
 
@@ -365,7 +365,7 @@ func (s *Server) Run() error {
 		s.startStatusHTTP()
 	}
 	// If error should be reported and exit the server it can be sent on this
-	// channel. Otherwise, end with sending a nil error to signal "done"
+	// channel. Otherwise end with sending a nil error to signal "done"
 	errChan := make(chan error)
 	go s.startNetworkListener(s.listener, false, errChan)
 	go s.startNetworkListener(s.socket, true, errChan)
@@ -395,7 +395,7 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 				}
 			}
 
-			// If we got PROXY protocol error, we should continue to accept.
+			// If we got PROXY protocol error, we should continue accept.
 			if proxyprotocol.IsProxyProtocolError(err) {
 				logutil.BgLogger().Error("PROXY protocol failed", zap.Error(err))
 				continue
@@ -408,6 +408,7 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 
 		clientConn := s.newConn(conn)
 		if isUnixSocket {
+
 			uc, ok := conn.(*net.UnixConn)
 			if !ok {
 				logutil.BgLogger().Error("Expected UNIX socket, but got something else")
@@ -425,20 +426,19 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 
 		err = plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
 			authPlugin := plugin.DeclareAuditManifest(p.Manifest)
-			if authPlugin.OnConnectionEvent == nil {
-				return nil
-			}
-			host, _, err := clientConn.PeerHost("")
-			if err != nil {
-				logutil.BgLogger().Error("get peer host failed", zap.Error(err))
-				terror.Log(clientConn.Close())
-				return errors.Trace(err)
-			}
-			if err = authPlugin.OnConnectionEvent(context.Background(), plugin.PreAuth,
-				&variable.ConnectionInfo{Host: host}); err != nil {
-				logutil.BgLogger().Info("do connection event failed", zap.Error(err))
-				terror.Log(clientConn.Close())
-				return errors.Trace(err)
+			if authPlugin.OnConnectionEvent != nil {
+				host, _, err := clientConn.PeerHost("")
+				if err != nil {
+					logutil.BgLogger().Error("get peer host failed", zap.Error(err))
+					terror.Log(clientConn.Close())
+					return errors.Trace(err)
+				}
+				err = authPlugin.OnConnectionEvent(context.Background(), plugin.PreAuth, &variable.ConnectionInfo{Host: host})
+				if err != nil {
+					logutil.BgLogger().Info("do connection event failed", zap.Error(err))
+					terror.Log(clientConn.Close())
+					return errors.Trace(err)
+				}
 			}
 			return nil
 		})
@@ -502,8 +502,8 @@ func (s *Server) Close() {
 func (s *Server) onConn(conn *clientConn) {
 	ctx := logutil.WithConnID(context.Background(), conn.connectionID)
 	if err := conn.handshake(ctx); err != nil {
-		if plugin.IsEnable(plugin.Audit) && conn.getCtx() != nil {
-			conn.getCtx().GetSessionVars().ConnectionInfo = conn.connectInfo()
+		if plugin.IsEnable(plugin.Audit) && conn.ctx != nil {
+			conn.ctx.GetSessionVars().ConnectionInfo = conn.connectInfo()
 			err = plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
 				authPlugin := plugin.DeclareAuditManifest(p.Manifest)
 				if authPlugin.OnConnectionEvent != nil {
@@ -514,17 +514,11 @@ func (s *Server) onConn(conn *clientConn) {
 			})
 			terror.Log(err)
 		}
-		if errors.Cause(err) == io.EOF {
-			// `EOF` means the connection is closed normally, we do not treat it as a noticeable error and log it in 'DEBUG' level.
-			logutil.BgLogger().With(zap.Uint64("conn", conn.connectionID)).
-				Debug("EOF", zap.String("remote addr", conn.bufReadConn.RemoteAddr().String()))
-		} else {
-			metrics.HandShakeErrorCounter.Inc()
-			logutil.BgLogger().With(zap.Uint64("conn", conn.connectionID)).
-				Warn("Server.onConn handshake", zap.Error(err),
-					zap.String("remote addr", conn.bufReadConn.RemoteAddr().String()))
-		}
-		terror.Log(conn.Close())
+		// Some keep alive services will send request to TiDB and disconnect immediately.
+		// So we only record metrics.
+		metrics.HandShakeErrorCounter.Inc()
+		terror.Log(errors.Trace(err))
+		terror.Log(errors.Trace(conn.Close()))
 		return
 	}
 
@@ -624,22 +618,9 @@ func (s *Server) checkConnectionCount() error {
 
 // ShowProcessList implements the SessionManager interface.
 func (s *Server) ShowProcessList() map[uint64]*util.ProcessInfo {
-	rs := make(map[uint64]*util.ProcessInfo)
-	for connID, pi := range s.getUserProcessList() {
-		rs[connID] = pi
-	}
-	if s.dom != nil {
-		for connID, pi := range s.dom.SysProcTracker().GetSysProcessList() {
-			rs[connID] = pi
-		}
-	}
-	return rs
-}
-
-func (s *Server) getUserProcessList() map[uint64]*util.ProcessInfo {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
-	rs := make(map[uint64]*util.ProcessInfo)
+	rs := make(map[uint64]*util.ProcessInfo, len(s.clients))
 	for _, client := range s.clients {
 		if pi := client.ctx.ShowProcess(); pi != nil {
 			rs[pi.ID] = pi
@@ -683,8 +664,7 @@ func (s *Server) Kill(connectionID uint64, query bool) {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
 	conn, ok := s.clients[connectionID]
-	if !ok && s.dom != nil {
-		s.dom.SysProcTracker().KillSysProcess(connectionID)
+	if !ok {
 		return
 	}
 
@@ -733,13 +713,6 @@ func (s *Server) KillAllConnections() {
 			terror.Log(err)
 		}
 		killConn(conn)
-	}
-
-	if s.dom != nil {
-		sysProcTracker := s.dom.SysProcTracker()
-		for connID := range sysProcTracker.GetSysProcessList() {
-			sysProcTracker.KillSysProcess(connID)
-		}
 	}
 }
 
@@ -810,47 +783,6 @@ func (s *Server) kickIdleConnection() {
 // ServerID implements SessionManager interface.
 func (s *Server) ServerID() uint64 {
 	return s.dom.ServerID()
-}
-
-// StoreInternalSession implements SessionManager interface.
-// @param addr	The address of a session.session struct variable
-func (s *Server) StoreInternalSession(se interface{}) {
-	s.sessionMapMutex.Lock()
-	s.internalSessions[se] = struct{}{}
-	s.sessionMapMutex.Unlock()
-}
-
-// DeleteInternalSession implements SessionManager interface.
-// @param addr	The address of a session.session struct variable
-func (s *Server) DeleteInternalSession(se interface{}) {
-	s.sessionMapMutex.Lock()
-	delete(s.internalSessions, se)
-	s.sessionMapMutex.Unlock()
-}
-
-// GetInternalSessionStartTSList implements SessionManager interface.
-func (s *Server) GetInternalSessionStartTSList() []uint64 {
-	s.sessionMapMutex.Lock()
-	defer s.sessionMapMutex.Unlock()
-	tsList := make([]uint64, 0, len(s.internalSessions))
-	analyzeProcID := util.GetAutoAnalyzeProcID(s.ServerID)
-	for se := range s.internalSessions {
-		if ts, processInfoID := session.GetStartTSFromSession(se); ts != 0 {
-			if processInfoID == analyzeProcID {
-				continue
-			}
-			tsList = append(tsList, ts)
-		}
-	}
-	return tsList
-}
-
-// InternalSessionExists is used for test
-func (s *Server) InternalSessionExists(se interface{}) bool {
-	s.sessionMapMutex.Lock()
-	_, ok := s.internalSessions[se]
-	s.sessionMapMutex.Unlock()
-	return ok
 }
 
 // setSysTimeZoneOnce is used for parallel run tests. When several servers are running,

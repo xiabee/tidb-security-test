@@ -21,6 +21,8 @@ import (
 )
 
 func TestNewLabel(t *testing.T) {
+	t.Parallel()
+
 	type TestCase struct {
 		name  string
 		input string
@@ -56,6 +58,8 @@ func TestNewLabel(t *testing.T) {
 }
 
 func TestRestoreLabel(t *testing.T) {
+	t.Parallel()
+
 	type TestCase struct {
 		name   string
 		input  Label
@@ -90,6 +94,8 @@ func TestRestoreLabel(t *testing.T) {
 }
 
 func TestNewLabels(t *testing.T) {
+	t.Parallel()
+
 	labels, err := NewLabels(nil)
 	require.NoError(t, err)
 	require.Len(t, labels, 0)
@@ -122,11 +128,13 @@ func TestNewLabels(t *testing.T) {
 }
 
 func TestAddLabels(t *testing.T) {
+	t.Parallel()
+
 	type TestCase struct {
 		name   string
 		labels Labels
 		label  Label
-		err    bool
+		err    error
 	}
 
 	labels, err := NewLabels([]string{"merge_option=allow"})
@@ -145,12 +153,12 @@ func TestAddLabels(t *testing.T) {
 			"normal",
 			labels,
 			label,
-			false,
+			nil,
 		},
 		{
 			"duplicated attributes, skip",
 			l1, l2,
-			false,
+			nil,
 		},
 		{
 			"duplicated attributes, skip",
@@ -159,30 +167,32 @@ func TestAddLabels(t *testing.T) {
 				Value: "allow",
 			}),
 			label,
-			false,
+			nil,
 		},
 		{
 			"conflict attributes",
 			l3,
 			l2,
-			true,
+			ErrConflictingAttributes,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			err = test.labels.Add(test.label)
-			if test.err {
-				require.Error(t, err)
-			} else {
+			if test.err == nil {
 				require.NoError(t, err)
 				require.Equal(t, test.label, test.labels[len(test.labels)-1])
+			} else {
+				require.ErrorIs(t, err, test.err)
 			}
 		})
 	}
 }
 
 func TestRestoreLabels(t *testing.T) {
+	t.Parallel()
+
 	type TestCase struct {
 		name   string
 		input  Labels

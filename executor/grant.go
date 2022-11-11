@@ -29,7 +29,6 @@ import (
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/privilege/privileges"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
@@ -73,20 +72,8 @@ func (e *GrantExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		dbName = e.ctx.GetSessionVars().CurrentDB
 	}
 
-	// For table & column level, check whether table exists and privilege is valid
+	// Make sure the table exist.
 	if e.Level.Level == ast.GrantLevelTable {
-		// Return if privilege is invalid, to fail before not existing table, see issue #29302
-		for _, p := range e.Privs {
-			if len(p.Cols) == 0 {
-				if !mysql.AllTablePrivs.Has(p.Priv) && p.Priv != mysql.AllPriv && p.Priv != mysql.UsagePriv && p.Priv != mysql.GrantPriv && p.Priv != mysql.ExtendedPriv {
-					return ErrIllegalGrantForTable
-				}
-			} else {
-				if !mysql.AllColumnPrivs.Has(p.Priv) && p.Priv != mysql.AllPriv && p.Priv != mysql.UsagePriv {
-					return ErrWrongUsage.GenWithStackByArgs("COLUMN GRANT", "NON-COLUMN PRIVILEGES")
-				}
-			}
-		}
 		dbNameStr := model.NewCIStr(dbName)
 		schema := e.ctx.GetInfoSchema().(infoschema.InfoSchema)
 		tbl, err := schema.TableByName(dbNameStr, model.NewCIStr(e.Level.TableName))
@@ -105,9 +92,8 @@ func (e *GrantExec) Next(ctx context.Context, req *chunk.Chunk) error {
 				return err
 			}
 		}
-		// Note the table name compare is not case sensitive here.
-		// In TiDB, system variable lower_case_table_names = 2 which means name comparisons are not case-sensitive.
-		if tbl != nil && tbl.Meta().Name.L != strings.ToLower(e.Level.TableName) {
+		// Note the table name compare is case sensitive here.
+		if tbl != nil && tbl.Meta().Name.String() != e.Level.TableName {
 			return infoschema.ErrTableNotExists.GenWithStackByArgs(dbName, e.Level.TableName)
 		}
 		if len(e.Level.DBName) > 0 {
@@ -120,7 +106,7 @@ func (e *GrantExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 
 	// Commit the old transaction, like DDL.
-	if err := sessiontxn.NewTxnInStmt(ctx, e.ctx); err != nil {
+	if err := e.ctx.NewTxn(ctx); err != nil {
 		return err
 	}
 	defer func() { e.ctx.GetSessionVars().SetInTxn(false) }()
@@ -128,6 +114,7 @@ func (e *GrantExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	// Create internal session to start internal transaction.
 	isCommit := false
 	internalSession, err := e.getSysSession()
+	internalSession.GetSessionVars().User = e.ctx.GetSessionVars().User
 	if err != nil {
 		return err
 	}
@@ -169,7 +156,7 @@ func (e *GrantExec) Next(ctx context.Context, req *chunk.Chunk) error {
 			}
 			_, err := internalSession.(sqlexec.SQLExecutor).ExecuteInternal(ctx,
 				`INSERT INTO %n.%n (Host, User, authentication_string, plugin) VALUES (%?, %?, %?, %?);`,
-				mysql.SystemDB, mysql.UserTable, strings.ToLower(user.User.Hostname), user.User.Username, pwd, authPlugin)
+				mysql.SystemDB, mysql.UserTable, user.User.Hostname, user.User.Username, pwd, authPlugin)
 			if err != nil {
 				return err
 			}
@@ -490,7 +477,7 @@ func (e *GrantExec) grantGlobalLevel(priv *ast.PrivElem, user *ast.UserSpec, int
 	if err != nil {
 		return err
 	}
-	sqlexec.MustFormatSQL(sql, ` WHERE User=%? AND Host=%?`, user.User.Username, strings.ToLower(user.User.Hostname))
+	sqlexec.MustFormatSQL(sql, ` WHERE User=%? AND Host=%?`, user.User.Username, user.User.Hostname)
 
 	_, err = internalSession.(sqlexec.SQLExecutor).ExecuteInternal(context.Background(), sql.String())
 	return err
@@ -647,6 +634,13 @@ func composeDBPrivUpdate(sql *strings.Builder, priv mysql.PrivilegeType, value s
 func composeTablePrivUpdateForGrant(ctx sessionctx.Context, sql *strings.Builder, priv mysql.PrivilegeType, name string, host string, db string, tbl string) error {
 	var newTablePriv, newColumnPriv []string
 	if priv != mysql.AllPriv {
+		// TODO: https://github.com/pingcap/parser/pull/581 removed privs from all priv lists
+		// it is to avoid add GRANT in GRANT ALL SQLs
+		// WithGRANT seems broken, fix it later
+		if priv != mysql.GrantPriv && !mysql.AllTablePrivs.Has(priv) {
+			return ErrIllegalGrantForTable
+		}
+
 		currTablePriv, currColumnPriv, err := getTablePriv(ctx, name, host, db, tbl)
 		if err != nil {
 			return err
@@ -676,6 +670,10 @@ func composeTablePrivUpdateForGrant(ctx sessionctx.Context, sql *strings.Builder
 func composeColumnPrivUpdateForGrant(ctx sessionctx.Context, sql *strings.Builder, priv mysql.PrivilegeType, name string, host string, db string, tbl string, col string) error {
 	var newColumnPriv []string
 	if priv != mysql.AllPriv {
+		if !mysql.AllColumnPrivs.Has(priv) {
+			return ErrWrongUsage.GenWithStackByArgs("COLUMN GRANT", "NON-COLUMN PRIVILEGES")
+		}
+
 		currColumnPriv, err := getColumnPriv(ctx, name, host, db, tbl, col)
 		if err != nil {
 			return err
@@ -741,11 +739,11 @@ func getTablePriv(ctx sessionctx.Context, name string, host string, db string, t
 		return "", "", errors.Errorf("get table privilege fail for %s %s %s %s", name, host, db, tbl)
 	}
 	row := rows[0]
-	if fields[0].Column.GetType() == mysql.TypeSet {
+	if fields[0].Column.Tp == mysql.TypeSet {
 		tablePriv := row.GetSet(0)
 		tPriv = tablePriv.Name
 	}
-	if fields[1].Column.GetType() == mysql.TypeSet {
+	if fields[1].Column.Tp == mysql.TypeSet {
 		columnPriv := row.GetSet(1)
 		cPriv = columnPriv.Name
 	}
@@ -767,7 +765,7 @@ func getColumnPriv(ctx sessionctx.Context, name string, host string, db string, 
 		return "", errors.Errorf("get column privilege fail for %s %s %s %s %s", name, host, db, tbl, col)
 	}
 	cPriv := ""
-	if fields[0].Column.GetType() == mysql.TypeSet {
+	if fields[0].Column.Tp == mysql.TypeSet {
 		setVal := rows[0].GetSet(0)
 		cPriv = setVal.Name
 	}
@@ -810,7 +808,7 @@ func getRowsAndFields(ctx sessionctx.Context, rs sqlexec.RecordSet) ([]chunk.Row
 
 func getRowFromRecordSet(ctx context.Context, se sessionctx.Context, rs sqlexec.RecordSet) ([]chunk.Row, error) {
 	var rows []chunk.Row
-	req := rs.NewChunk(nil)
+	req := rs.NewChunk()
 	for {
 		err := rs.Next(ctx, req)
 		if err != nil || req.NumRows() == 0 {

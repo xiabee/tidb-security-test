@@ -86,8 +86,3 @@ func (m *mockManager) ResignOwner(ctx context.Context) error {
 	}
 	return nil
 }
-
-// RequireOwner implements Manager.RequireOwner interface.
-func (m *mockManager) RequireOwner(context.Context) error {
-	return nil
-}

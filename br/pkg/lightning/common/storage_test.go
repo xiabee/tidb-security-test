@@ -15,17 +15,20 @@
 package common_test
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/stretchr/testify/require"
 )
 
-func TestGetStorageSize(t *testing.T) {
+var _ = Suite(&testStorageSuite{})
+
+type testStorageSuite struct {
+}
+
+func (t *testStorageSuite) TestGetStorageSize(c *C) {
 	// only ensure we can get storage size.
-	d := t.TempDir()
+	d := c.MkDir()
 	size, err := common.GetStorageSize(d)
-	require.NoError(t, err)
-	require.Greater(t, size.Capacity, uint64(0))
-	require.Greater(t, size.Available, uint64(0))
+	c.Assert(err, IsNil)
+	c.Assert(size.Capacity, Greater, uint64(0))
+	c.Assert(size.Available, Greater, uint64(0))
 }

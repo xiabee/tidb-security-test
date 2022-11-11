@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	plannercore "github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -270,13 +271,10 @@ func (e *UpdateExec) updateRows(ctx context.Context) (int, error) {
 				txn.GetSnapshot().SetOption(kv.CollectRuntimeStats, e.stats.SnapshotRuntimeStats)
 			}
 		}
-		txn, err := e.ctx.Txn(true)
-		if err == nil {
-			sc := e.ctx.GetSessionVars().StmtCtx
-			txn.SetOption(kv.ResourceGroupTagger, sc.GetResourceGroupTagger())
-			if sc.KvExecCounter != nil {
-				// Bind an interceptor for client-go to count the number of SQL executions of each TiKV.
-				txn.SetOption(kv.RPCInterceptor, sc.KvExecCounter.RPCInterceptor())
+		if variable.TopSQLEnabled() {
+			txn, err := e.ctx.Txn(true)
+			if err == nil {
+				txn.SetOption(kv.ResourceGroupTag, e.ctx.GetSessionVars().StmtCtx.GetResourceGroupTag())
 			}
 		}
 		for rowIdx := 0; rowIdx < chk.NumRows(); rowIdx++ {

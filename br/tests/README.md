@@ -44,6 +44,7 @@ This folder contains all tests which relies on external processes such as TiDB.
     * `bin/mc`
     * `bin/tiflash`
     * `bin/cdc`
+    * `bin/tikv-importer`
 
     The versions must be ≥2.1.0.
 
@@ -66,8 +67,7 @@ If you have docker installed, you can skip step 1 and step 2 by running
 
 ## Running
 
-Link `bin` directory by `cd br && ln -s ../bin bin` and run `make br_integration_test` to execute the integration tests.
-This command will
+Run `make br_integration_test` to execute the integration tests. This command will
 
 1. Build `br`
 2. Check that all 9 required executables and `br` executable exist

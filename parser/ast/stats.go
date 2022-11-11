@@ -40,8 +40,9 @@ type AnalyzeTableStmt struct {
 	// HistogramOperation is set in "ANALYZE TABLE ... UPDATE/DROP HISTOGRAM ..." statement.
 	HistogramOperation HistogramOperationType
 	// ColumnNames indicate the columns whose statistics need to be collected.
-	ColumnNames  []model.CIStr
-	ColumnChoice model.ColumnChoice
+	ColumnNames []*ColumnName
+	// PredicateColumns is true when we only collect statistics of predicate columns and indexed columns.
+	PredicateColumns bool
 }
 
 // AnalyzeOptType is the type for analyze options.
@@ -129,23 +130,19 @@ func (n *AnalyzeTableStmt) Restore(ctx *format.RestoreCtx) error {
 				if i != 0 {
 					ctx.WritePlain(",")
 				}
-				ctx.WriteName(columnName.O)
+				ctx.WriteName(columnName.Name.O)
 			}
 		}
-	}
-	switch n.ColumnChoice {
-	case model.AllColumns:
-		ctx.WriteKeyWord(" ALL COLUMNS")
-	case model.PredicateColumns:
-		ctx.WriteKeyWord(" PREDICATE COLUMNS")
-	case model.ColumnList:
+	} else if len(n.ColumnNames) > 0 {
 		ctx.WriteKeyWord(" COLUMNS ")
 		for i, columnName := range n.ColumnNames {
 			if i != 0 {
 				ctx.WritePlain(",")
 			}
-			ctx.WriteName(columnName.O)
+			ctx.WriteName(columnName.Name.O)
 		}
+	} else if n.PredicateColumns {
+		ctx.WriteKeyWord(" PREDICATE COLUMNS")
 	}
 	if n.IndexFlag {
 		ctx.WriteKeyWord(" INDEX")

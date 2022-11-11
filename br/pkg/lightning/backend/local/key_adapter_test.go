@@ -19,10 +19,8 @@ import (
 	"crypto/rand"
 	"math"
 	"sort"
-	"testing"
-	"unsafe"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
 func randBytes(n int) []byte {
@@ -31,54 +29,83 @@ func randBytes(n int) []byte {
 	return b
 }
 
-func TestNoopKeyAdapter(t *testing.T) {
-	keyAdapter := noopKeyAdapter{}
-	key := randBytes(32)
-	require.Len(t, key, keyAdapter.EncodedLen(key))
-	encodedKey := keyAdapter.Encode(nil, key, 0)
-	require.Equal(t, key, encodedKey)
-
-	decodedKey, err := keyAdapter.Decode(nil, encodedKey)
-	require.NoError(t, err)
-	require.Equal(t, key, decodedKey)
+type noopKeyAdapterSuite struct {
+	keyAdapter KeyAdapter
 }
 
-func TestDupDetectKeyAdapter(t *testing.T) {
+var _ = Suite(&noopKeyAdapterSuite{})
+
+func (s *noopKeyAdapterSuite) SetUpSuite(c *C) {
+	s.keyAdapter = noopKeyAdapter{}
+}
+
+func (s *noopKeyAdapterSuite) TestBasic(c *C) {
+	key := randBytes(32)
+	c.Assert(s.keyAdapter.EncodedLen(key), Equals, len(key))
+	encodedKey := s.keyAdapter.Encode(nil, key, 0, 0)
+	c.Assert(encodedKey, BytesEquals, key)
+
+	decodedKey, _, _, err := s.keyAdapter.Decode(nil, encodedKey)
+	c.Assert(err, IsNil)
+	c.Assert(decodedKey, BytesEquals, key)
+}
+
+type duplicateKeyAdapterSuite struct {
+	keyAdapter KeyAdapter
+}
+
+var _ = Suite(&duplicateKeyAdapterSuite{})
+
+func (s *duplicateKeyAdapterSuite) SetUpSuite(c *C) {
+	s.keyAdapter = duplicateKeyAdapter{}
+}
+
+func (s *duplicateKeyAdapterSuite) TestBasic(c *C) {
 	inputs := []struct {
-		key   []byte
-		rowID int64
+		key    []byte
+		rowID  int64
+		offset int64
 	}{
 		{
 			[]byte{0x0},
+			0,
 			0,
 		},
 		{
 			randBytes(32),
 			1,
+			-2034,
+		},
+		{
+			randBytes(32),
+			1,
+			math.MaxInt64,
 		},
 		{
 			randBytes(32),
 			math.MaxInt32,
+			math.MinInt64,
 		},
 		{
 			randBytes(32),
 			math.MinInt32,
+			2345678,
 		},
 	}
 
-	keyAdapter := dupDetectKeyAdapter{}
 	for _, input := range inputs {
-		result := keyAdapter.Encode(nil, input.key, input.rowID)
-		require.Equal(t, keyAdapter.EncodedLen(input.key), len(result))
+		result := s.keyAdapter.Encode(nil, input.key, input.rowID, input.offset)
 
 		// Decode the result.
-		key, err := keyAdapter.Decode(nil, result)
-		require.NoError(t, err)
-		require.Equal(t, input.key, key)
+		key, rowID, offset, err := s.keyAdapter.Decode(nil, result)
+		c.Assert(err, IsNil)
+		c.Assert(key, BytesEquals, input.key)
+		c.Assert(rowID, Equals, input.rowID)
+		c.Assert(offset, Equals, input.offset)
 	}
 }
 
-func TestDupDetectKeyOrder(t *testing.T) {
+func (s *duplicateKeyAdapterSuite) TestKeyOrder(c *C) {
 	keys := [][]byte{
 		{0x0, 0x1, 0x2},
 		{0x0, 0x1, 0x3},
@@ -86,75 +113,43 @@ func TestDupDetectKeyOrder(t *testing.T) {
 		{0x0, 0x1, 0x3, 0x4, 0x0},
 		{0x0, 0x1, 0x3, 0x4, 0x0, 0x0, 0x0},
 	}
-	keyAdapter := dupDetectKeyAdapter{}
-	encodedKeys := make([][]byte, 0, len(keys))
-	for _, key := range keys {
-		encodedKeys = append(encodedKeys, keyAdapter.Encode(nil, key, 1))
+	keyAdapter := duplicateKeyAdapter{}
+	var encodedKeys [][]byte
+	for i, key := range keys {
+		encodedKeys = append(encodedKeys, keyAdapter.Encode(nil, key, 1, int64(i*1234)))
 	}
 	sorted := sort.SliceIsSorted(encodedKeys, func(i, j int) bool {
 		return bytes.Compare(encodedKeys[i], encodedKeys[j]) < 0
 	})
-	require.True(t, sorted)
+	c.Assert(sorted, IsTrue)
 }
 
-func TestDupDetectEncodeDupKey(t *testing.T) {
-	keyAdapter := dupDetectKeyAdapter{}
+func (s *duplicateKeyAdapterSuite) TestEncodeKeyWithBuf(c *C) {
 	key := randBytes(32)
-	result1 := keyAdapter.Encode(nil, key, 10)
-	result2 := keyAdapter.Encode(nil, key, 20)
-	require.NotEqual(t, result1, result2)
+	buf := make([]byte, 256)
+	buf2 := s.keyAdapter.Encode(buf, key, 1, 1234)
+	// Verify the encode result first.
+	key2, _, _, err := s.keyAdapter.Decode(nil, buf2)
+	c.Assert(err, IsNil)
+	c.Assert(key2, BytesEquals, key)
+	// There should be no new slice allocated.
+	// If we change a byte in `buf`, `buf2` can read the new byte.
+	c.Assert(buf[:len(buf2)], BytesEquals, buf2)
+	buf[0]++
+	c.Assert(buf[0], Equals, buf2[0])
 }
 
-func startWithSameMemory(x []byte, y []byte) bool {
-	return cap(x) > 0 && cap(y) > 0 && uintptr(unsafe.Pointer(&x[:cap(x)][0])) == uintptr(unsafe.Pointer(&y[:cap(y)][0]))
-}
-
-func TestEncodeKeyToPreAllocatedBuf(t *testing.T) {
-	keyAdapters := []KeyAdapter{noopKeyAdapter{}, dupDetectKeyAdapter{}}
-	for _, keyAdapter := range keyAdapters {
-		key := randBytes(32)
-		buf := make([]byte, 256)
-		buf2 := keyAdapter.Encode(buf[:4], key, 1)
-		require.True(t, startWithSameMemory(buf, buf2))
-		// Verify the encoded result first.
-		key2, err := keyAdapter.Decode(nil, buf2[4:])
-		require.NoError(t, err)
-		require.Equal(t, key, key2)
-	}
-}
-
-func TestDecodeKeyToPreAllocatedBuf(t *testing.T) {
+func (s *duplicateKeyAdapterSuite) TestDecodeKeyWithBuf(c *C) {
 	data := []byte{
 		0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf7,
 		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf,
 	}
-	keyAdapters := []KeyAdapter{noopKeyAdapter{}, dupDetectKeyAdapter{}}
-	for _, keyAdapter := range keyAdapters {
-		key, err := keyAdapter.Decode(nil, data)
-		require.NoError(t, err)
-		buf := make([]byte, 4+len(data))
-		buf2, err := keyAdapter.Decode(buf[:4], data)
-		require.NoError(t, err)
-		require.True(t, startWithSameMemory(buf, buf2))
-		require.Equal(t, key, buf2[4:])
-	}
-}
-
-func TestDecodeKeyDstIsInsufficient(t *testing.T) {
-	data := []byte{
-		0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf7,
-		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf,
-	}
-	keyAdapters := []KeyAdapter{noopKeyAdapter{}, dupDetectKeyAdapter{}}
-	for _, keyAdapter := range keyAdapters {
-		key, err := keyAdapter.Decode(nil, data)
-		require.NoError(t, err)
-		buf := make([]byte, 4, 6)
-		copy(buf, []byte{'a', 'b', 'c', 'd'})
-		buf2, err := keyAdapter.Decode(buf[:4], data)
-		require.NoError(t, err)
-		require.False(t, startWithSameMemory(buf, buf2))
-		require.Equal(t, buf[:4], buf2[:4])
-		require.Equal(t, key, buf2[4:])
-	}
+	buf := make([]byte, len(data))
+	key, _, _, err := s.keyAdapter.Decode(buf, data)
+	c.Assert(err, IsNil)
+	// There should be no new slice allocated.
+	// If we change a byte in `buf`, `buf2` can read the new byte.
+	c.Assert(buf, BytesEquals, key[:len(buf)])
+	buf[0]++
+	c.Assert(buf[0], Equals, key[0])
 }

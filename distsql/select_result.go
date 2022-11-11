@@ -46,7 +46,6 @@ import (
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"go.uber.org/zap"
-	"golang.org/x/exp/maps"
 )
 
 var (
@@ -153,8 +152,7 @@ type selectResult struct {
 	durationReported bool
 	memTracker       *memory.Tracker
 
-	stats  *selectResultRuntimeStats
-	paging bool
+	stats *selectResultRuntimeStats
 }
 
 func (r *selectResult) fetchResp(ctx context.Context) error {
@@ -208,11 +206,7 @@ func (r *selectResult) fetchResp(ctx context.Context) error {
 				// final round of fetch
 				// TODO: Add a label to distinguish between success or failure.
 				// https://github.com/pingcap/tidb/issues/11397
-				if r.paging {
-					metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType, "paging").Observe(r.fetchDuration.Seconds())
-				} else {
-					metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType, "common").Observe(r.fetchDuration.Seconds())
-				}
+				metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType).Observe(r.fetchDuration.Seconds())
 				r.durationReported = true
 			}
 			return nil
@@ -487,7 +481,10 @@ func (s *selectResultRuntimeStats) mergeCopRuntimeStats(copStats *copr.CopRuntim
 	} else {
 		s.procKeys = append(s.procKeys, 0)
 	}
-	maps.Copy(s.backoffSleep, copStats.BackoffSleep)
+
+	for k, v := range copStats.BackoffSleep {
+		s.backoffSleep[k] += v
+	}
 	s.totalProcessTime += copStats.TimeDetail.ProcessTime
 	s.totalWaitTime += copStats.TimeDetail.WaitTime
 	s.rpcStat.Merge(copStats.RegionRequestRuntimeStats)
@@ -510,7 +507,9 @@ func (s *selectResultRuntimeStats) Clone() execdetails.RuntimeStats {
 	}
 	newRs.totalProcessTime += s.totalProcessTime
 	newRs.totalWaitTime += s.totalWaitTime
-	maps.Copy(newRs.rpcStat.Stats, s.rpcStat.Stats)
+	for k, v := range s.rpcStat.Stats {
+		newRs.rpcStat.Stats[k] = v
+	}
 	return &newRs
 }
 

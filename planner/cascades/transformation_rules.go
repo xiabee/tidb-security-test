@@ -310,8 +310,8 @@ type PushSelDownTiKVSingleGather struct {
 // NewRulePushSelDownTiKVSingleGather creates a new Transformation PushSelDownTiKVSingleGather.
 // The pattern of this rule is `Selection -> TiKVSingleGather -> Any`.
 func NewRulePushSelDownTiKVSingleGather() Transformation {
-	any1 := memo.NewPattern(memo.OperandAny, memo.EngineTiKVOrTiFlash)
-	tg := memo.BuildPattern(memo.OperandTiKVSingleGather, memo.EngineTiDBOnly, any1)
+	any := memo.NewPattern(memo.OperandAny, memo.EngineTiKVOrTiFlash)
+	tg := memo.BuildPattern(memo.OperandTiKVSingleGather, memo.EngineTiDBOnly, any)
 	p := memo.BuildPattern(memo.OperandSelection, memo.EngineTiDBOnly, tg)
 
 	rule := &PushSelDownTiKVSingleGather{}
@@ -920,7 +920,7 @@ func (r *pushDownJoin) predicatePushDown(
 			leftCond = append(join.LeftConditions, derivedLeftJoinCond...)
 			join.LeftConditions = nil
 			remainCond = append(expression.ScalarFuncs2Exprs(equalCond), otherCond...)
-			remainCond = append(remainCond, leftPushCond...) // nozero
+			remainCond = append(remainCond, leftPushCond...)
 		} else {
 			remainCond = expression.ExtractFiltersFromDNFs(join.SCtx(), remainCond)
 			// Only derive left where condition, because right where condition cannot be pushed down
@@ -931,7 +931,7 @@ func (r *pushDownJoin) predicatePushDown(
 			rightCond = append(join.RightConditions, derivedRightJoinCond...)
 			join.RightConditions = nil
 			remainCond = append(expression.ScalarFuncs2Exprs(equalCond), otherCond...)
-			remainCond = append(remainCond, rightPushCond...) // nozero
+			remainCond = append(remainCond, rightPushCond...)
 		}
 	default:
 		// TODO: Enhance this rule to deal with Semi/SmiAnti Joins.
@@ -1602,7 +1602,7 @@ func (r *EliminateSingleMaxMin) OnTransform(old *memo.ExprIter) (newExprs []*mem
 	// If there's no column in f.GetArgs()[0], we still need limit and read data from real table because the result should be NULL if the input is empty.
 	if len(expression.ExtractColumns(f.Args[0])) > 0 {
 		// If it can be NULL, we need to filter NULL out first.
-		if !mysql.HasNotNullFlag(f.Args[0].GetType().GetFlag()) {
+		if !mysql.HasNotNullFlag(f.Args[0].GetType().Flag) {
 			sel := plannercore.LogicalSelection{}.Init(ctx, agg.SelectBlockOffset())
 			isNullFunc := expression.NewFunctionInternal(ctx, ast.IsNull, types.NewFieldType(mysql.TypeTiny), f.Args[0])
 			notNullFunc := expression.NewFunctionInternal(ctx, ast.UnaryNot, types.NewFieldType(mysql.TypeTiny), isNullFunc)

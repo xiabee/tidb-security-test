@@ -4,17 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
 	"github.com/pingcap/tidb/br/pkg/version/build"
-	"github.com/stretchr/testify/require"
 )
+
+var _ = Suite(&cpSQLSuite{})
 
 type cpSQLSuite struct {
 	db   *sql.DB
@@ -22,10 +23,9 @@ type cpSQLSuite struct {
 	cpdb *checkpoints.MySQLCheckpointsDB
 }
 
-func newCPSQLSuite(t *testing.T) (*cpSQLSuite, func()) {
-	var s cpSQLSuite
+func (s *cpSQLSuite) SetUpTest(c *C) {
 	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	s.db = db
 	s.mock = mock
 
@@ -47,20 +47,19 @@ func newCPSQLSuite(t *testing.T) (*cpSQLSuite, func()) {
 		WillReturnResult(sqlmock.NewResult(5, 1))
 
 	cpdb, err := checkpoints.NewMySQLCheckpointsDB(context.Background(), s.db, "mock-schema")
-	require.NoError(t, err)
-	require.Nil(t, s.mock.ExpectationsWereMet())
+	c.Assert(err, IsNil)
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
 	s.cpdb = cpdb
-	return &s, func() {
-		s.mock.ExpectClose()
-		require.Nil(t, s.cpdb.Close())
-		require.Nil(t, s.mock.ExpectationsWereMet())
-	}
 }
 
-func TestNormalOperations(t *testing.T) {
+func (s *cpSQLSuite) TearDownTest(c *C) {
+	s.mock.ExpectClose()
+	c.Assert(s.cpdb.Close(), IsNil)
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
+}
+
+func (s *cpSQLSuite) TestNormalOperations(c *C) {
 	ctx := context.Background()
-	s, clean := newCPSQLSuite(t)
-	defer clean()
 	cpdb := s.cpdb
 
 	// 2. initialize with checkpoint data.
@@ -102,8 +101,8 @@ func TestNormalOperations(t *testing.T) {
 		},
 	})
 	s.mock.MatchExpectationsInOrder(true)
-	require.NoError(t, err)
-	require.Nil(t, s.mock.ExpectationsWereMet())
+	c.Assert(err, IsNil)
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
 
 	// 3. set some checkpoints
 
@@ -155,8 +154,8 @@ func TestNormalOperations(t *testing.T) {
 		},
 	})
 	s.mock.MatchExpectationsInOrder(true)
-	require.NoError(t, err)
-	require.Nil(t, s.mock.ExpectationsWereMet())
+	c.Assert(err, IsNil)
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
 
 	// 4. update some checkpoints
 
@@ -223,7 +222,7 @@ func TestNormalOperations(t *testing.T) {
 	s.mock.MatchExpectationsInOrder(false)
 	cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{"`db1`.`t2`": cpd})
 	s.mock.MatchExpectationsInOrder(true)
-	require.Nil(t, s.mock.ExpectationsWereMet())
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
 
 	// 5. get back the checkpoints
 
@@ -261,8 +260,8 @@ func TestNormalOperations(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, err)
-	require.Equal(t, &checkpoints.TableCheckpoint{
+	c.Assert(err, IsNil)
+	c.Assert(cp, DeepEquals, &checkpoints.TableCheckpoint{
 		Status:    checkpoints.CheckpointStatusAllWritten,
 		AllocBase: 132861,
 		TableID:   int64(2),
@@ -293,20 +292,17 @@ func TestNormalOperations(t *testing.T) {
 			},
 		},
 		Checksum: verification.MakeKVChecksum(4492, 686, 486070148910),
-	}, cp)
-	require.Nil(t, s.mock.ExpectationsWereMet())
+	})
+	c.Assert(s.mock.ExpectationsWereMet(), IsNil)
 }
 
-func TestRemoveAllCheckpoints_SQL(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestRemoveAllCheckpoints(c *C) {
 	s.mock.ExpectExec("DROP SCHEMA `mock-schema`").WillReturnResult(sqlmock.NewResult(0, 1))
 
 	ctx := context.Background()
 
 	err := s.cpdb.RemoveCheckpoint(ctx, "all")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	s.mock.ExpectBegin()
 	s.mock.
@@ -329,14 +325,11 @@ func TestRemoveAllCheckpoints_SQL(t *testing.T) {
 	s.mock.ExpectRollback()
 
 	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 }
 
-func TestRemoveOneCheckpoint_SQL(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestRemoveOneCheckpoint(c *C) {
 	s.mock.ExpectBegin()
 	s.mock.
 		ExpectExec("DELETE FROM `mock-schema`\\.chunk_v\\d+ WHERE table_name = \\?").
@@ -353,13 +346,10 @@ func TestRemoveOneCheckpoint_SQL(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	err := s.cpdb.RemoveCheckpoint(context.Background(), "`db1`.`t2`")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestIgnoreAllErrorCheckpoints_SQL(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestIgnoreAllErrorCheckpoints(c *C) {
 	s.mock.ExpectBegin()
 	s.mock.
 		ExpectExec("UPDATE `mock-schema`\\.engine_v\\d+ SET status = 30 WHERE 'all' = \\? AND status <= 25").
@@ -372,13 +362,10 @@ func TestIgnoreAllErrorCheckpoints_SQL(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	err := s.cpdb.IgnoreErrorCheckpoint(context.Background(), "all")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestIgnoreOneErrorCheckpoint(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestIgnoreOneErrorCheckpoint(c *C) {
 	s.mock.ExpectBegin()
 	s.mock.
 		ExpectExec("UPDATE `mock-schema`\\.engine_v\\d+ SET status = 30 WHERE table_name = \\? AND status <= 25").
@@ -391,13 +378,10 @@ func TestIgnoreOneErrorCheckpoint(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	err := s.cpdb.IgnoreErrorCheckpoint(context.Background(), "`db1`.`t2`")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestDestroyAllErrorCheckpoints_SQL(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestDestroyAllErrorCheckpoints(c *C) {
 	s.mock.ExpectBegin()
 	s.mock.
 		ExpectQuery("SELECT (?s:.+)'all' = \\?").
@@ -421,18 +405,15 @@ func TestDestroyAllErrorCheckpoints_SQL(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	dtc, err := s.cpdb.DestroyErrorCheckpoint(context.Background(), "all")
-	require.NoError(t, err)
-	require.Equal(t, []checkpoints.DestroyedTableCheckpoint{{
+	c.Assert(err, IsNil)
+	c.Assert(dtc, DeepEquals, []checkpoints.DestroyedTableCheckpoint{{
 		TableName:   "`db1`.`t2`",
 		MinEngineID: -1,
 		MaxEngineID: 0,
-	}}, dtc)
+	}})
 }
 
-func TestDestroyOneErrorCheckpoints(t *testing.T) {
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-
+func (s *cpSQLSuite) TestDestroyOneErrorCheckpoints(c *C) {
 	s.mock.ExpectBegin()
 	s.mock.
 		ExpectQuery("SELECT (?s:.+)table_name = \\?").
@@ -456,19 +437,17 @@ func TestDestroyOneErrorCheckpoints(t *testing.T) {
 	s.mock.ExpectCommit()
 
 	dtc, err := s.cpdb.DestroyErrorCheckpoint(context.Background(), "`db1`.`t2`")
-	require.NoError(t, err)
-	require.Equal(t, []checkpoints.DestroyedTableCheckpoint{{
+	c.Assert(err, IsNil)
+	c.Assert(dtc, DeepEquals, []checkpoints.DestroyedTableCheckpoint{{
 		TableName:   "`db1`.`t2`",
 		MinEngineID: -1,
 		MaxEngineID: 0,
-	}}, dtc)
+	}})
 }
 
-func TestDump(t *testing.T) {
+func (s *cpSQLSuite) TestDump(c *C) {
 	ctx := context.Background()
-	s, clean := newCPSQLSuite(t)
-	defer clean()
-	tm := time.Unix(1555555555, 0).UTC()
+	t := time.Unix(1555555555, 0).UTC()
 
 	s.mock.
 		ExpectQuery("SELECT (?s:.+) FROM `mock-schema`\\.chunk_v\\d+").
@@ -482,55 +461,53 @@ func TestDump(t *testing.T) {
 				"`db1`.`t2`", "/tmp/path/1.sql", 0, mydump.SourceTypeSQL, mydump.CompressionNone, "", 456, "[]",
 				55904, 102400, 681, 5000,
 				4491, 586, 486070148917,
-				tm, tm,
+				t, t,
 			),
 		)
 
 	var csvBuilder strings.Builder
 	err := s.cpdb.DumpChunks(ctx, &csvBuilder)
-	require.NoError(t, err)
-	require.Equal(t,
+	c.Assert(err, IsNil)
+	c.Assert(csvBuilder.String(), Equals,
 		"table_name,path,offset,type,compression,sort_key,file_size,columns,pos,end_offset,prev_rowid_max,rowid_max,kvc_bytes,kvc_kvs,kvc_checksum,create_time,update_time\n"+
 			"`db1`.`t2`,/tmp/path/1.sql,0,3,0,,456,[],55904,102400,681,5000,4491,586,486070148917,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n",
-		csvBuilder.String(),
 	)
 
 	s.mock.
 		ExpectQuery("SELECT .+ FROM `mock-schema`\\.engine_v\\d+").
 		WillReturnRows(
 			sqlmock.NewRows([]string{"table_name", "engine_id", "status", "create_time", "update_time"}).
-				AddRow("`db1`.`t2`", -1, 30, tm, tm).
-				AddRow("`db1`.`t2`", 0, 120, tm, tm),
+				AddRow("`db1`.`t2`", -1, 30, t, t).
+				AddRow("`db1`.`t2`", 0, 120, t, t),
 		)
 
 	csvBuilder.Reset()
 	err = s.cpdb.DumpEngines(ctx, &csvBuilder)
-	require.NoError(t, err)
-	require.Equal(t, "table_name,engine_id,status,create_time,update_time\n"+
-		"`db1`.`t2`,-1,30,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n"+
-		"`db1`.`t2`,0,120,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n",
-		csvBuilder.String())
+	c.Assert(err, IsNil)
+	c.Assert(csvBuilder.String(), Equals,
+		"table_name,engine_id,status,create_time,update_time\n"+
+			"`db1`.`t2`,-1,30,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n"+
+			"`db1`.`t2`,0,120,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n",
+	)
 
 	s.mock.
 		ExpectQuery("SELECT .+ FROM `mock-schema`\\.table_v\\d+").
 		WillReturnRows(
 			sqlmock.NewRows([]string{"task_id", "table_name", "hash", "status", "alloc_base", "create_time", "update_time"}).
-				AddRow(1555555555, "`db1`.`t2`", 0, 90, 132861, tm, tm),
+				AddRow(1555555555, "`db1`.`t2`", 0, 90, 132861, t, t),
 		)
 
 	csvBuilder.Reset()
 	err = s.cpdb.DumpTables(ctx, &csvBuilder)
-	require.NoError(t, err)
-	require.Equal(t, "task_id,table_name,hash,status,alloc_base,create_time,update_time\n"+
-		"1555555555,`db1`.`t2`,0,90,132861,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n",
-		csvBuilder.String(),
+	c.Assert(err, IsNil)
+	c.Assert(csvBuilder.String(), Equals,
+		"task_id,table_name,hash,status,alloc_base,create_time,update_time\n"+
+			"1555555555,`db1`.`t2`,0,90,132861,2019-04-18 02:45:55 +0000 UTC,2019-04-18 02:45:55 +0000 UTC\n",
 	)
 }
 
-func TestMoveCheckpoints(t *testing.T) {
+func (s *cpSQLSuite) TestMoveCheckpoints(c *C) {
 	ctx := context.Background()
-	s, clean := newCPSQLSuite(t)
-	defer clean()
 
 	s.mock.
 		ExpectExec("CREATE SCHEMA IF NOT EXISTS `mock-schema\\.12345678\\.bak`").
@@ -549,5 +526,5 @@ func TestMoveCheckpoints(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	err := s.cpdb.MoveCheckpoints(ctx, 12345678)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }

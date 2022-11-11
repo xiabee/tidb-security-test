@@ -17,7 +17,6 @@ package types
 import (
 	"math"
 	"strconv"
-	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -52,12 +51,12 @@ const (
 
 	DivFracIncr = 4
 
-	// Round up to the next integer if positive or down to the next integer if negative.
-	ModeHalfUp RoundMode = 5
+	// ModeHalfEven rounds normally.
+	ModeHalfEven RoundMode = 5
 	// Truncate just truncates the decimal.
 	ModeTruncate RoundMode = 10
 	// Ceiling is not supported now.
-	ModeCeiling RoundMode = 0
+	modeCeiling RoundMode = 0
 
 	pow10off int = 81
 )
@@ -265,7 +264,7 @@ func (d *MyDecimal) GetDigitsInt() int8 {
 // String returns the decimal string representation rounded to resultFrac.
 func (d *MyDecimal) String() string {
 	tmp := *d
-	err := tmp.Round(&tmp, int(tmp.resultFrac), ModeHalfUp)
+	err := tmp.Round(&tmp, int(tmp.resultFrac), ModeHalfEven)
 	terror.Log(errors.Trace(err))
 	return string(tmp.ToString())
 }
@@ -394,6 +393,8 @@ func (d *MyDecimal) ToString() (str []byte) {
 
 // FromString parses decimal from string.
 func (d *MyDecimal) FromString(str []byte) error {
+	// strErr is used to check str is bad number or not
+	var strErr error
 	for i := 0; i < len(str); i++ {
 		if !isSpace(str[i]) {
 			str = str[i:]
@@ -424,6 +425,8 @@ func (d *MyDecimal) FromString(str []byte) error {
 			endIdx++
 		}
 		digitsFrac = endIdx - strIdx - 1
+	} else if strIdx < len(str) && (str[strIdx] != 'e' && str[strIdx] != 'E' && str[strIdx] != ' ') {
+		strErr = ErrBadNumber
 	} else {
 		digitsFrac = 0
 		endIdx = strIdx
@@ -483,40 +486,33 @@ func (d *MyDecimal) FromString(str []byte) error {
 	if innerIdx != 0 {
 		d.wordBuf[wordIdx] = word * powers10[digitsPerWord-innerIdx]
 	}
-	if endIdx+1 <= len(str) {
-		if str[endIdx] == 'e' || str[endIdx] == 'E' {
-			exponent, err1 := strToInt(string(str[endIdx+1:]))
-			if err1 != nil {
-				err = errors.Cause(err1)
-				if err != ErrTruncated {
-					*d = zeroMyDecimal
-				}
-			}
-			if exponent > math.MaxInt32/2 {
-				negative := d.negative
-				maxDecimal(wordBufLen*digitsPerWord, 0, d)
-				d.negative = negative
-				err = ErrOverflow
-			}
-			if exponent < math.MinInt32/2 && err != ErrOverflow {
+	if endIdx+1 <= len(str) && (str[endIdx] == 'e' || str[endIdx] == 'E') {
+		exponent, err1 := strToInt(string(str[endIdx+1:]))
+		if err1 != nil {
+			err = errors.Cause(err1)
+			if err != ErrTruncated {
 				*d = zeroMyDecimal
-				err = ErrTruncated
 			}
-			if err != ErrOverflow {
-				shiftErr := d.Shift(int(exponent))
-				if shiftErr != nil {
-					if shiftErr == ErrOverflow {
-						negative := d.negative
-						maxDecimal(wordBufLen*digitsPerWord, 0, d)
-						d.negative = negative
-					}
-					err = shiftErr
+		}
+		if exponent > math.MaxInt32/2 {
+			negative := d.negative
+			maxDecimal(wordBufLen*digitsPerWord, 0, d)
+			d.negative = negative
+			err = ErrOverflow
+		}
+		if exponent < math.MinInt32/2 && err != ErrOverflow {
+			*d = zeroMyDecimal
+			err = ErrTruncated
+		}
+		if err != ErrOverflow {
+			shiftErr := d.Shift(int(exponent))
+			if shiftErr != nil {
+				if shiftErr == ErrOverflow {
+					negative := d.negative
+					maxDecimal(wordBufLen*digitsPerWord, 0, d)
+					d.negative = negative
 				}
-			}
-		} else {
-			trimstr := strings.TrimSpace(string(str[endIdx:]))
-			if len(trimstr) != 0 {
-				err = ErrTruncated
+				err = shiftErr
 			}
 		}
 	}
@@ -531,6 +527,9 @@ func (d *MyDecimal) FromString(str []byte) error {
 		d.negative = false
 	}
 	d.resultFrac = d.digitsFrac
+	if strErr != nil {
+		return strErr
+	}
 	return err
 }
 
@@ -586,7 +585,7 @@ func (d *MyDecimal) Shift(shift int) error {
 		err = ErrTruncated
 		wordsFrac -= lack
 		diff := digitsFrac - wordsFrac*digitsPerWord
-		err1 := d.Round(d, digitEnd-point-diff, ModeHalfUp)
+		err1 := d.Round(d, digitEnd-point-diff, ModeHalfEven)
 		if err1 != nil {
 			return errors.Trace(err1)
 		}
@@ -802,15 +801,15 @@ func (d *MyDecimal) doMiniRightShift(shift, beg, end int) {
 //    to			- result buffer. d == to is allowed
 //    frac			- to what position after fraction point to round. can be negative!
 //    roundMode		- round to nearest even or truncate
-// 			ModeHalfUp rounds normally.
-// 			ModeTruncate just truncates the decimal.
+// 			ModeHalfEven rounds normally.
+// 			Truncate just truncates the decimal.
 //
 // NOTES
-//  frac can be negative !
+//  scale can be negative !
 //  one TRUNCATED error (line XXX below) isn't treated very logical :(
 //
 // RETURN VALUE
-//  nil/ErrTruncated/ErrOverflow
+//  eDecOK/eDecTruncated
 func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err error) {
 	// wordsFracTo is the number of fraction words in buffer.
 	wordsFracTo := (frac + 1) / digitsPerWord
@@ -860,7 +859,7 @@ func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err err
 		doInc := false
 		switch roundMode {
 		// Notice: No support for ceiling mode now.
-		case ModeCeiling:
+		case modeCeiling:
 			// If any word after scale is not zero, do increment.
 			// e.g ceiling 3.0001 to scale 1, gets 3.1
 			idx := toIdx + (wordsFrac - wordsFracTo)
@@ -871,10 +870,10 @@ func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err err
 				}
 				idx--
 			}
-		case ModeHalfUp:
+		case ModeHalfEven:
 			digAfterScale := d.wordBuf[toIdx+1] / digMask // the first digit after scale.
-			// If first digit after scale is equal to or greater than 5, do increment.
-			doInc = digAfterScale >= 5
+			// If first digit after scale is 5 and round even, do increment if digit at scale is odd.
+			doInc = (digAfterScale > 5) || (digAfterScale == 5)
 		case ModeTruncate:
 			// Never round, just truncate.
 			doInc = false
@@ -1401,13 +1400,7 @@ func (d *MyDecimal) FromBin(bin []byte, precision, frac int) (binSize int, err e
 	if bin[binIdx]&0x80 > 0 {
 		mask = 0
 	}
-	binSize, err = DecimalBinSize(precision, frac)
-	if err != nil {
-		return 0, err
-	}
-	if binSize < 0 || binSize > 40 {
-		return 0, ErrBadNumber
-	}
+	binSize = DecimalBinSize(precision, frac)
 	dCopy := make([]byte, 40)
 	dCopy = dCopy[:binSize]
 	copy(dCopy, bin)
@@ -1483,16 +1476,13 @@ func (d *MyDecimal) FromBin(bin []byte, precision, frac int) (binSize int, err e
 }
 
 // DecimalBinSize returns the size of array to hold a binary representation of a decimal.
-func DecimalBinSize(precision, frac int) (int, error) {
+func DecimalBinSize(precision, frac int) int {
 	digitsInt := precision - frac
 	wordsInt := digitsInt / digitsPerWord
 	wordsFrac := frac / digitsPerWord
 	xInt := digitsInt - wordsInt*digitsPerWord
 	xFrac := frac - wordsFrac*digitsPerWord
-	if xInt < 0 || xInt >= len(dig2bytes) || xFrac < 0 || xFrac >= len(dig2bytes) {
-		return 0, ErrBadNumber
-	}
-	return wordsInt*wordSize + dig2bytes[xInt] + wordsFrac*wordSize + dig2bytes[xFrac], nil
+	return wordsInt*wordSize + dig2bytes[xInt] + wordsFrac*wordSize + dig2bytes[xFrac]
 }
 
 func readWord(b []byte, size int) int32 {
@@ -2349,11 +2339,7 @@ func DecimalPeak(b []byte) (int, error) {
 	}
 	precision := int(b[0])
 	frac := int(b[1])
-	binSize, err := DecimalBinSize(precision, frac)
-	if err != nil {
-		return 0, err
-	}
-	return binSize + 2, nil
+	return DecimalBinSize(precision, frac) + 2, nil
 }
 
 // NewDecFromInt creates a MyDecimal from int.

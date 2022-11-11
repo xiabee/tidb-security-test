@@ -59,13 +59,6 @@ func defineGCSFlags(flags *pflag.FlagSet) {
 	flags.String(gcsCredentialsFile, "", "(experimental) Set the GCS credentials file path")
 }
 
-func hiddenGCSFlags(flags *pflag.FlagSet) {
-	_ = flags.MarkHidden(gcsEndpointOption)
-	_ = flags.MarkHidden(gcsStorageClassOption)
-	_ = flags.MarkHidden(gcsPredefinedACL)
-	_ = flags.MarkHidden(gcsCredentialsFile)
-}
-
 func (options *GCSBackendOptions) parseFromFlags(flags *pflag.FlagSet) error {
 	var err error
 	options.Endpoint, err = flags.GetString(gcsEndpointOption)
@@ -186,19 +179,15 @@ func (s *gcsStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(strin
 	if opt == nil {
 		opt = &WalkOption{}
 	}
-	if len(opt.ObjPrefix) != 0 {
-		return errors.New("gcs storage not support ObjPrefix for now")
-	}
+
 	prefix := path.Join(s.gcs.Prefix, opt.SubDir)
 	if len(prefix) > 0 && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
+
 	query := &storage.Query{Prefix: prefix}
 	// only need each object's name and size
-	err := query.SetAttrSelection([]string{"Name", "Size"})
-	if err != nil {
-		return errors.Trace(err)
-	}
+	query.SetAttrSelection([]string{"Name", "Size"})
 	iter := s.bucket.Objects(ctx, query)
 	for {
 		attrs, err := iter.Next()
@@ -212,8 +201,6 @@ func (s *gcsStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(strin
 		// which can not be reuse in other API(Open/Read) directly.
 		// so we use TrimPrefix to filter Prefix for next Open/Read.
 		path := strings.TrimPrefix(attrs.Name, s.gcs.Prefix)
-		// trim the prefix '/' to ensure that the path returned is consistent with the local storage
-		path = strings.TrimPrefix(path, "/")
 		if err = fn(path, attrs.Size); err != nil {
 			return errors.Trace(err)
 		}
@@ -232,19 +219,6 @@ func (s *gcsStorage) Create(ctx context.Context, name string) (ExternalFileWrite
 	wc.StorageClass = s.gcs.StorageClass
 	wc.PredefinedACL = s.gcs.PredefinedAcl
 	return newFlushStorageWriter(wc, &emptyFlusher{}, wc), nil
-}
-
-// Rename file name from oldFileName to newFileName.
-func (s *gcsStorage) Rename(ctx context.Context, oldFileName, newFileName string) error {
-	data, err := s.ReadFile(ctx, oldFileName)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	err = s.WriteFile(ctx, newFileName, data)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return s.DeleteFile(ctx, oldFileName)
 }
 
 func newGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorageOptions) (*gcsStorage, error) {

@@ -3,24 +3,29 @@
 package redact_test
 
 import (
-	"encoding/hex"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/redact"
-	"github.com/stretchr/testify/require"
-	"go.uber.org/goleak"
 )
 
-func TestRedact(t *testing.T) {
-	defer goleak.VerifyNone(t)
+type testRedactSuite struct{}
 
+func (s *testRedactSuite) SetUpSuite(c *C)    {}
+func (s *testRedactSuite) TearDownSuite(c *C) {}
+
+var _ = Suite(&testRedactSuite{})
+
+func TestT(t *testing.T) {}
+
+func (s *testRedactSuite) TestRedact(c *C) {
 	redacted, secret := "?", "secret"
 
 	redact.InitRedact(false)
-	require.Equal(t, redact.String(secret), secret)
-	require.Equal(t, redact.Key([]byte(secret)), hex.EncodeToString([]byte(secret)))
+	c.Assert(redact.String(secret), Equals, secret)
+	c.Assert(redact.Key([]byte(secret)), Equals, secret)
 
 	redact.InitRedact(true)
-	require.Equal(t, redact.String(secret), redacted)
-	require.Equal(t, redact.Key([]byte(secret)), redacted)
+	c.Assert(redact.String(secret), Equals, redacted)
+	c.Assert(redact.Key([]byte(secret)), Equals, redacted)
 }

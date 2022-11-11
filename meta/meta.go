@@ -108,8 +108,6 @@ var (
 	ErrTableNotExists = dbterror.ClassMeta.NewStd(mysql.ErrNoSuchTable)
 	// ErrDDLReorgElementNotExist is the error for reorg element not exists.
 	ErrDDLReorgElementNotExist = dbterror.ClassMeta.NewStd(errno.ErrDDLReorgElementNotExist)
-	// ErrInvalidString is the error for invalid string to parse
-	ErrInvalidString = dbterror.ClassMeta.NewStd(errno.ErrInvalidCharacterString)
 )
 
 // Meta is for handling meta information in a transaction.
@@ -123,6 +121,7 @@ type Meta struct {
 // If the current Meta needs to handle a job, jobListKey is the type of the job's list.
 func NewMeta(txn kv.Transaction, jobListKeys ...JobListKeyType) *Meta {
 	txn.SetOption(kv.Priority, kv.PriorityHigh)
+	txn.SetOption(kv.SyncLog, struct{}{})
 	txn.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
 	t := structure.NewStructure(txn, txn, mMetaPrefix)
 	listKey := DefaultJobListKey
@@ -166,14 +165,6 @@ func (m *Meta) GenGlobalIDs(n int) ([]int64, error) {
 	return ids, nil
 }
 
-// GenPlacementPolicyID generates next placement policy id globally.
-func (m *Meta) GenPlacementPolicyID() (int64, error) {
-	policyIDMutex.Lock()
-	defer policyIDMutex.Unlock()
-
-	return m.txn.Inc(mPolicyGlobalID, 1)
-}
-
 // GetGlobalID gets current global id.
 func (m *Meta) GetGlobalID() (int64, error) {
 	return m.txn.GetInt64(mNextGlobalIDKey)
@@ -189,53 +180,11 @@ func (m *Meta) policyKey(policyID int64) []byte {
 }
 
 func (m *Meta) dbKey(dbID int64) []byte {
-	return DBkey(dbID)
-}
-
-// DBkey encodes the dbID into dbKey.
-func DBkey(dbID int64) []byte {
 	return []byte(fmt.Sprintf("%s:%d", mDBPrefix, dbID))
 }
 
-// ParseDBKey decodes the dbkey to get dbID.
-func ParseDBKey(dbkey []byte) (int64, error) {
-	if !IsDBkey(dbkey) {
-		return 0, ErrInvalidString.GenWithStack("fail to parse dbKey")
-	}
-
-	dbID := strings.TrimPrefix(string(dbkey), mDBPrefix+":")
-	id, err := strconv.Atoi(dbID)
-	return int64(id), errors.Trace(err)
-}
-
-// IsDBkey checks whether the dbKey comes from DBKey().
-func IsDBkey(dbKey []byte) bool {
-	return strings.HasPrefix(string(dbKey), mDBPrefix+":")
-}
-
 func (m *Meta) autoTableIDKey(tableID int64) []byte {
-	return AutoTableIDKey(tableID)
-}
-
-// AutoTableIDKey decodes the auto tableID key.
-func AutoTableIDKey(tableID int64) []byte {
 	return []byte(fmt.Sprintf("%s:%d", mTableIDPrefix, tableID))
-}
-
-// IsAutoTableIDKey checks whether the key is auto tableID key.
-func IsAutoTableIDKey(key []byte) bool {
-	return strings.HasPrefix(string(key), mTableIDPrefix+":")
-}
-
-// ParseAutoTableIDKey decodes the tableID from the auto tableID key.
-func ParseAutoTableIDKey(key []byte) (int64, error) {
-	if !IsAutoTableIDKey(key) {
-		return 0, ErrInvalidString.GenWithStack("fail to parse autoTableKey")
-	}
-
-	tableID := strings.TrimPrefix(string(key), mTableIDPrefix+":")
-	id, err := strconv.Atoi(tableID)
-	return int64(id), err
 }
 
 func (m *Meta) autoIncrementIDKey(tableID int64) []byte {
@@ -243,78 +192,15 @@ func (m *Meta) autoIncrementIDKey(tableID int64) []byte {
 }
 
 func (m *Meta) autoRandomTableIDKey(tableID int64) []byte {
-	return AutoRandomTableIDKey(tableID)
-}
-
-// AutoRandomTableIDKey encodes the auto random tableID key.
-func AutoRandomTableIDKey(tableID int64) []byte {
 	return []byte(fmt.Sprintf("%s:%d", mRandomIDPrefix, tableID))
 }
 
-// IsAutoRandomTableIDKey checks whether the key is auto random tableID key.
-func IsAutoRandomTableIDKey(key []byte) bool {
-	return strings.HasPrefix(string(key), mRandomIDPrefix+":")
-}
-
-// ParseAutoRandomTableIDKey decodes the tableID from the auto random tableID key.
-func ParseAutoRandomTableIDKey(key []byte) (int64, error) {
-	if !IsAutoRandomTableIDKey(key) {
-		return 0, ErrInvalidString.GenWithStack("fail to parse AutoRandomTableIDKey")
-	}
-
-	tableID := strings.TrimPrefix(string(key), mRandomIDPrefix+":")
-	id, err := strconv.Atoi(tableID)
-	return int64(id), err
-}
-
 func (m *Meta) tableKey(tableID int64) []byte {
-	return TableKey(tableID)
-}
-
-// TableKey encodes the tableID into tableKey.
-func TableKey(tableID int64) []byte {
 	return []byte(fmt.Sprintf("%s:%d", mTablePrefix, tableID))
 }
 
-// IsTableKey checks whether the tableKey comes from TableKey().
-func IsTableKey(tableKey []byte) bool {
-	return strings.HasPrefix(string(tableKey), mTablePrefix+":")
-}
-
-// ParseTableKey decodes the tableKey to get tableID.
-func ParseTableKey(tableKey []byte) (int64, error) {
-	if !strings.HasPrefix(string(tableKey), mTablePrefix) {
-		return 0, ErrInvalidString.GenWithStack("fail to parse tableKey")
-	}
-
-	tableID := strings.TrimPrefix(string(tableKey), mTablePrefix+":")
-	id, err := strconv.Atoi(tableID)
-	return int64(id), errors.Trace(err)
-}
-
 func (m *Meta) sequenceKey(sequenceID int64) []byte {
-	return SequenceKey(sequenceID)
-}
-
-// SequenceKey encodes the sequence key.
-func SequenceKey(sequenceID int64) []byte {
 	return []byte(fmt.Sprintf("%s:%d", mSequencePrefix, sequenceID))
-}
-
-// IsSequenceKey checks whether the key is sequence key.
-func IsSequenceKey(key []byte) bool {
-	return strings.HasPrefix(string(key), mSequencePrefix+":")
-}
-
-// ParseSequenceKey decodes the tableID from the sequence key.
-func ParseSequenceKey(key []byte) (int64, error) {
-	if !IsSequenceKey(key) {
-		return 0, ErrInvalidString.GenWithStack("fail to parse sequence key")
-	}
-
-	sequenceID := strings.TrimPrefix(string(key), mSequencePrefix+":")
-	id, err := strconv.Atoi(sequenceID)
-	return int64(id), errors.Trace(err)
 }
 
 func (m *Meta) sequenceCycleKey(sequenceID int64) []byte {
@@ -346,11 +232,6 @@ func (m *Meta) GetSchemaVersion() (int64, error) {
 // GenSchemaVersion generates next schema version.
 func (m *Meta) GenSchemaVersion() (int64, error) {
 	return m.txn.Inc(mSchemaVersionKey, 1)
-}
-
-// GenSchemaVersions increases the schema version.
-func (m *Meta) GenSchemaVersions(count int64) (int64, error) {
-	return m.txn.Inc(mSchemaVersionKey, count)
 }
 
 func (m *Meta) checkPolicyExists(policyKey []byte) error {
@@ -403,15 +284,22 @@ func (m *Meta) checkTableNotExists(dbKey []byte, tableKey []byte) error {
 
 // CreatePolicy creates a policy.
 func (m *Meta) CreatePolicy(policy *model.PolicyInfo) error {
-	if policy.ID == 0 {
-		return errors.New("policy.ID is invalid")
+	if policy.ID != 0 {
+		policyKey := m.policyKey(policy.ID)
+		if err := m.checkPolicyNotExists(policyKey); err != nil {
+			return errors.Trace(err)
+		}
+	} else {
+		// Autofill the policy ID.
+		policyIDMutex.Lock()
+		genID, err := m.txn.Inc(mPolicyGlobalID, 1)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		policyIDMutex.Unlock()
+		policy.ID = genID
 	}
-
 	policyKey := m.policyKey(policy.ID)
-	if err := m.checkPolicyNotExists(policyKey); err != nil {
-		return errors.Trace(err)
-	}
-
 	data, err := json.Marshal(policy)
 	if err != nil {
 		return errors.Trace(err)
@@ -1030,11 +918,6 @@ func (m *Meta) GetAllHistoryDDLJobs() ([]*model.Job, error) {
 	return jobs, nil
 }
 
-// GetHistoryDDLCount the count of all history DDL jobs.
-func (m *Meta) GetHistoryDDLCount() (uint64, error) {
-	return m.txn.HGetLen(mDDLJobHistoryKey)
-}
-
 // GetLastNHistoryDDLJobs gets latest N history ddl jobs.
 func (m *Meta) GetLastNHistoryDDLJobs(num int) ([]*model.Job, error) {
 	pairs, err := m.txn.HGetLastN(mDDLJobHistoryKey, num)
@@ -1121,7 +1004,7 @@ func (m *Meta) GetBootstrapVersion() (int64, error) {
 
 // FinishBootstrap finishes bootstrap.
 func (m *Meta) FinishBootstrap(version int64) error {
-	err := m.txn.Set(mBootstrapKey, []byte(strconv.FormatInt(version, 10)))
+	err := m.txn.Set(mBootstrapKey, []byte(fmt.Sprintf("%d", version)))
 	return errors.Trace(err)
 }
 

@@ -61,7 +61,6 @@ const (
 	tikvProfileCPU        = "tikv_profile_cpu"
 	tidbGCLeaderDesc      = "tidb_gc_leader_desc"
 	restrictedPriv        = "RESTRICTED_"
-	tidbAuditRetractLog   = "tidb_audit_redact_log" // sysvar installed by a plugin
 )
 
 var (
@@ -83,7 +82,7 @@ func Enable() {
 func Disable() {
 	atomic.StoreInt32(&semEnabled, 0)
 	variable.SetSysVar(variable.TiDBEnableEnhancedSecurity, variable.Off)
-	if hostname, err := os.Hostname(); err == nil {
+	if hostname, err := os.Hostname(); err != nil {
 		variable.SetSysVar(variable.Hostname, hostname)
 	}
 }
@@ -156,9 +155,7 @@ func IsInvisibleSysVar(varNameInLower string) bool {
 		variable.TiDBMemoryUsageAlarmRatio,
 		variable.TiDBRedactLog,
 		variable.TiDBRestrictedReadOnly,
-		variable.TiDBTopSQLMaxTimeSeriesCount,
-		variable.TiDBTopSQLMaxMetaCount,
-		tidbAuditRetractLog:
+		variable.TiDBSlowLogMasking:
 		return true
 	}
 	return false

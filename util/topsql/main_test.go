@@ -17,16 +17,30 @@ package topsql
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/testkit/testsetup"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/util/testbridge"
+	"github.com/pingcap/tidb/util/topsql/tracecpu"
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	testsetup.SetupForCommonTest()
+	testbridge.WorkaroundGoCheckFlags()
+
+	// set up
+	variable.TopSQLVariable.Enable.Store(true)
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.TopSQL.ReceiverAddress = "mock"
+	})
+	variable.TopSQLVariable.PrecisionSeconds.Store(1)
+	tracecpu.GlobalSQLCPUProfiler.Run()
+
 	opts := []goleak.Option{
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
-		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
-		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
+		goleak.IgnoreTopFunction("time.Sleep"),
+		goleak.IgnoreTopFunction("runtime/pprof.readProfile"),
+		goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),
+		goleak.IgnoreTopFunction("github.com/pingcap/tidb/util/topsql/tracecpu.(*sqlCPUProfiler).startAnalyzeProfileWorker"),
 	}
+
 	goleak.VerifyTestMain(m, opts...)
 }

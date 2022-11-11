@@ -24,6 +24,8 @@ import (
 )
 
 func TestMetricSchemaDef(t *testing.T) {
+	t.Parallel()
+
 	for name, def := range infoschema.MetricTableMap {
 		if strings.Contains(def.PromQL, "$QUANTILE") || strings.Contains(def.PromQL, "histogram_quantile") {
 			require.Greaterf(t, def.Quantile, float64(0), "the quantile of metric table %v should > 0", name)

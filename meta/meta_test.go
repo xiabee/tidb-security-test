@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,12 +28,13 @@ import (
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/store/mockstore"
-	"github.com/pingcap/tidb/testkit/testutil"
-	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPlacementPolicy(t *testing.T) {
+	t.Parallel()
+
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 
@@ -49,7 +51,6 @@ func TestPlacementPolicy(t *testing.T) {
 
 	// test the meta storage of placemnt policy.
 	policy := &model.PolicyInfo{
-		ID:   1,
 		Name: model.NewCIStr("aa"),
 		PlacementSettings: &model.PlacementSettings{
 			PrimaryRegion:      "my primary",
@@ -104,6 +105,8 @@ func TestPlacementPolicy(t *testing.T) {
 }
 
 func TestBackupAndRestoreAutoIDs(t *testing.T) {
+	t.Parallel()
+
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	defer func() {
@@ -151,6 +154,8 @@ func TestBackupAndRestoreAutoIDs(t *testing.T) {
 }
 
 func TestMeta(t *testing.T) {
+	t.Parallel()
+
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 
@@ -172,18 +177,22 @@ func TestMeta(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), n)
 
-	var wg util.WaitGroupWrapper
-	wg.Run(func() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		ids, err := m.GenGlobalIDs(3)
 		require.NoError(t, err)
 		anyMatch(t, ids, []int64{2, 3, 4}, []int64{6, 7, 8})
-	})
+	}()
 
-	wg.Run(func() {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
 		ids, err := m.GenGlobalIDs(4)
 		require.NoError(t, err)
 		anyMatch(t, ids, []int64{5, 6, 7, 8}, []int64{2, 3, 4, 5})
-	})
+	}()
 	wg.Wait()
 
 	n, err = m.GetSchemaVersion()
@@ -380,6 +389,7 @@ func TestMeta(t *testing.T) {
 }
 
 func TestSnapshot(t *testing.T) {
+	t.Parallel()
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	defer func() {
@@ -417,6 +427,7 @@ func TestSnapshot(t *testing.T) {
 }
 
 func TestElement(t *testing.T) {
+	t.Parallel()
 	checkElement := func(key []byte, resErr error) {
 		e := &meta.Element{ID: 123, TypeKey: key}
 		eBytes := e.EncodeElement()
@@ -442,6 +453,8 @@ func TestElement(t *testing.T) {
 }
 
 func TestDDL(t *testing.T) {
+	t.Parallel()
+
 	testCases := []struct {
 		desc        string
 		startHandle kv.Handle
@@ -454,8 +467,8 @@ func TestDDL(t *testing.T) {
 		},
 		{
 			"kv.CommonHandle",
-			testutil.MustNewCommonHandle(t, "abc", 1222, "string"),
-			testutil.MustNewCommonHandle(t, "dddd", 1222, "string"),
+			testkit.MustNewCommonHandle(t, "abc", 1222, "string"),
+			testkit.MustNewCommonHandle(t, "dddd", 1222, "string"),
 		},
 	}
 
@@ -463,6 +476,7 @@ func TestDDL(t *testing.T) {
 		// copy iterator variable into a new variable, see issue #27779
 		tc := tc
 		t.Run(tc.desc, func(t *testing.T) {
+			t.Parallel()
 			store, err := mockstore.NewMockStore()
 			require.NoError(t, err)
 			defer func() {
@@ -605,6 +619,8 @@ func TestDDL(t *testing.T) {
 }
 
 func TestAddIndexJob(t *testing.T) {
+	t.Parallel()
+
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	defer func() {
@@ -714,54 +730,4 @@ func match(ids, candidate []int64) bool {
 	}
 
 	return true
-}
-
-func TestDBKey(b *testing.T) {
-	var dbID int64 = 10
-	dbKey := meta.DBkey(dbID)
-	require.True(b, meta.IsDBkey(dbKey))
-
-	parseID, err := meta.ParseDBKey(dbKey)
-	require.NoError(b, err)
-	require.Equal(b, dbID, parseID)
-}
-
-func TestTableKey(b *testing.T) {
-	var tableID int64 = 10
-	tableKey := meta.TableKey(tableID)
-	require.True(b, meta.IsTableKey(tableKey))
-
-	parseID, err := meta.ParseTableKey(tableKey)
-	require.NoError(b, err)
-	require.Equal(b, tableID, parseID)
-}
-
-func TestAutoTableIDKey(b *testing.T) {
-	var tableID int64 = 10
-	tableKey := meta.AutoTableIDKey(tableID)
-	require.True(b, meta.IsAutoTableIDKey(tableKey))
-
-	id, err := meta.ParseAutoTableIDKey(tableKey)
-	require.NoError(b, err)
-	require.Equal(b, tableID, id)
-}
-
-func TestAutoRandomTableIDKey(b *testing.T) {
-	var tableID int64 = 10
-	key := meta.AutoRandomTableIDKey(tableID)
-	require.True(b, meta.IsAutoRandomTableIDKey(key))
-
-	id, err := meta.ParseAutoRandomTableIDKey(key)
-	require.NoError(b, err)
-	require.Equal(b, tableID, id)
-}
-
-func TestSequenceKey(b *testing.T) {
-	var tableID int64 = 10
-	key := meta.SequenceKey(tableID)
-	require.True(b, meta.IsSequenceKey(key))
-
-	id, err := meta.ParseSequenceKey(key)
-	require.NoError(b, err)
-	require.Equal(b, tableID, id)
 }

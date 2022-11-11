@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -39,8 +40,7 @@ type Scanner struct {
 	r   reader
 	buf bytes.Buffer
 
-	client     charset.Encoding
-	connection charset.Encoding
+	encoding charset.Encoding
 
 	errs         []error
 	warns        []error
@@ -89,9 +89,7 @@ func (s *Scanner) Errors() (warns []error, errs []error) {
 
 // reset resets the sql string to be scanned.
 func (s *Scanner) reset(sql string) {
-	s.client = charset.FindEncoding(mysql.DefaultCharset)
-	s.connection = charset.FindEncoding(mysql.DefaultCharset)
-	s.r = reader{s: sql, p: Pos{Line: 1}, l: len(sql)}
+	s.r = reader{s: sql, p: Pos{Line: 1}}
 	s.buf.Reset()
 	s.errs = s.errs[:0]
 	s.warns = s.warns[:0]
@@ -139,43 +137,13 @@ func (s *Scanner) AppendError(err error) {
 	s.errs = append(s.errs, err)
 }
 
-// AppendWarn sets warning into scanner.
-func (s *Scanner) AppendWarn(err error) {
-	if err == nil {
-		return
-	}
-	s.warns = append(s.warns, err)
-}
-
-// convert2System convert lit from client encoding to system encoding which is utf8mb4.
-func (s *Scanner) convert2System(tok int, lit string) (int, string) {
-	utf8Lit, err := s.client.Transform(nil, charset.HackSlice(lit), charset.OpDecodeReplace)
-	if err != nil {
-		s.AppendWarn(err)
-	}
-
-	return tok, charset.HackString(utf8Lit)
-}
-
-// convert2Connection convert lit from client encoding to connection encoding.
-func (s *Scanner) convert2Connection(tok int, lit string) (int, string) {
-	if mysql.IsUTF8Charset(s.client.Name()) {
-		return tok, lit
-	}
-	utf8Lit, err := s.client.Transform(nil, charset.HackSlice(lit), charset.OpDecodeReplace)
+func (s *Scanner) tryDecodeToUTF8String(sql string) string {
+	utf8Lit, err := s.encoding.DecodeString(sql)
 	if err != nil {
 		s.AppendError(err)
-		if s.sqlMode.HasStrictMode() && s.client.Tp() == s.connection.Tp() {
-			return invalid, lit
-		}
 		s.lastErrorAsWarn()
 	}
-
-	// It is definitely valid if `client` is the same with `connection`, so just transform if they are not the same.
-	if s.client.Tp() != s.connection.Tp() {
-		utf8Lit, _ = s.connection.Transform(nil, utf8Lit, charset.OpReplaceNoErr)
-	}
-	return tok, charset.HackString(utf8Lit)
+	return utf8Lit
 }
 
 func (s *Scanner) getNextToken() int {
@@ -256,9 +224,10 @@ func (s *Scanner) Lex(v *yySymType) int {
 	case quotedIdentifier, identifier:
 		tok = identifier
 		s.identifierDot = s.r.peek() == '.'
-		tok, v.ident = s.convert2System(tok, lit)
-	case stringLit:
-		tok, v.ident = s.convert2Connection(tok, lit)
+	}
+
+	if tok == unicode.ReplacementChar {
+		return invalid
 	}
 
 	return tok
@@ -293,7 +262,7 @@ func (s *Scanner) EnableWindowFunc(val bool) {
 func (s *Scanner) InheritScanner(sql string) *Scanner {
 	return &Scanner{
 		r:                 reader{s: sql},
-		client:            s.client,
+		encoding:          s.encoding,
 		sqlMode:           s.sqlMode,
 		supportWindowFunc: s.supportWindowFunc,
 	}
@@ -301,9 +270,7 @@ func (s *Scanner) InheritScanner(sql string) *Scanner {
 
 // NewScanner returns a new scanner object.
 func NewScanner(s string) *Scanner {
-	lexer := &Scanner{r: reader{s: s}}
-	lexer.reset(s)
-	return lexer
+	return &Scanner{r: reader{s: s}}
 }
 
 func (s *Scanner) handleIdent(lval *yySymType) int {
@@ -314,23 +281,21 @@ func (s *Scanner) handleIdent(lval *yySymType) int {
 	if !strings.HasPrefix(str, "_") {
 		return identifier
 	}
-	cs, _ := charset.GetCharsetInfo(str[1:])
-	if cs == nil {
+	cs, err := charset.GetCharsetInfo(str[1:])
+	if err != nil {
 		return identifier
 	}
 	lval.ident = cs.Name
 	return underscoreCS
 }
 
-func (s *Scanner) skipWhitespace() byte {
-	return s.r.incAsLongAs(func(b byte) bool {
-		return unicode.IsSpace(rune(b))
-	})
+func (s *Scanner) skipWhitespace() rune {
+	return s.r.incAsLongAs(unicode.IsSpace)
 }
 
 func (s *Scanner) scan() (tok int, pos Pos, lit string) {
 	ch0 := s.r.peek()
-	if unicode.IsSpace(rune(ch0)) {
+	if unicode.IsSpace(ch0) {
 		ch0 = s.skipWhitespace()
 	}
 	pos = s.r.pos()
@@ -346,7 +311,10 @@ func (s *Scanner) scan() (tok int, pos Pos, lit string) {
 
 	// search a trie to get a token.
 	node := &ruleTable
-	for !(node.childs[ch0] == nil || s.r.eof()) {
+	for ch0 >= 0 && ch0 <= 255 {
+		if node.childs[ch0] == nil || s.r.eof() {
+			break
+		}
 		node = node.childs[ch0]
 		if node.fn != nil {
 			return node.fn(s)
@@ -369,7 +337,7 @@ func startWithXx(s *Scanner) (tok int, pos Pos, lit string) {
 			s.r.inc()
 			tok, lit = hexLit, s.r.data(&pos)
 		} else {
-			tok = invalid
+			tok = unicode.ReplacementChar
 		}
 		return
 	}
@@ -401,7 +369,7 @@ func startWithBb(s *Scanner) (tok int, pos Pos, lit string) {
 			s.r.inc()
 			tok, lit = bitLit, s.r.data(&pos)
 		} else {
-			tok = invalid
+			tok = unicode.ReplacementChar
 		}
 		return
 	}
@@ -410,7 +378,7 @@ func startWithBb(s *Scanner) (tok int, pos Pos, lit string) {
 }
 
 func startWithSharp(s *Scanner) (tok int, pos Pos, lit string) {
-	s.r.incAsLongAs(func(ch byte) bool {
+	s.r.incAsLongAs(func(ch rune) bool {
 		return ch != '\n'
 	})
 	return s.scan()
@@ -421,7 +389,7 @@ func startWithDash(s *Scanner) (tok int, pos Pos, lit string) {
 	if strings.HasPrefix(s.r.s[pos.Offset:], "--") {
 		remainLen := len(s.r.s[pos.Offset:])
 		if remainLen == 2 || (remainLen > 2 && unicode.IsSpace(rune(s.r.s[pos.Offset+2]))) {
-			s.r.incAsLongAs(func(ch byte) bool {
+			s.r.incAsLongAs(func(ch rune) bool {
 				return ch != '\n'
 			})
 			return s.scan()
@@ -507,7 +475,7 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 
 	// standard C-like comment. read until we see '*/' then drop it.
 	for {
-		if currentCharIsStar || s.r.incAsLongAs(func(ch byte) bool { return ch != '*' }) == '*' {
+		if currentCharIsStar || s.r.incAsLongAs(func(ch rune) bool { return ch != '*' }) == '*' {
 			switch s.r.readByte() {
 			case '/':
 				// Meets */, means comment end.
@@ -573,7 +541,7 @@ func startWithAt(s *Scanner) (tok int, pos Pos, lit string) {
 		case identifier:
 			tok, lit = doubleAtIdentifier, s.r.data(&pos)
 		}
-	case invalid:
+	case unicode.ReplacementChar:
 		break
 	default:
 		tok = singleAtIdentifier
@@ -615,13 +583,12 @@ func scanQuotedIdent(s *Scanner) (tok int, pos Pos, lit string) {
 	pos = s.r.pos()
 	s.r.inc()
 	s.buf.Reset()
-	for !s.r.eof() {
-		tPos := s.r.pos()
-		if s.r.skipRune(s.client) {
-			s.buf.WriteString(s.r.data(&tPos))
-			continue
-		}
+	for {
 		ch := s.r.readByte()
+		if ch == unicode.ReplacementChar && s.r.eof() {
+			tok = unicode.ReplacementChar
+			return
+		}
 		if ch == '`' {
 			if s.r.peek() != '`' {
 				// don't return identifier in case that it's interpreted as keyword token later.
@@ -630,10 +597,8 @@ func scanQuotedIdent(s *Scanner) (tok int, pos Pos, lit string) {
 			}
 			s.r.inc()
 		}
-		s.buf.WriteByte(ch)
+		s.buf.WriteRune(ch)
 	}
-	tok = invalid
-	return
 }
 
 func startString(s *Scanner) (tok int, pos Pos, lit string) {
@@ -682,46 +647,43 @@ func (mb *lazyBuf) data() string {
 
 func (s *Scanner) scanString() (tok int, pos Pos, lit string) {
 	tok, pos = stringLit, s.r.pos()
+	mb := lazyBuf{false, &s.r, &s.buf, &pos}
 	ending := s.r.readByte()
-	s.buf.Reset()
+	ch0 := s.r.peek()
 	for !s.r.eof() {
-		tPos := s.r.pos()
-		if s.r.skipRune(s.client) {
-			s.buf.WriteString(s.r.data(&tPos))
-			continue
-		}
-		ch0 := s.r.readByte()
 		if ch0 == ending {
+			s.r.inc()
 			if s.r.peek() != ending {
-				lit = s.buf.String()
+				lit = mb.data()
 				return
 			}
-			s.r.inc()
-			s.buf.WriteByte(ch0)
+			str := mb.r.data(&pos)
+			mb.setUseBuf(str[1 : len(str)-1])
 		} else if ch0 == '\\' && !s.sqlMode.HasNoBackslashEscapesMode() {
-			if s.r.eof() {
-				break
-			}
-			s.handleEscape(s.r.peek(), &s.buf)
+			mb.setUseBuf(mb.r.data(&pos)[1:])
+			ch0 = handleEscape(s)
+		}
+		mb.writeRune(ch0, s.r.w)
+		if !s.r.eof() {
 			s.r.inc()
-		} else {
-			s.buf.WriteByte(ch0)
+			ch0 = s.r.peek()
 		}
 	}
 
-	tok = invalid
+	tok = unicode.ReplacementChar
 	return
 }
 
 // handleEscape handles the case in scanString when previous char is '\'.
-func (s *Scanner) handleEscape(b byte, buf *bytes.Buffer) {
-	var ch0 byte
+func handleEscape(s *Scanner) rune {
+	s.r.inc()
+	ch0 := s.r.peek()
 	/*
 		\" \' \\ \n \0 \b \Z \r \t ==> escape to one char
 		\% \_ ==> preserve both char
 		other ==> remove \
 	*/
-	switch b {
+	switch ch0 {
 	case 'n':
 		ch0 = '\n'
 	case '0':
@@ -735,12 +697,9 @@ func (s *Scanner) handleEscape(b byte, buf *bytes.Buffer) {
 	case 't':
 		ch0 = '\t'
 	case '%', '_':
-		buf.WriteByte('\\')
-		ch0 = b
-	default:
-		ch0 = b
+		s.buf.WriteByte('\\')
 	}
-	buf.WriteByte(ch0)
+	return ch0
 }
 
 func startWithNumber(s *Scanner) (tok int, pos Pos, lit string) {
@@ -820,13 +779,13 @@ func startWithDot(s *Scanner) (tok int, pos Pos, lit string) {
 }
 
 func (s *Scanner) scanOct() {
-	s.r.incAsLongAs(func(ch byte) bool {
+	s.r.incAsLongAs(func(ch rune) bool {
 		return ch >= '0' && ch <= '7'
 	})
 }
 
 func (s *Scanner) scanHex() {
-	s.r.incAsLongAs(func(ch byte) bool {
+	s.r.incAsLongAs(func(ch rune) bool {
 		return ch >= '0' && ch <= '9' ||
 			ch >= 'a' && ch <= 'f' ||
 			ch >= 'A' && ch <= 'F'
@@ -834,7 +793,7 @@ func (s *Scanner) scanHex() {
 }
 
 func (s *Scanner) scanBit() {
-	s.r.incAsLongAs(func(ch byte) bool {
+	s.r.incAsLongAs(func(ch rune) bool {
 		return ch == '0' || ch == '1'
 	})
 }
@@ -914,7 +873,7 @@ func (s *Scanner) scanFeatureIDs() (featureIDs []string) {
 			return nil
 		case expectChar:
 			if isIdentChar(ch) {
-				b.WriteByte(ch)
+				b.WriteRune(ch)
 				state = obtainChar
 				break
 			}
@@ -922,7 +881,7 @@ func (s *Scanner) scanFeatureIDs() (featureIDs []string) {
 			return nil
 		case obtainChar:
 			if isIdentChar(ch) {
-				b.WriteByte(ch)
+				b.WriteRune(ch)
 				state = obtainChar
 				break
 			} else if ch == ',' {
@@ -953,23 +912,39 @@ func (s *Scanner) lastErrorAsWarn() {
 type reader struct {
 	s string
 	p Pos
-	l int
+	w int
+
+	peekRune        rune
+	peekRuneUpdated bool
 }
 
 var eof = Pos{-1, -1, -1}
 
 func (r *reader) eof() bool {
-	return r.p.Offset >= r.l
+	return r.p.Offset >= len(r.s)
 }
 
 // peek() peeks a rune from underlying reader.
-// if reader meets EOF, it will return 0. to distinguish from
-// the real 0, the caller should call r.eof() again to check.
-func (r *reader) peek() byte {
-	if r.eof() {
-		return 0
+// if reader meets EOF, it will return unicode.ReplacementChar. to distinguish from
+// the real unicode.ReplacementChar, the caller should call r.eof() again to check.
+func (r *reader) peek() rune {
+	if r.peekRuneUpdated {
+		return r.peekRune
 	}
-	return r.s[r.p.Offset]
+	if r.eof() {
+		return unicode.ReplacementChar
+	}
+	v, w := rune(r.s[r.p.Offset]), 1
+	if v >= 0x80 {
+		v, w = utf8.DecodeRuneInString(r.s[r.p.Offset:])
+		if v == utf8.RuneError && w == 1 {
+			v = rune(r.s[r.p.Offset]) // illegal encoding
+		}
+	}
+	r.w = w
+	r.peekRune = v
+	r.peekRuneUpdated = true
+	return v
 }
 
 // inc increase the position offset of the reader.
@@ -979,8 +954,9 @@ func (r *reader) inc() {
 		r.p.Line++
 		r.p.Col = 0
 	}
-	r.p.Offset += 1
+	r.p.Offset += r.w
 	r.p.Col++
+	r.peekRuneUpdated = false
 }
 
 func (r *reader) incN(n int) {
@@ -989,9 +965,9 @@ func (r *reader) incN(n int) {
 	}
 }
 
-func (r *reader) readByte() (ch byte) {
+func (r *reader) readByte() (ch rune) {
 	ch = r.peek()
-	if r.eof() {
+	if ch == unicode.ReplacementChar && r.eof() {
 		return
 	}
 	r.inc()
@@ -1003,6 +979,9 @@ func (r *reader) pos() Pos {
 }
 
 func (r *reader) updatePos(pos Pos) {
+	if r.p.Offset != pos.Offset {
+		r.peekRuneUpdated = false
+	}
 	r.p = pos
 }
 
@@ -1010,25 +989,15 @@ func (r *reader) data(from *Pos) string {
 	return r.s[from.Offset:r.p.Offset]
 }
 
-func (r *reader) incAsLongAs(fn func(b byte) bool) byte {
+func (r *reader) incAsLongAs(fn func(rune) bool) rune {
 	for {
 		ch := r.peek()
 		if !fn(ch) {
 			return ch
 		}
-		if r.eof() {
+		if ch == unicode.ReplacementChar && r.eof() {
 			return 0
 		}
 		r.inc()
 	}
-}
-
-// skipRune skip mb character, return true indicate something has been skipped.
-func (r *reader) skipRune(enc charset.Encoding) bool {
-	if r.s[r.p.Offset] <= unicode.MaxASCII {
-		return false
-	}
-	c := enc.MbLen(r.s[r.p.Offset:])
-	r.incN(c)
-	return c > 0
 }

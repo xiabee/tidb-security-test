@@ -15,17 +15,15 @@
 package aggfuncs_test
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/executor/aggfuncs"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
-	"github.com/pingcap/tidb/util/mock"
 )
 
-func TestMergePartialResult4JsonObjectagg(t *testing.T) {
+func (s *testSuite) TestMergePartialResult4JsonObjectagg(c *C) {
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON}
 	var argCombines [][]byte
 	for i := 0; i < len(typeList); i++ {
@@ -65,13 +63,12 @@ func TestMergePartialResult4JsonObjectagg(t *testing.T) {
 		tests = append(tests, aggTest)
 	}
 
-	ctx := mock.NewContext()
 	for _, test := range tests {
-		testMultiArgsMergePartialResult(t, ctx, test)
+		s.testMultiArgsMergePartialResult(c, test)
 	}
 }
 
-func TestJsonObjectagg(t *testing.T) {
+func (s *testSuite) TestJsonObjectagg(c *C) {
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON}
 	var argCombines [][]byte
 	for i := 0; i < len(typeList); i++ {
@@ -103,13 +100,12 @@ func TestJsonObjectagg(t *testing.T) {
 		tests = append(tests, aggTest)
 	}
 
-	ctx := mock.NewContext()
 	for _, test := range tests {
-		testMultiArgsAggFunc(t, ctx, test)
+		s.testMultiArgsAggFunc(c, test)
 	}
 }
 
-func TestMemJsonObjectagg(t *testing.T) {
+func (s *testSuite) TestMemJsonObjectagg(c *C) {
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON, mysql.TypeDuration, mysql.TypeNewDecimal, mysql.TypeDate}
 	var argCombines [][]byte
 	for i := 0; i < len(typeList); i++ {
@@ -150,7 +146,7 @@ func TestMemJsonObjectagg(t *testing.T) {
 			buildMultiArgsAggMemTester(ast.AggFuncJsonObjectAgg, argTypes, mysql.TypeJSON, numRows, aggfuncs.DefPartialResult4JsonObjectAgg+aggfuncs.DefMapStringInterfaceBucketSize, defaultMultiArgsMemDeltaGens, false),
 		}
 		for _, test := range tests {
-			testMultiArgsAggMemFunc(t, test)
+			s.testMultiArgsAggMemFunc(c, test)
 		}
 	}
 }

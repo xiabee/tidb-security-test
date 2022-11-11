@@ -15,90 +15,98 @@
 package core
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
-	"github.com/stretchr/testify/require"
 )
 
 // LogicalOptimize exports the `logicalOptimize` function for test packages and
 // doesn't affect the normal package and access control of Golang (tricky ^_^)
 var LogicalOptimize = logicalOptimize
 
-func testDecimalConvert(t *testing.T, lDec, lLen, rDec, rLen int, lConvert, rConvert bool, cDec, cLen int) {
+var _ = Suite(&testPlannerFunctionSuite{})
+
+type testPlannerFunctionSuite struct {
+}
+
+func testDecimalConvert(lDec, lLen, rDec, rLen int, lConvert, rConvert bool, cDec, cLen int, c *C) {
 	lType := types.NewFieldType(mysql.TypeNewDecimal)
-	lType.SetDecimal(lDec)
-	lType.SetFlen(lLen)
+	lType.Decimal = lDec
+	lType.Flen = lLen
 
 	rType := types.NewFieldType(mysql.TypeNewDecimal)
-	rType.SetDecimal(rDec)
-	rType.SetFlen(rLen)
+	rType.Decimal = rDec
+	rType.Flen = rLen
 
 	cType, lCon, rCon := negotiateCommonType(lType, rType)
-	require.Equal(t, mysql.TypeNewDecimal, cType.GetType())
-	require.Equal(t, cDec, cType.GetDecimal())
-	require.Equal(t, cLen, cType.GetFlen())
-	require.Equal(t, lConvert, lCon)
-	require.Equal(t, rConvert, rCon)
+	c.Assert(cType.Tp, Equals, mysql.TypeNewDecimal)
+	c.Assert(cType.Decimal, Equals, cDec)
+	c.Assert(cType.Flen, Equals, cLen)
+	c.Assert(lConvert, Equals, lCon)
+	c.Assert(rConvert, Equals, rCon)
 }
 
-func TestMPPDecimalConvert(t *testing.T) {
-	testDecimalConvert(t, 5, 9, 5, 8, false, false, 5, 9)
-	testDecimalConvert(t, 5, 8, 5, 9, false, false, 5, 9)
-	testDecimalConvert(t, 0, 8, 0, 11, true, false, 0, 11)
-	testDecimalConvert(t, 0, 16, 0, 11, false, false, 0, 16)
-	testDecimalConvert(t, 5, 9, 4, 9, true, true, 5, 10)
-	testDecimalConvert(t, 5, 8, 4, 9, true, true, 5, 10)
-	testDecimalConvert(t, 5, 9, 4, 8, false, true, 5, 9)
-	testDecimalConvert(t, 10, 16, 0, 11, true, true, 10, 21)
-	testDecimalConvert(t, 5, 19, 0, 20, false, true, 5, 25)
-	testDecimalConvert(t, 20, 20, 0, 60, true, true, 20, 65)
-	testDecimalConvert(t, 20, 40, 0, 60, false, true, 20, 65)
-	testDecimalConvert(t, 0, 40, 0, 60, false, false, 0, 60)
+func (t *testPlannerFunctionSuite) TestMPPDecimalConvert(c *C) {
+	testDecimalConvert(5, 9, 5, 8, false, false, 5, 9, c)
+	testDecimalConvert(5, 8, 5, 9, false, false, 5, 9, c)
+	testDecimalConvert(0, 8, 0, 11, true, false, 0, 11, c)
+	testDecimalConvert(0, 16, 0, 11, false, false, 0, 16, c)
+	testDecimalConvert(5, 9, 4, 9, true, true, 5, 10, c)
+	testDecimalConvert(5, 8, 4, 9, true, true, 5, 10, c)
+	testDecimalConvert(5, 9, 4, 8, false, true, 5, 9, c)
+	testDecimalConvert(10, 16, 0, 11, true, true, 10, 21, c)
+	testDecimalConvert(5, 19, 0, 20, false, true, 5, 25, c)
+	testDecimalConvert(20, 20, 0, 60, true, true, 20, 65, c)
+	testDecimalConvert(20, 40, 0, 60, false, true, 20, 65, c)
+	testDecimalConvert(0, 40, 0, 60, false, false, 0, 60, c)
 }
 
-func testJoinKeyTypeConvert(t *testing.T, leftType, rightType, retType *types.FieldType, lConvert, rConvert bool) {
+func testJoinKeyTypeConvert(leftType, rightType, retType *types.FieldType, lConvert, rConvert bool, c *C) {
 	cType, lCon, rCon := negotiateCommonType(leftType, rightType)
-	require.Equal(t, retType.GetType(), cType.GetType())
-	require.Equal(t, retType.GetFlen(), cType.GetFlen())
-	require.Equal(t, retType.GetDecimal(), cType.GetDecimal())
-	require.Equal(t, retType.GetFlag(), cType.GetFlag())
-	require.Equal(t, lConvert, lCon)
-	require.Equal(t, rConvert, rCon)
-
+	c.Assert(cType.Tp, Equals, retType.Tp)
+	c.Assert(cType.Flen, Equals, retType.Flen)
+	c.Assert(cType.Decimal, Equals, retType.Decimal)
+	c.Assert(cType.Flag, Equals, retType.Flag)
+	c.Assert(lConvert, Equals, lCon)
+	c.Assert(rConvert, Equals, rCon)
 }
 
-func TestMPPJoinKeyTypeConvert(t *testing.T) {
-	tinyIntType := types.NewFieldTypeBuilder().SetType(mysql.TypeTiny).BuildP()
-	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTiny)
-	tinyIntType.SetFlen(flen)
-	tinyIntType.SetDecimal(decimal)
+func (t *testPlannerFunctionSuite) TestMPPJoinKeyTypeConvert(c *C) {
+	tinyIntType := &types.FieldType{
+		Tp: mysql.TypeTiny,
+	}
+	tinyIntType.Flen, tinyIntType.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTiny)
 
-	unsignedTinyIntType := types.NewFieldTypeBuilder().SetType(mysql.TypeTiny).BuildP()
-	unsignedTinyIntType.SetFlen(flen)
-	unsignedTinyIntType.SetDecimal(decimal)
-	unsignedTinyIntType.SetFlag(mysql.UnsignedFlag)
+	unsignedTinyIntType := &types.FieldType{
+		Tp: mysql.TypeTiny,
+	}
+	unsignedTinyIntType.Flen, tinyIntType.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeTiny)
+	unsignedTinyIntType.Flag = mysql.UnsignedFlag
 
-	bigIntType := types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).BuildP()
-	flen, decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
-	bigIntType.SetFlen(flen)
-	bigIntType.SetDecimal(decimal)
+	bigIntType := &types.FieldType{
+		Tp: mysql.TypeLonglong,
+	}
+	bigIntType.Flen, tinyIntType.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 
-	unsignedBigIntType := types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).BuildP()
-	unsignedBigIntType.SetFlen(flen)
-	unsignedBigIntType.SetDecimal(decimal)
-	unsignedBigIntType.SetFlag(mysql.UnsignedFlag)
+	unsignedBigIntType := &types.FieldType{
+		Tp: mysql.TypeLonglong,
+	}
+	unsignedBigIntType.Flen, tinyIntType.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
+	unsignedBigIntType.Flag = mysql.UnsignedFlag
 
-	decimalType := types.NewFieldTypeBuilder().SetType(mysql.TypeNewDecimal).SetFlen(20).SetDecimal(0).BuildP()
+	decimalType := &types.FieldType{
+		Tp:      mysql.TypeNewDecimal,
+		Flen:    20,
+		Decimal: 0,
+	}
 
-	testJoinKeyTypeConvert(t, tinyIntType, tinyIntType, tinyIntType, false, false)
-	testJoinKeyTypeConvert(t, tinyIntType, unsignedTinyIntType, bigIntType, true, true)
-	testJoinKeyTypeConvert(t, tinyIntType, bigIntType, bigIntType, true, false)
-	testJoinKeyTypeConvert(t, bigIntType, tinyIntType, bigIntType, false, true)
-	testJoinKeyTypeConvert(t, unsignedBigIntType, tinyIntType, decimalType, true, true)
-	testJoinKeyTypeConvert(t, tinyIntType, unsignedBigIntType, decimalType, true, true)
-	testJoinKeyTypeConvert(t, bigIntType, bigIntType, bigIntType, false, false)
-	testJoinKeyTypeConvert(t, unsignedBigIntType, bigIntType, decimalType, true, true)
-	testJoinKeyTypeConvert(t, bigIntType, unsignedBigIntType, decimalType, true, true)
+	testJoinKeyTypeConvert(tinyIntType, tinyIntType, tinyIntType, false, false, c)
+	testJoinKeyTypeConvert(tinyIntType, unsignedTinyIntType, bigIntType, true, true, c)
+	testJoinKeyTypeConvert(tinyIntType, bigIntType, bigIntType, true, false, c)
+	testJoinKeyTypeConvert(bigIntType, tinyIntType, bigIntType, false, true, c)
+	testJoinKeyTypeConvert(unsignedBigIntType, tinyIntType, decimalType, true, true, c)
+	testJoinKeyTypeConvert(tinyIntType, unsignedBigIntType, decimalType, true, true, c)
+	testJoinKeyTypeConvert(bigIntType, bigIntType, bigIntType, false, false, c)
+	testJoinKeyTypeConvert(unsignedBigIntType, bigIntType, decimalType, true, true, c)
+	testJoinKeyTypeConvert(bigIntType, unsignedBigIntType, decimalType, true, true, c)
 }

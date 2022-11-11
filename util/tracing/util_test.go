@@ -18,7 +18,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/opentracing/basictracer-go"
+	basictracer "github.com/opentracing/basictracer-go"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/tidb/util/tracing"
 	"github.com/stretchr/testify/require"

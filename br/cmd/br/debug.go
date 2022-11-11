@@ -89,9 +89,6 @@ func newCheckSumCommand() *cobra.Command {
 				if err != nil {
 					return errors.Trace(err)
 				}
-				if schema.Table == nil {
-					continue
-				}
 				tblInfo := &model.TableInfo{}
 				err = json.Unmarshal(schema.Table, tblInfo)
 				if err != nil {
@@ -219,10 +216,6 @@ func newBackupMetaValidateCommand() *cobra.Command {
 			tableIDMap := make(map[int64]int64)
 			// Simulate to create table
 			for _, table := range tables {
-				if table.Info == nil {
-					// empty database.
-					continue
-				}
 				indexIDAllocator := mockid.NewIDAllocator()
 				newTable := new(model.TableInfo)
 				tableID, _ := tableIDAllocator.Alloc()
@@ -236,7 +229,7 @@ func newBackupMetaValidateCommand() *cobra.Command {
 						Name: indexInfo.Name,
 					}
 				}
-				rules := restore.GetRewriteRules(newTable, table.Info, 0, true)
+				rules := restore.GetRewriteRules(newTable, table.Info, 0)
 				rewriteRules.Data = append(rewriteRules.Data, rules.Data...)
 				tableIDMap[table.Info.ID] = int64(tableID)
 			}
@@ -329,7 +322,7 @@ func encodeBackupMetaCommand() *cobra.Command {
 			if err := cfg.ParseFromFlags(cmd.Flags()); err != nil {
 				return errors.Trace(err)
 			}
-			_, s, err := task.GetStorage(ctx, cfg.Storage, &cfg)
+			_, s, err := task.GetStorage(ctx, &cfg)
 			if err != nil {
 				return errors.Trace(err)
 			}

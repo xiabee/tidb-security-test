@@ -21,6 +21,7 @@ import (
 )
 
 func TestPluginDeclare(t *testing.T) {
+	t.Parallel()
 	auditRaw := &AuditManifest{Manifest: Manifest{}}
 	auditExport := ExportManifest(auditRaw)
 	audit2 := DeclareAuditManifest(auditExport)
@@ -43,6 +44,7 @@ func TestPluginDeclare(t *testing.T) {
 }
 
 func TestDecode(t *testing.T) {
+	t.Parallel()
 	failID := ID("fail")
 	_, _, err := failID.Decode()
 	require.Error(t, err)

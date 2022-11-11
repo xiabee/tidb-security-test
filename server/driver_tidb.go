@@ -31,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tidb/util/topsql/stmtstats"
 )
 
 // TiDBDriver implements IDriver.
@@ -165,13 +164,8 @@ func (ts *TiDBStatement) Close() error {
 			if !ok {
 				return errors.Errorf("invalid CachedPrepareStmt type")
 			}
-			cacheKey, err := core.NewPlanCacheKey(ts.ctx.GetSessionVars(), preparedObj.StmtText, preparedObj.StmtDB, preparedObj.PreparedAst.SchemaVersion)
-			if err != nil {
-				return err
-			}
-			if !ts.ctx.GetSessionVars().IgnorePreparedCacheCloseStmt { // keep the plan in cache
-				ts.ctx.PreparedPlanCache().Delete(cacheKey)
-			}
+			ts.ctx.PreparedPlanCache().Delete(core.NewPSTMTPlanCacheKey(
+				ts.ctx.GetSessionVars(), ts.id, preparedObj.PreparedAst.SchemaVersion))
 		}
 		ts.ctx.GetSessionVars().RemovePreparedStmt(ts.id)
 	}
@@ -222,13 +216,7 @@ func (tc *TiDBContext) WarningCount() uint16 {
 
 // ExecuteStmt implements QueryCtx interface.
 func (tc *TiDBContext) ExecuteStmt(ctx context.Context, stmt ast.StmtNode) (ResultSet, error) {
-	var rs sqlexec.RecordSet
-	var err error
-	if s, ok := stmt.(*ast.NonTransactionalDeleteStmt); ok {
-		rs, err = session.HandleNonTransactionalDelete(ctx, s, tc.Session)
-	} else {
-		rs, err = tc.Session.ExecuteStmt(ctx, stmt)
-	}
+	rs, err := tc.Session.ExecuteStmt(ctx, stmt)
 	if err != nil {
 		tc.Session.GetSessionVars().StmtCtx.AppendError(err)
 		return nil, err
@@ -302,11 +290,6 @@ func (tc *TiDBContext) Prepare(sql string) (statement PreparedStatement, columns
 	return
 }
 
-// GetStmtStats implements the sessionctx.Context interface.
-func (tc *TiDBContext) GetStmtStats() *stmtstats.StatementStats {
-	return tc.Session.GetStmtStats()
-}
-
 type tidbResultSet struct {
 	recordSet    sqlexec.RecordSet
 	columns      []*ColumnInfo
@@ -315,8 +298,8 @@ type tidbResultSet struct {
 	preparedStmt *core.CachedPrepareStmt
 }
 
-func (trs *tidbResultSet) NewChunk(alloc chunk.Allocator) *chunk.Chunk {
-	return trs.recordSet.NewChunk(alloc)
+func (trs *tidbResultSet) NewChunk() *chunk.Chunk {
+	return trs.recordSet.NewChunk()
 }
 
 func (trs *tidbResultSet) Next(ctx context.Context, req *chunk.Chunk) error {
@@ -381,26 +364,28 @@ func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
 		OrgName: fld.Column.Name.O,
 		Table:   fld.TableAsName.O,
 		Schema:  fld.DBName.O,
-		Flag:    uint16(fld.Column.GetFlag()),
-		Charset: uint16(mysql.CharsetNameToID(fld.Column.GetCharset())),
-		Type:    fld.Column.GetType(),
+		Flag:    uint16(fld.Column.Flag),
+		Charset: uint16(mysql.CharsetNameToID(fld.Column.Charset)),
+		Type:    fld.Column.Tp,
 	}
 
 	if fld.Table != nil {
 		ci.OrgTable = fld.Table.Name.O
 	}
-	if fld.Column.GetFlen() != types.UnspecifiedLength {
-		ci.ColumnLength = uint32(fld.Column.GetFlen())
+	if fld.Column.Flen == types.UnspecifiedLength {
+		ci.ColumnLength = 0
+	} else {
+		ci.ColumnLength = uint32(fld.Column.Flen)
 	}
-	if fld.Column.GetType() == mysql.TypeNewDecimal {
+	if fld.Column.Tp == mysql.TypeNewDecimal {
 		// Consider the negative sign.
 		ci.ColumnLength++
-		if fld.Column.GetDecimal() > types.DefaultFsp {
+		if fld.Column.Decimal > int(types.DefaultFsp) {
 			// Consider the decimal point.
 			ci.ColumnLength++
 		}
-	} else if types.IsString(fld.Column.GetType()) ||
-		fld.Column.GetType() == mysql.TypeEnum || fld.Column.GetType() == mysql.TypeSet { // issue #18870
+	} else if types.IsString(fld.Column.Tp) ||
+		fld.Column.Tp == mysql.TypeEnum || fld.Column.Tp == mysql.TypeSet { // issue #18870
 		// Fix issue #4540.
 		// The flen is a hint, not a precise value, so most client will not use the value.
 		// But we found in rare MySQL client, like Navicat for MySQL(version before 12) will truncate
@@ -413,7 +398,7 @@ func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
 		// * utf8mb4, the multiple is 4
 		// We used to check non-string types to avoid the truncation problem in some MySQL
 		// client such as Navicat. Now we only allow string type enter this branch.
-		charsetDesc, err := charset.GetCharsetInfo(fld.Column.GetCharset())
+		charsetDesc, err := charset.GetCharsetInfo(fld.Column.Charset)
 		if err != nil {
 			ci.ColumnLength *= 4
 		} else {
@@ -421,14 +406,14 @@ func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
 		}
 	}
 
-	if fld.Column.GetDecimal() == types.UnspecifiedLength {
-		if fld.Column.GetType() == mysql.TypeDuration {
+	if fld.Column.Decimal == types.UnspecifiedLength {
+		if fld.Column.Tp == mysql.TypeDuration {
 			ci.Decimal = uint8(types.DefaultFsp)
 		} else {
 			ci.Decimal = mysql.NotFixedDec
 		}
 	} else {
-		ci.Decimal = uint8(fld.Column.GetDecimal())
+		ci.Decimal = uint8(fld.Column.Decimal)
 	}
 
 	// Keep things compatible for old clients.

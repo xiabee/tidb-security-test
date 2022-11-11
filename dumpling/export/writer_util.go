@@ -226,7 +226,7 @@ func WriteInsert(pCtx *tcontext.Context, cfg *Config, meta TableMeta, tblIR Tabl
 			}
 			counter++
 			wp.AddFileSize(uint64(bf.Len()-lastBfSize) + 2) // 2 is for ",\n" and ";\n"
-			failpoint.Inject("ChaosBrokenWriterConn", func(_ failpoint.Value) {
+			failpoint.Inject("ChaosBrokenMySQLConn", func(_ failpoint.Value) {
 				failpoint.Return(0, errors.New("connection is closed"))
 			})
 
@@ -344,7 +344,6 @@ func WriteInsertInCsv(pCtx *tcontext.Context, cfg *Config, meta TableMeta, tblIR
 				bf.Write(opt.separator)
 			}
 		}
-		bf.WriteByte('\r')
 		bf.WriteByte('\n')
 	}
 	wp.currentFileSize += uint64(bf.Len())
@@ -360,7 +359,6 @@ func WriteInsertInCsv(pCtx *tcontext.Context, cfg *Config, meta TableMeta, tblIR
 		counter++
 		wp.currentFileSize += uint64(bf.Len()-lastBfSize) + 1 // 1 is for "\n"
 
-		bf.WriteByte('\r')
 		bf.WriteByte('\n')
 		if bf.Len() >= lengthLimit {
 			select {

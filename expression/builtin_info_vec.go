@@ -114,7 +114,7 @@ func (b *builtinCurrentUserSig) vecEvalString(input *chunk.Chunk, result *chunk.
 		return errors.Errorf("Missing session variable when eval builtin")
 	}
 	for i := 0; i < n; i++ {
-		result.AppendString(data.User.String())
+		result.AppendString(data.User.AuthIdentityString())
 	}
 	return nil
 }
@@ -168,7 +168,7 @@ func (b *builtinUserSig) vecEvalString(input *chunk.Chunk, result *chunk.Column)
 
 	result.ReserveString(n)
 	for i := 0; i < n; i++ {
-		result.AppendString(data.User.LoginString())
+		result.AppendString(data.User.String())
 	}
 	return nil
 }
@@ -179,8 +179,9 @@ func (b *builtinTiDBIsDDLOwnerSig) vectorized() bool {
 
 func (b *builtinTiDBIsDDLOwnerSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) error {
 	n := input.NumRows()
+	ddlOwnerChecker := b.ctx.DDLOwnerChecker()
 	var res int64
-	if b.ctx.IsDDLOwner() {
+	if ddlOwnerChecker.IsOwner() {
 		res = 1
 	}
 	result.ResizeInt64(n, false)

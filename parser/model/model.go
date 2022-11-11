@@ -22,7 +22,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser/auth"
-	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 )
@@ -71,7 +70,7 @@ func (s SchemaState) String() string {
 	case StateGlobalTxnOnly:
 		return "global txn only"
 	default:
-		return "none"
+		return "queueing"
 	}
 }
 
@@ -111,9 +110,9 @@ type ColumnInfo struct {
 	GeneratedExprString string              `json:"generated_expr_string"`
 	GeneratedStored     bool                `json:"generated_stored"`
 	Dependences         map[string]struct{} `json:"dependences"`
-	FieldType           types.FieldType     `json:"type"`
-	State               SchemaState         `json:"state"`
-	Comment             string              `json:"comment"`
+	types.FieldType     `json:"type"`
+	State               SchemaState `json:"state"`
+	Comment             string      `json:"comment"`
 	// A hidden column is used internally(expression index) and are not accessible by users.
 	Hidden           bool `json:"hidden"`
 	*ChangeStateInfo `json:"change_state_info"`
@@ -131,78 +130,6 @@ func (c *ColumnInfo) Clone() *ColumnInfo {
 	return &nc
 }
 
-func (c *ColumnInfo) GetType() byte {
-	return c.FieldType.GetType()
-}
-
-func (c *ColumnInfo) GetFlag() uint {
-	return c.FieldType.GetFlag()
-}
-
-func (c *ColumnInfo) GetFlen() int {
-	return c.FieldType.GetFlen()
-}
-
-func (c *ColumnInfo) GetDecimal() int {
-	return c.FieldType.GetDecimal()
-}
-
-func (c *ColumnInfo) GetCharset() string {
-	return c.FieldType.GetCharset()
-}
-
-func (c *ColumnInfo) GetCollate() string {
-	return c.FieldType.GetCollate()
-}
-
-func (c *ColumnInfo) GetElems() []string {
-	return c.FieldType.GetElems()
-}
-
-func (c *ColumnInfo) SetType(tp byte) {
-	c.FieldType.SetType(tp)
-}
-
-func (c *ColumnInfo) SetFlag(flag uint) {
-	c.FieldType.SetFlag(flag)
-}
-
-func (c *ColumnInfo) AddFlag(flag uint) {
-	c.FieldType.AddFlag(flag)
-}
-
-func (c *ColumnInfo) AndFlag(flag uint) {
-	c.FieldType.AndFlag(flag)
-}
-
-func (c *ColumnInfo) ToggleFlag(flag uint) {
-	c.FieldType.ToggleFlag(flag)
-}
-
-func (c *ColumnInfo) DelFlag(flag uint) {
-	c.FieldType.DelFlag(flag)
-}
-
-func (c *ColumnInfo) SetFlen(flen int) {
-	c.FieldType.SetFlen(flen)
-}
-
-func (c *ColumnInfo) SetDecimal(decimal int) {
-	c.FieldType.SetDecimal(decimal)
-}
-
-func (c *ColumnInfo) SetCharset(charset string) {
-	c.FieldType.SetCharset(charset)
-}
-
-func (c *ColumnInfo) SetCollate(collate string) {
-	c.FieldType.SetCollate(collate)
-}
-
-func (c *ColumnInfo) SetElems(elems []string) {
-	c.FieldType.SetElems(elems)
-}
-
 // IsGenerated returns true if the column is generated column.
 func (c *ColumnInfo) IsGenerated() bool {
 	return len(c.GeneratedExprString) != 0
@@ -214,7 +141,7 @@ func (c *ColumnInfo) IsGenerated() bool {
 // The mysql.TypeBit type supports the null default value.
 func (c *ColumnInfo) SetOriginDefaultValue(value interface{}) error {
 	c.OriginDefaultValue = value
-	if c.GetType() == mysql.TypeBit {
+	if c.Tp == mysql.TypeBit {
 		if value == nil {
 			return nil
 		}
@@ -229,7 +156,7 @@ func (c *ColumnInfo) SetOriginDefaultValue(value interface{}) error {
 
 // GetOriginDefaultValue gets the origin default value.
 func (c *ColumnInfo) GetOriginDefaultValue() interface{} {
-	if c.GetType() == mysql.TypeBit && c.OriginDefaultValueBit != nil {
+	if c.Tp == mysql.TypeBit && c.OriginDefaultValueBit != nil {
 		// If the column type is BIT, both `OriginDefaultValue` and `DefaultValue` of ColumnInfo are corrupted,
 		// because the content before json.Marshal is INCONSISTENT with the content after json.Unmarshal.
 		return string(c.OriginDefaultValueBit)
@@ -240,7 +167,7 @@ func (c *ColumnInfo) GetOriginDefaultValue() interface{} {
 // SetDefaultValue sets the default value.
 func (c *ColumnInfo) SetDefaultValue(value interface{}) error {
 	c.DefaultValue = value
-	if c.GetType() == mysql.TypeBit {
+	if c.Tp == mysql.TypeBit {
 		// For mysql.TypeBit type, the default value storage format must be a string.
 		// Other value such as int must convert to string format first.
 		// The mysql.TypeBit type supports the null default value.
@@ -260,7 +187,7 @@ func (c *ColumnInfo) SetDefaultValue(value interface{}) error {
 // Default value use to stored in DefaultValue field, but now,
 // bit type default value will store in DefaultValueBit for fix bit default value decode/encode bug.
 func (c *ColumnInfo) GetDefaultValue() interface{} {
-	if c.GetType() == mysql.TypeBit && c.DefaultValueBit != nil {
+	if c.Tp == mysql.TypeBit && c.DefaultValueBit != nil {
 		return string(c.DefaultValueBit)
 	}
 	return c.DefaultValue
@@ -269,10 +196,10 @@ func (c *ColumnInfo) GetDefaultValue() interface{} {
 // GetTypeDesc gets the description for column type.
 func (c *ColumnInfo) GetTypeDesc() string {
 	desc := c.FieldType.CompactStr()
-	if mysql.HasUnsignedFlag(c.GetFlag()) && c.GetType() != mysql.TypeBit && c.GetType() != mysql.TypeYear {
+	if mysql.HasUnsignedFlag(c.Flag) && c.Tp != mysql.TypeBit && c.Tp != mysql.TypeYear {
 		desc += " unsigned"
 	}
-	if mysql.HasZerofillFlag(c.GetFlag()) && c.GetType() != mysql.TypeYear {
+	if mysql.HasZerofillFlag(c.Flag) && c.Tp != mysql.TypeYear {
 		desc += " zerofill"
 	}
 	return desc
@@ -286,26 +213,7 @@ func FindColumnInfo(cols []*ColumnInfo, name string) *ColumnInfo {
 			return col
 		}
 	}
-	return nil
-}
 
-// FindColumnInfoByID finds ColumnInfo in cols by id.
-func FindColumnInfoByID(cols []*ColumnInfo, id int64) *ColumnInfo {
-	for _, col := range cols {
-		if col.ID == id {
-			return col
-		}
-	}
-	return nil
-}
-
-// FindIndexInfoByID finds IndexInfo in indices by id.
-func FindIndexInfoByID(indices []*IndexInfo, id int64) *IndexInfo {
-	for _, idx := range indices {
-		if idx.ID == id {
-			return idx
-		}
-	}
 	return nil
 }
 
@@ -315,12 +223,6 @@ const ExtraHandleID = -1
 
 // ExtraPidColID is the column ID of column which store the partitionID decoded in global index values.
 const ExtraPidColID = -2
-
-// ExtraPhysTblID is the column ID of column that should be filled in with the physical table id.
-// Primarily used for table partition dynamic prune mode, to return which partition (physical table id) the row came from.
-// Using a dedicated id for this, since in the future ExtraPidColID and ExtraPhysTblID may be used for the same request.
-// Must be after ExtraPidColID!
-const ExtraPhysTblID = -3
 
 const (
 	// TableInfoVersion0 means the table info version is 0.
@@ -362,9 +264,6 @@ var ExtraHandleName = NewCIStr("_tidb_rowid")
 
 // ExtraPartitionIdName is the name of ExtraPartitionId Column.
 var ExtraPartitionIdName = NewCIStr("_tidb_pid")
-
-// ExtraPhysTblIdName is the name of ExtraPhysTblID Column.
-var ExtraPhysTblIdName = NewCIStr("_tidb_tid")
 
 // TableInfo provides meta data describing a DB table.
 type TableInfo struct {
@@ -440,7 +339,8 @@ type TableInfo struct {
 
 	TempTableType        `json:"temp_table_type"`
 	TableCacheStatusType `json:"cache_table_status"`
-	PlacementPolicyRef   *PolicyRefInfo `json:"policy_ref_info"`
+	PlacementPolicyRef   *PolicyRefInfo     `json:"policy_ref_info"`
+	DirectPlacementOpts  *PlacementSettings `json:"placement_settings"`
 
 	// StatsOptions is used when do analyze/auto-analyze for each table
 	StatsOptions *StatsOptions `json:"stats_options"`
@@ -640,7 +540,7 @@ func (t *TableInfo) Clone() *TableInfo {
 // GetPkName will return the pk name if pk exists.
 func (t *TableInfo) GetPkName() CIStr {
 	for _, colInfo := range t.Columns {
-		if mysql.HasPriKeyFlag(colInfo.GetFlag()) {
+		if mysql.HasPriKeyFlag(colInfo.Flag) {
 			return colInfo.Name
 		}
 	}
@@ -651,7 +551,7 @@ func (t *TableInfo) GetPkName() CIStr {
 // Make sure PkIsHandle checked before call this method.
 func (t *TableInfo) GetPkColInfo() *ColumnInfo {
 	for _, colInfo := range t.Columns {
-		if mysql.HasPriKeyFlag(colInfo.GetFlag()) {
+		if mysql.HasPriKeyFlag(colInfo.Flag) {
 			return colInfo
 		}
 	}
@@ -660,7 +560,7 @@ func (t *TableInfo) GetPkColInfo() *ColumnInfo {
 
 func (t *TableInfo) GetAutoIncrementColInfo() *ColumnInfo {
 	for _, colInfo := range t.Columns {
-		if mysql.HasAutoIncrementFlag(colInfo.GetFlag()) {
+		if mysql.HasAutoIncrementFlag(colInfo.Flag) {
 			return colInfo
 		}
 	}
@@ -672,7 +572,7 @@ func (t *TableInfo) IsAutoIncColUnsigned() bool {
 	if col == nil {
 		return false
 	}
-	return mysql.HasUnsignedFlag(col.GetFlag())
+	return mysql.HasUnsignedFlag(col.Flag)
 }
 
 // ContainsAutoRandomBits indicates whether a table contains auto_random column.
@@ -685,7 +585,7 @@ func (t *TableInfo) IsAutoRandomBitColUnsigned() bool {
 	if !t.PKIsHandle || t.AutoRandomBits == 0 {
 		return false
 	}
-	return mysql.HasUnsignedFlag(t.GetPkColInfo().GetFlag())
+	return mysql.HasUnsignedFlag(t.GetPkColInfo().Flag)
 }
 
 // Cols returns the columns of the table in public state.
@@ -719,66 +619,15 @@ func (t *TableInfo) IsLocked() bool {
 	return t.Lock != nil && len(t.Lock.Sessions) > 0
 }
 
-// MoveColumnInfo moves a column to another offset.
-func (t *TableInfo) MoveColumnInfo(from, to int) {
-	if from == to {
-		return
-	}
-	updatedOffsets := make(map[int]int)
-	src := t.Columns[from]
-	if from < to {
-		for i := from; i < to; i++ {
-			t.Columns[i] = t.Columns[i+1]
-			t.Columns[i].Offset = i
-			updatedOffsets[i+1] = i
-		}
-	} else if from > to {
-		for i := from; i > to; i-- {
-			t.Columns[i] = t.Columns[i-1]
-			t.Columns[i].Offset = i
-			updatedOffsets[i-1] = i
-		}
-	}
-	t.Columns[to] = src
-	t.Columns[to].Offset = to
-	updatedOffsets[from] = to
-	for _, idx := range t.Indices {
-		for _, idxCol := range idx.Columns {
-			newOffset, ok := updatedOffsets[idxCol.Offset]
-			if ok {
-				idxCol.Offset = newOffset
-			}
-		}
-	}
-}
-
-// ClearPlacement clears all table and partitions' placement settings
-func (t *TableInfo) ClearPlacement() {
-	t.PlacementPolicyRef = nil
-	if t.Partition != nil {
-		for i := range t.Partition.Definitions {
-			def := &t.Partition.Definitions[i]
-			def.PlacementPolicyRef = nil
-		}
-	}
-}
-
 // NewExtraHandleColInfo mocks a column info for extra handle column.
 func NewExtraHandleColInfo() *ColumnInfo {
 	colInfo := &ColumnInfo{
 		ID:   ExtraHandleID,
 		Name: ExtraHandleName,
 	}
-
-	colInfo.SetFlag(mysql.PriKeyFlag | mysql.NotNullFlag)
-	colInfo.SetType(mysql.TypeLonglong)
-
-	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
-	colInfo.SetFlen(flen)
-	colInfo.SetDecimal(decimal)
-
-	colInfo.SetCharset(charset.CharsetBin)
-	colInfo.SetCollate(charset.CollationBin)
+	colInfo.Flag = mysql.PriKeyFlag | mysql.NotNullFlag
+	colInfo.Tp = mysql.TypeLonglong
+	colInfo.Flen, colInfo.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	return colInfo
 }
 
@@ -788,23 +637,8 @@ func NewExtraPartitionIDColInfo() *ColumnInfo {
 		ID:   ExtraPidColID,
 		Name: ExtraPartitionIdName,
 	}
-	colInfo.SetType(mysql.TypeLonglong)
-	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
-	colInfo.SetFlen(flen)
-	colInfo.SetDecimal(decimal)
-	return colInfo
-}
-
-// NewExtraPhysTblIDColInfo mocks a column info for extra partition id column.
-func NewExtraPhysTblIDColInfo() *ColumnInfo {
-	colInfo := &ColumnInfo{
-		ID:   ExtraPhysTblID,
-		Name: ExtraPhysTblIdName,
-	}
-	colInfo.SetType(mysql.TypeLonglong)
-	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
-	colInfo.SetFlen(flen)
-	colInfo.SetDecimal(decimal)
+	colInfo.Tp = mysql.TypeLonglong
+	colInfo.Flen, colInfo.Decimal = mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	return colInfo
 }
 
@@ -818,11 +652,6 @@ func (t *TableInfo) ColumnIsInIndex(c *ColumnInfo) bool {
 		}
 	}
 	return false
-}
-
-// HasClusteredIndex checks whether the table has a clustered index.
-func (t *TableInfo) HasClusteredIndex() bool {
-	return t.PKIsHandle || t.IsCommonHandle
 }
 
 // IsView checks if TableInfo is a view.
@@ -989,29 +818,6 @@ type PartitionInfo struct {
 	Num                 uint64                `json:"num"`
 }
 
-func (pi *PartitionInfo) Clone() *PartitionInfo {
-	newPi := *pi
-	newPi.Columns = make([]CIStr, len(pi.Columns))
-	copy(newPi.Columns, pi.Columns)
-
-	newPi.Definitions = make([]PartitionDefinition, len(pi.Definitions))
-	for i := range pi.Definitions {
-		newPi.Definitions[i] = pi.Definitions[i].Clone()
-	}
-
-	newPi.AddingDefinitions = make([]PartitionDefinition, len(pi.AddingDefinitions))
-	for i := range pi.AddingDefinitions {
-		newPi.AddingDefinitions[i] = pi.AddingDefinitions[i].Clone()
-	}
-
-	newPi.DroppingDefinitions = make([]PartitionDefinition, len(pi.DroppingDefinitions))
-	for i := range pi.DroppingDefinitions {
-		newPi.DroppingDefinitions[i] = pi.DroppingDefinitions[i].Clone()
-	}
-
-	return &newPi
-}
-
 // GetNameByID gets the partition name by ID.
 func (pi *PartitionInfo) GetNameByID(id int64) string {
 	definitions := pi.Definitions
@@ -1019,10 +825,21 @@ func (pi *PartitionInfo) GetNameByID(id int64) string {
 	// see https://github.com/pingcap/parser/pull/1072 for the benchmark.
 	for i := range definitions {
 		if id == definitions[i].ID {
-			return definitions[i].Name.O
+			return definitions[i].Name.L
 		}
 	}
 	return ""
+}
+
+// GetPlacementByID gets the partition placement by ID.
+func (pi *PartitionInfo) GetPlacementByID(id int64) (*PolicyRefInfo, *PlacementSettings) {
+	definitions := pi.Definitions
+	for i := range definitions {
+		if id == definitions[i].ID {
+			return definitions[i].PlacementPolicyRef, definitions[i].DirectPlacementOpts
+		}
+	}
+	return nil, nil
 }
 
 func (pi *PartitionInfo) GetStateByID(id int64) SchemaState {
@@ -1075,12 +892,13 @@ type PartitionState struct {
 
 // PartitionDefinition defines a single partition.
 type PartitionDefinition struct {
-	ID                 int64          `json:"id"`
-	Name               CIStr          `json:"name"`
-	LessThan           []string       `json:"less_than"`
-	InValues           [][]string     `json:"in_values"`
-	PlacementPolicyRef *PolicyRefInfo `json:"policy_ref_info"`
-	Comment            string         `json:"comment,omitempty"`
+	ID                  int64              `json:"id"`
+	Name                CIStr              `json:"name"`
+	LessThan            []string           `json:"less_than"`
+	InValues            [][]string         `json:"in_values"`
+	PlacementPolicyRef  *PolicyRefInfo     `json:"policy_ref_info"`
+	DirectPlacementOpts *PlacementSettings `json:"placement_settings"`
+	Comment             string             `json:"comment,omitempty"`
 }
 
 // Clone clones ConstraintInfo.
@@ -1234,24 +1052,6 @@ func (t *TableInfo) FindConstraintInfoByName(constrName string) *ConstraintInfo 
 	return nil
 }
 
-// FindIndexNameByID finds index name by id.
-func (t *TableInfo) FindIndexNameByID(id int64) string {
-	indexInfo := FindIndexInfoByID(t.Indices, id)
-	if indexInfo != nil {
-		return indexInfo.Name.L
-	}
-	return ""
-}
-
-// FindColumnNameByID finds column name by id.
-func (t *TableInfo) FindColumnNameByID(id int64) string {
-	colInfo := FindColumnInfoByID(t.Columns, id)
-	if colInfo != nil {
-		return colInfo.Name.L
-	}
-	return ""
-}
-
 // FKInfo provides meta data describing a foreign key constraint.
 type FKInfo struct {
 	ID       int64       `json:"id"`
@@ -1278,13 +1078,14 @@ func (fk *FKInfo) Clone() *FKInfo {
 
 // DBInfo provides meta data describing a DB.
 type DBInfo struct {
-	ID                 int64          `json:"id"`      // Database ID
-	Name               CIStr          `json:"db_name"` // DB name.
-	Charset            string         `json:"charset"`
-	Collate            string         `json:"collate"`
-	Tables             []*TableInfo   `json:"-"` // Tables in the DB.
-	State              SchemaState    `json:"state"`
-	PlacementPolicyRef *PolicyRefInfo `json:"policy_ref_info"`
+	ID                  int64              `json:"id"`      // Database ID
+	Name                CIStr              `json:"db_name"` // DB name.
+	Charset             string             `json:"charset"`
+	Collate             string             `json:"collate"`
+	Tables              []*TableInfo       `json:"-"` // Tables in the DB.
+	State               SchemaState        `json:"state"`
+	PlacementPolicyRef  *PolicyRefInfo     `json:"policy_ref_info"`
+	DirectPlacementOpts *PlacementSettings `json:"placement_settings"`
 }
 
 // Clone clones DBInfo.
@@ -1377,13 +1178,6 @@ type PolicyInfo struct {
 	State SchemaState `json:"state"`
 }
 
-func (p *PolicyInfo) Clone() *PolicyInfo {
-	var cloned PolicyInfo
-	cloned = *p
-	cloned.PlacementSettings = p.PlacementSettings.Clone()
-	return &cloned
-}
-
 func writeSettingItemToBuilder(sb *strings.Builder, item string) {
 	if sb.Len() != 0 {
 		sb.WriteString(" ")
@@ -1446,12 +1240,6 @@ func (p *PlacementSettings) String() string {
 	return sb.String()
 }
 
-func (p *PlacementSettings) Clone() *PlacementSettings {
-	var cloned PlacementSettings
-	cloned = *p
-	return &cloned
-}
-
 type StatsOptions struct {
 	*StatsWindowSettings
 	AutoRecalc   bool         `json:"auto_recalc"`
@@ -1467,7 +1255,7 @@ type StatsOptions struct {
 func NewStatsOptions() *StatsOptions {
 	return &StatsOptions{
 		AutoRecalc:   true,
-		ColumnChoice: DefaultChoice,
+		ColumnChoice: AllColumns,
 		ColumnList:   []CIStr{},
 		SampleNum:    uint64(0),
 		SampleRate:   0.0,
@@ -1480,8 +1268,7 @@ func NewStatsOptions() *StatsOptions {
 type ColumnChoice byte
 
 const (
-	DefaultChoice ColumnChoice = iota
-	AllColumns
+	AllColumns ColumnChoice = iota
 	PredicateColumns
 	ColumnList
 )
@@ -1489,13 +1276,13 @@ const (
 func (s ColumnChoice) String() string {
 	switch s {
 	case AllColumns:
-		return "ALL"
+		return "AllColumns"
 	case PredicateColumns:
-		return "PREDICATE"
+		return "PredicateColumns"
 	case ColumnList:
-		return "LIST"
+		return "ColumnList"
 	default:
-		return "DEFAULT"
+		return ""
 	}
 }
 

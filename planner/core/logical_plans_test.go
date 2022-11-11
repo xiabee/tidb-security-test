@@ -16,30 +16,42 @@ package core
 
 import (
 	"fmt"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/planner/util"
+	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/collate"
+	"github.com/pingcap/tidb/util/testleak"
 )
 
-func newTypeWithFlen(typeByte byte, flen int) *types.FieldType {
+var _ = SerialSuites(&testUnitTestSuit{})
+
+type testUnitTestSuit struct {
+	ctx sessionctx.Context
+}
+
+func (s *testUnitTestSuit) SetUpSuite(c *C) {
+	s.ctx = MockContext()
+}
+
+func (s *testUnitTestSuit) newTypeWithFlen(typeByte byte, flen int) *types.FieldType {
 	tp := types.NewFieldType(typeByte)
-	tp.SetFlen(flen)
+	tp.Flen = flen
 	return tp
 }
 
-func SubstituteCol2CorCol(expr expression.Expression, colIDs map[int64]struct{}) (expression.Expression, error) {
+func (s *testUnitTestSuit) SubstituteCol2CorCol(expr expression.Expression, colIDs map[int64]struct{}) (expression.Expression, error) {
 	switch x := expr.(type) {
 	case *expression.ScalarFunction:
 		newArgs := make([]expression.Expression, 0, len(x.GetArgs()))
 		for _, arg := range x.GetArgs() {
-			newArg, err := SubstituteCol2CorCol(arg, colIDs)
+			newArg, err := s.SubstituteCol2CorCol(arg, colIDs)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -55,8 +67,8 @@ func SubstituteCol2CorCol(expr expression.Expression, colIDs map[int64]struct{})
 	return expr, nil
 }
 
-func TestIndexPathSplitCorColCond(t *testing.T) {
-	ctx := MockContext()
+func (s *testUnitTestSuit) TestIndexPathSplitCorColCond(c *C) {
+	defer testleak.AfterTest(c)()
 	totalSchema := expression.NewSchema()
 	totalSchema.Append(&expression.Column{
 		UniqueID: 1,
@@ -68,11 +80,11 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 	})
 	totalSchema.Append(&expression.Column{
 		UniqueID: 3,
-		RetType:  newTypeWithFlen(mysql.TypeVarchar, 10),
+		RetType:  s.newTypeWithFlen(mysql.TypeVarchar, 10),
 	})
 	totalSchema.Append(&expression.Column{
 		UniqueID: 4,
-		RetType:  newTypeWithFlen(mysql.TypeVarchar, 10),
+		RetType:  s.newTypeWithFlen(mysql.TypeVarchar, 10),
 	})
 	totalSchema.Append(&expression.Column{
 		UniqueID: 5,
@@ -165,10 +177,11 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 			remained:   "[]",
 		},
 	}
+	collate.SetNewCollationEnabledForTest(true)
 	for _, tt := range testCases {
-		comment := fmt.Sprintf("failed at case:\nexpr: %v\ncorColIDs: %v\nidxColIDs: %v\nidxColLens: %v\naccess: %v\nremained: %v\n", tt.expr, tt.corColIDs, tt.idxColIDs, tt.idxColLens, tt.access, tt.remained)
-		filters, err := expression.ParseSimpleExprsWithNames(ctx, tt.expr, totalSchema, names)
-		require.NoError(t, err, comment)
+		comment := Commentf("failed at case:\nexpr: %v\ncorColIDs: %v\nidxColIDs: %v\nidxColLens: %v\naccess: %v\nremained: %v\n", tt.expr, tt.corColIDs, tt.idxColIDs, tt.idxColLens, tt.access, tt.remained)
+		filters, err := expression.ParseSimpleExprsWithNames(s.ctx, tt.expr, totalSchema, names)
+		c.Assert(err, IsNil, comment)
 		if sf, ok := filters[0].(*expression.ScalarFunction); ok && sf.FuncName.L == ast.LogicAnd {
 			filters = expression.FlattenCNFConditions(sf)
 		}
@@ -178,8 +191,8 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 			idMap[id] = struct{}{}
 		}
 		for _, filter := range filters {
-			trueFilter, err := SubstituteCol2CorCol(filter, idMap)
-			require.NoError(t, err, comment)
+			trueFilter, err := s.SubstituteCol2CorCol(filter, idMap)
+			c.Assert(err, IsNil, comment)
 			trueFilters = append(trueFilters, trueFilter)
 		}
 		path := util.AccessPath{
@@ -189,8 +202,9 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 			IdxColLens:   tt.idxColLens,
 		}
 
-		access, remained := path.SplitCorColAccessCondFromFilters(ctx, path.EqCondCount)
-		require.Equal(t, tt.access, fmt.Sprintf("%s", access), comment)
-		require.Equal(t, tt.remained, fmt.Sprintf("%s", remained), comment)
+		access, remained := path.SplitCorColAccessCondFromFilters(s.ctx, path.EqCondCount)
+		c.Assert(fmt.Sprintf("%s", access), Equals, tt.access, comment)
+		c.Assert(fmt.Sprintf("%s", remained), Equals, tt.remained, comment)
 	}
+	collate.SetNewCollationEnabledForTest(false)
 }

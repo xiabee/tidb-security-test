@@ -36,49 +36,46 @@ type Cluster struct {
 	kv.Storage
 	*server.TiDBDriver
 	*domain.Domain
-	DSN        string
-	PDClient   pd.Client
-	HttpServer *http.Server
+	DSN      string
+	PDClient pd.Client
 }
 
 // NewCluster create a new mock cluster.
 func NewCluster() (*Cluster, error) {
-	cluster := &Cluster{}
-
 	pprofOnce.Do(func() {
 		go func() {
 			// Make sure pprof is registered.
 			_ = pprof.Handler
 			addr := "0.0.0.0:12235"
 			log.Info("start pprof", zap.String("addr", addr))
-			cluster.HttpServer = &http.Server{Addr: addr}
-			if e := cluster.HttpServer.ListenAndServe(); e != nil {
+			if e := http.ListenAndServe(addr, nil); e != nil {
 				log.Warn("fail to start pprof", zap.String("addr", addr), zap.Error(e))
 			}
 		}()
 	})
 
+	var mockCluster testutils.Cluster
 	storage, err := mockstore.NewMockStore(
 		mockstore.WithClusterInspector(func(c testutils.Cluster) {
 			mockstore.BootstrapWithSingleStore(c)
-			cluster.Cluster = c
+			mockCluster = c
 		}),
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	cluster.Storage = storage
-
 	session.SetSchemaLease(0)
 	session.DisableStats4Test()
 	dom, err := session.BootstrapSession(storage)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	cluster.Domain = dom
-
-	cluster.PDClient = storage.(tikv.Storage).GetRegionCache().PDClient()
-	return cluster, nil
+	return &Cluster{
+		Storage:  storage,
+		Cluster:  mockCluster,
+		Domain:   dom,
+		PDClient: storage.(tikv.Storage).GetRegionCache().PDClient(),
+	}, nil
 }
 
 // Start runs a mock cluster.
@@ -91,7 +88,6 @@ func (mock *Cluster) Start() error {
 	cfg.Store = "tikv"
 	cfg.Status.StatusPort = 0
 	cfg.Status.ReportStatus = true
-	cfg.Socket = fmt.Sprintf("/tmp/tidb-mock-%d.sock", time.Now().UnixNano())
 
 	svr, err := server.NewServer(cfg, mock.TiDBDriver)
 	if err != nil {
@@ -99,7 +95,7 @@ func (mock *Cluster) Start() error {
 	}
 	mock.Server = svr
 	go func() {
-		if err1 := svr.Run(); err1 != nil {
+		if err1 := svr.Run(); err != nil {
 			panic(err1)
 		}
 	}()
@@ -113,13 +109,10 @@ func (mock *Cluster) Stop() {
 		mock.Domain.Close()
 	}
 	if mock.Storage != nil {
-		_ = mock.Storage.Close()
+		mock.Storage.Close()
 	}
 	if mock.Server != nil {
 		mock.Server.Close()
-	}
-	if mock.HttpServer != nil {
-		_ = mock.HttpServer.Close()
 	}
 }
 
@@ -164,8 +157,7 @@ func waitUntilServerOnline(addr string, statusPort uint) string {
 	// connect http status
 	statusURL := fmt.Sprintf("http://127.0.0.1:%d/status", statusPort)
 	for retry = 0; retry < retryTime; retry++ {
-		// #nosec G107
-		resp, err := http.Get(statusURL) // nolint:noctx,gosec
+		resp, err := http.Get(statusURL) // nolint:noctx
 		if err == nil {
 			// Ignore errors.
 			_, _ = io.ReadAll(resp.Body)

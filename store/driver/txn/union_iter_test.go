@@ -34,6 +34,7 @@ func r(key, value string) *kv.Entry {
 }
 
 func TestUnionIter(t *testing.T) {
+	t.Parallel()
 	// test iter normal cases, snap iter become invalid before dirty iter
 	snapRecords := []*kv.Entry{
 		r("k00", "v0"),
@@ -114,6 +115,7 @@ func TestUnionIter(t *testing.T) {
 }
 
 func TestUnionIterErrors(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		dirty                     []*kv.Entry
 		snap                      []*kv.Entry

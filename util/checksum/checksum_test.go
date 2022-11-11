@@ -25,6 +25,7 @@ import (
 )
 
 func TestChecksumReadAt(t *testing.T) {
+	t.Parallel()
 	f := newFakeFile()
 
 	w := newTestBuff("0123456789", 510)
@@ -55,9 +56,11 @@ func TestChecksumReadAt(t *testing.T) {
 // both the current block and the following block have errors.
 func TestAddOneByte(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testAddOneByte(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testAddOneByte(t, true)
 	})
 }
@@ -96,9 +99,11 @@ func testAddOneByte(t *testing.T, encrypt bool) {
 // both the current block and the following block have errors.
 func TestDeleteOneByte(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testDeleteOneByte(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testDeleteOneByte(t, true)
 	})
 }
@@ -137,9 +142,11 @@ func testDeleteOneByte(t *testing.T, encrypt bool) {
 // only the current block has error.
 func TestModifyOneByte(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testModifyOneByte(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testModifyOneByte(t, true)
 	})
 }
@@ -177,9 +184,11 @@ func testModifyOneByte(t *testing.T, encrypt bool) {
 // TestReadEmptyFile ensures that whether encrypted or not, no error will occur.
 func TestReadEmptyFile(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testReadEmptyFile(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testReadEmptyFile(t, true)
 	})
 }
@@ -212,9 +221,11 @@ func testReadEmptyFile(t *testing.T, encrypt bool) {
 // only the current block has error.
 func TestModifyThreeBytes(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testModifyThreeBytes(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testModifyThreeBytes(t, true)
 	})
 }
@@ -259,9 +270,11 @@ func testModifyThreeBytes(t *testing.T, encrypt bool) {
 // 2. Read all data at once.
 func TestReadDifferentBlockSize(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testReadDifferentBlockSize(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testReadDifferentBlockSize(t, true)
 	})
 }
@@ -315,9 +328,11 @@ func testReadDifferentBlockSize(t *testing.T, encrypt bool) {
 // 2. Write some block and append some block.
 func TestWriteDifferentBlockSize(t *testing.T) {
 	t.Run("unencrypted", func(t *testing.T) {
+		t.Parallel()
 		testWriteDifferentBlockSize(t, false)
 	})
 	t.Run("encrypted", func(t *testing.T) {
+		t.Parallel()
 		testWriteDifferentBlockSize(t, true)
 	})
 }
@@ -378,6 +393,7 @@ func testWriteDifferentBlockSize(t *testing.T, encrypt bool) {
 }
 
 func TestChecksumWriter(t *testing.T) {
+	t.Parallel()
 	f := newFakeFile()
 
 	buf := newTestBuff("0123456789", 100)
@@ -397,6 +413,7 @@ func TestChecksumWriter(t *testing.T) {
 }
 
 func TestChecksumWriterAutoFlush(t *testing.T) {
+	t.Parallel()
 	f := newFakeFile()
 
 	buf := newTestBuff("0123456789", 102)
@@ -479,7 +496,7 @@ func assertUnderlyingWrite(t *testing.T, encrypt bool, f io.WriteCloser, fc func
 }
 
 func underlyingReadAt(f io.ReaderAt, encrypt bool, ctrCipher *encrypt2.CtrCipher, n, off int) error {
-	var underlying = f
+	var underlying io.ReaderAt = f
 	if encrypt {
 		underlying = encrypt2.NewReader(underlying, ctrCipher)
 	}
@@ -492,7 +509,7 @@ func underlyingReadAt(f io.ReaderAt, encrypt bool, ctrCipher *encrypt2.CtrCipher
 
 func assertReadAtFunc(t *testing.T, encrypt bool, ctrCipher *encrypt2.CtrCipher) func(off int64, r []byte, assertErr error, assertN int, assertString string, f io.ReaderAt) {
 	return func(off int64, r []byte, assertErr error, assertN int, assertString string, f io.ReaderAt) {
-		var underlying = f
+		var underlying io.ReaderAt = f
 		if encrypt {
 			underlying = encrypt2.NewReader(underlying, ctrCipher)
 		}

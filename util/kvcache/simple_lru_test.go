@@ -46,6 +46,8 @@ func newMockHashKey(key int64) *mockCacheKey {
 }
 
 func TestPut(t *testing.T) {
+	t.Parallel()
+
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -119,6 +121,7 @@ func TestPut(t *testing.T) {
 }
 
 func TestZeroQuota(t *testing.T) {
+	t.Parallel()
 	lru := NewSimpleLRUCache(100, 0, 0)
 	require.Equal(t, uint(100), lru.capacity)
 
@@ -135,6 +138,7 @@ func TestZeroQuota(t *testing.T) {
 }
 
 func TestOOMGuard(t *testing.T) {
+	t.Parallel()
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -160,6 +164,7 @@ func TestOOMGuard(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
+	t.Parallel()
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -203,6 +208,7 @@ func TestGet(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
+	t.Parallel()
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -232,6 +238,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestDeleteAll(t *testing.T) {
+	t.Parallel()
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -258,6 +265,7 @@ func TestDeleteAll(t *testing.T) {
 }
 
 func TestValues(t *testing.T) {
+	t.Parallel()
 	maxMem, err := memory.MemTotal()
 	require.NoError(t, err)
 
@@ -280,6 +288,7 @@ func TestValues(t *testing.T) {
 }
 
 func TestPutProfileName(t *testing.T) {
+	t.Parallel()
 	lru := NewSimpleLRUCache(3, 0, 10)
 	require.Equal(t, uint(3), lru.capacity)
 	tem := reflect.TypeOf(*lru)

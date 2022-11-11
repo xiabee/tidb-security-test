@@ -5,32 +5,41 @@ package utils_test
 import (
 	"context"
 	"sync"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/testleak"
 	pd "github.com/tikv/pd/client"
 )
 
-func TestCheckGCSafepoint(t *testing.T) {
+var _ = Suite(&testSafePointSuite{})
+
+type testSafePointSuite struct{}
+
+func (s *testSafePointSuite) SetUpSuite(c *C) {}
+
+func (s *testSafePointSuite) TearDownSuite(c *C) {
+	testleak.AfterTest(c)()
+}
+
+func (s *testSafePointSuite) TestCheckGCSafepoint(c *C) {
 	ctx := context.Background()
 	pdClient := &mockSafePoint{safepoint: 2333}
 	{
 		err := utils.CheckGCSafePoint(ctx, pdClient, 2333+1)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 	}
 	{
 		err := utils.CheckGCSafePoint(ctx, pdClient, 2333)
-		require.Error(t, err)
+		c.Assert(err, NotNil)
 	}
 	{
 		err := utils.CheckGCSafePoint(ctx, pdClient, 2333-1)
-		require.Error(t, err)
+		c.Assert(err, NotNil)
 	}
 	{
 		err := utils.CheckGCSafePoint(ctx, pdClient, 0)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "GC safepoint 2333 exceed TS 0")
+		c.Assert(err, ErrorMatches, ".*GC safepoint 2333 exceed TS 0.*")
 	}
 }
 
@@ -64,7 +73,7 @@ func (m *mockSafePoint) UpdateGCSafePoint(ctx context.Context, safePoint uint64)
 	return m.safepoint, nil
 }
 
-func TestStartServiceSafePointKeeper(t *testing.T) {
+func (s *testSafePointSuite) TestStartServiceSafePointKeeper(c *C) {
 	pdClient := &mockSafePoint{safepoint: 2333}
 
 	cases := []struct {
@@ -119,11 +128,11 @@ func TestStartServiceSafePointKeeper(t *testing.T) {
 	for i, cs := range cases {
 		ctx, cancel := context.WithCancel(context.Background())
 		err := utils.StartServiceSafePointKeeper(ctx, pdClient, cs.sp)
-		if cs.ok {
-			require.NoErrorf(t, err, "case #%d, %v", i, cs)
-		} else {
-			require.Errorf(t, err, "case #%d, %v", i, cs)
+		checker := IsNil
+		if !cs.ok {
+			checker = NotNil
 		}
+		c.Assert(err, checker, Commentf("case #%d, %v", i, cs))
 		cancel()
 	}
 }

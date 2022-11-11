@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
@@ -32,13 +33,8 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/collate"
-	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/ranger"
-	"github.com/pingcap/tidb/util/tracing"
 	"go.uber.org/atomic"
-	"go.uber.org/zap"
 )
 
 const (
@@ -112,107 +108,21 @@ type HistColl struct {
 	Pseudo         bool
 }
 
-// TableMemoryUsage records tbl memory usage
-type TableMemoryUsage struct {
-	TableID         int64
-	TotalMemUsage   int64
-	ColumnsMemUsage map[int64]CacheItemMemoryUsage
-	IndicesMemUsage map[int64]CacheItemMemoryUsage
-}
-
-// TotalIdxTrackingMemUsage returns total indices' tracking memory usage
-func (t *TableMemoryUsage) TotalIdxTrackingMemUsage() (sum int64) {
-	for _, idx := range t.IndicesMemUsage {
-		sum += idx.TrackingMemUsage()
-	}
-	return sum
-}
-
-// TableCacheItem indicates the unit item stored in statsCache, eg: Column/Index
-type TableCacheItem interface {
-	ItemID() int64
-	DropEvicted()
-	MemoryUsage() CacheItemMemoryUsage
-}
-
-// CacheItemMemoryUsage indicates the memory usage of TableCacheItem
-type CacheItemMemoryUsage interface {
-	ItemID() int64
-	TotalMemoryUsage() int64
-	TrackingMemUsage() int64
-}
-
-// ColumnMemUsage records column memory usage
-type ColumnMemUsage struct {
-	ColumnID          int64
-	HistogramMemUsage int64
-	CMSketchMemUsage  int64
-	FMSketchMemUsage  int64
-	TotalMemUsage     int64
-}
-
-// TotalMemoryUsage implements CacheItemMemoryUsage
-func (c *ColumnMemUsage) TotalMemoryUsage() int64 {
-	return c.TotalMemUsage
-}
-
-// ItemID implements CacheItemMemoryUsage
-func (c *ColumnMemUsage) ItemID() int64 {
-	return c.ColumnID
-}
-
-// TrackingMemUsage implements CacheItemMemoryUsage
-func (c *ColumnMemUsage) TrackingMemUsage() int64 {
-	return c.CMSketchMemUsage
-}
-
-// IndexMemUsage records index memory usage
-type IndexMemUsage struct {
-	IndexID           int64
-	HistogramMemUsage int64
-	CMSketchMemUsage  int64
-	TotalMemUsage     int64
-}
-
-// TotalMemoryUsage implements CacheItemMemoryUsage
-func (c *IndexMemUsage) TotalMemoryUsage() int64 {
-	return c.TotalMemUsage
-}
-
-// ItemID implements CacheItemMemoryUsage
-func (c *IndexMemUsage) ItemID() int64 {
-	return c.IndexID
-}
-
-// TrackingMemUsage implements CacheItemMemoryUsage
-func (c *IndexMemUsage) TrackingMemUsage() int64 {
-	return c.CMSketchMemUsage
-}
-
 // MemoryUsage returns the total memory usage of this Table.
 // it will only calc the size of Columns and Indices stats data of table.
 // We ignore the size of other metadata in Table
-func (t *Table) MemoryUsage() *TableMemoryUsage {
-	tMemUsage := &TableMemoryUsage{
-		TableID:         t.PhysicalID,
-		ColumnsMemUsage: make(map[int64]CacheItemMemoryUsage),
-		IndicesMemUsage: make(map[int64]CacheItemMemoryUsage),
-	}
+func (t *Table) MemoryUsage() (sum int64) {
 	for _, col := range t.Columns {
 		if col != nil {
-			colMemUsage := col.MemoryUsage()
-			tMemUsage.ColumnsMemUsage[colMemUsage.ItemID()] = colMemUsage
-			tMemUsage.TotalMemUsage += colMemUsage.TotalMemoryUsage()
+			sum += col.MemoryUsage()
 		}
 	}
 	for _, index := range t.Indices {
 		if index != nil {
-			idxMemUsage := index.MemoryUsage()
-			tMemUsage.IndicesMemUsage[idxMemUsage.ItemID()] = idxMemUsage
-			tMemUsage.TotalMemUsage += idxMemUsage.TotalMemoryUsage()
+			sum += index.MemoryUsage()
 		}
 	}
-	return tMemUsage
+	return
 }
 
 // Copy copies the current table.
@@ -298,17 +208,11 @@ func (t *Table) ColumnByName(colName string) *Column {
 // GetStatsInfo returns their statistics according to the ID of the column or index, including histogram, CMSketch, TopN and FMSketch.
 func (t *Table) GetStatsInfo(ID int64, isIndex bool) (int64, *Histogram, *CMSketch, *TopN, *FMSketch) {
 	if isIndex {
-		if idxStatsInfo, ok := t.Indices[ID]; ok {
-			return int64(idxStatsInfo.TotalRowCount()), idxStatsInfo.Histogram.Copy(), idxStatsInfo.CMSketch.Copy(), idxStatsInfo.TopN.Copy(), idxStatsInfo.FMSketch.Copy()
-		}
-		// newly added index which is not analyzed yet
-		return 0, nil, nil, nil, nil
+		idxStatsInfo := t.Indices[ID]
+		return int64(idxStatsInfo.TotalRowCount()), idxStatsInfo.Histogram.Copy(), idxStatsInfo.CMSketch.Copy(), idxStatsInfo.TopN.Copy(), idxStatsInfo.FMSketch.Copy()
 	}
-	if colStatsInfo, ok := t.Columns[ID]; ok {
-		return int64(colStatsInfo.TotalRowCount()), colStatsInfo.Histogram.Copy(), colStatsInfo.CMSketch.Copy(), colStatsInfo.TopN.Copy(), colStatsInfo.FMSketch.Copy()
-	}
-	// newly added column which is not analyzed yet
-	return 0, nil, nil, nil, nil
+	colStatsInfo := t.Columns[ID]
+	return int64(colStatsInfo.TotalRowCount()), colStatsInfo.Histogram.Copy(), colStatsInfo.CMSketch.Copy(), colStatsInfo.TopN.Copy(), colStatsInfo.FMSketch.Copy()
 }
 
 // GetColRowCount tries to get the row count of the a column if possible.
@@ -323,38 +227,23 @@ func (t *Table) GetColRowCount() float64 {
 	return -1
 }
 
-// GetStatsHealthy calculates stats healthy if the table stats is not pseudo.
-// If the table stats is pseudo, it returns 0, false, otherwise it returns stats healthy, ture.
-func (t *Table) GetStatsHealthy() (int64, bool) {
-	if t == nil || t.Pseudo {
-		return 0, false
-	}
-	var healthy int64
-	if t.ModifyCount < t.Count {
-		healthy = int64((1.0 - float64(t.ModifyCount)/float64(t.Count)) * 100.0)
-	} else if t.ModifyCount == 0 {
-		healthy = 100
-	}
-	return healthy, true
-}
-
 type tableColumnID struct {
 	TableID  int64
 	ColumnID int64
 }
 
 type neededColumnMap struct {
-	m    sync.RWMutex
+	m    sync.Mutex
 	cols map[tableColumnID]struct{}
 }
 
 func (n *neededColumnMap) AllCols() []tableColumnID {
-	n.m.RLock()
+	n.m.Lock()
 	keys := make([]tableColumnID, 0, len(n.cols))
 	for key := range n.cols {
 		keys = append(keys, key)
 	}
-	n.m.RUnlock()
+	n.m.Unlock()
 	return keys
 }
 
@@ -368,12 +257,6 @@ func (n *neededColumnMap) Delete(col tableColumnID) {
 	n.m.Lock()
 	delete(n.cols, col)
 	n.m.Unlock()
-}
-
-func (n *neededColumnMap) Length() int {
-	n.m.RLock()
-	defer n.m.RUnlock()
-	return len(n.cols)
 }
 
 // RatioOfPseudoEstimate means if modifyCount / statsTblCount is greater than this ratio, we think the stats is invalid
@@ -393,28 +276,27 @@ func (t *Table) IsOutdated() bool {
 }
 
 // ColumnGreaterRowCount estimates the row count where the column greater than value.
-func (t *Table) ColumnGreaterRowCount(sctx sessionctx.Context, value types.Datum, colID int64) float64 {
+func (t *Table) ColumnGreaterRowCount(sc *stmtctx.StatementContext, value types.Datum, colID int64) float64 {
 	c, ok := t.Columns[colID]
-	if !ok || c.IsInvalid(sctx, t.Pseudo) {
+	if !ok || c.IsInvalid(sc, t.Pseudo) {
 		return float64(t.Count) / pseudoLessRate
 	}
 	return c.greaterRowCount(value) * c.GetIncreaseFactor(t.Count)
 }
 
 // ColumnLessRowCount estimates the row count where the column less than value. Note that null values are not counted.
-func (t *Table) ColumnLessRowCount(sctx sessionctx.Context, value types.Datum, colID int64) float64 {
+func (t *Table) ColumnLessRowCount(sc *stmtctx.StatementContext, value types.Datum, colID int64) float64 {
 	c, ok := t.Columns[colID]
-	if !ok || c.IsInvalid(sctx, t.Pseudo) {
+	if !ok || c.IsInvalid(sc, t.Pseudo) {
 		return float64(t.Count) / pseudoLessRate
 	}
 	return c.lessRowCount(value) * c.GetIncreaseFactor(t.Count)
 }
 
 // ColumnBetweenRowCount estimates the row count where column greater or equal to a and less than b.
-func (t *Table) ColumnBetweenRowCount(sctx sessionctx.Context, a, b types.Datum, colID int64) (float64, error) {
-	sc := sctx.GetSessionVars().StmtCtx
+func (t *Table) ColumnBetweenRowCount(sc *stmtctx.StatementContext, a, b types.Datum, colID int64) (float64, error) {
 	c, ok := t.Columns[colID]
-	if !ok || c.IsInvalid(sctx, t.Pseudo) {
+	if !ok || c.IsInvalid(sc, t.Pseudo) {
 		return float64(t.Count) / pseudoBetweenRate, nil
 	}
 	aEncoded, err := codec.EncodeKey(sc, nil, a)
@@ -425,7 +307,7 @@ func (t *Table) ColumnBetweenRowCount(sctx sessionctx.Context, a, b types.Datum,
 	if err != nil {
 		return 0, err
 	}
-	count := c.BetweenRowCount(sctx, a, b, aEncoded, bEncoded)
+	count := c.BetweenRowCount(sc, a, b, aEncoded, bEncoded)
 	if a.IsNull() {
 		count += float64(c.NullCount)
 	}
@@ -433,128 +315,64 @@ func (t *Table) ColumnBetweenRowCount(sctx sessionctx.Context, a, b types.Datum,
 }
 
 // ColumnEqualRowCount estimates the row count where the column equals to value.
-func (t *Table) ColumnEqualRowCount(sctx sessionctx.Context, value types.Datum, colID int64) (float64, error) {
+func (t *Table) ColumnEqualRowCount(sc *stmtctx.StatementContext, value types.Datum, colID int64) (float64, error) {
 	c, ok := t.Columns[colID]
-	if !ok || c.IsInvalid(sctx, t.Pseudo) {
+	if !ok || c.IsInvalid(sc, t.Pseudo) {
 		return float64(t.Count) / pseudoEqualRate, nil
 	}
-	encodedVal, err := codec.EncodeKey(sctx.GetSessionVars().StmtCtx, nil, value)
+	encodedVal, err := codec.EncodeKey(sc, nil, value)
 	if err != nil {
 		return 0, err
 	}
-	result, err := c.equalRowCount(sctx, value, encodedVal, t.ModifyCount)
+	result, err := c.equalRowCount(sc, value, encodedVal, t.ModifyCount)
 	result *= c.GetIncreaseFactor(t.Count)
 	return result, errors.Trace(err)
 }
 
 // GetRowCountByIntColumnRanges estimates the row count by a slice of IntColumnRange.
-func (coll *HistColl) GetRowCountByIntColumnRanges(sctx sessionctx.Context, colID int64, intRanges []*ranger.Range) (float64, error) {
-	sc := sctx.GetSessionVars().StmtCtx
-	var result float64
+func (coll *HistColl) GetRowCountByIntColumnRanges(sc *stmtctx.StatementContext, colID int64, intRanges []*ranger.Range) (float64, error) {
 	c, ok := coll.Columns[colID]
-	if !ok || c.IsInvalid(sctx, coll.Pseudo) {
+	if !ok || c.IsInvalid(sc, coll.Pseudo) {
 		if len(intRanges) == 0 {
 			return 0, nil
 		}
 		if intRanges[0].LowVal[0].Kind() == types.KindInt64 {
-			result = getPseudoRowCountBySignedIntRanges(intRanges, float64(coll.Count))
-		} else {
-			result = getPseudoRowCountByUnsignedIntRanges(intRanges, float64(coll.Count))
+			return getPseudoRowCountBySignedIntRanges(intRanges, float64(coll.Count)), nil
 		}
-		if sc.EnableOptimizerCETrace && ok {
-			CETraceRange(sctx, coll.PhysicalID, []string{c.Info.Name.O}, intRanges, "Column Stats-Pseudo", uint64(result))
-		}
-		return result, nil
+		return getPseudoRowCountByUnsignedIntRanges(intRanges, float64(coll.Count)), nil
 	}
-	result, err := c.GetColumnRowCount(sctx, intRanges, coll.Count, true)
-	if sc.EnableOptimizerCETrace {
-		CETraceRange(sctx, coll.PhysicalID, []string{c.Info.Name.O}, intRanges, "Column Stats", uint64(result))
-	}
+	result, err := c.GetColumnRowCount(sc, intRanges, coll.Count, true)
 	return result, errors.Trace(err)
 }
 
 // GetRowCountByColumnRanges estimates the row count by a slice of Range.
-func (coll *HistColl) GetRowCountByColumnRanges(sctx sessionctx.Context, colID int64, colRanges []*ranger.Range) (float64, error) {
-	sc := sctx.GetSessionVars().StmtCtx
+func (coll *HistColl) GetRowCountByColumnRanges(sc *stmtctx.StatementContext, colID int64, colRanges []*ranger.Range) (float64, error) {
 	c, ok := coll.Columns[colID]
-	if !ok || c.IsInvalid(sctx, coll.Pseudo) {
-		result, err := GetPseudoRowCountByColumnRanges(sc, float64(coll.Count), colRanges, 0)
-		if err == nil && sc.EnableOptimizerCETrace && ok {
-			CETraceRange(sctx, coll.PhysicalID, []string{c.Info.Name.O}, colRanges, "Column Stats-Pseudo", uint64(result))
-		}
-		return result, err
+	if !ok || c.IsInvalid(sc, coll.Pseudo) {
+		return GetPseudoRowCountByColumnRanges(sc, float64(coll.Count), colRanges, 0)
 	}
-	result, err := c.GetColumnRowCount(sctx, colRanges, coll.Count, false)
-	if sc.EnableOptimizerCETrace {
-		CETraceRange(sctx, coll.PhysicalID, []string{c.Info.Name.O}, colRanges, "Column Stats", uint64(result))
-	}
+	result, err := c.GetColumnRowCount(sc, colRanges, coll.Count, false)
 	return result, errors.Trace(err)
 }
 
 // GetRowCountByIndexRanges estimates the row count by a slice of Range.
-func (coll *HistColl) GetRowCountByIndexRanges(sctx sessionctx.Context, idxID int64, indexRanges []*ranger.Range) (float64, error) {
-	sc := sctx.GetSessionVars().StmtCtx
-	idx, ok := coll.Indices[idxID]
-	colNames := make([]string, 0, 8)
-	if ok {
-		for _, col := range idx.Info.Columns {
-			colNames = append(colNames, col.Name.O)
-		}
-	}
-	if !ok || idx.IsInvalid(coll.Pseudo) {
+func (coll *HistColl) GetRowCountByIndexRanges(sc *stmtctx.StatementContext, idxID int64, indexRanges []*ranger.Range) (float64, error) {
+	idx := coll.Indices[idxID]
+	if idx == nil || idx.IsInvalid(coll.Pseudo) {
 		colsLen := -1
 		if idx != nil && idx.Info.Unique {
 			colsLen = len(idx.Info.Columns)
 		}
-		result, err := getPseudoRowCountByIndexRanges(sc, indexRanges, float64(coll.Count), colsLen)
-		if err == nil && sc.EnableOptimizerCETrace && ok {
-			CETraceRange(sctx, coll.PhysicalID, colNames, indexRanges, "Index Stats-Pseudo", uint64(result))
-		}
-		return result, err
+		return getPseudoRowCountByIndexRanges(sc, indexRanges, float64(coll.Count), colsLen)
 	}
 	var result float64
 	var err error
 	if idx.CMSketch != nil && idx.StatsVer == Version1 {
-		result, err = coll.getIndexRowCount(sctx, idxID, indexRanges)
+		result, err = coll.getIndexRowCount(sc, idxID, indexRanges)
 	} else {
-		result, err = idx.GetRowCount(sctx, coll, indexRanges, coll.Count)
-	}
-	if sc.EnableOptimizerCETrace {
-		CETraceRange(sctx, coll.PhysicalID, colNames, indexRanges, "Index Stats", uint64(result))
+		result, err = idx.GetRowCount(sc, coll, indexRanges, coll.Count)
 	}
 	return result, errors.Trace(err)
-}
-
-// CETraceRange appends a list of ranges and related information into CE trace
-func CETraceRange(sctx sessionctx.Context, tableID int64, colNames []string, ranges []*ranger.Range, tp string, rowCount uint64) {
-	sc := sctx.GetSessionVars().StmtCtx
-	allPoint := true
-	for _, ran := range ranges {
-		if !ran.IsPointNullable(sctx) {
-			allPoint = false
-			break
-		}
-	}
-	if allPoint {
-		tp = tp + "-Point"
-	} else {
-		tp = tp + "-Range"
-	}
-	expr, err := ranger.RangesToString(sc, ranges, colNames)
-	if err != nil {
-		logutil.BgLogger().Debug("[OptimizerTrace] Failed to trace CE of ranges", zap.Error(err))
-	}
-	// We don't need to record meaningless expressions.
-	if expr == "" || expr == "true" || expr == "false" {
-		return
-	}
-	CERecord := tracing.CETraceRecord{
-		TableID:  tableID,
-		Type:     tp,
-		Expr:     expr,
-		RowCount: rowCount,
-	}
-	sc.OptimizerCETrace = append(sc.OptimizerCETrace, &CERecord)
 }
 
 // PseudoAvgCountPerValue gets a pseudo average count if histogram not exists.
@@ -567,7 +385,7 @@ func (t *Table) PseudoAvgCountPerValue() float64 {
 func GetOrdinalOfRangeCond(sc *stmtctx.StatementContext, ran *ranger.Range) int {
 	for i := range ran.LowVal {
 		a, b := ran.LowVal[i], ran.HighVal[i]
-		cmp, err := a.Compare(sc, &b, ran.Collators[0])
+		cmp, err := a.CompareDatum(sc, &b)
 		if err != nil {
 			return 0
 		}
@@ -685,7 +503,7 @@ func outOfRangeEQSelectivity(ndv, realtimeRowCount, columnRowCount int64) float6
 }
 
 // crossValidationSelectivity gets the selectivity of multi-column equal conditions by cross validation.
-func (coll *HistColl) crossValidationSelectivity(sctx sessionctx.Context, idx *Index, usedColsLen int, idxPointRange *ranger.Range) (float64, float64, error) {
+func (coll *HistColl) crossValidationSelectivity(sc *stmtctx.StatementContext, idx *Index, usedColsLen int, idxPointRange *ranger.Range) (float64, float64, error) {
 	minRowCount := math.MaxFloat64
 	cols := coll.Idx2ColumnIDs[idx.ID]
 	crossValidationSelectivity := 1.0
@@ -695,20 +513,29 @@ func (coll *HistColl) crossValidationSelectivity(sctx sessionctx.Context, idx *I
 			break
 		}
 		if col, ok := coll.Columns[colID]; ok {
-			if col.IsInvalid(sctx, coll.Pseudo) {
+			if col.IsInvalid(sc, coll.Pseudo) {
 				continue
 			}
-			// Since the column range is point range(LowVal is equal to HighVal), we need to set both LowExclude and HighExclude to false.
-			// Otherwise we would get 0.0 estRow from GetColumnRowCount.
+			lowExclude := idxPointRange.LowExclude
+			highExclude := idxPointRange.HighExclude
+			// Consider this case:
+			// create table t(a int, b int, c int, primary key(a,b,c));
+			// insert into t values(1,1,1),(2,2,3);
+			// explain select * from t where (a,b) in ((1,1),(2,2)) and c > 2;
+			// For column a, we will get range: (1, 1], (2, 2], but GetColumnRowCount() with rang = (2, 2] will return 0.
+			// And the result of the explain statement will output estRow 0.0. So we change it to [2, 2].
+			if lowExclude != highExclude && i < usedColsLen {
+				lowExclude = false
+				highExclude = false
+			}
 			rang := ranger.Range{
 				LowVal:      []types.Datum{idxPointRange.LowVal[i]},
-				LowExclude:  false,
+				LowExclude:  lowExclude,
 				HighVal:     []types.Datum{idxPointRange.HighVal[i]},
-				HighExclude: false,
-				Collators:   []collate.Collator{idxPointRange.Collators[i]},
+				HighExclude: highExclude,
 			}
 
-			rowCount, err := col.GetColumnRowCount(sctx, []*ranger.Range{&rang}, coll.Count, col.IsHandle)
+			rowCount, err := col.GetColumnRowCount(sc, []*ranger.Range{&rang}, coll.Count, col.IsHandle)
 			if err != nil {
 				return 0, 0, err
 			}
@@ -723,7 +550,7 @@ func (coll *HistColl) crossValidationSelectivity(sctx sessionctx.Context, idx *I
 }
 
 // getEqualCondSelectivity gets the selectivity of the equal conditions.
-func (coll *HistColl) getEqualCondSelectivity(sctx sessionctx.Context, idx *Index, bytes []byte, usedColsLen int, idxPointRange *ranger.Range) (float64, error) {
+func (coll *HistColl) getEqualCondSelectivity(sc *stmtctx.StatementContext, idx *Index, bytes []byte, usedColsLen int, idxPointRange *ranger.Range) (float64, error) {
 	coverAll := len(idx.Info.Columns) == usedColsLen
 	// In this case, the row count is at most 1.
 	if idx.Info.Unique && coverAll {
@@ -744,13 +571,13 @@ func (coll *HistColl) getEqualCondSelectivity(sctx sessionctx.Context, idx *Inde
 				break
 			}
 			if col, ok := coll.Columns[colID]; ok {
-				ndv = mathutil.Max(ndv, col.Histogram.NDV)
+				ndv = mathutil.MaxInt64(ndv, col.Histogram.NDV)
 			}
 		}
 		return outOfRangeEQSelectivity(ndv, coll.Count, int64(idx.TotalRowCount())), nil
 	}
 
-	minRowCount, crossValidationSelectivity, err := coll.crossValidationSelectivity(sctx, idx, usedColsLen, idxPointRange)
+	minRowCount, crossValidationSelectivity, err := coll.crossValidationSelectivity(sc, idx, usedColsLen, idxPointRange)
 	if err != nil {
 		return 0, nil
 	}
@@ -762,8 +589,7 @@ func (coll *HistColl) getEqualCondSelectivity(sctx sessionctx.Context, idx *Inde
 	return idxCount / idx.TotalRowCount(), nil
 }
 
-func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, indexRanges []*ranger.Range) (float64, error) {
-	sc := sctx.GetSessionVars().StmtCtx
+func (coll *HistColl) getIndexRowCount(sc *stmtctx.StatementContext, idxID int64, indexRanges []*ranger.Range) (float64, error) {
 	idx := coll.Indices[idxID]
 	totalCount := float64(0)
 	for _, ran := range indexRanges {
@@ -780,7 +606,7 @@ func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, ind
 		// on single-column index, use previous way as well, because CMSketch does not contain null
 		// values in this case.
 		if rangePosition == 0 || isSingleColIdxNullRange(idx, ran) {
-			count, err := idx.GetRowCount(sctx, nil, []*ranger.Range{ran}, coll.Count)
+			count, err := idx.GetRowCount(sc, nil, []*ranger.Range{ran}, coll.Count)
 			if err != nil {
 				return 0, errors.Trace(err)
 			}
@@ -794,7 +620,7 @@ func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, ind
 			if err != nil {
 				return 0, errors.Trace(err)
 			}
-			selectivity, err = coll.getEqualCondSelectivity(sctx, idx, bytes, rangePosition, ran)
+			selectivity, err = coll.getEqualCondSelectivity(sc, idx, bytes, rangePosition, ran)
 			if err != nil {
 				return 0, errors.Trace(err)
 			}
@@ -810,7 +636,7 @@ func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, ind
 				if err != nil {
 					return 0, err
 				}
-				res, err := coll.getEqualCondSelectivity(sctx, idx, bytes, rangePosition, ran)
+				res, err := coll.getEqualCondSelectivity(sc, idx, bytes, rangePosition, ran)
 				if err != nil {
 					return 0, errors.Trace(err)
 				}
@@ -824,7 +650,6 @@ func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, ind
 				LowExclude:  ran.LowExclude,
 				HighVal:     []types.Datum{ran.HighVal[rangePosition]},
 				HighExclude: ran.HighExclude,
-				Collators:   []collate.Collator{ran.Collators[rangePosition]},
 			}
 			var count float64
 			var err error
@@ -837,9 +662,9 @@ func (coll *HistColl) getIndexRowCount(sctx sessionctx.Context, idxID int64, ind
 			}
 			// prefer index stats over column stats
 			if idx, ok := coll.ColID2IdxID[colID]; ok {
-				count, err = coll.GetRowCountByIndexRanges(sctx, idx, []*ranger.Range{&rang})
+				count, err = coll.GetRowCountByIndexRanges(sc, idx, []*ranger.Range{&rang})
 			} else {
-				count, err = coll.GetRowCountByColumnRanges(sctx, colID, []*ranger.Range{&rang})
+				count, err = coll.GetRowCountByColumnRanges(sc, colID, []*ranger.Range{&rang})
 			}
 			if err != nil {
 				return 0, errors.Trace(err)
@@ -877,7 +702,7 @@ func PseudoTable(tblInfo *model.TableInfo) *Table {
 			t.Columns[col.ID] = &Column{
 				PhysicalID: fakePhysicalID,
 				Info:       col,
-				IsHandle:   tblInfo.PKIsHandle && mysql.HasPriKeyFlag(col.GetFlag()),
+				IsHandle:   tblInfo.PKIsHandle && mysql.HasPriKeyFlag(col.Flag),
 				Histogram:  *NewHistogram(col.ID, 0, 0, 0, &col.FieldType, 0, 0),
 			}
 		}
@@ -947,7 +772,7 @@ func GetPseudoRowCountByColumnRanges(sc *stmtctx.StatementContext, tableRowCount
 		} else if ran.HighVal[colIdx].Kind() == types.KindMaxValue {
 			rowCount += tableRowCount / pseudoLessRate
 		} else {
-			compare, err1 := ran.LowVal[colIdx].Compare(sc, &ran.HighVal[colIdx], ran.Collators[colIdx])
+			compare, err1 := ran.LowVal[colIdx].CompareDatum(sc, &ran.HighVal[colIdx])
 			if err1 != nil {
 				return 0, errors.Trace(err1)
 			}

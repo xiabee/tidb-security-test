@@ -146,14 +146,6 @@ func getTiDBKeyFlags(flag tikvstore.KeyFlags) kv.KeyFlags {
 	if flag.HasNeedLocked() {
 		v = kv.ApplyFlagsOps(v, kv.SetNeedLocked)
 	}
-
-	if flag.HasAssertExist() {
-		v = kv.ApplyFlagsOps(v, kv.SetAssertExist)
-	} else if flag.HasAssertNotExist() {
-		v = kv.ApplyFlagsOps(v, kv.SetAssertNotExist)
-	} else if flag.HasAssertUnknown() {
-		v = kv.ApplyFlagsOps(v, kv.SetAssertUnknown)
-	}
 	return v
 }
 
@@ -163,14 +155,6 @@ func getTiKVFlagsOp(op kv.FlagsOp) tikvstore.FlagsOp {
 		return tikvstore.SetPresumeKeyNotExists
 	case kv.SetNeedLocked:
 		return tikvstore.SetNeedLocked
-	case kv.SetAssertExist:
-		return tikvstore.SetAssertExist
-	case kv.SetAssertNotExist:
-		return tikvstore.SetAssertNotExist
-	case kv.SetAssertUnknown:
-		return tikvstore.SetAssertUnknown
-	case kv.SetAssertNone:
-		return tikvstore.SetAssertNone
 	}
 	return 0
 }

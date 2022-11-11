@@ -30,11 +30,12 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/collate"
 	"github.com/stretchr/testify/require"
 )
 
 func TestCodecKey(t *testing.T) {
+	t.Parallel()
+
 	table := []struct {
 		Input  []types.Datum
 		Expect []types.Datum
@@ -114,6 +115,8 @@ func estimateValuesSize(sc *stmtctx.StatementContext, vals []types.Datum) (int, 
 }
 
 func TestCodecKeyCompare(t *testing.T) {
+	t.Parallel()
+
 	table := []struct {
 		Left   []types.Datum
 		Right  []types.Datum
@@ -229,6 +232,8 @@ func TestCodecKeyCompare(t *testing.T) {
 }
 
 func TestNumberCodec(t *testing.T) {
+	t.Parallel()
+
 	tblInt64 := []int64{
 		math.MinInt64,
 		math.MinInt32,
@@ -329,6 +334,8 @@ func TestNumberCodec(t *testing.T) {
 }
 
 func TestNumberOrder(t *testing.T) {
+	t.Parallel()
+
 	tblInt64 := []struct {
 		Arg1 int64
 		Arg2 int64
@@ -397,6 +404,8 @@ func TestNumberOrder(t *testing.T) {
 }
 
 func TestFloatCodec(t *testing.T) {
+	t.Parallel()
+
 	tblFloat := []float64{
 		-1,
 		0,
@@ -455,6 +464,8 @@ func TestFloatCodec(t *testing.T) {
 }
 
 func TestBytes(t *testing.T) {
+	t.Parallel()
+
 	tblBytes := [][]byte{
 		{},
 		{0x00, 0x01},
@@ -533,6 +544,8 @@ func parseDuration(t *testing.T, s string) types.Duration {
 }
 
 func TestTime(t *testing.T) {
+	t.Parallel()
+
 	tbl := []string{
 		"2011-01-01 00:00:00",
 		"2011-01-01 00:00:00",
@@ -580,6 +593,8 @@ func TestTime(t *testing.T) {
 }
 
 func TestDuration(t *testing.T) {
+	t.Parallel()
+
 	tbl := []string{
 		"11:11:11",
 		"00:00:00",
@@ -622,6 +637,8 @@ func TestDuration(t *testing.T) {
 }
 
 func TestDecimal(t *testing.T) {
+	t.Parallel()
+
 	tbl := []string{
 		"1234.00",
 		"1234",
@@ -794,6 +811,8 @@ func TestDecimal(t *testing.T) {
 }
 
 func TestJSON(t *testing.T) {
+	t.Parallel()
+
 	tbl := []string{
 		"1234.00",
 		`{"a": "b"}`,
@@ -823,6 +842,8 @@ func TestJSON(t *testing.T) {
 }
 
 func TestCut(t *testing.T) {
+	t.Parallel()
+
 	table := []struct {
 		Input  []types.Datum
 		Expect []types.Datum
@@ -918,18 +939,22 @@ func TestCut(t *testing.T) {
 }
 
 func TestCutOneError(t *testing.T) {
+	t.Parallel()
+
 	var b []byte
 	_, _, err := CutOne(b)
 	require.Error(t, err)
-	require.EqualError(t, err, "invalid encoded key")
+	require.Regexp(t, "invalid encoded key", err.Error())
 
 	b = []byte{4 /* codec.uintFlag */, 0, 0, 0}
 	_, _, err = CutOne(b)
 	require.Error(t, err)
-	require.Regexp(t, "^invalid encoded key", err.Error())
+	require.Regexp(t, "invalid encoded key.*", err.Error())
 }
 
 func TestSetRawValues(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	datums := types.MakeDatums(1, "abc", 1.1, []byte("def"))
 	rowData, err := EncodeValue(sc, nil, datums...)
@@ -948,6 +973,8 @@ func TestSetRawValues(t *testing.T) {
 }
 
 func TestDecodeOneToChunk(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	datums, tps := datumsForTest(sc)
 	rowCount := 3
@@ -960,7 +987,7 @@ func TestDecodeOneToChunk(t *testing.T) {
 				require.True(t, expect.IsNull())
 			} else {
 				if got.Kind() != types.KindMysqlDecimal {
-					cmp, err := got.Compare(sc, &expect, collate.GetCollator(tp.GetCollate()))
+					cmp, err := got.CompareDatum(sc, &expect)
 					require.NoError(t, err)
 					require.Equalf(t, 0, cmp, "expect: %v, got %v", expect, got)
 				} else {
@@ -972,6 +999,8 @@ func TestDecodeOneToChunk(t *testing.T) {
 }
 
 func TestHashGroup(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	tp := types.NewFieldType(mysql.TypeNewDecimal)
 	tps := []*types.FieldType{tp}
@@ -983,29 +1012,21 @@ func TestHashGroup(t *testing.T) {
 
 	buf1 := make([][]byte, 3)
 	tp1 := tp
-	tp1.SetFlen(20)
-	tp1.SetDecimal(5)
+	tp1.Flen = 20
+	tp1.Decimal = 5
 	_, err := HashGroupKey(sc, 3, chk1.Column(0), buf1, tp1)
 	require.Error(t, err)
 
 	tp2 := tp
-	tp2.SetFlen(12)
-	tp2.SetDecimal(10)
+	tp2.Flen = 12
+	tp2.Decimal = 10
 	_, err = HashGroupKey(sc, 3, chk1.Column(0), buf1, tp2)
 	require.Error(t, err)
 }
 
 func datumsForTest(sc *stmtctx.StatementContext) ([]types.Datum, []*types.FieldType) {
 	decType := types.NewFieldType(mysql.TypeNewDecimal)
-	decType.SetDecimal(2)
-	_tp1 := types.NewFieldType(mysql.TypeEnum)
-	_tp1.SetElems([]string{"a"})
-	_tp2 := types.NewFieldType(mysql.TypeSet)
-	_tp2.SetElems([]string{"a"})
-	_tp3 := types.NewFieldType(mysql.TypeSet)
-	_tp3.SetElems([]string{"a", "b", "c", "d", "e", "f"})
-	_tp4 := types.NewFieldType(mysql.TypeBit)
-	_tp4.SetFlen(8)
+	decType.Decimal = 2
 	table := []struct {
 		value interface{}
 		tp    *types.FieldType
@@ -1044,10 +1065,10 @@ func datumsForTest(sc *stmtctx.StatementContext) ([]types.Datum, []*types.FieldT
 		{types.CurrentTime(mysql.TypeDate), types.NewFieldType(mysql.TypeDate)},
 		{types.NewTime(types.FromGoTime(time.Now()), mysql.TypeTimestamp, types.DefaultFsp), types.NewFieldType(mysql.TypeTimestamp)},
 		{types.Duration{Duration: time.Second, Fsp: 1}, types.NewFieldType(mysql.TypeDuration)},
-		{types.Enum{Name: "a", Value: 1}, _tp1},
-		{types.Set{Name: "a", Value: 1}, _tp2},
-		{types.Set{Name: "f", Value: 32}, _tp3},
-		{types.BinaryLiteral{100}, _tp4},
+		{types.Enum{Name: "a", Value: 1}, &types.FieldType{Tp: mysql.TypeEnum, Elems: []string{"a"}}},
+		{types.Set{Name: "a", Value: 1}, &types.FieldType{Tp: mysql.TypeSet, Elems: []string{"a"}}},
+		{types.Set{Name: "f", Value: 32}, &types.FieldType{Tp: mysql.TypeSet, Elems: []string{"a", "b", "c", "d", "e", "f"}}},
+		{types.BinaryLiteral{100}, &types.FieldType{Tp: mysql.TypeBit, Flen: 8}},
 		{json.CreateBinary("abc"), types.NewFieldType(mysql.TypeJSON)},
 		{int64(1), types.NewFieldType(mysql.TypeYear)},
 	}
@@ -1077,6 +1098,8 @@ func chunkForTest(t *testing.T, sc *stmtctx.StatementContext, datums []types.Dat
 }
 
 func TestDecodeRange(t *testing.T) {
+	t.Parallel()
+
 	_, _, err := DecodeRange(nil, 0, nil, nil)
 	require.Error(t, err)
 
@@ -1087,7 +1110,7 @@ func TestDecodeRange(t *testing.T) {
 	datums1, _, err := DecodeRange(rowData, len(datums), nil, nil)
 	require.NoError(t, err)
 	for i, datum := range datums1 {
-		cmp, err := datum.Compare(nil, &datums[i], collate.GetBinaryCollator())
+		cmp, err := datum.CompareDatum(nil, &datums[i])
 		require.NoError(t, err)
 		require.Equal(t, 0, cmp)
 	}
@@ -1143,6 +1166,8 @@ func testHashChunkRowEqual(t *testing.T, a, b interface{}, equal bool) {
 }
 
 func TestHashChunkRow(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	buf := make([]byte, 1)
 	datums, tps := datumsForTest(sc)
@@ -1187,6 +1212,8 @@ func TestHashChunkRow(t *testing.T) {
 }
 
 func TestValueSizeOfSignedInt(t *testing.T) {
+	t.Parallel()
+
 	testCase := []int64{64, 8192, 1048576, 134217728, 17179869184, 2199023255552, 281474976710656, 36028797018963968, 4611686018427387904}
 	var b []byte
 	for _, v := range testCase {
@@ -1212,6 +1239,8 @@ func TestValueSizeOfSignedInt(t *testing.T) {
 }
 
 func TestValueSizeOfUnsignedInt(t *testing.T) {
+	t.Parallel()
+
 	testCase := []uint64{128, 16384, 2097152, 268435456, 34359738368, 4398046511104, 562949953421312, 72057594037927936, 9223372036854775808}
 	var b []byte
 	for _, v := range testCase {
@@ -1227,6 +1256,8 @@ func TestValueSizeOfUnsignedInt(t *testing.T) {
 }
 
 func TestHashChunkColumns(t *testing.T) {
+	t.Parallel()
+
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	buf := make([]byte, 1)
 	datums, tps := datumsForTest(sc)

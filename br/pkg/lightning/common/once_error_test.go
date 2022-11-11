@@ -18,28 +18,36 @@ import (
 	"errors"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/stretchr/testify/require"
 )
 
-func TestOnceError(t *testing.T) {
+func TestCommon(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&onceErrorSuite{})
+
+type onceErrorSuite struct{}
+
+func (s *onceErrorSuite) TestOnceError(c *C) {
 	var err common.OnceError
 
-	require.Nil(t, err.Get())
+	c.Assert(err.Get(), IsNil)
 
 	err.Set(nil)
-	require.Nil(t, err.Get())
+	c.Assert(err.Get(), IsNil)
 
 	e := errors.New("1")
 	err.Set(e)
-	require.Equal(t, e, err.Get())
+	c.Assert(err.Get(), Equals, e)
 
 	e2 := errors.New("2")
 	err.Set(e2)
-	require.Equal(t, e, err.Get()) // e, not e2.
+	c.Assert(err.Get(), Equals, e) // e, not e2.
 
 	err.Set(nil)
-	require.Equal(t, e, err.Get())
+	c.Assert(err.Get(), Equals, e)
 
 	ch := make(chan struct{})
 	go func() {
@@ -47,5 +55,5 @@ func TestOnceError(t *testing.T) {
 		ch <- struct{}{}
 	}()
 	<-ch
-	require.Equal(t, e, err.Get())
+	c.Assert(err.Get(), Equals, e)
 }

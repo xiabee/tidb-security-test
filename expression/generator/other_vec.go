@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build ignore
 // +build ignore
 
 package main
@@ -144,7 +143,7 @@ func (b *{{.SigName}}) vecEvalInt(input *chunk.Chunk, result *chunk.Column) erro
 	}
 	{{- end }}
 	{{- if $InputInt }}
-		isUnsigned0 := mysql.HasUnsignedFlag(b.args[0].GetType().GetFlag())
+		isUnsigned0 := mysql.HasUnsignedFlag(b.args[0].GetType().Flag)
 	{{- end }}
 	var compareResult int
 	args := b.args[1:]
@@ -216,7 +215,7 @@ func (b *{{.SigName}}) vecEvalInt(input *chunk.Chunk, result *chunk.Column) erro
 			return err
 		}
 		{{- if $InputInt }}
-			isUnsigned := mysql.HasUnsignedFlag(args[j].GetType().GetFlag())
+			isUnsigned := mysql.HasUnsignedFlag(args[j].GetType().Flag)
 		{{- end }}
 		{{- if $InputFixed }}
 			args1 := buf1.{{.Input.TypeNameInColumn}}s()
@@ -279,7 +278,6 @@ package expression
 import (
 	"fmt"
 	"math/rand"
-	"strconv"
 	"testing"
 	"time"
 
@@ -330,7 +328,7 @@ func (g inGener) gen() interface{} {
 		}
 		return *j
 	case types.ETString:
-		return strconv.FormatInt(randNum, 10)
+		return fmt.Sprint(randNum)
 	}
 	return randNum
 }

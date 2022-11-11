@@ -33,6 +33,7 @@ import (
 )
 
 func TestBaseBuiltin(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	bf, err := newBaseBuiltinFuncWithTp(ctx, "", nil, types.ETTimestamp)
 	require.NoError(t, err)
@@ -53,6 +54,7 @@ func TestBaseBuiltin(t *testing.T) {
 }
 
 func TestClone(t *testing.T) {
+	t.Parallel()
 	builtinFuncs := []builtinFunc{
 		&builtinArithmeticPlusRealSig{}, &builtinArithmeticPlusDecimalSig{}, &builtinArithmeticPlusIntSig{}, &builtinArithmeticMinusRealSig{}, &builtinArithmeticMinusDecimalSig{},
 		&builtinArithmeticMinusIntSig{}, &builtinArithmeticDivideRealSig{}, &builtinArithmeticDivideDecimalSig{}, &builtinArithmeticMultiplyRealSig{}, &builtinArithmeticMultiplyDecimalSig{},
@@ -159,6 +161,7 @@ func TestClone(t *testing.T) {
 }
 
 func TestGetUint64FromConstant(t *testing.T) {
+	t.Parallel()
 	con := &Constant{
 		Value: types.NewDatum(nil),
 	}
@@ -196,6 +199,7 @@ func TestGetUint64FromConstant(t *testing.T) {
 }
 
 func TestSetExprColumnInOperand(t *testing.T) {
+	t.Parallel()
 	col := &Column{RetType: newIntFieldType()}
 	require.True(t, setExprColumnInOperand(col).(*Column).InOperand)
 
@@ -207,6 +211,7 @@ func TestSetExprColumnInOperand(t *testing.T) {
 }
 
 func TestPopRowFirstArg(t *testing.T) {
+	t.Parallel()
 	c1, c2, c3 := &Column{RetType: newIntFieldType()}, &Column{RetType: newIntFieldType()}, &Column{RetType: newIntFieldType()}
 	f, err := funcs[ast.RowFunc].getFunction(mock.NewContext(), []Expression{c1, c2, c3})
 	require.NoError(t, err)
@@ -217,11 +222,12 @@ func TestPopRowFirstArg(t *testing.T) {
 }
 
 func TestGetStrIntFromConstant(t *testing.T) {
+	t.Parallel()
 	col := &Column{}
 	_, _, err := GetStringFromConstant(mock.NewContext(), col)
 	require.Error(t, err)
 
-	con := &Constant{RetType: types.NewFieldType(mysql.TypeNull)}
+	con := &Constant{RetType: &types.FieldType{Tp: mysql.TypeNull}}
 	_, isNull, err := GetStringFromConstant(mock.NewContext(), con)
 	require.NoError(t, err)
 	require.True(t, isNull)
@@ -230,7 +236,7 @@ func TestGetStrIntFromConstant(t *testing.T) {
 	ret, _, _ := GetStringFromConstant(mock.NewContext(), con)
 	require.Equal(t, "1", ret)
 
-	con = &Constant{RetType: types.NewFieldType(mysql.TypeNull)}
+	con = &Constant{RetType: &types.FieldType{Tp: mysql.TypeNull}}
 	_, isNull, _ = GetIntFromConstant(mock.NewContext(), con)
 	require.True(t, isNull)
 
@@ -244,6 +250,7 @@ func TestGetStrIntFromConstant(t *testing.T) {
 }
 
 func TestSubstituteCorCol2Constant(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	corCol1 := &CorrelatedColumn{Data: &NewOne().Value}
 	corCol1.RetType = types.NewFieldType(mysql.TypeLonglong)
@@ -269,6 +276,7 @@ func TestSubstituteCorCol2Constant(t *testing.T) {
 }
 
 func TestPushDownNot(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	col := &Column{Index: 1, RetType: types.NewFieldType(mysql.TypeLonglong)}
 	// !((a=1||a=1)&&a=1)
@@ -314,6 +322,7 @@ func TestPushDownNot(t *testing.T) {
 }
 
 func TestFilter(t *testing.T) {
+	t.Parallel()
 	conditions := []Expression{
 		newFunction(ast.EQ, newColumn(0), newColumn(1)),
 		newFunction(ast.EQ, newColumn(1), newColumn(2)),
@@ -325,6 +334,7 @@ func TestFilter(t *testing.T) {
 }
 
 func TestFilterOutInPlace(t *testing.T) {
+	t.Parallel()
 	conditions := []Expression{
 		newFunction(ast.EQ, newColumn(0), newColumn(1)),
 		newFunction(ast.EQ, newColumn(1), newColumn(2)),
@@ -339,6 +349,7 @@ func TestFilterOutInPlace(t *testing.T) {
 }
 
 func TestHashGroupKey(t *testing.T) {
+	t.Parallel()
 	ctx := mock.NewContext()
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	eTypes := []types.EvalType{types.ETInt, types.ETReal, types.ETDecimal, types.ETString, types.ETTimestamp, types.ETDatetime, types.ETDuration}
@@ -346,7 +357,7 @@ func TestHashGroupKey(t *testing.T) {
 	for i := 0; i < len(tNames); i++ {
 		ft := eType2FieldType(eTypes[i])
 		if eTypes[i] == types.ETDecimal {
-			ft.SetFlen(0)
+			ft.Flen = 0
 		}
 		colExpr := &Column{Index: 0, RetType: ft}
 		input := chunk.New([]*types.FieldType{ft}, 1024, 1024)
@@ -381,26 +392,28 @@ func isLogicOrFunction(e Expression) bool {
 }
 
 func TestDisableParseJSONFlag4Expr(t *testing.T) {
+	t.Parallel()
 	var expr Expression
 	expr = &Column{RetType: newIntFieldType()}
 	ft := expr.GetType()
-	ft.AddFlag(mysql.ParseToJSONFlag)
+	ft.Flag |= mysql.ParseToJSONFlag
 	DisableParseJSONFlag4Expr(expr)
-	require.True(t, mysql.HasParseToJSONFlag(ft.GetFlag()))
+	require.True(t, mysql.HasParseToJSONFlag(ft.Flag))
 
 	expr = &CorrelatedColumn{Column: Column{RetType: newIntFieldType()}}
 	ft = expr.GetType()
-	ft.AddFlag(mysql.ParseToJSONFlag)
+	ft.Flag |= mysql.ParseToJSONFlag
 	DisableParseJSONFlag4Expr(expr)
-	require.True(t, mysql.HasParseToJSONFlag(ft.GetFlag()))
+	require.True(t, mysql.HasParseToJSONFlag(ft.Flag))
 	expr = &ScalarFunction{RetType: newIntFieldType()}
 	ft = expr.GetType()
-	ft.AddFlag(mysql.ParseToJSONFlag)
+	ft.Flag |= mysql.ParseToJSONFlag
 	DisableParseJSONFlag4Expr(expr)
-	require.False(t, mysql.HasParseToJSONFlag(ft.GetFlag()))
+	require.False(t, mysql.HasParseToJSONFlag(ft.Flag))
 }
 
 func TestSQLDigestTextRetriever(t *testing.T) {
+	t.Parallel()
 	// Create a fake session as the argument to the retriever, though it's actually not used when mock data is set.
 
 	r := NewSQLDigestTextRetriever()
@@ -595,7 +608,7 @@ func (m *MockExpr) SetCoercibility(Coercibility)                                
 func (m *MockExpr) Repertoire() Repertoire                                        { return UNICODE }
 func (m *MockExpr) SetRepertoire(Repertoire)                                      {}
 
-func (m *MockExpr) CharsetAndCollation() (string, string) {
+func (m *MockExpr) CharsetAndCollation(ctx sessionctx.Context) (string, string) {
 	return "", ""
 }
 func (m *MockExpr) SetCharsetAndCollation(chs, coll string) {}

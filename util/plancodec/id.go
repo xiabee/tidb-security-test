@@ -174,19 +174,16 @@ const (
 	typeDataSourceID          int = 40
 	typeLoadDataID            int = 41
 	typeTableSampleID         int = 42
-	typeTableFullScanID       int = 43
-	typeTableRangeScanID      int = 44
-	typeTableRowIDScanID      int = 45
-	typeIndexFullScanID       int = 46
-	typeIndexRangeScanID      int = 47
-	typeExchangeReceiverID    int = 48
-	typeExchangeSenderID      int = 49
-	typeCTEID                 int = 50
-	typeCTEDefinitionID       int = 51
-	typeCTETableID            int = 52
-	typePartitionUnionID      int = 53
-	typeShuffleID             int = 54
-	typeShuffleReceiverID     int = 55
+	typeTableFullScan         int = 43
+	typeTableRangeScan        int = 44
+	typeTableRowIDScan        int = 45
+	typeIndexFullScan         int = 46
+	typeIndexRangeScan        int = 47
+	typeExchangeReceiver      int = 48
+	typeExchangeSender        int = 49
+	typeCTE                   int = 50
+	typeCTEDefinition         int = 51
+	typeCTETable              int = 52
 )
 
 // TypeStringToPhysicalID converts the plan type string to plan id.
@@ -210,8 +207,6 @@ func TypeStringToPhysicalID(tp string) int {
 		return typeJoinID
 	case TypeUnion:
 		return typeUnionID
-	case TypePartitionUnion:
-		return typePartitionUnionID
 	case TypeTableScan:
 		return typeTableScanID
 	case TypeMemTableScan:
@@ -260,10 +255,6 @@ func TypeStringToPhysicalID(tp string) int {
 		return typeIndexReaderID
 	case TypeWindow:
 		return typeWindowID
-	case TypeShuffle:
-		return typeShuffleID
-	case TypeShuffleReceiver:
-		return typeShuffleReceiverID
 	case TypeTiKVSingleGather:
 		return typeTiKVSingleGatherID
 	case TypeIndexMerge:
@@ -283,25 +274,25 @@ func TypeStringToPhysicalID(tp string) int {
 	case TypeTableSample:
 		return typeTableSampleID
 	case TypeTableFullScan:
-		return typeTableFullScanID
+		return typeTableFullScan
 	case TypeTableRangeScan:
-		return typeTableRangeScanID
+		return typeTableRangeScan
 	case TypeTableRowIDScan:
-		return typeTableRowIDScanID
+		return typeTableRowIDScan
 	case TypeIndexFullScan:
-		return typeIndexFullScanID
+		return typeIndexFullScan
 	case TypeIndexRangeScan:
-		return typeIndexRangeScanID
+		return typeIndexRangeScan
 	case TypeExchangeReceiver:
-		return typeExchangeReceiverID
+		return typeExchangeReceiver
 	case TypeExchangeSender:
-		return typeExchangeSenderID
+		return typeExchangeSender
 	case TypeCTE:
-		return typeCTEID
+		return typeCTE
 	case TypeCTEDefinition:
-		return typeCTEDefinitionID
+		return typeCTEDefinition
 	case TypeCTETable:
-		return typeCTETableID
+		return typeCTETable
 	}
 	// Should never reach here.
 	return 0
@@ -328,8 +319,6 @@ func PhysicalIDToTypeString(id int) string {
 		return TypeJoin
 	case typeUnionID:
 		return TypeUnion
-	case typePartitionUnionID:
-		return TypePartitionUnion
 	case typeTableScanID:
 		return TypeTableScan
 	case typeMemTableScanID:
@@ -378,10 +367,6 @@ func PhysicalIDToTypeString(id int) string {
 		return TypeIndexReader
 	case typeWindowID:
 		return TypeWindow
-	case typeShuffleID:
-		return TypeShuffle
-	case typeShuffleReceiverID:
-		return TypeShuffleReceiver
 	case typeTiKVSingleGatherID:
 		return TypeTiKVSingleGather
 	case typeIndexMergeID:
@@ -398,25 +383,25 @@ func PhysicalIDToTypeString(id int) string {
 		return TypeLoadData
 	case typeTableSampleID:
 		return TypeTableSample
-	case typeTableFullScanID:
+	case typeTableFullScan:
 		return TypeTableFullScan
-	case typeTableRangeScanID:
+	case typeTableRangeScan:
 		return TypeTableRangeScan
-	case typeTableRowIDScanID:
+	case typeTableRowIDScan:
 		return TypeTableRowIDScan
-	case typeIndexFullScanID:
+	case typeIndexFullScan:
 		return TypeIndexFullScan
-	case typeIndexRangeScanID:
+	case typeIndexRangeScan:
 		return TypeIndexRangeScan
-	case typeExchangeReceiverID:
+	case typeExchangeReceiver:
 		return TypeExchangeReceiver
-	case typeExchangeSenderID:
+	case typeExchangeSender:
 		return TypeExchangeSender
-	case typeCTEID:
+	case typeCTE:
 		return TypeCTE
-	case typeCTEDefinitionID:
+	case typeCTEDefinition:
 		return TypeCTEDefinition
-	case typeCTETableID:
+	case typeCTETable:
 		return TypeCTETable
 	}
 

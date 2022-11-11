@@ -22,6 +22,8 @@ import (
 )
 
 func TestSessionPool(t *testing.T) {
+	t.Parallel()
+
 	f := func() (pools.Resource, error) { return &testResource{}, nil }
 	pool := newSessionPool(1, f)
 	tr, err := pool.Get()

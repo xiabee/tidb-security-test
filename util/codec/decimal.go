@@ -34,15 +34,11 @@ func EncodeDecimal(b []byte, dec *types.MyDecimal, precision, frac int) ([]byte,
 	return b, errors.Trace(err)
 }
 
-func valueSizeOfDecimal(dec *types.MyDecimal, precision, frac int) (int, error) {
+func valueSizeOfDecimal(dec *types.MyDecimal, precision, frac int) int {
 	if precision == 0 {
 		precision, frac = dec.PrecisionAndFrac()
 	}
-	binSize, err := types.DecimalBinSize(precision, frac)
-	if err != nil {
-		return 0, err
-	}
-	return binSize + 2, nil
+	return types.DecimalBinSize(precision, frac) + 2
 }
 
 // DecodeDecimal decodes bytes to decimal.

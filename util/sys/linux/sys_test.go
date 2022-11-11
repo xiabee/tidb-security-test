@@ -21,6 +21,8 @@ import (
 )
 
 func TestGetOSVersion(t *testing.T) {
+	t.Parallel()
+
 	osRelease, err := OSVersion()
 	require.NoError(t, err)
 	require.NotEmpty(t, osRelease)

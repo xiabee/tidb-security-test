@@ -24,6 +24,8 @@ import (
 )
 
 func TestParseExpression(t *testing.T) {
+	t.Parallel()
+
 	node, err := ParseExpression("json_extract(a, '$.a')")
 	require.NoError(t, err)
 	require.Equal(t, "json_extract", node.(*ast.FuncCallExpr).FnName.L)

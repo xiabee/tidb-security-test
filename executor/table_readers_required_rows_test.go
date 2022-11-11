@@ -18,8 +18,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"testing"
 
+	"github.com/cznic/mathutil"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
@@ -31,9 +32,7 @@ import (
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tipb/go-tipb"
-	"github.com/stretchr/testify/require"
 )
 
 type requiredRowsSelectResult struct {
@@ -80,7 +79,7 @@ func (r *requiredRowsSelectResult) genOneRow() chunk.Row {
 }
 
 func (r *requiredRowsSelectResult) genValue(valType *types.FieldType) interface{} {
-	switch valType.GetType() {
+	switch valType.Tp {
 	case mysql.TypeLong, mysql.TypeLonglong:
 		return int64(rand.Int())
 	case mysql.TypeDouble:
@@ -154,7 +153,7 @@ func buildMockBaseExec(sctx sessionctx.Context) baseExecutor {
 	return baseExec
 }
 
-func TestTableReaderRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestTableReaderRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -185,14 +184,14 @@ func TestTableReaderRequiredRows(t *testing.T) {
 		sctx := defaultCtx()
 		ctx := mockDistsqlSelectCtxSet(testCase.totalRows, testCase.expectedRowsDS)
 		exec := buildTableReader(sctx)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
+		c.Assert(exec.Close(), IsNil)
 	}
 }
 
@@ -206,7 +205,7 @@ func buildIndexReader(sctx sessionctx.Context) Executor {
 	return e
 }
 
-func TestIndexReaderRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestIndexReaderRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -237,13 +236,13 @@ func TestIndexReaderRequiredRows(t *testing.T) {
 		sctx := defaultCtx()
 		ctx := mockDistsqlSelectCtxSet(testCase.totalRows, testCase.expectedRowsDS)
 		exec := buildIndexReader(sctx)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
+		c.Assert(exec.Close(), IsNil)
 	}
 }

@@ -40,10 +40,7 @@ func FoldConstant(expr Expression) Expression {
 	e, _ := foldConstant(expr)
 	// keep the original coercibility, charset, collation and repertoire values after folding
 	e.SetCoercibility(expr.Coercibility())
-
-	charset, collate := expr.GetType().GetCharset(), expr.GetType().GetCollate()
-	e.GetType().SetCharset(charset)
-	e.GetType().SetCollate(collate)
+	e.GetType().Charset, e.GetType().Collate = expr.GetType().Charset, expr.GetType().Collate
 	e.SetRepertoire(expr.Repertoire())
 	return e
 }
@@ -65,7 +62,7 @@ func isNullHandler(expr *ScalarFunction) (Expression, bool) {
 		}
 		return &Constant{Value: value, RetType: expr.RetType}, false
 	}
-	if mysql.HasNotNullFlag(arg0.GetType().GetFlag()) {
+	if mysql.HasNotNullFlag(arg0.GetType().Flag) {
 		return NewZero(), false
 	}
 	return expr, false
@@ -126,7 +123,7 @@ func caseWhenHandler(expr *ScalarFunction) (Expression, bool) {
 				foldedExpr, isDeferred := foldConstant(args[i+1])
 				isDeferredConst = isDeferredConst || isDeferred
 				if _, isConst := foldedExpr.(*Constant); isConst {
-					foldedExpr.GetType().SetDecimal(expr.GetType().GetDecimal())
+					foldedExpr.GetType().Decimal = expr.GetType().Decimal
 					return foldedExpr, isDeferredConst
 				}
 				return foldedExpr, isDeferredConst
@@ -143,7 +140,7 @@ func caseWhenHandler(expr *ScalarFunction) (Expression, bool) {
 		foldedExpr, isDeferred := foldConstant(args[l-1])
 		isDeferredConst = isDeferredConst || isDeferred
 		if _, isConst := foldedExpr.(*Constant); isConst {
-			foldedExpr.GetType().SetDecimal(expr.GetType().GetDecimal())
+			foldedExpr.GetType().Decimal = expr.GetType().Decimal
 			return foldedExpr, isDeferredConst
 		}
 		return foldedExpr, isDeferredConst
@@ -219,9 +216,9 @@ func foldConstant(expr Expression) (Expression, bool) {
 			// set right not null flag for constant value
 			switch value.Kind() {
 			case types.KindNull:
-				retType.DelFlag(mysql.NotNullFlag)
+				retType.Flag &= ^mysql.NotNullFlag
 			default:
-				retType.AddFlag(mysql.NotNullFlag)
+				retType.Flag |= mysql.NotNullFlag
 			}
 		}
 		if err != nil {

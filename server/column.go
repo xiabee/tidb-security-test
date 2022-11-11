@@ -15,7 +15,6 @@
 package server
 
 import (
-	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
 )
 
@@ -40,7 +39,7 @@ type ColumnInfo struct {
 // Dump dumps ColumnInfo to bytes.
 func (column *ColumnInfo) Dump(buffer []byte, d *resultEncoder) []byte {
 	if d == nil {
-		d = newResultEncoder(charset.CharsetUTF8MB4)
+		d = &resultEncoder{}
 	}
 	nameDump, orgnameDump := []byte(column.Name), []byte(column.OrgName)
 	if len(nameDump) > maxColumnNameSize {

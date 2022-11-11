@@ -18,6 +18,8 @@ import (
 )
 
 func TestWriteDatabaseMeta(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -37,27 +39,9 @@ func TestWriteDatabaseMeta(t *testing.T) {
 	require.Equal(t, "/*!40101 SET NAMES binary*/;\nCREATE DATABASE `test`;\n", string(bytes))
 }
 
-func TestWritePolicyMeta(t *testing.T) {
-	dir := t.TempDir()
-	config := defaultConfigForTest(t)
-	config.OutputDirPath = dir
-
-	writer, clean := createTestWriter(config, t)
-	defer clean()
-
-	err := writer.WritePolicyMeta("testpolicy", "create placement policy `y` followers=2")
-	require.NoError(t, err)
-
-	p := path.Join(dir, "testpolicy-placement-policy-create.sql")
-	_, err = os.Stat(p)
-	require.NoError(t, err)
-
-	bytes, err := ioutil.ReadFile(p)
-	require.NoError(t, err)
-	require.Equal(t, "/*!40101 SET NAMES binary*/;\ncreate placement policy `y` followers=2;\n", string(bytes))
-}
-
 func TestWriteTableMeta(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	config := defaultConfigForTest(t)
@@ -77,6 +61,8 @@ func TestWriteTableMeta(t *testing.T) {
 }
 
 func TestWriteViewMeta(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -106,6 +92,8 @@ func TestWriteViewMeta(t *testing.T) {
 }
 
 func TestWriteTableData(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -145,6 +133,8 @@ func TestWriteTableData(t *testing.T) {
 }
 
 func TestWriteTableDataWithFileSize(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -195,6 +185,8 @@ func TestWriteTableDataWithFileSize(t *testing.T) {
 }
 
 func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -246,6 +238,8 @@ func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
 }
 
 func TestWriteTableDataWithStatementSize(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir

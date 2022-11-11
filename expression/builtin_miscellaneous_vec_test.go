@@ -50,11 +50,12 @@ var vecBuiltinMiscellaneousCases = map[string][]vecExprBenchCase{
 	},
 	ast.InetAton: {
 		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{&ipv4StrGener{newDefaultRandGen()}}},
+		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}},
 		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{
 			newSelectStringGener(
 				[]string{
-					"11.11.11.11",
-					"255.255.255.255",
+					"11.11.11.11.",    // last char is .
+					"266.266.266.266", // int in string exceed 255
 					"127",
 					".122",
 					".123.123",
@@ -107,9 +108,6 @@ var vecBuiltinMiscellaneousCases = map[string][]vecExprBenchCase{
 		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{&uuidBinGener{newDefaultRandGen()}}},
 		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt}, geners: []dataGenerator{&uuidBinGener{newDefaultRandGen()}}},
 	},
-	ast.IsUUID: {
-		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{&uuidStrGener{newDefaultRandGen()}}},
-	},
 }
 
 func TestVectorizedBuiltinMiscellaneousEvalOneVec(t *testing.T) {
@@ -151,7 +149,7 @@ func TestSleepVectorized(t *testing.T) {
 	warnCnt := counter{}
 
 	// non-strict model
-	sessVars.StmtCtx.BadNullAsWarning = true
+	sessVars.StrictSQLMode = false
 	input.AppendFloat64(0, 1)
 	err = f.vecEvalInt(input, result)
 	require.NoError(t, err)
@@ -184,7 +182,7 @@ func TestSleepVectorized(t *testing.T) {
 	require.Equal(t, uint16(warnCnt.add(2)), sessVars.StmtCtx.WarningCount())
 
 	// for error case under the strict model
-	sessVars.StmtCtx.BadNullAsWarning = false
+	sessVars.StrictSQLMode = true
 	input.Reset()
 	input.AppendNull(0)
 	err = f.vecEvalInt(input, result)

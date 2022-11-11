@@ -15,7 +15,6 @@
 package core
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	gomath "math"
@@ -33,8 +32,7 @@ import (
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/collate"
-	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/math"
 	"github.com/pingcap/tidb/util/plancodec"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tidb/util/set"
@@ -44,7 +42,6 @@ import (
 const FullRange = -1
 
 // partitionProcessor rewrites the ast for table partition.
-// Used by static partition prune mode.
 //
 // create table t (id int) partition by range (id)
 //   (partition p1 values less than (10),
@@ -60,19 +57,18 @@ const FullRange = -1
 // partitionProcessor is here because it's easier to prune partition after predicate push down.
 type partitionProcessor struct{}
 
-func (s *partitionProcessor) optimize(ctx context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
-	p, err := s.rewriteDataSource(lp, opt)
-	return p, err
+func (s *partitionProcessor) optimize(ctx context.Context, lp LogicalPlan) (LogicalPlan, error) {
+	return s.rewriteDataSource(lp)
 }
 
-func (s *partitionProcessor) rewriteDataSource(lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (s *partitionProcessor) rewriteDataSource(lp LogicalPlan) (LogicalPlan, error) {
 	// Assert there will not be sel -> sel in the ast.
 	switch p := lp.(type) {
 	case *DataSource:
-		return s.prune(p, opt)
+		return s.prune(p)
 	case *LogicalUnionScan:
 		ds := p.Children()[0]
-		ds, err := s.prune(ds.(*DataSource), opt)
+		ds, err := s.prune(ds.(*DataSource))
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +93,7 @@ func (s *partitionProcessor) rewriteDataSource(lp LogicalPlan, opt *logicalOptim
 	default:
 		children := lp.Children()
 		for i, child := range children {
-			newChild, err := s.rewriteDataSource(child, opt)
+			newChild, err := s.rewriteDataSource(child)
 			if err != nil {
 				return nil, err
 			}
@@ -143,7 +139,7 @@ func (s *partitionProcessor) findUsedPartitions(ctx sessionctx.Context, tbl tabl
 	ranges := detachedResult.Ranges
 	used := make([]int, 0, len(ranges))
 	for _, r := range ranges {
-		if r.IsPointNullable(ctx) {
+		if r.IsPointNullable(ctx.GetSessionVars().StmtCtx) {
 			if !r.HighVal[0].IsNull() {
 				if len(r.HighVal) != len(partIdx) {
 					used = []int{-1}
@@ -161,7 +157,7 @@ func (s *partitionProcessor) findUsedPartitions(ctx sessionctx.Context, tbl tabl
 			if isNull {
 				pos = 0
 			}
-			idx := mathutil.Abs(pos % int64(pi.Num))
+			idx := math.Abs(pos % int64(pi.Num))
 			if len(partitionNames) > 0 && !s.findByName(partitionNames, pi.Definitions[idx].Name.L) {
 				continue
 			}
@@ -193,7 +189,7 @@ func (s *partitionProcessor) findUsedPartitions(ctx sessionctx.Context, tbl tabl
 				}
 
 				var rangeScalar float64
-				if mysql.HasUnsignedFlag(col.RetType.GetFlag()) {
+				if mysql.HasUnsignedFlag(col.RetType.Flag) {
 					rangeScalar = float64(uint64(posHigh)) - float64(uint64(posLow)) // use float64 to avoid integer overflow
 				} else {
 					rangeScalar = float64(posHigh) - float64(posLow) // use float64 to avoid integer overflow
@@ -202,7 +198,7 @@ func (s *partitionProcessor) findUsedPartitions(ctx sessionctx.Context, tbl tabl
 				// if range is less than the number of partitions, there will be unused partitions we can prune out.
 				if rangeScalar < float64(numPartitions) && !highIsNull && !lowIsNull {
 					for i := posLow; i <= posHigh; i++ {
-						idx := mathutil.Abs(i % int64(pi.Num))
+						idx := math.Abs(i % int64(pi.Num))
 						if len(partitionNames) > 0 && !s.findByName(partitionNames, pi.Definitions[idx].Name.L) {
 							continue
 						}
@@ -212,11 +208,11 @@ func (s *partitionProcessor) findUsedPartitions(ctx sessionctx.Context, tbl tabl
 				}
 
 				// issue:#22619
-				if col.RetType.GetType() == mysql.TypeBit {
+				if col.RetType.Tp == mysql.TypeBit {
 					// maximum number of partitions is 8192
-					if col.RetType.GetFlen() > 0 && col.RetType.GetFlen() < int(gomath.Log2(ddl.PartitionCountLimit)) {
+					if col.RetType.Flen > 0 && col.RetType.Flen < int(gomath.Log2(ddl.PartitionCountLimit)) {
 						// all possible hash values
-						maxUsedPartitions := 1 << col.RetType.GetFlen()
+						maxUsedPartitions := 1 << col.RetType.Flen
 						if maxUsedPartitions < numPartitions {
 							for i := 0; i < maxUsedPartitions; i++ {
 								used = append(used, i)
@@ -312,15 +308,6 @@ func (s *partitionProcessor) reconstructTableColNames(ds *DataSource) ([]*types.
 			})
 			continue
 		}
-		if colExpr.ID == model.ExtraPhysTblID {
-			names = append(names, &types.FieldName{
-				DBName:      ds.DBName,
-				TblName:     ds.tableInfo.Name,
-				ColName:     model.ExtraPhysTblIdName,
-				OrigColName: model.ExtraPhysTblIdName,
-			})
-			continue
-		}
 		if colInfo, found := colsInfoMap[colExpr.ID]; found {
 			names = append(names, &types.FieldName{
 				DBName:      ds.DBName,
@@ -336,7 +323,7 @@ func (s *partitionProcessor) reconstructTableColNames(ds *DataSource) ([]*types.
 	return names, nil
 }
 
-func (s *partitionProcessor) processHashPartition(ds *DataSource, pi *model.PartitionInfo, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (s *partitionProcessor) processHashPartition(ds *DataSource, pi *model.PartitionInfo) (LogicalPlan, error) {
 	names, err := s.reconstructTableColNames(ds)
 	if err != nil {
 		return nil, err
@@ -346,11 +333,10 @@ func (s *partitionProcessor) processHashPartition(ds *DataSource, pi *model.Part
 		return nil, err
 	}
 	if used != nil {
-		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi), opt)
+		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi))
 	}
 	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.blockOffset)
 	tableDual.schema = ds.Schema()
-	appendNoPartitionChildTraceStep(ds, tableDual, opt)
 	return tableDual, nil
 }
 
@@ -486,7 +472,7 @@ func (l *listPartitionPruner) locateColumnPartitionsByCondition(cond expression.
 			return nil, true, nil
 		}
 		var locations []tables.ListPartitionLocation
-		if r.IsPointNullable(l.ctx) {
+		if r.IsPointNullable(sc) {
 			location, err := colPrune.LocatePartition(sc, r.HighVal[0])
 			if types.ErrOverflow.Equal(err) {
 				return nil, true, nil // return full-scan if over-flow
@@ -568,7 +554,7 @@ func (l *listPartitionPruner) findUsedListPartitions(conds []expression.Expressi
 	}
 	used := make(map[int]struct{}, len(ranges))
 	for _, r := range ranges {
-		if r.IsPointNullable(l.ctx) {
+		if r.IsPointNullable(l.ctx.GetSessionVars().StmtCtx) {
 			if len(r.HighVal) != len(exprCols) {
 				return l.fullRange, nil
 			}
@@ -630,7 +616,7 @@ func (s *partitionProcessor) pruneListPartition(ctx sessionctx.Context, tbl tabl
 	return used, nil
 }
 
-func (s *partitionProcessor) prune(ds *DataSource, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (s *partitionProcessor) prune(ds *DataSource) (LogicalPlan, error) {
 	pi := ds.tableInfo.GetPartitionInfo()
 	if pi == nil {
 		return ds, nil
@@ -644,15 +630,15 @@ func (s *partitionProcessor) prune(ds *DataSource, opt *logicalOptimizeOp) (Logi
 	// Try to locate partition directly for hash partition.
 	switch pi.Type {
 	case model.PartitionTypeRange:
-		return s.processRangePartition(ds, pi, opt)
+		return s.processRangePartition(ds, pi)
 	case model.PartitionTypeHash:
-		return s.processHashPartition(ds, pi, opt)
+		return s.processHashPartition(ds, pi)
 	case model.PartitionTypeList:
-		return s.processListPartition(ds, pi, opt)
+		return s.processListPartition(ds, pi)
 	}
 
-	// We haven't implement partition by key and so on.
-	return s.makeUnionAllChildren(ds, pi, fullRange(len(pi.Definitions)), opt)
+	// We haven't implement partition by list and so on.
+	return s.makeUnionAllChildren(ds, pi, fullRange(len(pi.Definitions)))
 }
 
 // findByName checks whether object name exists in list.
@@ -824,26 +810,26 @@ func intersectionRange(start, end, newStart, newEnd int) (int, int) {
 }
 
 func (s *partitionProcessor) pruneRangePartition(ctx sessionctx.Context, pi *model.PartitionInfo, tbl table.PartitionedTable, conds []expression.Expression,
-	columns []*expression.Column, names types.NameSlice) (partitionRangeOR, error) {
+	columns []*expression.Column, names types.NameSlice, condsToBePruned *[]expression.Expression) (partitionRangeOR, []expression.Expression, error) {
 	partExpr, err := tbl.(partitionTable).PartitionExpr()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Partition by range columns.
 	if len(pi.Columns) > 0 {
 		result, err := s.pruneRangeColumnsPartition(ctx, conds, pi, partExpr, columns, names)
-		return result, err
+		return result, nil, err
 	}
 
 	// Partition by range.
 	col, fn, mono, err := makePartitionByFnCol(ctx, columns, names, pi.Expr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := fullRange(len(pi.Definitions))
 	if col == nil {
-		return result, nil
+		return result, nil, nil
 	}
 
 	// Extract the partition column, if the column is not null, it's possible to prune.
@@ -858,28 +844,54 @@ func (s *partitionProcessor) pruneRangePartition(ctx sessionctx.Context, pi *mod
 	}
 	result = partitionRangeForCNFExpr(ctx, conds, &pruner, result)
 
-	return result, nil
+	if condsToBePruned == nil {
+		return result, nil, nil
+	}
+	// remove useless predicates after partition pruning
+	newConds := make([]expression.Expression, 0, len(*condsToBePruned))
+	for _, cond := range *condsToBePruned {
+		if dataForPrune, ok := pruner.extractDataForPrune(ctx, cond); ok {
+			switch dataForPrune.op {
+			case ast.EQ:
+				unsigned := mysql.HasUnsignedFlag(pruner.col.RetType.Flag)
+				start, _ := pruneUseBinarySearch(pruner.lessThan, dataForPrune, unsigned)
+				// if the type of partition key is Int
+				if pk, ok := partExpr.Expr.(*expression.Column); ok && pk.RetType.EvalType() == types.ETInt {
+					// see if can be removed
+					// see issue #22079: https://github.com/pingcap/tidb/issues/22079 for details
+					if start > 0 && pruner.lessThan.data[start-1] == dataForPrune.c && (pruner.lessThan.data[start]-1) == dataForPrune.c {
+						continue
+					}
+				}
+			}
+		}
+		newConds = append(newConds, cond)
+	}
+
+	return result, newConds, nil
 }
 
-func (s *partitionProcessor) processRangePartition(ds *DataSource, pi *model.PartitionInfo, opt *logicalOptimizeOp) (LogicalPlan, error) {
-	used, err := s.pruneRangePartition(ds.ctx, pi, ds.table.(table.PartitionedTable), ds.allConds, ds.TblCols, ds.names)
+func (s *partitionProcessor) processRangePartition(ds *DataSource, pi *model.PartitionInfo) (LogicalPlan, error) {
+	used, prunedConds, err := s.pruneRangePartition(ds.ctx, pi, ds.table.(table.PartitionedTable), ds.allConds, ds.TblCols, ds.names, &ds.pushedDownConds)
 	if err != nil {
 		return nil, err
 	}
-	return s.makeUnionAllChildren(ds, pi, used, opt)
+	if prunedConds != nil {
+		ds.pushedDownConds = prunedConds
+	}
+	return s.makeUnionAllChildren(ds, pi, used)
 }
 
-func (s *partitionProcessor) processListPartition(ds *DataSource, pi *model.PartitionInfo, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (s *partitionProcessor) processListPartition(ds *DataSource, pi *model.PartitionInfo) (LogicalPlan, error) {
 	used, err := s.pruneListPartition(ds.SCtx(), ds.table, ds.partitionNames, ds.allConds)
 	if err != nil {
 		return nil, err
 	}
 	if used != nil {
-		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi), opt)
+		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi))
 	}
 	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.blockOffset)
 	tableDual.schema = ds.Schema()
-	appendNoPartitionChildTraceStep(ds, tableDual, opt)
 	return tableDual, nil
 }
 
@@ -948,9 +960,6 @@ func partitionRangeForExpr(sctx sessionctx.Context, expr expression.Expression,
 			if p, ok := pruner.(*rangePruner); ok {
 				newRange := partitionRangeForInExpr(sctx, op.GetArgs(), p)
 				return result.intersection(newRange)
-			} else if p, ok := pruner.(*rangeColumnsPruner); ok {
-				newRange := partitionRangeColumnForInExpr(sctx, op.GetArgs(), p)
-				return result.intersection(newRange)
 			}
 			return result
 		}
@@ -994,7 +1003,7 @@ func (p *rangePruner) partitionRangeForExpr(sctx sessionctx.Context, expr expres
 		return 0, 0, false
 	}
 
-	unsigned := mysql.HasUnsignedFlag(p.col.RetType.GetFlag())
+	unsigned := mysql.HasUnsignedFlag(p.col.RetType.Flag)
 	start, end := pruneUseBinarySearch(p.lessThan, dataForPrune, unsigned)
 	return start, end, true
 }
@@ -1011,43 +1020,6 @@ func partitionRangeForOrExpr(sctx sessionctx.Context, expr1, expr2 expression.Ex
 	return tmp1.union(tmp2)
 }
 
-func partitionRangeColumnForInExpr(sctx sessionctx.Context, args []expression.Expression,
-	pruner *rangeColumnsPruner) partitionRangeOR {
-	col, ok := args[0].(*expression.Column)
-	if !ok || col.ID != pruner.partCol.ID {
-		return pruner.fullRange()
-	}
-
-	var result partitionRangeOR
-	for i := 1; i < len(args); i++ {
-		constExpr, ok := args[i].(*expression.Constant)
-		if !ok {
-			return pruner.fullRange()
-		}
-		switch constExpr.Value.Kind() {
-		case types.KindInt64, types.KindUint64, types.KindMysqlTime, types.KindString: // for safety, only support string,int and datetime now
-		case types.KindNull:
-			result = append(result, partitionRange{0, 1})
-			continue
-		default:
-			return pruner.fullRange()
-		}
-
-		// convert all elements to EQ-exprs and prune them one by one
-		sf, err := expression.NewFunction(sctx, ast.EQ, types.NewFieldType(types.KindInt64), []expression.Expression{col, args[i]}...)
-		if err != nil {
-			return pruner.fullRange()
-		}
-		start, end, ok := pruner.partitionRangeForExpr(sctx, sf)
-		if !ok {
-			return pruner.fullRange()
-		}
-		result = append(result, partitionRange{start, end})
-	}
-
-	return result.simplify()
-}
-
 func partitionRangeForInExpr(sctx sessionctx.Context, args []expression.Expression,
 	pruner *rangePruner) partitionRangeOR {
 	col, ok := args[0].(*expression.Column)
@@ -1056,7 +1028,7 @@ func partitionRangeForInExpr(sctx sessionctx.Context, args []expression.Expressi
 	}
 
 	var result partitionRangeOR
-	unsigned := mysql.HasUnsignedFlag(col.RetType.GetFlag())
+	unsigned := mysql.HasUnsignedFlag(col.RetType.Flag)
 	for i := 1; i < len(args); i++ {
 		constExpr, ok := args[i].(*expression.Constant)
 		if !ok {
@@ -1252,13 +1224,11 @@ func relaxOP(op string) string {
 	return op
 }
 
-// pruneUseBinarySearch returns the start and end of which partitions will match.
-// If no match (i.e. value > last partition) the start partition will be the number of partition, not the first partition!
 func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune, unsigned bool) (start int, end int) {
 	length := lessThan.length()
 	switch data.op {
 	case ast.EQ:
-		// col = 66, lessThan = [4 7 11 14 17] => [5, 5)
+		// col = 66, lessThan = [4 7 11 14 17] => [5, 6)
 		// col = 14, lessThan = [4 7 11 14 17] => [4, 5)
 		// col = 10, lessThan = [4 7 11 14 17] => [2, 3)
 		// col = 3, lessThan = [4 7 11 14 17] => [0, 1)
@@ -1312,7 +1282,7 @@ func (s *partitionProcessor) resolveAccessPaths(ds *DataSource) error {
 	if err != nil {
 		return err
 	}
-	possiblePaths, err = filterPathByIsolationRead(ds.ctx, possiblePaths, ds.tableInfo.Name, ds.DBName)
+	possiblePaths, err = filterPathByIsolationRead(ds.ctx, possiblePaths, ds.DBName)
 	if err != nil {
 		return err
 	}
@@ -1420,11 +1390,9 @@ func (s *partitionProcessor) checkHintsApplicable(ds *DataSource, partitionSet s
 	appendWarnForUnknownPartitions(ds.ctx, HintReadFromStorage, unknownPartitions)
 }
 
-func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.PartitionInfo, or partitionRangeOR, opt *logicalOptimizeOp) (LogicalPlan, error) {
-
+func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.PartitionInfo, or partitionRangeOR) (LogicalPlan, error) {
 	children := make([]LogicalPlan, 0, len(pi.Definitions))
 	partitionNameSet := make(set.StringSet)
-	usedDefinition := make(map[int64]model.PartitionDefinition)
 	for _, r := range or {
 		for i := r.start; i < r.end; i++ {
 			// This is for `table partition (p0,p1)` syntax, only union the specified partition if has specified partitions.
@@ -1446,13 +1414,15 @@ func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.Part
 			// id as FromID. So we set the id of the newDataSource with the original one to
 			// avoid traversing the whole plan tree to update the references.
 			newDataSource.id = ds.id
+			if !ds.ctx.GetSessionVars().UseDynamicPartitionPrune() {
+				newDataSource.statisticTable = getStatsTable(ds.SCtx(), ds.table.Meta(), pi.Definitions[i].ID)
+			}
 			err := s.resolveOptimizeHint(&newDataSource, pi.Definitions[i].Name)
 			partitionNameSet.Insert(pi.Definitions[i].Name.L)
 			if err != nil {
 				return nil, err
 			}
 			children = append(children, &newDataSource)
-			usedDefinition[pi.Definitions[i].ID] = pi.Definitions[i]
 		}
 	}
 	s.checkHintsApplicable(ds, partitionNameSet)
@@ -1461,18 +1431,15 @@ func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.Part
 		// No result after table pruning.
 		tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.blockOffset)
 		tableDual.schema = ds.Schema()
-		appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, tableDual, children, opt)
 		return tableDual, nil
 	}
 	if len(children) == 1 {
 		// No need for the union all.
-		appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, children[0], children, opt)
 		return children[0], nil
 	}
 	unionAll := LogicalPartitionUnionAll{}.Init(ds.SCtx(), ds.blockOffset)
 	unionAll.SetChildren(children...)
 	unionAll.SetSchema(ds.schema.Clone())
-	appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, unionAll, children, opt)
 	return unionAll, nil
 }
 
@@ -1551,25 +1518,13 @@ func (p *rangeColumnsPruner) partitionRangeForExpr(sctx sessionctx.Context, expr
 		return 0, len(p.data), false
 	}
 
-	// If different collation, we can only prune if:
-	// - expression is binary collation (can only be found in one partition)
-	// - EQ operator, consider values 'a','b','ä' where 'ä' would be in the same partition as 'a' if general_ci, but is binary after 'b'
-	// otherwise return all partitions / no pruning
-	_, exprColl := expr.CharsetAndCollation()
-	colColl := p.partCol.RetType.GetCollate()
-	if exprColl != colColl && (opName != ast.EQ || !collate.IsBinCollation(exprColl)) {
-		return 0, len(p.data), true
-	}
-	start, end := p.pruneUseBinarySearch(sctx, opName, con)
+	start, end := p.pruneUseBinarySearch(sctx, opName, con, op)
 	return start, end, true
 }
 
-// pruneUseBinarySearch returns the start and end of which partitions will match.
-// If no match (i.e. value > last partition) the start partition will be the number of partition, not the first partition!
-func (p *rangeColumnsPruner) pruneUseBinarySearch(sctx sessionctx.Context, op string, data *expression.Constant) (start int, end int) {
+func (p *rangeColumnsPruner) pruneUseBinarySearch(sctx sessionctx.Context, op string, data *expression.Constant, f *expression.ScalarFunction) (start int, end int) {
 	var err error
 	var isNull bool
-	charSet, collation := p.partCol.RetType.GetCharset(), p.partCol.RetType.GetCollate()
 	compare := func(ith int, op string, v *expression.Constant) bool {
 		if ith == len(p.data)-1 {
 			if p.maxvalue {
@@ -1578,7 +1533,7 @@ func (p *rangeColumnsPruner) pruneUseBinarySearch(sctx sessionctx.Context, op st
 		}
 		var expr expression.Expression
 		expr, err = expression.NewFunctionBase(sctx, op, types.NewFieldType(mysql.TypeLonglong), p.data[ith], v)
-		expr.SetCharsetAndCollation(charSet, collation)
+		expr.SetCharsetAndCollation(f.CharsetAndCollation(sctx))
 		var val int64
 		val, isNull, err = expr.EvalInt(sctx, chunk.Row{})
 		return val > 0
@@ -1611,61 +1566,4 @@ func (p *rangeColumnsPruner) pruneUseBinarySearch(sctx sessionctx.Context, op st
 		end = length
 	}
 	return start, end
-}
-
-func appendMakeUnionAllChildrenTranceStep(ds *DataSource, usedMap map[int64]model.PartitionDefinition, plan LogicalPlan, children []LogicalPlan, opt *logicalOptimizeOp) {
-	if len(children) == 0 {
-		appendNoPartitionChildTraceStep(ds, plan, opt)
-		return
-	}
-	var action, reason func() string
-	used := make([]model.PartitionDefinition, 0, len(usedMap))
-	for _, def := range usedMap {
-		used = append(used, def)
-	}
-	sort.Slice(used, func(i, j int) bool {
-		return used[i].ID < used[j].ID
-	})
-	if len(children) == 1 {
-		action = func() string {
-			return fmt.Sprintf("%v_%v becomes %s_%v", ds.TP(), ds.ID(), plan.TP(), plan.ID())
-		}
-		reason = func() string {
-			return fmt.Sprintf("%v_%v has one needed partition[%s] after pruning", ds.TP(), ds.ID(), used[0].Name)
-		}
-	} else {
-		action = func() string {
-			buffer := bytes.NewBufferString(fmt.Sprintf("%v_%v becomes %s_%v with children[", ds.TP(), ds.ID(), plan.TP(), plan.ID()))
-			for i, child := range children {
-				if i > 0 {
-					buffer.WriteString(",")
-				}
-				buffer.WriteString(fmt.Sprintf("%s_%v", child.TP(), child.ID()))
-			}
-			buffer.WriteString("]")
-			return buffer.String()
-		}
-		reason = func() string {
-			buffer := bytes.NewBufferString(fmt.Sprintf("%v_%v has multiple needed partitions[", ds.TP(), ds.ID()))
-			for i, u := range used {
-				if i > 0 {
-					buffer.WriteString(",")
-				}
-				buffer.WriteString(u.Name.String())
-			}
-			buffer.WriteString("] after pruning")
-			return buffer.String()
-		}
-	}
-	opt.appendStepToCurrent(ds.ID(), ds.TP(), reason, action)
-}
-
-func appendNoPartitionChildTraceStep(ds *DataSource, dual LogicalPlan, opt *logicalOptimizeOp) {
-	action := func() string {
-		return fmt.Sprintf("%v_%v becomes %v_%v", ds.TP(), ds.ID(), dual.TP(), dual.ID())
-	}
-	reason := func() string {
-		return fmt.Sprintf("%v_%v doesn't have needed partition table after pruning", ds.TP(), ds.ID())
-	}
-	opt.appendStepToCurrent(dual.ID(), dual.TP(), reason, action)
 }

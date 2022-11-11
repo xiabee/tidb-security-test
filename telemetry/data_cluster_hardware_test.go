@@ -21,6 +21,8 @@ import (
 )
 
 func TestNormalizeDiskName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		diskName string
 		expected string
@@ -37,6 +39,8 @@ func TestNormalizeDiskName(t *testing.T) {
 }
 
 func TestIsNormalizedDiskNameAllowed(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		diskName string
 	}{
@@ -62,6 +66,8 @@ func TestIsNormalizedDiskNameAllowed(t *testing.T) {
 }
 
 func TestIsNormalizedDiskNameNotAllowed(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		diskName string
 	}{
@@ -78,6 +84,8 @@ func TestIsNormalizedDiskNameNotAllowed(t *testing.T) {
 }
 
 func TestNormalizeFieldName(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		fileName string
 		expected string

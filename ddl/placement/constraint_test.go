@@ -15,20 +15,23 @@
 package placement
 
 import (
-	"fmt"
-	"testing"
+	"errors"
 
-	"github.com/stretchr/testify/require"
+	. "github.com/pingcap/check"
 )
 
-func TestNewFromYaml(t *testing.T) {
+var _ = Suite(&testConstraintSuite{})
+
+type testConstraintSuite struct{}
+
+func (t *testConstraintSuite) TestNewFromYaml(c *C) {
 	_, err := NewConstraintsFromYaml([]byte("[]"))
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	_, err = NewConstraintsFromYaml([]byte("]"))
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 }
 
-func TestNewConstraint(t *testing.T) {
+func (t *testConstraintSuite) TestNew(c *C) {
 	type TestCase struct {
 		name  string
 		input string
@@ -111,19 +114,19 @@ func TestNewConstraint(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		label, err := NewConstraint(test.input)
-		comment := fmt.Sprintf("%s: %v", test.name, err)
-		if test.err == nil {
-			require.NoError(t, err, comment)
-			require.Equal(t, test.label, label, comment)
+	for _, t := range tests {
+		label, err := NewConstraint(t.input)
+		comment := Commentf("%s: %v", t.name, err)
+		if t.err == nil {
+			c.Assert(err, IsNil, comment)
+			c.Assert(label, DeepEquals, t.label, comment)
 		} else {
-			require.ErrorIs(t, err, test.err, comment)
+			c.Assert(errors.Is(err, t.err), IsTrue, comment)
 		}
 	}
 }
 
-func TestRestoreConstraint(t *testing.T) {
+func (t *testConstraintSuite) TestRestore(c *C) {
 	type TestCase struct {
 		name   string
 		input  Constraint
@@ -133,7 +136,7 @@ func TestRestoreConstraint(t *testing.T) {
 	var tests []TestCase
 
 	input, err := NewConstraint("+zone=bj")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		name:   "normal, op in",
 		input:  input,
@@ -141,7 +144,7 @@ func TestRestoreConstraint(t *testing.T) {
 	})
 
 	input, err = NewConstraint("+  zone = bj  ")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		name:   "normal with spaces, op in",
 		input:  input,
@@ -149,7 +152,7 @@ func TestRestoreConstraint(t *testing.T) {
 	})
 
 	input, err = NewConstraint("-  zone = bj  ")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		name:   "normal with spaces, op not in",
 		input:  input,
@@ -186,19 +189,19 @@ func TestRestoreConstraint(t *testing.T) {
 		err: ErrInvalidConstraintFormat,
 	})
 
-	for _, test := range tests {
-		output, err := test.input.Restore()
-		comment := fmt.Sprintf("%s: %v", test.name, err)
-		if test.err == nil {
-			require.NoError(t, err, comment)
-			require.Equal(t, test.output, output, comment)
+	for _, t := range tests {
+		output, err := t.input.Restore()
+		comment := Commentf("%s: %v", t.name, err)
+		if t.err == nil {
+			c.Assert(err, IsNil, comment)
+			c.Assert(output, Equals, t.output, comment)
 		} else {
-			require.ErrorIs(t, err, test.err, comment)
+			c.Assert(errors.Is(err, t.err), IsTrue, comment)
 		}
 	}
 }
 
-func TestCompatibleWith(t *testing.T) {
+func (t *testConstraintSuite) TestCompatibleWith(c *C) {
 	type TestCase struct {
 		name   string
 		i1     Constraint
@@ -208,9 +211,9 @@ func TestCompatibleWith(t *testing.T) {
 	var tests []TestCase
 
 	i1, err := NewConstraint("+zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	i2, err := NewConstraint("-zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		"case 2",
 		i1, i2,
@@ -218,9 +221,9 @@ func TestCompatibleWith(t *testing.T) {
 	})
 
 	i1, err = NewConstraint("+zone=bj")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	i2, err = NewConstraint("+zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		"case 3",
 		i1, i2,
@@ -228,9 +231,9 @@ func TestCompatibleWith(t *testing.T) {
 	})
 
 	i1, err = NewConstraint("+zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	i2, err = NewConstraint("+zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		"case 1",
 		i1, i2,
@@ -238,9 +241,9 @@ func TestCompatibleWith(t *testing.T) {
 	})
 
 	i1, err = NewConstraint("+zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	i2, err = NewConstraint("+dc=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		"normal 1",
 		i1, i2,
@@ -248,16 +251,17 @@ func TestCompatibleWith(t *testing.T) {
 	})
 
 	i1, err = NewConstraint("-zone=sh")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	i2, err = NewConstraint("-zone=bj")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	tests = append(tests, TestCase{
 		"normal 2",
 		i1, i2,
 		ConstraintCompatible,
 	})
 
-	for _, test := range tests {
-		require.Equal(t, test.output, test.i1.CompatibleWith(&test.i2), test.name)
+	for _, t := range tests {
+		comment := Commentf("%s", t.name)
+		c.Assert(t.i1.CompatibleWith(&t.i2), Equals, t.output, comment)
 	}
 }

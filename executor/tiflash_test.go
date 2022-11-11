@@ -22,35 +22,42 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/executor"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/terror"
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/store/mockstore"
 	"github.com/pingcap/tidb/store/mockstore/unistore"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/testkit/external"
 	"github.com/pingcap/tidb/util/israce"
 	"github.com/pingcap/tidb/util/kvcache"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/testkit"
+	"github.com/pingcap/tidb/util/testleak"
 	"github.com/tikv/client-go/v2/testutils"
 )
 
-// withMockTiFlash sets the mockStore to have N TiFlash stores (naming as tiflash0, tiflash1, ...).
-func withMockTiFlash(nodes int) mockstore.MockTiKVStoreOption {
-	return mockstore.WithMultipleOptions(
+type tiflashTestSuite struct {
+	store kv.Storage
+	dom   *domain.Domain
+	*parser.Parser
+}
+
+func (s *tiflashTestSuite) SetUpSuite(c *C) {
+	var err error
+	s.store, err = mockstore.NewMockStore(
 		mockstore.WithClusterInspector(func(c testutils.Cluster) {
 			mockCluster := c.(*unistore.Cluster)
 			_, _, region1 := mockstore.BootstrapWithSingleStore(c)
 			tiflashIdx := 0
-			for tiflashIdx < nodes {
+			for tiflashIdx < 2 {
 				store2 := c.AllocID()
 				peer2 := c.AllocID()
 				addr2 := fmt.Sprintf("tiflash%d", tiflashIdx)
@@ -61,35 +68,31 @@ func withMockTiFlash(nodes int) mockstore.MockTiKVStoreOption {
 		}),
 		mockstore.WithStoreType(mockstore.EmbedUnistore),
 	)
+
+	c.Assert(err, IsNil)
+
+	session.SetSchemaLease(0)
+	session.DisableStats4Test()
+
+	s.dom, err = session.BootstrapSession(s.store)
+	c.Assert(err, IsNil)
+	s.dom.SetStatsUpdating(true)
 }
 
-func TestNonsupportCharsetTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b char(10) charset gbk collate gbk_bin)")
-	err := tk.ExecToErr("alter table t set tiflash replica 1")
-	require.Error(t, err)
-	require.Equal(t, "[ddl:8200]Unsupported ALTER table replica for table contain gbk charset", err.Error())
-
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a char(10) charset utf8)")
-	tk.MustExec("alter table t set tiflash replica 1")
+func (s *tiflashTestSuite) TearDownSuite(c *C) {
+	s.dom.Close()
+	c.Assert(s.store.Close(), IsNil)
 }
 
-func TestReadPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestReadPartitionTable(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b int not null) partition by hash(a) partitions 2")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,0)")
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
@@ -108,19 +111,11 @@ func TestReadPartitionTable(t *testing.T) {
 	tk.MustQuery("select /*+ STREAM_AGG() */ count(*) from t").Check(testkit.Rows("5"))
 	tk.MustExec("insert into t values(6,0)")
 	tk.MustQuery("select /*+ STREAM_AGG() */ count(*) from t").Check(testkit.Rows("6"))
-	// test dynamic prune + union scan
-	tk.MustExec("set tidb_partition_prune_mode=dynamic")
-	tk.MustQuery("select /*+ STREAM_AGG() */ count(*) from t").Check(testkit.Rows("6"))
-	// test dynamic prune + batch cop + union scan
-	tk.MustExec("set tidb_allow_batch_cop=2")
-	tk.MustQuery("select /*+ STREAM_AGG() */ count(*) from t").Check(testkit.Rows("6"))
 	tk.MustExec("commit")
 }
 
-func TestAggPushDownApplyAll(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestAggPushDownApplyAll(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists foo")
@@ -138,18 +133,16 @@ func TestAggPushDownApplyAll(t *testing.T) {
 	tk.MustQuery("select * from foo where a=all(select a from bar where bar.b=foo.b)").Check(testkit.Rows("0 <nil>"))
 }
 
-func TestReadUnsigedPK(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestReadUnsigedPK(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("drop table if exists t1")
 	tk.MustExec("create table t(a bigint unsigned not null primary key, b int not null)")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,0)")
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
@@ -158,9 +151,9 @@ func TestReadUnsigedPK(t *testing.T) {
 
 	tk.MustExec("create table t1(a bigint unsigned not null primary key, b int not null)")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t1")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t1")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t1 values(1,0)")
 	tk.MustExec("insert into t1 values(2,0)")
 	tk.MustExec("insert into t1 values(3,0)")
@@ -169,6 +162,7 @@ func TestReadUnsigedPK(t *testing.T) {
 
 	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\"")
 	tk.MustExec("set @@session.tidb_allow_mpp=ON")
+	tk.MustExec("set @@session.tidb_opt_broadcast_join=ON")
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
 	tk.MustExec("set tidb_opt_mpp_outer_join_fixed_build_side=1")
@@ -178,17 +172,15 @@ func TestReadUnsigedPK(t *testing.T) {
 }
 
 // to fix https://github.com/pingcap/tidb/issues/27952
-func TestJoinRace(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestJoinRace(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null, b int not null)")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,1)")
 	tk.MustExec("insert into t values(2,1)")
 	tk.MustExec("insert into t values(3,1)")
@@ -208,29 +200,27 @@ func TestJoinRace(t *testing.T) {
 
 }
 
-func TestMppExecution(t *testing.T) {
+func (s *tiflashTestSuite) TestMppExecution(c *C) {
 	if israce.RaceEnabled {
-		t.Skip("skip race test because of long running")
+		c.Skip("skip race test because of long running")
 	}
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b int not null)")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,0)")
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
 
 	tk.MustExec("create table t1(a int primary key, b int not null)")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t1")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t1")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t1 values(1,0)")
 	tk.MustExec("insert into t1 values(2,0)")
 	tk.MustExec("insert into t1 values(3,0)")
@@ -247,9 +237,9 @@ func TestMppExecution(t *testing.T) {
 	// test multi-way join
 	tk.MustExec("create table t2(a int primary key, b int not null)")
 	tk.MustExec("alter table t2 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t2")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t2")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into t2 values(1,0)")
 	tk.MustExec("insert into t2 values(2,0)")
@@ -277,14 +267,14 @@ func TestMppExecution(t *testing.T) {
 	tk.MustExec("begin")
 	tk.MustQuery("select count(*) from ( select * from t2 group by a, b) A group by A.b").Check(testkit.Rows("3"))
 	tk.MustQuery("select count(*) from t1 where t1.a+100 > ( select count(*) from t2 where t1.a=t2.a and t1.b=t2.b) group by t1.b").Check(testkit.Rows("4"))
-	txn, err := tk.Session().Txn(true)
-	require.NoError(t, err)
+	txn, err := tk.Se.Txn(true)
+	c.Assert(err, IsNil)
 	ts := txn.StartTS()
-	taskID := tk.Session().GetSessionVars().AllocMPPTaskID(ts)
-	require.Equal(t, int64(6), taskID)
+	taskID := tk.Se.GetSessionVars().AllocMPPTaskID(ts)
+	c.Assert(taskID, Equals, int64(6))
 	tk.MustExec("commit")
-	taskID = tk.Session().GetSessionVars().AllocMPPTaskID(ts + 1)
-	require.Equal(t, int64(1), taskID)
+	taskID = tk.Se.GetSessionVars().AllocMPPTaskID(ts + 1)
+	c.Assert(taskID, Equals, int64(1))
 
 	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(3)`)
 	// all the data is related to one store, so there are three tasks.
@@ -294,9 +284,9 @@ func TestMppExecution(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (c1 decimal(8, 5) not null, c2 decimal(9, 5), c3 decimal(9, 4) , c4 decimal(8, 4) not null)")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1.00000,1.00000,1.0000,1.0000)")
 	tk.MustExec("insert into t values(1.00010,1.00010,1.0001,1.0001)")
 	tk.MustExec("insert into t values(1.00001,1.00001,1.0000,1.0002)")
@@ -307,17 +297,15 @@ func TestMppExecution(t *testing.T) {
 	tk.MustQuery("select /*+ nth_plan(2) */ t1.c1 from t t1 join t t2 on t1.c1 = t2.c3 order by t1.c1").Check(testkit.Rows("1.00000", "1.00000", "1.00010"))
 }
 
-func TestInjectExtraProj(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestInjectExtraProj(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a bigint(20))")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values (9223372036854775807)")
 	tk.MustExec("insert into t values (9223372036854775807)")
 	tk.MustExec("insert into t values (9223372036854775807)")
@@ -329,12 +317,10 @@ func TestInjectExtraProj(t *testing.T) {
 	tk.MustQuery("select avg(a), a from t group by a").Check(testkit.Rows("9223372036854775807.0000 9223372036854775807"))
 }
 
-func TestTiFlashPartitionTableShuffledHashJoin(t *testing.T) {
-	t.Skip("too slow")
+func (s *tiflashTestSuite) TestTiFlashPartitionTableShuffledHashJoin(c *C) {
+	c.Skip("too slow")
 
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`create database tiflash_partition_SHJ`)
 	tk.MustExec("use tiflash_partition_SHJ")
 	tk.MustExec(`create table thash (a int, b int) partition by hash(a) partitions 4`)
@@ -356,9 +342,9 @@ func TestTiFlashPartitionTableShuffledHashJoin(t *testing.T) {
 
 	for _, tbl := range []string{`thash`, `trange`, `tlist`, `tnormal`} {
 		tk.MustExec("alter table " + tbl + " set tiflash replica 1")
-		tb := external.GetTableByName(t, tk, "tiflash_partition_SHJ", tbl)
-		err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-		require.NoError(t, err)
+		tb := testGetTableByName(c, tk.Se, "tiflash_partition_SHJ", tbl)
+		err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+		c.Assert(err, IsNil)
 	}
 
 	vals := make([]string, 0, 100)
@@ -371,6 +357,7 @@ func TestTiFlashPartitionTableShuffledHashJoin(t *testing.T) {
 	}
 
 	tk.MustExec("SET tidb_enforce_mpp=1")
+	tk.MustExec("SET tidb_opt_broadcast_join=0")
 	tk.MustExec("SET tidb_broadcast_join_threshold_count=0")
 	tk.MustExec("SET tidb_broadcast_join_threshold_size=0")
 	tk.MustExec("set @@session.tidb_isolation_read_engines='tiflash'")
@@ -404,12 +391,10 @@ func TestTiFlashPartitionTableShuffledHashJoin(t *testing.T) {
 	}
 }
 
-func TestTiFlashPartitionTableReader(t *testing.T) {
-	t.Skip("too slow")
+func (s *tiflashTestSuite) TestTiFlashPartitionTableReader(c *C) {
+	c.Skip("too slow")
 
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`create database tiflash_partition_tablereader`)
 	tk.MustExec("use tiflash_partition_tablereader")
 	tk.MustExec(`create table thash (a int, b int) partition by hash(a) partitions 4`)
@@ -431,9 +416,9 @@ func TestTiFlashPartitionTableReader(t *testing.T) {
 
 	for _, tbl := range []string{`thash`, `trange`, `tlist`, `tnormal`} {
 		tk.MustExec("alter table " + tbl + " set tiflash replica 1")
-		tb := external.GetTableByName(t, tk, "tiflash_partition_tablereader", tbl)
-		err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-		require.NoError(t, err)
+		tb := testGetTableByName(c, tk.Se, "tiflash_partition_tablereader", tbl)
+		err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+		c.Assert(err, IsNil)
 	}
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
@@ -470,19 +455,17 @@ func TestTiFlashPartitionTableReader(t *testing.T) {
 	}
 }
 
-func TestPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestPartitionTable(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("drop table if exists t1")
 	tk.MustExec("drop table if exists t2")
 	tk.MustExec("create table t(a int not null primary key, b int not null) partition by hash(a+1) partitions 4")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,0)")
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
@@ -493,7 +476,7 @@ func TestPartitionTable(t *testing.T) {
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
 	tk.MustExec("set tidb_opt_mpp_outer_join_fixed_build_side=1")
-	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(1)`)
+	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(4)`)
 	tk.MustQuery("select count(*) from t").Check(testkit.Rows("4"))
 	failpoint.Disable("github.com/pingcap/tidb/executor/checkTotalMPPTasks")
 	tk.MustExec("set @@session.tidb_partition_prune_mode='static-only'")
@@ -504,9 +487,9 @@ func TestPartitionTable(t *testing.T) {
 
 	tk.MustExec("create table t1(a int not null primary key, b int not null) partition by hash(a) partitions 4")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t1")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t1")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t1 values(1,4)")
 	tk.MustExec("insert into t1 values(2,3)")
 	tk.MustExec("insert into t1 values(3,2)")
@@ -514,8 +497,9 @@ func TestPartitionTable(t *testing.T) {
 
 	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\"")
 	tk.MustExec("set @@session.tidb_allow_mpp=ON")
+	tk.MustExec("set @@session.tidb_opt_broadcast_join=ON")
 	// test if it is really work.
-	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(2)`)
+	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(8)`)
 	tk.MustQuery("select count(*) from t1 , t where t1.a = t.a").Check(testkit.Rows("4"))
 	// test partition prune
 	tk.MustQuery("select count(*) from t1 , t where t1.a = t.a and t1.a < 2 and t.a < 2").Check(testkit.Rows("1"))
@@ -524,16 +508,16 @@ func TestPartitionTable(t *testing.T) {
 	// test multi-way join
 	tk.MustExec("create table t2(a int not null primary key, b int not null)")
 	tk.MustExec("alter table t2 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t2")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t2")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into t2 values(1,0)")
 	tk.MustExec("insert into t2 values(2,0)")
 	tk.MustExec("insert into t2 values(3,0)")
 	tk.MustExec("insert into t2 values(4,0)")
 	// test with no partition table
-	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(3)`)
+	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(9)`)
 	tk.MustQuery("select count(*) from t1 , t, t2 where t1.a = t.a and t2.a = t.a").Check(testkit.Rows("4"))
 	failpoint.Disable("github.com/pingcap/tidb/executor/checkTotalMPPTasks")
 
@@ -544,35 +528,33 @@ func TestPartitionTable(t *testing.T) {
 		PARTITION p3 VALUES LESS THAN (7)
 	);`)
 	tk.MustExec("alter table t3 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t3")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t3")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into t3 values(1,0)")
 	tk.MustExec("insert into t3 values(2,2)")
 	tk.MustExec("insert into t3 values(3,4)")
 	tk.MustExec("insert into t3 values(4,6)")
 
-	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(2)`)
+	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(7)`)
 	tk.MustQuery("select count(*) from t, t3 where t3.a = t.a and t3.b <= 4").Check(testkit.Rows("3"))
 	failpoint.Disable("github.com/pingcap/tidb/executor/checkTotalMPPTasks")
-	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(2)`)
+	failpoint.Enable("github.com/pingcap/tidb/executor/checkTotalMPPTasks", `return(5)`)
 	tk.MustQuery("select count(*) from t, t3 where t3.a = t.a and t3.b > 10").Check(testkit.Rows("0"))
 	failpoint.Disable("github.com/pingcap/tidb/executor/checkTotalMPPTasks")
 	failpoint.Disable("github.com/pingcap/tidb/executor/checkUseMPP")
 }
 
-func TestMppEnum(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestMppEnum(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b enum('aca','bca','zca'))")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,'aca')")
 	tk.MustExec("insert into t values(2,'bca')")
 	tk.MustExec("insert into t values(3,'zca')")
@@ -584,30 +566,28 @@ func TestMppEnum(t *testing.T) {
 	tk.MustQuery("select t1.b from t t1 join t t2 on t1.a = t2.a order by t1.b").Check(testkit.Rows("aca", "bca", "zca"))
 }
 
-func TestTiFlashPlanCacheable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestTiFlashPlanCacheable(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	orgEnable := plannercore.PreparedPlanCacheEnabled()
 	defer func() {
 		plannercore.SetPreparedPlanCache(orgEnable)
 	}()
 	plannercore.SetPreparedPlanCache(true)
 
-	sess, err := session.CreateSession4TestWithOpt(store, &session.Opt{
+	var err error
+	tk.Se, err = session.CreateSession4TestWithOpt(s.store, &session.Opt{
 		PreparedPlanCache: kvcache.NewSimpleLRUCache(100, 0.1, math.MaxUint64),
 	})
-	tk.SetSession(sess)
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t;")
 	tk.MustExec("create table t(a int);")
 	tk.MustExec("set @@tidb_enable_collect_execution_info=0;")
 	tk.MustExec("alter table test.t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("set @@session.tidb_isolation_read_engines = 'tikv, tiflash'")
 	tk.MustExec("insert into t values(1);")
 	tk.MustExec("prepare stmt from 'select /*+ read_from_storage(tiflash[t]) */ * from t;';")
@@ -637,10 +617,8 @@ func TestTiFlashPlanCacheable(t *testing.T) {
 	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
 }
 
-func TestDispatchTaskRetry(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestDispatchTaskRetry(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b int not null)")
@@ -649,20 +627,20 @@ func TestDispatchTaskRetry(t *testing.T) {
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
 	tk.MustExec("insert into t values(4,0)")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("set @@session.tidb_enforce_mpp=ON")
-	require.Nil(t, failpoint.Enable("github.com/pingcap/tidb/store/mockstore/unistore/mppDispatchTimeout", "3*return(true)"))
+	c.Assert(failpoint.Enable("github.com/pingcap/tidb/store/mockstore/unistore/mppDispatchTimeout", "3*return(true)"), IsNil)
 	tk.MustQuery("select count(*) from t").Check(testkit.Rows("4"))
-	require.Nil(t, failpoint.Disable("github.com/pingcap/tidb/store/mockstore/unistore/mppDispatchTimeout"))
+	c.Assert(failpoint.Disable("github.com/pingcap/tidb/store/mockstore/unistore/mppDispatchTimeout"), IsNil)
 }
 
-func TestCancelMppTasks(t *testing.T) {
+func (s *tiflashTestSuite) TestCancelMppTasks(c *C) {
+	testleak.BeforeTest()
+	defer testleak.AfterTest(c)()
 	var hang = "github.com/pingcap/tidb/store/mockstore/unistore/mppRecvHang"
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b int not null)")
@@ -671,55 +649,53 @@ func TestCancelMppTasks(t *testing.T) {
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
 	tk.MustExec("insert into t values(4,0)")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\"")
 	tk.MustExec("set @@session.tidb_allow_mpp=ON")
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
 	tk.MustExec("set tidb_opt_mpp_outer_join_fixed_build_side=1")
-	atomic.StoreUint32(&tk.Session().GetSessionVars().Killed, 0)
-	require.Nil(t, failpoint.Enable(hang, `return(true)`))
+	atomic.StoreUint32(&tk.Se.GetSessionVars().Killed, 0)
+	c.Assert(failpoint.Enable(hang, `return(true)`), IsNil)
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		err := tk.QueryToErr("select count(*) from t as t1 , t where t1.a = t.a")
-		require.Error(t, err)
-		require.Equal(t, int(executor.ErrQueryInterrupted.Code()), int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code))
+		c.Assert(err, NotNil)
+		c.Assert(int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code), Equals, int(executor.ErrQueryInterrupted.Code()))
 	}()
 	time.Sleep(1 * time.Second)
-	atomic.StoreUint32(&tk.Session().GetSessionVars().Killed, 1)
+	atomic.StoreUint32(&tk.Se.GetSessionVars().Killed, 1)
 	wg.Wait()
-	require.Nil(t, failpoint.Disable(hang))
+	c.Assert(failpoint.Disable(hang), IsNil)
 }
 
 // all goroutines exit if one goroutine hangs but another return errors
-func TestMppGoroutinesExitFromErrors(t *testing.T) {
+func (s *tiflashTestSuite) TestMppGoroutinesExitFromErrors(c *C) {
 	// mock non-root tasks return error
 	var mppNonRootTaskError = "github.com/pingcap/tidb/store/copr/mppNonRootTaskError"
 	// mock root tasks hang
 	var hang = "github.com/pingcap/tidb/store/mockstore/unistore/mppRecvHang"
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int not null primary key, b int not null)")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,0)")
 	tk.MustExec("insert into t values(2,0)")
 	tk.MustExec("insert into t values(3,0)")
 	tk.MustExec("drop table if exists t1")
 	tk.MustExec("create table t1(a int not null primary key, b int not null)")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t1")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t1")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t1 values(1,0)")
 	tk.MustExec("insert into t1 values(2,0)")
 	tk.MustExec("insert into t1 values(3,0)")
@@ -728,20 +704,18 @@ func TestMppGoroutinesExitFromErrors(t *testing.T) {
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
 	tk.MustExec("set tidb_opt_mpp_outer_join_fixed_build_side=1")
-	require.Nil(t, failpoint.Enable(mppNonRootTaskError, `return(true)`))
-	require.Nil(t, failpoint.Enable(hang, `return(true)`))
+	c.Assert(failpoint.Enable(mppNonRootTaskError, `return(true)`), IsNil)
+	c.Assert(failpoint.Enable(hang, `return(true)`), IsNil)
 
 	// generate 2 root tasks, one will hang and another will return errors
 	err = tk.QueryToErr("select count(*) from t as t1 , t where t1.a = t.a")
-	require.Error(t, err)
-	require.Nil(t, failpoint.Disable(mppNonRootTaskError))
-	require.Nil(t, failpoint.Disable(hang))
+	c.Assert(err, NotNil)
+	c.Assert(failpoint.Disable(mppNonRootTaskError), IsNil)
+	c.Assert(failpoint.Disable(hang), IsNil)
 }
 
-func TestMppUnionAll(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestMppUnionAll(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists x1")
 	tk.MustExec("create table x1(a int , b int);")
@@ -749,12 +723,12 @@ func TestMppUnionAll(t *testing.T) {
 	tk.MustExec("drop table if exists x2")
 	tk.MustExec("create table x2(a int , b int);")
 	tk.MustExec("alter table x2 set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "x1")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
-	tb = external.GetTableByName(t, tk, "test", "x2")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "x1")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
+	tb = testGetTableByName(c, tk.Se, "test", "x2")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into x1 values (1, 1), (2, 2), (3, 3), (4, 4)")
 	tk.MustExec("insert into x2 values (5, 1), (2, 2), (3, 3), (4, 4)")
@@ -769,9 +743,9 @@ func TestMppUnionAll(t *testing.T) {
 	tk.MustExec("drop table if exists x3")
 	tk.MustExec("create table x3(a int , b int);")
 	tk.MustExec("alter table x3 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "x3")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "x3")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into x3 values (2, 2), (2, 3), (2, 4)")
 	// test nested union all
@@ -786,9 +760,9 @@ func TestMppUnionAll(t *testing.T) {
 	tk.MustExec("drop table if exists x4")
 	tk.MustExec("create table x4(a int not null, b int not null);")
 	tk.MustExec("alter table x4 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "x4")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "x4")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("set @@tidb_enforce_mpp=1")
 	tk.MustExec("insert into x4 values (2, 2), (2, 3)")
@@ -796,10 +770,8 @@ func TestMppUnionAll(t *testing.T) {
 
 }
 
-func TestUnionWithEmptyDualTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestUnionWithEmptyDualTable(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("drop table if exists t1")
@@ -807,12 +779,12 @@ func TestUnionWithEmptyDualTable(t *testing.T) {
 	tk.MustExec("create table t1 (a int, b int not null, c double)")
 	tk.MustExec("alter table t set tiflash replica 1")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
-	tb = external.GetTableByName(t, tk, "test", "t1")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
+	tb = testGetTableByName(c, tk.Se, "test", "t1")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(1,2,3)")
 	tk.MustExec("insert into t1 values(1,2,3)")
 	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\"")
@@ -820,18 +792,17 @@ func TestUnionWithEmptyDualTable(t *testing.T) {
 	tk.MustQuery("select count(*) from (select a , b from t union all select a , c from t1 where false) tt").Check(testkit.Rows("1"))
 }
 
-func TestAvgOverflow(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestAvgOverflow(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
+
 	// avg int
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (a decimal(1,0))")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t values(9)")
 	for i := 0; i < 16; i++ {
 		tk.MustExec("insert into t select * from t")
@@ -845,9 +816,10 @@ func TestAvgOverflow(t *testing.T) {
 	tk.MustExec("drop table if exists td;")
 	tk.MustExec("create table td (col_bigint bigint(20), col_smallint smallint(6));")
 	tk.MustExec("alter table td set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "td")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "td")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into td values (null, 22876);")
 	tk.MustExec("insert into td values (9220557287087669248, 32767);")
 	tk.MustExec("insert into td values (28030, 32767);")
@@ -865,24 +837,22 @@ func TestAvgOverflow(t *testing.T) {
 	tk.MustExec("drop table if exists td;")
 }
 
-func TestMppApply(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestMppApply(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists x1")
 	tk.MustExec("create table x1(a int primary key, b int);")
 	tk.MustExec("alter table x1 set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "x1")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "x1")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into x1 values(1, 1),(2, 10),(0,11);")
 
 	tk.MustExec("create table x2(a int primary key, b int);")
 	tk.MustExec("alter table x2 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "x2")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "x2")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into x2 values(1,2),(0,1),(2,-3);")
 	tk.MustExec("analyze table x1, x2;")
 
@@ -897,31 +867,29 @@ func TestMppApply(t *testing.T) {
 	tk.MustQuery("select /*+ agg_to_cop(), hash_agg()*/ count(*) from x1 where b > any (select x2.a from x2 where x1.a = x2.a);").Check(testkit.Rows("2"))
 }
 
-func TestTiFlashVirtualColumn(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestTiFlashVirtualColumn(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1,t2,t3")
 	tk.MustExec("create table t1 (a bit(4), b bit(4), c bit(4) generated always as (a) virtual)")
 	tk.MustExec("alter table t1 set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t1")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t1")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t1(a,b) values(b'01',b'01'),(b'10',b'10'),(b'11',b'11')")
 
 	tk.MustExec("create table t2 (a int, b int, c int generated always as (a) virtual)")
 	tk.MustExec("alter table t2 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t2")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t2")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t2(a,b) values(1,1),(2,2),(3,3)")
 
 	tk.MustExec("create table t3 (a bit(4), b bit(4), c bit(4) generated always as (b'01'+b'10') virtual)")
 	tk.MustExec("alter table t3 set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "t3")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "t3")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into t3(a,b) values(b'01',b'01'),(b'10',b'10'),(b'11',b'11')")
 
 	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\"")
@@ -935,12 +903,10 @@ func TestTiFlashVirtualColumn(t *testing.T) {
 	tk.MustQuery("select /*+ hash_agg() */ count(*) from t3 where c > b'01'").Check(testkit.Rows("3"))
 }
 
-func TestTiFlashPartitionTableShuffledHashAggregation(t *testing.T) {
-	t.Skip("too slow")
+func (s *tiflashTestSuite) TestTiFlashPartitionTableShuffledHashAggregation(c *C) {
+	c.Skip("too slow")
 
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("create database tiflash_partition_AGG")
 	tk.MustExec("use tiflash_partition_AGG")
 	tk.MustExec(`create table thash (a int, b int) partition by hash(a) partitions 4`)
@@ -962,9 +928,9 @@ func TestTiFlashPartitionTableShuffledHashAggregation(t *testing.T) {
 
 	for _, tbl := range []string{`thash`, `trange`, `tlist`, `tnormal`} {
 		tk.MustExec("alter table " + tbl + " set tiflash replica 1")
-		tb := external.GetTableByName(t, tk, "tiflash_partition_AGG", tbl)
-		err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-		require.NoError(t, err)
+		tb := testGetTableByName(c, tk.Se, "tiflash_partition_AGG", tbl)
+		err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+		c.Assert(err, IsNil)
 	}
 
 	vals := make([]string, 0, 100)
@@ -996,7 +962,7 @@ func TestTiFlashPartitionTableShuffledHashAggregation(t *testing.T) {
 			tk.MustExec(fmt.Sprintf("set @@tidb_partition_prune_mode = '%v'", mode))
 			for _, tbl := range []string{`thash`, `trange`, `tlist`, `tnormal`} {
 				q := fmt.Sprintf("select /*+ HASH_AGG() */ count(*) from %v t1 where %v", tbl, cond)
-				require.True(t, tk.HasPlan(q, "HashAgg"))
+				c.Assert(tk.HasPlan(q, "HashAgg"), IsTrue)
 				if res == nil {
 					res = tk.MustQuery(q).Sort().Rows()
 				} else {
@@ -1007,12 +973,10 @@ func TestTiFlashPartitionTableShuffledHashAggregation(t *testing.T) {
 	}
 }
 
-func TestTiFlashPartitionTableBroadcastJoin(t *testing.T) {
-	t.Skip("too slow")
+func (s *tiflashTestSuite) TestTiFlashPartitionTableBroadcastJoin(c *C) {
+	c.Skip("too slow")
 
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("create database tiflash_partition_BCJ")
 	tk.MustExec("use tiflash_partition_BCJ")
 	tk.MustExec(`create table thash (a int, b int) partition by hash(a) partitions 4`)
@@ -1034,9 +998,9 @@ func TestTiFlashPartitionTableBroadcastJoin(t *testing.T) {
 
 	for _, tbl := range []string{`thash`, `trange`, `tlist`, `tnormal`} {
 		tk.MustExec("alter table " + tbl + " set tiflash replica 1")
-		tb := external.GetTableByName(t, tk, "tiflash_partition_BCJ", tbl)
-		err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-		require.NoError(t, err)
+		tb := testGetTableByName(c, tk.Se, "tiflash_partition_BCJ", tbl)
+		err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+		c.Assert(err, IsNil)
 	}
 
 	vals := make([]string, 0, 100)
@@ -1049,6 +1013,7 @@ func TestTiFlashPartitionTableBroadcastJoin(t *testing.T) {
 	}
 	tk.MustExec("set @@session.tidb_isolation_read_engines='tiflash'")
 	tk.MustExec("set @@session.tidb_enforce_mpp=1")
+	tk.MustExec("set @@session.tidb_opt_broadcast_join=ON")
 	// mock executor does not support use outer table as build side for outer join, so need to
 	// force the inner table as build side
 	tk.MustExec("set tidb_opt_mpp_outer_join_fixed_build_side=1")
@@ -1079,17 +1044,15 @@ func TestTiFlashPartitionTableBroadcastJoin(t *testing.T) {
 	}
 }
 
-func TestForbidTiflashDuringStaleRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestForbidTiflashDuringStaleRead(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a bigint(20))")
 	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "t")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	time.Sleep(2 * time.Second)
 	tk.MustExec("insert into t values (9223372036854775807)")
 	tk.MustExec("insert into t values (9223372036854775807)")
@@ -1103,8 +1066,8 @@ func TestForbidTiflashDuringStaleRead(t *testing.T) {
 		fmt.Fprintf(resBuff, "%s\n", row)
 	}
 	res := resBuff.String()
-	require.Contains(t, res, "tiflash")
-	require.NotContains(t, res, "tikv")
+	c.Assert(strings.Contains(res, "tiflash"), IsTrue)
+	c.Assert(strings.Contains(res, "tikv"), IsFalse)
 	tk.MustExec("set transaction read only as of timestamp now(1)")
 	rows = tk.MustQuery("explain select avg(a) from t").Rows()
 	resBuff = bytes.NewBufferString("")
@@ -1112,119 +1075,12 @@ func TestForbidTiflashDuringStaleRead(t *testing.T) {
 		fmt.Fprintf(resBuff, "%s\n", row)
 	}
 	res = resBuff.String()
-	require.NotContains(t, res, "tiflash")
-	require.Contains(t, res, "tikv")
+	c.Assert(strings.Contains(res, "tiflash"), IsFalse)
+	c.Assert(strings.Contains(res, "tikv"), IsTrue)
 }
 
-func TestForbidTiFlashIfExtraPhysTableIDIsNeeded(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int not null primary key, b int not null) partition by hash(a) partitions 2")
-	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
-	tk.MustExec("set tidb_partition_prune_mode=dynamic")
-	tk.MustExec("set tidb_enforce_mpp=1")
-
-	rows := tk.MustQuery("explain select count(*) from t").Rows()
-	resBuff := bytes.NewBufferString("")
-	for _, row := range rows {
-		fmt.Fprintf(resBuff, "%s\n", row)
-	}
-	res := resBuff.String()
-	require.Contains(t, res, "tiflash")
-	require.NotContains(t, res, "tikv")
-
-	rows = tk.MustQuery("explain select count(*) from t for update").Rows()
-	resBuff = bytes.NewBufferString("")
-	for _, row := range rows {
-		fmt.Fprintf(resBuff, "%s\n", row)
-	}
-	res = resBuff.String()
-	require.NotContains(t, res, "tiflash")
-	require.Contains(t, res, "tikv")
-
-	tk.MustExec("begin")
-	rows = tk.MustQuery("explain select count(*) from t").Rows()
-	resBuff = bytes.NewBufferString("")
-	for _, row := range rows {
-		fmt.Fprintf(resBuff, "%s\n", row)
-	}
-	res = resBuff.String()
-	require.Contains(t, res, "tiflash")
-	require.NotContains(t, res, "tikv")
-	tk.MustExec("insert into t values(1,2)")
-	rows = tk.MustQuery("explain select count(*) from t").Rows()
-	resBuff = bytes.NewBufferString("")
-	for _, row := range rows {
-		fmt.Fprintf(resBuff, "%s\n", row)
-	}
-	res = resBuff.String()
-	require.Contains(t, res, "tiflash")
-	require.NotContains(t, res, "tikv")
-	tk.MustExec("rollback")
-}
-
-func TestTiflashPartitionTableScan(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test;")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(\n    a int,\n    primary key(a)\n) partition by range(a) (\n    partition p1 values less than (10),\n    partition p2 values less than (20),\n    partition p3 values less than (30),\n    partition p4 values less than (40),\n    partition p5 values less than (50)\n);")
-	tk.MustExec("alter table t set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
-	time.Sleep(2 * time.Second)
-	tk.MustExec("insert into t values(1),(11),(21),(31),(41);")
-	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic';")
-	tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash\";")
-	// MPP
-	tk.MustExec("set @@session.tidb_allow_mpp=ON;")
-	tk.MustQuery("select count(*) from t where a < 12;").Check(testkit.Rows("2"))
-
-	// BatchCop
-	tk.MustExec("set @@session.tidb_allow_mpp=OFF;")
-	tk.MustExec("set @@tidb_allow_batch_cop = 2;")
-	tk.MustQuery("select count(*) from t where a < 12;").Check(testkit.Rows("2"))
-
-	// test retry batch cop
-	// MPP
-	wg := sync.WaitGroup{}
-	wg.Add(1)
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/store/mockstore/unistore/rpcServerBusy", `return(true)`))
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/store/mockstore/unistore/rpcServerBusy"))
-		wg.Done()
-	}()
-	tk.MustExec("set @@session.tidb_allow_mpp=ON;")
-	tk.MustQuery("select count(*) from t where a < 12;").Check(testkit.Rows("2"))
-	wg.Wait()
-
-	// BatchCop
-	wg.Add(1)
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/store/mockstore/unistore/rpcServerBusy", `return(true)`))
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/store/mockstore/unistore/rpcServerBusy"))
-		wg.Done()
-	}()
-	tk.MustExec("set @@session.tidb_allow_mpp=OFF;")
-	tk.MustExec("set @@tidb_allow_batch_cop = 2;")
-	tk.MustQuery("select count(*) from t where a < 12;").Check(testkit.Rows("2"))
-	wg.Wait()
-}
-
-func TestAggPushDownCountStar(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestAggPushDownCountStar(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists c")
@@ -1232,13 +1088,13 @@ func TestAggPushDownCountStar(t *testing.T) {
 	tk.MustExec("create table c(c_id bigint primary key)")
 	tk.MustExec("create table o(o_id bigint primary key, c_id bigint not null)")
 	tk.MustExec("alter table c set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "c")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "c")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("alter table o set tiflash replica 1")
-	tb = external.GetTableByName(t, tk, "test", "o")
-	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb = testGetTableByName(c, tk.Se, "test", "o")
+	err = domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 	tk.MustExec("insert into c values(1),(2),(3),(4),(5)")
 	tk.MustExec("insert into o values(1,1),(2,1),(3,2),(4,2),(5,2)")
 
@@ -1248,17 +1104,15 @@ func TestAggPushDownCountStar(t *testing.T) {
 	tk.MustQuery("select count(*) from c, o where c.c_id=o.c_id").Check(testkit.Rows("5"))
 }
 
-func TestTiflashEmptyDynamicPruneResult(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t, withMockTiFlash(2))
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *tiflashTestSuite) TestTiflashEmptyDynamicPruneResult(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("CREATE TABLE `IDT_RP24833` (  `COL1` bigint(16) DEFAULT '15' COMMENT 'NUMERIC UNIQUE INDEX',\n  `COL2` varchar(20) DEFAULT NULL,\n  `COL4` datetime DEFAULT NULL,\n  `COL3` bigint(20) DEFAULT NULL,\n  `COL5` float DEFAULT NULL,\n  KEY `UK_COL1` (`COL1`) /*!80000 INVISIBLE */\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\nPARTITION BY RANGE ((`COL1`-57))\n(PARTITION `P0` VALUES LESS THAN (-3503857335115112215),\n PARTITION `P1` VALUES LESS THAN (-2987877108151063747),\n PARTITION `P2` VALUES LESS THAN (-1981049919102122710),\n PARTITION `P3` VALUES LESS THAN (-1635802972727465681),\n PARTITION `P4` VALUES LESS THAN (1186020639986357714),\n PARTITION `P5` VALUES LESS THAN (1220018677454711359),\n PARTITION `PMX` VALUES LESS THAN (MAXVALUE));")
 	tk.MustExec("alter table IDT_RP24833 set tiflash replica 1")
-	tb := external.GetTableByName(t, tk, "test", "IDT_RP24833")
-	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
-	require.NoError(t, err)
+	tb := testGetTableByName(c, tk.Se, "test", "IDT_RP24833")
+	err := domain.GetDomain(tk.Se).DDL().UpdateTableReplicaInfo(tk.Se, tb.Meta().ID, true)
+	c.Assert(err, IsNil)
 
 	tk.MustExec("insert into IDT_RP24833 values(-8448770111093677011, \"郇鋺篤堯擈斥鍮啸赠璭饱磟朅闑傒聎疫ᛄ怖霃\", \"8781-05-02 04:23:03\", -27252736532807028, -1.34554e38);")
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic';")

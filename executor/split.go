@@ -22,6 +22,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -35,7 +36,6 @@ import (
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 )
@@ -538,7 +538,7 @@ func (e *SplitTableRegionExec) calculateIntBoundValue() (lowerValue int64, step 
 	isUnsigned := false
 	if e.tableInfo.PKIsHandle {
 		if pkCol := e.tableInfo.GetPkColInfo(); pkCol != nil {
-			isUnsigned = mysql.HasUnsignedFlag(pkCol.GetFlag())
+			isUnsigned = mysql.HasUnsignedFlag(pkCol.Flag)
 		}
 	}
 	if isUnsigned {
@@ -561,7 +561,7 @@ func (e *SplitTableRegionExec) calculateIntBoundValue() (lowerValue int64, step 
 		lowerValue = lowerRecordID
 	}
 	if step < minRegionStepValue {
-		errMsg := fmt.Sprintf("the region size is too small, expected at least %d, but got %d", minRegionStepValue, step)
+		errMsg := fmt.Sprintf("the region size is too small, expected at least %d, but got %d", step, minRegionStepValue)
 		return 0, 0, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 	}
 	return lowerValue, step, nil
@@ -629,7 +629,7 @@ func getPhysicalTableRegions(physicalTableID int64, tableInfo *model.TableInfo, 
 	// This is used to decode the int handle properly.
 	var hasUnsignedIntHandle bool
 	if pkInfo := tableInfo.GetPkColInfo(); pkInfo != nil {
-		hasUnsignedIntHandle = mysql.HasUnsignedFlag(pkInfo.GetFlag())
+		hasUnsignedIntHandle = mysql.HasUnsignedFlag(pkInfo.Flag)
 	}
 	// for record
 	startKey, endKey := tablecodec.GetTableHandleKeyRange(physicalTableID)

@@ -181,12 +181,7 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 	for i := range e.fields {
 		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
-		ft := types.FieldType{}
-		ft.SetType(mysql.TypeBlob)
-		ft.SetFlen(mysql.MaxBlobWidth)
-		ft.SetCharset(mysql.DefaultCharset)
-		ft.SetCollate(mysql.DefaultCollationName)
-		rf.Column.FieldType = ft
+		rf.Column.FieldType = types.FieldType{Tp: mysql.TypeBlob, Flen: mysql.MaxBlobWidth, Charset: mysql.DefaultCharset, Collate: mysql.DefaultCollationName}
 		e.fields[i] = rf
 	}
 
@@ -203,7 +198,7 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 		ft := fieldTypeFromPBColumn(col)
 		fts[i] = ft
 		if ft.EvalType() == types.ETString {
-			collators[i] = collate.GetCollator(ft.GetCollate())
+			collators[i] = collate.GetCollator(ft.Collate)
 		}
 	}
 	colReq := analyzeReq.ColReq
@@ -278,7 +273,7 @@ func (e *analyzeColumnsExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return nil
 }
 
-func (e *analyzeColumnsExec) NewChunk(_ chunk.Allocator) *chunk.Chunk {
+func (e *analyzeColumnsExec) NewChunk() *chunk.Chunk {
 	fields := make([]*types.FieldType, 0, len(e.fields))
 	for _, field := range e.fields {
 		fields = append(fields, &field.Column.FieldType)

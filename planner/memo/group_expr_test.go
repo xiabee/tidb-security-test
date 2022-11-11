@@ -25,6 +25,7 @@ import (
 )
 
 func TestNewGroupExpr(t *testing.T) {
+	t.Parallel()
 	p := &plannercore.LogicalLimit{}
 	expr := NewGroupExpr(p)
 	require.Equal(t, p, expr.ExprNode)
@@ -33,6 +34,7 @@ func TestNewGroupExpr(t *testing.T) {
 }
 
 func TestGroupExprFingerprint(t *testing.T) {
+	t.Parallel()
 	p := &plannercore.LogicalLimit{Count: 3}
 	expr := NewGroupExpr(p)
 	childGroup := NewGroupWithSchema(nil, expression.NewSchema())

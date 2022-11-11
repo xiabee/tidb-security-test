@@ -19,9 +19,10 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"testing"
 	"time"
 
+	"github.com/cznic/mathutil"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/parser/ast"
@@ -34,12 +35,19 @@ import (
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/disk"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
+
+var _ = SerialSuites(&testExecSuite{})
+var _ = SerialSuites(&testExecSerialSuite{})
+
+type testExecSuite struct {
+}
+
+type testExecSerialSuite struct {
+}
 
 type requiredRowsDataSource struct {
 	baseExecutor
@@ -107,7 +115,7 @@ func (r *requiredRowsDataSource) genOneRow() chunk.Row {
 }
 
 func defaultGenerator(valType *types.FieldType) interface{} {
-	switch valType.GetType() {
+	switch valType.Tp {
 	case mysql.TypeLong, mysql.TypeLonglong:
 		return int64(rand.Int())
 	case mysql.TypeDouble:
@@ -125,7 +133,7 @@ func (r *requiredRowsDataSource) checkNumNextCalled() error {
 	return nil
 }
 
-func TestLimitRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestLimitRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -182,15 +190,15 @@ func TestLimitRequiredRows(t *testing.T) {
 		ctx := context.Background()
 		ds := newRequiredRowsDataSource(sctx, testCase.totalRows, testCase.expectedRowsDS)
 		exec := buildLimitExec(sctx, ds, testCase.limitOffset, testCase.limitCount)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], sctx.GetSessionVars().MaxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -216,7 +224,7 @@ func defaultCtx() sessionctx.Context {
 	return ctx
 }
 
-func TestSortRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestSortRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -265,15 +273,15 @@ func TestSortRequiredRows(t *testing.T) {
 			byItems = append(byItems, &util.ByItems{Expr: col})
 		}
 		exec := buildSortExec(sctx, byItems, ds)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -286,7 +294,7 @@ func buildSortExec(sctx sessionctx.Context, byItems []*util.ByItems, src Executo
 	return &sortExec
 }
 
-func TestTopNRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestTopNRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -372,15 +380,15 @@ func TestTopNRequiredRows(t *testing.T) {
 			byItems = append(byItems, &util.ByItems{Expr: col})
 		}
 		exec := buildTopNExec(sctx, testCase.topNOffset, testCase.topNCount, byItems, ds)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -396,11 +404,11 @@ func buildTopNExec(ctx sessionctx.Context, offset, count int, byItems []*util.By
 	}
 }
 
-func TestSelectionRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestSelectionRequiredRows(c *C) {
 	gen01 := func() func(valType *types.FieldType) interface{} {
 		closureCount := 0
 		return func(valType *types.FieldType) interface{} {
-			switch valType.GetType() {
+			switch valType.Tp {
 			case mysql.TypeLong, mysql.TypeLonglong:
 				ret := int64(closureCount % 2)
 				closureCount++
@@ -461,19 +469,19 @@ func TestSelectionRequiredRows(t *testing.T) {
 					Value:   types.NewDatum(testCase.filtersOfCol1),
 					RetType: types.NewFieldType(mysql.TypeTiny),
 				})
-			require.NoError(t, err)
+			c.Assert(err, IsNil)
 			filters = append(filters, f)
 		}
 		exec := buildSelectionExec(sctx, filters, ds)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -484,7 +492,7 @@ func buildSelectionExec(ctx sessionctx.Context, filters []expression.Expression,
 	}
 }
 
-func TestProjectionUnparallelRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestProjectionUnparallelRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -523,20 +531,20 @@ func TestProjectionUnparallelRequiredRows(t *testing.T) {
 			}
 		}
 		exec := buildProjectionExec(sctx, exprs, ds, 0)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
-func TestProjectionParallelRequiredRows(t *testing.T) {
-	t.Skip("not stable because of goroutine schedule")
+func (s *testExecSuite) TestProjectionParallelRequiredRows(c *C) {
+	c.Skip("not stable because of goroutine schedule")
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -579,19 +587,19 @@ func TestProjectionParallelRequiredRows(t *testing.T) {
 			}
 		}
 		exec := buildProjectionExec(sctx, exprs, ds, testCase.numWorkers)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 
 			// wait projectionInputFetcher blocked on fetching data
 			// from child in the background.
 			time.Sleep(time.Millisecond * 25)
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -607,7 +615,7 @@ func divGenerator(factor int) func(valType *types.FieldType) interface{} {
 	closureCountInt := 0
 	closureCountDouble := 0
 	return func(valType *types.FieldType) interface{} {
-		switch valType.GetType() {
+		switch valType.Tp {
 		case mysql.TypeLong, mysql.TypeLonglong:
 			ret := int64(closureCountInt / factor)
 			closureCountInt++
@@ -622,7 +630,7 @@ func divGenerator(factor int) func(valType *types.FieldType) interface{} {
 	}
 }
 
-func TestStreamAggRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestStreamAggRequiredRows(c *C) {
 	maxChunkSize := defaultCtx().GetSessionVars().MaxChunkSize
 	testCases := []struct {
 		totalRows      int
@@ -666,24 +674,24 @@ func TestStreamAggRequiredRows(t *testing.T) {
 		schema := expression.NewSchema(childCols...)
 		groupBy := []expression.Expression{childCols[1]}
 		aggFunc, err := aggregation.NewAggFuncDesc(sctx, testCase.aggFunc, []expression.Expression{childCols[0]}, true)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 		aggFuncs := []*aggregation.AggFuncDesc{aggFunc}
 		exec := buildStreamAggExecutor(sctx, ds, schema, aggFuncs, groupBy, 1, true)
-		require.NoError(t, exec.Open(ctx))
+		c.Assert(exec.Open(ctx), IsNil)
 		chk := newFirstChunk(exec)
 		for i := range testCase.requiredRows {
 			chk.SetRequiredRows(testCase.requiredRows[i], maxChunkSize)
-			require.NoError(t, exec.Next(ctx, chk))
-			require.Equal(t, testCase.expectedRows[i], chk.NumRows())
+			c.Assert(exec.Next(ctx, chk), IsNil)
+			c.Assert(chk.NumRows(), Equals, testCase.expectedRows[i])
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, ds.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(ds.checkNumNextCalled(), IsNil)
 	}
 }
 
-func TestMergeJoinRequiredRows(t *testing.T) {
+func (s *testExecSuite) TestMergeJoinRequiredRows(c *C) {
 	justReturn1 := func(valType *types.FieldType) interface{} {
-		switch valType.GetType() {
+		switch valType.Tp {
 		case mysql.TypeLong, mysql.TypeLonglong:
 			return int64(1)
 		case mysql.TypeDouble:
@@ -703,15 +711,15 @@ func TestMergeJoinRequiredRows(t *testing.T) {
 		innerSrc := newRequiredRowsDataSourceWithGenerator(ctx, 1, nil, justReturn1)             // just return one row: (1, 1)
 		outerSrc := newRequiredRowsDataSourceWithGenerator(ctx, 10000000, required, justReturn1) // always return (1, 1)
 		exec := buildMergeJoinExec(ctx, joinType, innerSrc, outerSrc)
-		require.NoError(t, exec.Open(context.Background()))
+		c.Assert(exec.Open(context.Background()), IsNil)
 
 		chk := newFirstChunk(exec)
 		for i := range required {
 			chk.SetRequiredRows(required[i], ctx.GetSessionVars().MaxChunkSize)
-			require.NoError(t, exec.Next(context.Background(), chk))
+			c.Assert(exec.Next(context.Background(), chk), IsNil)
 		}
-		require.NoError(t, exec.Close())
-		require.NoError(t, outerSrc.checkNumNextCalled())
+		c.Assert(exec.Close(), IsNil)
+		c.Assert(outerSrc.checkNumNextCalled(), IsNil)
 	}
 }
 
@@ -757,13 +765,13 @@ func genTestChunk4VecGroupChecker(chkRows []int, sameNum int) (expr []expression
 
 	expr = make([]expression.Expression, 1)
 	expr[0] = &expression.Column{
-		RetType: types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlen(mysql.MaxIntWidth).BuildP(),
+		RetType: &types.FieldType{Tp: mysql.TypeLonglong, Flen: mysql.MaxIntWidth},
 		Index:   0,
 	}
 	return
 }
 
-func TestVecGroupChecker4GroupCount(t *testing.T) {
+func (s *testExecSuite) TestVecGroupChecker(c *C) {
 	testCases := []struct {
 		chunkRows      []int
 		expectedGroups int
@@ -815,15 +823,15 @@ func TestVecGroupChecker4GroupCount(t *testing.T) {
 		groupNum := 0
 		for i, inputChk := range inputChks {
 			flag, err := groupChecker.splitIntoGroups(inputChk)
-			require.NoError(t, err)
-			require.Equal(t, testCase.expectedFlag[i], flag)
+			c.Assert(err, IsNil)
+			c.Assert(flag, Equals, testCase.expectedFlag[i])
 			if flag {
 				groupNum += groupChecker.groupCount - 1
 			} else {
 				groupNum += groupChecker.groupCount
 			}
 		}
-		require.Equal(t, testCase.expectedGroups, groupNum)
+		c.Assert(groupNum, Equals, testCase.expectedGroups)
 	}
 }
 
@@ -846,7 +854,7 @@ func buildMergeJoinExec(ctx sessionctx.Context, joinType plannercore.JoinType, i
 		j.CompareFuncs = append(j.CompareFuncs, expression.GetCmpFunction(nil, j.LeftJoinKeys[i], j.RightJoinKeys[i]))
 	}
 
-	b := newExecutorBuilder(ctx, nil, nil, oracle.GlobalTxnScope)
+	b := newExecutorBuilder(ctx, nil, nil, 0, false, oracle.GlobalTxnScope)
 	return b.build(j)
 }
 
@@ -863,14 +871,14 @@ func (mp *mockPlan) Schema() *expression.Schema {
 	return mp.exec.Schema()
 }
 
-func TestVecGroupCheckerDATARACE(t *testing.T) {
+func (s *testExecSuite) TestVecGroupCheckerDATARACE(c *C) {
 	ctx := mock.NewContext()
 
 	mTypes := []byte{mysql.TypeVarString, mysql.TypeNewDecimal, mysql.TypeJSON}
 	for _, mType := range mTypes {
 		exprs := make([]expression.Expression, 1)
 		exprs[0] = &expression.Column{
-			RetType: types.NewFieldTypeBuilder().SetType(mType).BuildP(),
+			RetType: &types.FieldType{Tp: mType},
 			Index:   0,
 		}
 		vgc := newVecGroupChecker(ctx, exprs)
@@ -892,37 +900,37 @@ func TestVecGroupCheckerDATARACE(t *testing.T) {
 		case mysql.TypeJSON:
 			chk.Column(0).ReserveJSON(1)
 			j := new(json.BinaryJSON)
-			require.NoError(t, j.UnmarshalJSON([]byte(fmt.Sprintf(`{"%v":%v}`, 123, 123))))
+			c.Assert(j.UnmarshalJSON([]byte(fmt.Sprintf(`{"%v":%v}`, 123, 123))), IsNil)
 			chk.Column(0).AppendJSON(*j)
 		}
 
 		_, err := vgc.splitIntoGroups(chk)
-		require.NoError(t, err)
+		c.Assert(err, IsNil)
 
 		switch mType {
 		case mysql.TypeVarString:
-			require.Equal(t, "abc", vgc.firstRowDatums[0].GetString())
-			require.Equal(t, "abc", vgc.lastRowDatums[0].GetString())
+			c.Assert(vgc.firstRowDatums[0].GetString(), Equals, "abc")
+			c.Assert(vgc.lastRowDatums[0].GetString(), Equals, "abc")
 			chk.Column(0).ReserveString(1)
 			chk.Column(0).AppendString("edf")
-			require.Equal(t, "abc", vgc.firstRowDatums[0].GetString())
-			require.Equal(t, "abc", vgc.lastRowDatums[0].GetString())
+			c.Assert(vgc.firstRowDatums[0].GetString(), Equals, "abc")
+			c.Assert(vgc.lastRowDatums[0].GetString(), Equals, "abc")
 		case mysql.TypeNewDecimal:
-			require.Equal(t, "123", vgc.firstRowDatums[0].GetMysqlDecimal().String())
-			require.Equal(t, "123", vgc.lastRowDatums[0].GetMysqlDecimal().String())
+			c.Assert(vgc.firstRowDatums[0].GetMysqlDecimal().String(), Equals, "123")
+			c.Assert(vgc.lastRowDatums[0].GetMysqlDecimal().String(), Equals, "123")
 			chk.Column(0).ResizeDecimal(1, false)
 			chk.Column(0).Decimals()[0] = *types.NewDecFromInt(456)
-			require.Equal(t, "123", vgc.firstRowDatums[0].GetMysqlDecimal().String())
-			require.Equal(t, "123", vgc.lastRowDatums[0].GetMysqlDecimal().String())
+			c.Assert(vgc.firstRowDatums[0].GetMysqlDecimal().String(), Equals, "123")
+			c.Assert(vgc.lastRowDatums[0].GetMysqlDecimal().String(), Equals, "123")
 		case mysql.TypeJSON:
-			require.Equal(t, `{"123": 123}`, vgc.firstRowDatums[0].GetMysqlJSON().String())
-			require.Equal(t, `{"123": 123}`, vgc.lastRowDatums[0].GetMysqlJSON().String())
+			c.Assert(vgc.firstRowDatums[0].GetMysqlJSON().String(), Equals, `{"123": 123}`)
+			c.Assert(vgc.lastRowDatums[0].GetMysqlJSON().String(), Equals, `{"123": 123}`)
 			chk.Column(0).ReserveJSON(1)
 			j := new(json.BinaryJSON)
-			require.NoError(t, j.UnmarshalJSON([]byte(fmt.Sprintf(`{"%v":%v}`, 456, 456))))
+			c.Assert(j.UnmarshalJSON([]byte(fmt.Sprintf(`{"%v":%v}`, 456, 456))), IsNil)
 			chk.Column(0).AppendJSON(*j)
-			require.Equal(t, `{"123": 123}`, vgc.firstRowDatums[0].GetMysqlJSON().String())
-			require.Equal(t, `{"123": 123}`, vgc.lastRowDatums[0].GetMysqlJSON().String())
+			c.Assert(vgc.firstRowDatums[0].GetMysqlJSON().String(), Equals, `{"123": 123}`)
+			c.Assert(vgc.lastRowDatums[0].GetMysqlJSON().String(), Equals, `{"123": 123}`)
 		}
 	}
 }

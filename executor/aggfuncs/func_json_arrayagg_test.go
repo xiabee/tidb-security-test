@@ -27,9 +27,11 @@ import (
 )
 
 func TestMergePartialResult4JsonArrayagg(t *testing.T) {
+	t.Parallel()
+
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON}
 
-	tests := make([]aggTest, 0, len(typeList))
+	var tests []aggTest
 	numRows := 5
 	for _, argType := range typeList {
 		entries1 := make([]interface{}, 0)
@@ -64,9 +66,11 @@ func TestMergePartialResult4JsonArrayagg(t *testing.T) {
 }
 
 func TestJsonArrayagg(t *testing.T) {
+	t.Parallel()
+
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON}
 
-	tests := make([]aggTest, 0, len(typeList))
+	var tests []aggTest
 	numRows := 5
 
 	for _, argType := range typeList {
@@ -100,7 +104,7 @@ func jsonArrayaggMemDeltaGens(srcChk *chunk.Chunk, dataType *types.FieldType) (m
 
 		memDelta := int64(0)
 		memDelta += aggfuncs.DefInterfaceSize
-		switch dataType.GetType() {
+		switch dataType.Tp {
 		case mysql.TypeLonglong:
 			memDelta += aggfuncs.DefUint64Size
 		case mysql.TypeDouble:
@@ -119,7 +123,7 @@ func jsonArrayaggMemDeltaGens(srcChk *chunk.Chunk, dataType *types.FieldType) (m
 		case mysql.TypeNewDecimal:
 			memDelta += aggfuncs.DefMyDecimalSize
 		default:
-			return memDeltas, errors.Errorf("unsupported type - %v", dataType.GetType())
+			return memDeltas, errors.Errorf("unsupported type - %v", dataType.Tp)
 		}
 		memDeltas = append(memDeltas, memDelta)
 	}
@@ -127,9 +131,11 @@ func jsonArrayaggMemDeltaGens(srcChk *chunk.Chunk, dataType *types.FieldType) (m
 }
 
 func TestMemJsonArrayagg(t *testing.T) {
+	t.Parallel()
+
 	typeList := []byte{mysql.TypeLonglong, mysql.TypeDouble, mysql.TypeString, mysql.TypeJSON}
 
-	tests := make([]aggMemTest, 0, len(typeList))
+	var tests []aggMemTest
 	numRows := 5
 	for _, argType := range typeList {
 		tests = append(tests, buildAggMemTester(ast.AggFuncJsonArrayagg, argType, numRows, aggfuncs.DefPartialResult4JsonArrayagg+aggfuncs.DefSliceSize, jsonArrayaggMemDeltaGens, false))

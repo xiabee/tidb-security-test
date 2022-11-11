@@ -224,7 +224,6 @@ const (
 	RestoreStringWithoutDefaultCharset
 
 	RestoreTiDBSpecialComment
-	SkipPlacementRuleForRestore
 )
 
 const (
@@ -301,21 +300,17 @@ func (rf RestoreFlags) HasTiDBSpecialCommentFlag() bool {
 	return rf.has(RestoreTiDBSpecialComment)
 }
 
-func (rf RestoreFlags) HasSkipPlacementRuleForRestoreFlag() bool {
-	return rf.has(SkipPlacementRuleForRestore)
-}
-
 // RestoreCtx is `Restore` context to hold flags and writer.
 type RestoreCtx struct {
 	Flags     RestoreFlags
 	In        io.Writer
 	DefaultDB string
-	CTERestorer
+	CTENames  []string
 }
 
 // NewRestoreCtx returns a new `RestoreCtx`.
 func NewRestoreCtx(flags RestoreFlags, in io.Writer) *RestoreCtx {
-	return &RestoreCtx{Flags: flags, In: in, DefaultDB: ""}
+	return &RestoreCtx{flags, in, "", make([]string, 0)}
 }
 
 // WriteKeyWord writes the `keyWord` into writer.
@@ -330,20 +325,18 @@ func (ctx *RestoreCtx) WriteKeyWord(keyWord string) {
 	fmt.Fprint(ctx.In, keyWord)
 }
 
-func (ctx *RestoreCtx) WriteWithSpecialComments(featureID string, fn func() error) error {
+func (ctx *RestoreCtx) WriteWithSpecialComments(featureID string, fn func()) {
 	if !ctx.Flags.HasTiDBSpecialCommentFlag() {
-		return fn()
+		fn()
+		return
 	}
 	ctx.WritePlain("/*T!")
 	if len(featureID) != 0 {
 		ctx.WritePlainf("[%s]", featureID)
 	}
 	ctx.WritePlain(" ")
-	if err := fn(); err != nil {
-		return err
-	}
+	fn()
 	ctx.WritePlain(" */")
-	return nil
 }
 
 // WriteString writes the string into writer
@@ -393,34 +386,4 @@ func (ctx *RestoreCtx) WritePlain(plainText string) {
 // WritePlainf write the plain text into writer without any handling.
 func (ctx *RestoreCtx) WritePlainf(format string, a ...interface{}) {
 	fmt.Fprintf(ctx.In, format, a...)
-}
-
-// CTERestorer is used by WithClause related nodes restore.
-type CTERestorer struct {
-	CTENames []string
-}
-
-// IsCTETableName returns true if the given tableName comes from CTE.
-func (c *CTERestorer) IsCTETableName(nameL string) bool {
-	for _, n := range c.CTENames {
-		if n == nameL {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *CTERestorer) RecordCTEName(nameL string) {
-	c.CTENames = append(c.CTENames, nameL)
-}
-
-func (c *CTERestorer) RestoreCTEFunc() func() {
-	l := len(c.CTENames)
-	return func() {
-		if l == 0 {
-			c.CTENames = nil
-		} else {
-			c.CTENames = c.CTENames[:l]
-		}
-	}
 }

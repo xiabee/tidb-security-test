@@ -142,10 +142,10 @@ import (
 	"strings"
 
 	"github.com/cznic/mathutil"
+	parser "github.com/cznic/parser/yacc"
 	"github.com/cznic/sortutil"
 	"github.com/cznic/strutil"
-	parser "modernc.org/parser/yacc"
-	"modernc.org/y"
+	"github.com/cznic/y"
 )
 
 var (
@@ -324,7 +324,7 @@ func main1(in string) (err error) {
 	}
 
 	if fn := *oXErrorsGen; fn != "" {
-		f, err := os.OpenFile(fn, os.O_RDWR|os.O_CREATE, 0600)
+		f, err := os.OpenFile(fn, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			return err
 		}
@@ -528,7 +528,6 @@ type %[1]sLexer interface {
 	Lex(lval *%[1]sSymType) int
 	Errorf(format string, a ...interface{}) error
 	AppendError(err error)
-	AppendWarn(err error)
 	Errors() (warns []error, errs []error)
 }
 

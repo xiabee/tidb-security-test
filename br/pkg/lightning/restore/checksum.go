@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,14 +33,13 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	tidbcfg "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/driver"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -310,11 +310,11 @@ func (e *tikvChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpo
 			zap.Int("concurrency", distSQLScanConcurrency), zap.Int("retry", i))
 
 		// do not retry context.Canceled error
-		if !common.IsRetryableError(err) {
+		if !utils.IsRetryableError(err) {
 			break
 		}
 		if distSQLScanConcurrency > minDistSQLScanConcurrency {
-			distSQLScanConcurrency = mathutil.Max(distSQLScanConcurrency/2, minDistSQLScanConcurrency)
+			distSQLScanConcurrency = utils.MaxInt(distSQLScanConcurrency/2, minDistSQLScanConcurrency)
 		}
 	}
 
@@ -331,7 +331,6 @@ func (e *tikvChecksumManager) Checksum(ctx context.Context, tableInfo *checkpoin
 	if err := e.manager.addOneJob(ctx, tbl, ts); err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.manager.removeOneJob(tbl)
 
 	return e.checksumDB(ctx, tableInfo, ts)
 }
@@ -373,7 +372,7 @@ type gcTTLManager struct {
 	currentTS     uint64
 	serviceID     string
 	// 0 for not start, otherwise started
-	started atomic.Bool
+	started uint32
 }
 
 func newGCTTLManager(pdClient pd.Client) gcTTLManager {
@@ -385,7 +384,7 @@ func newGCTTLManager(pdClient pd.Client) gcTTLManager {
 
 func (m *gcTTLManager) addOneJob(ctx context.Context, table string, ts uint64) error {
 	// start gc ttl loop if not started yet.
-	if m.started.CAS(false, true) {
+	if atomic.CompareAndSwapUint32(&m.started, 0, 1) {
 		m.start(ctx)
 	}
 	m.lock.Lock()

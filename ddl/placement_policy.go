@@ -24,52 +24,25 @@ import (
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/util/dbterror"
 )
 
 func onCreatePlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	policyInfo := &model.PolicyInfo{}
-	var orReplace bool
-	if err := job.DecodeArgs(policyInfo, &orReplace); err != nil {
+	if err := job.DecodeArgs(policyInfo); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 	policyInfo.State = model.StateNone
 
-	if err := checkPolicyValidation(policyInfo.PlacementSettings); err != nil {
-		job.State = model.JobStateCancelled
+	err := checkPlacementPolicyNotExistAndCancelExistJob(d, t, job, policyInfo)
+	if err != nil {
 		return ver, errors.Trace(err)
 	}
-
-	existPolicy, err := getPlacementPolicyByName(d, t, policyInfo.Name)
+	err = checkPolicyValidation(policyInfo.PlacementSettings)
 	if err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
-
-	if existPolicy != nil {
-		if !orReplace {
-			job.State = model.JobStateCancelled
-			return ver, infoschema.ErrPlacementPolicyExists.GenWithStackByArgs(existPolicy.Name)
-		}
-
-		replacePolicy := existPolicy.Clone()
-		replacePolicy.PlacementSettings = policyInfo.PlacementSettings
-		if err = updateExistPlacementPolicy(t, replacePolicy); err != nil {
-			job.State = model.JobStateCancelled
-			return ver, errors.Trace(err)
-		}
-
-		job.SchemaID = replacePolicy.ID
-		ver, err = updateSchemaVersion(d, t, job)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		// Finish this job.
-		job.FinishDBJob(model.JobStateDone, model.StatePublic, ver, nil)
-		return ver, nil
-	}
-
 	switch policyInfo.State {
 	case model.StateNone:
 		// none -> public
@@ -80,7 +53,7 @@ func onCreatePlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64
 		}
 		job.SchemaID = policyInfo.ID
 
-		ver, err = updateSchemaVersion(d, t, job)
+		ver, err = updateSchemaVersion(t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -89,7 +62,7 @@ func onCreatePlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64
 		return ver, nil
 	default:
 		// We can't enter here.
-		return ver, dbterror.ErrInvalidDDLState.GenWithStackByArgs("policy", policyInfo.State)
+		return ver, ErrInvalidDDLState.GenWithStackByArgs("policy", policyInfo.State)
 	}
 }
 
@@ -111,32 +84,33 @@ func getPolicyInfo(t *meta.Meta, policyID int64) (*model.PolicyInfo, error) {
 	return policy, nil
 }
 
-func getPlacementPolicyByName(d *ddlCtx, t *meta.Meta, policyName model.CIStr) (*model.PolicyInfo, error) {
+func checkPlacementPolicyNotExistAndCancelExistJob(d *ddlCtx, t *meta.Meta, job *model.Job, info *model.PolicyInfo) error {
 	currVer, err := t.GetSchemaVersion()
 	if err != nil {
-		return nil, err
+		return err
 	}
-
 	is := d.infoCache.GetLatest()
 	if is.SchemaMetaVersion() == currVer {
 		// Use cached policy.
-		policy, ok := is.PolicyByName(policyName)
+		_, ok := is.PolicyByName(info.Name)
 		if ok {
-			return policy, nil
+			job.State = model.JobStateCancelled
+			return infoschema.ErrPlacementPolicyExists.GenWithStackByArgs(info.Name)
 		}
-		return nil, nil
+		return nil
 	}
 	// Check in meta directly.
 	policies, err := t.ListPolicies()
 	if err != nil {
-		return nil, errors.Trace(err)
+		return errors.Trace(err)
 	}
 	for _, policy := range policies {
-		if policy.Name.L == policyName.L {
-			return policy, nil
+		if policy.Name.L == info.Name.L {
+			job.State = model.JobStateCancelled
+			return infoschema.ErrPlacementPolicyExists.GenWithStackByArgs(info.Name)
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 func checkPlacementPolicyExistAndCancelNonExistJob(t *meta.Meta, job *model.Job, policyID int64) (*model.PolicyInfo, error) {
@@ -150,32 +124,6 @@ func checkPlacementPolicyExistAndCancelNonExistJob(t *meta.Meta, job *model.Job,
 	return nil, err
 }
 
-func checkPlacementPolicyRefValidAndCanNonValidJob(t *meta.Meta, job *model.Job, ref *model.PolicyRefInfo) (*model.PolicyInfo, error) {
-	if ref == nil {
-		return nil, nil
-	}
-
-	return checkPlacementPolicyExistAndCancelNonExistJob(t, job, ref.ID)
-}
-
-func checkAllTablePlacementPoliciesExistAndCancelNonExistJob(t *meta.Meta, job *model.Job, tblInfo *model.TableInfo) error {
-	if _, err := checkPlacementPolicyRefValidAndCanNonValidJob(t, job, tblInfo.PlacementPolicyRef); err != nil {
-		return errors.Trace(err)
-	}
-
-	if tblInfo.Partition == nil {
-		return nil
-	}
-
-	for _, def := range tblInfo.Partition.Definitions {
-		if _, err := checkPlacementPolicyRefValidAndCanNonValidJob(t, job, def.PlacementPolicyRef); err != nil {
-			return errors.Trace(err)
-		}
-	}
-
-	return nil
-}
-
 func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	policyInfo, err := checkPlacementPolicyExistAndCancelNonExistJob(t, job, job.SchemaID)
 	if err != nil {
@@ -184,7 +132,7 @@ func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 
 	err = checkPlacementPolicyNotInUse(d, t, policyInfo)
 	if err != nil {
-		if dbterror.ErrPlacementPolicyInUse.Equal(err) {
+		if ErrPlacementPolicyInUse.Equal(err) {
 			job.State = model.JobStateCancelled
 		}
 		return ver, errors.Trace(err)
@@ -198,7 +146,7 @@ func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(d, t, job)
+		ver, err = updateSchemaVersion(t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -211,7 +159,7 @@ func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(d, t, job)
+		ver, err = updateSchemaVersion(t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -222,14 +170,14 @@ func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 		if err = t.DropPolicy(policyInfo.ID); err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(d, t, job)
+		ver, err = updateSchemaVersion(t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
 		// Finish this job. By now policy don't consider the binlog sync.
 		job.FinishDBJob(model.JobStateDone, model.StateNone, ver, nil)
 	default:
-		err = dbterror.ErrInvalidDDLState.GenWithStackByArgs("policy", policyInfo.State)
+		err = ErrInvalidDDLState.GenWithStackByArgs("policy", policyInfo.State)
 	}
 	return ver, errors.Trace(err)
 }
@@ -251,40 +199,24 @@ func onAlterPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64,
 
 	err = checkPolicyValidation(newPolicyInfo.PlacementSettings)
 	if err != nil {
-		return ver, errors.Trace(err)
-	}
-
-	if err = updateExistPlacementPolicy(t, &newPolicyInfo); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	ver, err = updateSchemaVersion(d, t, job)
+	err = t.UpdatePolicy(&newPolicyInfo)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
-	// Finish this job.
-	job.FinishDBJob(model.JobStateDone, model.StatePublic, ver, nil)
-	return ver, nil
-}
-
-func updateExistPlacementPolicy(t *meta.Meta, policy *model.PolicyInfo) error {
-	err := t.UpdatePolicy(policy)
+	dbIDs, partIDs, tblInfos, err := getPlacementPolicyDependedObjectsIDs(t, oldPolicy)
 	if err != nil {
-		return errors.Trace(err)
+		return ver, errors.Trace(err)
 	}
-
-	dbIDs, partIDs, tblInfos, err := getPlacementPolicyDependedObjectsIDs(t, policy)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
 	if len(dbIDs)+len(tblInfos)+len(partIDs) != 0 {
 		// build bundle from new placement policy.
-		bundle, err := placement.NewBundleFromOptions(policy.PlacementSettings)
+		bundle, err := placement.NewBundleFromOptions(newPolicyInfo.PlacementSettings)
 		if err != nil {
-			return errors.Trace(err)
+			return ver, errors.Trace(err)
 		}
 		// Do the http request only when the rules is existed.
 		bundles := make([]*placement.Bundle, 0, len(tblInfos)+len(partIDs))
@@ -304,13 +236,21 @@ func updateExistPlacementPolicy(t *meta.Meta, policy *model.PolicyInfo) error {
 			cp := bundle.Clone()
 			bundles = append(bundles, cp.Reset(placement.RuleIndexPartition, []int64{id}))
 		}
-		err = infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
+		err = infosync.PutRuleBundles(context.TODO(), bundles)
 		if err != nil {
-			return errors.Wrapf(err, "failed to notify PD the placement rules")
+			job.State = model.JobStateCancelled
+			return ver, errors.Wrapf(err, "failed to notify PD the placement rules")
 		}
 	}
 
-	return nil
+	ver, err = updateSchemaVersion(t, job)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	// Finish this job.
+	job.FinishDBJob(model.JobStateDone, model.StatePublic, ver, nil)
+	return ver, nil
 }
 
 func checkPlacementPolicyNotInUse(d *ddlCtx, t *meta.Meta, policy *model.PolicyInfo) error {
@@ -320,17 +260,16 @@ func checkPlacementPolicyNotInUse(d *ddlCtx, t *meta.Meta, policy *model.PolicyI
 	}
 	is := d.infoCache.GetLatest()
 	if is.SchemaMetaVersion() == currVer {
-		return CheckPlacementPolicyNotInUseFromInfoSchema(is, policy)
+		return checkPlacementPolicyNotInUseFromInfoSchema(is, policy)
 	}
 
-	return CheckPlacementPolicyNotInUseFromMeta(t, policy)
+	return checkPlacementPolicyNotInUseFromMeta(t, policy)
 }
 
-// CheckPlacementPolicyNotInUseFromInfoSchema export for test.
-func CheckPlacementPolicyNotInUseFromInfoSchema(is infoschema.InfoSchema, policy *model.PolicyInfo) error {
+func checkPlacementPolicyNotInUseFromInfoSchema(is infoschema.InfoSchema, policy *model.PolicyInfo) error {
 	for _, dbInfo := range is.AllSchemas() {
 		if ref := dbInfo.PlacementPolicyRef; ref != nil && ref.ID == policy.ID {
-			return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+			return ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
 		}
 
 		for _, tbl := range is.SchemaTables(dbInfo.Name) {
@@ -366,7 +305,7 @@ func getPlacementPolicyDependedObjectsIDs(t *meta.Meta, policy *model.PolicyInfo
 			}
 			if tblInfo.Partition != nil {
 				for _, part := range tblInfo.Partition.Definitions {
-					if part.PlacementPolicyRef != nil && part.PlacementPolicyRef.ID == policy.ID {
+					if part.PlacementPolicyRef != nil && part.PlacementPolicyRef.ID == part.ID {
 						partIDs = append(partIDs, part.ID)
 					}
 				}
@@ -376,8 +315,7 @@ func getPlacementPolicyDependedObjectsIDs(t *meta.Meta, policy *model.PolicyInfo
 	return dbIDs, partIDs, tblInfos, nil
 }
 
-// CheckPlacementPolicyNotInUseFromMeta export for test.
-func CheckPlacementPolicyNotInUseFromMeta(t *meta.Meta, policy *model.PolicyInfo) error {
+func checkPlacementPolicyNotInUseFromMeta(t *meta.Meta, policy *model.PolicyInfo) error {
 	schemas, err := t.ListDatabases()
 	if err != nil {
 		return err
@@ -385,7 +323,7 @@ func CheckPlacementPolicyNotInUseFromMeta(t *meta.Meta, policy *model.PolicyInfo
 
 	for _, dbInfo := range schemas {
 		if ref := dbInfo.PlacementPolicyRef; ref != nil && ref.ID == policy.ID {
-			return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+			return ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
 		}
 
 		tables, err := t.ListTables(dbInfo.ID)
@@ -404,32 +342,16 @@ func CheckPlacementPolicyNotInUseFromMeta(t *meta.Meta, policy *model.PolicyInfo
 
 func checkPlacementPolicyNotUsedByTable(tblInfo *model.TableInfo, policy *model.PolicyInfo) error {
 	if ref := tblInfo.PlacementPolicyRef; ref != nil && ref.ID == policy.ID {
-		return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+		return ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
 	}
 
 	if tblInfo.Partition != nil {
 		for _, partition := range tblInfo.Partition.Definitions {
 			if ref := partition.PlacementPolicyRef; ref != nil && ref.ID == policy.ID {
-				return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+				return ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
 			}
 		}
 	}
 
 	return nil
-}
-
-func tableHasPlacementSettings(tblInfo *model.TableInfo) bool {
-	if tblInfo.PlacementPolicyRef != nil {
-		return true
-	}
-
-	if tblInfo.Partition != nil {
-		for _, def := range tblInfo.Partition.Definitions {
-			if def.PlacementPolicyRef != nil {
-				return true
-			}
-		}
-	}
-
-	return false
 }

@@ -15,25 +15,50 @@
 package core_test
 
 import (
-	"fmt"
-	"strconv"
 	"strings"
-	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
-	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/testkit/testdata"
 	"github.com/pingcap/tidb/util/collate"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/testkit"
+	"github.com/pingcap/tidb/util/testutil"
 )
 
-func TestSetVariables(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+var _ = SerialSuites(&testEnforceMPPSuite{})
+
+type testEnforceMPPSuite struct {
+	testData testutil.TestData
+	store    kv.Storage
+	dom      *domain.Domain
+}
+
+func (s *testEnforceMPPSuite) SetUpSuite(c *C) {
+	var err error
+	s.testData, err = testutil.LoadTestSuiteData("testdata", "enforce_mpp_suite")
+	c.Assert(err, IsNil)
+}
+
+func (s *testEnforceMPPSuite) TearDownSuite(c *C) {
+	c.Assert(s.testData.GenerateOutputIfNeeded(), IsNil)
+}
+
+func (s *testEnforceMPPSuite) SetUpTest(c *C) {
+	var err error
+	s.store, s.dom, err = newStoreWithBootstrap()
+	c.Assert(err, IsNil)
+}
+
+func (s *testEnforceMPPSuite) TearDownTest(c *C) {
+	s.dom.Close()
+	err := s.store.Close()
+	c.Assert(err, IsNil)
+}
+
+func (s *testEnforceMPPSuite) TestSetVariables(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test value limit of tidb_opt_tiflash_concurrency_factor
 	tk.MustExec("set @@tidb_opt_tiflash_concurrency_factor = 0")
@@ -42,53 +67,18 @@ func TestSetVariables(t *testing.T) {
 
 	// test set tidb_enforce_mpp when tidb_allow_mpp=false;
 	err := tk.ExecToErr("set @@tidb_allow_mpp = 0; set @@tidb_enforce_mpp = 1;")
-	require.EqualError(t, err, `[variable:1231]Variable 'tidb_enforce_mpp' can't be set to the value of '1' but tidb_allow_mpp is 0, please activate tidb_allow_mpp at first.'`)
+	c.Assert(err, NotNil)
+	c.Assert(err.Error(), Equals, `[variable:1231]Variable 'tidb_enforce_mpp' can't be set to the value of '1' but tidb_allow_mpp is 0, please activate tidb_allow_mpp at first.'`)
+
 	err = tk.ExecToErr("set @@tidb_allow_mpp = 1; set @@tidb_enforce_mpp = 1;")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
+
 	err = tk.ExecToErr("set @@tidb_allow_mpp = 0;")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestRowSizeInMPP(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a varchar(10), b varchar(20), c varchar(256))")
-	tk.MustExec("insert into t values (space(10), space(20), space(256))")
-	tk.MustExec("analyze table t")
-
-	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
-	is := dom.InfoSchema()
-	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
-	for _, tblInfo := range db.Tables {
-		if tblInfo.Name.L == "t" {
-			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
-				Count:     1,
-				Available: true,
-			}
-		}
-	}
-
-	tk.MustExec(`set @@tidb_opt_tiflash_concurrency_factor=1`)
-	tk.MustExec(`set @@tidb_allow_mpp=1`)
-	var costs [3]float64
-	for i, col := range []string{"a", "b", "c"} {
-		rs := tk.MustQuery(fmt.Sprintf(`explain format='verbose' select /*+ read_from_storage(tiflash[t]) */ %v from t`, col)).Rows()
-		cost, err := strconv.ParseFloat(rs[0][2].(string), 64)
-		require.NoError(t, err)
-		costs[i] = cost
-	}
-	require.True(t, costs[0] < costs[1] && costs[1] < costs[2]) // rowSize can affect the final cost
-}
-
-func TestEnforceMPP(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestEnforceMPP(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test query
 	tk.MustExec("use test")
@@ -97,10 +87,10 @@ func TestEnforceMPP(t *testing.T) {
 	tk.MustExec("create index idx on t(a)")
 
 	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
+	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
+	c.Assert(exists, IsTrue)
 	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -116,8 +106,7 @@ func TestEnforceMPP(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	filterWarnings := func(originalWarnings []stmtctx.SQLWarn) []stmtctx.SQLWarn {
 		warnings := make([]stmtctx.SQLWarn, 0, 4)
 		for _, warning := range originalWarnings {
@@ -129,29 +118,27 @@ func TestEnforceMPP(t *testing.T) {
 		return warnings
 	}
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") {
 			tk.MustExec(tt)
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(filterWarnings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(filterWarnings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()))
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(filterWarnings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(filterWarnings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())), DeepEquals, output[i].Warn)
 	}
 }
 
 // general cases.
-func TestEnforceMPPWarning1(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestEnforceMPPWarning1(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test query
 	tk.MustExec("use test")
@@ -165,10 +152,9 @@ func TestEnforceMPPWarning1(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") {
@@ -177,10 +163,10 @@ func TestEnforceMPPWarning1(t *testing.T) {
 		}
 		if strings.HasPrefix(tt, "cmd: create-replica") {
 			// Create virtual tiflash replica info.
-			dom := domain.GetDomain(tk.Session())
+			dom := domain.GetDomain(tk.Se)
 			is := dom.InfoSchema()
 			db, exists := is.SchemaByName(model.NewCIStr("test"))
-			require.True(t, exists)
+			c.Assert(exists, IsTrue)
 			for _, tblInfo := range db.Tables {
 				if tblInfo.Name.L == "t" {
 					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -193,10 +179,10 @@ func TestEnforceMPPWarning1(t *testing.T) {
 		}
 		if strings.HasPrefix(tt, "cmd: enable-replica") {
 			// Create virtual tiflash replica info.
-			dom := domain.GetDomain(tk.Session())
+			dom := domain.GetDomain(tk.Se)
 			is := dom.InfoSchema()
 			db, exists := is.SchemaByName(model.NewCIStr("test"))
-			require.True(t, exists)
+			c.Assert(exists, IsTrue)
 			for _, tblInfo := range db.Tables {
 				if tblInfo.Name.L == "t" {
 					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -207,22 +193,20 @@ func TestEnforceMPPWarning1(t *testing.T) {
 			}
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()), DeepEquals, output[i].Warn)
 	}
 }
 
 // partition table.
-func TestEnforceMPPWarning2(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestEnforceMPPWarning2(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test query
 	tk.MustExec("use test")
@@ -230,10 +214,10 @@ func TestEnforceMPPWarning2(t *testing.T) {
 	tk.MustExec("CREATE TABLE t (a int, b char(20)) PARTITION BY HASH(a)")
 
 	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
+	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
+	c.Assert(exists, IsTrue)
 	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -249,32 +233,29 @@ func TestEnforceMPPWarning2(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") {
 			tk.MustExec(tt)
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()), DeepEquals, output[i].Warn)
 	}
 }
 
 // new collation.
-func TestEnforceMPPWarning3(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestEnforceMPPWarning3(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test query
 	tk.MustExec("use test")
@@ -282,10 +263,10 @@ func TestEnforceMPPWarning3(t *testing.T) {
 	tk.MustExec("CREATE TABLE t (a int, b char(20))")
 
 	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
+	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
+	c.Assert(exists, IsTrue)
 	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -301,10 +282,9 @@ func TestEnforceMPPWarning3(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") || strings.HasPrefix(tt, "UPDATE") {
@@ -319,23 +299,20 @@ func TestEnforceMPPWarning3(t *testing.T) {
 			collate.SetNewCollationEnabledForTest(false)
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()), DeepEquals, output[i].Warn)
 	}
-	collate.SetNewCollationEnabledForTest(true)
 }
 
 // Test enforce mpp warning for joins
-func TestEnforceMPPWarning4(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestEnforceMPPWarning4(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test table
 	tk.MustExec("use test")
@@ -345,10 +322,10 @@ func TestEnforceMPPWarning4(t *testing.T) {
 	tk.MustExec("CREATE TABLE s(a int primary key)")
 
 	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
+	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
+	c.Assert(exists, IsTrue)
 	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "s" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -364,32 +341,29 @@ func TestEnforceMPPWarning4(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") || strings.HasPrefix(tt, "UPDATE") {
 			tk.MustExec(tt)
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()), DeepEquals, output[i].Warn)
 	}
 }
 
 // Test agg push down for MPP mode
-func TestMPP2PhaseAggPushDown(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testEnforceMPPSuite) TestMPP2PhaseAggPushDown(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	// test table
 	tk.MustExec("use test")
@@ -399,10 +373,10 @@ func TestMPP2PhaseAggPushDown(t *testing.T) {
 	tk.MustExec("create table o(o_id bigint, c_id bigint not null)")
 
 	// Create virtual tiflash replica info.
-	dom := domain.GetDomain(tk.Session())
+	dom := domain.GetDomain(tk.Se)
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
-	require.True(t, exists)
+	c.Assert(exists, IsTrue)
 	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "c" || tblInfo.Name.L == "o" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -418,23 +392,22 @@ func TestMPP2PhaseAggPushDown(t *testing.T) {
 		Plan []string
 		Warn []string
 	}
-	enforceMPPSuiteData := plannercore.GetEnforceMPPSuiteData()
-	enforceMPPSuiteData.GetTestCases(t, &input, &output)
+	s.testData.GetTestCases(c, &input, &output)
 	for i, tt := range input {
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
 		})
 		if strings.HasPrefix(tt, "set") || strings.HasPrefix(tt, "UPDATE") {
 			tk.MustExec(tt)
 			continue
 		}
-		testdata.OnRecord(func() {
+		s.testData.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-			output[i].Warn = testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings())
+			output[i].Plan = s.testData.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Warn = s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings())
 		})
 		res := tk.MustQuery(tt)
 		res.Check(testkit.Rows(output[i].Plan...))
-		require.Equal(t, output[i].Warn, testdata.ConvertSQLWarnToStrings(tk.Session().GetSessionVars().StmtCtx.GetWarnings()))
+		c.Assert(s.testData.ConvertSQLWarnToStrings(tk.Se.GetSessionVars().StmtCtx.GetWarnings()), DeepEquals, output[i].Warn)
 	}
 }

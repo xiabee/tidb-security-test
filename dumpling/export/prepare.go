@@ -15,12 +15,10 @@ import (
 )
 
 const (
-	outputFileTemplateSchema   = "schema"
-	outputFileTemplateTable    = "table"
-	outputFileTemplateView     = "view"
-	outputFileTemplateSequence = "sequence"
-	outputFileTemplateData     = "data"
-	outputFileTemplatePolicy   = "placement-policy"
+	outputFileTemplateSchema = "schema"
+	outputFileTemplateTable  = "table"
+	outputFileTemplateView   = "view"
+	outputFileTemplateData   = "data"
 
 	defaultOutputFileTemplateBase = `
 		{{- define "objectName" -}}
@@ -52,9 +50,6 @@ const (
 		{{- end -}}
 		{{- define "data" -}}
 			{{template "objectName" .}}.{{.Index}}
-		{{- end -}}
-		{{- define "placement-policy" -}}
-            {{fn .Policy}}-placement-policy-create
 		{{- end -}}
 	`
 

@@ -109,7 +109,7 @@ func (b BinaryLiteral) ToInt(sc *stmtctx.StatementContext) (uint64, error) {
 		return 0, nil
 	}
 	if length > 8 {
-		var err = ErrTruncatedWrongVal.FastGenByArgs("BINARY", b)
+		var err = ErrTruncatedWrongVal.GenWithStackByArgs("BINARY", b)
 		if sc != nil {
 			err = sc.HandleTruncate(err)
 		}

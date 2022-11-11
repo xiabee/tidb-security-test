@@ -45,6 +45,8 @@ func createTestSuite(t *testing.T) (sessionctx.Context, *temporaryTableDDL, func
 }
 
 func TestAddLocalTemporaryTable(t *testing.T) {
+	t.Parallel()
+
 	sctx, ddl, clean := createTestSuite(t)
 	defer clean()
 
@@ -108,6 +110,8 @@ func TestAddLocalTemporaryTable(t *testing.T) {
 }
 
 func TestRemoveLocalTemporaryTable(t *testing.T) {
+	t.Parallel()
+
 	sctx, ddl, clean := createTestSuite(t)
 	defer clean()
 
@@ -155,6 +159,8 @@ func TestRemoveLocalTemporaryTable(t *testing.T) {
 }
 
 func TestTruncateLocalTemporaryTable(t *testing.T) {
+	t.Parallel()
+
 	sctx, ddl, clean := createTestSuite(t)
 	defer clean()
 

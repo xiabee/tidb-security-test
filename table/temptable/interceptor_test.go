@@ -49,6 +49,7 @@ func encodeTableKey(tblID int64, suffix ...byte) kv.Key {
 }
 
 func TestGetKeyAccessedTableID(t *testing.T) {
+	t.Parallel()
 	tbPrefix := tablecodec.TablePrefix()
 	prefix0 := encodeTableKey(0)
 	prefixMax := encodeTableKey(math.MaxInt64)
@@ -113,6 +114,7 @@ func TestGetKeyAccessedTableID(t *testing.T) {
 }
 
 func TestGetRangeAccessedTableID(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		start kv.Key
 		end   kv.Key
@@ -217,6 +219,7 @@ func TestGetRangeAccessedTableID(t *testing.T) {
 }
 
 func TestNotTableRange(t *testing.T) {
+	t.Parallel()
 	falseCases := [][]kv.Key{
 		{nil, nil},
 		{nil, encodeTableKey(1, 0)},
@@ -251,6 +254,7 @@ func TestNotTableRange(t *testing.T) {
 }
 
 func TestGetSessionTemporaryTableKey(t *testing.T) {
+	t.Parallel()
 	localTempTableData := []*kv.Entry{
 		{Key: encodeTableKey(5), Value: []byte("v5")},
 		{Key: encodeTableKey(5, 0), Value: []byte("v50")},
@@ -327,6 +331,7 @@ func TestGetSessionTemporaryTableKey(t *testing.T) {
 }
 
 func TestInterceptorTemporaryTableInfoByID(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1, 5).
 		AddTable(model.TempTableGlobal, 2, 6).
@@ -376,6 +381,7 @@ func TestInterceptorTemporaryTableInfoByID(t *testing.T) {
 }
 
 func TestInterceptorOnGet(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1).
 		AddTable(model.TempTableGlobal, 3).
@@ -522,6 +528,7 @@ func TestInterceptorOnGet(t *testing.T) {
 }
 
 func TestInterceptorBatchGetTemporaryTableKeys(t *testing.T) {
+	t.Parallel()
 	localTempTableData := []*kv.Entry{
 		{Key: encodeTableKey(5), Value: []byte("v5")},
 		{Key: encodeTableKey(5, 0), Value: []byte("v50")},
@@ -705,6 +712,7 @@ func TestInterceptorBatchGetTemporaryTableKeys(t *testing.T) {
 }
 
 func TestInterceptorOnBatchGet(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1).
 		AddTable(model.TempTableGlobal, 3).
@@ -868,7 +876,7 @@ func TestInterceptorOnBatchGet(t *testing.T) {
 			inter = emptyRetrieverInterceptor
 		}
 		result, err := inter.OnBatchGet(ctx, snap, c.keys)
-		require.NoError(t, err, i)
+		require.Nil(t, err, i)
 		require.NotNil(t, result, i)
 		require.Equal(t, c.result, result, i)
 		if c.nilSession {
@@ -906,6 +914,7 @@ func TestInterceptorOnBatchGet(t *testing.T) {
 }
 
 func TestCreateUnionIter(t *testing.T) {
+	t.Parallel()
 	retriever := newMockedRetriever(t).SetData([]*kv.Entry{
 		{Key: kv.Key("k1"), Value: []byte("v1")},
 		{Key: kv.Key("k10"), Value: []byte("")},
@@ -1046,6 +1055,7 @@ func TestCreateUnionIter(t *testing.T) {
 }
 
 func TestErrorCreateUnionIter(t *testing.T) {
+	t.Parallel()
 	retriever := newMockedRetriever(t).SetAllowedMethod("Iter", "IterReverse").SetData([]*kv.Entry{
 		{Key: kv.Key("k1"), Value: []byte("")},
 	})
@@ -1183,6 +1193,7 @@ func checkCreatedIterClosed(t *testing.T, retriever *mockedRetriever, snap *mock
 }
 
 func TestIterTable(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1).
 		AddTable(model.TempTableGlobal, 3).
@@ -1335,6 +1346,7 @@ func TestIterTable(t *testing.T) {
 }
 
 func TestOnIter(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1).
 		AddTable(model.TempTableGlobal, 3).
@@ -1544,6 +1556,7 @@ func TestOnIter(t *testing.T) {
 }
 
 func TestOnIterReverse(t *testing.T) {
+	t.Parallel()
 	is := newMockedInfoSchema(t).
 		AddTable(model.TempTableNone, 1).
 		AddTable(model.TempTableGlobal, 3).

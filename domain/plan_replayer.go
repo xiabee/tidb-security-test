@@ -16,6 +16,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -28,12 +29,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// dumpFileGcChecker is used to gc dump file in circle
-// For now it is used by `plan replayer` and `trace plan` statement
-type dumpFileGcChecker struct {
+type planReplayer struct {
 	sync.Mutex
-	gcLease time.Duration
-	paths   []string
+	planReplayerGCLease time.Duration
 }
 
 // GetPlanReplayerDirName returns plan replayer directory path.
@@ -58,37 +56,32 @@ func parseTime(s string) (time.Time, error) {
 	return time.Unix(0, i), nil
 }
 
-func (p *dumpFileGcChecker) gcDumpFiles(t time.Duration) {
+func (p *planReplayer) planReplayerGC(t time.Duration) {
 	p.Lock()
 	defer p.Unlock()
-	for _, path := range p.paths {
-		p.gcDumpFilesByPath(path, t)
-	}
-}
-
-func (p *dumpFileGcChecker) gcDumpFilesByPath(path string, t time.Duration) {
+	path := GetPlanReplayerDirName()
 	files, err := ioutil.ReadDir(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			logutil.BgLogger().Warn("[dumpFileGcChecker] open plan replayer directory failed", zap.Error(err))
+			logutil.BgLogger().Warn("[PlanReplayer] open plan replayer directory failed", zap.Error(err))
 		}
+		return
 	}
 
 	gcTime := time.Now().Add(-t)
 	for _, f := range files {
-		fileName := f.Name()
-		createTime, err := parseTime(fileName)
+		createTime, err := parseTime(f.Name())
 		if err != nil {
-			logutil.BgLogger().Error("[dumpFileGcChecker] parseTime failed", zap.Error(err), zap.String("filename", fileName))
+			logutil.BgLogger().Warn("[PlanReplayer] parseTime failed", zap.Error(err))
 			continue
 		}
 		if !createTime.After(gcTime) {
 			err := os.Remove(filepath.Join(path, f.Name()))
 			if err != nil {
-				logutil.BgLogger().Warn("[dumpFileGcChecker] remove file failed", zap.Error(err), zap.String("filename", fileName))
+				logutil.BgLogger().Warn("[PlanReplayer] remove file failed", zap.Error(err))
 				continue
 			}
-			logutil.BgLogger().Info("dumpFileGcChecker successful", zap.String("filename", fileName))
+			logutil.BgLogger().Info(fmt.Sprintf("[PlanReplayer] GC %s", f.Name()))
 		}
 	}
 }

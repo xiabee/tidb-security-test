@@ -32,8 +32,6 @@ import (
 	tikverr "github.com/tikv/client-go/v2/error"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikvrpc"
-	"github.com/tikv/client-go/v2/tikvrpc/interceptor"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	"go.uber.org/zap"
 )
@@ -42,8 +40,6 @@ type tikvTxn struct {
 	*tikv.KVTxn
 	idxNameCache        map[int64]*model.TableInfo
 	snapshotInterceptor kv.SnapshotInterceptor
-	// columnMapsCache is a cache used for the mutation checker
-	columnMapsCache interface{}
 }
 
 // NewTiKVTxn returns a new Transaction.
@@ -54,7 +50,7 @@ func NewTiKVTxn(txn *tikv.KVTxn) kv.Transaction {
 	totalLimit := atomic.LoadUint64(&kv.TxnTotalSizeLimit)
 	txn.GetUnionStore().SetEntrySizeLimit(entryLimit, totalLimit)
 
-	return &tikvTxn{txn, make(map[int64]*model.TableInfo), nil, nil}
+	return &tikvTxn{txn, make(map[int64]*model.TableInfo), nil}
 }
 
 func (txn *tikvTxn) GetTableInfo(id int64) *model.TableInfo {
@@ -190,6 +186,8 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 		txn.KVTxn.SetPriority(getTiKVPriority(val.(int)))
 	case kv.NotFillCache:
 		txn.KVTxn.GetSnapshot().SetNotFillCache(val.(bool))
+	case kv.SyncLog:
+		txn.EnableForceSyncLog()
 	case kv.Pessimistic:
 		txn.SetPessimistic(val.(bool))
 	case kv.SnapshotTS:
@@ -227,20 +225,10 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 		txn.KVTxn.GetSnapshot().SetMatchStoreLabels(val.([]*metapb.StoreLabel))
 	case kv.ResourceGroupTag:
 		txn.KVTxn.SetResourceGroupTag(val.([]byte))
-	case kv.ResourceGroupTagger:
-		txn.KVTxn.SetResourceGroupTagger(val.(tikvrpc.ResourceGroupTagger))
 	case kv.KVFilter:
 		txn.KVTxn.SetKVFilter(val.(tikv.KVFilter))
 	case kv.SnapInterceptor:
 		txn.snapshotInterceptor = val.(kv.SnapshotInterceptor)
-	case kv.CommitTSUpperBoundCheck:
-		txn.KVTxn.SetCommitTSUpperBoundCheck(val.(func(commitTS uint64) bool))
-	case kv.RPCInterceptor:
-		txn.KVTxn.SetRPCInterceptor(val.(interceptor.RPCInterceptor))
-	case kv.AssertionLevel:
-		txn.KVTxn.SetAssertionLevel(val.(kvrpcpb.AssertionLevel))
-	case kv.TableToColumnMaps:
-		txn.columnMapsCache = val
 	}
 }
 
@@ -250,8 +238,6 @@ func (txn *tikvTxn) GetOption(opt int) interface{} {
 		return !txn.KVTxn.IsCasualConsistency()
 	case kv.TxnScope:
 		return txn.KVTxn.GetScope()
-	case kv.TableToColumnMaps:
-		return txn.columnMapsCache
 	default:
 		return nil
 	}
@@ -294,19 +280,6 @@ func (txn *tikvTxn) extractKeyExistsErr(key kv.Key) error {
 		return extractKeyExistsErrFromHandle(key, value, tblInfo)
 	}
 	return extractKeyExistsErrFromIndex(key, value, tblInfo, indexID)
-}
-
-// SetAssertion sets an assertion for the key operation.
-func (txn *tikvTxn) SetAssertion(key []byte, assertion ...kv.FlagsOp) error {
-	f, err := txn.GetUnionStore().GetMemBuffer().GetFlags(key)
-	if err != nil && !tikverr.IsErrNotFound(err) {
-		return err
-	}
-	if err == nil && f.HasAssertionFlags() {
-		return nil
-	}
-	txn.GetUnionStore().GetMemBuffer().UpdateFlags(key, getTiKVFlagsOps(assertion)...)
-	return nil
 }
 
 // TiDBKVFilter is the filter specific to TiDB to filter out KV pairs that needn't be committed.

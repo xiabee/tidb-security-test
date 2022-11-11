@@ -17,12 +17,12 @@ package encrypt
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/testkit/testsetup"
+	"github.com/pingcap/tidb/util/testbridge"
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	testsetup.SetupForCommonTest()
+	testbridge.WorkaroundGoCheckFlags()
 
 	goleak.VerifyTestMain(m)
 }

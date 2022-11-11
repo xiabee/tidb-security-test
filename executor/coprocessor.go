@@ -118,8 +118,8 @@ func (h *CoprocessorDAGHandler) buildResponseAndSendToStream(chk *chunk.Chunk, t
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
-	for i := range chunks {
-		resp := h.buildStreamResponse(&chunks[i])
+	for _, c := range chunks {
+		resp := h.buildStreamResponse(&c)
 		if err = stream.Send(resp); err != nil {
 			return err
 		}
@@ -170,7 +170,7 @@ func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (Exec
 	}
 	plan = core.InjectExtraProjection(plan)
 	// Build executor.
-	b := newExecutorBuilder(h.sctx, is, nil, oracle.GlobalTxnScope)
+	b := newExecutorBuilder(h.sctx, is, nil, 0, false, oracle.GlobalTxnScope)
 	return b.build(plan), nil
 }
 

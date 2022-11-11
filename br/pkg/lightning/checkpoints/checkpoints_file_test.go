@@ -6,13 +6,23 @@ import (
 	"sort"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
-	"github.com/stretchr/testify/require"
 )
+
+func Test(t *testing.T) {
+	TestingT(t)
+}
+
+var _ = Suite(&cpFileSuite{})
+
+type cpFileSuite struct {
+	cpdb *checkpoints.FileCheckpointsDB
+}
 
 func newTestConfig() *config.Config {
 	cfg := config.NewConfig()
@@ -26,15 +36,16 @@ func newTestConfig() *config.Config {
 	return cfg
 }
 
-func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func()) {
-	dir := t.TempDir()
+func (s *cpFileSuite) SetUpTest(c *C) {
+	dir := c.MkDir()
+	s.cpdb = checkpoints.NewFileCheckpointsDB(filepath.Join(dir, "cp.pb"))
+
 	ctx := context.Background()
-	cpdb, err := checkpoints.NewFileCheckpointsDB(ctx, filepath.Join(dir, "cp.pb"))
-	require.NoError(t, err)
+	cpdb := s.cpdb
 
 	// 2. initialize with checkpoint data.
 	cfg := newTestConfig()
-	err = cpdb.Initialize(ctx, cfg, map[string]*checkpoints.TidbDBInfo{
+	err := cpdb.Initialize(ctx, cfg, map[string]*checkpoints.TidbDBInfo{
 		"db1": {
 			Name: "db1",
 			Tables: map[string]*checkpoints.TidbTableInfo{
@@ -49,7 +60,7 @@ func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func())
 			},
 		},
 	})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	// 3. set some checkpoints
 
@@ -79,7 +90,7 @@ func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func())
 			Chunks: nil,
 		},
 	})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	err = cpdb.InsertEngineCheckpoints(ctx, "`db2`.`t3`", map[int32]*checkpoints.EngineCheckpoint{
 		-1: {
@@ -87,7 +98,7 @@ func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func())
 			Chunks: nil,
 		},
 	})
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 
 	// 4. update some checkpoints
 
@@ -120,13 +131,13 @@ func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func())
 	ccm.MergeInto(cpd)
 
 	cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{"`db1`.`t2`": cpd})
-	return cpdb, func() {
-		err := cpdb.Close()
-		require.NoError(t, err)
-	}
 }
 
-func setInvalidStatus(cpdb *checkpoints.FileCheckpointsDB) {
+func (s *cpFileSuite) TearDownTest(c *C) {
+	c.Assert(s.cpdb.Close(), IsNil)
+}
+
+func (s *cpFileSuite) setInvalidStatus() {
 	cpd := checkpoints.NewTableCheckpointDiff()
 	scm := checkpoints.StatusCheckpointMerger{
 		EngineID: -1,
@@ -135,22 +146,20 @@ func setInvalidStatus(cpdb *checkpoints.FileCheckpointsDB) {
 	scm.SetInvalid()
 	scm.MergeInto(cpd)
 
-	cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{
+	s.cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{
 		"`db1`.`t2`": cpd,
 		"`db2`.`t3`": cpd,
 	})
 }
 
-func TestGet(t *testing.T) {
+func (s *cpFileSuite) TestGet(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
 	// 5. get back the checkpoints
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
-	expect := &checkpoints.TableCheckpoint{
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
+	c.Assert(cp, DeepEquals, &checkpoints.TableCheckpoint{
 		Status:    checkpoints.CheckpointStatusAllWritten,
 		AllocBase: 132861,
 		Checksum:  verification.MakeKVChecksum(4492, 686, 486070148910),
@@ -182,12 +191,11 @@ func TestGet(t *testing.T) {
 				}},
 			},
 		},
-	}
-	require.Equal(t, expect, cp)
+	})
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.NoError(t, err)
-	expect = &checkpoints.TableCheckpoint{
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(err, IsNil)
+	c.Assert(cp, DeepEquals, &checkpoints.TableCheckpoint{
 		Status: checkpoints.CheckpointStatusLoaded,
 		Engines: map[int32]*checkpoints.EngineCheckpoint{
 			-1: {
@@ -195,97 +203,86 @@ func TestGet(t *testing.T) {
 				Chunks: []*checkpoints.ChunkCheckpoint{},
 			},
 		},
-	}
-	require.Equal(t, expect, cp)
+	})
 
-	cp, err = cpdb.Get(ctx, "`db3`.`not-exists`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err = s.cpdb.Get(ctx, "`db3`.`not-exists`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 }
 
-func TestRemoveAllCheckpoints(t *testing.T) {
+func (s *cpFileSuite) TestRemoveAllCheckpoints(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	err := cpdb.RemoveCheckpoint(ctx, "all")
-	require.NoError(t, err)
+	err := s.cpdb.RemoveCheckpoint(ctx, "all")
+	c.Assert(err, IsNil)
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 }
 
-func TestRemoveOneCheckpoint(t *testing.T) {
+func (s *cpFileSuite) TestRemoveOneCheckpoint(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	err := cpdb.RemoveCheckpoint(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
+	err := s.cpdb.RemoveCheckpoint(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusLoaded, cp.Status)
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusLoaded)
 }
 
-func TestIgnoreAllErrorCheckpoints(t *testing.T) {
+func (s *cpFileSuite) TestIgnoreAllErrorCheckpoints(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	setInvalidStatus(cpdb)
+	s.setInvalidStatus()
 
-	err := cpdb.IgnoreErrorCheckpoint(ctx, "all")
-	require.NoError(t, err)
+	err := s.cpdb.IgnoreErrorCheckpoint(ctx, "all")
+	c.Assert(err, IsNil)
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusLoaded, cp.Status)
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusLoaded)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusLoaded, cp.Status)
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusLoaded)
 }
 
-func TestIgnoreOneErrorCheckpoints(t *testing.T) {
+func (s *cpFileSuite) TestIgnoreOneErrorCheckpoints(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	setInvalidStatus(cpdb)
+	s.setInvalidStatus()
 
-	err := cpdb.IgnoreErrorCheckpoint(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
+	err := s.cpdb.IgnoreErrorCheckpoint(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusLoaded, cp.Status)
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusLoaded)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusAllWritten/10, cp.Status)
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusAllWritten/10)
 }
 
-func TestDestroyAllErrorCheckpoints(t *testing.T) {
+func (s *cpFileSuite) TestDestroyAllErrorCheckpoints(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	setInvalidStatus(cpdb)
+	s.setInvalidStatus()
 
-	dtc, err := cpdb.DestroyErrorCheckpoint(ctx, "all")
-	require.NoError(t, err)
+	dtc, err := s.cpdb.DestroyErrorCheckpoint(ctx, "all")
+	c.Assert(err, IsNil)
 	sort.Slice(dtc, func(i, j int) bool { return dtc[i].TableName < dtc[j].TableName })
-	expect := []checkpoints.DestroyedTableCheckpoint{
+	c.Assert(dtc, DeepEquals, []checkpoints.DestroyedTableCheckpoint{
 		{
 			TableName:   "`db1`.`t2`",
 			MinEngineID: -1,
@@ -296,41 +293,37 @@ func TestDestroyAllErrorCheckpoints(t *testing.T) {
 			MinEngineID: -1,
 			MaxEngineID: -1,
 		},
-	}
-	require.Equal(t, expect, dtc)
+	})
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 }
 
-func TestDestroyOneErrorCheckpoint(t *testing.T) {
+func (s *cpFileSuite) TestDestroyOneErrorCheckpoint(c *C) {
 	ctx := context.Background()
-	cpdb, clean := newFileCheckpointsDB(t)
-	defer clean()
 
-	setInvalidStatus(cpdb)
+	s.setInvalidStatus()
 
-	dtc, err := cpdb.DestroyErrorCheckpoint(ctx, "`db1`.`t2`")
-	require.NoError(t, err)
-	expect := []checkpoints.DestroyedTableCheckpoint{
+	dtc, err := s.cpdb.DestroyErrorCheckpoint(ctx, "`db1`.`t2`")
+	c.Assert(err, IsNil)
+	c.Assert(dtc, DeepEquals, []checkpoints.DestroyedTableCheckpoint{
 		{
 			TableName:   "`db1`.`t2`",
 			MinEngineID: -1,
 			MaxEngineID: 0,
 		},
-	}
-	require.Equal(t, expect, dtc)
+	})
 
-	cp, err := cpdb.Get(ctx, "`db1`.`t2`")
-	require.Nil(t, cp)
-	require.True(t, errors.IsNotFound(err))
+	cp, err := s.cpdb.Get(ctx, "`db1`.`t2`")
+	c.Assert(cp, IsNil)
+	c.Assert(errors.IsNotFound(err), IsTrue)
 
-	cp, err = cpdb.Get(ctx, "`db2`.`t3`")
-	require.NoError(t, err)
-	require.Equal(t, checkpoints.CheckpointStatusAllWritten/10, cp.Status)
+	cp, err = s.cpdb.Get(ctx, "`db2`.`t3`")
+	c.Assert(err, IsNil)
+	c.Assert(cp.Status, Equals, checkpoints.CheckpointStatusAllWritten/10)
 }

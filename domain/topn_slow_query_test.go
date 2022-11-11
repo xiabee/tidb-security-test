@@ -22,6 +22,8 @@ import (
 )
 
 func TestPush(t *testing.T) {
+	t.Parallel()
+
 	slowQuery := newTopNSlowQueries(10, 0, 10)
 	// Insert data into the heap.
 	slowQuery.Append(&SlowQueryInfo{Duration: 300 * time.Millisecond})
@@ -68,6 +70,8 @@ func TestPush(t *testing.T) {
 }
 
 func TestRemoveExpired(t *testing.T) {
+	t.Parallel()
+
 	now := time.Now()
 	slowQuery := newTopNSlowQueries(6, 3*time.Second, 10)
 
@@ -95,6 +99,8 @@ func TestRemoveExpired(t *testing.T) {
 }
 
 func TestQueue(t *testing.T) {
+	t.Parallel()
+
 	q := newTopNSlowQueries(10, time.Minute, 5)
 	q.Append(&SlowQueryInfo{SQL: "aaa"})
 	q.Append(&SlowQueryInfo{SQL: "bbb"})

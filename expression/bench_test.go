@@ -23,7 +23,6 @@ import (
 	"net"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -39,7 +38,7 @@ import (
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/benchdaily"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/math"
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -63,23 +62,40 @@ func (h *benchHelper) init() {
 	h.ctx.GetSessionVars().MaxChunkSize = numRows
 
 	h.inputTypes = make([]*types.FieldType, 0, 10)
-	ftb := types.NewFieldTypeBuilder()
-	ftb.SetType(mysql.TypeLonglong).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxIntWidth).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin)
-	h.inputTypes = append(h.inputTypes, ftb.BuildP())
-
-	ftb = types.NewFieldTypeBuilder()
-	ftb.SetType(mysql.TypeDouble).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxRealWidth).SetDecimal(types.UnspecifiedLength).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin)
-	h.inputTypes = append(h.inputTypes, ftb.BuildP())
-
-	ftb = types.NewFieldTypeBuilder()
-	ftb.SetType(mysql.TypeNewDecimal).SetFlag(mysql.BinaryFlag).SetFlen(11).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin)
-	h.inputTypes = append(h.inputTypes, ftb.BuildP())
+	h.inputTypes = append(h.inputTypes, &types.FieldType{
+		Tp:      mysql.TypeLonglong,
+		Flen:    mysql.MaxIntWidth,
+		Decimal: 0,
+		Flag:    mysql.BinaryFlag,
+		Charset: charset.CharsetBin,
+		Collate: charset.CollationBin,
+	})
+	h.inputTypes = append(h.inputTypes, &types.FieldType{
+		Tp:      mysql.TypeDouble,
+		Flen:    mysql.MaxRealWidth,
+		Decimal: types.UnspecifiedLength,
+		Flag:    mysql.BinaryFlag,
+		Charset: charset.CharsetBin,
+		Collate: charset.CollationBin,
+	})
+	h.inputTypes = append(h.inputTypes, &types.FieldType{
+		Tp:      mysql.TypeNewDecimal,
+		Flen:    11,
+		Decimal: 0,
+		Flag:    mysql.BinaryFlag,
+		Charset: charset.CharsetBin,
+		Collate: charset.CollationBin,
+	})
 
 	// Use 20 string columns to show the cache performance.
 	for i := 0; i < 20; i++ {
-		ftb = types.NewFieldTypeBuilder()
-		ftb.SetType(mysql.TypeVarString).SetDecimal(types.UnspecifiedLength).SetCharset(charset.CharsetUTF8).SetCollate(charset.CollationUTF8)
-		h.inputTypes = append(h.inputTypes, ftb.BuildP())
+		h.inputTypes = append(h.inputTypes, &types.FieldType{
+			Tp:      mysql.TypeVarString,
+			Flen:    0,
+			Decimal: types.UnspecifiedLength,
+			Charset: charset.CharsetUTF8,
+			Collate: charset.CollationUTF8,
+		})
 	}
 
 	h.inputChunk = chunk.NewChunkWithCapacity(h.inputTypes, numRows)
@@ -202,26 +218,8 @@ type defaultRandGen struct {
 	*rand.Rand
 }
 
-type lockedSource struct {
-	lk  sync.Mutex
-	src rand.Source
-}
-
-func (r *lockedSource) Int63() (n int64) {
-	r.lk.Lock()
-	n = r.src.Int63()
-	r.lk.Unlock()
-	return
-}
-
-func (r *lockedSource) Seed(seed int64) {
-	r.lk.Lock()
-	r.src.Seed(seed)
-	r.lk.Unlock()
-}
-
 func newDefaultRandGen() *defaultRandGen {
-	return &defaultRandGen{rand.New(&lockedSource{src: rand.NewSource(int64(rand.Uint64()))})}
+	return &defaultRandGen{rand.New(rand.NewSource(int64(rand.Uint64())))}
 }
 
 type defaultGener struct {
@@ -445,8 +443,8 @@ func (g *rangeDurationGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
-	tm := (mathutil.Abs(g.randGen.Int63n(12))*3600 + mathutil.Abs(g.randGen.Int63n(60))*60 + mathutil.Abs(g.randGen.Int63n(60))) * 1000
-	tu := (tm + mathutil.Abs(g.randGen.Int63n(1000))) * 1000
+	tm := (math.Abs(g.randGen.Int63n(12))*3600 + math.Abs(g.randGen.Int63n(60))*60 + math.Abs(g.randGen.Int63n(60))) * 1000
+	tu := (tm + math.Abs(g.randGen.Int63n(1000))) * 1000
 	return types.Duration{
 		Duration: time.Duration(tu * 1000)}
 }
@@ -1101,6 +1099,8 @@ func genVecExprBenchCase(ctx sessionctx.Context, funcName string, testCase vecEx
 // testVectorizedEvalOneVec is used to verify that the vectorized
 // expression is evaluated correctly during projection
 func testVectorizedEvalOneVec(t *testing.T, vecExprCases vecExprBenchCases) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 	for funcName, testCases := range vecExprCases {
 		for _, testCase := range testCases {
@@ -1302,6 +1302,8 @@ func removeTestOptions(args []string) []string {
 // testVectorizedBuiltinFunc is used to verify that the vectorized
 // expression is evaluated correctly
 func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
+	t.Parallel()
+
 	testFunc := make(map[string]bool)
 	argList := removeTestOptions(flag.Args())
 	testAll := len(argList) == 0
@@ -1468,7 +1470,7 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			default:
-				t.Fatalf("evalType=%v is not supported", testCase.retEvalType)
+				t.Fatal(fmt.Sprintf("evalType=%v is not supported", testCase.retEvalType))
 			}
 
 			// check warnings
@@ -1485,6 +1487,8 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 // testVectorizedBuiltinFuncForRand is used to verify that the vectorized
 // expression is evaluated correctly
 func testVectorizedBuiltinFuncForRand(t *testing.T, vecExprCases vecExprBenchCases) {
+	t.Parallel()
+
 	for funcName, testCases := range vecExprCases {
 		require.True(t, strings.EqualFold("rand", funcName))
 
@@ -1510,7 +1514,7 @@ func testVectorizedBuiltinFuncForRand(t *testing.T, vecExprCases vecExprBenchCas
 					require.True(t, (0 <= v) && (v < 1))
 				}
 			default:
-				t.Fatalf("evalType=%v is not supported", testCase.retEvalType)
+				t.Fatal(fmt.Sprintf("evalType=%v is not supported", testCase.retEvalType))
 			}
 		}
 	}
@@ -1613,7 +1617,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 						}
 					}
 				default:
-					b.Fatalf("evalType=%v is not supported", testCase.retEvalType)
+					b.Fatal(fmt.Sprintf("evalType=%v is not supported", testCase.retEvalType))
 				}
 			})
 			b.Run(baseFuncName+"-NonVecBuiltinFunc", func(b *testing.B) {
@@ -1726,7 +1730,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 						}
 					}
 				default:
-					b.Fatalf("evalType=%v is not supported", testCase.retEvalType)
+					b.Fatal(fmt.Sprintf("evalType=%v is not supported", testCase.retEvalType))
 				}
 			})
 		}

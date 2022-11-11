@@ -16,18 +16,16 @@ package aggfuncs_test
 
 import (
 	"encoding/binary"
-	"fmt"
 	"testing"
 
 	"github.com/dgryski/go-farm"
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/executor/aggfuncs"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/set"
-	"github.com/stretchr/testify/require"
 )
 
 func genApproxDistinctMergePartialResult(begin, end uint64) string {
@@ -41,15 +39,15 @@ func genApproxDistinctMergePartialResult(begin, end uint64) string {
 	return string(o.Serialize())
 }
 
-func TestMergePartialResult4Count(t *testing.T) {
+func (s *testSuite) TestMergePartialResult4Count(c *C) {
 	tester := buildAggTester(ast.AggFuncCount, mysql.TypeLonglong, 5, 5, 3, 8)
-	testMergePartialResult(t, tester)
+	s.testMergePartialResult(c, tester)
 
 	tester = buildAggTester(ast.AggFuncApproxCountDistinct, mysql.TypeLonglong, 5, genApproxDistinctMergePartialResult(0, 5), genApproxDistinctMergePartialResult(2, 5), 5)
-	testMergePartialResult(t, tester)
+	s.testMergePartialResult(c, tester)
 }
 
-func TestCount(t *testing.T) {
+func (s *testSuite) TestCount(c *C) {
 	tests := []aggTest{
 		buildAggTester(ast.AggFuncCount, mysql.TypeLonglong, 5, 0, 5),
 		buildAggTester(ast.AggFuncCount, mysql.TypeFloat, 5, 0, 5),
@@ -60,10 +58,8 @@ func TestCount(t *testing.T) {
 		buildAggTester(ast.AggFuncCount, mysql.TypeDuration, 5, 0, 5),
 		buildAggTester(ast.AggFuncCount, mysql.TypeJSON, 5, 0, 5),
 	}
-	for i, test := range tests {
-		t.Run(fmt.Sprintf("%s_%d", test.funcName, i), func(t *testing.T) {
-			testAggFunc(t, test)
-		})
+	for _, test := range tests {
+		s.testAggFunc(c, test)
 	}
 	tests2 := []multiArgsAggTest{
 		buildMultiArgsAggTester(ast.AggFuncCount, []byte{mysql.TypeLonglong, mysql.TypeLonglong}, mysql.TypeLonglong, 5, 0, 5),
@@ -75,10 +71,8 @@ func TestCount(t *testing.T) {
 		buildMultiArgsAggTester(ast.AggFuncCount, []byte{mysql.TypeDuration, mysql.TypeDuration}, mysql.TypeLonglong, 5, 0, 5),
 		buildMultiArgsAggTester(ast.AggFuncCount, []byte{mysql.TypeJSON, mysql.TypeJSON}, mysql.TypeLonglong, 5, 0, 5),
 	}
-	for i, test := range tests2 {
-		t.Run(fmt.Sprintf("%s_%d", test.funcName, i), func(t *testing.T) {
-			testMultiArgsAggFunc(t, mock.NewContext(), test)
-		})
+	for _, test := range tests2 {
+		s.testMultiArgsAggFunc(c, test)
 	}
 
 	tests3 := []aggTest{
@@ -92,7 +86,7 @@ func TestCount(t *testing.T) {
 		buildAggTester(ast.AggFuncCount, mysql.TypeJSON, 5, 0, 5),
 	}
 	for _, test := range tests3 {
-		testAggFunc(t, test)
+		s.testAggFunc(c, test)
 	}
 
 	tests4 := []multiArgsAggTest{
@@ -106,14 +100,12 @@ func TestCount(t *testing.T) {
 		buildMultiArgsAggTester(ast.AggFuncApproxCountDistinct, []byte{mysql.TypeJSON, mysql.TypeJSON}, mysql.TypeLonglong, 5, 0, 5),
 	}
 
-	for i, test := range tests4 {
-		t.Run(fmt.Sprintf("%s_%d", test.funcName, i), func(t *testing.T) {
-			testMultiArgsAggFunc(t, mock.NewContext(), test)
-		})
+	for _, test := range tests4 {
+		s.testMultiArgsAggFunc(c, test)
 	}
 }
 
-func TestMemCount(t *testing.T) {
+func (s *testSuite) TestMemCount(c *C) {
 	tests := []aggMemTest{
 		buildAggMemTester(ast.AggFuncCount, mysql.TypeLonglong, 5,
 			aggfuncs.DefPartialResult4CountSize, defaultUpdateMemDeltaGens, false),
@@ -150,29 +142,28 @@ func TestMemCount(t *testing.T) {
 		buildAggMemTester(ast.AggFuncApproxCountDistinct, mysql.TypeString, 5,
 			aggfuncs.DefPartialResult4ApproxCountDistinctSize, approxCountDistinctUpdateMemDeltaGens, true),
 	}
-	for i, test := range tests {
-		t.Run(fmt.Sprintf("%s_%d", test.aggTest.funcName, i), func(t *testing.T) {
-			testAggMemFunc(t, test)
-		})
+	for _, test := range tests {
+		s.testAggMemFunc(c, test)
 	}
 }
 
-func TestWriteTime(t *testing.T) {
-	tt, err := types.ParseDate(&(stmtctx.StatementContext{}), "2020-11-11")
-	require.NoError(t, err)
+func (s *testSuite) TestWriteTime(c *C) {
+	t, err := types.ParseDate(&(stmtctx.StatementContext{}), "2020-11-11")
+	c.Assert(err, IsNil)
 
 	buf := make([]byte, 16)
 	for i := range buf {
 		buf[i] = uint8(255)
 	}
-	aggfuncs.WriteTime(buf, tt)
+	aggfuncs.WriteTime(buf, t)
 	for i := range buf {
-		require.False(t, buf[i] == uint8(255))
+		c.Assert(buf[i] == uint8(255), IsFalse)
 	}
 }
 
 func BenchmarkCount(b *testing.B) {
-	ctx := mock.NewContext()
+	s := testSuite{}
+	s.SetUpSuite(nil)
 
 	rowNum := 50000
 	tests := []aggTest{
@@ -186,7 +177,7 @@ func BenchmarkCount(b *testing.B) {
 		buildAggTester(ast.AggFuncCount, mysql.TypeJSON, rowNum, 0, rowNum),
 	}
 	for _, test := range tests {
-		benchmarkAggFunc(b, ctx, test)
+		s.benchmarkAggFunc(b, test)
 	}
 
 	tests2 := []multiArgsAggTest{
@@ -200,7 +191,7 @@ func BenchmarkCount(b *testing.B) {
 		buildMultiArgsAggTester(ast.AggFuncCount, []byte{mysql.TypeJSON, mysql.TypeJSON}, mysql.TypeLonglong, rowNum, 0, rowNum),
 	}
 	for _, test := range tests2 {
-		benchmarkMultiArgsAggFunc(b, ctx, test)
+		s.benchmarkMultiArgsAggFunc(b, test)
 	}
 
 	tests3 := []multiArgsAggTest{
@@ -214,6 +205,6 @@ func BenchmarkCount(b *testing.B) {
 		buildMultiArgsAggTester(ast.AggFuncApproxCountDistinct, []byte{mysql.TypeJSON, mysql.TypeJSON}, mysql.TypeLonglong, rowNum, 0, rowNum),
 	}
 	for _, test := range tests3 {
-		benchmarkMultiArgsAggFunc(b, ctx, test)
+		s.benchmarkMultiArgsAggFunc(b, test)
 	}
 }

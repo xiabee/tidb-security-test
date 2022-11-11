@@ -16,8 +16,9 @@ package handle
 
 import (
 	"context"
-	"strconv"
+	"fmt"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser/model"
@@ -27,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
 )
@@ -54,7 +54,7 @@ func (h *Handle) initStatsMeta4Chunk(is infoschema.InfoSchema, cache *statsCache
 			Version:  row.GetUint64(0),
 			Name:     getFullTableName(is, tableInfo),
 		}
-		cache.Put(physicalID, tbl)
+		cache.tables[physicalID] = tbl
 	}
 }
 
@@ -65,8 +65,8 @@ func (h *Handle) initStatsMeta(is infoschema.InfoSchema) (statsCache, error) {
 		return statsCache{}, errors.Trace(err)
 	}
 	defer terror.Call(rc.Close)
-	tables := newStatsCache()
-	req := rc.NewChunk(nil)
+	tables := statsCache{tables: make(map[int64]*statistics.Table)}
+	req := rc.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	for {
 		err := rc.Next(context.TODO(), req)
@@ -84,7 +84,7 @@ func (h *Handle) initStatsMeta(is infoschema.InfoSchema) (statsCache, error) {
 func (h *Handle) initStatsHistograms4Chunk(is infoschema.InfoSchema, cache *statsCache, iter *chunk.Iterator4Chunk) {
 	for row := iter.Begin(); row != iter.End(); row = iter.Next() {
 		tblID, statsVer := row.GetInt64(0), row.GetInt64(8)
-		table, ok := cache.Get(tblID)
+		table, ok := cache.tables[tblID]
 		if !ok {
 			continue
 		}
@@ -146,14 +146,13 @@ func (h *Handle) initStatsHistograms4Chunk(is infoschema.InfoSchema, cache *stat
 				PhysicalID: table.PhysicalID,
 				Info:       colInfo,
 				Count:      nullCount + topnCount,
-				IsHandle:   tbl.Meta().PKIsHandle && mysql.HasPriKeyFlag(colInfo.GetFlag()),
+				IsHandle:   tbl.Meta().PKIsHandle && mysql.HasPriKeyFlag(colInfo.Flag),
 				Flag:       row.GetInt64(10),
 				StatsVer:   statsVer,
 			}
 			lastAnalyzePos.Copy(&col.LastAnalyzePos)
 			table.Columns[hist.ID] = col
 		}
-		cache.Put(tblID, table)
 	}
 }
 
@@ -164,7 +163,7 @@ func (h *Handle) initStatsHistograms(is infoschema.InfoSchema, cache *statsCache
 		return errors.Trace(err)
 	}
 	defer terror.Call(rc.Close)
-	req := rc.NewChunk(nil)
+	req := rc.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	for {
 		err := rc.Next(context.TODO(), req)
@@ -180,9 +179,9 @@ func (h *Handle) initStatsHistograms(is infoschema.InfoSchema, cache *statsCache
 }
 
 func (h *Handle) initStatsTopN4Chunk(cache *statsCache, iter *chunk.Iterator4Chunk) {
-	affectedIndexes := make(map[*statistics.Index]struct{})
+	affectedIndexes := make(map[int64]*statistics.Index)
 	for row := iter.Begin(); row != iter.End(); row = iter.Next() {
-		table, ok := cache.Get(row.GetInt64(0))
+		table, ok := cache.tables[row.GetInt64(0)]
 		if !ok {
 			continue
 		}
@@ -193,12 +192,12 @@ func (h *Handle) initStatsTopN4Chunk(cache *statsCache, iter *chunk.Iterator4Chu
 		if idx.TopN == nil {
 			idx.TopN = statistics.NewTopN(32)
 		}
-		affectedIndexes[idx] = struct{}{}
+		affectedIndexes[row.GetInt64(1)] = idx
 		data := make([]byte, len(row.GetBytes(2)))
 		copy(data, row.GetBytes(2))
 		idx.TopN.AppendTopN(data, row.GetUint64(3))
 	}
-	for idx := range affectedIndexes {
+	for _, idx := range affectedIndexes {
 		idx.TopN.Sort()
 	}
 }
@@ -210,7 +209,7 @@ func (h *Handle) initStatsTopN(cache *statsCache) error {
 		return errors.Trace(err)
 	}
 	defer terror.Call(rc.Close)
-	req := rc.NewChunk(nil)
+	req := rc.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	for {
 		err := rc.Next(context.TODO(), req)
@@ -227,7 +226,7 @@ func (h *Handle) initStatsTopN(cache *statsCache) error {
 
 func (h *Handle) initStatsFMSketch4Chunk(cache *statsCache, iter *chunk.Iterator4Chunk) {
 	for row := iter.Begin(); row != iter.End(); row = iter.Next() {
-		table, ok := cache.Get(row.GetInt64(0))
+		table, ok := cache.tables[row.GetInt64(0)]
 		if !ok {
 			continue
 		}
@@ -258,7 +257,7 @@ func (h *Handle) initStatsFMSketch(cache *statsCache) error {
 		return errors.Trace(err)
 	}
 	defer terror.Call(rc.Close)
-	req := rc.NewChunk(nil)
+	req := rc.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	for {
 		err := rc.Next(context.TODO(), req)
@@ -276,7 +275,7 @@ func (h *Handle) initStatsFMSketch(cache *statsCache) error {
 func (h *Handle) initStatsBuckets4Chunk(cache *statsCache, iter *chunk.Iterator4Chunk) {
 	for row := iter.Begin(); row != iter.End(); row = iter.Next() {
 		tableID, isIndex, histID := row.GetInt64(0), row.GetInt64(1), row.GetInt64(2)
-		table, ok := cache.Get(tableID)
+		table, ok := cache.tables[tableID]
 		if !ok {
 			continue
 		}
@@ -295,7 +294,7 @@ func (h *Handle) initStatsBuckets4Chunk(cache *statsCache, iter *chunk.Iterator4
 				continue
 			}
 			column.Count += row.GetInt64(3)
-			if !mysql.HasPriKeyFlag(column.Info.GetFlag()) {
+			if !mysql.HasPriKeyFlag(column.Info.Flag) {
 				continue
 			}
 			hist = &column.Histogram
@@ -331,7 +330,7 @@ func (h *Handle) initTopNCountSum(tableID, colID int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	req := rs.NewChunk(nil)
+	req := rs.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	err = rs.Next(context.TODO(), req)
 	if err != nil {
@@ -350,7 +349,7 @@ func (h *Handle) initStatsBuckets(cache *statsCache) error {
 		return errors.Trace(err)
 	}
 	defer terror.Call(rc.Close)
-	req := rc.NewChunk(nil)
+	req := rc.NewChunk()
 	iter := chunk.NewIterator4Chunk(req)
 	for {
 		err := rc.Next(context.TODO(), req)
@@ -363,8 +362,8 @@ func (h *Handle) initStatsBuckets(cache *statsCache) error {
 		h.initStatsBuckets4Chunk(cache, iter)
 	}
 	lastVersion := uint64(0)
-	for _, table := range cache.Values() {
-		lastVersion = mathutil.Max(lastVersion, table.Version)
+	for _, table := range cache.tables {
+		lastVersion = mathutil.MaxUint64(lastVersion, table.Version)
 		for _, idx := range table.Indices {
 			for i := 1; i < idx.Len(); i++ {
 				idx.Buckets[i].Count += idx.Buckets[i-1].Count
@@ -416,19 +415,8 @@ func (h *Handle) InitStats(is infoschema.InfoSchema) (err error) {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	cache.FreshMemUsage()
+	cache.initMemoryUsage()
 	h.updateStatsCache(cache)
-	v := h.statsCache.Load()
-	if v == nil {
-		return nil
-	}
-	healthyChange := &statsHealthyChange{}
-	for _, tbl := range v.(statsCache).Values() {
-		if healthy, ok := tbl.GetStatsHealthy(); ok {
-			healthyChange.add(healthy)
-		}
-	}
-	healthyChange.apply()
 	return nil
 }
 
@@ -440,5 +428,5 @@ func getFullTableName(is infoschema.InfoSchema, tblInfo *model.TableInfo) string
 			}
 		}
 	}
-	return strconv.FormatInt(tblInfo.ID, 10)
+	return fmt.Sprintf("%d", tblInfo.ID)
 }

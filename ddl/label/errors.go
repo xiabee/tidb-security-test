@@ -19,4 +19,6 @@ import "errors"
 var (
 	// ErrInvalidAttributesFormat is from attributes.go
 	ErrInvalidAttributesFormat = errors.New("attributes should be in format 'key=value'")
+	// ErrConflictingAttributes is from attributes.go
+	ErrConflictingAttributes = errors.New("conflicting attributes")
 )

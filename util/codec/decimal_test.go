@@ -22,6 +22,8 @@ import (
 )
 
 func TestDecimalCodec(t *testing.T) {
+	t.Parallel()
+
 	inputs := []struct {
 		Input float64
 	}{
@@ -61,6 +63,8 @@ func TestDecimalCodec(t *testing.T) {
 }
 
 func TestFrac(t *testing.T) {
+	t.Parallel()
+
 	inputs := []struct {
 		Input *types.MyDecimal
 	}{

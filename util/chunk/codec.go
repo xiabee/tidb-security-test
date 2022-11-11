@@ -19,9 +19,9 @@ import (
 	"reflect"
 	"unsafe"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/mathutil"
 )
 
 // Codec is used to:
@@ -140,9 +140,6 @@ func (c *Codec) decodeColumn(buffer []byte, col *Column, ordinal int) (remained 
 
 	// decode data.
 	col.data = buffer[:numDataBytes:numDataBytes]
-	// The column reference the data of the grpc response, the memory of the grpc message cannot be GCed if we reuse
-	// this column. Thus, we set `avoidReusing` to true.
-	col.avoidReusing = true
 	return buffer[numDataBytes:]
 }
 
@@ -173,7 +170,7 @@ func bytesToI64Slice(b []byte) (i64s []int64) {
 const varElemLen = -1
 
 func getFixedLen(colType *types.FieldType) int {
-	switch colType.GetType() {
+	switch colType.Tp {
 	case mysql.TypeFloat:
 		return 4
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong,
@@ -206,7 +203,7 @@ func EstimateTypeWidth(colType *types.FieldType) int {
 		return colLen
 	}
 
-	colLen = colType.GetFlen()
+	colLen = colType.Flen
 	if colLen > 0 {
 		if colLen <= 32 {
 			return colLen

@@ -24,6 +24,8 @@ import (
 )
 
 func TestGetEnforcerRules(t *testing.T) {
+	t.Parallel()
+
 	prop := &property.PhysicalProperty{}
 	group := memo.NewGroupWithSchema(nil, expression.NewSchema())
 	enforcers := GetEnforcerRules(group, prop)
@@ -40,6 +42,7 @@ func TestGetEnforcerRules(t *testing.T) {
 }
 
 func TestNewProperties(t *testing.T) {
+	t.Parallel()
 	prop := &property.PhysicalProperty{}
 	col := &expression.Column{}
 	group := memo.NewGroupWithSchema(nil, expression.NewSchema())

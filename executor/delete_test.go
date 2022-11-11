@@ -24,6 +24,8 @@ import (
 )
 
 func TestDeleteLockKey(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -109,6 +111,8 @@ func TestDeleteLockKey(t *testing.T) {
 }
 
 func TestIssue21200(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 

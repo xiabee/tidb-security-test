@@ -15,16 +15,12 @@
 package expression_test
 
 import (
-	"testing"
-
-	"github.com/pingcap/tidb/testkit"
+	. "github.com/pingcap/check"
+	"github.com/pingcap/tidb/util/testkit"
 )
 
-func TestFoldIfNull(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
+func (s *testIntegrationSuite) TestFoldIfNull(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test;`)
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t(a bigint, b bigint);`)

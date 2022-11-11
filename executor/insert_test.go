@@ -19,9 +19,10 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"testing"
+	"sync"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/executor"
@@ -29,69 +30,66 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
-	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/execdetails"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/israce"
+	"github.com/pingcap/tidb/util/testkit"
+	"github.com/pingcap/tidb/util/testutil"
 )
 
-func TestInsertOnDuplicateKey(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	testInsertOnDuplicateKey(t, tk)
+func (s *testSuite8) TestInsertOnDuplicateKey(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
+	testInsertOnDuplicateKey(c, tk)
 }
 
-func TestInsertOnDuplicateKeyWithBinlog(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite8) TestInsertOnDuplicateKeyWithBinlog(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	failpoint.Enable("github.com/pingcap/tidb/table/tables/forceWriteBinlog", "return")
 	defer failpoint.Disable("github.com/pingcap/tidb/table/tables/forceWriteBinlog")
-	testInsertOnDuplicateKey(t, tk)
+	testInsertOnDuplicateKey(c, tk)
 }
 
-func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
+func testInsertOnDuplicateKey(c *C, tk *testkit.TestKit) {
 	tk.MustExec("use test")
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(a1 bigint primary key, b1 bigint);`)
 	tk.MustExec(`create table t2(a2 bigint primary key, b2 bigint);`)
 	tk.MustExec(`insert into t1 values(1, 100);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t2 values(1, 200);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 
 	tk.MustExec(`insert into t1 select a2, b2 from t2 on duplicate key update b1 = a2;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 1  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 1"))
 
 	tk.MustExec(`insert into t1 select a2, b2 from t2 on duplicate key update b1 = b2;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 1  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 200"))
 
 	tk.MustExec(`insert into t1 select a2, b2 from t2 on duplicate key update a1 = a2;`)
-	require.Equal(t, uint64(0), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(0))
 	tk.CheckLastMessage("Records: 1  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 200"))
 
 	tk.MustExec(`insert into t1 select a2, b2 from t2 on duplicate key update b1 = 300;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 1  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 300"))
 
 	tk.MustExec(`insert into t1 values(1, 1) on duplicate key update b1 = 400;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 400"))
 
 	tk.MustExec(`insert into t1 select 1, 500 from t2 on duplicate key update b1 = 400;`)
-	require.Equal(t, uint64(0), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(0))
 	tk.CheckLastMessage("Records: 1  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("1 400"))
 
@@ -99,97 +97,97 @@ func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
 	tk.MustExec(`create table t1(a bigint primary key, b bigint);`)
 	tk.MustExec(`create table t2(a bigint primary key, b bigint);`)
 	_, err := tk.Exec(`insert into t1 select * from t2 on duplicate key update c = t2.b;`)
-	require.Equal(t, `[planner:1054]Unknown column 'c' in 'field list'`, err.Error())
+	c.Assert(err.Error(), Equals, `[planner:1054]Unknown column 'c' in 'field list'`)
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(a bigint primary key, b bigint);`)
 	tk.MustExec(`create table t2(a bigint primary key, b bigint);`)
 	_, err = tk.Exec(`insert into t1 select * from t2 on duplicate key update a = b;`)
-	require.Equal(t, `[planner:1052]Column 'b' in field list is ambiguous`, err.Error())
+	c.Assert(err.Error(), Equals, `[planner:1052]Column 'b' in field list is ambiguous`)
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(a bigint primary key, b bigint);`)
 	tk.MustExec(`create table t2(a bigint primary key, b bigint);`)
 	_, err = tk.Exec(`insert into t1 select * from t2 on duplicate key update c = b;`)
-	require.Equal(t, `[planner:1054]Unknown column 'c' in 'field list'`, err.Error())
+	c.Assert(err.Error(), Equals, `[planner:1054]Unknown column 'c' in 'field list'`)
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(a1 bigint primary key, b1 bigint);`)
 	tk.MustExec(`create table t2(a2 bigint primary key, b2 bigint);`)
 	_, err = tk.Exec(`insert into t1 select * from t2 on duplicate key update a1 = values(b2);`)
-	require.Equal(t, `[planner:1054]Unknown column 'b2' in 'field list'`, err.Error())
+	c.Assert(err.Error(), Equals, `[planner:1054]Unknown column 'b2' in 'field list'`)
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(a1 bigint primary key, b1 bigint);`)
 	tk.MustExec(`create table t2(a2 bigint primary key, b2 bigint);`)
 	tk.MustExec(`insert into t1 values(1, 100);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t2 values(1, 200);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t1 select * from t2 on duplicate key update b1 = values(b1) + b2;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 1  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t1`).Check(testkit.Rows("1 400"))
 	tk.MustExec(`insert into t1 select * from t2 on duplicate key update b1 = values(b1) + b2;`)
-	require.Equal(t, uint64(0), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(0))
 	tk.CheckLastMessage("Records: 1  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t1`).Check(testkit.Rows("1 400"))
 
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t(k1 bigint, k2 bigint, val bigint, primary key(k1, k2));`)
 	tk.MustExec(`insert into t (val, k1, k2) values (3, 1, 2);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustQuery(`select * from t;`).Check(testkit.Rows(`1 2 3`))
 	tk.MustExec(`insert into t (val, k1, k2) select c, a, b from (select 1 as a, 2 as b, 4 as c) tmp on duplicate key update val = tmp.c;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 1  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t;`).Check(testkit.Rows(`1 2 4`))
 
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t(k1 double, k2 double, v double, primary key(k1, k2));`)
 	tk.MustExec(`insert into t (v, k1, k2) select c, a, b from (select "3" c, "1" a, "2" b) tmp on duplicate key update v=c;`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("Records: 1  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t;`).Check(testkit.Rows(`1 2 3`))
 	tk.MustExec(`insert into t (v, k1, k2) select c, a, b from (select "3" c, "1" a, "2" b) tmp on duplicate key update v=c;`)
-	require.Equal(t, uint64(0), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(0))
 	tk.CheckLastMessage("Records: 1  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t;`).Check(testkit.Rows(`1 2 3`))
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(id int, a int, b int);`)
 	tk.MustExec(`insert into t1 values (1, 1, 1);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t1 values (2, 2, 1);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t1 values (3, 3, 1);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`create table t2(a int primary key, b int, unique(b));`)
 	tk.MustExec(`insert into t2 select a, b from t1 order by id on duplicate key update a=t1.a, b=t1.b;`)
-	require.Equal(t, uint64(5), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(5))
 	tk.CheckLastMessage("Records: 3  Duplicates: 2  Warnings: 0")
 	tk.MustQuery(`select * from t2 order by a;`).Check(testkit.Rows(`3 1`))
 
 	tk.MustExec(`drop table if exists t1, t2;`)
 	tk.MustExec(`create table t1(id int, a int, b int);`)
 	tk.MustExec(`insert into t1 values (1, 1, 1);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t1 values (2, 1, 2);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`insert into t1 values (3, 3, 1);`)
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
 	tk.CheckLastMessage("")
 	tk.MustExec(`create table t2(a int primary key, b int, unique(b));`)
 	tk.MustExec(`insert into t2 select a, b from t1 order by id on duplicate key update a=t1.a, b=t1.b;`)
-	require.Equal(t, uint64(4), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(4))
 	tk.CheckLastMessage("Records: 3  Duplicates: 1  Warnings: 0")
 	tk.MustQuery(`select * from t2 order by a;`).Check(testkit.Rows(`1 2`, `3 1`))
 
@@ -201,17 +199,17 @@ func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
 	tk.MustExec(`insert into t1 values (4, 4, 2, 2);`)
 	tk.MustExec(`create table t2(a int primary key, b int, c int, unique(b), unique(c));`)
 	tk.MustExec(`insert into t2 select a, b, c from t1 order by id on duplicate key update b=t2.b, c=t2.c;`)
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.CheckLastMessage("Records: 4  Duplicates: 0  Warnings: 0")
 	tk.MustQuery(`select * from t2 order by a;`).Check(testkit.Rows(`1 1 1`, `3 2 2`))
 
 	tk.MustExec(`drop table if exists t1`)
 	tk.MustExec(`create table t1(a int primary key, b int);`)
 	tk.MustExec(`insert into t1 values(1,1),(2,2),(3,3),(4,4),(5,5);`)
-	require.Equal(t, uint64(5), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(5))
 	tk.CheckLastMessage("Records: 5  Duplicates: 0  Warnings: 0")
 	tk.MustExec(`insert into t1 values(4,14),(5,15),(6,16),(7,17),(8,18) on duplicate key update b=b+10`)
-	require.Equal(t, uint64(7), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(7))
 	tk.CheckLastMessage("Records: 5  Duplicates: 2  Warnings: 0")
 
 	tk.MustExec("drop table if exists a, b")
@@ -220,7 +218,7 @@ func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
 	tk.MustExec("insert into a values(1)")
 	tk.MustExec("insert into b values(1, 2)")
 	tk.MustExec("insert into a select x from b ON DUPLICATE KEY UPDATE a.x=b.y")
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
 	tk.MustQuery("select * from a").Check(testkit.Rows("2"))
 
 	// Test issue 28078.
@@ -231,21 +229,21 @@ func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
 	tk.MustExec("insert into a values (1, '2022-01-04 07:02:04', 'a', 1.1), (2, '2022-01-04 07:02:05', 'b', 2.2)")
 	tk.MustExec("insert into b values (2, '12:34:56', 'c', 10), (3, '01:23:45', 'd', 20)")
 	tk.MustExec("insert into a (id) select id from b on duplicate key update a.a2 = b.b2, a.a3 = 3.3")
-	require.Equal(t, uint64(3), tk.Session().AffectedRows())
-	tk.MustQuery("select * from a").Check(testkit.RowsWithSep("/",
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(3))
+	tk.MustQuery("select * from a").Check(testutil.RowsWithSep("/",
 		"1/2022-01-04 07:02:04/a/1.1",
 		"2/2022-01-04 07:02:05/c/3.3",
 		"3/<nil>/<nil>/<nil>"))
 	tk.MustExec("insert into a (id) select 4 from b where b3 = 20 on duplicate key update a.a3 = b.b3")
-	require.Equal(t, uint64(1), tk.Session().AffectedRows())
-	tk.MustQuery("select * from a").Check(testkit.RowsWithSep("/",
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(1))
+	tk.MustQuery("select * from a").Check(testutil.RowsWithSep("/",
 		"1/2022-01-04 07:02:04/a/1.1",
 		"2/2022-01-04 07:02:05/c/3.3",
 		"3/<nil>/<nil>/<nil>",
 		"4/<nil>/<nil>/<nil>"))
 	tk.MustExec("insert into a (a2, a3) select 'x', 1.2 from b on duplicate key update a.a2 = b.b3")
-	require.Equal(t, uint64(2), tk.Session().AffectedRows())
-	tk.MustQuery("select * from a").Check(testkit.RowsWithSep("/",
+	c.Assert(tk.Se.AffectedRows(), Equals, uint64(2))
+	tk.MustQuery("select * from a").Check(testutil.RowsWithSep("/",
 		"1/2022-01-04 07:02:04/a/1.1",
 		"2/2022-01-04 07:02:05/c/3.3",
 		"3/<nil>/<nil>/<nil>",
@@ -261,33 +259,29 @@ func testInsertOnDuplicateKey(t *testing.T, tk *testkit.TestKit) {
 	tk.MustQuery(`select * from t1 use index(primary)`).Check(testkit.Rows(`1.0000`))
 }
 
-func TestClusterIndexInsertOnDuplicateKey(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite8) TestClusterIndexInsertOnDuplicateKey(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("drop database if exists cluster_index_duplicate_entry_error;")
 	tk.MustExec("create database cluster_index_duplicate_entry_error;")
 	tk.MustExec("use cluster_index_duplicate_entry_error;")
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 
 	tk.MustExec("create table t(a char(20), b int, primary key(a));")
 	tk.MustExec("insert into t values('aa', 1), ('bb', 1);")
 	_, err := tk.Exec("insert into t values('aa', 2);")
-	require.Regexp(t, ".*Duplicate entry 'aa' for.*", err.Error())
+	c.Assert(err, ErrorMatches, ".*Duplicate entry 'aa' for.*")
 
 	tk.MustExec("drop table t;")
 	tk.MustExec("create table t(a char(20), b varchar(30), c varchar(10), primary key(a, b, c));")
 	tk.MustExec("insert into t values ('a', 'b', 'c'), ('b', 'a', 'c');")
 	_, err = tk.Exec("insert into t values ('a', 'b', 'c');")
-	require.Regexp(t, ".*Duplicate entry 'a-b-c' for.*", err.Error())
+	c.Assert(err, ErrorMatches, ".*Duplicate entry 'a-b-c' for.*")
 }
 
-func TestPaddingCommonHandle(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestPaddingCommonHandle(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 	tk.MustExec("drop table if exists t1;")
 	tk.MustExec(`create table t1(c1 decimal(6,4), primary key(c1))`)
 	tk.MustExec(`insert into t1 set c1 = 0.1`)
@@ -295,10 +289,11 @@ func TestPaddingCommonHandle(t *testing.T) {
 	tk.MustQuery(`select * from t1`).Check(testkit.Rows(`1.0000`))
 }
 
-func TestInsertReorgDelete(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite2) TestInsertReorgDelete(c *C) {
+	if israce.RaceEnabled {
+		c.Skip("exhaustive types test, skip race test")
+	}
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
 	inputs := []struct {
@@ -349,10 +344,8 @@ func TestInsertReorgDelete(t *testing.T) {
 	}
 }
 
-func TestUpdateDuplicateKey(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestUpdateDuplicateKey(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
 	tk.MustExec(`drop table if exists t;`)
@@ -360,13 +353,11 @@ func TestUpdateDuplicateKey(t *testing.T) {
 	tk.MustExec(`insert into c values(1,2,3);`)
 	tk.MustExec(`insert into c values(1,2,4);`)
 	_, err := tk.Exec(`update c set i=1,j=2,k=4 where i=1 and j=2 and k=3;`)
-	require.EqualError(t, err, "[kv:1062]Duplicate entry '1-2-4' for key 'PRIMARY'")
+	c.Assert(err.Error(), Equals, "[kv:1062]Duplicate entry '1-2-4' for key 'PRIMARY'")
 }
 
-func TestIssue37187(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestIssue37187(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 
 	tk.MustExec("drop table if exists a, b")
@@ -374,29 +365,27 @@ func TestIssue37187(t *testing.T) {
 	tk.MustExec("create table t2 (c int(11) ,d varchar(100) ,primary key (c));")
 	tk.MustExec("prepare in1 from 'insert into t1 (a,b) select c,null from t2 t on duplicate key update b=t.d';")
 	err := tk.ExecToErr("execute in1;")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 }
 
-func TestInsertWrongValueForField(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertWrongValueForField(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`drop table if exists t1;`)
 	tk.MustExec(`create table t1(a bigint);`)
 	_, err := tk.Exec(`insert into t1 values("asfasdfsajhlkhlksdaf");`)
-	require.True(t, terror.ErrorEqual(err, table.ErrTruncatedWrongValueForField))
+	c.Assert(terror.ErrorEqual(err, table.ErrTruncatedWrongValueForField), IsTrue)
 
 	tk.MustExec(`drop table if exists t1;`)
 	tk.MustExec(`create table t1(a varchar(10)) charset ascii;`)
 	_, err = tk.Exec(`insert into t1 values('我');`)
-	require.True(t, terror.ErrorEqual(err, table.ErrTruncatedWrongValueForField))
+	c.Assert(terror.ErrorEqual(err, table.ErrTruncatedWrongValueForField), IsTrue)
 
 	tk.MustExec(`drop table if exists t1;`)
 	tk.MustExec(`create table t1(a char(10) charset utf8);`)
 	tk.MustExec(`insert into t1 values('我');`)
 	tk.MustExec(`alter table t1 add column b char(10) charset ascii as ((a));`)
-	tk.MustQuery(`select * from t1;`).Check(testkit.Rows("我 ?"))
+	tk.MustQuery(`select * from t1;`).Check(testkit.Rows(`我 `))
 
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t (a year);`)
@@ -407,19 +396,17 @@ func TestInsertWrongValueForField(t *testing.T) {
 	tk.MustExec(`CREATE TABLE ts (id int DEFAULT NULL, time1 TIMESTAMP NULL DEFAULT NULL)`)
 	tk.MustExec(`SET @@sql_mode=''`)
 	tk.MustExec(`INSERT INTO ts (id, time1) VALUES (1, TIMESTAMP '1018-12-23 00:00:00')`)
-	tk.MustQuery(`SHOW WARNINGS`).Check(testkit.Rows(`Warning 1292 Incorrect timestamp value: '1018-12-23 00:00:00' for column 'time1' at row 1`))
+	tk.MustQuery(`SHOW WARNINGS`).Check(testkit.Rows(`Warning 1292 Incorrect timestamp value: '1018-12-23 00:00:00'`))
 	tk.MustQuery(`SELECT * FROM ts ORDER BY id`).Check(testkit.Rows(`1 0000-00-00 00:00:00`))
 
 	tk.MustExec(`SET @@sql_mode='STRICT_TRANS_TABLES'`)
 	_, err = tk.Exec(`INSERT INTO ts (id, time1) VALUES (2, TIMESTAMP '1018-12-24 00:00:00')`)
-	require.EqualError(t, err, `[table:1292]Incorrect timestamp value: '1018-12-24 00:00:00' for column 'time1' at row 1`)
+	c.Assert(err.Error(), Equals, `[table:1292]Incorrect timestamp value: '1018-12-24 00:00:00' for column 'time1' at row 1`)
 	tk.MustExec(`DROP TABLE ts`)
 }
 
-func TestInsertValueForCastDecimalField(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertValueForCastDecimalField(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`drop table if exists t1;`)
 	tk.MustExec(`create table t1(a decimal(15,2));`)
@@ -428,10 +415,8 @@ func TestInsertValueForCastDecimalField(t *testing.T) {
 	tk.MustQuery(`select cast(a as decimal) from t1;`).Check(testkit.Rows(`9999999999`))
 }
 
-func TestInsertDateTimeWithTimeZone(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertDateTimeWithTimeZone(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 
 	tk.MustExec(`use test;`)
 	tk.MustExec(`set time_zone="+09:00";`)
@@ -532,10 +517,8 @@ func TestInsertDateTimeWithTimeZone(t *testing.T) {
 	}
 }
 
-func TestInsertZeroYear(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertZeroYear(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`drop table if exists t1;`)
 	tk.MustExec(`create table t1(a year(4));`)
@@ -564,10 +547,8 @@ func TestInsertZeroYear(t *testing.T) {
 	))
 }
 
-func TestAllowInvalidDates(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteP1) TestAllowInvalidDates(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`drop table if exists t1, t2, t3, t4;`)
 	tk.MustExec(`create table t1(d date);`)
@@ -601,10 +582,8 @@ func TestAllowInvalidDates(t *testing.T) {
 	runWithMode("ALLOW_INVALID_DATES")
 }
 
-func TestInsertWithAutoidSchema(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertWithAutoidSchema(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table t1(id int primary key auto_increment, n int);`)
 	tk.MustExec(`create table t2(id int unsigned primary key auto_increment, n int);`)
@@ -1016,9 +995,9 @@ func TestInsertWithAutoidSchema(t *testing.T) {
 			retryInfo := &variable.RetryInfo{Retrying: true}
 			retryInfo.AddAutoIncrementID(1000)
 			retryInfo.AddAutoIncrementID(1001)
-			tk.Session().GetSessionVars().RetryInfo = retryInfo
+			tk.Se.GetSessionVars().RetryInfo = retryInfo
 			tk.MustExec(tt.insert[8:])
-			tk.Session().GetSessionVars().RetryInfo = &variable.RetryInfo{}
+			tk.Se.GetSessionVars().RetryInfo = &variable.RetryInfo{}
 		} else {
 			tk.MustExec(tt.insert)
 		}
@@ -1032,10 +1011,8 @@ func TestInsertWithAutoidSchema(t *testing.T) {
 
 }
 
-func TestPartitionInsertOnDuplicate(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestPartitionInsertOnDuplicate(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table t1 (a int,b int,primary key(a,b)) partition by range(a) (partition p0 values less than (100),partition p1 values less than (1000))`)
 	tk.MustExec(`insert into t1 set a=1, b=1`)
@@ -1060,38 +1037,34 @@ func TestPartitionInsertOnDuplicate(t *testing.T) {
 	tk.MustQuery("select * from t3").Check(testkit.Rows("1 2 3 4 16"))
 }
 
-func TestBit(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestBit(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table t1 (a bit(3))`)
 	_, err := tk.Exec("insert into t1 values(-1)")
-	require.True(t, types.ErrDataTooLong.Equal(err))
-	require.Regexp(t, ".*Data too long for column 'a' at.*", err.Error())
+	c.Assert(types.ErrDataTooLong.Equal(err), IsTrue)
+	c.Assert(err.Error(), Matches, ".*Data too long for column 'a' at.*")
 	_, err = tk.Exec("insert into t1 values(9)")
-	require.Regexp(t, ".*Data too long for column 'a' at.*", err.Error())
+	c.Assert(err.Error(), Matches, ".*Data too long for column 'a' at.*")
 
 	tk.MustExec(`create table t64 (a bit(64))`)
 	tk.MustExec("insert into t64 values(-1)")
 	tk.MustExec("insert into t64 values(18446744073709551615)")      // 2^64 - 1
 	_, err = tk.Exec("insert into t64 values(18446744073709551616)") // z^64
-	require.Regexp(t, ".*Out of range value for column 'a' at.*", err.Error())
+	c.Assert(err.Error(), Matches, ".*Out of range value for column 'a' at.*")
 
 }
 
-func TestAllocateContinuousRowID(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuiteP1) TestAllocateContinuousRowID(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table t1 (a int,b int, key I_a(a));`)
-	var wg util.WaitGroupWrapper
+	wg := sync.WaitGroup{}
 	for i := 0; i < 5; i++ {
-		idx := i
-		wg.Run(func() {
-			tk := testkit.NewTestKit(t, store)
-			tk.MustExec("use test")
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			tk := testkit.NewTestKitWithInit(c, s.store)
 			for j := 0; j < 10; j++ {
 				k := strconv.Itoa(idx*100 + j)
 				sql := "insert into t1(a,b) values (" + k + ", 2)"
@@ -1101,72 +1074,66 @@ func TestAllocateContinuousRowID(t *testing.T) {
 				tk.MustExec(sql)
 				q := "select _tidb_rowid from t1 where a=" + k
 				rows := tk.MustQuery(q).Rows()
-				require.Equal(t, 21, len(rows))
+				c.Assert(len(rows), Equals, 21)
 				last := 0
 				for _, r := range rows {
-					require.Equal(t, 1, len(r))
+					c.Assert(len(r), Equals, 1)
 					v, err := strconv.Atoi(r[0].(string))
-					require.Equal(t, nil, err)
+					c.Assert(err, Equals, nil)
 					if last > 0 {
-						require.Equal(t, v, last+1)
+						c.Assert(last+1, Equals, v)
 					}
 					last = v
 				}
 			}
-		})
+		}(i)
 	}
 	wg.Wait()
 }
 
-func TestJiraIssue5366(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestJiraIssue5366(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table bug (a varchar(100))`)
 	tk.MustExec(` insert into bug select  ifnull(JSON_UNQUOTE(JSON_EXTRACT('[{"amount":2000,"feeAmount":0,"merchantNo":"20190430140319679394","shareBizCode":"20160311162_SECOND"}]', '$[0].merchantNo')),'') merchant_no union SELECT '20180531557' merchant_no;`)
 	tk.MustQuery(`select * from bug`).Sort().Check(testkit.Rows("20180531557", "20190430140319679394"))
 }
 
-func TestDMLCast(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestDMLCast(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`create table t (a int, b double)`)
 	tk.MustExec(`insert into t values (ifnull('',0)+0, 0)`)
 	tk.MustExec(`insert into t values (0, ifnull('',0)+0)`)
 	tk.MustQuery(`select * from t`).Check(testkit.Rows("0 0", "0 0"))
 	_, err := tk.Exec(`insert into t values ('', 0)`)
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	_, err = tk.Exec(`insert into t values (0, '')`)
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	_, err = tk.Exec(`update t set a = ''`)
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	_, err = tk.Exec(`update t set b = ''`)
-	require.Error(t, err)
+	c.Assert(err, NotNil)
 	tk.MustExec("update t set a = ifnull('',0)+0")
 	tk.MustExec("update t set b = ifnull('',0)+0")
 	tk.MustExec("delete from t where a = ''")
 	tk.MustQuery(`select * from t`).Check(testkit.Rows())
 }
 
-func TestInsertFloatOverflow(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestInsertFloatOverflow(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec(`drop table if exists t,t1;`)
 	tk.MustExec("create table t(col1 FLOAT, col2 FLOAT(10,2), col3 DOUBLE, col4 DOUBLE(10,2), col5 DECIMAL, col6 DECIMAL(10,2));")
 	_, err := tk.Exec("insert into t values (-3.402823466E+68, -34028234.6611, -1.7976931348623157E+308, -17976921.34, -9999999999, -99999999.99);")
-	require.EqualError(t, err, "[types:1264]Out of range value for column 'col1' at row 1")
+	c.Assert(err.Error(), Equals, "[types:1264]Out of range value for column 'col1' at row 1")
 	_, err = tk.Exec("insert into t values (-34028234.6611, -3.402823466E+68, -1.7976931348623157E+308, -17976921.34, -9999999999, -99999999.99);")
-	require.EqualError(t, err, "[types:1264]Out of range value for column 'col2' at row 1")
+	c.Assert(err.Error(), Equals, "[types:1264]Out of range value for column 'col2' at row 1")
 	_, err = tk.Exec("create table t1(id1 float,id2 float)")
-	require.NoError(t, err)
+	c.Assert(err, IsNil)
 	_, err = tk.Exec("insert ignore into t1 values(999999999999999999999999999999999999999,-999999999999999999999999999999999999999)")
-	require.NoError(t, err)
-	tk.MustQuery("select @@warning_count").Check(testkit.RowsWithSep("|", "2"))
+	c.Assert(err, IsNil)
+	tk.MustQuery("select @@warning_count").Check(testutil.RowsWithSep("|", "2"))
 	tk.MustQuery("select convert(id1,decimal(65)),convert(id2,decimal(65)) from t1").Check(testkit.Rows("340282346638528860000000000000000000000 -340282346638528860000000000000000000000"))
 	tk.MustExec("drop table if exists t,t1")
 }
@@ -1175,14 +1142,12 @@ func TestInsertFloatOverflow(t *testing.T) {
 // than that of auto_increment_increment, the value of auto_increment_offset is ignored
 // (https://dev.mysql.com/doc/refman/8.0/en/replication-options-master.html#sysvar_auto_increment_increment),
 // This issue is a flaw of the implementation of MySQL and it doesn't exist in TiDB.
-func TestAutoIDIncrementAndOffset(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite3) TestAutoIDIncrementAndOffset(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	// Test for offset is larger than increment.
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 5
-	tk.Session().GetSessionVars().AutoIncrementOffset = 10
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 5
+	tk.Se.GetSessionVars().AutoIncrementOffset = 10
 	tk.MustExec(`create table io (a int key auto_increment)`)
 	tk.MustExec(`insert into io values (null),(null),(null)`)
 	tk.MustQuery(`select * from io`).Check(testkit.Rows("10", "15", "20"))
@@ -1190,31 +1155,31 @@ func TestAutoIDIncrementAndOffset(t *testing.T) {
 
 	// Test handle is PK.
 	tk.MustExec(`create table io (a int key auto_increment)`)
-	tk.Session().GetSessionVars().AutoIncrementOffset = 10
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 2
+	tk.Se.GetSessionVars().AutoIncrementOffset = 10
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 2
 	tk.MustExec(`insert into io values (),(),()`)
 	tk.MustQuery(`select * from io`).Check(testkit.Rows("10", "12", "14"))
 	tk.MustExec(`delete from io`)
 
 	// Test reset the increment.
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 5
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 5
 	tk.MustExec(`insert into io values (),(),()`)
 	tk.MustQuery(`select * from io`).Check(testkit.Rows("15", "20", "25"))
 	tk.MustExec(`delete from io`)
 
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 10
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 10
 	tk.MustExec(`insert into io values (),(),()`)
 	tk.MustQuery(`select * from io`).Check(testkit.Rows("30", "40", "50"))
 	tk.MustExec(`delete from io`)
 
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 5
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 5
 	tk.MustExec(`insert into io values (),(),()`)
 	tk.MustQuery(`select * from io`).Check(testkit.Rows("55", "60", "65"))
 	tk.MustExec(`drop table io`)
 
 	// Test handle is not PK.
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 2
-	tk.Session().GetSessionVars().AutoIncrementOffset = 10
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 2
+	tk.Se.GetSessionVars().AutoIncrementOffset = 10
 	tk.MustExec(`create table io (a int, b int auto_increment, key(b))`)
 	tk.MustExec(`insert into io(b) values (null),(null),(null)`)
 	// AutoID allocation will take increment and offset into consideration.
@@ -1223,102 +1188,62 @@ func TestAutoIDIncrementAndOffset(t *testing.T) {
 	tk.MustQuery(`select _tidb_rowid from io`).Check(testkit.Rows("15", "16", "17"))
 	tk.MustExec(`delete from io`)
 
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 10
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 10
 	tk.MustExec(`insert into io(b) values (null),(null),(null)`)
 	tk.MustQuery(`select b from io`).Check(testkit.Rows("20", "30", "40"))
 	tk.MustQuery(`select _tidb_rowid from io`).Check(testkit.Rows("41", "42", "43"))
 
 	// Test invalid value.
-	tk.Session().GetSessionVars().AutoIncrementIncrement = -1
-	tk.Session().GetSessionVars().AutoIncrementOffset = -2
+	tk.Se.GetSessionVars().AutoIncrementIncrement = -1
+	tk.Se.GetSessionVars().AutoIncrementOffset = -2
 	_, err := tk.Exec(`insert into io(b) values (null),(null),(null)`)
-	require.Error(t, err)
-	require.EqualError(t, err, "[autoid:8060]Invalid auto_increment settings: auto_increment_increment: -1, auto_increment_offset: -2, both of them must be in range [1..65535]")
+	c.Assert(err, NotNil)
+	c.Assert(err.Error(), Equals, "[autoid:8060]Invalid auto_increment settings: auto_increment_increment: -1, auto_increment_offset: -2, both of them must be in range [1..65535]")
 	tk.MustExec(`delete from io`)
 
-	tk.Session().GetSessionVars().AutoIncrementIncrement = 65536
-	tk.Session().GetSessionVars().AutoIncrementOffset = 65536
+	tk.Se.GetSessionVars().AutoIncrementIncrement = 65536
+	tk.Se.GetSessionVars().AutoIncrementOffset = 65536
 	_, err = tk.Exec(`insert into io(b) values (null),(null),(null)`)
-	require.Error(t, err)
-	require.EqualError(t, err, "[autoid:8060]Invalid auto_increment settings: auto_increment_increment: 65536, auto_increment_offset: 65536, both of them must be in range [1..65535]")
+	c.Assert(err, NotNil)
+	c.Assert(err.Error(), Equals, "[autoid:8060]Invalid auto_increment settings: auto_increment_increment: 65536, auto_increment_offset: 65536, both of them must be in range [1..65535]")
 }
 
-// Fix https://github.com/pingcap/tidb/issues/32601.
-func TestTextTooLongError(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	// Set strict sql_mode
-	tk.MustExec("set sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';")
+var _ = Suite(&testSuite9{&baseTestSuite{}})
 
-	// For max_allowed_packet default value is big enough to ensure tinytext, text can test correctly.
-	tk.MustExec(`drop table if exists t1;`)
-	tk.MustExec("CREATE TABLE t1(c1 TINYTEXT CHARACTER SET utf8mb4);")
-	_, err := tk.Exec("INSERT INTO t1 (c1) VALUES(REPEAT(X'C385', 128));")
-	require.EqualError(t, err, "[types:1406]Data too long for column 'c1' at row 1")
-
-	tk.MustExec(`drop table if exists t1;`)
-	tk.MustExec("CREATE TABLE t1(c1 Text CHARACTER SET utf8mb4);")
-	_, err = tk.Exec("INSERT INTO t1 (c1) VALUES(REPEAT(X'C385', 32768));")
-	require.EqualError(t, err, "[types:1406]Data too long for column 'c1' at row 1")
-
-	tk.MustExec(`drop table if exists t1;`)
-	tk.MustExec("CREATE TABLE t1(c1 mediumtext);")
-	_, err = tk.Exec("INSERT INTO t1 (c1) VALUES(REPEAT(X'C385', 8777215));")
-	require.EqualError(t, err, "[types:1406]Data too long for column 'c1' at row 1")
-
-	// For long text, max_allowed_packet default value can not allow 4GB package, skip the test case.
-
-	// Set non strict sql_mode, we are not supposed to raise an error but to truncate the value.
-	tk.MustExec("set sql_mode = 'ONLY_FULL_GROUP_BY,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';")
-
-	tk.MustExec(`drop table if exists t1;`)
-	tk.MustExec("CREATE TABLE t1(c1 TINYTEXT CHARACTER SET utf8mb4);")
-	_, err = tk.Exec("INSERT INTO t1 (c1) VALUES(REPEAT(X'C385', 128));")
-	require.NoError(t, err)
-	tk.MustQuery(`select length(c1) from t1;`).Check(testkit.Rows("254"))
-
-	tk.MustExec(`drop table if exists t1;`)
-	tk.MustExec("CREATE TABLE t1(c1 Text CHARACTER SET utf8mb4);")
-	_, err = tk.Exec("INSERT INTO t1 (c1) VALUES(REPEAT(X'C385', 32768));")
-	require.NoError(t, err)
-	tk.MustQuery(`select length(c1) from t1;`).Check(testkit.Rows("65534"))
-	// For mediumtext or bigger size, for tikv limit, we will get:ERROR 8025 (HY000): entry too large, the max entry size is 6291456, the size of data is 16777247, no need to test.
+type testSuite9 struct {
+	*baseTestSuite
 }
 
-func TestAutoRandomID(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestAutoRandomID(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`drop table if exists ar`)
 	tk.MustExec(`create table ar (id bigint key clustered auto_random, name char(10))`)
 
 	tk.MustExec(`insert into ar(id) values (null)`)
 	rs := tk.MustQuery(`select id from ar`)
-	require.Equal(t, 1, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 1)
 	firstValue, err := strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 	tk.MustExec(`delete from ar`)
 
 	tk.MustExec(`insert into ar(id) values (0)`)
 	rs = tk.MustQuery(`select id from ar`)
-	require.Equal(t, 1, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 1)
 	firstValue, err = strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 	tk.MustExec(`delete from ar`)
 
 	tk.MustExec(`insert into ar(name) values ('a')`)
 	rs = tk.MustQuery(`select id from ar`)
-	require.Equal(t, 1, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 1)
 	firstValue, err = strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 
 	tk.MustExec(`drop table ar`)
@@ -1326,57 +1251,53 @@ func TestAutoRandomID(t *testing.T) {
 	overflowVal := 1 << (64 - 5)
 	errMsg := fmt.Sprintf(autoid.AutoRandomRebaseOverflow, overflowVal, 1<<(64-16)-1)
 	_, err = tk.Exec(fmt.Sprintf("alter table ar auto_random_base = %d", overflowVal))
-	require.Error(t, err)
-	require.True(t, strings.Contains(err.Error(), errMsg))
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), errMsg), IsTrue)
 }
 
-func TestMultiAutoRandomID(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestMultiAutoRandomID(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`drop table if exists ar`)
 	tk.MustExec(`create table ar (id bigint key clustered auto_random, name char(10))`)
 
 	tk.MustExec(`insert into ar(id) values (null),(null),(null)`)
 	rs := tk.MustQuery(`select id from ar order by id`)
-	require.Equal(t, 3, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 3)
 	firstValue, err := strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
-	require.Equal(t, fmt.Sprintf("%d", firstValue+1), rs.Rows()[1][0].(string))
-	require.Equal(t, fmt.Sprintf("%d", firstValue+2), rs.Rows()[2][0].(string))
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
+	c.Assert(rs.Rows()[1][0].(string), Equals, fmt.Sprintf("%d", firstValue+1))
+	c.Assert(rs.Rows()[2][0].(string), Equals, fmt.Sprintf("%d", firstValue+2))
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 	tk.MustExec(`delete from ar`)
 
 	tk.MustExec(`insert into ar(id) values (0),(0),(0)`)
 	rs = tk.MustQuery(`select id from ar order by id`)
-	require.Equal(t, 3, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 3)
 	firstValue, err = strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
-	require.Equal(t, fmt.Sprintf("%d", firstValue+1), rs.Rows()[1][0].(string))
-	require.Equal(t, fmt.Sprintf("%d", firstValue+2), rs.Rows()[2][0].(string))
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
+	c.Assert(rs.Rows()[1][0].(string), Equals, fmt.Sprintf("%d", firstValue+1))
+	c.Assert(rs.Rows()[2][0].(string), Equals, fmt.Sprintf("%d", firstValue+2))
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 	tk.MustExec(`delete from ar`)
 
 	tk.MustExec(`insert into ar(name) values ('a'),('a'),('a')`)
 	rs = tk.MustQuery(`select id from ar order by id`)
-	require.Equal(t, 3, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 3)
 	firstValue, err = strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
-	require.Equal(t, fmt.Sprintf("%d", firstValue+1), rs.Rows()[1][0].(string))
-	require.Equal(t, fmt.Sprintf("%d", firstValue+2), rs.Rows()[2][0].(string))
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
+	c.Assert(rs.Rows()[1][0].(string), Equals, fmt.Sprintf("%d", firstValue+1))
+	c.Assert(rs.Rows()[2][0].(string), Equals, fmt.Sprintf("%d", firstValue+2))
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 
 	tk.MustExec(`drop table ar`)
 }
 
-func TestAutoRandomIDAllowZero(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestAutoRandomIDAllowZero(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`drop table if exists ar`)
 	tk.MustExec(`create table ar (id bigint key clustered auto_random, name char(10))`)
@@ -1387,28 +1308,26 @@ func TestAutoRandomIDAllowZero(t *testing.T) {
 
 	tk.MustExec(`insert into ar(id) values (0)`)
 	rs = tk.MustQuery(`select id from ar`)
-	require.Equal(t, 1, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 1)
 	firstValue, err := strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Equal(t, 0, firstValue)
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Equals, 0)
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 	tk.MustExec(`delete from ar`)
 
 	tk.MustExec(`insert into ar(id) values (null)`)
 	rs = tk.MustQuery(`select id from ar`)
-	require.Equal(t, 1, len(rs.Rows()))
+	c.Assert(len(rs.Rows()), Equals, 1)
 	firstValue, err = strconv.Atoi(rs.Rows()[0][0].(string))
-	require.NoError(t, err)
-	require.Greater(t, firstValue, 0)
+	c.Assert(err, IsNil)
+	c.Assert(firstValue, Greater, 0)
 	tk.MustQuery(`select last_insert_id()`).Check(testkit.Rows(fmt.Sprintf("%d", firstValue)))
 
 	tk.MustExec(`drop table ar`)
 }
 
-func TestAutoRandomIDExplicit(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestAutoRandomIDExplicit(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("set @@allow_auto_random_explicit_insert = true")
 
 	tk.MustExec(`use test`)
@@ -1428,37 +1347,37 @@ func TestAutoRandomIDExplicit(t *testing.T) {
 	tk.MustExec(`drop table ar`)
 }
 
-func TestInsertErrorMsg(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestInsertErrorMsg(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec(`drop table if exists t`)
 	tk.MustExec(`create table t (a int primary key, b datetime, d date)`)
 	_, err := tk.Exec(`insert into t values (1, '2019-02-11 30:00:00', '2019-01-31')`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Incorrect datetime value: '2019-02-11 30:00:00' for column 'b' at row 1")
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "Incorrect datetime value: '2019-02-11 30:00:00' for column 'b' at row 1"), IsTrue, Commentf("%v", err))
 }
 
-func TestIssue16366(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestIssue16366(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test;`)
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t(c numeric primary key);`)
 	tk.MustExec("insert ignore into t values(null);")
 	_, err := tk.Exec(`insert into t values(0);`)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "Duplicate entry '0' for key 'PRIMARY'")
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "Duplicate entry '0' for key 'PRIMARY'"), IsTrue, Commentf("%v", err))
 }
 
-func TestClusterPrimaryTablePlainInsert(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+var _ = SerialSuites(&testSuite10{&baseTestSuite{}})
+
+type testSuite10 struct {
+	*baseTestSuite
+}
+
+func (s *testSuite10) TestClusterPrimaryTablePlainInsert(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 
 	tk.MustExec(`drop table if exists t1pk`)
 	tk.MustExec(`create table t1pk(id varchar(200) primary key, v int)`)
@@ -1497,12 +1416,10 @@ func TestClusterPrimaryTablePlainInsert(t *testing.T) {
 		Check(testkit.Rows("abc xyz 1 100", "abc xyz 1 101", "abc zzz 1 101"))
 }
 
-func TestClusterPrimaryTableInsertIgnore(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestClusterPrimaryTableInsertIgnore(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 
 	tk.MustExec(`drop table if exists it1pk`)
 	tk.MustExec(`create table it1pk(id varchar(200) primary key, v int)`)
@@ -1525,12 +1442,10 @@ func TestClusterPrimaryTableInsertIgnore(t *testing.T) {
 	tk.MustQuery(`select * from it1pku`).Check(testkit.Rows("abc 1 2", "bbb 2 1"))
 }
 
-func TestClusterPrimaryTableInsertDuplicate(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestClusterPrimaryTableInsertDuplicate(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 
 	tk.MustExec(`drop table if exists dt1pi`)
 	tk.MustExec(`create table dt1pi(id varchar(200) primary key, v int)`)
@@ -1559,12 +1474,10 @@ func TestClusterPrimaryTableInsertDuplicate(t *testing.T) {
 	tk.MustQuery(`select id1, id2, v from ts1pk`).Check(testkit.Rows("2018-01-01 11:11:12 2018-01-01 11:11:11 2"))
 }
 
-func TestClusterPrimaryKeyForIndexScan(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestClusterPrimaryKeyForIndexScan(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
-	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
+	tk.Se.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 
 	tk.MustExec("drop table if exists pkt1;")
 	tk.MustExec("CREATE TABLE pkt1 (a varchar(255), b int, index idx(b), primary key(a,b));")
@@ -1590,10 +1503,10 @@ func TestClusterPrimaryKeyForIndexScan(t *testing.T) {
 		tk.MustExec(sql)
 		cnt++
 	}
-	require.Equal(t, 15, cnt)
+	c.Assert(cnt, Equals, 15)
 }
 
-func TestInsertRuntimeStat(t *testing.T) {
+func (s *testSuite10) TestInsertRuntimeStat(c *C) {
 	stats := &executor.InsertRuntimeStat{
 		BasicRuntimeStats:    &execdetails.BasicRuntimeStats{},
 		SnapshotRuntimeStats: nil,
@@ -1601,19 +1514,20 @@ func TestInsertRuntimeStat(t *testing.T) {
 		Prefetch:             1 * time.Second,
 	}
 	stats.BasicRuntimeStats.Record(5*time.Second, 1)
-	require.Equal(t, "prepare: 3s, check_insert: {total_time: 2s, mem_insert_time: 1s, prefetch: 1s}", stats.String())
-	require.Equal(t, stats.Clone().String(), stats.String())
+	c.Assert(stats.String(), Equals, "prepare: 3s, check_insert: {total_time: 2s, mem_insert_time: 1s, prefetch: 1s}")
+	c.Assert(stats.String(), Equals, stats.Clone().String())
 	stats.Merge(stats.Clone())
-	require.Equal(t, "prepare: 6s, check_insert: {total_time: 4s, mem_insert_time: 2s, prefetch: 2s}", stats.String())
+	c.Assert(stats.String(), Equals, "prepare: 6s, check_insert: {total_time: 4s, mem_insert_time: 2s, prefetch: 2s}")
 }
 
-func TestDuplicateEntryMessage(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSerialSuite) TestDuplicateEntryMessage(c *C) {
+	collate.SetNewCollationEnabledForTest(true)
+	defer collate.SetNewCollationEnabledForTest(false)
+
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test;")
 	for _, enable := range []variable.ClusteredIndexDefMode{variable.ClusteredIndexDefModeOn, variable.ClusteredIndexDefModeOff, variable.ClusteredIndexDefModeIntOnly} {
-		tk.Session().GetSessionVars().EnableClusteredIndex = enable
+		tk.Se.GetSessionVars().EnableClusteredIndex = enable
 		tk.MustExec("drop table if exists t;")
 		tk.MustExec("create table t(a int, b char(10), unique key(b)) collate utf8mb4_general_ci;")
 		tk.MustExec("insert into t value (34, '12Ak');")
@@ -1658,7 +1572,7 @@ func TestDuplicateEntryMessage(t *testing.T) {
 		tk.MustExec("create table t (a char(10) collate utf8mb4_unicode_ci, b char(20) collate utf8mb4_general_ci, c int(11), primary key (a, b, c), unique key (a));")
 		tk.MustExec("insert ignore into t values ('$', 'C', 10);")
 		tk.MustExec("insert ignore into t values ('$', 'C', 10);")
-		tk.MustQuery("show warnings;").Check(testkit.RowsWithSep("|", "Warning|1062|Duplicate entry '$-C-10' for key 'PRIMARY'"))
+		tk.MustQuery("show warnings;").Check(testutil.RowsWithSep("|", "Warning|1062|Duplicate entry '$-C-10' for key 'PRIMARY'"))
 
 		tk.MustExec("begin pessimistic;")
 		tk.MustExec("insert into t values ('a7', 'a', 10);")
@@ -1674,10 +1588,8 @@ func TestDuplicateEntryMessage(t *testing.T) {
 	}
 }
 
-func TestIssue20768(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSerialSuite) TestIssue20768(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("create table t1(a year, primary key(a))")
@@ -1692,21 +1604,18 @@ func TestIssue20768(t *testing.T) {
 	tk.MustQuery("select /*+ merge_join(t1) */ * from t1 join t2 on t1.a = t2.a").Check(testkit.Rows("0 0"))
 }
 
-func TestIssue10402(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite9) TestIssue10402(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("create table vctt (v varchar(4), c char(4))")
 	tk.MustExec("insert into vctt values ('ab  ', 'ab   ')")
 	tk.MustQuery("select * from vctt").Check(testkit.Rows("ab   ab"))
 	tk.MustExec("delete from vctt")
-	tk.Session().GetSessionVars().StmtCtx.SetWarnings(nil)
+	tk.Se.GetSessionVars().StmtCtx.SetWarnings(nil)
 	tk.MustExec("insert into vctt values ('ab\\n\\n\\n', 'ab\\n\\n\\n'), ('ab\\t\\t\\t', 'ab\\t\\t\\t'), ('ab    ', 'ab    '), ('ab\\r\\r\\r', 'ab\\r\\r\\r')")
-	require.Equal(t, uint16(4), tk.Session().GetSessionVars().StmtCtx.WarningCount())
-	warns := tk.Session().GetSessionVars().StmtCtx.GetWarnings()
-	require.Equal(t, "[{Warning [types:1265]Data truncated for column 'v' at row 1} {Warning [types:1265]Data truncated for column 'v' at row 2} {Warning [types:1265]Data truncated for column 'v' at row 3} {Warning [types:1265]Data truncated for column 'v' at row 4}]",
-		fmt.Sprintf("%v", warns))
+	c.Check(tk.Se.GetSessionVars().StmtCtx.WarningCount(), Equals, uint16(4))
+	warns := tk.Se.GetSessionVars().StmtCtx.GetWarnings()
+	c.Check(fmt.Sprintf("%v", warns), Equals, "[{Warning [types:1265]Data truncated, field len 4, data len 5} {Warning [types:1265]Data truncated, field len 4, data len 5} {Warning [types:1265]Data truncated, field len 4, data len 6} {Warning [types:1265]Data truncated, field len 4, data len 5}]")
 	tk.MustQuery("select * from vctt").Check(testkit.Rows("ab\n\n ab\n\n", "ab\t\t ab\t\t", "ab   ab", "ab\r\r ab\r\r"))
 	tk.MustQuery("select length(v), length(c) from vctt").Check(testkit.Rows("4 4", "4 4", "4 2", "4 4"))
 }
@@ -1730,27 +1639,23 @@ func combination(items []string) func() []string {
 }
 
 // TestDuplicatedEntryErr See https://github.com/pingcap/tidb/issues/24582
-func TestDuplicatedEntryErr(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestDuplicatedEntryErr(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1;")
 	tk.MustExec("create table t1(a int, b varchar(20), primary key(a,b(3)) clustered);")
 	tk.MustExec("insert into t1 values(1,'aaaaa');")
 	err := tk.ExecToErr("insert into t1 values(1,'aaaaa');")
-	require.EqualError(t, err, "[kv:1062]Duplicate entry '1-aaa' for key 'PRIMARY'")
+	c.Assert(err.Error(), Equals, "[kv:1062]Duplicate entry '1-aaa' for key 'PRIMARY'")
 	err = tk.ExecToErr("insert into t1 select 1, 'aaa'")
-	require.EqualError(t, err, "[kv:1062]Duplicate entry '1-aaa' for key 'PRIMARY'")
+	c.Assert(err.Error(), Equals, "[kv:1062]Duplicate entry '1-aaa' for key 'PRIMARY'")
 	tk.MustExec("insert into t1 select 1, 'bb'")
 	err = tk.ExecToErr("insert into t1 select 1, 'bb'")
-	require.EqualError(t, err, "[kv:1062]Duplicate entry '1-bb' for key 'PRIMARY'")
+	c.Assert(err.Error(), Equals, "[kv:1062]Duplicate entry '1-bb' for key 'PRIMARY'")
 }
 
-func TestBinaryLiteralInsertToEnum(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestBinaryLiteralInsertToEnum(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists bintest")
 
@@ -1759,10 +1664,8 @@ func TestBinaryLiteralInsertToEnum(t *testing.T) {
 	tk.MustQuery("select * from bintest").Check(testkit.Rows("a"))
 }
 
-func TestBinaryLiteralInsertToSet(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite10) TestBinaryLiteralInsertToSet(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists bintest")
 
@@ -1771,10 +1674,14 @@ func TestBinaryLiteralInsertToSet(t *testing.T) {
 	tk.MustQuery("select * from bintest").Check(testkit.Rows("a"))
 }
 
-func TestGlobalTempTableAutoInc(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+var _ = SerialSuites(&testSuite13{&baseTestSuite{}})
+
+type testSuite13 struct {
+	*baseTestSuite
+}
+
+func (s *testSuite13) TestGlobalTempTableAutoInc(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists temp_test")
 	tk.MustExec("create global temporary table temp_test(id int primary key auto_increment) on commit delete rows")
@@ -1818,10 +1725,8 @@ func TestGlobalTempTableAutoInc(t *testing.T) {
 	tk.MustExec("commit")
 }
 
-func TestGlobalTempTableRowID(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite13) TestGlobalTempTableRowID(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists temp_test")
 	tk.MustExec("create global temporary table temp_test(id int) on commit delete rows")
@@ -1855,10 +1760,8 @@ func TestGlobalTempTableRowID(t *testing.T) {
 	tk.MustExec("commit")
 }
 
-func TestGlobalTempTableParallel(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite13) TestGlobalTempTableParallel(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists temp_test")
 	tk.MustExec("create global temporary table temp_test(id int primary key auto_increment) on commit delete rows")
@@ -1866,11 +1769,12 @@ func TestGlobalTempTableParallel(t *testing.T) {
 
 	threads := 8
 	loops := 1
-	var wg util.WaitGroupWrapper
+	wg := sync.WaitGroup{}
+	wg.Add(threads)
 
 	insertFunc := func() {
-		newTk := testkit.NewTestKit(t, store)
-		newTk.MustExec("use test")
+		defer wg.Done()
+		newTk := testkit.NewTestKitWithInit(c, s.store)
 		newTk.MustExec("begin")
 		for i := 0; i < loops; i++ {
 			newTk.MustExec("insert temp_test value(0)")
@@ -1882,20 +1786,18 @@ func TestGlobalTempTableParallel(t *testing.T) {
 	}
 
 	for i := 0; i < threads; i++ {
-		wg.Run(insertFunc)
+		go insertFunc()
 	}
 	wg.Wait()
 }
 
-func TestIssue26762(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite13) TestIssue26762(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 	tk.MustExec("drop table if exists t1;")
 	tk.MustExec("create table t1(c1 date);")
 	_, err := tk.Exec("insert into t1 values('2020-02-31');")
-	require.EqualError(t, err, `[table:1292]Incorrect date value: '2020-02-31' for column 'c1' at row 1`)
+	c.Assert(err.Error(), Equals, `[table:1292]Incorrect date value: '2020-02-31' for column 'c1' at row 1`)
 
 	tk.MustExec("set @@sql_mode='ALLOW_INVALID_DATES';")
 	tk.MustExec("insert into t1 values('2020-02-31');")
@@ -1903,56 +1805,12 @@ func TestIssue26762(t *testing.T) {
 
 	tk.MustExec("set @@sql_mode='STRICT_TRANS_TABLES';")
 	_, err = tk.Exec("insert into t1 values('2020-02-31');")
-	require.EqualError(t, err, `[table:1292]Incorrect date value: '2020-02-31' for column 'c1' at row 1`)
-}
-
-func TestStringtoDecimal(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t (id decimal(10))")
-	tk.MustGetErrCode("insert into t values('1sdf')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1edf')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('12Ea')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1E')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1e')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1.2A')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1.2.3.4.5')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1.2.')", errno.ErrTruncatedWrongValueForField)
-	tk.MustGetErrCode("insert into t values('1,999.00')", errno.ErrTruncatedWrongValueForField)
-	tk.MustExec("insert into t values('12e-3')")
-	// TODO: MySQL8.0 reports Note 1265 Data truncated for column 'id' at row 1
-	tk.MustQuery("show warnings;").Check(testkit.RowsWithSep("|", "Warning|1366|Incorrect decimal value: '12e-3' for column 'id' at row 1"))
-	tk.MustQuery("select id from t").Check(testkit.Rows("0"))
-	tk.MustExec("drop table if exists t")
-}
-
-func TestIssue17745(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec(`use test`)
-	tk.MustExec("drop table if exists tt1")
-	tk.MustExec("create table tt1 (c1 decimal(64))")
-	tk.MustGetErrCode("insert into tt1 values(89000000000000000000000000000000000000000000000000000000000000000000000000000000000000000)", errno.ErrWarnDataOutOfRange)
-	tk.MustGetErrCode("insert into tt1 values(89123456789012345678901234567890123456789012345678901234567890123456789012345678900000000)", errno.ErrWarnDataOutOfRange)
-	tk.MustExec("insert ignore into tt1 values(89123456789012345678901234567890123456789012345678901234567890123456789012345678900000000)")
-	tk.MustQuery("show warnings;").Check(testkit.Rows(`Warning 1264 Out of range value for column 'c1' at row 1`, `Warning 1292 Truncated incorrect DECIMAL value: '789012345678901234567890123456789012345678901234567890123456789012345678900000000'`))
-	tk.MustQuery("select c1 from tt1").Check(testkit.Rows("9999999999999999999999999999999999999999999999999999999999999999"))
-	tk.MustGetErrCode("update tt1 set c1 = 89123456789012345678901234567890123456789012345678901234567890123456789012345678900000000", errno.ErrWarnDataOutOfRange)
-	tk.MustExec("drop table if exists tt1")
-	tk.MustGetErrCode("insert into tt1 values(4556414e723532)", errno.ErrIllegalValueForType)
-	tk.MustQuery("select 888888888888888888888888888888888888888888888888888888888888888888888888888888888888").Check(testkit.Rows("99999999999999999999999999999999999999999999999999999999999999999"))
-	tk.MustQuery("show warnings;").Check(testkit.RowsWithSep("|", "Warning|1292|Truncated incorrect DECIMAL value: '888888888888888888888888888888888888888888888888888888888888888888888888888888888'"))
+	c.Assert(err.Error(), Equals, `[table:1292]Incorrect date value: '2020-02-31' for column 'c1' at row 1`)
 }
 
 // TestInsertIssue29892 test the double type with auto_increment problem, just leverage the serial test suite.
-func TestInsertIssue29892(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testAutoRandomSuite) TestInsertIssue29892(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec(`use test`)
 
 	tk.MustExec("set global tidb_txn_mode='optimistic';")
@@ -1961,12 +1819,12 @@ func TestInsertIssue29892(t *testing.T) {
 	tk.MustExec("create table t(a double auto_increment key, b int)")
 	tk.MustExec("insert into t values (146576794, 1)")
 
-	tk1 := testkit.NewTestKit(t, store)
+	tk1 := testkit.NewTestKit(c, s.store)
 	tk1.MustExec(`use test`)
 	tk1.MustExec("begin")
 	tk1.MustExec("insert into t(b) select 1")
 
-	tk2 := testkit.NewTestKit(t, store)
+	tk2 := testkit.NewTestKit(c, s.store)
 	tk2.MustExec(`use test`)
 	tk2.MustExec("begin")
 	tk2.MustExec("insert into t values (146576795, 1)")
@@ -1976,15 +1834,13 @@ func TestInsertIssue29892(t *testing.T) {
 	// since the origin auto-id (146576795) is cached in retryInfo, it will be fetched again to do the retry again,
 	// which will duplicate with what has been inserted in tk1.
 	_, err := tk1.Exec("commit")
-	require.Error(t, err)
-	require.Equal(t, true, strings.Contains(err.Error(), "Duplicate entry"))
+	c.Assert(err, NotNil)
+	c.Assert(strings.Contains(err.Error(), "Duplicate entry"), Equals, true)
 }
 
 // https://github.com/pingcap/tidb/issues/29483.
-func TestReplaceAllocatingAutoID(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
+func (s *testSuite13) TestReplaceAllocatingAutoID(c *C) {
+	tk := testkit.NewTestKit(c, s.store)
 	tk.MustExec("drop database if exists replace_auto_id;")
 	tk.MustExec("create database replace_auto_id;")
 	tk.MustExec(`use replace_auto_id;`)
@@ -1995,40 +1851,4 @@ func TestReplaceAllocatingAutoID(t *testing.T) {
 	tk.MustExec("INSERT INTO t1 VALUES (127,'maxvalue');")
 	// Note that this error is different from MySQL's duplicated primary key error.
 	tk.MustGetErrCode("REPLACE INTO t1 VALUES (0,'newmaxvalue');", errno.ErrAutoincReadFailed)
-}
-
-func TestInsertIntoSelectError(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("DROP TABLE IF EXISTS t1;")
-	tk.MustExec("CREATE TABLE t1(a INT) ENGINE = InnoDB;")
-	tk.MustExec("INSERT IGNORE into t1(SELECT SLEEP(NULL));")
-	tk.MustQuery("SHOW WARNINGS;").Check(testkit.Rows("Warning 1210 Incorrect arguments to sleep"))
-	tk.MustExec("INSERT IGNORE into t1(SELECT SLEEP(-1));")
-	tk.MustQuery("SHOW WARNINGS;").Check(testkit.Rows("Warning 1210 Incorrect arguments to sleep"))
-	tk.MustExec("INSERT IGNORE into t1(SELECT SLEEP(1));")
-	tk.MustQuery("SELECT * FROM t1;").Check(testkit.Rows("0", "0", "0"))
-	tk.MustExec("DROP TABLE t1;")
-}
-
-// https://github.com/pingcap/tidb/issues/32213.
-func TestIssue32213(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec(`use test`)
-
-	tk.MustExec("create table test.t1(c1 float)")
-	tk.MustExec("insert into test.t1 values(999.99)")
-	tk.MustQuery("select cast(test.t1.c1 as decimal(4, 1)) from test.t1").Check(testkit.Rows("999.9"))
-	tk.MustQuery("select cast(test.t1.c1 as decimal(5, 1)) from test.t1").Check(testkit.Rows("1000.0"))
-
-	tk.MustExec("drop table if exists test.t1")
-	tk.MustExec("create table test.t1(c1 decimal(6, 4))")
-	tk.MustExec("insert into test.t1 values(99.9999)")
-	tk.MustQuery("select cast(test.t1.c1 as decimal(5, 3)) from test.t1").Check(testkit.Rows("99.999"))
-	tk.MustQuery("select cast(test.t1.c1 as decimal(6, 3)) from test.t1").Check(testkit.Rows("100.000"))
 }

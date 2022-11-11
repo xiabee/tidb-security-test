@@ -15,18 +15,19 @@
 package ddl_test
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/util/dbterror"
-	"github.com/stretchr/testify/require"
 )
+
+var _ = Suite(&testDDLAlgorithmSuite{})
 
 var (
 	allAlgorithm = []ast.AlgorithmType{ast.AlgorithmTypeCopy,
 		ast.AlgorithmTypeInplace, ast.AlgorithmTypeInstant}
 )
+
+type testDDLAlgorithmSuite struct{}
 
 type testCase struct {
 	alterSpec          ast.AlterTableSpec
@@ -34,7 +35,7 @@ type testCase struct {
 	expectedAlgorithm  []ast.AlgorithmType
 }
 
-func TestFindAlterAlgorithm(t *testing.T) {
+func (s *testDDLAlgorithmSuite) TestFindAlterAlgorithm(c *C) {
 	supportedInstantAlgorithms := []ast.AlgorithmType{ast.AlgorithmTypeDefault, ast.AlgorithmTypeCopy, ast.AlgorithmTypeInplace, ast.AlgorithmTypeInstant}
 	expectedInstantAlgorithms := []ast.AlgorithmType{ast.AlgorithmTypeInstant, ast.AlgorithmTypeInstant, ast.AlgorithmTypeInstant, ast.AlgorithmTypeInstant}
 
@@ -76,11 +77,11 @@ func TestFindAlterAlgorithm(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		runAlterAlgorithmTestCases(t, &tc)
+		runAlterAlgorithmTestCases(c, &tc)
 	}
 }
 
-func runAlterAlgorithmTestCases(t *testing.T, tc *testCase) {
+func runAlterAlgorithmTestCases(c *C, tc *testCase) {
 	unsupported := make([]ast.AlgorithmType, 0, len(allAlgorithm))
 Loop:
 	for _, alm := range allAlgorithm {
@@ -100,16 +101,16 @@ Loop:
 	for i, alm := range tc.supportedAlgorithm {
 		algorithm, err = ddl.ResolveAlterAlgorithm(&tc.alterSpec, alm)
 		if err != nil {
-			require.True(t, dbterror.ErrAlterOperationNotSupported.Equal(err))
+			c.Assert(ddl.ErrAlterOperationNotSupported.Equal(err), IsTrue)
 		}
-		require.Equal(t, tc.expectedAlgorithm[i], algorithm)
+		c.Assert(algorithm, Equals, tc.expectedAlgorithm[i])
 	}
 
 	// Test unsupported.
 	for _, alm := range unsupported {
 		algorithm, err = ddl.ResolveAlterAlgorithm(&tc.alterSpec, alm)
-		require.Equal(t, ast.AlgorithmTypeDefault, algorithm)
-		require.Error(t, err)
-		require.True(t, dbterror.ErrAlterOperationNotSupported.Equal(err))
+		c.Assert(algorithm, Equals, ast.AlgorithmTypeDefault)
+		c.Assert(err, NotNil, Commentf("Tp:%v, alm:%s", tc.alterSpec.Tp, alm))
+		c.Assert(ddl.ErrAlterOperationNotSupported.Equal(err), IsTrue)
 	}
 }

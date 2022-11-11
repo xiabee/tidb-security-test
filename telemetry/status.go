@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 
 	"github.com/pingcap/errors"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 )
 
 const (

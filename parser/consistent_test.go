@@ -16,6 +16,8 @@ package parser
 import (
 	"io/ioutil"
 	"os"
+	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -24,7 +26,10 @@ import (
 )
 
 func TestKeywordConsistent(t *testing.T) {
-	parserFilename := "parser.y"
+	t.Parallel()
+
+	_, filename, _, _ := runtime.Caller(0)
+	parserFilename := path.Join(path.Dir(filename), "parser.y")
 	parserFile, err := os.Open(parserFilename)
 	requires.NoError(t, err)
 	data, err := ioutil.ReadAll(parserFile)

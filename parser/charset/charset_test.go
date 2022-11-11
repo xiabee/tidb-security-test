@@ -26,6 +26,7 @@ func testValidCharset(t *testing.T, charset string, collation string, expect boo
 }
 
 func TestValidCharset(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cs   string
 		co   string
@@ -60,6 +61,7 @@ func testGetDefaultCollation(t *testing.T, charset string, expectCollation strin
 }
 
 func TestGetDefaultCollation(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cs   string
 		co   string
@@ -82,16 +84,35 @@ func TestGetDefaultCollation(t *testing.T) {
 	charsetNum := 0
 	for _, collate := range collations {
 		if collate.IsDefault {
-			if desc, ok := CharacterSetInfos[collate.CharsetName]; ok {
+			if desc, ok := charsetInfos[collate.CharsetName]; ok {
 				require.Equal(t, desc.DefaultCollation, collate.Name)
 				charsetNum += 1
 			}
 		}
 	}
-	require.Equal(t, len(CharacterSetInfos), charsetNum)
+	require.Equal(t, len(charsetInfos), charsetNum)
+}
+
+func TestSupportedCollations(t *testing.T) {
+	t.Parallel()
+	// All supportedCollation are defined from their names
+	require.Equal(t, len(supportedCollationNames), len(supportedCollationNames))
+
+	// The default collations of supported charsets is the subset of supported collations
+	for _, desc := range GetSupportedCharsets() {
+		found := false
+		for _, c := range GetSupportedCollations() {
+			if desc.DefaultCollation == c.Name {
+				found = true
+				break
+			}
+		}
+		require.Truef(t, found, "Charset [%v] is supported but its default collation [%v] is not.", desc.Name, desc.DefaultCollation)
+	}
 }
 
 func TestGetCharsetDesc(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cs     string
 		result string
@@ -117,6 +138,7 @@ func TestGetCharsetDesc(t *testing.T) {
 }
 
 func TestGetCollationByName(t *testing.T) {
+	t.Parallel()
 	for _, collation := range collations {
 		coll, err := GetCollationByName(collation.Name)
 		require.NoError(t, err)
@@ -125,24 +147,6 @@ func TestGetCollationByName(t *testing.T) {
 
 	_, err := GetCollationByName("non_exist")
 	require.EqualError(t, err, "[ddl:1273]Unknown collation: 'non_exist'")
-}
-
-func TestValidCustomCharset(t *testing.T) {
-	AddCharset(&Charset{"custom", "custom_collation", make(map[string]*Collation), "Custom", 4})
-	defer RemoveCharset("custom")
-	AddCollation(&Collation{99999, "custom", "custom_collation", true})
-
-	tests := []struct {
-		cs   string
-		co   string
-		succ bool
-	}{
-		{"custom", "custom_collation", true},
-		{"utf8", "utf8_invalid_ci", false},
-	}
-	for _, tt := range tests {
-		testValidCharset(t, tt.cs, tt.co, tt.succ)
-	}
 }
 
 func BenchmarkGetCharsetDesc(b *testing.B) {

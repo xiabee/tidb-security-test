@@ -22,6 +22,8 @@ import (
 )
 
 func TestDomainCtx(t *testing.T) {
+	t.Parallel()
+
 	ctx := mock.NewContext()
 	require.NotEqual(t, "", domainKey.String())
 

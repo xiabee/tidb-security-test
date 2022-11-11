@@ -47,11 +47,6 @@ func (*noopStorage) Create(ctx context.Context, name string) (ExternalFileWriter
 	return &noopWriter{}, nil
 }
 
-// Rename implements ExternalStorage interface.
-func (*noopStorage) Rename(ctx context.Context, oldFileName, newFileName string) error {
-	return nil
-}
-
 func newNoopStorage() *noopStorage {
 	return &noopStorage{}
 }

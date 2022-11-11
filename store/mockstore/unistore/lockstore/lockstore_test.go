@@ -26,6 +26,8 @@ import (
 )
 
 func TestMemStore(t *testing.T) {
+	t.Parallel()
+
 	prefix := "ls"
 	n := 30000
 	ls := NewMemStore(1 << 10)
@@ -78,6 +80,8 @@ func deleteMemStore(t *testing.T, ls *MemStore, prefix string, n int) {
 }
 
 func TestIterator(t *testing.T) {
+	t.Parallel()
+
 	_ = checkKey
 	t.Skip("Skip this unstable test(#26235) and bring it back before 2021-07-29.")
 	ls := NewMemStore(1 << 10)
@@ -129,6 +133,8 @@ func numToKey(n int) []byte {
 }
 
 func TestReplace(t *testing.T) {
+	t.Parallel()
+
 	prefix := "ls"
 	n := 30000
 	ls := NewMemStore(1 << 10)

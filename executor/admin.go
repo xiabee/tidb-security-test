@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tidb/util/timeutil"
@@ -294,11 +295,15 @@ func (e *RecoverIndexExec) buildTableScan(ctx context.Context, txn kv.Transactio
 func buildRecoverIndexKeyRanges(sctx *stmtctx.StatementContext, tid int64, startHandle kv.Handle) ([]kv.KeyRange, error) {
 	var startKey []byte
 	if startHandle == nil {
-		startKey = tablecodec.GenTableRecordPrefix(tid).Next()
+		startKey = tablecodec.EncodeRowKey(tid, []byte{codec.NilFlag})
 	} else {
-		startKey = tablecodec.EncodeRowKey(tid, startHandle.Encoded()).PrefixNext()
+		startKey = tablecodec.EncodeRowKey(tid, startHandle.Next().Encoded())
 	}
-	endKey := tablecodec.GenTableRecordPrefix(tid).PrefixNext()
+	maxVal, err := codec.EncodeKey(sctx, nil, types.MaxValueDatum())
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	endKey := tablecodec.EncodeRowKey(tid, maxVal)
 	return []kv.KeyRange{{StartKey: startKey, EndKey: endKey}}, nil
 }
 
@@ -318,7 +323,6 @@ func (e *RecoverIndexExec) backfillIndex(ctx context.Context) (int64, int64, err
 	)
 	for {
 		errInTxn := kv.RunInNewTxn(context.Background(), e.ctx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
-			setOptionForTopSQL(e.ctx.GetSessionVars().StmtCtx, txn)
 			var err error
 			result, err = e.backfillIndexInTxn(ctx, txn, currentHandle)
 			return err
@@ -340,9 +344,6 @@ func (e *RecoverIndexExec) backfillIndex(ctx context.Context) (int64, int64, err
 			break
 		}
 		currentHandle = result.currentHandle
-		if currentHandle.Next().Compare(result.currentHandle) <= 0 {
-			break // There is no more handles in the table.
-		}
 	}
 	return totalAddedCnt, totalScanCnt, nil
 }
@@ -466,7 +467,7 @@ func (e *RecoverIndexExec) backfillIndexInTxn(ctx context.Context, txn kv.Transa
 			return result, err
 		}
 
-		_, err = e.index.Create(e.ctx, txn, row.idxVals, row.handle, row.rsData, table.WithIgnoreAssertion)
+		_, err = e.index.Create(e.ctx, txn, row.idxVals, row.handle, row.rsData)
 		if err != nil {
 			return result, err
 		}
@@ -696,7 +697,6 @@ func (e *CleanupIndexExec) cleanTableIndex(ctx context.Context) error {
 	for {
 		errInTxn := kv.RunInNewTxn(context.Background(), e.ctx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 			txn.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
-			setOptionForTopSQL(e.ctx.GetSessionVars().StmtCtx, txn)
 			err := e.fetchIndex(ctx, txn)
 			if err != nil {
 				return err

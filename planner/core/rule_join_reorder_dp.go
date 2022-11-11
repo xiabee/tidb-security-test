@@ -23,7 +23,7 @@ import (
 
 type joinReorderDPSolver struct {
 	*baseSingleGroupJoinOrderSolver
-	newJoin func(lChild, rChild LogicalPlan, eqConds []*expression.ScalarFunction, otherConds, leftConds, rightConds []expression.Expression, joinType JoinType) LogicalPlan
+	newJoin func(lChild, rChild LogicalPlan, eqConds []*expression.ScalarFunction, otherConds []expression.Expression) LogicalPlan
 }
 
 type joinGroupEqEdge struct {
@@ -37,19 +37,16 @@ type joinGroupNonEqEdge struct {
 	expr       expression.Expression
 }
 
-func (s *joinReorderDPSolver) solve(joinGroup []LogicalPlan, tracer *joinReorderTrace) (LogicalPlan, error) {
-	eqConds := expression.ScalarFuncs2Exprs(s.eqEdges)
+func (s *joinReorderDPSolver) solve(joinGroup []LogicalPlan, eqConds []expression.Expression) (LogicalPlan, error) {
 	for _, node := range joinGroup {
 		_, err := node.recursiveDeriveStats(nil)
 		if err != nil {
 			return nil, err
 		}
-		cost := s.baseNodeCumCost(node)
 		s.curJoinGroup = append(s.curJoinGroup, &jrNode{
 			p:       node,
-			cumCost: cost,
+			cumCost: s.baseNodeCumCost(node),
 		})
-		tracer.appendLogicalJoinCost(node, cost)
 	}
 	adjacents := make([][]int, len(s.curJoinGroup))
 	totalEqEdges := make([]joinGroupEqEdge, 0, len(eqConds))
@@ -123,7 +120,7 @@ func (s *joinReorderDPSolver) solve(joinGroup []LogicalPlan, tracer *joinReorder
 			totalNonEqEdges = append(totalNonEqEdges[:i], totalNonEqEdges[i+1:]...)
 		}
 		// Do DP on each sub graph.
-		join, err := s.dpGraph(visitID2NodeID, nodeID2VisitID, joinGroup, totalEqEdges, subNonEqEdges, tracer)
+		join, err := s.dpGraph(visitID2NodeID, nodeID2VisitID, joinGroup, totalEqEdges, subNonEqEdges)
 		if err != nil {
 			return nil, err
 		}
@@ -162,7 +159,7 @@ func (s *joinReorderDPSolver) bfsGraph(startNode int, visited []bool, adjacents 
 // It implements the traditional join reorder algorithm: DP by subset using the following formula:
 //   bestPlan[S:set of node] = the best one among Join(bestPlan[S1:subset of S], bestPlan[S2: S/S1])
 func (s *joinReorderDPSolver) dpGraph(visitID2NodeID, nodeID2VisitID []int, joinGroup []LogicalPlan,
-	totalEqEdges []joinGroupEqEdge, totalNonEqEdges []joinGroupNonEqEdge, tracer *joinReorderTrace) (LogicalPlan, error) {
+	totalEqEdges []joinGroupEqEdge, totalNonEqEdges []joinGroupNonEqEdge) (LogicalPlan, error) {
 	nodeCnt := uint(len(visitID2NodeID))
 	bestPlan := make([]*jrNode, 1<<nodeCnt)
 	// bestPlan[s] is nil can be treated as bestCost[s] = +inf.
@@ -195,7 +192,6 @@ func (s *joinReorderDPSolver) dpGraph(visitID2NodeID, nodeID2VisitID []int, join
 				return nil, err
 			}
 			curCost := s.calcJoinCumCost(join, bestPlan[sub], bestPlan[remain])
-			tracer.appendLogicalJoinCost(join, curCost)
 			if bestPlan[nodeBitmap] == nil {
 				bestPlan[nodeBitmap] = &jrNode{
 					p:       join,
@@ -212,7 +208,7 @@ func (s *joinReorderDPSolver) dpGraph(visitID2NodeID, nodeID2VisitID []int, join
 
 func (s *joinReorderDPSolver) nodesAreConnected(leftMask, rightMask uint, oldPos2NewPos []int,
 	totalEqEdges []joinGroupEqEdge, totalNonEqEdges []joinGroupNonEqEdge) ([]joinGroupEqEdge, []expression.Expression) {
-	var ( // nolint: prealloc
+	var (
 		usedEqEdges []joinGroupEqEdge
 		otherConds  []expression.Expression
 	)
@@ -249,7 +245,7 @@ func (s *joinReorderDPSolver) newJoinWithEdge(leftPlan, rightPlan LogicalPlan, e
 			eqConds = append(eqConds, newSf)
 		}
 	}
-	join := s.newJoin(leftPlan, rightPlan, eqConds, otherConds, nil, nil, InnerJoin)
+	join := s.newJoin(leftPlan, rightPlan, eqConds, otherConds)
 	_, err := join.recursiveDeriveStats(nil)
 	return join, err
 }
@@ -271,7 +267,7 @@ func (s *joinReorderDPSolver) makeBushyJoin(cartesianJoinGroup []LogicalPlan, ot
 			otherConds, usedOtherConds = expression.FilterOutInPlace(otherConds, func(expr expression.Expression) bool {
 				return expression.ExprFromSchema(expr, mergedSchema)
 			})
-			resultJoinGroup = append(resultJoinGroup, s.newJoin(cartesianJoinGroup[i], cartesianJoinGroup[i+1], nil, usedOtherConds, nil, nil, InnerJoin))
+			resultJoinGroup = append(resultJoinGroup, s.newJoin(cartesianJoinGroup[i], cartesianJoinGroup[i+1], nil, usedOtherConds))
 		}
 		cartesianJoinGroup = resultJoinGroup
 	}

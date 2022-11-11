@@ -37,6 +37,8 @@ import (
 // This test checks the resolve lock functionality. When a txn meets the lock of a large transaction,
 // it should not block by the lock.
 func TestResolvedLargeTxnLocks(t *testing.T) {
+	t.Parallel()
+
 	rpcClient, cluster, pdClient, err := testutils.NewMockTiKV("", mockcopr.NewCoprRPCHandler())
 	require.NoError(t, err)
 
@@ -103,6 +105,8 @@ func TestResolvedLargeTxnLocks(t *testing.T) {
 }
 
 func TestIssue15662(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 	tk := testkit.NewTestKit(t, store)

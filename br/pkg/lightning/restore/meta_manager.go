@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/tidb"
@@ -20,11 +19,6 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"go.uber.org/zap"
-)
-
-const (
-	maxRetryOnStatusConflict = 30
-	maxBackoffTime           = 30 * time.Second
 )
 
 type metaMgrBuilder interface {
@@ -162,7 +156,7 @@ func parseMetaStatus(s string) (metaStatus, error) {
 	case "finish":
 		return metaStatusFinished, nil
 	default:
-		return metaStatusInitial, common.ErrInvalidMetaStatus.GenWithStackByArgs(s)
+		return metaStatusInitial, errors.Errorf("invalid meta status '%s'", s)
 	}
 }
 
@@ -185,149 +179,119 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 		return nil, 0, errors.Annotate(err, "enable pessimistic transaction failed")
 	}
 	needAutoID := common.TableHasAutoRowID(m.tr.tableInfo.Core) || m.tr.tableInfo.Core.GetAutoIncrementColInfo() != nil || m.tr.tableInfo.Core.ContainsAutoRandomBits()
-	tableChecksumingMsg := "Target table is calculating checksum. Please wait until the checksum is finished and try again."
-	doAllocTableRowIDsFn := func() error {
-		return exec.Transact(ctx, "init table allocator base", func(ctx context.Context, tx *sql.Tx) error {
-			rows, err := tx.QueryContext(
-				ctx,
-				fmt.Sprintf("SELECT task_id, row_id_base, row_id_max, total_kvs_base, total_bytes_base, checksum_base, status from %s WHERE table_id = ? FOR UPDATE", m.tableName),
-				m.tr.tableInfo.ID,
-			)
+	err = exec.Transact(ctx, "init table allocator base", func(ctx context.Context, tx *sql.Tx) error {
+		query := fmt.Sprintf("SELECT task_id, row_id_base, row_id_max, total_kvs_base, total_bytes_base, checksum_base, status from %s WHERE table_id = ? FOR UPDATE", m.tableName)
+		rows, err := tx.QueryContext(ctx, query, m.tr.tableInfo.ID)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		defer rows.Close()
+		var (
+			metaTaskID, rowIDBase, rowIDMax, maxRowIDMax int64
+			totalKvs, totalBytes, checksum               uint64
+			statusValue                                  string
+		)
+		for rows.Next() {
+			if err = rows.Scan(&metaTaskID, &rowIDBase, &rowIDMax, &totalKvs, &totalBytes, &checksum, &statusValue); err != nil {
+				return errors.Trace(err)
+			}
+			status, err := parseMetaStatus(statusValue)
+			if err != nil {
+				return errors.Annotatef(err, "invalid meta status '%s'", statusValue)
+			}
+
+			// skip finished meta
+			if status >= metaStatusFinished {
+				continue
+			}
+
+			if status == metaStatusChecksuming {
+				return errors.New("target table is calculating checksum, please wait unit the checksum is finished and try again.")
+			}
+
+			if metaTaskID == m.taskID {
+				curStatus = status
+				baseChecksum = checksum
+				baseTotalKvs = totalKvs
+				baseTotalBytes = totalBytes
+				if status >= metaStatusRowIDAllocated {
+					if rowIDMax-rowIDBase != rawRowIDMax {
+						return errors.Errorf("verify allocator base failed. local: '%d', meta: '%d'", rawRowIDMax, rowIDMax-rowIDBase)
+					}
+					newRowIDBase = rowIDBase
+					newRowIDMax = rowIDMax
+					break
+				}
+				continue
+			}
+
+			// other tasks has finished this logic, we needn't do again.
+			if status >= metaStatusRowIDAllocated {
+				newStatus = metaStatusRestoreStarted
+			}
+
+			if rowIDMax > maxRowIDMax {
+				maxRowIDMax = rowIDMax
+			}
+		}
+		if rows.Err() != nil {
+			return errors.Trace(rows.Err())
+		}
+
+		// no enough info are available, fetch row_id max for table
+		if curStatus == metaStatusInitial {
+			if needAutoID && maxRowIDMax == 0 {
+				// NOTE: currently, if a table contains auto_incremental unique key and _tidb_rowid,
+				// the `show table next_row_id` will returns the unique key field only.
+				var autoIDField string
+				for _, col := range m.tr.tableInfo.Core.Columns {
+					if mysql.HasAutoIncrementFlag(col.Flag) {
+						autoIDField = col.Name.L
+						break
+					} else if mysql.HasPriKeyFlag(col.Flag) && m.tr.tableInfo.Core.AutoRandomBits > 0 {
+						autoIDField = col.Name.L
+						break
+					}
+				}
+				if len(autoIDField) == 0 && common.TableHasAutoRowID(m.tr.tableInfo.Core) {
+					autoIDField = model.ExtraHandleName.L
+				}
+				if len(autoIDField) == 0 {
+					return errors.Errorf("table %s contains auto increment id or _tidb_rowid, but target field not found", m.tr.tableName)
+				}
+
+				autoIDInfos, err := tidb.FetchTableAutoIDInfos(ctx, tx, m.tr.tableName)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				found := false
+				for _, info := range autoIDInfos {
+					if strings.ToLower(info.Column) == autoIDField {
+						maxRowIDMax = info.NextID - 1
+						found = true
+						break
+					}
+				}
+				if !found {
+					return errors.Errorf("can't fetch previous auto id base for table %s field '%s'", m.tr.tableName, autoIDField)
+				}
+			}
+			newRowIDBase = maxRowIDMax
+			newRowIDMax = newRowIDBase + rawRowIDMax
+			// table contains no data, can skip checksum
+			if needAutoID && newRowIDBase == 0 && newStatus < metaStatusRestoreStarted {
+				newStatus = metaStatusRestoreStarted
+			}
+			query = fmt.Sprintf("update %s set row_id_base = ?, row_id_max = ?, status = ? where table_id = ? and task_id = ?", m.tableName)
+			_, err := tx.ExecContext(ctx, query, newRowIDBase, newRowIDMax, newStatus.String(), m.tr.tableInfo.ID, m.taskID)
 			if err != nil {
 				return errors.Trace(err)
 			}
-			defer rows.Close()
-			var (
-				metaTaskID, rowIDBase, rowIDMax, maxRowIDMax int64
-				totalKvs, totalBytes, checksum               uint64
-				statusValue                                  string
-			)
-			for rows.Next() {
-				if err = rows.Scan(&metaTaskID, &rowIDBase, &rowIDMax, &totalKvs, &totalBytes, &checksum, &statusValue); err != nil {
-					return errors.Trace(err)
-				}
-				status, err := parseMetaStatus(statusValue)
-				if err != nil {
-					return err
-				}
 
-				// skip finished meta
-				if status >= metaStatusFinished {
-					continue
-				}
-
-				if status == metaStatusChecksuming {
-					return common.ErrAllocTableRowIDs.GenWithStack(tableChecksumingMsg)
-				}
-
-				if metaTaskID == m.taskID {
-					curStatus = status
-					baseChecksum = checksum
-					baseTotalKvs = totalKvs
-					baseTotalBytes = totalBytes
-					if status >= metaStatusRowIDAllocated {
-						if rowIDMax-rowIDBase != rawRowIDMax {
-							return common.ErrAllocTableRowIDs.GenWithStack("verify allocator base failed. local: '%d', meta: '%d'", rawRowIDMax, rowIDMax-rowIDBase)
-						}
-						newRowIDBase = rowIDBase
-						newRowIDMax = rowIDMax
-						break
-					}
-					continue
-				}
-
-				// other tasks has finished this logic, we needn't do again.
-				if status >= metaStatusRowIDAllocated {
-					newStatus = metaStatusRestoreStarted
-				}
-
-				if rowIDMax > maxRowIDMax {
-					maxRowIDMax = rowIDMax
-				}
-			}
-			if rows.Err() != nil {
-				return errors.Trace(rows.Err())
-			}
-
-			// no enough info are available, fetch row_id max for table
-			if curStatus == metaStatusInitial {
-				if needAutoID && maxRowIDMax == 0 {
-					// NOTE: currently, if a table contains auto_incremental unique key and _tidb_rowid,
-					// the `show table next_row_id` will returns the unique key field only.
-					var autoIDField string
-					for _, col := range m.tr.tableInfo.Core.Columns {
-						if mysql.HasAutoIncrementFlag(col.GetFlag()) {
-							autoIDField = col.Name.L
-							break
-						} else if mysql.HasPriKeyFlag(col.GetFlag()) && m.tr.tableInfo.Core.AutoRandomBits > 0 {
-							autoIDField = col.Name.L
-							break
-						}
-					}
-					if len(autoIDField) == 0 && common.TableHasAutoRowID(m.tr.tableInfo.Core) {
-						autoIDField = model.ExtraHandleName.L
-					}
-					if len(autoIDField) == 0 {
-						return common.ErrAllocTableRowIDs.GenWithStack("table %s contains auto increment id or _tidb_rowid, but target field not found", m.tr.tableName)
-					}
-
-					autoIDInfos, err := tidb.FetchTableAutoIDInfos(ctx, tx, m.tr.tableName)
-					if err != nil {
-						return errors.Trace(err)
-					}
-					found := false
-					for _, info := range autoIDInfos {
-						if strings.ToLower(info.Column) == autoIDField {
-							maxRowIDMax = info.NextID - 1
-							found = true
-							break
-						}
-					}
-					if !found {
-						return common.ErrAllocTableRowIDs.GenWithStack("can't fetch previous auto id base for table %s field '%s'", m.tr.tableName, autoIDField)
-					}
-				}
-				newRowIDBase = maxRowIDMax
-				newRowIDMax = newRowIDBase + rawRowIDMax
-				// table contains no data, can skip checksum
-				if needAutoID && newRowIDBase == 0 && newStatus < metaStatusRestoreStarted {
-					newStatus = metaStatusRestoreStarted
-				}
-
-				// nolint:gosec
-				query := fmt.Sprintf("update %s set row_id_base = ?, row_id_max = ?, status = ? where table_id = ? and task_id = ?", m.tableName)
-				_, err := tx.ExecContext(ctx, query, newRowIDBase, newRowIDMax, newStatus.String(), m.tr.tableInfo.ID, m.taskID)
-				if err != nil {
-					return errors.Trace(err)
-				}
-
-				curStatus = newStatus
-			}
-			return nil
-		})
-	}
-	// TODO: the retry logic is duplicate with code in local.writeAndIngestByRanges, should encapsulate it later.
-	// max retry backoff time: 2+4+8+16+30*26=810s
-	backOffTime := time.Second
-	for i := 0; i < maxRetryOnStatusConflict; i++ {
-		err = doAllocTableRowIDsFn()
-		if err == nil || !strings.Contains(err.Error(), tableChecksumingMsg) {
-			break
+			curStatus = newStatus
 		}
-		// we only retry if it's tableChecksuming error, it happens during parallel import.
-		// for detail see https://docs.pingcap.com/tidb/stable/tidb-lightning-distributed-import
-		log.L().Warn("target table is doing checksum, will try again",
-			zap.Int("retry time", i+1), log.ShortError(err))
-		backOffTime *= 2
-		if backOffTime > maxBackoffTime {
-			backOffTime = maxBackoffTime
-		}
-		select {
-		case <-time.After(backOffTime):
-		case <-ctx.Done():
-			return nil, 0, errors.Trace(ctx.Err())
-		}
-	}
+		return nil
+	})
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
@@ -417,11 +381,8 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 	needChecksum = true
 	needRemoteDupe = true
 	err = exec.Transact(ctx, "checksum pre-check", func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(
-			ctx,
-			fmt.Sprintf("SELECT task_id, total_kvs_base, total_bytes_base, checksum_base, total_kvs, total_bytes, checksum, status, has_duplicates from %s WHERE table_id = ? FOR UPDATE", m.tableName),
-			m.tr.tableInfo.ID,
-		)
+		query := fmt.Sprintf("SELECT task_id, total_kvs_base, total_bytes_base, checksum_base, total_kvs, total_bytes, checksum, status, has_duplicates from %s WHERE table_id = ? FOR UPDATE", m.tableName)
+		rows, err := tx.QueryContext(ctx, query, m.tr.tableInfo.ID)
 		if err != nil {
 			return errors.Annotate(err, "fetch task meta failed")
 		}
@@ -441,7 +402,7 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 			}
 			status, err := parseMetaStatus(statusValue)
 			if err != nil {
-				return err
+				return errors.Annotatef(err, "invalid meta status '%s'", statusValue)
 			}
 
 			if taskHasDuplicates {
@@ -470,7 +431,7 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 				needRemoteDupe = false
 				break
 			} else if status == metaStatusChecksuming {
-				return common.ErrTableIsChecksuming.GenWithStackByArgs(m.tableName)
+				return errors.New("another task is checksuming, there must be something wrong!")
 			}
 
 			totalBytes += baseTotalBytes
@@ -487,8 +448,7 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 			return errors.Trace(rows.Err())
 		}
 
-		// nolint:gosec
-		query := fmt.Sprintf("update %s set total_kvs = ?, total_bytes = ?, checksum = ?, status = ?, has_duplicates = ? where table_id = ? and task_id = ?", m.tableName)
+		query = fmt.Sprintf("update %s set total_kvs = ?, total_bytes = ?, checksum = ?, status = ?, has_duplicates = ? where table_id = ? and task_id = ?", m.tableName)
 		_, err = tx.ExecContext(ctx, query, checksum.SumKVS(), checksum.SumSize(), checksum.Sum(), newStatus.String(), hasLocalDupes, m.tr.tableInfo.ID, m.taskID)
 		return errors.Annotate(err, "update local checksum failed")
 	})
@@ -596,7 +556,7 @@ func parseTaskMetaStatus(s string) (taskMetaStatus, error) {
 	case "switched":
 		return taskMetaStatusSwitchBack, nil
 	default:
-		return taskMetaStatusInitial, common.ErrInvalidMetaStatus.GenWithStackByArgs(s)
+		return taskMetaStatusInitial, errors.Errorf("invalid meta status '%s'", s)
 	}
 }
 
@@ -633,10 +593,8 @@ func (m *dbTaskMetaMgr) CheckTaskExist(ctx context.Context) (bool, error) {
 	// avoid override existing metadata if the meta is already inserted.
 	exist := false
 	err := exec.Transact(ctx, "check whether this task has started before", func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx,
-			fmt.Sprintf("SELECT task_id from %s WHERE task_id = ?", m.tableName),
-			m.taskID,
-		)
+		query := fmt.Sprintf("SELECT task_id from %s WHERE task_id = %d", m.tableName, m.taskID)
+		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {
 			return errors.Annotate(err, "fetch task meta failed")
 		}
@@ -677,10 +635,8 @@ func (m *dbTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(t
 		return errors.Annotate(err, "enable pessimistic transaction failed")
 	}
 	return exec.Transact(ctx, "check tasks exclusively", func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(
-			ctx,
-			fmt.Sprintf("SELECT task_id, pd_cfgs, status, state, source_bytes, cluster_avail from %s FOR UPDATE", m.tableName),
-		)
+		query := fmt.Sprintf("SELECT task_id, pd_cfgs, status, state, source_bytes, cluster_avail from %s FOR UPDATE", m.tableName)
+		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {
 			return errors.Annotate(err, "fetch task metas failed")
 		}
@@ -695,7 +651,7 @@ func (m *dbTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(t
 			}
 			status, err := parseTaskMetaStatus(statusValue)
 			if err != nil {
-				return err
+				return errors.Annotatef(err, "invalid task meta status '%s'", statusValue)
 			}
 			task.status = status
 			tasks = append(tasks, task)
@@ -708,7 +664,6 @@ func (m *dbTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(t
 			return errors.Trace(err)
 		}
 		for _, task := range newTasks {
-			// nolint:gosec
 			query := fmt.Sprintf("REPLACE INTO %s (task_id, pd_cfgs, status, state, source_bytes, cluster_avail) VALUES(?, ?, ?, ?, ?, ?)", m.tableName)
 			if _, err = tx.ExecContext(ctx, query, task.taskID, task.pdCfgs, task.status.String(), task.state, task.sourceBytes, task.clusterAvail); err != nil {
 				return errors.Trace(err)
@@ -740,10 +695,8 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 	paused := false
 	var pausedCfg storedCfgs
 	err = exec.Transact(ctx, "check and pause schedulers", func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(
-			ctx,
-			fmt.Sprintf("SELECT task_id, pd_cfgs, status, state from %s FOR UPDATE", m.tableName),
-		)
+		query := fmt.Sprintf("SELECT task_id, pd_cfgs, status, state from %s FOR UPDATE", m.tableName)
+		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {
 			return errors.Annotate(err, "fetch task meta failed")
 		}
@@ -766,7 +719,7 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 			}
 			status, err := parseTaskMetaStatus(statusValue)
 			if err != nil {
-				return err
+				return errors.Annotatef(err, "invalid task meta status '%s'", statusValue)
 			}
 
 			if status == taskMetaStatusInitial {
@@ -816,8 +769,7 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 			return errors.Trace(err)
 		}
 
-		// nolint:gosec
-		query := fmt.Sprintf("update %s set pd_cfgs = ?, status = ? where task_id = ?", m.tableName)
+		query = fmt.Sprintf("update %s set pd_cfgs = ?, status = ? where task_id = ?", m.tableName)
 		_, err = tx.ExecContext(ctx, query, string(jsonByts), taskMetaStatusScheduleSet.String(), m.taskID)
 
 		return errors.Annotate(err, "update task pd configs failed")
@@ -869,7 +821,8 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 	switchBack := true
 	allFinished := finished
 	err = exec.Transact(ctx, "check and finish schedulers", func(ctx context.Context, tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT task_id, status, state from %s FOR UPDATE", m.tableName))
+		query := fmt.Sprintf("SELECT task_id, status, state from %s FOR UPDATE", m.tableName)
+		rows, err := tx.QueryContext(ctx, query)
 		if err != nil {
 			return errors.Annotate(err, "fetch task meta failed")
 		}
@@ -892,7 +845,7 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 			}
 			status, err := parseTaskMetaStatus(statusValue)
 			if err != nil {
-				return err
+				return errors.Annotatef(err, "invalid task meta status '%s'", statusValue)
 			}
 
 			if taskID == m.taskID {
@@ -929,8 +882,7 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 				newStatus = taskMetaStatusSwitchSkipped
 			}
 
-			// nolint:gosec
-			query := fmt.Sprintf("update %s set status = ?, state = ? where task_id = ?", m.tableName)
+			query = fmt.Sprintf("update %s set status = ?, state = ? where task_id = ?", m.tableName)
 			if _, err = tx.ExecContext(ctx, query, newStatus.String(), newState, m.taskID); err != nil {
 				return errors.Trace(err)
 			}

@@ -11,8 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !codes
-// +build !codes
+//+build !codes
 
 package test_driver
 

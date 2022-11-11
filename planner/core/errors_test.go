@@ -15,14 +15,16 @@
 package core
 
 import (
-	"testing"
-
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
-	"github.com/stretchr/testify/require"
 )
 
-func TestError(t *testing.T) {
+type testErrorSuite struct{}
+
+var _ = Suite(testErrorSuite{})
+
+func (s testErrorSuite) TestError(c *C) {
 	kvErrs := []*terror.Error{
 		ErrUnsupportedType,
 		ErrAnalyzeMissIndex,
@@ -82,10 +84,9 @@ func TestError(t *testing.T) {
 		ErrCartesianProductUnsupported,
 		ErrStmtNotFound,
 		ErrAmbiguous,
-		ErrKeyPart0,
 	}
 	for _, err := range kvErrs {
 		code := terror.ToSQLError(err).Code
-		require.Truef(t, code != mysql.ErrUnknown && code == uint16(err.Code()), "err: %v", err)
+		c.Assert(code != mysql.ErrUnknown && code == uint16(err.Code()), IsTrue, Commentf("err: %v", err))
 	}
 }

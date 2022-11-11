@@ -20,11 +20,12 @@ import (
 	"github.com/pingcap/tidb/executor/aggfuncs"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/set"
 )
 
 func TestMergePartialResult4Avg(t *testing.T) {
+	t.Parallel()
+
 	tests := []aggTest{
 		buildAggTester(ast.AggFuncAvg, mysql.TypeNewDecimal, 5, 2.0, 3.0, 2.375),
 		buildAggTester(ast.AggFuncAvg, mysql.TypeDouble, 5, 2.0, 3.0, 2.375),
@@ -35,6 +36,8 @@ func TestMergePartialResult4Avg(t *testing.T) {
 }
 
 func TestAvg(t *testing.T) {
+	t.Parallel()
+
 	tests := []aggTest{
 		buildAggTester(ast.AggFuncAvg, mysql.TypeNewDecimal, 5, nil, 2.0),
 		buildAggTester(ast.AggFuncAvg, mysql.TypeDouble, 5, nil, 2.0),
@@ -46,6 +49,8 @@ func TestAvg(t *testing.T) {
 }
 
 func TestMemAvg(t *testing.T) {
+	t.Parallel()
+
 	tests := []aggMemTest{
 		buildAggMemTester(ast.AggFuncAvg, mysql.TypeNewDecimal, 5,
 			aggfuncs.DefPartialResult4AvgDecimalSize, defaultUpdateMemDeltaGens, false),
@@ -62,7 +67,8 @@ func TestMemAvg(t *testing.T) {
 }
 
 func BenchmarkAvg(b *testing.B) {
-	ctx := mock.NewContext()
+	s := testSuite{}
+	s.SetUpSuite(nil)
 
 	rowNum := 50000
 	tests := []aggTest{
@@ -70,6 +76,6 @@ func BenchmarkAvg(b *testing.B) {
 		buildAggTester(ast.AggFuncAvg, mysql.TypeDouble, rowNum, nil, 2.0),
 	}
 	for _, test := range tests {
-		benchmarkAggFunc(b, ctx, test)
+		s.benchmarkAggFunc(b, test)
 	}
 }

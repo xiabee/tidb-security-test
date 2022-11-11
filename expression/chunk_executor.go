@@ -122,11 +122,11 @@ func evalOneVec(ctx sessionctx.Context, expr Expression, input *chunk.Chunk, out
 		if err := expr.VecEvalInt(ctx, input, result); err != nil {
 			return err
 		}
-		if ft.GetType() == mysql.TypeBit {
+		if ft.Tp == mysql.TypeBit {
 			i64s := result.Int64s()
 			buf := chunk.NewColumn(ft, input.NumRows())
 			buf.ReserveBytes(input.NumRows())
-			byteSize := (ft.GetFlen() + 7) >> 3
+			byteSize := (ft.Flen + 7) >> 3
 			for i := range i64s {
 				if result.IsNull(i) {
 					buf.AppendNull()
@@ -136,7 +136,7 @@ func evalOneVec(ctx sessionctx.Context, expr Expression, input *chunk.Chunk, out
 			}
 			// TODO: recycle all old Columns returned here.
 			output.SetCol(colIdx, buf)
-		} // else if mysql.HasUnsignedFlag(ft.flag) {
+		} // else if mysql.HasUnsignedFlag(ft.Flag) {
 		// the underlying memory formats of int64 and uint64 are the same in Golang,
 		// so we can do a no-op here.
 		// }
@@ -144,7 +144,7 @@ func evalOneVec(ctx sessionctx.Context, expr Expression, input *chunk.Chunk, out
 		if err := expr.VecEvalReal(ctx, input, result); err != nil {
 			return err
 		}
-		if ft.GetType() == mysql.TypeFloat {
+		if ft.Tp == mysql.TypeFloat {
 			f64s := result.Float64s()
 			n := input.NumRows()
 			buf := chunk.NewColumn(ft, n)
@@ -171,7 +171,7 @@ func evalOneVec(ctx sessionctx.Context, expr Expression, input *chunk.Chunk, out
 		if err := expr.VecEvalString(ctx, input, result); err != nil {
 			return err
 		}
-		if ft.GetType() == mysql.TypeEnum {
+		if ft.Tp == mysql.TypeEnum {
 			n := input.NumRows()
 			buf := chunk.NewColumn(ft, n)
 			buf.ReserveEnum(n)
@@ -183,7 +183,7 @@ func evalOneVec(ctx sessionctx.Context, expr Expression, input *chunk.Chunk, out
 				}
 			}
 			output.SetCol(colIdx, buf)
-		} else if ft.GetType() == mysql.TypeSet {
+		} else if ft.Tp == mysql.TypeSet {
 			n := input.NumRows()
 			buf := chunk.NewColumn(ft, n)
 			buf.ReserveSet(n)
@@ -263,20 +263,20 @@ func executeToInt(ctx sessionctx.Context, expr Expression, fieldType *types.Fiel
 		output.AppendNull(colID)
 		return nil
 	}
-	if fieldType.GetType() == mysql.TypeBit {
-		byteSize := (fieldType.GetFlen() + 7) >> 3
+	if fieldType.Tp == mysql.TypeBit {
+		byteSize := (fieldType.Flen + 7) >> 3
 		output.AppendBytes(colID, types.NewBinaryLiteralFromUint(uint64(res), byteSize))
 		return nil
 	}
-	if fieldType.GetType() == mysql.TypeEnum {
-		e, err := types.ParseEnumValue(fieldType.GetElems(), uint64(res))
+	if fieldType.Tp == mysql.TypeEnum {
+		e, err := types.ParseEnumValue(fieldType.Elems, uint64(res))
 		if err != nil {
 			return err
 		}
 		output.AppendEnum(colID, e)
 		return nil
 	}
-	if mysql.HasUnsignedFlag(fieldType.GetFlag()) {
+	if mysql.HasUnsignedFlag(fieldType.Flag) {
 		output.AppendUint64(colID, uint64(res))
 		return nil
 	}
@@ -293,7 +293,7 @@ func executeToReal(ctx sessionctx.Context, expr Expression, fieldType *types.Fie
 		output.AppendNull(colID)
 		return nil
 	}
-	if fieldType.GetType() == mysql.TypeFloat {
+	if fieldType.Tp == mysql.TypeFloat {
 		output.AppendFloat32(colID, float32(res))
 		return nil
 	}
@@ -360,10 +360,10 @@ func executeToString(ctx sessionctx.Context, expr Expression, fieldType *types.F
 	}
 	if isNull {
 		output.AppendNull(colID)
-	} else if fieldType.GetType() == mysql.TypeEnum {
+	} else if fieldType.Tp == mysql.TypeEnum {
 		val := types.Enum{Value: uint64(0), Name: res}
 		output.AppendEnum(colID, val)
-	} else if fieldType.GetType() == mysql.TypeSet {
+	} else if fieldType.Tp == mysql.TypeSet {
 		val := types.Set{Value: uint64(0), Name: res}
 		output.AppendSet(colID, val)
 	} else {

@@ -29,6 +29,8 @@ import (
 )
 
 func TestGrantGlobal(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -69,6 +71,8 @@ func TestGrantGlobal(t *testing.T) {
 }
 
 func TestGrantDBScope(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -108,6 +112,8 @@ func TestGrantDBScope(t *testing.T) {
 }
 
 func TestWithGrantOption(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -132,6 +138,8 @@ func TestWithGrantOption(t *testing.T) {
 }
 
 func TestGrantTableScope(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -176,6 +184,8 @@ func TestGrantTableScope(t *testing.T) {
 }
 
 func TestGrantColumnScope(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -222,6 +232,8 @@ func TestGrantColumnScope(t *testing.T) {
 }
 
 func TestIssue2456(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -234,6 +246,8 @@ func TestIssue2456(t *testing.T) {
 }
 
 func TestNoAutoCreateUser(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -246,6 +260,8 @@ func TestNoAutoCreateUser(t *testing.T) {
 }
 
 func TestCreateUserWhenGrant(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -261,18 +277,9 @@ func TestCreateUserWhenGrant(t *testing.T) {
 	tk.MustExec(`DROP USER IF EXISTS 'test'@'%'`)
 }
 
-func TestCreateUserWithTooLongName(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	err := tk.ExecToErr("CREATE USER '1234567890abcdefGHIKL1234567890abcdefGHIKL@localhost'")
-	require.Truef(t, terror.ErrorEqual(err, executor.ErrWrongStringLength), "ERROR 1470 (HY000): String '1234567890abcdefGHIKL1234567890abcdefGHIKL' is too long for user name (should be no longer than 32)")
-	err = tk.ExecToErr("CREATE USER 'some_user_name@host_1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij1234567890X'")
-	require.Truef(t, terror.ErrorEqual(err, executor.ErrWrongStringLength), "ERROR 1470 (HY000): String 'host_1234567890abcdefghij1234567890abcdefghij1234567890abcdefghij12345' is too long for host name (should be no longer than 255)")
-}
-
 func TestGrantPrivilegeAtomic(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -327,6 +334,8 @@ func TestGrantPrivilegeAtomic(t *testing.T) {
 }
 
 func TestIssue2654(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -339,6 +348,8 @@ func TestIssue2654(t *testing.T) {
 }
 
 func TestGrantUnderANSIQuotes(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -353,6 +364,8 @@ func TestGrantUnderANSIQuotes(t *testing.T) {
 }
 
 func TestMaintainRequire(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -426,6 +439,8 @@ func TestMaintainRequire(t *testing.T) {
 }
 
 func TestMaintainAuthString(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -437,6 +452,8 @@ func TestMaintainAuthString(t *testing.T) {
 }
 
 func TestGrantOnNonExistTable(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -449,9 +466,9 @@ func TestGrantOnNonExistTable(t *testing.T) {
 	require.True(t, terror.ErrorEqual(err, infoschema.ErrTableNotExists))
 
 	tk.MustExec("create table if not exists xx (id int)")
-	// Case insensitive, differ from MySQL default behaviour.
-	// In TiDB, system variable lower_case_table_names = 2, which means compare table name using lower case.
-	tk.MustExec("grant Select,Insert on XX to 'genius'")
+	// Case sensitive
+	_, err = tk.Exec("grant Select,Insert on XX to 'genius'")
+	require.True(t, terror.ErrorEqual(err, infoschema.ErrTableNotExists))
 
 	_, err = tk.Exec("grant Select,Insert on xx to 'genius'")
 	require.NoError(t, err)
@@ -498,6 +515,8 @@ func TestGrantOnNonExistTable(t *testing.T) {
 }
 
 func TestIssue22721(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -512,6 +531,8 @@ func TestIssue22721(t *testing.T) {
 }
 
 func TestPerformanceSchemaPrivGrant(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -560,6 +581,8 @@ func TestPerformanceSchemaPrivGrant(t *testing.T) {
 }
 
 func TestGrantDynamicPrivs(t *testing.T) {
+	t.Parallel()
+
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
 
@@ -593,36 +616,16 @@ func TestGrantDynamicPrivs(t *testing.T) {
 	tk.MustQuery("SELECT WITH_GRANT_OPTION FROM mysql.global_grants WHERE `Host` = '%' AND `User` = 'dyn' AND Priv='CONNECTION_ADMIN'").Check(testkit.Rows("Y"))
 }
 
-func TestNonExistTableIllegalGrant(t *testing.T) {
+func TestIssue38293(t *testing.T) {
 	store, clean := testkit.CreateMockStore(t)
 	defer clean()
-
 	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("create user u29302")
-	defer tk.MustExec("drop user u29302")
-	// Table level, not existing table, illegal privilege
-	tk.MustGetErrCode("grant create temporary tables on NotExistsD29302.NotExistsT29302 to u29302", mysql.ErrIllegalGrantForTable)
-	tk.MustGetErrCode("grant lock tables on test.NotExistsT29302 to u29302", mysql.ErrIllegalGrantForTable)
-	// Column level, not existing table, illegal privilege
-	tk.MustGetErrCode("grant create temporary tables (NotExistsCol) on NotExistsD29302.NotExistsT29302 to u29302;", mysql.ErrWrongUsage)
-}
-
-func TestIssue34610(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("DROP DATABASE IF EXISTS d1;")
-	tk.MustExec("CREATE DATABASE d1;")
-	tk.MustExec("USE d1;")
-	tk.MustExec("CREATE USER user_1@localhost;")
+	tk.Session().GetSessionVars().User = &auth.UserIdentity{Username: "root", Hostname: "localhost"}
+	tk.MustExec("DROP USER IF EXISTS test")
+	tk.MustExec("CREATE USER test")
 	defer func() {
-		tk.MustExec("DROP DATABASE d1;")
-		tk.MustExec("DROP USER user_1@localhost;")
+		tk.MustExec("DROP USER test")
 	}()
-
-	tk.MustExec("CREATE TABLE T1(f1 INT);")
-	tk.MustGetErrCode("CREATE TABLE t1(f1 INT);", mysql.ErrTableExists)
-	tk.MustExec("GRANT SELECT ON T1 to user_1@localhost;")
-	tk.MustExec("GRANT SELECT ON t1 to user_1@localhost;")
+	tk.MustExec("GRANT SELECT ON `mysql`.`db` TO test")
+	tk.MustQuery("SELECT `Grantor` FROM `mysql`.`tables_priv` WHERE User = 'test'").Check(testkit.Rows("root@localhost"))
 }

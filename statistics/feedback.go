@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
@@ -34,9 +35,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/ranger"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
@@ -123,30 +122,11 @@ func (m *QueryFeedbackMap) append(k QueryFeedbackKey, qs []*QueryFeedback) bool 
 	if !ok || s == nil {
 		s = make([]*QueryFeedback, 0, 8)
 	}
-	l := mathutil.Min(int64(len(qs)), remained)
+	l := mathutil.MinInt64(int64(len(qs)), remained)
 	s = append(s, qs[:l]...)
 	m.Feedbacks[k] = s
 	m.Size = m.Size + int(l)
 	return true
-}
-
-// SiftFeedbacks eliminates feedbacks which are overlapped with others. It is a tradeoff between
-// feedback accuracy and its overhead.
-func (m *QueryFeedbackMap) SiftFeedbacks() {
-	sc := &stmtctx.StatementContext{TimeZone: time.UTC}
-	for k, qs := range m.Feedbacks {
-		fbs := make([]Feedback, 0, len(qs)*2)
-		for _, q := range qs {
-			fbs = append(fbs, q.Feedback...)
-		}
-		if len(fbs) == 0 {
-			delete(m.Feedbacks, k)
-			continue
-		}
-		m.Feedbacks[k] = m.Feedbacks[k][:1]
-		m.Feedbacks[k][0].Feedback, _ = NonOverlappedFeedbacks(sc, fbs)
-	}
-	m.Size = len(m.Feedbacks)
 }
 
 // Merge combines 2 collections of feedbacks.
@@ -236,7 +216,6 @@ func (q *QueryFeedback) DecodeToRanges(isIndex bool) ([]*ranger.Range, error) {
 			LowVal:      lowVal,
 			HighVal:     highVal,
 			HighExclude: true,
-			Collators:   collate.GetBinaryCollatorSlice(len(lowVal)),
 		}))
 	}
 	return ranges, nil
@@ -351,14 +330,14 @@ func NonOverlappedFeedbacks(sc *stmtctx.StatementContext, fbs []Feedback) ([]Fee
 	// with the previous chosen feedbacks.
 	var existsErr bool
 	sort.Slice(fbs, func(i, j int) bool {
-		res, err := fbs[i].Upper.Compare(sc, fbs[j].Upper, collate.GetBinaryCollator())
+		res, err := fbs[i].Upper.CompareDatum(sc, fbs[j].Upper)
 		if err != nil {
 			existsErr = true
 		}
 		if existsErr || res != 0 {
 			return res < 0
 		}
-		res, err = fbs[i].Lower.Compare(sc, fbs[j].Lower, collate.GetBinaryCollator())
+		res, err = fbs[i].Lower.CompareDatum(sc, fbs[j].Lower)
 		if err != nil {
 			existsErr = true
 		}
@@ -370,7 +349,7 @@ func NonOverlappedFeedbacks(sc *stmtctx.StatementContext, fbs []Feedback) ([]Fee
 	resFBs := make([]Feedback, 0, len(fbs))
 	previousEnd := &types.Datum{}
 	for _, fb := range fbs {
-		res, err := previousEnd.Compare(sc, fb.Lower, collate.GetBinaryCollator())
+		res, err := previousEnd.CompareDatum(sc, fb.Lower)
 		if err != nil {
 			return fbs, false
 		}
@@ -391,14 +370,14 @@ type BucketFeedback struct {
 
 // outOfRange checks if the `val` is between `min` and `max`.
 func outOfRange(sc *stmtctx.StatementContext, min, max, val *types.Datum) (int, error) {
-	result, err := val.Compare(sc, min, collate.GetBinaryCollator())
+	result, err := val.CompareDatum(sc, min)
 	if err != nil {
 		return 0, err
 	}
 	if result < 0 {
 		return result, nil
 	}
-	result, err = val.Compare(sc, max, collate.GetBinaryCollator())
+	result, err = val.CompareDatum(sc, max)
 	if err != nil {
 		return 0, err
 	}
@@ -478,7 +457,7 @@ func buildBucketFeedback(h *Histogram, feedback *QueryFeedback) (map[int]*Bucket
 		}
 		bkt.feedback = append(bkt.feedback, fb)
 		// Update the bound if necessary.
-		res, err := bkt.lower.Compare(nil, fb.Lower, collate.GetBinaryCollator())
+		res, err := bkt.lower.CompareDatum(nil, fb.Lower)
 		if err != nil {
 			logutil.BgLogger().Debug("compare datum failed", zap.Any("value1", bkt.lower), zap.Any("value2", fb.Lower), zap.Error(err))
 			continue
@@ -486,7 +465,7 @@ func buildBucketFeedback(h *Histogram, feedback *QueryFeedback) (map[int]*Bucket
 		if res > 0 {
 			bkt.lower = fb.Lower
 		}
-		res, err = bkt.upper.Compare(nil, fb.Upper, collate.GetBinaryCollator())
+		res, err = bkt.upper.CompareDatum(nil, fb.Upper)
 		if err != nil {
 			logutil.BgLogger().Debug("compare datum failed", zap.Any("value1", bkt.upper), zap.Any("value2", fb.Upper), zap.Error(err))
 			continue
@@ -522,7 +501,7 @@ func (b *BucketFeedback) getBoundaries(num int) []types.Datum {
 	total = 1
 	// Erase the repeat values.
 	for i := 1; i < len(vals); i++ {
-		cmp, err := vals[total-1].Compare(nil, &vals[i], collate.GetBinaryCollator())
+		cmp, err := vals[total-1].CompareDatum(nil, &vals[i])
 		if err != nil {
 			logutil.BgLogger().Debug("compare datum failed", zap.Any("value1", vals[total-1]), zap.Any("value2", vals[i]), zap.Error(err))
 			continue
@@ -1018,7 +997,7 @@ func DecodeFeedback(val []byte, q *QueryFeedback, c *CMSketch, t *TopN, ft *type
 	if len(pb.IndexRanges) > 0 || len(pb.HashValues) > 0 || len(pb.IndexPoints) > 0 {
 		decodeFeedbackForIndex(q, pb, c, t)
 	} else if len(pb.IntRanges) > 0 {
-		decodeFeedbackForPK(q, pb, mysql.HasUnsignedFlag(ft.GetFlag()))
+		decodeFeedbackForPK(q, pb, mysql.HasUnsignedFlag(ft.Flag))
 	} else {
 		err = decodeFeedbackForColumn(q, pb, ft)
 	}
@@ -1081,7 +1060,7 @@ func setNextValue(d *types.Datum) {
 
 // SupportColumnType checks if the type of the column can be updated by feedback.
 func SupportColumnType(ft *types.FieldType) bool {
-	switch ft.GetType() {
+	switch ft.Tp {
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong, mysql.TypeFloat,
 		mysql.TypeDouble, mysql.TypeString, mysql.TypeVarString, mysql.TypeVarchar, mysql.TypeBlob, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob,
 		mysql.TypeNewDecimal, mysql.TypeDuration, mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:

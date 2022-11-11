@@ -28,20 +28,21 @@ import (
 )
 
 func TestProfiles(t *testing.T) {
+	t.Parallel()
 	var err error
 	var store kv.Storage
 	var dom *domain.Domain
 
 	store, err = mockstore.NewMockStore()
-	require.NoError(t, err)
+	require.Nil(t, err)
 	defer func() {
 		err := store.Close()
-		require.NoError(t, err)
+		require.Nil(t, err)
 	}()
 
 	session.DisableStats4Test()
 	dom, err = session.BootstrapSession(store)
-	require.NoError(t, err)
+	require.Nil(t, err)
 	defer dom.Close()
 
 	oldValue := profile.CPUProfileInterval

@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,7 +43,6 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/logutil"
-	tlsutil "github.com/pingcap/tidb/util/tls"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
 )
@@ -70,6 +70,15 @@ func RunWithRetry(retryCnt int, backoff uint64, f func() (bool, error)) (err err
 		time.Sleep(sleepTime)
 	}
 	return errors.Trace(err)
+}
+
+// GetStack gets the stacktrace.
+func GetStack() []byte {
+	const size = 4096
+	buf := make([]byte, size)
+	stackSize := runtime.Stack(buf, false)
+	buf = buf[:stackSize]
+	return buf
 }
 
 // WithRecovery wraps goroutine startup call with force recovery.
@@ -110,7 +119,7 @@ func Recover(metricsLabel, funcInfo string, recoverFn func(), quit bool) {
 		zap.String("label", metricsLabel),
 		zap.String("funcInfo", funcInfo),
 		zap.Reflect("r", r),
-		zap.Stack("stack"))
+		zap.String("stack", string(GetStack())))
 	metrics.PanicCounter.WithLabelValues(metricsLabel).Inc()
 	if quit {
 		// Wait for metrics to be pushed.
@@ -157,16 +166,6 @@ func SyntaxWarn(err error) error {
 	if err == nil {
 		return nil
 	}
-	logutil.BgLogger().Debug("syntax error", zap.Error(err))
-
-	// If the warn is already a terror with stack, pass it through.
-	if errors.HasStack(err) {
-		cause := errors.Cause(err)
-		if _, ok := cause.(*terror.Error); ok {
-			return err
-		}
-	}
-
 	return parser.ErrParse.GenWithStackByArgs(syntaxErrorPrefix, err.Error())
 }
 
@@ -270,9 +269,8 @@ func MockPkixAttribute(name, value string) pkix.AttributeTypeAndValue {
 	if !exists {
 		panic(fmt.Sprintf("unsupport mock type: %s", name))
 	}
-	split := strings.Split(n, ".")
-	vs := make([]int, 0, len(split))
-	for _, v := range split {
+	var vs []int
+	for _, v := range strings.Split(n, ".") {
 		i, err := strconv.Atoi(v)
 		if err != nil {
 			panic(err)
@@ -393,7 +391,7 @@ func ColumnsToProto(columns []*model.ColumnInfo, pkIsHandle bool) []*tipb.Column
 		col := ColumnToProto(c)
 		// TODO: Here `PkHandle`'s meaning is changed, we will change it to `IsHandle` when tikv's old select logic
 		// is abandoned.
-		if (pkIsHandle && mysql.HasPriKeyFlag(c.GetFlag())) || c.ID == model.ExtraHandleID {
+		if (pkIsHandle && mysql.HasPriKeyFlag(c.Flag)) || c.ID == model.ExtraHandleID {
 			col.PkHandle = true
 		} else {
 			col.PkHandle = false
@@ -407,13 +405,13 @@ func ColumnsToProto(columns []*model.ColumnInfo, pkIsHandle bool) []*tipb.Column
 func ColumnToProto(c *model.ColumnInfo) *tipb.ColumnInfo {
 	pc := &tipb.ColumnInfo{
 		ColumnId:  c.ID,
-		Collation: collate.RewriteNewCollationIDIfNeeded(int32(mysql.CollationNames[c.GetCollate()])),
-		ColumnLen: int32(c.GetFlen()),
-		Decimal:   int32(c.GetDecimal()),
-		Flag:      int32(c.GetFlag()),
-		Elems:     c.GetElems(),
+		Collation: collate.RewriteNewCollationIDIfNeeded(int32(mysql.CollationNames[c.FieldType.Collate])),
+		ColumnLen: int32(c.FieldType.Flen),
+		Decimal:   int32(c.FieldType.Decimal),
+		Flag:      int32(c.Flag),
+		Elems:     c.Elems,
 	}
-	pc.Tp = int32(c.GetType())
+	pc.Tp = int32(c.FieldType.Tp)
 	return pc
 }
 
@@ -465,8 +463,7 @@ func LoadTLSCertificates(ca, key, cert string, autoTLS bool, rsaKeySize int) (tl
 		return
 	}
 
-	requireTLS := tlsutil.RequireSecureTransport.Load()
-
+	requireTLS := config.GetGlobalConfig().Security.RequireSecureTransport
 	var minTLSVersion uint16 = tls.VersionTLS11
 	switch tlsver := config.GetGlobalConfig().Security.MinTLSVersion; tlsver {
 	case "TLSv1.0":

@@ -6,9 +6,9 @@ import (
 	"context"
 	"math"
 	"strconv"
-	"testing"
 	"time"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/gluetidb"
 	"github.com/pingcap/tidb/br/pkg/metautil"
@@ -18,34 +18,46 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/tablecodec"
-	"github.com/stretchr/testify/require"
+	"github.com/pingcap/tidb/util/testleak"
 	pd "github.com/tikv/pd/client"
 	"google.golang.org/grpc/keepalive"
 )
 
-var mc *mock.Cluster
+var _ = Suite(&testRestoreClientSuite{})
 
 var defaultKeepaliveCfg = keepalive.ClientParameters{
 	Time:    3 * time.Second,
 	Timeout: 10 * time.Second,
 }
 
-func TestCreateTables(t *testing.T) {
-	m := mc
-	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
-	err := client.Init(g, m.Storage)
-	require.NoError(t, err)
+type testRestoreClientSuite struct {
+	mock *mock.Cluster
+}
 
-	info, err := m.Domain.GetSnapshotInfoSchema(math.MaxUint64)
-	require.NoError(t, err)
+func (s *testRestoreClientSuite) SetUpTest(c *C) {
+	var err error
+	s.mock, err = mock.NewCluster()
+	c.Assert(err, IsNil)
+}
+
+func (s *testRestoreClientSuite) TearDownTest(c *C) {
+	testleak.AfterTest(c)()
+}
+
+func (s *testRestoreClientSuite) TestCreateTables(c *C) {
+	c.Assert(s.mock.Start(), IsNil)
+	defer s.mock.Stop()
+	client, err := restore.NewRestoreClient(gluetidb.New(), s.mock.PDClient, s.mock.Storage, nil, defaultKeepaliveCfg, false)
+	c.Assert(err, IsNil)
+
+	info, err := s.mock.Domain.GetSnapshotInfoSchema(math.MaxUint64)
+	c.Assert(err, IsNil)
 	dbSchema, isExist := info.SchemaByName(model.NewCIStr("test"))
-	require.True(t, isExist)
+	c.Assert(isExist, IsTrue)
 
-	client.SetBatchDdlSize(1)
 	tables := make([]*metautil.Table, 4)
 	intField := types.NewFieldType(mysql.TypeLong)
-	intField.SetCharset("binary")
+	intField.Charset = "binary"
 	for i := len(tables) - 1; i >= 0; i-- {
 		tables[i] = &metautil.Table{
 			DB: dbSchema,
@@ -63,59 +75,59 @@ func TestCreateTables(t *testing.T) {
 			},
 		}
 	}
-	rules, newTables, err := client.CreateTables(m.Domain, tables, 0)
-	require.NoError(t, err)
+	rules, newTables, err := client.CreateTables(s.mock.Domain, tables, 0)
+	c.Assert(err, IsNil)
 	// make sure tables and newTables have same order
-	for i, tbl := range tables {
-		require.Equal(t, tbl.Info.Name, newTables[i].Name)
+	for i, t := range tables {
+		c.Assert(newTables[i].Name, Equals, t.Info.Name)
 	}
 	for _, nt := range newTables {
-		require.Regexp(t, "test[0-3]", nt.Name.String())
+		c.Assert(nt.Name.String(), Matches, "test[0-3]")
 	}
 	oldTableIDExist := make(map[int64]bool)
 	newTableIDExist := make(map[int64]bool)
 	for _, tr := range rules.Data {
 		oldTableID := tablecodec.DecodeTableID(tr.GetOldKeyPrefix())
-		require.False(t, oldTableIDExist[oldTableID], "table rule duplicate old table id")
+		c.Assert(oldTableIDExist[oldTableID], IsFalse, Commentf("table rule duplicate old table id"))
 		oldTableIDExist[oldTableID] = true
 
 		newTableID := tablecodec.DecodeTableID(tr.GetNewKeyPrefix())
-		require.False(t, newTableIDExist[newTableID], "table rule duplicate new table id")
+		c.Assert(newTableIDExist[newTableID], IsFalse, Commentf("table rule duplicate new table id"))
 		newTableIDExist[newTableID] = true
 	}
 
 	for i := 0; i < len(tables); i++ {
-		require.True(t, oldTableIDExist[int64(i)], "table rule does not exist")
+		c.Assert(oldTableIDExist[int64(i)], IsTrue, Commentf("table rule does not exist"))
 	}
 }
 
-func TestIsOnline(t *testing.T) {
-	m := mc
-	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
-	err := client.Init(g, m.Storage)
-	require.NoError(t, err)
+func (s *testRestoreClientSuite) TestIsOnline(c *C) {
+	c.Assert(s.mock.Start(), IsNil)
+	defer s.mock.Stop()
 
-	require.False(t, client.IsOnline())
+	client, err := restore.NewRestoreClient(gluetidb.New(), s.mock.PDClient, s.mock.Storage, nil, defaultKeepaliveCfg, false)
+	c.Assert(err, IsNil)
+
+	c.Assert(client.IsOnline(), IsFalse)
 	client.EnableOnline()
-	require.True(t, client.IsOnline())
+	c.Assert(client.IsOnline(), IsTrue)
 }
 
-func TestPreCheckTableClusterIndex(t *testing.T) {
-	m := mc
-	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
-	err := client.Init(g, m.Storage)
-	require.NoError(t, err)
+func (s *testRestoreClientSuite) TestPreCheckTableClusterIndex(c *C) {
+	c.Assert(s.mock.Start(), IsNil)
+	defer s.mock.Stop()
 
-	info, err := m.Domain.GetSnapshotInfoSchema(math.MaxUint64)
-	require.NoError(t, err)
+	client, err := restore.NewRestoreClient(gluetidb.New(), s.mock.PDClient, s.mock.Storage, nil, defaultKeepaliveCfg, false)
+	c.Assert(err, IsNil)
+
+	info, err := s.mock.Domain.GetSnapshotInfoSchema(math.MaxUint64)
+	c.Assert(err, IsNil)
 	dbSchema, isExist := info.SchemaByName(model.NewCIStr("test"))
-	require.True(t, isExist)
+	c.Assert(isExist, IsTrue)
 
 	tables := make([]*metautil.Table, 4)
 	intField := types.NewFieldType(mysql.TypeLong)
-	intField.SetCharset("binary")
+	intField.Charset = "binary"
 	for i := len(tables) - 1; i >= 0; i-- {
 		tables[i] = &metautil.Table{
 			DB: dbSchema,
@@ -133,14 +145,13 @@ func TestPreCheckTableClusterIndex(t *testing.T) {
 			},
 		}
 	}
-	_, _, err = client.CreateTables(m.Domain, tables, 0)
-	require.NoError(t, err)
+	_, _, err = client.CreateTables(s.mock.Domain, tables, 0)
+	c.Assert(err, IsNil)
 
 	// exist different tables
 	tables[1].Info.IsCommonHandle = true
-	err = client.PreCheckTableClusterIndex(tables, nil, m.Domain)
-	require.Error(t, err)
-	require.Regexp(t, `.*@@tidb_enable_clustered_index should be ON \(backup table = true, created table = false\).*`, err.Error())
+	c.Assert(client.PreCheckTableClusterIndex(tables, nil, s.mock.Domain),
+		ErrorMatches, `.*@@tidb_enable_clustered_index should be ON \(backup table = true, created table = false\).*`)
 
 	// exist different DDLs
 	jobs := []*model.Job{{
@@ -155,14 +166,13 @@ func TestPreCheckTableClusterIndex(t *testing.T) {
 			},
 		},
 	}}
-	err = client.PreCheckTableClusterIndex(nil, jobs, m.Domain)
-	require.Error(t, err)
-	require.Regexp(t, `.*@@tidb_enable_clustered_index should be ON \(backup table = true, created table = false\).*`, err.Error())
+	c.Assert(client.PreCheckTableClusterIndex(nil, jobs, s.mock.Domain),
+		ErrorMatches, `.*@@tidb_enable_clustered_index should be ON \(backup table = true, created table = false\).*`)
 
 	// should pass pre-check cluster index
 	tables[1].Info.IsCommonHandle = false
 	jobs[0].BinlogInfo.TableInfo.IsCommonHandle = false
-	require.Nil(t, client.PreCheckTableClusterIndex(tables, jobs, m.Domain))
+	c.Assert(client.PreCheckTableClusterIndex(tables, jobs, s.mock.Domain), IsNil)
 }
 
 type fakePDClient struct {
@@ -174,8 +184,10 @@ func (fpdc fakePDClient) GetAllStores(context.Context, ...pd.GetStoreOption) ([]
 	return append([]*metapb.Store{}, fpdc.stores...), nil
 }
 
-func TestPreCheckTableTiFlashReplicas(t *testing.T) {
-	m := mc
+func (s *testRestoreClientSuite) TestPreCheckTableTiFlashReplicas(c *C) {
+	c.Assert(s.mock.Start(), IsNil)
+	defer s.mock.Stop()
+
 	mockStores := []*metapb.Store{
 		{
 			Id: 1,
@@ -197,12 +209,10 @@ func TestPreCheckTableTiFlashReplicas(t *testing.T) {
 		},
 	}
 
-	g := gluetidb.New()
-	client := restore.NewRestoreClient(fakePDClient{
+	client, err := restore.NewRestoreClient(gluetidb.New(), fakePDClient{
 		stores: mockStores,
-	}, nil, defaultKeepaliveCfg, false)
-	err := client.Init(g, m.Storage)
-	require.NoError(t, err)
+	}, s.mock.Storage, nil, defaultKeepaliveCfg, false)
+	c.Assert(err, IsNil)
 
 	tables := make([]*metautil.Table, 4)
 	for i := 0; i < len(tables); i++ {
@@ -223,20 +233,15 @@ func TestPreCheckTableTiFlashReplicas(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	require.Nil(t, client.PreCheckTableTiFlashReplica(ctx, tables, false))
+	c.Assert(client.PreCheckTableTiFlashReplica(ctx, tables), IsNil)
 
 	for i := 0; i < len(tables); i++ {
 		if i == 0 || i > 2 {
-			require.Nil(t, tables[i].Info.TiFlashReplica)
+			c.Assert(tables[i].Info.TiFlashReplica, IsNil)
 		} else {
-			require.NotNil(t, tables[i].Info.TiFlashReplica)
+			c.Assert(tables[i].Info.TiFlashReplica, NotNil)
 			obtainCount := int(tables[i].Info.TiFlashReplica.Count)
-			require.Equal(t, i, obtainCount)
+			c.Assert(obtainCount, Equals, i)
 		}
-	}
-
-	require.Nil(t, client.PreCheckTableTiFlashReplica(ctx, tables, true))
-	for i := 0; i < len(tables); i++ {
-		require.Nil(t, tables[i].Info.TiFlashReplica)
 	}
 }

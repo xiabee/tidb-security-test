@@ -21,6 +21,7 @@ import (
 )
 
 func TestUnquote(t *testing.T) {
+	t.Parallel()
 	table := []struct {
 		str    string
 		expect string
@@ -66,6 +67,7 @@ func TestUnquote(t *testing.T) {
 }
 
 func TestPatternMatch(t *testing.T) {
+	t.Parallel()
 	tbl := []struct {
 		pattern string
 		input   string
@@ -109,6 +111,7 @@ func TestPatternMatch(t *testing.T) {
 }
 
 func TestCompileLike2Regexp(t *testing.T) {
+	t.Parallel()
 	tbl := []struct {
 		pattern string
 		regexp  string
@@ -136,6 +139,7 @@ func TestCompileLike2Regexp(t *testing.T) {
 }
 
 func TestIsExactMatch(t *testing.T) {
+	t.Parallel()
 	tbl := []struct {
 		pattern    string
 		escape     byte
@@ -163,6 +167,7 @@ func TestIsExactMatch(t *testing.T) {
 }
 
 func TestBuildStringFromLabels(t *testing.T) {
+	t.Parallel()
 	tbl := []struct {
 		name     string
 		labels   map[string]string

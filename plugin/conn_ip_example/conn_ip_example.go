@@ -30,7 +30,6 @@ var connection int32
 
 // Validate implements TiDB plugin's Validate SPI.
 // It is called before OnInit
-// nolint: unused, deadcode
 func Validate(ctx context.Context, m *plugin.Manifest) error {
 	fmt.Println("## conn_ip_example Validate called ##")
 	fmt.Printf("---- context: %s\n", ctx)
@@ -38,7 +37,6 @@ func Validate(ctx context.Context, m *plugin.Manifest) error {
 }
 
 // OnInit implements TiDB plugin's OnInit SPI.
-// nolint: unused, deadcode
 func OnInit(ctx context.Context, manifest *plugin.Manifest) error {
 	fmt.Println("## conn_ip_example OnInit called ##")
 	fmt.Printf("---- context: %s\n", ctx)
@@ -80,7 +78,6 @@ func OnInit(ctx context.Context, manifest *plugin.Manifest) error {
 }
 
 // OnShutdown implements TiDB plugin's OnShutdown SPI.
-// nolint: unused, deadcode
 func OnShutdown(ctx context.Context, manifest *plugin.Manifest) error {
 	fmt.Println("## conn_ip_example OnShutdown called ##")
 	fmt.Printf("---- context: %s\n", ctx)
@@ -90,7 +87,6 @@ func OnShutdown(ctx context.Context, manifest *plugin.Manifest) error {
 }
 
 // OnGeneralEvent implements TiDB Audit plugin's OnGeneralEvent SPI.
-// nolint: unused, deadcode
 func OnGeneralEvent(ctx context.Context, sctx *variable.SessionVars, event plugin.GeneralEvent, cmd string) {
 	fmt.Println("## conn_ip_example OnGeneralEvent called ##")
 	if sctx != nil {
@@ -116,7 +112,6 @@ func OnGeneralEvent(ctx context.Context, sctx *variable.SessionVars, event plugi
 }
 
 // OnConnectionEvent implements TiDB Audit plugin's OnConnectionEvent SPI.
-// nolint: unused, deadcode
 func OnConnectionEvent(ctx context.Context, event plugin.ConnectionEvent, info *variable.ConnectionInfo) error {
 	var reason string
 	if r := ctx.Value(plugin.RejectReasonCtxValue{}); r != nil {

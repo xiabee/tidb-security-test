@@ -18,28 +18,39 @@ import (
 	"context"
 	"testing"
 
+	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
-	"github.com/stretchr/testify/require"
 )
 
-func TestApplyRecycle(t *testing.T) {
+type testWorkerPool struct{}
+
+func (s *testWorkerPool) SetUpSuite(c *C)    {}
+func (s *testWorkerPool) TearDownSuite(c *C) {}
+
+var _ = Suite(&testWorkerPool{})
+
+func TestNewRestoreWorkerPool(t *testing.T) {
+	TestingT(t)
+}
+
+func (s *testWorkerPool) TestApplyRecycle(c *C) {
 	pool := worker.NewPool(context.Background(), 3, "test")
 
 	w1, w2, w3 := pool.Apply(), pool.Apply(), pool.Apply()
-	require.Equal(t, int64(1), w1.ID)
-	require.Equal(t, int64(2), w2.ID)
-	require.Equal(t, int64(3), w3.ID)
-	require.Equal(t, false, pool.HasWorker())
+	c.Assert(w1.ID, Equals, int64(1))
+	c.Assert(w2.ID, Equals, int64(2))
+	c.Assert(w3.ID, Equals, int64(3))
+	c.Assert(pool.HasWorker(), Equals, false)
 
 	pool.Recycle(w3)
-	require.Equal(t, true, pool.HasWorker())
-	require.Equal(t, w3, pool.Apply())
+	c.Assert(pool.HasWorker(), Equals, true)
+	c.Assert(pool.Apply(), Equals, w3)
 	pool.Recycle(w2)
-	require.Equal(t, w2, pool.Apply())
+	c.Assert(pool.Apply(), Equals, w2)
 	pool.Recycle(w1)
-	require.Equal(t, w1, pool.Apply())
+	c.Assert(pool.Apply(), Equals, w1)
 
-	require.Equal(t, false, pool.HasWorker())
+	c.Assert(pool.HasWorker(), Equals, false)
 
-	require.PanicsWithValue(t, "invalid restore worker", func() { pool.Recycle(nil) })
+	c.Assert(func() { pool.Recycle(nil) }, PanicMatches, "invalid restore worker")
 }

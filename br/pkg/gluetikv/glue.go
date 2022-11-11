@@ -16,16 +16,8 @@ import (
 	pd "github.com/tikv/pd/client"
 )
 
-// Asserting Glue implements glue.ConsoleGlue and glue.Glue at compile time.
-var (
-	_ glue.ConsoleGlue = Glue{}
-	_ glue.Glue        = Glue{}
-)
-
 // Glue is an implementation of glue.Glue that accesses only TiKV without TiDB.
-type Glue struct {
-	glue.StdIOGlue
-}
+type Glue struct{}
 
 // GetDomain implements glue.Glue.
 func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
@@ -67,9 +59,4 @@ func (Glue) Record(name string, val uint64) {
 // GetVersion implements glue.Glue.
 func (Glue) GetVersion() string {
 	return "BR\n" + build.Info()
-}
-
-// UseOneShotSession implements glue.Glue.
-func (g Glue) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(glue.Session) error) error {
-	return nil
 }

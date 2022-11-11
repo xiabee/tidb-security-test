@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"math/rand"
 	"runtime/trace"
 	"strings"
 	"sync"
@@ -33,7 +32,6 @@ import (
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/planner/cascades"
 	"github.com/pingcap/tidb/planner/core"
 	plannercore "github.com/pingcap/tidb/planner/core"
@@ -46,14 +44,32 @@ import (
 	"github.com/pingcap/tidb/util/hint"
 	"github.com/pingcap/tidb/util/logutil"
 	utilparser "github.com/pingcap/tidb/util/parser"
-	"github.com/pingcap/tidb/util/topsql"
 	"go.uber.org/zap"
 )
+
+// GetPreparedStmt extract the prepared statement from the execute statement.
+func GetPreparedStmt(stmt *ast.ExecuteStmt, vars *variable.SessionVars) (*plannercore.CachedPrepareStmt, error) {
+	var ok bool
+	execID := stmt.ExecID
+	if stmt.Name != "" {
+		if execID, ok = vars.PreparedStmtNameToID[stmt.Name]; !ok {
+			return nil, plannercore.ErrStmtNotFound
+		}
+	}
+	if preparedPointer, ok := vars.PreparedStmts[execID]; ok {
+		preparedObj, ok := preparedPointer.(*plannercore.CachedPrepareStmt)
+		if !ok {
+			return nil, errors.Errorf("invalid CachedPrepareStmt type")
+		}
+		return preparedObj, nil
+	}
+	return nil, plannercore.ErrStmtNotFound
+}
 
 // IsReadOnly check whether the ast.Node is a read only statement.
 func IsReadOnly(node ast.Node, vars *variable.SessionVars) bool {
 	if execStmt, isExecStmt := node.(*ast.ExecuteStmt); isExecStmt {
-		prepareStmt, err := plannercore.GetPreparedStmt(execStmt, vars)
+		prepareStmt, err := GetPreparedStmt(execStmt, vars)
 		if err != nil {
 			logutil.BgLogger().Warn("GetPreparedStmt failed", zap.Error(err))
 			return false
@@ -87,25 +103,12 @@ func GetExecuteForUpdateReadIS(node ast.Node, sctx sessionctx.Context) infoschem
 	return nil
 }
 
-func matchSQLBinding(sctx sessionctx.Context, stmtNode ast.StmtNode) (bindRecord *bindinfo.BindRecord, scope string, matched bool) {
-	useBinding := sctx.GetSessionVars().UsePlanBaselines
-	if !useBinding || stmtNode == nil {
-		return nil, "", false
-	}
-	var err error
-	bindRecord, scope, err = getBindRecord(sctx, stmtNode)
-	if err != nil || bindRecord == nil || len(bindRecord.Bindings) == 0 {
-		return nil, "", false
-	}
-	return bindRecord, scope, true
-}
-
 // Optimize does optimization and creates a Plan.
 // The node must be prepared first.
 func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is infoschema.InfoSchema) (plannercore.Plan, types.NameSlice, error) {
 	sessVars := sctx.GetSessionVars()
 
-	if !sctx.GetSessionVars().InRestrictedSQL && variable.RestrictedReadOnly.Load() || variable.VarTiDBSuperReadOnly.Load() {
+	if !sctx.GetSessionVars().InRestrictedSQL && (variable.RestrictedReadOnly.Load() || variable.VarTiDBSuperReadOnly.Load()) {
 		allowed, err := allowInReadOnlyMode(sctx, node)
 		if err != nil {
 			return nil, nil, err
@@ -160,29 +163,34 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 	if !ok {
 		useBinding = false
 	}
-	bindRecord, scope, match := matchSQLBinding(sctx, stmtNode)
-	if !match {
-		useBinding = false
-	}
-	if ok {
-		// add the extra Limit after matching the bind record
-		stmtNode = plannercore.TryAddExtraLimit(sctx, stmtNode)
-		node = stmtNode
-	}
-
 	var (
-		names                      types.NameSlice
-		bestPlan, bestPlanFromBind plannercore.Plan
-		chosenBinding              bindinfo.Binding
-		err                        error
+		bindRecord *bindinfo.BindRecord
+		scope      string
+		err        error
 	)
 	if useBinding {
+		bindRecord, scope, err = getBindRecord(sctx, stmtNode)
+		if err != nil || bindRecord == nil || len(bindRecord.Bindings) == 0 {
+			useBinding = false
+		}
+	}
+	if useBinding && sessVars.SelectLimit != math.MaxUint64 {
+		sessVars.StmtCtx.AppendWarning(errors.New("sql_select_limit is set, ignore SQL bindings"))
+		useBinding = false
+	}
+
+	var names types.NameSlice
+	var bestPlan, bestPlanFromBind plannercore.Plan
+	if useBinding {
 		minCost := math.MaxFloat64
-		var bindStmtHints stmtctx.StmtHints
+		var (
+			bindStmtHints stmtctx.StmtHints
+			chosenBinding bindinfo.Binding
+		)
 		originHints := hint.CollectHint(stmtNode)
 		// bindRecord must be not nil when coming here, try to find the best binding.
 		for _, binding := range bindRecord.Bindings {
-			if !binding.IsBindingEnabled() {
+			if binding.Status != bindinfo.Using {
 				continue
 			}
 			metrics.BindUsageCounter.WithLabelValues(scope).Inc()
@@ -211,7 +219,7 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 			for _, warn := range warns {
 				sessVars.StmtCtx.AppendWarning(warn)
 			}
-			if err := setFoundInBinding(sctx, true, chosenBinding.BindSQL); err != nil {
+			if err := setFoundInBinding(sctx, true); err != nil {
 				logutil.BgLogger().Warn("set tidb_found_in_binding failed", zap.Error(err))
 			}
 			if sessVars.StmtCtx.InVerboseExplain {
@@ -240,8 +248,7 @@ func Optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 	defer func() {
 		sessVars.StmtCtx.StmtHints = savedStmtHints
 	}()
-	if sessVars.EvolvePlanBaselines && bestPlanFromBind != nil &&
-		sessVars.SelectLimit == math.MaxUint64 { // do not evolve this query if sql_select_limit is enabled
+	if sessVars.EvolvePlanBaselines && bestPlanFromBind != nil {
 		// Check bestPlanFromBind firstly to avoid nil stmtNode.
 		if _, ok := stmtNode.(*ast.SelectStmt); ok && !bindRecord.Bindings[0].Hint.ContainTableHint(plannercore.HintReadFromStorage) {
 			sessVars.StmtCtx.StmtHints = originStmtHints
@@ -327,21 +334,11 @@ func optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 			failpoint.Return(nil, nil, 0, errors.New("gofail wrong optimizerCnt error"))
 		}
 	})
-	failpoint.Inject("mockHighLoadForOptimize", func() {
-		sqlPrefixes := []string{"select"}
-		topsql.MockHighCPULoad(sctx.GetSessionVars().StmtCtx.OriginalSQL, sqlPrefixes, 10)
-	})
-
 	// build logical plan
 	sctx.GetSessionVars().PlanID = 0
 	sctx.GetSessionVars().PlanColumnID = 0
-	sctx.GetSessionVars().MapHashCode2UniqueID4ExtendedCol = nil
 	hintProcessor := &hint.BlockHintProcessor{Ctx: sctx}
 	node.Accept(hintProcessor)
-
-	failpoint.Inject("mockRandomPlanID", func() {
-		sctx.GetSessionVars().PlanID = rand.Intn(1000) // nolint:gosec
-	})
 
 	builder := planBuilderPool.Get().(*plannercore.PlanBuilder)
 	defer planBuilderPool.Put(builder.ResetForReuse())
@@ -399,8 +396,7 @@ func optimize(ctx context.Context, sctx sessionctx.Context, node ast.Node, is in
 	return finalPlan, names, cost, err
 }
 
-// ExtractSelectAndNormalizeDigest extract the select statement and normalize it.
-func ExtractSelectAndNormalizeDigest(stmtNode ast.StmtNode, specifiledDB string) (ast.StmtNode, string, string, error) {
+func extractSelectAndNormalizeDigest(stmtNode ast.StmtNode, specifiledDB string) (ast.StmtNode, string, string, error) {
 	switch x := stmtNode.(type) {
 	case *ast.ExplainStmt:
 		// This function is only used to find bind record.
@@ -455,14 +451,14 @@ func getBindRecord(ctx sessionctx.Context, stmt ast.StmtNode) (*bindinfo.BindRec
 	if ctx.Value(bindinfo.SessionBindInfoKeyType) == nil {
 		return nil, "", nil
 	}
-	stmtNode, normalizedSQL, hash, err := ExtractSelectAndNormalizeDigest(stmt, ctx.GetSessionVars().CurrentDB)
+	stmtNode, normalizedSQL, hash, err := extractSelectAndNormalizeDigest(stmt, ctx.GetSessionVars().CurrentDB)
 	if err != nil || stmtNode == nil {
 		return nil, "", err
 	}
 	sessionHandle := ctx.Value(bindinfo.SessionBindInfoKeyType).(*bindinfo.SessionHandle)
-	bindRecord := sessionHandle.GetBindRecord(hash, normalizedSQL, "")
+	bindRecord := sessionHandle.GetBindRecord(normalizedSQL, "")
 	if bindRecord != nil {
-		if bindRecord.HasEnabledBinding() {
+		if bindRecord.HasUsingBinding() {
 			return bindRecord, metrics.ScopeSession, nil
 		}
 		return nil, "", nil
@@ -509,24 +505,13 @@ func handleEvolveTasks(ctx context.Context, sctx sessionctx.Context, br *bindinf
 // useMaxTS returns true when meets following conditions:
 //  1. ctx is auto commit tagged.
 //  2. plan is point get by pk.
-//  3. not a cache table.
 func useMaxTS(ctx sessionctx.Context, p plannercore.Plan) bool {
 	if !plannercore.IsAutoCommitTxn(ctx) {
 		return false
 	}
-	v, ok := p.(*plannercore.PointGetPlan)
-	if !ok {
-		return false
-	}
-	noSecondRead := v.IndexInfo == nil || (v.IndexInfo.Primary && v.TblInfo.IsCommonHandle)
-	if !noSecondRead {
-		return false
-	}
 
-	if v.TblInfo != nil && (v.TblInfo.TableCacheStatusType != model.TableCacheStatusDisable) {
-		return false
-	}
-	return true
+	v, ok := p.(*plannercore.PointGetPlan)
+	return ok && (v.IndexInfo == nil || (v.IndexInfo.Primary && v.TblInfo.IsCommonHandle))
 }
 
 // OptimizeExecStmt to optimize prepare statement protocol "execute" statement
@@ -559,7 +544,7 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 	}
 	hintOffs := make(map[string]int, len(hints))
 	var forceNthPlan *ast.TableOptimizerHint
-	var memoryQuotaHintCnt, useToJAHintCnt, useCascadesHintCnt, noIndexMergeHintCnt, readReplicaHintCnt, maxExecutionTimeCnt, forceNthPlanCnt, straightJoinHintCnt int
+	var memoryQuotaHintCnt, useToJAHintCnt, useCascadesHintCnt, noIndexMergeHintCnt, readReplicaHintCnt, maxExecutionTimeCnt, forceNthPlanCnt int
 	setVars := make(map[string]string)
 	setVarsOffs := make([]int, 0, len(hints))
 	for i, hint := range hints {
@@ -585,9 +570,6 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 		case "nth_plan":
 			forceNthPlanCnt++
 			forceNthPlan = hint
-		case "straight_join":
-			hintOffs[hint.HintName.L] = i
-			straightJoinHintCnt++
 		case "set_var":
 			setVarHint := hint.HintData.(ast.HintSetVar)
 
@@ -611,7 +593,6 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 			setVarsOffs = append(setVarsOffs, i)
 		}
 	}
-	stmtHints.OriginalTableHints = hints
 	stmtHints.SetVars = setVars
 
 	// Handle MEMORY_QUOTA
@@ -663,14 +644,6 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 		}
 		stmtHints.NoIndexMergeHint = true
 	}
-	// Handle straight_join
-	if straightJoinHintCnt != 0 {
-		if straightJoinHintCnt > 1 {
-			warn := errors.New("STRAIGHT_JOIN() is defined more than once, only the last definition takes effect")
-			warns = append(warns, warn)
-		}
-		stmtHints.StraightJoinOrder = true
-	}
 	// Handle READ_CONSISTENT_REPLICA
 	if readReplicaHintCnt != 0 {
 		if readReplicaHintCnt > 1 {
@@ -699,7 +672,7 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 		stmtHints.ForceNthPlan = forceNthPlan.HintData.(int64)
 		if stmtHints.ForceNthPlan < 1 {
 			stmtHints.ForceNthPlan = -1
-			warn := errors.Errorf("the hintdata for NTH_PLAN() is too small, hint ignored")
+			warn := errors.Errorf("the hintdata for NTH_PLAN() is too small, hint ignored.")
 			warns = append(warns, warn)
 		}
 	} else {
@@ -712,9 +685,8 @@ func handleStmtHints(hints []*ast.TableOptimizerHint) (stmtHints stmtctx.StmtHin
 	return
 }
 
-func setFoundInBinding(sctx sessionctx.Context, opt bool, bindSQL string) error {
+func setFoundInBinding(sctx sessionctx.Context, opt bool) error {
 	vars := sctx.GetSessionVars()
-	vars.StmtCtx.BindSQL = bindSQL
 	err := vars.SetSystemVar(variable.TiDBFoundInBinding, variable.BoolToOnOff(opt))
 	return err
 }

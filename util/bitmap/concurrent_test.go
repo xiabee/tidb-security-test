@@ -23,6 +23,8 @@ import (
 )
 
 func TestConcurrentBitmapSet(t *testing.T) {
+	t.Parallel()
+
 	const loopCount = 1000
 	const interval = 2
 
@@ -49,6 +51,8 @@ func TestConcurrentBitmapSet(t *testing.T) {
 // TestConcurrentBitmapUniqueSetter checks if isSetter is unique everytime
 // when a bit is set.
 func TestConcurrentBitmapUniqueSetter(t *testing.T) {
+	t.Parallel()
+
 	const loopCount = 10000
 	const competitorsPerSet = 50
 

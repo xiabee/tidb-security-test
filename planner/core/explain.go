@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
 	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -290,8 +289,8 @@ func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
 	if p.stats.StatsVersion == statistics.PseudoVersion && !normalized {
 		buffer.WriteString(", stats:pseudo")
 	}
-	if p.StoreType == kv.TiFlash && p.Table.GetPartitionInfo() != nil && p.IsMPPOrBatchCop && p.ctx.GetSessionVars().UseDynamicPartitionPrune() {
-		buffer.WriteString(", PartitionTableScan:true")
+	if p.IsGlobalRead {
+		buffer.WriteString(", global read")
 	}
 	return buffer.String()
 }
@@ -312,7 +311,7 @@ func (p *PhysicalTableScan) isFullScan() bool {
 	var unsignedIntHandle bool
 	if p.Table.PKIsHandle {
 		if pkColInfo := p.Table.GetPkColInfo(); pkColInfo != nil {
-			unsignedIntHandle = mysql.HasUnsignedFlag(pkColInfo.GetFlag())
+			unsignedIntHandle = mysql.HasUnsignedFlag(pkColInfo.Flag)
 		}
 	}
 	for _, ran := range p.Ranges {
@@ -333,7 +332,8 @@ func (p *PhysicalTableReader) ExplainNormalizedInfo() string {
 	return ""
 }
 
-func getAccessObjectForTableScan(sctx sessionctx.Context, ts *PhysicalTableScan, partitionInfo PartitionInfo) string {
+func (p *PhysicalTableReader) accessObject(sctx sessionctx.Context) string {
+	ts := p.TablePlans[0].(*PhysicalTableScan)
 	pi := ts.Table.GetPartitionInfo()
 	if pi == nil || !sctx.GetSessionVars().UseDynamicPartitionPrune() {
 		return ""
@@ -346,51 +346,7 @@ func getAccessObjectForTableScan(sctx sessionctx.Context, ts *PhysicalTableScan,
 	}
 	tbl := tmp.(table.PartitionedTable)
 
-	return partitionAccessObject(sctx, tbl, pi, &partitionInfo)
-}
-
-func (p *PhysicalTableReader) accessObject(sctx sessionctx.Context) string {
-	if !sctx.GetSessionVars().UseDynamicPartitionPrune() {
-		return ""
-	}
-	if len(p.PartitionInfos) == 0 {
-		ts := p.TablePlans[0].(*PhysicalTableScan)
-		return getAccessObjectForTableScan(sctx, ts, p.PartitionInfo)
-	}
-	if len(p.PartitionInfos) == 1 {
-		return getAccessObjectForTableScan(sctx, p.PartitionInfos[0].tableScan, p.PartitionInfos[0].partitionInfo)
-	}
-	containsPartitionTable := false
-	for _, info := range p.PartitionInfos {
-		if info.tableScan.Table.GetPartitionInfo() != nil {
-			containsPartitionTable = true
-			break
-		}
-	}
-	if !containsPartitionTable {
-		return ""
-	}
-	var buffer bytes.Buffer
-	for index, info := range p.PartitionInfos {
-		if index > 0 {
-			buffer.WriteString(", ")
-		}
-
-		tblName := info.tableScan.Table.Name.O
-		if info.tableScan.TableAsName != nil && info.tableScan.TableAsName.O != "" {
-			tblName = info.tableScan.TableAsName.O
-		}
-
-		if info.tableScan.Table.GetPartitionInfo() == nil {
-			buffer.WriteString("table of ")
-			buffer.WriteString(tblName)
-			continue
-		}
-		buffer.WriteString(getAccessObjectForTableScan(sctx, info.tableScan, info.partitionInfo))
-		buffer.WriteString(" of ")
-		buffer.WriteString(tblName)
-	}
-	return buffer.String()
+	return partitionAccessObject(sctx, tbl, pi, &p.PartitionInfo)
 }
 
 func partitionAccessObject(sctx sessionctx.Context, tbl table.PartitionedTable, pi *model.PartitionInfo, partTable *PartitionInfo) string {
@@ -432,7 +388,7 @@ func (p *PhysicalIndexReader) ExplainInfo() string {
 
 // ExplainNormalizedInfo implements Plan interface.
 func (p *PhysicalIndexReader) ExplainNormalizedInfo() string {
-	return "index:" + p.indexPlan.TP()
+	return p.ExplainInfo()
 }
 
 func (p *PhysicalIndexReader) accessObject(sctx sessionctx.Context) string {
@@ -457,22 +413,17 @@ func (p *PhysicalIndexReader) accessObject(sctx sessionctx.Context) string {
 
 // ExplainInfo implements Plan interface.
 func (p *PhysicalIndexLookUpReader) ExplainInfo() string {
-	var str strings.Builder
 	// The children can be inferred by the relation symbol.
 	if p.PushedLimit != nil {
+		var str strings.Builder
 		str.WriteString("limit embedded(offset:")
 		str.WriteString(strconv.FormatUint(p.PushedLimit.Offset, 10))
 		str.WriteString(", count:")
 		str.WriteString(strconv.FormatUint(p.PushedLimit.Count, 10))
 		str.WriteString(")")
+		return str.String()
 	}
-	if p.Paging {
-		if p.PushedLimit != nil {
-			str.WriteString(", ")
-		}
-		str.WriteString("paging:true")
-	}
-	return str.String()
+	return ""
 }
 
 func (p *PhysicalIndexLookUpReader) accessObject(sctx sessionctx.Context) string {

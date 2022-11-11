@@ -48,9 +48,8 @@ func main() {
 		NewDebugCommand(),
 		NewBackupCommand(),
 		NewRestoreCommand(),
-		NewStreamCommand(),
 	)
-	// Outputs cmd.Print to stdout.
+	// Ouputs cmd.Print to stdout.
 	rootCmd.SetOut(os.Stdout)
 
 	rootCmd.SetArgs(os.Args[1:])

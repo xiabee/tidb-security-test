@@ -16,6 +16,7 @@ package kv
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/pingcap/kvproto/pkg/mpp"
@@ -33,6 +34,8 @@ type MPPTask struct {
 	ID      int64       // mppTaskID
 	StartTs uint64
 	TableID int64 // physical table id
+
+	PartitionTableIDs []int64
 }
 
 // ToPB generates the pb structure.
@@ -47,7 +50,7 @@ func (t *MPPTask) ToPB() *mpp.TaskMeta {
 	return meta
 }
 
-//MppTaskStates denotes the state of mpp tasks
+// MppTaskStates denotes the state of mpp tasks
 type MppTaskStates uint8
 
 const (
@@ -78,10 +81,10 @@ type MPPDispatchRequest struct {
 type MPPClient interface {
 	// ConstructMPPTasks schedules task for a plan fragment.
 	// TODO:: This interface will be refined after we support more executors.
-	ConstructMPPTasks(context.Context, *MPPBuildTasksRequest, map[string]time.Time, time.Duration) ([]MPPTaskMeta, error)
+	ConstructMPPTasks(context.Context, *MPPBuildTasksRequest, *sync.Map, time.Duration) ([]MPPTaskMeta, error)
 
 	// DispatchMPPTasks dispatches ALL mpp requests at once, and returns an iterator that transfers the data.
-	DispatchMPPTasks(ctx context.Context, vars interface{}, reqs []*MPPDispatchRequest, startTs uint64) Response
+	DispatchMPPTasks(ctx context.Context, vars interface{}, reqs []*MPPDispatchRequest, needTriggerFallback bool, startTs uint64) Response
 }
 
 // MPPBuildTasksRequest request the stores allocation for a mpp plan fragment.
@@ -89,4 +92,6 @@ type MPPClient interface {
 type MPPBuildTasksRequest struct {
 	KeyRanges []KeyRange
 	StartTS   uint64
+
+	PartitionIDAndRanges []PartitionIDAndRanges
 }

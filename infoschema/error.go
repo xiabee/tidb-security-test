@@ -78,4 +78,20 @@ var (
 	ErrWrongObject = dbterror.ClassSchema.NewStd(mysql.ErrWrongObject)
 	// ErrAdminCheckTable returns when the check table in temporary mode.
 	ErrAdminCheckTable = dbterror.ClassSchema.NewStd(mysql.ErrAdminCheckTable)
+	// ErrEmptyDatabase returns when the database is unexpectedly empty.
+	ErrEmptyDatabase = dbterror.ClassSchema.NewStd(mysql.ErrBadDB)
+	// ErrForbidSchemaChange returns when the schema change is illegal
+	ErrForbidSchemaChange = dbterror.ClassSchema.NewStd(mysql.ErrForbidSchemaChange)
+	// ErrTableWithoutPrimaryKey returns when there is no primary key on a table and sql_require_primary_key is set
+	ErrTableWithoutPrimaryKey = dbterror.ClassSchema.NewStd(mysql.ErrTableWithoutPrimaryKey)
+	// ErrForeignKeyCannotUseVirtualColumn returns when foreign key refer virtual generated column.
+	ErrForeignKeyCannotUseVirtualColumn = dbterror.ClassSchema.NewStd(mysql.ErrForeignKeyCannotUseVirtualColumn)
+	// ErrForeignKeyCannotOpenParent returns when foreign key refer table not exists.
+	ErrForeignKeyCannotOpenParent = dbterror.ClassSchema.NewStd(mysql.ErrForeignKeyCannotOpenParent)
+	// ErrForeignKeyNoColumnInParent returns when foreign key refer columns don't exist in parent table.
+	ErrForeignKeyNoColumnInParent = dbterror.ClassSchema.NewStd(mysql.ErrForeignKeyNoColumnInParent)
+	// ErrForeignKeyNoIndexInParent returns when foreign key refer columns don't have related index in parent table.
+	ErrForeignKeyNoIndexInParent = dbterror.ClassSchema.NewStd(mysql.ErrForeignKeyNoIndexInParent)
+	// ErrForeignKeyColumnNotNull returns when foreign key with SET NULL constrain and the related column has not null.
+	ErrForeignKeyColumnNotNull = dbterror.ClassSchema.NewStd(mysql.ErrForeignKeyColumnNotNull)
 )

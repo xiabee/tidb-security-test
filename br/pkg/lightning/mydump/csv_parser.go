@@ -16,14 +16,17 @@ package mydump
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
+	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
-	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/mathutil"
 )
 
 var (
@@ -72,7 +75,9 @@ type CSVParser struct {
 	shouldParseHeader bool
 }
 
+// NewCSVParser creates a CSV parser.
 func NewCSVParser(
+	ctx context.Context,
 	cfg *config.CSVConfig,
 	reader ReadSeekCloser,
 	blockBufSize int64,
@@ -118,9 +123,9 @@ func NewCSVParser(
 			escFlavor = backslashEscapeFlavorMySQLWithNull
 		}
 	}
-
+	metrics, _ := metric.FromContext(ctx)
 	return &CSVParser{
-		blockParser:       makeBlockParser(reader, blockBufSize, ioWorkers),
+		blockParser:       makeBlockParser(reader, blockBufSize, ioWorkers, metrics, log.FromContext(ctx)),
 		cfg:               cfg,
 		charsetConvertor:  charsetConvertor,
 		comma:             []byte(separator),
@@ -213,7 +218,7 @@ func (parser *CSVParser) peekBytes(cnt int) ([]byte, error) {
 	if len(parser.buf) == 0 {
 		return nil, io.EOF
 	}
-	cnt = utils.MinInt(cnt, len(parser.buf))
+	cnt = mathutil.Min(cnt, len(parser.buf))
 	return parser.buf[:cnt], nil
 }
 
@@ -536,6 +541,7 @@ func (parser *CSVParser) ReadRow() error {
 	return nil
 }
 
+// ReadColumns reads the columns of this CSV file.
 func (parser *CSVParser) ReadColumns() error {
 	columns, err := parser.readRecord(nil)
 	if err != nil {
@@ -550,12 +556,6 @@ func (parser *CSVParser) ReadColumns() error {
 		parser.columns = append(parser.columns, strings.ToLower(colName))
 	}
 	return nil
-}
-
-var newLineASCIISet = makeByteSet([]byte{'\r', '\n'})
-
-func indexOfNewLine(b []byte) int {
-	return IndexAnyByte(b, &newLineASCIISet)
 }
 
 // ReadUntilTerminator seeks the file until the terminator token is found, and

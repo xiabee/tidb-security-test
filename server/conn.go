@@ -45,7 +45,6 @@ import (
 	"io"
 	"net"
 	"os/user"
-	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"strconv"
@@ -59,8 +58,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/executor"
+	"github.com/pingcap/tidb/extension"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
@@ -74,8 +75,10 @@ import (
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessiontxn"
 	storeerr "github.com/pingcap/tidb/store/driver/error"
 	"github.com/pingcap/tidb/tablecodec"
 	tidbutil "github.com/pingcap/tidb/util"
@@ -85,6 +88,8 @@ import (
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
+	tlsutil "github.com/pingcap/tidb/util/tls"
+	topsqlstate "github.com/pingcap/tidb/util/topsql/state"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
@@ -149,6 +154,11 @@ var (
 
 	connIdleDurationHistogramNotInTxn = metrics.ConnIdleDurationHistogram.WithLabelValues("0")
 	connIdleDurationHistogramInTxn    = metrics.ConnIdleDurationHistogram.WithLabelValues("1")
+
+	affectedRowsCounterInsert  = metrics.AffectedRowsCounter.WithLabelValues("Insert")
+	affectedRowsCounterUpdate  = metrics.AffectedRowsCounter.WithLabelValues("Update")
+	affectedRowsCounterDelete  = metrics.AffectedRowsCounter.WithLabelValues("Delete")
+	affectedRowsCounterReplace = metrics.AffectedRowsCounter.WithLabelValues("Replace")
 )
 
 // newClientConn creates a *clientConn object.
@@ -158,6 +168,7 @@ func newClientConn(s *Server) *clientConn {
 		connectionID: s.globalConnID.NextID(),
 		collation:    mysql.DefaultCollationID,
 		alloc:        arena.NewAllocator(32 * 1024),
+		chunkAlloc:   chunk.NewAllocator(),
 		status:       connStatusDispatching,
 		lastActive:   time.Now(),
 		authPlugin:   mysql.AuthNativePassword,
@@ -167,19 +178,26 @@ func newClientConn(s *Server) *clientConn {
 // clientConn represents a connection between server and client, it maintains connection specific state,
 // handles client query.
 type clientConn struct {
-	pkt           *packetIO         // a helper to read and write data in packet format.
-	bufReadConn   *bufferedReadConn // a buffered-read net.Conn or buffered-read tls.Conn.
-	tlsConn       *tls.Conn         // TLS connection, nil if not TLS.
-	server        *Server           // a reference of server instance.
-	capability    uint32            // client capability affects the way server handles client request.
-	connectionID  uint64            // atomically allocated by a global variable, unique in process scope.
-	user          string            // user of the client.
-	dbname        string            // default database name.
-	salt          []byte            // random bytes used for authentication.
-	alloc         arena.Allocator   // an memory allocator for reducing memory allocation.
-	lastPacket    []byte            // latest sql query string, currently used for logging error.
-	ctx           *TiDBContext      // an interface to execute sql statements.
+	pkt          *packetIO         // a helper to read and write data in packet format.
+	bufReadConn  *bufferedReadConn // a buffered-read net.Conn or buffered-read tls.Conn.
+	tlsConn      *tls.Conn         // TLS connection, nil if not TLS.
+	server       *Server           // a reference of server instance.
+	capability   uint32            // client capability affects the way server handles client request.
+	connectionID uint64            // atomically allocated by a global variable, unique in process scope.
+	user         string            // user of the client.
+	dbname       string            // default database name.
+	salt         []byte            // random bytes used for authentication.
+	alloc        arena.Allocator   // an memory allocator for reducing memory allocation.
+	chunkAlloc   chunk.Allocator
+	lastPacket   []byte // latest sql query string, currently used for logging error.
+	// ShowProcess() and mysql.ComChangeUser both visit this field, ShowProcess() read information through
+	// the TiDBContext and mysql.ComChangeUser re-create it, so a lock is required here.
+	ctx struct {
+		sync.RWMutex
+		*TiDBContext // an interface to execute sql statements.
+	}
 	attrs         map[string]string // attributes parsed from client handshake response, not used for now.
+	serverHost    string            // server host
 	peerHost      string            // peer host
 	peerPort      string            // peer port
 	status        int32             // dispatching/reading/shutdown/waitshutdown
@@ -189,12 +207,26 @@ type clientConn struct {
 	authPlugin    string            // default authentication plugin
 	isUnixSocket  bool              // connection is Unix Socket file
 	rsEncoder     *resultEncoder    // rsEncoder is used to encode the string result to different charsets.
+	inputDecoder  *inputDecoder     // inputDecoder is used to decode the different charsets of incoming strings to utf-8.
 	socketCredUID uint32            // UID from the other end of the Unix Socket
 	// mu is used for cancelling the execution of current transaction.
 	mu struct {
 		sync.RWMutex
 		cancelFunc context.CancelFunc
 	}
+	extensions *extension.SessionExtensions
+}
+
+func (cc *clientConn) getCtx() *TiDBContext {
+	cc.ctx.RLock()
+	defer cc.ctx.RUnlock()
+	return cc.ctx.TiDBContext
+}
+
+func (cc *clientConn) setCtx(ctx *TiDBContext) {
+	cc.ctx.Lock()
+	cc.ctx.TiDBContext = ctx
+	cc.ctx.Unlock()
 }
 
 func (cc *clientConn) String() string {
@@ -321,8 +353,8 @@ func closeConn(cc *clientConn, connections int) error {
 	}
 	// Close statements and session
 	// This will release advisory locks, row locks, etc.
-	if cc.ctx != nil {
-		return cc.ctx.Close()
+	if ctx := cc.getCtx(); ctx != nil {
+		return ctx.Close()
 	}
 	return nil
 }
@@ -368,13 +400,12 @@ func (cc *clientConn) writeInitialHandshake(ctx context.Context) error {
 	data = append(data, cc.salt[8:]...)
 	data = append(data, 0)
 	// auth-plugin name
-	if cc.ctx == nil {
-		err := cc.openSession()
-		if err != nil {
+	if ctx := cc.getCtx(); ctx == nil {
+		if err := cc.openSession(); err != nil {
 			return err
 		}
 	}
-	defAuthPlugin, err := variable.GetGlobalSystemVar(cc.ctx.GetSessionVars(), variable.DefaultAuthPlugin)
+	defAuthPlugin, err := cc.ctx.GetSessionVars().GetGlobalSystemVar(context.Background(), variable.DefaultAuthPlugin)
 	if err != nil {
 		return err
 	}
@@ -383,21 +414,22 @@ func (cc *clientConn) writeInitialHandshake(ctx context.Context) error {
 
 	// Close the session to force this to be re-opened after we parse the response. This is needed
 	// to ensure we use the collation and client flags from the response for the session.
-	err = cc.ctx.Close()
-	if err != nil {
+	if err = cc.ctx.Close(); err != nil {
 		return err
 	}
-	cc.ctx = nil
+	cc.setCtx(nil)
 
 	data = append(data, 0)
-	err = cc.writePacket(data)
-	if err != nil {
+	if err = cc.writePacket(data); err != nil {
 		return err
 	}
 	return cc.flush(ctx)
 }
 
 func (cc *clientConn) readPacket() ([]byte, error) {
+	if cc.getCtx() != nil {
+		cc.pkt.setMaxAllowedPacket(cc.ctx.GetSessionVars().MaxAllowedPacket)
+	}
 	return cc.pkt.readPacket()
 }
 
@@ -433,61 +465,6 @@ type handshakeResponse41 struct {
 	Auth       []byte
 	AuthPlugin string
 	Attrs      map[string]string
-}
-
-// parseOldHandshakeResponseHeader parses the old version handshake header HandshakeResponse320
-func parseOldHandshakeResponseHeader(ctx context.Context, packet *handshakeResponse41, data []byte) (parsedBytes int, err error) {
-	// Ensure there are enough data to read:
-	// https://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::HandshakeResponse320
-	logutil.Logger(ctx).Debug("try to parse hanshake response as Protocol::HandshakeResponse320", zap.ByteString("packetData", data))
-	if len(data) < 2+3 {
-		logutil.Logger(ctx).Error("got malformed handshake response", zap.ByteString("packetData", data))
-		return 0, mysql.ErrMalformPacket
-	}
-	offset := 0
-	// capability
-	capability := binary.LittleEndian.Uint16(data[:2])
-	packet.Capability = uint32(capability)
-
-	// be compatible with Protocol::HandshakeResponse41
-	packet.Capability |= mysql.ClientProtocol41
-
-	offset += 2
-	// skip max packet size
-	offset += 3
-	// usa default CharsetID
-	packet.Collation = mysql.CollationNames["utf8mb4_general_ci"]
-
-	return offset, nil
-}
-
-// parseOldHandshakeResponseBody parse the HandshakeResponse for Protocol::HandshakeResponse320 (except the common header part).
-func parseOldHandshakeResponseBody(ctx context.Context, packet *handshakeResponse41, data []byte, offset int) (err error) {
-	defer func() {
-		// Check malformat packet cause out of range is disgusting, but don't panic!
-		if r := recover(); r != nil {
-			logutil.Logger(ctx).Error("handshake panic", zap.ByteString("packetData", data), zap.Stack("stack"))
-			err = mysql.ErrMalformPacket
-		}
-	}()
-	// user name
-	packet.User = string(data[offset : offset+bytes.IndexByte(data[offset:], 0)])
-	offset += len(packet.User) + 1
-
-	if packet.Capability&mysql.ClientConnectWithDB > 0 {
-		if len(data[offset:]) > 0 {
-			idx := bytes.IndexByte(data[offset:], 0)
-			packet.DBName = string(data[offset : offset+idx])
-			offset = offset + idx + 1
-		}
-		if len(data[offset:]) > 0 {
-			packet.Auth = data[offset : offset+bytes.IndexByte(data[offset:], 0)]
-		}
-	} else {
-		packet.Auth = data[offset : offset+bytes.IndexByte(data[offset:], 0)]
-	}
-
-	return nil
 }
 
 // parseHandshakeResponseHeader parses the common header of SSLRequest and HandshakeResponse41.
@@ -624,8 +601,6 @@ func (cc *clientConn) readOptionalSSLRequestAndHandshakeResponse(ctx context.Con
 		return err
 	}
 
-	isOldVersion := false
-
 	var resp handshakeResponse41
 	var pos int
 
@@ -638,8 +613,8 @@ func (cc *clientConn) readOptionalSSLRequestAndHandshakeResponse(ctx context.Con
 	if capability&mysql.ClientProtocol41 > 0 {
 		pos, err = parseHandshakeResponseHeader(ctx, &resp, data)
 	} else {
-		pos, err = parseOldHandshakeResponseHeader(ctx, &resp, data)
-		isOldVersion = true
+		logutil.Logger(ctx).Error("ClientProtocol41 flag is not set, please upgrade client")
+		return errNotSupportedAuthMode
 	}
 
 	if err != nil {
@@ -660,28 +635,22 @@ func (cc *clientConn) readOptionalSSLRequestAndHandshakeResponse(ctx context.Con
 				logutil.Logger(ctx).Warn("read handshake response failure after upgrade to TLS", zap.Error(err))
 				return err
 			}
-			if isOldVersion {
-				pos, err = parseOldHandshakeResponseHeader(ctx, &resp, data)
-			} else {
-				pos, err = parseHandshakeResponseHeader(ctx, &resp, data)
-			}
+			pos, err = parseHandshakeResponseHeader(ctx, &resp, data)
 			if err != nil {
 				terror.Log(err)
 				return err
 			}
 		}
-	} else if config.GetGlobalConfig().Security.RequireSecureTransport {
+	} else if tlsutil.RequireSecureTransport.Load() && !cc.isUnixSocket {
+		// If it's not a socket connection, we should reject the connection
+		// because TLS is required.
 		err := errSecureTransportRequired.FastGenByArgs()
 		terror.Log(err)
 		return err
 	}
 
 	// Read the remaining part of the packet.
-	if isOldVersion {
-		err = parseOldHandshakeResponseBody(ctx, &resp, data, pos)
-	} else {
-		err = parseHandshakeResponseBody(ctx, &resp, data, pos)
-	}
+	err = parseHandshakeResponseBody(ctx, &resp, data, pos)
 	if err != nil {
 		terror.Log(err)
 		return err
@@ -704,8 +673,16 @@ func (cc *clientConn) readOptionalSSLRequestAndHandshakeResponse(ctx context.Con
 		if err != nil {
 			return err
 		}
+	case mysql.AuthTiDBSM3Password:
+		resp.Auth, err = cc.authSM3(ctx)
+		if err != nil {
+			return err
+		}
 	case mysql.AuthNativePassword:
 	case mysql.AuthSocket:
+	case mysql.AuthTiDBSessionToken:
+	case mysql.AuthTiDBAuthToken:
+	case mysql.AuthMySQLClearPassword:
 	default:
 		return errors.New("Unknown auth plugin")
 	}
@@ -730,8 +707,11 @@ func (cc *clientConn) handleAuthPlugin(ctx context.Context, resp *handshakeRespo
 
 		switch resp.AuthPlugin {
 		case mysql.AuthCachingSha2Password:
+		case mysql.AuthTiDBSM3Password:
 		case mysql.AuthNativePassword:
 		case mysql.AuthSocket:
+		case mysql.AuthTiDBSessionToken:
+		case mysql.AuthMySQLClearPassword:
 		default:
 			logutil.Logger(ctx).Warn("Unknown Auth Plugin", zap.String("plugin", resp.AuthPlugin))
 		}
@@ -747,16 +727,18 @@ func (cc *clientConn) handleAuthPlugin(ctx context.Context, resp *handshakeRespo
 	return nil
 }
 
+// authSha implements the caching_sha2_password specific part of the protocol.
 func (cc *clientConn) authSha(ctx context.Context) ([]byte, error) {
-
 	const (
-		ShaCommand       = 1
-		RequestRsaPubKey = 2
-		FastAuthOk       = 3
-		FastAuthFail     = 4
+		shaCommand       = 1
+		requestRsaPubKey = 2 // Not supported yet, only TLS is supported as secure channel.
+		fastAuthOk       = 3
+		fastAuthFail     = 4
 	)
 
-	err := cc.writePacket([]byte{0, 0, 0, 0, ShaCommand, FastAuthFail})
+	// Currently we always send a "FastAuthFail" as the cached part of the protocol isn't implemented yet.
+	// This triggers the client to send the full response.
+	err := cc.writePacket([]byte{0, 0, 0, 0, shaCommand, fastAuthFail})
 	if err != nil {
 		logutil.Logger(ctx).Error("authSha packet write failed", zap.Error(err))
 		return nil, err
@@ -770,6 +752,27 @@ func (cc *clientConn) authSha(ctx context.Context) ([]byte, error) {
 	data, err := cc.readPacket()
 	if err != nil {
 		logutil.Logger(ctx).Error("authSha packet read failed", zap.Error(err))
+		return nil, err
+	}
+	return bytes.Trim(data, "\x00"), nil
+}
+
+// authSM3 implements the tidb_sm3_password specific part of the protocol.
+func (cc *clientConn) authSM3(ctx context.Context) ([]byte, error) {
+	err := cc.writePacket([]byte{0, 0, 0, 0, 1, 4})
+	if err != nil {
+		logutil.Logger(ctx).Error("authSM3 packet write failed", zap.Error(err))
+		return nil, err
+	}
+	err = cc.flush(ctx)
+	if err != nil {
+		logutil.Logger(ctx).Error("authSM3 packet flush failed", zap.Error(err))
+		return nil, err
+	}
+
+	data, err := cc.readPacket()
+	if err != nil {
+		logutil.Logger(ctx).Error("authSM3 packet read failed", zap.Error(err))
 		return nil, err
 	}
 	return bytes.Trim(data, "\x00"), nil
@@ -795,11 +798,11 @@ func (cc *clientConn) openSession() error {
 		tlsState := cc.tlsConn.ConnectionState()
 		tlsStatePtr = &tlsState
 	}
-	var err error
-	cc.ctx, err = cc.server.driver.OpenCtx(cc.connectionID, cc.capability, cc.collation, cc.dbname, tlsStatePtr)
+	ctx, err := cc.server.driver.OpenCtx(cc.connectionID, cc.capability, cc.collation, cc.dbname, tlsStatePtr, cc.extensions)
 	if err != nil {
 		return err
 	}
+	cc.setCtx(ctx)
 
 	err = cc.server.checkConnectionCount()
 	if err != nil {
@@ -810,7 +813,7 @@ func (cc *clientConn) openSession() error {
 
 func (cc *clientConn) openSessionAndDoAuth(authData []byte, authPlugin string) error {
 	// Open a context unless this was done before.
-	if cc.ctx == nil {
+	if ctx := cc.getCtx(); ctx == nil {
 		err := cc.openSession()
 		if err != nil {
 			return err
@@ -830,8 +833,17 @@ func (cc *clientConn) openSessionAndDoAuth(authData []byte, authPlugin string) e
 		return errAccessDeniedNoPassword.FastGenByArgs(cc.user, host)
 	}
 
-	if !cc.ctx.Auth(&auth.UserIdentity{Username: cc.user, Hostname: host}, authData, cc.salt) {
-		return errAccessDenied.FastGenByArgs(cc.user, host, hasPassword)
+	userIdentity := &auth.UserIdentity{Username: cc.user, Hostname: host}
+	if authPlugin == mysql.AuthTiDBSessionToken {
+		if !cc.ctx.AuthWithoutVerification(userIdentity) {
+			return errAccessDenied.FastGenByArgs(cc.user, host, hasPassword)
+		}
+		if err = sessionstates.ValidateSessionToken(authData, cc.user); err != nil {
+			logutil.BgLogger().Warn("verify session token failed", zap.String("username", cc.user), zap.Error(err))
+			return errAccessDenied.FastGenByArgs(cc.user, host, hasPassword)
+		}
+	} else if err = cc.ctx.Auth(userIdentity, authData, cc.salt); err != nil {
+		return err
 	}
 	cc.ctx.SetPort(port)
 	if cc.dbname != "" {
@@ -847,7 +859,7 @@ func (cc *clientConn) openSessionAndDoAuth(authData []byte, authPlugin string) e
 // Check if the Authentication Plugin of the server, client and user configuration matches
 func (cc *clientConn) checkAuthPlugin(ctx context.Context, resp *handshakeResponse41) ([]byte, error) {
 	// Open a context unless this was done before.
-	if cc.ctx == nil {
+	if ctx := cc.getCtx(); ctx == nil {
 		err := cc.openSession()
 		if err != nil {
 			return nil, err
@@ -855,6 +867,10 @@ func (cc *clientConn) checkAuthPlugin(ctx context.Context, resp *handshakeRespon
 	}
 
 	authData := resp.Auth
+	// tidb_session_token is always permitted and skips stored user plugin.
+	if resp.AuthPlugin == mysql.AuthTiDBSessionToken {
+		return authData, nil
+	}
 	hasPassword := "YES"
 	if len(authData) == 0 {
 		hasPassword = "NO"
@@ -875,6 +891,7 @@ func (cc *clientConn) checkAuthPlugin(ctx context.Context, resp *handshakeRespon
 			zap.String("user", cc.user), zap.String("host", host))
 	}
 	failpoint.Inject("FakeUser", func(val failpoint.Value) {
+		//nolint:forcetypeassert
 		userplugin = val.(string)
 	})
 	if userplugin == mysql.AuthSocket {
@@ -911,6 +928,9 @@ func (cc *clientConn) checkAuthPlugin(ctx context.Context, resp *handshakeRespon
 	// method send by the client (*authPlugin) then we need to switch the authentication
 	// method to match the one configured for that specific user.
 	if (cc.authPlugin != userplugin) || (cc.authPlugin != resp.AuthPlugin) {
+		if userplugin == mysql.AuthTiDBAuthToken {
+			userplugin = mysql.AuthMySQLClearPassword
+		}
 		if resp.Capability&mysql.ClientPluginAuth > 0 {
 			authData, err := cc.authSwitchRequest(ctx, userplugin)
 			if err != nil {
@@ -929,11 +949,12 @@ func (cc *clientConn) checkAuthPlugin(ctx context.Context, resp *handshakeRespon
 
 func (cc *clientConn) PeerHost(hasPassword string) (host, port string, err error) {
 	if len(cc.peerHost) > 0 {
-		return cc.peerHost, "", nil
+		return cc.peerHost, cc.peerPort, nil
 	}
 	host = variable.DefHostname
 	if cc.isUnixSocket {
 		cc.peerHost = host
+		cc.serverHost = host
 		return
 	}
 	addr := cc.bufReadConn.RemoteAddr().String()
@@ -944,6 +965,15 @@ func (cc *clientConn) PeerHost(hasPassword string) (host, port string, err error
 	}
 	cc.peerHost = host
 	cc.peerPort = port
+
+	serverAddr := cc.bufReadConn.LocalAddr().String()
+	serverHost, _, err := net.SplitHostPort(serverAddr)
+	if err != nil {
+		err = errAccessDenied.GenWithStackByArgs(cc.user, addr, hasPassword)
+		return
+	}
+	cc.serverHost = serverHost
+
 	return
 }
 
@@ -960,12 +990,21 @@ func (cc *clientConn) skipInitConnect() bool {
 
 // initResultEncoder initialize the result encoder for current connection.
 func (cc *clientConn) initResultEncoder(ctx context.Context) {
-	chs, err := variable.GetSessionOrGlobalSystemVar(cc.ctx.GetSessionVars(), variable.CharacterSetResults)
+	chs, err := cc.ctx.GetSessionVars().GetSessionOrGlobalSystemVar(context.Background(), variable.CharacterSetResults)
 	if err != nil {
 		chs = ""
 		logutil.Logger(ctx).Warn("get character_set_results system variable failed", zap.Error(err))
 	}
 	cc.rsEncoder = newResultEncoder(chs)
+}
+
+func (cc *clientConn) initInputEncoder(ctx context.Context) {
+	chs, err := cc.ctx.GetSessionVars().GetSessionOrGlobalSystemVar(context.Background(), variable.CharacterSetClient)
+	if err != nil {
+		chs = ""
+		logutil.Logger(ctx).Warn("get character_set_client system variable failed", zap.Error(err))
+	}
+	cc.inputDecoder = newInputDecoder(chs)
 }
 
 // initConnect runs the initConnect SQL statement if it has been specified.
@@ -991,7 +1030,7 @@ func (cc *clientConn) initConnect(ctx context.Context) error {
 		// init_connect does not care about the results,
 		// but they need to be drained because of lazy loading.
 		if rs != nil {
-			req := rs.NewChunk()
+			req := rs.NewChunk(nil)
 			for {
 				if err = rs.Next(ctx, req); err != nil {
 					return err
@@ -1013,19 +1052,15 @@ func (cc *clientConn) initConnect(ctx context.Context) error {
 // it will be recovered and log the panic error.
 // This function returns and the connection is closed if there is an IO error or there is a panic.
 func (cc *clientConn) Run(ctx context.Context) {
-	const size = 4096
 	defer func() {
 		r := recover()
 		if r != nil {
-			buf := make([]byte, size)
-			stackSize := runtime.Stack(buf, false)
-			buf = buf[:stackSize]
 			logutil.Logger(ctx).Error("connection running loop panic",
 				zap.Stringer("lastSQL", getLastStmtInConn{cc}),
 				zap.String("err", fmt.Sprintf("%v", r)),
-				zap.String("stack", string(buf)),
+				zap.Stack("stack"),
 			)
-			err := cc.writeError(ctx, errors.New(fmt.Sprintf("%v", r)))
+			err := cc.writeError(ctx, fmt.Errorf("%v", r))
 			terror.Log(err)
 			metrics.PanicCounter.WithLabelValues(metrics.LabelSession).Inc()
 		}
@@ -1063,6 +1098,11 @@ func (cc *clientConn) Run(ctx context.Context) {
 							zap.Error(err),
 						)
 					}
+				} else if errors.ErrorEqual(err, errNetPacketTooLarge) {
+					err := cc.writeError(ctx, err)
+					if err != nil {
+						terror.Log(err)
+					}
 				} else {
 					errStack := errors.ErrorStack(err)
 					if !strings.Contains(errStack, "use of closed network connection") {
@@ -1081,6 +1121,8 @@ func (cc *clientConn) Run(ctx context.Context) {
 
 		startTime := time.Now()
 		err = cc.dispatch(ctx, data)
+		cc.ctx.GetSessionVars().ClearAlloc(&cc.chunkAlloc, err != nil)
+		cc.chunkAlloc.Reset()
 		if err != nil {
 			cc.audit(plugin.Error) // tell the plugin API there was a dispatch error
 			if terror.ErrorEqual(err, io.EOF) {
@@ -1096,19 +1138,24 @@ func (cc *clientConn) Run(ctx context.Context) {
 				logutil.Logger(ctx).Fatal("critical error, stop the server", zap.Error(err))
 			}
 			var txnMode string
-			if cc.ctx != nil {
-				txnMode = cc.ctx.GetSessionVars().GetReadableTxnMode()
+			if ctx := cc.getCtx(); ctx != nil {
+				txnMode = ctx.GetSessionVars().GetReadableTxnMode()
 			}
 			metrics.ExecuteErrorCounter.WithLabelValues(metrics.ExecuteErrorToLabel(err)).Inc()
 			if storeerr.ErrLockAcquireFailAndNoWaitSet.Equal(err) {
 				logutil.Logger(ctx).Debug("Expected error for FOR UPDATE NOWAIT", zap.Error(err))
 			} else {
+				var startTS uint64
+				if ctx := cc.getCtx(); ctx != nil && ctx.GetSessionVars() != nil && ctx.GetSessionVars().TxnCtx != nil {
+					startTS = ctx.GetSessionVars().TxnCtx.StartTS
+				}
 				logutil.Logger(ctx).Info("command dispatched failed",
 					zap.String("connInfo", cc.String()),
 					zap.String("command", mysql.Command2Str[data[0]]),
 					zap.String("status", cc.SessionStatusToString()),
 					zap.Stringer("sql", getLastStmtInConn{cc}),
 					zap.String("txn_mode", txnMode),
+					zap.Uint64("timestamp", startTS),
 					zap.String("err", errStrForLog(err, cc.ctx.GetSessionVars().EnableRedactLog)),
 				)
 			}
@@ -1183,7 +1230,8 @@ func (cc *clientConn) addMetrics(cmd byte, startTime time.Time, err error) {
 
 	cost := time.Since(startTime)
 	sessionVar := cc.ctx.GetSessionVars()
-	cc.ctx.GetTxnWriteThroughputSLI().FinishExecuteStmt(cost, cc.ctx.AffectedRows(), sessionVar.InTxn())
+	affectedRows := cc.ctx.AffectedRows()
+	cc.ctx.GetTxnWriteThroughputSLI().FinishExecuteStmt(cost, affectedRows, sessionVar.InTxn())
 
 	switch sqlType {
 	case "Use":
@@ -1198,12 +1246,16 @@ func (cc *clientConn) addMetrics(cmd byte, startTime time.Time, err error) {
 		queryDurationHistogramRollback.Observe(cost.Seconds())
 	case "Insert":
 		queryDurationHistogramInsert.Observe(cost.Seconds())
+		affectedRowsCounterInsert.Add(float64(affectedRows))
 	case "Replace":
 		queryDurationHistogramReplace.Observe(cost.Seconds())
+		affectedRowsCounterReplace.Add(float64(affectedRows))
 	case "Delete":
 		queryDurationHistogramDelete.Observe(cost.Seconds())
+		affectedRowsCounterDelete.Add(float64(affectedRows))
 	case "Update":
 		queryDurationHistogramUpdate.Observe(cost.Seconds())
+		affectedRowsCounterUpdate.Add(float64(affectedRows))
 	case "Select":
 		queryDurationHistogramSelect.Observe(cost.Seconds())
 	case "Execute":
@@ -1247,7 +1299,7 @@ func (cc *clientConn) dispatch(ctx context.Context, data []byte) error {
 	cc.lastPacket = data
 	cmd := data[0]
 	data = data[1:]
-	if variable.TopSQLEnabled() {
+	if topsqlstate.TopSQLEnabled() {
 		defer pprof.SetGoroutineLabels(ctx)
 	}
 	if variable.EnablePProfSQLCPU.Load() {
@@ -1277,8 +1329,8 @@ func (cc *clientConn) dispatch(ctx context.Context, data []byte) error {
 	token := cc.server.getToken()
 	defer func() {
 		// if handleChangeUser failed, cc.ctx may be nil
-		if cc.ctx != nil {
-			cc.ctx.SetProcessInfo("", t, mysql.ComSleep, 0)
+		if ctx := cc.getCtx(); ctx != nil {
+			ctx.SetProcessInfo("", t, mysql.ComSleep, 0)
 		}
 
 		cc.server.releaseToken(token)
@@ -1303,11 +1355,6 @@ func (cc *clientConn) dispatch(ctx context.Context, data []byte) error {
 	}
 
 	switch cmd {
-	case mysql.ComSleep:
-		// TODO: According to mysql document, this command is supposed to be used only internally.
-		// So it's just a temp fix, not sure if it's done right.
-		// Investigate this command and write test case later.
-		return nil
 	case mysql.ComQuit:
 		return io.EOF
 	case mysql.ComInitDB:
@@ -1340,11 +1387,15 @@ func (cc *clientConn) dispatch(ctx context.Context, data []byte) error {
 	// ComProcessInfo, ComConnect, ComProcessKill, ComDebug
 	case mysql.ComPing:
 		return cc.writeOK(ctx)
-	// ComTime, ComDelayedInsert
 	case mysql.ComChangeUser:
 		return cc.handleChangeUser(ctx, data)
 	// ComBinlogDump, ComTableDump, ComConnectOut, ComRegisterSlave
 	case mysql.ComStmtPrepare:
+		// For issue 39132, same as ComQuery
+		if len(data) > 0 && data[len(data)-1] == 0 {
+			data = data[:len(data)-1]
+			dataStr = string(hack.String(data))
+		}
 		return cc.handleStmtPrepare(ctx, dataStr)
 	case mysql.ComStmtExecute:
 		return cc.handleStmtExecute(ctx, data)
@@ -1368,11 +1419,21 @@ func (cc *clientConn) dispatch(ctx context.Context, data []byte) error {
 }
 
 func (cc *clientConn) writeStats(ctx context.Context) error {
-	msg := []byte("Uptime: 0  Threads: 0  Questions: 0  Slow queries: 0  Opens: 0  Flush tables: 0  Open tables: 0  Queries per second avg: 0.000")
+	var err error
+	var uptime int64
+	info := serverInfo{}
+	info.ServerInfo, err = infosync.GetServerInfo()
+	if err != nil {
+		logutil.BgLogger().Error("Failed to get ServerInfo for uptime status", zap.Error(err))
+	} else {
+		uptime = int64(time.Since(time.Unix(info.ServerInfo.StartTimestamp, 0)).Seconds())
+	}
+	msg := []byte(fmt.Sprintf("Uptime: %d  Threads: 0  Questions: 0  Slow queries: 0  Opens: 0  Flush tables: 0  Open tables: 0  Queries per second avg: 0.000",
+		uptime))
 	data := cc.alloc.AllocWithLen(4, len(msg))
 	data = append(data, msg...)
 
-	err := cc.writePacket(data)
+	err = cc.writePacket(data)
 	if err != nil {
 		return err
 	}
@@ -1396,10 +1457,22 @@ func (cc *clientConn) useDB(ctx context.Context, db string) (err error) {
 }
 
 func (cc *clientConn) flush(ctx context.Context) error {
+	var (
+		stmtDetail *execdetails.StmtExecDetails
+		startTime  time.Time
+	)
+	if stmtDetailRaw := ctx.Value(execdetails.StmtExecDetailKey); stmtDetailRaw != nil {
+		//nolint:forcetypeassert
+		stmtDetail = stmtDetailRaw.(*execdetails.StmtExecDetails)
+		startTime = time.Now()
+	}
 	defer func() {
+		if stmtDetail != nil {
+			stmtDetail.WriteSQLRespDuration += time.Since(startTime)
+		}
 		trace.StartRegion(ctx, "FlushClientConn").End()
-		if cc.ctx != nil && cc.ctx.WarningCount() > 0 {
-			for _, err := range cc.ctx.GetWarnings() {
+		if ctx := cc.getCtx(); ctx != nil && ctx.WarningCount() > 0 {
+			for _, err := range ctx.GetWarnings() {
 				var warn *errors.Error
 				if ok := goerr.As(err.Err, &warn); ok {
 					code := uint16(warn.Code())
@@ -1417,18 +1490,22 @@ func (cc *clientConn) flush(ctx context.Context) error {
 }
 
 func (cc *clientConn) writeOK(ctx context.Context) error {
-	msg := cc.ctx.LastMessage()
-	return cc.writeOkWith(ctx, msg, cc.ctx.AffectedRows(), cc.ctx.LastInsertID(), cc.ctx.Status(), cc.ctx.WarningCount())
+	return cc.writeOkWith(ctx, mysql.OKHeader, true, cc.ctx.Status())
 }
 
-func (cc *clientConn) writeOkWith(ctx context.Context, msg string, affectedRows, lastInsertID uint64, status, warnCnt uint16) error {
+func (cc *clientConn) writeOkWith(ctx context.Context, header byte, flush bool, status uint16) error {
+	msg := cc.ctx.LastMessage()
+	affectedRows := cc.ctx.AffectedRows()
+	lastInsertID := cc.ctx.LastInsertID()
+	warnCnt := cc.ctx.WarningCount()
+
 	enclen := 0
 	if len(msg) > 0 {
 		enclen = lengthEncodedIntSize(uint64(len(msg))) + len(msg)
 	}
 
 	data := cc.alloc.AllocWithLen(4, 32+enclen)
-	data = append(data, mysql.OKHeader)
+	data = append(data, header)
 	data = dumpLengthEncodedInt(data, affectedRows)
 	data = dumpLengthEncodedInt(data, lastInsertID)
 	if cc.capability&mysql.ClientProtocol41 > 0 {
@@ -1446,7 +1523,11 @@ func (cc *clientConn) writeOkWith(ctx context.Context, msg string, affectedRows,
 		return err
 	}
 
-	return cc.flush(ctx)
+	if flush {
+		return cc.flush(ctx)
+	}
+
+	return nil
 }
 
 func (cc *clientConn) writeError(ctx context.Context, e error) error {
@@ -1487,20 +1568,23 @@ func (cc *clientConn) writeError(ctx context.Context, e error) error {
 	return cc.flush(ctx)
 }
 
-// writeEOF writes an EOF packet.
+// writeEOF writes an EOF packet or if ClientDeprecateEOF is set it
+// writes an OK packet with EOF indicator.
 // Note this function won't flush the stream because maybe there are more
 // packets following it.
-// serverStatus, a flag bit represents server information
-// in the packet.
-func (cc *clientConn) writeEOF(serverStatus uint16) error {
+// serverStatus, a flag bit represents server information in the packet.
+// Note: it is callers' responsibility to ensure correctness of serverStatus.
+func (cc *clientConn) writeEOF(ctx context.Context, serverStatus uint16) error {
+	if cc.capability&mysql.ClientDeprecateEOF > 0 {
+		return cc.writeOkWith(ctx, mysql.EOFHeader, false, serverStatus)
+	}
+
 	data := cc.alloc.AllocWithLen(4, 9)
 
 	data = append(data, mysql.EOFHeader)
 	if cc.capability&mysql.ClientProtocol41 > 0 {
 		data = dumpUint16(data, cc.ctx.WarningCount())
-		status := cc.ctx.Status()
-		status |= serverStatus
-		data = dumpUint16(data, status)
+		data = dumpUint16(data, serverStatus)
 	}
 
 	err := cc.writePacket(data)
@@ -1596,11 +1680,11 @@ func processStream(ctx context.Context, cc *clientConn, loadDataInfo *executor.L
 	}
 	if err != nil {
 		logutil.Logger(ctx).Error("load data process stream error", zap.Error(err))
-	} else {
-		err = loadDataInfo.EnqOneTask(ctx)
-		if err != nil {
-			logutil.Logger(ctx).Error("load data process stream error", zap.Error(err))
-		}
+		return
+	}
+	if err = loadDataInfo.EnqOneTask(ctx); err != nil {
+		logutil.Logger(ctx).Error("load data process stream error", zap.Error(err))
+		return
 	}
 }
 
@@ -1627,7 +1711,7 @@ func (cc *clientConn) handleLoadData(ctx context.Context, loadDataInfo *executor
 	loadDataInfo.StartStopWatcher()
 	// let stop watcher goroutine quit
 	defer loadDataInfo.ForceQuit()
-	err = loadDataInfo.Ctx.NewTxn(ctx)
+	err = sessiontxn.NewTxn(ctx, loadDataInfo.Ctx)
 	if err != nil {
 		return err
 	}
@@ -1746,6 +1830,24 @@ func (cc *clientConn) handlePlanReplayerLoad(ctx context.Context, planReplayerLo
 	return planReplayerLoadInfo.Update(data)
 }
 
+func (cc *clientConn) handlePlanReplayerDump(ctx context.Context, e *executor.PlanReplayerDumpInfo) error {
+	if cc.capability&mysql.ClientLocalFiles == 0 {
+		return errNotAllowedCommand
+	}
+	if e == nil {
+		return errors.New("plan replayer dump: executor is empty")
+	}
+	data, err := cc.getDataFromPath(ctx, e.Path)
+	if err != nil {
+		logutil.BgLogger().Error(err.Error())
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return e.DumpSQLsFromFile(ctx, data)
+}
+
 func (cc *clientConn) audit(eventType plugin.GeneralEvent) {
 	err := plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
 		audit := plugin.DeclareAuditManifest(p.Manifest)
@@ -1767,10 +1869,13 @@ func (cc *clientConn) audit(eventType plugin.GeneralEvent) {
 // Query `load stats` does not return result either.
 func (cc *clientConn) handleQuery(ctx context.Context, sql string) (err error) {
 	defer trace.StartRegion(ctx, "handleQuery").End()
-	sc := cc.ctx.GetSessionVars().StmtCtx
+	sessVars := cc.ctx.GetSessionVars()
+	sc := sessVars.StmtCtx
 	prevWarns := sc.GetWarnings()
-	stmts, err := cc.ctx.Parse(ctx, sql)
-	if err != nil {
+	var stmts []ast.StmtNode
+	cc.ctx.GetSessionVars().SetAlloc(cc.chunkAlloc)
+	if stmts, err = cc.ctx.Parse(ctx, sql); err != nil {
+		cc.onExtensionSQLParseFailed(sql, err)
 		return err
 	}
 
@@ -1783,7 +1888,6 @@ func (cc *clientConn) handleQuery(ctx context.Context, sql string) (err error) {
 
 	var pointPlans []plannercore.Plan
 	if len(stmts) > 1 {
-
 		// The client gets to choose if it allows multi-statements, and
 		// probably defaults OFF. This helps prevent against SQL injection attacks
 		// by early terminating the first statement, and then running an entirely
@@ -1808,20 +1912,51 @@ func (cc *clientConn) handleQuery(ctx context.Context, sql string) (err error) {
 		// Only pre-build point plans for multi-statement query
 		pointPlans, err = cc.prefetchPointPlanKeys(ctx, stmts)
 		if err != nil {
+			for _, stmt := range stmts {
+				cc.onExtensionStmtEnd(stmt, false, err)
+			}
 			return err
 		}
+		metrics.NumOfMultiQueryHistogram.Observe(float64(len(stmts)))
 	}
 	if len(pointPlans) > 0 {
 		defer cc.ctx.ClearValue(plannercore.PointPlanKey)
 	}
 	var retryable bool
+	var lastStmt ast.StmtNode
+	var expiredStmtTaskID uint64
 	for i, stmt := range stmts {
+		if lastStmt != nil {
+			cc.onExtensionStmtEnd(lastStmt, true, nil)
+		}
+		lastStmt = stmt
+
+		// expiredTaskID is the task ID of the previous statement. When executing a stmt,
+		// the StmtCtx will be reinit and the TaskID will change. We can compare the StmtCtx.TaskID
+		// with the previous one to determine whether StmtCtx has been inited for the current stmt.
+		expiredStmtTaskID = sessVars.StmtCtx.TaskID
+
 		if len(pointPlans) > 0 {
-			// Save the point plan in Session so we don't need to build the point plan again.
+			// Save the point plan in Session, so we don't need to build the point plan again.
 			cc.ctx.SetValue(plannercore.PointPlanKey, plannercore.PointPlanVal{Plan: pointPlans[i]})
 		}
 		retryable, err = cc.handleStmt(ctx, stmt, parserWarns, i == len(stmts)-1)
 		if err != nil {
+			action, txnErr := sessiontxn.GetTxnManager(&cc.ctx).OnStmtErrorForNextAction(sessiontxn.StmtErrAfterQuery, err)
+			if txnErr != nil {
+				err = txnErr
+				break
+			}
+
+			if retryable && action == sessiontxn.StmtActionRetryReady {
+				cc.ctx.GetSessionVars().RetryInfo.Retrying = true
+				_, err = cc.handleStmt(ctx, stmt, parserWarns, i == len(stmts)-1)
+				cc.ctx.GetSessionVars().RetryInfo.Retrying = false
+				if err != nil {
+					break
+				}
+				continue
+			}
 			if !retryable || !errors.ErrorEqual(err, storeerr.ErrTiFlashServerTimeout) {
 				break
 			}
@@ -1840,6 +1975,11 @@ func (cc *clientConn) handleQuery(ctx context.Context, sql string) (err error) {
 			}
 		}
 	}
+
+	if lastStmt != nil {
+		cc.onExtensionStmtEnd(lastStmt, sessVars.StmtCtx.TaskID != expiredStmtTaskID, err)
+	}
+
 	return err
 }
 
@@ -1868,12 +2008,11 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 		}
 	}
 	pointPlans := make([]plannercore.Plan, len(stmts))
-	var idxKeys []kv.Key
-	var rowKeys []kv.Key
+	var idxKeys []kv.Key //nolint: prealloc
+	var rowKeys []kv.Key //nolint: prealloc
 	sc := vars.StmtCtx
 	for i, stmt := range stmts {
-		switch stmt.(type) {
-		case *ast.UseStmt:
+		if _, ok := stmt.(*ast.UseStmt); ok {
 			// If there is a "use db" statement, we shouldn't cache even if it's possible.
 			// Consider the scenario where there are statements that could execute on multiple
 			// schemas, but the schema is actually different.
@@ -1881,7 +2020,7 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 		}
 		// TODO: the preprocess is run twice, we should find some way to avoid do it again.
 		// TODO: handle the PreprocessorReturn.
-		if err = plannercore.Preprocess(cc.ctx, stmt); err != nil {
+		if err = plannercore.Preprocess(ctx, cc.getCtx(), stmt); err != nil {
 			return nil, err
 		}
 		p := plannercore.TryFastPlan(cc.ctx.Session, stmt)
@@ -1891,8 +2030,8 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 		}
 		// Only support Update for now.
 		// TODO: support other point plans.
-		switch x := p.(type) {
-		case *plannercore.Update:
+		if x, ok := p.(*plannercore.Update); ok {
+			//nolint:forcetypeassert
 			updateStmt := stmt.(*ast.UpdateStmt)
 			if pp, ok := x.SelectPlan.(*plannercore.PointGetPlan); ok {
 				if pp.PartitionInfo != nil {
@@ -1900,7 +2039,7 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 				}
 				if pp.IndexInfo != nil {
 					executor.ResetUpdateStmtCtx(sc, updateStmt, vars)
-					idxKey, err1 := executor.EncodeUniqueIndexKey(cc.ctx, pp.TblInfo, pp.IndexInfo, pp.IndexValues, pp.TblInfo.ID)
+					idxKey, err1 := executor.EncodeUniqueIndexKey(cc.getCtx(), pp.TblInfo, pp.IndexInfo, pp.IndexValues, pp.TblInfo.ID)
 					if err1 != nil {
 						return nil, err1
 					}
@@ -1929,7 +2068,7 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 	}
 	if vars.TxnCtx.IsPessimistic {
 		allKeys := append(rowKeys, idxKeys...)
-		err = executor.LockKeys(ctx, cc.ctx, vars.LockWaitTimeout, allKeys...)
+		err = executor.LockKeys(ctx, cc.getCtx(), vars.LockWaitTimeout, allKeys...)
 		if err != nil {
 			// suppress the lock error, we are not going to handle it here for simplicity.
 			err = nil
@@ -1945,7 +2084,7 @@ func (cc *clientConn) prefetchPointPlanKeys(ctx context.Context, stmts []ast.Stm
 }
 
 // The first return value indicates whether the call of handleStmt has no side effect and can be retried.
-// Currently the first return value is used to fallback to TiKV when TiFlash is down.
+// Currently, the first return value is used to fall back to TiKV when TiFlash is down.
 func (cc *clientConn) handleStmt(ctx context.Context, stmt ast.StmtNode, warns []stmtctx.SQLWarn, lastStmt bool) (bool, error) {
 	ctx = context.WithValue(ctx, execdetails.StmtExecDetailKey, &execdetails.StmtExecDetails{})
 	ctx = context.WithValue(ctx, util.ExecDetailsKey, &util.ExecDetails{})
@@ -1962,37 +2101,34 @@ func (cc *clientConn) handleStmt(ctx context.Context, stmt ast.StmtNode, warns [
 		return true, err
 	}
 
+	status := cc.ctx.Status()
 	if lastStmt {
 		cc.ctx.GetSessionVars().StmtCtx.AppendWarnings(warns)
-	}
-
-	status := cc.ctx.Status()
-	if !lastStmt {
+	} else {
 		status |= mysql.ServerMoreResultsExists
 	}
 
 	if rs != nil {
-		connStatus := atomic.LoadInt32(&cc.status)
-		if connStatus == connStatusShutdown {
+		if connStatus := atomic.LoadInt32(&cc.status); connStatus == connStatusShutdown {
 			return false, executor.ErrQueryInterrupted
 		}
-
-		retryable, err := cc.writeResultset(ctx, rs, false, status, 0)
-		if err != nil {
+		if retryable, err := cc.writeResultset(ctx, rs, false, status, 0); err != nil {
 			return retryable, err
 		}
-	} else {
-		handled, err := cc.handleQuerySpecial(ctx, status)
-		if handled {
-			execStmt := cc.ctx.Value(session.ExecStmtVarKey)
-			if execStmt != nil {
-				execStmt.(*executor.ExecStmt).FinishExecuteStmt(0, err, false)
-			}
-		}
-		if err != nil {
-			return false, err
+		return false, nil
+	}
+
+	handled, err := cc.handleQuerySpecial(ctx, status)
+	if handled {
+		if execStmt := cc.ctx.Value(session.ExecStmtVarKey); execStmt != nil {
+			//nolint:forcetypeassert
+			execStmt.(*executor.ExecStmt).FinishExecuteStmt(0, err, false)
 		}
 	}
+	if err != nil {
+		return false, err
+	}
+
 	return false, nil
 }
 
@@ -2002,6 +2138,7 @@ func (cc *clientConn) handleQuerySpecial(ctx context.Context, status uint16) (bo
 	if loadDataInfo != nil {
 		handled = true
 		defer cc.ctx.SetValue(executor.LoadDataVarKey, nil)
+		//nolint:forcetypeassert
 		if err := cc.handleLoadData(ctx, loadDataInfo.(*executor.LoadDataInfo)); err != nil {
 			return handled, err
 		}
@@ -2011,6 +2148,7 @@ func (cc *clientConn) handleQuerySpecial(ctx context.Context, status uint16) (bo
 	if loadStats != nil {
 		handled = true
 		defer cc.ctx.SetValue(executor.LoadStatsVarKey, nil)
+		//nolint:forcetypeassert
 		if err := cc.handleLoadStats(ctx, loadStats.(*executor.LoadStatsInfo)); err != nil {
 			return handled, err
 		}
@@ -2020,6 +2158,7 @@ func (cc *clientConn) handleQuerySpecial(ctx context.Context, status uint16) (bo
 	if indexAdvise != nil {
 		handled = true
 		defer cc.ctx.SetValue(executor.IndexAdviseVarKey, nil)
+		//nolint:forcetypeassert
 		if err := cc.handleIndexAdvise(ctx, indexAdvise.(*executor.IndexAdviseInfo)); err != nil {
 			return handled, err
 		}
@@ -2029,12 +2168,22 @@ func (cc *clientConn) handleQuerySpecial(ctx context.Context, status uint16) (bo
 	if planReplayerLoad != nil {
 		handled = true
 		defer cc.ctx.SetValue(executor.PlanReplayerLoadVarKey, nil)
+		//nolint:forcetypeassert
 		if err := cc.handlePlanReplayerLoad(ctx, planReplayerLoad.(*executor.PlanReplayerLoadInfo)); err != nil {
 			return handled, err
 		}
 	}
 
-	return handled, cc.writeOkWith(ctx, cc.ctx.LastMessage(), cc.ctx.AffectedRows(), cc.ctx.LastInsertID(), status, cc.ctx.WarningCount())
+	planReplayerDump := cc.ctx.Value(executor.PlanReplayerDumpVarKey)
+	if planReplayerDump != nil {
+		handled = true
+		defer cc.ctx.SetValue(executor.PlanReplayerDumpVarKey, nil)
+		//nolint:forcetypeassert
+		if err := cc.handlePlanReplayerDump(ctx, planReplayerDump.(*executor.PlanReplayerDumpInfo)); err != nil {
+			return handled, err
+		}
+	}
+	return handled, cc.writeOkWith(ctx, mysql.OKHeader, true, status)
 }
 
 // handleFieldList returns the field list for a table.
@@ -2061,7 +2210,7 @@ func (cc *clientConn) handleFieldList(ctx context.Context, sql string) (err erro
 			return err
 		}
 	}
-	if err := cc.writeEOF(0); err != nil {
+	if err := cc.writeEOF(ctx, cc.ctx.Status()); err != nil {
 		return err
 	}
 	return cc.flush(ctx)
@@ -2086,27 +2235,24 @@ func (cc *clientConn) writeResultset(ctx context.Context, rs ResultSet, binary b
 		}
 		// TODO(jianzhang.zj: add metrics here)
 		runErr = errors.Errorf("%v", r)
-		buf := make([]byte, 4096)
-		stackSize := runtime.Stack(buf, false)
-		buf = buf[:stackSize]
-		logutil.Logger(ctx).Error("write query result panic", zap.Stringer("lastSQL", getLastStmtInConn{cc}), zap.String("stack", string(buf)))
+		logutil.Logger(ctx).Error("write query result panic", zap.Stringer("lastSQL", getLastStmtInConn{cc}), zap.Stack("stack"), zap.Any("recover", r))
 	}()
 	cc.initResultEncoder(ctx)
 	defer cc.rsEncoder.clean()
-	var err error
 	if mysql.HasCursorExistsFlag(serverStatus) {
-		err = cc.writeChunksWithFetchSize(ctx, rs, serverStatus, fetchSize)
-	} else {
-		retryable, err = cc.writeChunks(ctx, rs, binary, serverStatus)
+		if err := cc.writeChunksWithFetchSize(ctx, rs, serverStatus, fetchSize); err != nil {
+			return false, err
+		}
+		return false, cc.flush(ctx)
 	}
-	if err != nil {
+	if retryable, err := cc.writeChunks(ctx, rs, binary, serverStatus); err != nil {
 		return retryable, err
 	}
 
 	return false, cc.flush(ctx)
 }
 
-func (cc *clientConn) writeColumnInfo(columns []*ColumnInfo, serverStatus uint16) error {
+func (cc *clientConn) writeColumnInfo(columns []*ColumnInfo) error {
 	data := cc.alloc.AllocWithLen(4, 1024)
 	data = dumpLengthEncodedInt(data, uint64(len(columns)))
 	if err := cc.writePacket(data); err != nil {
@@ -2119,7 +2265,7 @@ func (cc *clientConn) writeColumnInfo(columns []*ColumnInfo, serverStatus uint16
 			return err
 		}
 	}
-	return cc.writeEOF(serverStatus)
+	return nil
 }
 
 // writeChunks writes data from a Chunk, which filled data by a ResultSet, into a connection.
@@ -2128,22 +2274,30 @@ func (cc *clientConn) writeColumnInfo(columns []*ColumnInfo, serverStatus uint16
 // The first return value indicates whether error occurs at the first call of ResultSet.Next.
 func (cc *clientConn) writeChunks(ctx context.Context, rs ResultSet, binary bool, serverStatus uint16) (bool, error) {
 	data := cc.alloc.AllocWithLen(4, 1024)
-	req := rs.NewChunk()
+	req := rs.NewChunk(cc.chunkAlloc)
 	gotColumnInfo := false
 	firstNext := true
+	validNextCount := 0
+	var start time.Time
 	var stmtDetail *execdetails.StmtExecDetails
 	stmtDetailRaw := ctx.Value(execdetails.StmtExecDetailKey)
 	if stmtDetailRaw != nil {
+		//nolint:forcetypeassert
 		stmtDetail = stmtDetailRaw.(*execdetails.StmtExecDetails)
 	}
 	for {
 		failpoint.Inject("fetchNextErr", func(value failpoint.Value) {
+			//nolint:forcetypeassert
 			switch value.(string) {
 			case "firstNext":
 				failpoint.Return(firstNext, storeerr.ErrTiFlashServerTimeout)
 			case "secondNext":
 				if !firstNext {
 					failpoint.Return(firstNext, storeerr.ErrTiFlashServerTimeout)
+				}
+			case "secondNextAndRetConflict":
+				if !firstNext && validNextCount > 1 {
+					failpoint.Return(firstNext, kv.ErrWriteConflict)
 				}
 			}
 		})
@@ -2152,14 +2306,24 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs ResultSet, binary bool
 		if err != nil {
 			return firstNext, err
 		}
-		firstNext = false
 		if !gotColumnInfo {
 			// We need to call Next before we get columns.
 			// Otherwise, we will get incorrect columns info.
 			columns := rs.Columns()
-			err = cc.writeColumnInfo(columns, serverStatus)
-			if err != nil {
+			if stmtDetail != nil {
+				start = time.Now()
+			}
+			if err = cc.writeColumnInfo(columns); err != nil {
 				return false, err
+			}
+			if cc.capability&mysql.ClientDeprecateEOF == 0 {
+				// metadata only needs EOF marker for old clients without ClientDeprecateEOF
+				if err = cc.writeEOF(ctx, serverStatus); err != nil {
+					return false, err
+				}
+			}
+			if stmtDetail != nil {
+				stmtDetail.WriteSQLRespDuration += time.Since(start)
 			}
 			gotColumnInfo = true
 		}
@@ -2167,8 +2331,12 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs ResultSet, binary bool
 		if rowCount == 0 {
 			break
 		}
+		validNextCount++
+		firstNext = false
 		reg := trace.StartRegion(ctx, "WriteClientConn")
-		start := time.Now()
+		if stmtDetail != nil {
+			start = time.Now()
+		}
 		for i := 0; i < rowCount; i++ {
 			data = data[0:4]
 			if binary {
@@ -2190,7 +2358,16 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs ResultSet, binary bool
 			stmtDetail.WriteSQLRespDuration += time.Since(start)
 		}
 	}
-	return false, cc.writeEOF(serverStatus)
+
+	if stmtDetail != nil {
+		start = time.Now()
+	}
+
+	err := cc.writeEOF(ctx, serverStatus)
+	if stmtDetail != nil {
+		stmtDetail.WriteSQLRespDuration += time.Since(start)
+	}
+	return false, err
 }
 
 // writeChunksWithFetchSize writes data from a Chunk, which filled data by a ResultSet, into a connection.
@@ -2199,13 +2376,15 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs ResultSet, binary bool
 // fetchSize, the desired number of rows to be fetched each time when client uses cursor.
 func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs ResultSet, serverStatus uint16, fetchSize int) error {
 	fetchedRows := rs.GetFetchedRows()
-
-	req := rs.NewChunk()
 	// if fetchedRows is not enough, getting data from recordSet.
+	// NOTE: chunk should not be allocated from the allocator
+	// the allocator will reset every statement
+	// but it maybe stored in the result set among statements
+	// ref https://github.com/pingcap/tidb/blob/7fc6ebbda4ddf84c0ba801ca7ebb636b934168cf/server/conn_stmt.go#L233-L239
+	// Here server.tidbResultSet implements Next method.
+	req := rs.NewChunk(nil)
 	for len(fetchedRows) < fetchSize {
-		// Here server.tidbResultSet implements Next method.
-		err := rs.Next(ctx, req)
-		if err != nil {
+		if err := rs.Next(ctx, req); err != nil {
 			return err
 		}
 		rowCount := req.NumRows()
@@ -2225,7 +2404,7 @@ func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs ResultSet
 		serverStatus &^= mysql.ServerStatusCursorExists
 		serverStatus |= mysql.ServerStatusLastRowSend
 		terror.Call(rs.Close)
-		return cc.writeEOF(serverStatus)
+		return cc.writeEOF(ctx, serverStatus)
 	}
 
 	// construct the rows sent to the client according to fetchSize.
@@ -2243,10 +2422,16 @@ func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs ResultSet
 	var stmtDetail *execdetails.StmtExecDetails
 	stmtDetailRaw := ctx.Value(execdetails.StmtExecDetailKey)
 	if stmtDetailRaw != nil {
+		//nolint:forcetypeassert
 		stmtDetail = stmtDetailRaw.(*execdetails.StmtExecDetails)
 	}
-	start := time.Now()
-	var err error
+	var (
+		err   error
+		start time.Time
+	)
+	if stmtDetail != nil {
+		start = time.Now()
+	}
 	for _, row := range curRows {
 		data = data[0:4]
 		data, err = dumpBinaryRow(data, rs.Columns(), row, cc.rsEncoder)
@@ -2263,7 +2448,14 @@ func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs ResultSet
 	if cl, ok := rs.(fetchNotifier); ok {
 		cl.OnFetchReturned()
 	}
-	return cc.writeEOF(serverStatus)
+	if stmtDetail != nil {
+		start = time.Now()
+	}
+	err = cc.writeEOF(ctx, serverStatus)
+	if stmtDetail != nil {
+		stmtDetail.WriteSQLRespDuration += time.Since(start)
+	}
+	return err
 }
 
 func (cc *clientConn) setConn(conn net.Conn) {
@@ -2300,21 +2492,47 @@ func (cc *clientConn) handleChangeUser(ctx context.Context, data []byte) error {
 	}
 	pass := data[:passLen]
 	data = data[passLen:]
-	dbName, _ := parseNullTermString(data)
+	dbName, data := parseNullTermString(data)
 	cc.dbname = string(hack.String(dbName))
-
-	err := cc.ctx.Close()
-	if err != nil {
-		logutil.Logger(ctx).Debug("close old context failed", zap.Error(err))
+	pluginName := ""
+	if len(data) > 0 {
+		// skip character set
+		if cc.capability&mysql.ClientProtocol41 > 0 && len(data) >= 2 {
+			data = data[2:]
+		}
+		if cc.capability&mysql.ClientPluginAuth > 0 && len(data) > 0 {
+			pluginNameB, _ := parseNullTermString(data)
+			pluginName = string(hack.String(pluginNameB))
+		}
 	}
 
+	if err := cc.ctx.Close(); err != nil {
+		logutil.Logger(ctx).Debug("close old context failed", zap.Error(err))
+	}
 	// session was closed by `ctx.Close` and should `openSession` explicitly to renew session.
 	// `openSession` won't run again in `openSessionAndDoAuth` because ctx is not nil.
-	err = cc.openSession()
+	err := cc.openSession()
 	if err != nil {
 		return err
 	}
-	if err := cc.openSessionAndDoAuth(pass, ""); err != nil {
+	fakeResp := &handshakeResponse41{
+		Auth:       pass,
+		AuthPlugin: pluginName,
+		Capability: cc.capability,
+	}
+	if fakeResp.AuthPlugin != "" {
+		failpoint.Inject("ChangeUserAuthSwitch", func(val failpoint.Value) {
+			failpoint.Return(errors.Errorf("%v", val))
+		})
+		newpass, err := cc.checkAuthPlugin(ctx, fakeResp)
+		if err != nil {
+			return err
+		}
+		if len(newpass) > 0 {
+			fakeResp.Auth = newpass
+		}
+	}
+	if err := cc.openSessionAndDoAuth(fakeResp.Auth, fakeResp.AuthPlugin); err != nil {
 		return err
 	}
 	return cc.handleCommonConnectionReset(ctx)
@@ -2331,10 +2549,11 @@ func (cc *clientConn) handleResetConnection(ctx context.Context) error {
 		tlsState := cc.tlsConn.ConnectionState()
 		tlsStatePtr = &tlsState
 	}
-	cc.ctx, err = cc.server.driver.OpenCtx(cc.connectionID, cc.capability, cc.collation, cc.dbname, tlsStatePtr)
+	tidbCtx, err := cc.server.driver.OpenCtx(cc.connectionID, cc.capability, cc.collation, cc.dbname, tlsStatePtr, cc.extensions)
 	if err != nil {
 		return err
 	}
+	cc.setCtx(tidbCtx)
 	if !cc.ctx.AuthWithoutVerification(user) {
 		return errors.New("Could not reset connection")
 	}
@@ -2350,10 +2569,10 @@ func (cc *clientConn) handleResetConnection(ctx context.Context) error {
 }
 
 func (cc *clientConn) handleCommonConnectionReset(ctx context.Context) error {
-	if plugin.IsEnable(plugin.Audit) {
-		cc.ctx.GetSessionVars().ConnectionInfo = cc.connectInfo()
-	}
+	connectionInfo := cc.connectInfo()
+	cc.ctx.GetSessionVars().ConnectionInfo = connectionInfo
 
+	cc.onExtensionConnEvent(extension.ConnReset, nil)
 	err := plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
 		authPlugin := plugin.DeclareAuditManifest(p.Manifest)
 		if authPlugin.OnConnectionEvent != nil {

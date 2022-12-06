@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +49,7 @@ import (
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/plancodec"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // ParseSlowLogBatchSize is the batch size of slow-log lines for a worker to parse, exported for testing.
@@ -66,6 +66,7 @@ type slowQueryRetriever struct {
 	fileLine              int
 	checker               *slowLogChecker
 	columnValueFactoryMap map[string]slowQueryColumnValueFactory
+	instanceFactory       func([]types.Datum)
 
 	taskList      chan slowLogTask
 	stats         *slowQueryRuntimeStats
@@ -96,6 +97,13 @@ func (e *slowQueryRetriever) initialize(ctx context.Context, sctx sessionctx.Con
 	// initialize column value factories.
 	e.columnValueFactoryMap = make(map[string]slowQueryColumnValueFactory, len(e.outputCols))
 	for idx, col := range e.outputCols {
+		if col.Name.O == util.ClusterTableInstanceColumnName {
+			e.instanceFactory, err = getInstanceColumnValueFactory(sctx, idx)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		factory, err := getColumnValueFactoryByName(sctx, col.Name.O, idx)
 		if err != nil {
 			return err
@@ -227,6 +235,11 @@ func (e *slowQueryRetriever) dataForSlowLog(ctx context.Context, sctx sessionctx
 		if len(rows) == 0 {
 			continue
 		}
+		if e.instanceFactory != nil {
+			for i := range rows {
+				e.instanceFactory(rows[i])
+			}
+		}
 		e.lastFetchSize = calculateDatumsSize(rows)
 		return rows, nil
 	}
@@ -277,7 +290,7 @@ func getOneLine(reader *bufio.Reader) ([]byte, error) {
 	var tempLine []byte
 	for isPrefix {
 		tempLine, isPrefix, err = reader.ReadLine()
-		resByte = append(resByte, tempLine...)
+		resByte = append(resByte, tempLine...) // nozero
 		// Use the max value of max_allowed_packet to check the single line length.
 		if len(resByte) > int(variable.MaxOfMaxAllowedPacket) {
 			return resByte, errors.Errorf("single line length exceeds limit: %v", variable.MaxOfMaxAllowedPacket)
@@ -459,6 +472,13 @@ func (e *slowQueryRetriever) parseSlowLog(ctx context.Context, sctx sessionctx.C
 		if e.stats != nil {
 			e.stats.readFile += time.Since(startTime)
 		}
+		failpoint.Inject("mockReadSlowLogSlow", func(val failpoint.Value) {
+			if val.(bool) {
+				signals := ctx.Value("signals").([]chan int)
+				signals[0] <- 1
+				<-signals[1]
+			}
+		})
 		for i := range logs {
 			log := logs[i]
 			t := slowLogTask{}
@@ -720,6 +740,14 @@ func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, column
 			row[columnIdx] = types.NewStringDatum(plan)
 			return true, nil
 		}, nil
+	case variable.SlowLogBinaryPlan:
+		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (bool, error) {
+			if strings.HasPrefix(value, variable.SlowLogBinaryPlanPrefix) {
+				value = value[len(variable.SlowLogBinaryPlanPrefix) : len(value)-len(variable.SlowLogPlanSuffix)]
+			}
+			row[columnIdx] = types.NewStringDatum(value)
+			return true, nil
+		}, nil
 	case variable.SlowLogConnIDStr, variable.SlowLogExecRetryCount, variable.SlowLogPreprocSubQueriesStr,
 		execdetails.WriteKeysStr, execdetails.WriteSizeStr, execdetails.PrewriteRegionStr, execdetails.TxnRetryStr,
 		execdetails.RequestCountStr, execdetails.TotalKeysStr, execdetails.ProcessKeysStr,
@@ -768,7 +796,7 @@ func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, column
 			return true, nil
 		}, nil
 	case variable.SlowLogPrepared, variable.SlowLogSucc, variable.SlowLogPlanFromCache, variable.SlowLogPlanFromBinding,
-		variable.SlowLogIsInternalStr:
+		variable.SlowLogIsInternalStr, variable.SlowLogIsExplicitTxn, variable.SlowLogIsWriteCacheTable, variable.SlowLogHasMoreResults:
 		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (valid bool, err error) {
 			v, err := strconv.ParseBool(value)
 			if err != nil {
@@ -777,17 +805,18 @@ func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, column
 			row[columnIdx] = types.NewDatum(v)
 			return true, nil
 		}, nil
-	case util.ClusterTableInstanceColumnName:
-		instanceAddr, err := infoschema.GetInstanceAddr(sctx)
-		if err != nil {
-			return nil, err
-		}
-		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (valid bool, err error) {
-			row[columnIdx] = types.NewStringDatum(instanceAddr)
-			return true, nil
-		}, nil
 	}
 	return nil, nil
+}
+
+func getInstanceColumnValueFactory(sctx sessionctx.Context, columnIdx int) (func(row []types.Datum), error) {
+	instanceAddr, err := infoschema.GetInstanceAddr(sctx)
+	if err != nil {
+		return nil, err
+	}
+	return func(row []types.Datum) {
+		row[columnIdx] = types.NewStringDatum(instanceAddr)
+	}, nil
 }
 
 func parsePlan(planString string) string {
@@ -834,6 +863,7 @@ func (e *slowQueryRetriever) getAllFiles(ctx context.Context, sctx sessionctx.Co
 	}
 	if e.extractor == nil || !e.extractor.Enable {
 		totalFileNum = 1
+		//nolint: gosec
 		file, err := os.Open(logFilePath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -932,8 +962,8 @@ func (e *slowQueryRetriever) getAllFiles(ctx context.Context, sctx sessionctx.Co
 		}
 	}
 	// Sort by start time
-	sort.Slice(logFiles, func(i, j int) bool {
-		return logFiles[i].start.Before(logFiles[j].start)
+	slices.SortFunc(logFiles, func(i, j logFile) bool {
+		return i.start.Before(j.start)
 	})
 	return logFiles, err
 }
@@ -1080,7 +1110,7 @@ func readLastLines(ctx context.Context, file *os.File, endCursor int64) ([]strin
 		if err != nil {
 			return nil, 0, err
 		}
-		lines = append(chars, lines...)
+		lines = append(chars, lines...) // nozero
 
 		// find first '\n' or '\r'
 		for i := 0; i < len(chars); i++ {

@@ -16,12 +16,14 @@ package ddl
 
 import (
 	"context"
+	"sync/atomic"
+	"testing"
 
-	. "github.com/pingcap/check"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/logutil"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
@@ -46,11 +48,14 @@ type TestDDLCallback struct {
 	// domain to reload schema before your ddl stepping into the next state change.
 	Do DomainReloader
 
-	onJobRunBefore         func(*model.Job)
-	OnJobRunBeforeExported func(*model.Job)
-	onJobUpdated           func(*model.Job)
-	OnJobUpdatedExported   func(*model.Job)
-	onWatched              func(ctx context.Context)
+	onJobRunBefore          func(*model.Job)
+	OnJobRunBeforeExported  func(*model.Job)
+	onJobUpdated            func(*model.Job)
+	OnJobUpdatedExported    atomic.Pointer[func(*model.Job)]
+	onWatched               func(ctx context.Context)
+	OnGetJobBeforeExported  func(string)
+	OnGetJobAfterExported   func(string, *model.Job)
+	OnJobSchemaStateChanged func(int64)
 }
 
 // OnChanged mock the same behavior with the main DDL hook.
@@ -69,11 +74,16 @@ func (tc *TestDDLCallback) OnChanged(err error) error {
 }
 
 // OnSchemaStateChanged mock the same behavior with the main ddl hook.
-func (tc *TestDDLCallback) OnSchemaStateChanged() {
+func (tc *TestDDLCallback) OnSchemaStateChanged(schemaVer int64) {
 	if tc.Do != nil {
 		if err := tc.Do.Reload(); err != nil {
 			logutil.BgLogger().Warn("reload failed on schema state changed", zap.Error(err))
 		}
+	}
+
+	if tc.OnJobSchemaStateChanged != nil {
+		tc.OnJobSchemaStateChanged(schemaVer)
+		return
 	}
 }
 
@@ -95,8 +105,8 @@ func (tc *TestDDLCallback) OnJobRunBefore(job *model.Job) {
 // OnJobUpdated is used to run the user customized logic of `OnJobUpdated` first.
 func (tc *TestDDLCallback) OnJobUpdated(job *model.Job) {
 	logutil.BgLogger().Info("on job updated", zap.String("job", job.String()))
-	if tc.OnJobUpdatedExported != nil {
-		tc.OnJobUpdatedExported(job)
+	if onJobUpdatedExportedFunc := tc.OnJobUpdatedExported.Load(); onJobUpdatedExportedFunc != nil {
+		(*onJobUpdatedExportedFunc)(job)
 		return
 	}
 	if tc.onJobUpdated != nil {
@@ -117,9 +127,32 @@ func (tc *TestDDLCallback) OnWatched(ctx context.Context) {
 	tc.BaseCallback.OnWatched(ctx)
 }
 
-func (s *testDDLSuite) TestCallback(c *C) {
+// OnGetJobBefore implements Callback.OnGetJobBefore interface.
+func (tc *TestDDLCallback) OnGetJobBefore(jobType string) {
+	if tc.OnGetJobBeforeExported != nil {
+		tc.OnGetJobBeforeExported(jobType)
+		return
+	}
+	tc.BaseCallback.OnGetJobBefore(jobType)
+}
+
+// OnGetJobAfter implements Callback.OnGetJobAfter interface.
+func (tc *TestDDLCallback) OnGetJobAfter(jobType string, job *model.Job) {
+	if tc.OnGetJobAfterExported != nil {
+		tc.OnGetJobAfterExported(jobType, job)
+		return
+	}
+	tc.BaseCallback.OnGetJobAfter(jobType, job)
+}
+
+// Clone copies the callback and take its reference
+func (tc *TestDDLCallback) Clone() *TestDDLCallback {
+	return &*tc
+}
+
+func TestCallback(t *testing.T) {
 	cb := &BaseCallback{}
-	c.Assert(cb.OnChanged(nil), IsNil)
+	require.Nil(t, cb.OnChanged(nil))
 	cb.OnJobRunBefore(nil)
 	cb.OnJobUpdated(nil)
 	cb.OnWatched(context.TODO())

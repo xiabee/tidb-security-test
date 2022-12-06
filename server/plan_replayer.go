@@ -16,17 +16,16 @@ package server
 
 import (
 	"fmt"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"github.com/gorilla/mux"
-	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/domain/infosync"
-	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
 )
@@ -53,16 +52,38 @@ func (s *Server) newPlanReplayerHandler() *PlanReplayerHandler {
 func (prh PlanReplayerHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
 	name := params[pFileName]
-	path := filepath.Join(domain.GetPlanReplayerDirName(), name)
-	if isExists(path) {
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"plan_replayer.zip\"")
+	handler := downloadFileHandler{
+		filePath:           filepath.Join(domain.GetPlanReplayerDirName(), name),
+		fileName:           name,
+		infoGetter:         prh.infoGetter,
+		address:            prh.address,
+		statusPort:         prh.statusPort,
+		urlPath:            fmt.Sprintf("plan_replayer/dump/%s", name),
+		downloadedFilename: "plan_replayer",
+		scheme:             util.InternalHTTPSchema(),
+	}
+	handleDownloadFile(handler, w, req)
+}
+
+func handleDownloadFile(handler downloadFileHandler, w http.ResponseWriter, req *http.Request) {
+	params := mux.Vars(req)
+	name := params[pFileName]
+	path := handler.filePath
+	isForwarded := len(req.URL.Query().Get("forward")) > 0
+	localAddr := fmt.Sprintf("%s:%v", handler.address, handler.statusPort)
+	exist, err := isExists(path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if exist {
+		//nolint: gosec
 		file, err := os.Open(path)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		_, err = io.Copy(w, file)
+		content, err := ioutil.ReadAll(file)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -72,66 +93,97 @@ func (prh PlanReplayerHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 			writeError(w, err)
 			return
 		}
-		err = os.Remove(path)
+		_, err = w.Write(content)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", handler.downloadedFilename))
+		logutil.BgLogger().Info("return dump file successfully", zap.String("filename", name),
+			zap.String("address", localAddr), zap.Bool("forwarded", isForwarded))
 		return
 	}
-	if prh.infoGetter == nil {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	// we didn't find file for forward request, return 404
-	forwarded := req.URL.Query().Get("forward")
-	if len(forwarded) > 0 {
+	// handler.infoGetter will be nil only in unit test
+	// or we couldn't find file for forward request, return 404
+	if handler.infoGetter == nil || isForwarded {
+		logutil.BgLogger().Info("failed to find dump file", zap.String("filename", name),
+			zap.String("address", localAddr), zap.Bool("forwarded", isForwarded))
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	// If we didn't find file in origin request, try to broadcast the request to all remote tidb-servers
-	topos, err := prh.infoGetter.GetAllTiDBTopology(req.Context())
+	topos, err := handler.infoGetter.GetAllTiDBTopology(req.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	client := util.InternalHTTPClient()
 	// transfer each remote tidb-server and try to find dump file
 	for _, topo := range topos {
-		if topo.IP == prh.address && topo.StatusPort == prh.statusPort {
+		if topo.IP == handler.address && topo.StatusPort == handler.statusPort {
 			continue
 		}
-		url := fmt.Sprintf("http://%s:%v/plan_replayer/dump/%s?forward=true", topo.IP, topo.StatusPort, name)
-		resp, err := http.Get(url) // nolint #nosec G107
+		remoteAddr := fmt.Sprintf("%s:%v", topo.IP, topo.StatusPort)
+		url := fmt.Sprintf("%s://%s/%s?forward=true", handler.scheme, remoteAddr, handler.urlPath)
+		resp, err := client.Get(url)
 		if err != nil {
-			terror.Log(errors.Trace(err))
-			logutil.BgLogger().Error("forward request failed", zap.String("addr", topo.IP), zap.Uint("port", topo.StatusPort), zap.Error(err))
+			logutil.BgLogger().Error("forward request failed",
+				zap.String("remote-addr", remoteAddr), zap.Error(err))
 			continue
 		}
-		defer terror.Call(resp.Body.Close)
 		if resp.StatusCode != http.StatusOK {
+			logutil.BgLogger().Info("can't find file in remote server", zap.String("filename", name),
+				zap.String("remote-addr", remoteAddr), zap.Int("status-code", resp.StatusCode))
 			continue
 		}
-		// find dump file in one remote tidb-server, return file directly
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"plan_replayer.zip\"")
-		_, err = io.Copy(w, resp.Body)
+		content, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		err = resp.Body.Close()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		_, err = w.Write(content)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		// find dump file in one remote tidb-server, return file directly
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.zip\"", handler.downloadedFilename))
+		logutil.BgLogger().Info("return dump file successfully in remote server",
+			zap.String("filename", name), zap.String("remote-addr", remoteAddr))
 		return
 	}
 	// we can't find dump file in any tidb-server, return 404 directly
 	logutil.BgLogger().Info("can't find dump file in any remote server", zap.String("filename", name))
 	w.WriteHeader(http.StatusNotFound)
+	_, err = w.Write([]byte(fmt.Sprintf("can't find dump file %s in any remote server", name)))
+	writeError(w, err)
 }
 
-func isExists(path string) bool {
+type downloadFileHandler struct {
+	scheme             string
+	filePath           string
+	fileName           string
+	infoGetter         *infosync.InfoSyncer
+	address            string
+	statusPort         uint
+	urlPath            string
+	downloadedFilename string
+}
+
+func isExists(path string) (bool, error) {
 	_, err := os.Stat(path)
-	if err != nil && !os.IsExist(err) {
-		return false
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	return true
+	return true, nil
 }

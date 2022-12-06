@@ -33,7 +33,10 @@ var (
 	ErrFunctionsNoopImpl           = dbterror.ClassExpression.NewStdErr(mysql.ErrNotSupportedYet, pmysql.Message("function %s has only noop implementation in tidb now, use tidb_enable_noop_functions to enable these functions", nil))
 	ErrInvalidArgumentForLogarithm = dbterror.ClassExpression.NewStd(mysql.ErrInvalidArgumentForLogarithm)
 	ErrIncorrectType               = dbterror.ClassExpression.NewStd(mysql.ErrIncorrectType)
+	ErrInvalidTypeForJSON          = dbterror.ClassExpression.NewStd(mysql.ErrInvalidTypeForJSON)
 	ErrInvalidTableSample          = dbterror.ClassExpression.NewStd(mysql.ErrInvalidTableSample)
+	ErrInternal                    = dbterror.ClassOptimizer.NewStd(mysql.ErrInternal)
+	ErrNoDB                        = dbterror.ClassOptimizer.NewStd(mysql.ErrNoDB)
 
 	// All the un-exported errors are defined here:
 	errFunctionNotExists             = dbterror.ClassExpression.NewStd(mysql.ErrSpDoesNotExist)
@@ -51,6 +54,8 @@ var (
 	errWrongValueForType             = dbterror.ClassExpression.NewStd(mysql.ErrWrongValueForType)
 	errUnknown                       = dbterror.ClassExpression.NewStd(mysql.ErrUnknown)
 	errSpecificAccessDenied          = dbterror.ClassExpression.NewStd(mysql.ErrSpecificAccessDenied)
+	errUserLockDeadlock              = dbterror.ClassExpression.NewStd(mysql.ErrUserLockDeadlock)
+	errUserLockWrongName             = dbterror.ClassExpression.NewStd(mysql.ErrUserLockWrongName)
 
 	// Sequence usage privilege check.
 	errSequenceAccessDenied      = dbterror.ClassExpression.NewStd(mysql.ErrTableaccessDenied)
@@ -85,5 +90,23 @@ func handleDivisionByZeroError(ctx sessionctx.Context) error {
 		}
 	}
 	sc.AppendWarning(ErrDivisionByZero)
+	return nil
+}
+
+// handleAllowedPacketOverflowed reports error or warning depend on the context.
+func handleAllowedPacketOverflowed(ctx sessionctx.Context, exprName string, maxAllowedPacketSize uint64) error {
+	err := errWarnAllowedPacketOverflowed.GenWithStackByArgs(exprName, maxAllowedPacketSize)
+	sc := ctx.GetSessionVars().StmtCtx
+
+	// insert|update|delete ignore ...
+	if sc.TruncateAsWarning {
+		sc.AppendWarning(err)
+		return nil
+	}
+
+	if ctx.GetSessionVars().StrictSQLMode && (sc.InInsertStmt || sc.InUpdateStmt || sc.InDeleteStmt) {
+		return err
+	}
+	sc.AppendWarning(err)
 	return nil
 }

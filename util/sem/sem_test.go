@@ -19,12 +19,10 @@ import (
 
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
-
 	"github.com/stretchr/testify/assert"
 )
 
 func TestInvisibleSchema(t *testing.T) {
-	t.Parallel()
 	assert := assert.New(t)
 
 	assert.True(IsInvisibleSchema(metricsSchema))
@@ -35,7 +33,6 @@ func TestInvisibleSchema(t *testing.T) {
 }
 
 func TestIsInvisibleTable(t *testing.T) {
-	t.Parallel()
 	assert := assert.New(t)
 
 	mysqlTbls := []string{exprPushdownBlacklist, gcDeleteRange, gcDeleteRangeDone, optRuleBlacklist, tidb, globalVariables}
@@ -61,7 +58,6 @@ func TestIsInvisibleTable(t *testing.T) {
 }
 
 func TestIsRestrictedPrivilege(t *testing.T) {
-	t.Parallel()
 	assert := assert.New(t)
 
 	assert.True(IsRestrictedPrivilege("RESTRICTED_TABLES_ADMIN"))
@@ -72,7 +68,6 @@ func TestIsRestrictedPrivilege(t *testing.T) {
 }
 
 func TestIsInvisibleStatusVar(t *testing.T) {
-	t.Parallel()
 	assert := assert.New(t)
 
 	assert.True(IsInvisibleStatusVar(tidbGCLeaderDesc))
@@ -82,7 +77,6 @@ func TestIsInvisibleStatusVar(t *testing.T) {
 }
 
 func TestIsInvisibleSysVar(t *testing.T) {
-	t.Parallel()
 	assert := assert.New(t)
 
 	assert.False(IsInvisibleSysVar(variable.Hostname))                   // changes the value to default, but is not invisible
@@ -107,5 +101,7 @@ func TestIsInvisibleSysVar(t *testing.T) {
 	assert.True(IsInvisibleSysVar(variable.TiDBEnableTelemetry))
 	assert.True(IsInvisibleSysVar(variable.TiDBRowFormatVersion))
 	assert.True(IsInvisibleSysVar(variable.TiDBRedactLog))
-	assert.True(IsInvisibleSysVar(variable.TiDBSlowLogMasking))
+	assert.True(IsInvisibleSysVar(variable.TiDBTopSQLMaxTimeSeriesCount))
+	assert.True(IsInvisibleSysVar(variable.TiDBTopSQLMaxTimeSeriesCount))
+	assert.True(IsInvisibleSysVar(tidbAuditRetractLog))
 }

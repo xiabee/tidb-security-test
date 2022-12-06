@@ -12,20 +12,17 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/stretchr/testify/require"
-
 	tcontext "github.com/pingcap/tidb/dumpling/context"
+	"github.com/pingcap/tidb/util/promutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteDatabaseMeta(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	err := writer.WriteDatabaseMeta("test", "CREATE DATABASE `test`")
 	require.NoError(t, err)
@@ -39,16 +36,32 @@ func TestWriteDatabaseMeta(t *testing.T) {
 	require.Equal(t, "/*!40101 SET NAMES binary*/;\nCREATE DATABASE `test`;\n", string(bytes))
 }
 
-func TestWriteTableMeta(t *testing.T) {
-	t.Parallel()
+func TestWritePolicyMeta(t *testing.T) {
+	dir := t.TempDir()
+	config := defaultConfigForTest(t)
+	config.OutputDirPath = dir
 
+	writer := createTestWriter(config, t)
+
+	err := writer.WritePolicyMeta("testpolicy", "create placement policy `y` followers=2")
+	require.NoError(t, err)
+
+	p := path.Join(dir, "testpolicy-placement-policy-create.sql")
+	_, err = os.Stat(p)
+	require.NoError(t, err)
+
+	bytes, err := ioutil.ReadFile(p)
+	require.NoError(t, err)
+	require.Equal(t, "/*!40101 SET NAMES binary*/;\ncreate placement policy `y` followers=2;\n", string(bytes))
+}
+
+func TestWriteTableMeta(t *testing.T) {
 	dir := t.TempDir()
 
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	err := writer.WriteTableMeta("test", "t", "CREATE TABLE t (a INT)")
 	require.NoError(t, err)
@@ -61,14 +74,11 @@ func TestWriteTableMeta(t *testing.T) {
 }
 
 func TestWriteViewMeta(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	specCmt := "/*!40101 SET NAMES binary*/;\n"
 	createTableSQL := "CREATE TABLE `v`(\n`a` int\n)ENGINE=MyISAM;\n"
@@ -92,14 +102,11 @@ func TestWriteViewMeta(t *testing.T) {
 }
 
 func TestWriteTableData(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -133,8 +140,6 @@ func TestWriteTableData(t *testing.T) {
 }
 
 func TestWriteTableDataWithFileSize(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -147,8 +152,7 @@ func TestWriteTableDataWithFileSize(t *testing.T) {
 	config.FileSize += uint64(len(specCmts[1]) + 1)
 	config.FileSize += uint64(len("INSERT INTO `employees` VALUES\n"))
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -185,8 +189,6 @@ func TestWriteTableDataWithFileSize(t *testing.T) {
 }
 
 func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -200,8 +202,7 @@ func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
 	config.FileSize += uint64(len(specCmts[1]) + 1)
 	config.FileSize += uint64(len("INSERT INTO `employees` VALUES\n"))
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -238,8 +239,6 @@ func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
 }
 
 func TestWriteTableDataWithStatementSize(t *testing.T) {
-	t.Parallel()
-
 	dir := t.TempDir()
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
@@ -249,8 +248,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 	config.OutputFileTemplate, err = ParseOutputFileTemplate("specified-name")
 	require.NoError(t, err)
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -301,8 +299,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 	require.NoError(t, err)
 	config.OutputDirPath, err = ioutil.TempDir("", "dumpling")
 
-	writer, clean = createTestWriter(config, t)
-	defer clean()
+	writer = createTestWriter(config, t)
 
 	cases = map[string]string{
 		"000000000-employee-te%25%2Fst.sql": "/*!40101 SET NAMES binary*/;\n" +
@@ -333,7 +330,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 
 var mu sync.Mutex
 
-func createTestWriter(conf *Config, t *testing.T) (w *Writer, clean func()) {
+func createTestWriter(conf *Config, t *testing.T) *Writer {
 	mu.Lock()
 	extStore, err := conf.createExternalStorage(context.Background())
 	mu.Unlock()
@@ -344,10 +341,10 @@ func createTestWriter(conf *Config, t *testing.T) (w *Writer, clean func()) {
 	conn, err := db.Conn(context.Background())
 	require.NoError(t, err)
 
-	w = NewWriter(tcontext.Background(), 0, conf, conn, extStore)
-	clean = func() {
+	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
+	w := NewWriter(tcontext.Background(), 0, conf, conn, extStore, metrics)
+	t.Cleanup(func() {
 		require.NoError(t, db.Close())
-	}
-
-	return
+	})
+	return w
 }

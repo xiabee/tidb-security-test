@@ -88,16 +88,10 @@ func (t *TableKVDecoder) IterRawIndexKeys(h kv.Handle, rawRow []byte, fn func([]
 	}
 
 	indices := t.tbl.Indices()
-	isCommonHandle := t.tbl.Meta().IsCommonHandle
 
 	var buffer []types.Datum
 	var indexBuffer []byte
 	for _, index := range indices {
-		// skip clustered PK
-		if index.Meta().Primary && isCommonHandle {
-			continue
-		}
-
 		indexValues, err := index.FetchValues(row, buffer)
 		if err != nil {
 			return err

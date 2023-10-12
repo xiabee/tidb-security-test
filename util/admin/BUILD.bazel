@@ -37,6 +37,7 @@ go_test(
     flaky = True,
     deps = [
         "//config",
+        "//sessionctx/variable",
         "//tablecodec",
         "//testkit",
         "//testkit/testsetup",

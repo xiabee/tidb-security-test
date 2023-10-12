@@ -21,13 +21,12 @@ import (
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/server/internal/column"
 	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
-func createColumnByTypeAndLen(tp byte, cl uint32) *column.Info {
-	return &column.Info{
+func createColumnByTypeAndLen(tp byte, cl uint32) *ColumnInfo {
+	return &ColumnInfo{
 		Schema:       "test",
 		Table:        "dual",
 		OrgTable:     "",
@@ -57,7 +56,7 @@ func TestConvertColumnInfo(t *testing.T) {
 		TableAsName:  model.NewCIStr("dual"),
 		DBName:       model.NewCIStr("test"),
 	}
-	colInfo := column.ConvertColumnInfo(&resultField)
+	colInfo := convertColumnInfo(&resultField)
 	require.Equal(t, createColumnByTypeAndLen(mysql.TypeBit, 1), colInfo)
 
 	// Test "mysql.TypeTiny", for: https://github.com/pingcap/tidb/issues/5405.
@@ -75,7 +74,7 @@ func TestConvertColumnInfo(t *testing.T) {
 		TableAsName:  model.NewCIStr("dual"),
 		DBName:       model.NewCIStr("test"),
 	}
-	colInfo = column.ConvertColumnInfo(&resultField)
+	colInfo = convertColumnInfo(&resultField)
 	require.Equal(t, createColumnByTypeAndLen(mysql.TypeTiny, 1), colInfo)
 
 	ftpb1 := types.NewFieldTypeBuilder()
@@ -92,6 +91,6 @@ func TestConvertColumnInfo(t *testing.T) {
 		TableAsName:  model.NewCIStr("dual"),
 		DBName:       model.NewCIStr("test"),
 	}
-	colInfo = column.ConvertColumnInfo(&resultField)
+	colInfo = convertColumnInfo(&resultField)
 	require.Equal(t, uint32(4), colInfo.ColumnLength)
 }

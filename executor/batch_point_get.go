@@ -17,11 +17,9 @@ package executor
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sync/atomic"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -38,11 +36,12 @@ import (
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil/consistency"
 	"github.com/pingcap/tidb/util/rowcodec"
+	"golang.org/x/exp/slices"
 )
 
 // BatchPointGetExec executes a bunch of point select queries.
 type BatchPointGetExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	tblInfo     *model.TableInfo
 	idxInfo     *model.IndexInfo
@@ -83,29 +82,29 @@ func (e *BatchPointGetExec) buildVirtualColumnInfo() {
 	if len(e.virtualColumnIndex) > 0 {
 		e.virtualColumnRetFieldTypes = make([]*types.FieldType, len(e.virtualColumnIndex))
 		for i, idx := range e.virtualColumnIndex {
-			e.virtualColumnRetFieldTypes[i] = e.Schema().Columns[idx].RetType
+			e.virtualColumnRetFieldTypes[i] = e.schema.Columns[idx].RetType
 		}
 	}
 }
 
 // Open implements the Executor interface.
 func (e *BatchPointGetExec) Open(context.Context) error {
-	sessVars := e.Ctx().GetSessionVars()
+	sessVars := e.ctx.GetSessionVars()
 	txnCtx := sessVars.TxnCtx
-	txn, err := e.Ctx().Txn(false)
+	txn, err := e.ctx.Txn(false)
 	if err != nil {
 		return err
 	}
 	e.txn = txn
 
-	setOptionForTopSQL(e.Ctx().GetSessionVars().StmtCtx, e.snapshot)
+	setOptionForTopSQL(e.ctx.GetSessionVars().StmtCtx, e.snapshot)
 	var batchGetter kv.BatchGetter = e.snapshot
 	if txn.Valid() {
 		lock := e.tblInfo.Lock
 		if e.lock {
 			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), &PessimisticLockCacheGetter{txnCtx: txnCtx}, e.snapshot)
-		} else if lock != nil && (lock.Tp == model.TableLockRead || lock.Tp == model.TableLockReadOnly) && e.Ctx().GetSessionVars().EnablePointGetCache {
-			batchGetter = newCacheBatchGetter(e.Ctx(), e.tblInfo.ID, e.snapshot)
+		} else if lock != nil && (lock.Tp == model.TableLockRead || lock.Tp == model.TableLockReadOnly) && e.ctx.GetSessionVars().EnablePointGetCache {
+			batchGetter = newCacheBatchGetter(e.ctx, e.tblInfo.ID, e.snapshot)
 		} else {
 			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), nil, e.snapshot)
 		}
@@ -158,10 +157,10 @@ func MockNewCacheTableSnapShot(snapshot kv.Snapshot, memBuffer kv.MemBuffer) *ca
 
 // Close implements the Executor interface.
 func (e *BatchPointGetExec) Close() error {
-	if e.RuntimeStats() != nil {
-		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
+	if e.runtimeStats != nil {
+		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
 	}
-	if e.RuntimeStats() != nil && e.snapshot != nil {
+	if e.runtimeStats != nil && e.snapshot != nil {
 		e.snapshot.SetOption(kv.CollectRuntimeStats, nil)
 	}
 	e.inited = 0
@@ -177,7 +176,7 @@ func (e *BatchPointGetExec) Next(ctx context.Context, req *chunk.Chunk) error {
 			return err
 		}
 		if e.lock {
-			e.UpdateDeltaForTableID(e.tblInfo.ID)
+			e.updateDeltaForTableID(e.tblInfo.ID)
 		}
 	}
 
@@ -186,14 +185,14 @@ func (e *BatchPointGetExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 	for !req.IsFull() && e.index < len(e.values) {
 		handle, val := e.handles[e.index], e.values[e.index]
-		err := DecodeRowValToChunk(e.Base().Ctx(), e.Schema(), e.tblInfo, handle, val, req, e.rowDecoder)
+		err := DecodeRowValToChunk(e.base().ctx, e.schema, e.tblInfo, handle, val, req, e.rowDecoder)
 		if err != nil {
 			return err
 		}
 		e.index++
 	}
 
-	err := table.FillVirtualColumnValue(e.virtualColumnRetFieldTypes, e.virtualColumnIndex, e.Schema().Columns, e.columns, e.Ctx(), req)
+	err := table.FillVirtualColumnValue(e.virtualColumnRetFieldTypes, e.virtualColumnIndex, e.schema.Columns, e.columns, e.ctx, req)
 	if err != nil {
 		return err
 	}
@@ -214,7 +213,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 	var indexKeys []kv.Key
 	var err error
 	batchGetter := e.batchGetter
-	rc := e.Ctx().GetSessionVars().IsPessimisticReadConsistency()
+	rc := e.ctx.GetSessionVars().IsPessimisticReadConsistency()
 	if e.idxInfo != nil && !isCommonHandleRead(e.tblInfo, e.idxInfo) {
 		// `SELECT a, b FROM t WHERE (a, b) IN ((1, 2), (1, 2), (2, 1), (1, 2))` should not return duplicated rows
 		dedup := make(map[hack.MutableString]struct{})
@@ -229,7 +228,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			if len(e.planPhysIDs) > 0 {
 				physID = e.planPhysIDs[i]
 			} else {
-				physID, err = core.GetPhysID(e.tblInfo, e.partExpr, e.partPos, idxVals[e.partPos])
+				physID, err = core.GetPhysID(e.tblInfo, e.partExpr, idxVals[e.partPos])
 				if err != nil {
 					continue
 				}
@@ -239,7 +238,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			if e.singlePart && e.partTblID != physID {
 				continue
 			}
-			idxKey, err1 := EncodeUniqueIndexKey(e.Ctx(), e.tblInfo, e.idxInfo, idxVals, physID)
+			idxKey, err1 := EncodeUniqueIndexKey(e.ctx, e.tblInfo, e.idxInfo, idxVals, physID)
 			if err1 != nil && !kv.ErrNotExist.Equal(err1) {
 				return err1
 			}
@@ -254,11 +253,11 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			toFetchIndexKeys = append(toFetchIndexKeys, idxKey)
 		}
 		if e.keepOrder {
-			slices.SortFunc(toFetchIndexKeys, func(i, j kv.Key) int {
+			slices.SortFunc(toFetchIndexKeys, func(i, j kv.Key) bool {
 				if e.desc {
-					return j.Cmp(i)
+					return i.Cmp(j) > 0
 				}
-				return i.Cmp(j)
+				return i.Cmp(j) < 0
 			})
 		}
 
@@ -303,7 +302,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 				pid := tablecodec.DecodeTableID(key)
 				e.physIDs = append(e.physIDs, pid)
 				if e.lock {
-					e.UpdateDeltaForTableID(pid)
+					e.updateDeltaForTableID(pid)
 				}
 			}
 		}
@@ -322,11 +321,11 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			failpoint.InjectContext(ctx, "batchPointGetRepeatableReadTest-step2", nil)
 		})
 	} else if e.keepOrder {
-		less := func(i, j kv.Handle) int {
+		less := func(i, j kv.Handle) bool {
 			if e.desc {
-				return j.Compare(i)
+				return i.Compare(j) > 0
 			}
-			return i.Compare(j)
+			return i.Compare(j) < 0
 		}
 		if e.tblInfo.PKIsHandle && mysql.HasUnsignedFlag(e.tblInfo.GetPkColInfo().GetFlag()) {
 			uintComparator := func(i, h kv.Handle) int {
@@ -343,11 +342,11 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 				}
 				return 0
 			}
-			less = func(i, j kv.Handle) int {
+			less = func(i, j kv.Handle) bool {
 				if e.desc {
-					return uintComparator(j, i)
+					return uintComparator(i, j) > 0
 				}
-				return uintComparator(i, j)
+				return uintComparator(i, j) < 0
 			}
 		}
 		slices.SortFunc(e.handles, less)
@@ -364,7 +363,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 		} else {
 			if handle.IsInt() {
 				d := types.NewIntDatum(handle.IntValue())
-				tID, err = core.GetPhysID(e.tblInfo, e.partExpr, e.partPos, d)
+				tID, err = core.GetPhysID(e.tblInfo, e.partExpr, d)
 				if err != nil {
 					continue
 				}
@@ -373,7 +372,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 				if err1 != nil {
 					return err1
 				}
-				tID, err = core.GetPhysID(e.tblInfo, e.partExpr, e.partPos, d)
+				tID, err = core.GetPhysID(e.tblInfo, e.partExpr, d)
 				if err != nil {
 					continue
 				}
@@ -395,7 +394,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 		lockKeys := make([]kv.Key, len(keys)+len(indexKeys))
 		copy(lockKeys, keys)
 		copy(lockKeys[len(keys):], indexKeys)
-		err = LockKeys(ctx, e.Ctx(), e.waitTime, lockKeys...)
+		err = LockKeys(ctx, e.ctx, e.waitTime, lockKeys...)
 		if err != nil {
 			return err
 		}
@@ -415,7 +414,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 		val := values[string(key)]
 		if len(val) == 0 {
 			if e.idxInfo != nil && (!e.tblInfo.IsCommonHandle || !e.idxInfo.Primary) &&
-				!e.Ctx().GetSessionVars().StmtCtx.WeakConsistency {
+				!e.ctx.GetSessionVars().StmtCtx.WeakConsistency {
 				return (&consistency.Reporter{
 					HandleEncode: func(_ kv.Handle) kv.Key {
 						return key
@@ -425,7 +424,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 					},
 					Tbl:  e.tblInfo,
 					Idx:  e.idxInfo,
-					Sctx: e.Ctx(),
+					Sctx: e.ctx,
 				}).ReportLookupInconsistent(ctx,
 					1, 0,
 					e.handles[i:i+1],
@@ -449,7 +448,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 	}
 	// Lock exists keys only for Read Committed Isolation.
 	if e.lock && rc {
-		err = LockKeys(ctx, e.Ctx(), e.waitTime, existKeys...)
+		err = LockKeys(ctx, e.ctx, e.waitTime, existKeys...)
 		if err != nil {
 			return err
 		}

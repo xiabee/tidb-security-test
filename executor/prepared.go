@@ -19,7 +19,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser"
@@ -38,14 +37,14 @@ import (
 )
 
 var (
-	_ exec.Executor = &DeallocateExec{}
-	_ exec.Executor = &ExecuteExec{}
-	_ exec.Executor = &PrepareExec{}
+	_ Executor = &DeallocateExec{}
+	_ Executor = &ExecuteExec{}
+	_ Executor = &PrepareExec{}
 )
 
 // PrepareExec represents a PREPARE executor.
 type PrepareExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	name    string
 	sqlText string
@@ -63,18 +62,18 @@ type PrepareExec struct {
 
 // NewPrepareExec creates a new PrepareExec.
 func NewPrepareExec(ctx sessionctx.Context, sqlTxt string) *PrepareExec {
-	base := exec.NewBaseExecutor(ctx, nil, 0)
-	base.SetInitCap(chunk.ZeroCapacity)
+	base := newBaseExecutor(ctx, nil, 0)
+	base.initCap = chunk.ZeroCapacity
 	return &PrepareExec{
-		BaseExecutor: base,
+		baseExecutor: base,
 		sqlText:      sqlTxt,
 		needReset:    true,
 	}
 }
 
 // Next implements the Executor Next interface.
-func (e *PrepareExec) Next(ctx context.Context, _ *chunk.Chunk) error {
-	vars := e.Ctx().GetSessionVars()
+func (e *PrepareExec) Next(ctx context.Context, req *chunk.Chunk) error {
+	vars := e.ctx.GetSessionVars()
 	if e.ID != 0 {
 		// Must be the case when we retry a prepare.
 		// Make sure it is idempotent.
@@ -88,7 +87,7 @@ func (e *PrepareExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		stmts []ast.StmtNode
 		err   error
 	)
-	if sqlParser, ok := e.Ctx().(sqlexec.SQLParser); ok {
+	if sqlParser, ok := e.ctx.(sqlexec.SQLParser); ok {
 		// FIXME: ok... yet another parse API, may need some api interface clean.
 		stmts, _, err = sqlParser.ParseSQL(ctx, e.sqlText,
 			parser.CharsetConnection(charset),
@@ -101,7 +100,7 @@ func (e *PrepareExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 			parser.CharsetConnection(charset),
 			parser.CollationConnection(collation))
 		for _, warn := range warns {
-			e.Ctx().GetSessionVars().StmtCtx.AppendWarning(util.SyntaxWarn(warn))
+			e.ctx.GetSessionVars().StmtCtx.AppendWarning(util.SyntaxWarn(warn))
 		}
 	}
 	if err != nil {
@@ -112,23 +111,23 @@ func (e *PrepareExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	}
 	stmt0 := stmts[0]
 	if e.needReset {
-		err = ResetContextOfStmt(e.Ctx(), stmt0)
+		err = ResetContextOfStmt(e.ctx, stmt0)
 		if err != nil {
 			return err
 		}
 	}
-	stmt, p, paramCnt, err := plannercore.GeneratePlanCacheStmtWithAST(ctx, e.Ctx(), true, stmt0.Text(), stmt0, nil)
+	stmt, p, paramCnt, err := plannercore.GeneratePlanCacheStmtWithAST(ctx, e.ctx, true, stmt0.Text(), stmt0, nil)
 	if err != nil {
 		return err
 	}
 	if topsqlstate.TopSQLEnabled() {
-		e.Ctx().GetSessionVars().StmtCtx.IsSQLRegistered.Store(true)
+		e.ctx.GetSessionVars().StmtCtx.IsSQLRegistered.Store(true)
 		topsql.AttachAndRegisterSQLInfo(ctx, stmt.NormalizedSQL, stmt.SQLDigest, vars.InRestrictedSQL)
 	}
 
-	e.Ctx().GetSessionVars().PlanID.Store(0)
-	e.Ctx().GetSessionVars().PlanColumnID.Store(0)
-	e.Ctx().GetSessionVars().MapHashCode2UniqueID4ExtendedCol = nil
+	e.ctx.GetSessionVars().PlanID.Store(0)
+	e.ctx.GetSessionVars().PlanColumnID.Store(0)
+	e.ctx.GetSessionVars().MapHashCode2UniqueID4ExtendedCol = nil
 	// In MySQL prepare protocol, the server need to tell the client how many column the prepared statement would return when executing it.
 	// For a query with on result, e.g. an insert statement, there will be no result, so 'e.Fields' is not set.
 	// Usually, p.Schema().Len() == 0 means no result. A special case is the 'do' statement, it looks like 'select' but discard the result.
@@ -151,12 +150,12 @@ func (e *PrepareExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 // It cannot be executed by itself, all it needs to do is to build
 // another Executor from a prepared statement.
 type ExecuteExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	is            infoschema.InfoSchema
 	name          string
 	usingVars     []expression.Expression
-	stmtExec      exec.Executor
+	stmtExec      Executor
 	stmt          ast.StmtNode
 	plan          plannercore.Plan
 	lowerPriority bool
@@ -164,7 +163,7 @@ type ExecuteExec struct {
 }
 
 // Next implements the Executor Next interface.
-func (*ExecuteExec) Next(context.Context, *chunk.Chunk) error {
+func (e *ExecuteExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return nil
 }
 
@@ -177,7 +176,7 @@ func (e *ExecuteExec) Build(b *executorBuilder) error {
 		return errors.Trace(b.err)
 	}
 	e.stmtExec = stmtExec
-	if e.Ctx().GetSessionVars().StmtCtx.Priority == mysql.NoPriority {
+	if e.ctx.GetSessionVars().StmtCtx.Priority == mysql.NoPriority {
 		e.lowerPriority = needLowerPriority(e.plan)
 	}
 	return nil
@@ -185,14 +184,14 @@ func (e *ExecuteExec) Build(b *executorBuilder) error {
 
 // DeallocateExec represent a DEALLOCATE executor.
 type DeallocateExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	Name string
 }
 
 // Next implements the Executor Next interface.
-func (e *DeallocateExec) Next(context.Context, *chunk.Chunk) error {
-	vars := e.Ctx().GetSessionVars()
+func (e *DeallocateExec) Next(ctx context.Context, req *chunk.Chunk) error {
+	vars := e.ctx.GetSessionVars()
 	id, ok := vars.PreparedStmtNameToID[e.Name]
 	if !ok {
 		return errors.Trace(plannercore.ErrStmtNotFound)
@@ -204,15 +203,15 @@ func (e *DeallocateExec) Next(context.Context, *chunk.Chunk) error {
 	}
 	prepared := preparedObj.PreparedAst
 	delete(vars.PreparedStmtNameToID, e.Name)
-	if e.Ctx().GetSessionVars().EnablePreparedPlanCache {
-		bindSQL, _ := plannercore.GetBindSQL4PlanCache(e.Ctx(), preparedObj)
+	if e.ctx.GetSessionVars().EnablePreparedPlanCache {
+		bindSQL, _ := plannercore.GetBindSQL4PlanCache(e.ctx, preparedObj)
 		cacheKey, err := plannercore.NewPlanCacheKey(vars, preparedObj.StmtText, preparedObj.StmtDB, prepared.SchemaVersion,
 			0, bindSQL, expression.ExprPushDownBlackListReloadTimeStamp.Load())
 		if err != nil {
 			return err
 		}
 		if !vars.IgnorePreparedCacheCloseStmt { // keep the plan in cache
-			e.Ctx().GetSessionPlanCache().Delete(cacheKey)
+			e.ctx.GetSessionPlanCache().Delete(cacheKey)
 		}
 	}
 	vars.RemovePreparedStmt(id)

@@ -25,6 +25,7 @@ import (
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/session"
@@ -84,7 +85,6 @@ func TestCreateTable(t *testing.T) {
 	tk.MustGetErrCode("create table t_enum (a enum('abc','Abc')) charset=utf8 collate=utf8_general_ci;", errno.ErrDuplicatedValueInType)
 	tk.MustGetErrCode("create table t_enum (a enum('e','E')) charset=utf8 collate=utf8_unicode_ci;", errno.ErrDuplicatedValueInType)
 	tk.MustGetErrCode("create table t_enum (a enum('ss','ß')) charset=utf8 collate=utf8_unicode_ci;", errno.ErrDuplicatedValueInType)
-	tk.MustGetErrCode("create table t_enum (a enum('æ','ae')) charset=utf8mb4 collate=utf8mb4_0900_ai_ci;", errno.ErrDuplicatedValueInType)
 	// test for set column
 	tk.MustGetErrCode("create table t_enum (a set('e','e'));", errno.ErrDuplicatedValueInType)
 	tk.MustGetErrCode("create table t_enum (a set('e','E')) charset=utf8 collate=utf8_general_ci;", errno.ErrDuplicatedValueInType)
@@ -93,7 +93,6 @@ func TestCreateTable(t *testing.T) {
 	tk.MustGetErrCode("create table t_enum (a set('e','E')) charset=utf8 collate=utf8_unicode_ci;", errno.ErrDuplicatedValueInType)
 	tk.MustGetErrCode("create table t_enum (a set('ss','ß')) charset=utf8 collate=utf8_unicode_ci;", errno.ErrDuplicatedValueInType)
 	tk.MustGetErrMsg("create table t_enum (a enum('ss','ß')) charset=utf8 collate=utf8_unicode_ci;", "[types:1291]Column 'a' has duplicated value 'ß' in ENUM")
-	tk.MustGetErrCode("create table t_enum (a set('æ','ae')) charset=utf8mb4 collate=utf8mb4_0900_ai_ci;", errno.ErrDuplicatedValueInType)
 
 	// test for table option "union" not supported
 	tk.MustExec("use test")
@@ -218,7 +217,9 @@ func testParallelExecSQL(t *testing.T, store kv.Storage, dom *domain.Domain, sql
 			sess := testkit.NewTestKit(t, store).Session()
 			err := sessiontxn.NewTxn(context.Background(), sess)
 			require.NoError(t, err)
-			jobs, err := ddl.GetAllDDLJobs(sess)
+			txn, err := sess.Txn(true)
+			require.NoError(t, err)
+			jobs, err := ddl.GetAllDDLJobs(sess, meta.NewMeta(txn))
 			require.NoError(t, err)
 			qLen = len(jobs)
 			if qLen == 2 {
@@ -244,7 +245,9 @@ func testParallelExecSQL(t *testing.T, store kv.Storage, dom *domain.Domain, sql
 			sess := testkit.NewTestKit(t, store).Session()
 			err := sessiontxn.NewTxn(context.Background(), sess)
 			require.NoError(t, err)
-			jobs, err := ddl.GetAllDDLJobs(sess)
+			txn, err := sess.Txn(true)
+			require.NoError(t, err)
+			jobs, err := ddl.GetAllDDLJobs(sess, meta.NewMeta(txn))
 			require.NoError(t, err)
 			qLen = len(jobs)
 			if qLen == 1 {

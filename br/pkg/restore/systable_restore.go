@@ -86,16 +86,17 @@ func generateResetSQLs(db *database, resetUsers []string) []string {
 		if sysPrivilegeTableMap[tableName] != "" {
 			for _, name := range resetUsers {
 				if strings.ToLower(name) == rootUser {
-					if rootReset {
+					if !rootReset {
+						updateSQL := fmt.Sprintf("UPDATE %s.%s SET authentication_string='',"+
+							" Shutdown_priv='Y',"+
+							" Config_priv='Y'"+
+							" WHERE USER='root' AND Host='%%';",
+							db.Name.L, sysUserTableName)
+						sqls = append(sqls, updateSQL)
+						rootReset = true
+					} else {
 						continue
 					}
-					updateSQL := fmt.Sprintf("UPDATE %s.%s SET authentication_string='',"+
-						" Shutdown_priv='Y',"+
-						" Config_priv='Y'"+
-						" WHERE USER='root' AND Host='%%';",
-						db.Name.L, sysUserTableName)
-					sqls = append(sqls, updateSQL)
-					rootReset = true
 				} else {
 					/* #nosec G202: SQL string concatenation */
 					whereClause := fmt.Sprintf("WHERE "+sysPrivilegeTableMap[tableName], name)
@@ -221,7 +222,8 @@ func (rc *Client) getDatabaseByName(name string) (*database, bool) {
 func (rc *Client) afterSystemTablesReplaced(tables []string) error {
 	var err error
 	for _, table := range tables {
-		if table == "user" {
+		switch {
+		case table == "user":
 			if rc.fullClusterRestore {
 				log.Info("privilege system table restored, please reconnect to make it effective")
 				err = rc.dom.NotifyUpdatePrivilege()

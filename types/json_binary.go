@@ -16,14 +16,12 @@ package types
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +33,7 @@ import (
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 /*
@@ -718,7 +717,7 @@ func appendBinaryNumber(buf []byte, x json.Number) (JSONTypeCode, []byte, error)
 	// - Then uint64 (valid in MySQL JSON, not in JSON decode library)
 	// - Then float64
 	// - Return an error
-	if strings.Contains(x.String(), "Ee.") {
+	if strings.ContainsAny(string(x), "Ee.") {
 		f64, err := x.Float64()
 		if err != nil {
 			return JSONTypeCodeFloat64, nil, errors.Trace(err)
@@ -836,8 +835,8 @@ func appendBinaryObject(buf []byte, x map[string]interface{}) ([]byte, error) {
 	for key, val := range x {
 		fields = append(fields, field{key: key, val: val})
 	}
-	slices.SortFunc(fields, func(i, j field) int {
-		return cmp.Compare(i.key, j.key)
+	slices.SortFunc(fields, func(i, j field) bool {
+		return i.key < j.key
 	})
 	for i, field := range fields {
 		keyEntryOff := keyEntryBegin + i*keyEntrySize

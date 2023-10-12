@@ -21,12 +21,10 @@ package expression
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -38,6 +36,7 @@ import (
 	"github.com/pingcap/tidb/util/plancodec"
 	"github.com/pingcap/tidb/util/printer"
 	"github.com/pingcap/tipb/go-tipb"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -963,45 +962,6 @@ func (b *builtinTiDBDecodeSQLDigestsSig) evalString(row chunk.Row) (string, bool
 	}
 
 	return string(resultStr), false, nil
-}
-
-type tidbEncodeSQLDigestFunctionClass struct {
-	baseFunctionClass
-}
-
-func (c *tidbEncodeSQLDigestFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-
-	argTps := []types.EvalType{types.ETString}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, argTps...)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinTiDBEncodeSQLDigestSig{bf}
-	return sig, nil
-}
-
-type builtinTiDBEncodeSQLDigestSig struct {
-	baseBuiltinFunc
-}
-
-func (b *builtinTiDBEncodeSQLDigestSig) Clone() builtinFunc {
-	newSig := &builtinTiDBEncodeSQLDigestSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-func (b *builtinTiDBEncodeSQLDigestSig) evalString(row chunk.Row) (string, bool, error) {
-	orgSQLStr, isNull, err := b.getArgs()[0].EvalString(b.ctx, row)
-	if err != nil {
-		return "", true, err
-	}
-	if isNull {
-		return "", true, nil
-	}
-	return parser.DigestHash(orgSQLStr).String(), false, nil
 }
 
 type tidbDecodePlanFunctionClass struct {

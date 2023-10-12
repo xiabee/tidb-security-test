@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/pingcap/tidb/infoschema"
@@ -32,13 +31,14 @@ import (
 	"github.com/pingcap/tidb/util/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"golang.org/x/exp/slices"
 )
 
 func TestMain(m *testing.M) {
 	opts := []goleak.Option{
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
 		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
 		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 	}
 	testsetup.SetupForCommonTest()
@@ -126,7 +126,7 @@ func newMockedRetriever(t *testing.T) *mockedRetriever {
 }
 
 func (r *mockedRetriever) SetData(data []*kv.Entry) *mockedRetriever {
-	lessFunc := func(i, j *kv.Entry) int { return bytes.Compare(i.Key, j.Key) }
+	lessFunc := func(i, j *kv.Entry) bool { return bytes.Compare(i.Key, j.Key) < 0 }
 	if !slices.IsSortedFunc(data, lessFunc) {
 		data = append([]*kv.Entry{}, data...)
 		slices.SortFunc(data, lessFunc)
@@ -217,13 +217,13 @@ func (r *mockedRetriever) Iter(k kv.Key, upperBound kv.Key) (iter kv.Iterator, e
 	return
 }
 
-func (r *mockedRetriever) IterReverse(k kv.Key, lowerBound kv.Key) (iter kv.Iterator, err error) {
+func (r *mockedRetriever) IterReverse(k kv.Key) (iter kv.Iterator, err error) {
 	r.checkMethodInvokeAllowed("IterReverse")
 	if err = r.getMethodErr("IterReverse"); err == nil {
 		data := make([]*kv.Entry, 0)
 		for i := 0; i < len(r.data); i++ {
 			item := r.data[len(r.data)-i-1]
-			if (len(k) == 0 || bytes.Compare(item.Key, k) < 0) && (len(lowerBound) == 0 || bytes.Compare(item.Key, lowerBound) >= 0) {
+			if len(k) == 0 || bytes.Compare(item.Key, k) < 0 {
 				data = append(data, item)
 			}
 		}

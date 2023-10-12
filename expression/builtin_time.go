@@ -2898,21 +2898,21 @@ func (du *baseDateArithmetical) getIntervalFromDecimal(ctx sessionctx.Context, a
 		}
 		switch strings.ToUpper(unit) {
 		case "HOUR_MINUTE", "MINUTE_SECOND":
-			interval = strings.ReplaceAll(interval, ".", ":")
+			interval = strings.Replace(interval, ".", ":", -1)
 		case "YEAR_MONTH":
-			interval = strings.ReplaceAll(interval, ".", "-")
+			interval = strings.Replace(interval, ".", "-", -1)
 		case "DAY_HOUR":
-			interval = strings.ReplaceAll(interval, ".", " ")
+			interval = strings.Replace(interval, ".", " ", -1)
 		case "DAY_MINUTE":
-			interval = "0 " + strings.ReplaceAll(interval, ".", ":")
+			interval = "0 " + strings.Replace(interval, ".", ":", -1)
 		case "DAY_SECOND":
-			interval = "0 00:" + strings.ReplaceAll(interval, ".", ":")
+			interval = "0 00:" + strings.Replace(interval, ".", ":", -1)
 		case "DAY_MICROSECOND":
 			interval = "0 00:00:" + interval
 		case "HOUR_MICROSECOND":
 			interval = "00:00:" + interval
 		case "HOUR_SECOND":
-			interval = "00:" + strings.ReplaceAll(interval, ".", ":")
+			interval = "00:" + strings.Replace(interval, ".", ":", -1)
 		case "MINUTE_MICROSECOND":
 			interval = "00:" + interval
 		case "SECOND_MICROSECOND":
@@ -3288,23 +3288,23 @@ func (du *baseDateArithmetical) vecGetIntervalFromDecimal(b *baseBuiltinFunc, in
 		switch strings.ToUpper(unit) {
 		case "HOUR_MINUTE", "MINUTE_SECOND":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return strings.ReplaceAll(val, ".", ":"), false, nil
+				return strings.Replace(val, ".", ":", -1), false, nil
 			}
 		case "YEAR_MONTH":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return strings.ReplaceAll(val, ".", "-"), false, nil
+				return strings.Replace(val, ".", "-", -1), false, nil
 			}
 		case "DAY_HOUR":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return strings.ReplaceAll(val, ".", " "), false, nil
+				return strings.Replace(val, ".", " ", -1), false, nil
 			}
 		case "DAY_MINUTE":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return "0 " + strings.ReplaceAll(val, ".", ":"), false, nil
+				return "0 " + strings.Replace(val, ".", ":", -1), false, nil
 			}
 		case "DAY_SECOND":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return "0 00:" + strings.ReplaceAll(val, ".", ":"), false, nil
+				return "0 00:" + strings.Replace(val, ".", ":", -1), false, nil
 			}
 		case "DAY_MICROSECOND":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
@@ -3316,7 +3316,7 @@ func (du *baseDateArithmetical) vecGetIntervalFromDecimal(b *baseBuiltinFunc, in
 			}
 		case "HOUR_SECOND":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
-				return "00:" + strings.ReplaceAll(val, ".", ":"), false, nil
+				return "00:" + strings.Replace(val, ".", ":", -1), false, nil
 			}
 		case "MINUTE_MICROSECOND":
 			amendInterval = func(val string, _ *chunk.Row) (string, bool, error) {
@@ -4159,22 +4159,20 @@ func (c *unixTimestampFunctionClass) getFunction(ctx sessionctx.Context, args []
 }
 
 // goTimeToMysqlUnixTimestamp converts go time into MySQL's Unix timestamp.
-// MySQL's Unix timestamp ranges from '1970-01-01 00:00:01.000000' UTC to '3001-01-18 23:59:59.999999' UTC. Values out of range should be rewritten to 0.
+// MySQL's Unix timestamp ranges in int32. Values out of range should be rewritten to 0.
 // https://dev.mysql.com/doc/refman/8.0/en/date-and-time-functions.html#function_unix-timestamp
 func goTimeToMysqlUnixTimestamp(t time.Time, decimal int) (*types.MyDecimal, error) {
-	microSeconds := t.UnixMicro()
-	// Prior to MySQL 8.0.28 (or any 32-bit platform), the valid range of argument values is the same as for the TIMESTAMP data type:
+	nanoSeconds := t.UnixNano()
+	// Prior to MySQL 8.0.28, the valid range of argument values is the same as for the TIMESTAMP data type:
 	// '1970-01-01 00:00:01.000000' UTC to '2038-01-19 03:14:07.999999' UTC.
-	// After 8.0.28, the range has been extended to '1970-01-01 00:00:01.000000' UTC to '3001-01-18 23:59:59.999999' UTC
-	// The magic value of '3001-01-18 23:59:59.999999' comes from the maximum supported timestamp on windows. Though TiDB
-	// doesn't support windows, this value is used here to keep the compatibility with MySQL
-	if microSeconds < 1e6 || microSeconds > 32536771199999999 {
+	// This is also the case in MySQL 8.0.28 and later for 32-bit platforms.
+	if nanoSeconds < 1e9 || (nanoSeconds/1e3) >= (math.MaxInt32+1)*1e6 {
 		return new(types.MyDecimal), nil
 	}
 	dec := new(types.MyDecimal)
 	// Here we don't use float to prevent precision lose.
-	dec.FromUint(uint64(microSeconds))
-	err := dec.Shift(-6)
+	dec.FromInt(nanoSeconds)
+	err := dec.Shift(-9)
 	if err != nil {
 		return nil, err
 	}
@@ -6546,45 +6544,6 @@ func (b *builtinTidbParseTsoSig) evalTime(row chunk.Row) (types.Time, bool, erro
 	return result, false, nil
 }
 
-// tidbParseTsoFunctionClass extracts logical time from a tso
-type tidbParseTsoLogicalFunctionClass struct {
-	baseFunctionClass
-}
-
-func (c *tidbParseTsoLogicalFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETInt, types.ETInt)
-	if err != nil {
-		return nil, err
-	}
-
-	sig := &builtinTidbParseTsoLogicalSig{bf}
-	return sig, nil
-}
-
-type builtinTidbParseTsoLogicalSig struct {
-	baseBuiltinFunc
-}
-
-func (b *builtinTidbParseTsoLogicalSig) Clone() builtinFunc {
-	newSig := &builtinTidbParseTsoLogicalSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// evalTime evals a builtinTidbParseTsoLogicalSig.
-func (b *builtinTidbParseTsoLogicalSig) evalInt(row chunk.Row) (int64, bool, error) {
-	arg, isNull, err := b.args[0].EvalInt(b.ctx, row)
-	if isNull || err != nil || arg <= 0 {
-		return 0, true, err
-	}
-
-	t := oracle.ExtractLogical(uint64(arg))
-	return t, false, nil
-}
-
 // tidbBoundedStalenessFunctionClass reads a time window [a, b] and compares it with the latest SafeTS
 // to determine which TS to use in a read only transaction.
 type tidbBoundedStalenessFunctionClass struct {
@@ -6684,7 +6643,7 @@ func CalAppropriateTime(minTime, maxTime, minSafeTime time.Time) time.Time {
 //     and with it, a read request won't fail because it's bigger than the latest SafeTS.
 func calAppropriateTime(minTime, maxTime, minSafeTime time.Time) time.Time {
 	if minSafeTime.Before(minTime) || minSafeTime.After(maxTime) {
-		logutil.BgLogger().Warn("calAppropriateTime",
+		logutil.BgLogger().Debug("calAppropriateTime",
 			zap.Time("minTime", minTime),
 			zap.Time("maxTime", maxTime),
 			zap.Time("minSafeTime", minSafeTime))

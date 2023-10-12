@@ -27,8 +27,6 @@ import (
 	tlog "github.com/opentracing/opentracing-go/log"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -48,15 +46,6 @@ const (
 	DefaultRecordPlanInSlowLog = 1
 	// DefaultTiDBEnableSlowLog enables TiDB to log slow queries.
 	DefaultTiDBEnableSlowLog = true
-)
-
-const (
-	// LogFieldCategory is the field name for log category
-	LogFieldCategory = "category"
-	// LogFieldConn is the field name for connection id in log
-	LogFieldConn = "conn"
-	// LogFieldSessionAlias is the field name for session_alias in log
-	LogFieldSessionAlias = "session_alias"
 )
 
 // EmptyFileLogConfig is an empty FileLogConfig.
@@ -105,9 +94,6 @@ const (
 	SlowLogTimeFormat = time.RFC3339Nano
 	// OldSlowLogTimeFormat is the first version of the the time format for slow log, This is use for compatibility.
 	OldSlowLogTimeFormat = "2006-01-02-15:04:05.999999999 -0700"
-
-	// GRPCDebugEnvName is the environment variable name for GRPC_DEBUG.
-	GRPCDebugEnvName = "GRPC_DEBUG"
 )
 
 // SlowQueryLogger is used to log slow query, InitLogger will modify it according to config file.
@@ -129,14 +115,13 @@ func InitLogger(cfg *LogConfig, opts ...zap.Option) error {
 	}
 
 	initGRPCLogger(gl)
-	tikv.SetLogContextKey(CtxLogKey)
 	return nil
 }
 
 func initGRPCLogger(gl *zap.Logger) {
 	level := zapcore.ErrorLevel
 	verbosity := 0
-	if len(os.Getenv(GRPCDebugEnvName)) > 0 {
+	if len(os.Getenv("GRPC_DEBUG")) > 0 {
 		verbosity = 999
 		level = zapcore.DebugLevel
 	}
@@ -209,82 +194,34 @@ func BgLogger() *zap.Logger {
 	return log.L()
 }
 
-// LoggerWithTraceInfo attaches fields from trace info to logger
-func LoggerWithTraceInfo(logger *zap.Logger, info *model.TraceInfo) *zap.Logger {
-	if logger == nil {
-		logger = log.L()
-	}
-
-	if fields := fieldsFromTraceInfo(info); len(fields) > 0 {
-		logger = logger.With(fields...)
-	}
-
-	return logger
-}
-
 // WithConnID attaches connId to context.
 func WithConnID(ctx context.Context, connID uint64) context.Context {
-	return WithFields(ctx, zap.Uint64(LogFieldConn, connID))
-}
-
-// WithSessionAlias attaches session_alias to context
-func WithSessionAlias(ctx context.Context, alias string) context.Context {
-	return WithFields(ctx, zap.String(LogFieldSessionAlias, alias))
-}
-
-// WithCategory attaches category to context.
-func WithCategory(ctx context.Context, category string) context.Context {
-	return WithFields(ctx, zap.String(LogFieldCategory, category))
-}
-
-// WithTraceFields attaches trace fields to context
-func WithTraceFields(ctx context.Context, info *model.TraceInfo) context.Context {
-	if info == nil {
-		return WithFields(ctx)
-	}
-	return WithFields(ctx,
-		zap.Uint64(LogFieldConn, info.ConnectionID),
-		zap.String(LogFieldSessionAlias, info.SessionAlias),
-	)
-}
-
-func fieldsFromTraceInfo(info *model.TraceInfo) []zap.Field {
-	if info == nil {
-		return nil
-	}
-
-	fields := make([]zap.Field, 0, 2)
-	if info.ConnectionID != 0 {
-		fields = append(fields, zap.Uint64(LogFieldConn, info.ConnectionID))
-	}
-
-	if info.SessionAlias != "" {
-		fields = append(fields, zap.String(LogFieldSessionAlias, info.SessionAlias))
-	}
-
-	return fields
-}
-
-// WithTraceLogger attaches trace identifier to context
-func WithTraceLogger(ctx context.Context, info *model.TraceInfo) context.Context {
 	var logger *zap.Logger
 	if ctxLogger, ok := ctx.Value(CtxLogKey).(*zap.Logger); ok {
 		logger = ctxLogger
 	} else {
 		logger = log.L()
 	}
-	return context.WithValue(ctx, CtxLogKey, wrapTraceLogger(ctx, info, logger))
+	return context.WithValue(ctx, CtxLogKey, logger.With(zap.Uint64("conn", connID)))
 }
 
-func wrapTraceLogger(ctx context.Context, info *model.TraceInfo, logger *zap.Logger) *zap.Logger {
+// WithTraceLogger attaches trace identifier to context
+func WithTraceLogger(ctx context.Context, connID uint64) context.Context {
+	var logger *zap.Logger
+	if ctxLogger, ok := ctx.Value(CtxLogKey).(*zap.Logger); ok {
+		logger = ctxLogger
+	} else {
+		logger = log.L()
+	}
+	return context.WithValue(ctx, CtxLogKey, wrapTraceLogger(ctx, connID, logger))
+}
+
+func wrapTraceLogger(ctx context.Context, connID uint64, logger *zap.Logger) *zap.Logger {
 	return logger.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
 		tl := &traceLog{ctx: ctx}
 		// cfg.Format == "", never return error
 		enc, _ := log.NewTextEncoder(&log.Config{})
-		traceCore := log.NewTextCore(enc, tl, tl)
-		if fields := fieldsFromTraceInfo(info); len(fields) > 0 {
-			traceCore = traceCore.With(fields)
-		}
+		traceCore := log.NewTextCore(enc, tl, tl).With([]zapcore.Field{zap.Uint64("conn", connID)})
 		return zapcore.NewTee(traceCore, core)
 	}))
 }
@@ -308,23 +245,13 @@ func (*traceLog) Sync() error {
 
 // WithKeyValue attaches key/value to context.
 func WithKeyValue(ctx context.Context, key, value string) context.Context {
-	return WithFields(ctx, zap.String(key, value))
-}
-
-// WithFields attaches key/value to context.
-func WithFields(ctx context.Context, fields ...zap.Field) context.Context {
 	var logger *zap.Logger
 	if ctxLogger, ok := ctx.Value(CtxLogKey).(*zap.Logger); ok {
 		logger = ctxLogger
 	} else {
 		logger = log.L()
 	}
-
-	if len(fields) > 0 {
-		logger = logger.With(fields...)
-	}
-
-	return context.WithValue(ctx, CtxLogKey, logger)
+	return context.WithValue(ctx, CtxLogKey, logger.With(zap.String(key, value)))
 }
 
 // TraceEventKey presents the TraceEventKey in span log.

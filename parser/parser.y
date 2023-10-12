@@ -27,7 +27,6 @@ package parser
 
 import (
 	"strings"
-	"time"
 
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/ast"
@@ -142,8 +141,6 @@ import (
 	fetch             "FETCH"
 	firstValue        "FIRST_VALUE"
 	floatType         "FLOAT"
-	float4Type        "FLOAT4"
-	float8Type        "FLOAT8"
 	forKwd            "FOR"
 	force             "FORCE"
 	foreign           "FOREIGN"
@@ -206,7 +203,6 @@ import (
 	mediumblobType    "MEDIUMBLOB"
 	mediumIntType     "MEDIUMINT"
 	mediumtextType    "MEDIUMTEXT"
-	middleIntType     "MIDDLEINT"
 	minuteMicrosecond "MINUTE_MICROSECOND"
 	minuteSecond      "MINUTE_SECOND"
 	mod               "MOD"
@@ -517,7 +513,6 @@ import (
 	oltpReadOnly          "OLTP_READ_ONLY"
 	oltpReadWrite         "OLTP_READ_WRITE"
 	oltpWriteOnly         "OLTP_WRITE_ONLY"
-	tpch10                "TPCH_10"
 	onDuplicate           "ON_DUPLICATE"
 	online                "ONLINE"
 	only                  "ONLY"
@@ -576,12 +571,10 @@ import (
 	reverse               "REVERSE"
 	role                  "ROLE"
 	rollback              "ROLLBACK"
-	rollup                "ROLLUP"
 	routine               "ROUTINE"
 	rowCount              "ROW_COUNT"
 	rowFormat             "ROW_FORMAT"
 	rtree                 "RTREE"
-	hypo                  "HYPO"
 	san                   "SAN"
 	savepoint             "SAVEPOINT"
 	second                "SECOND"
@@ -755,7 +748,6 @@ import (
 	substring             "SUBSTRING"
 	survivalPreferences   "SURVIVAL_PREFERENCES"
 	target                "TARGET"
-	taskTypes             "TASK_TYPES"
 	tidbJson              "TIDB_JSON"
 	timestampAdd          "TIMESTAMPADD"
 	timestampDiff         "TIMESTAMPDIFF"
@@ -787,14 +779,6 @@ import (
 	low                   "LOW"
 	ioReadBandwidth       "IO_READ_BANDWIDTH"
 	ioWriteBandwidth      "IO_WRITE_BANDWIDTH"
-	execElapsed           "EXEC_ELAPSED"
-	dryRun                "DRYRUN"
-	cooldown              "COOLDOWN"
-	watch                 "WATCH"
-	similar               "SIMILAR"
-	queryLimit            "QUERY_LIMIT"
-	background            "BACKGROUND"
-	unlimited             "UNLIMITED"
 
 	/* The following tokens belong to TiDBKeyword. Notice: make sure these tokens are contained in TiDBKeyword. */
 	admin                      "ADMIN"
@@ -903,7 +887,6 @@ import (
 %type	<expr>
 	Expression                      "expression"
 	MaxValueOrExpression            "maxvalue or expression"
-	DefaultOrExpression             "default or expression"
 	BoolPri                         "boolean primary expression"
 	ExprOrDefault                   "expression or default"
 	PredicateExpr                   "Predicate expression factor"
@@ -955,10 +938,9 @@ import (
 	CreateRoleStmt             "CREATE Role statement"
 	CreateDatabaseStmt         "Create Database Statement"
 	CreateIndexStmt            "CREATE INDEX statement"
-	CreateBindingStmt          "CREATE BINDING statement"
+	CreateBindingStmt          "CREATE BINDING  statement"
 	CreatePolicyStmt           "CREATE PLACEMENT POLICY statement"
 	CreateProcedureStmt        "CREATE PROCEDURE statement"
-	AddQueryWatchStmt          "ADD QUERY WATCH statement"
 	CreateResourceGroupStmt    "CREATE RESOURCE GROUP statement"
 	CreateSequenceStmt         "CREATE SEQUENCE statement"
 	CreateStatisticsStmt       "CREATE STATISTICS statement"
@@ -966,7 +948,6 @@ import (
 	DropDatabaseStmt           "DROP DATABASE statement"
 	DropIndexStmt              "DROP INDEX statement"
 	DropProcedureStmt          "DROP PROCEDURE statement"
-	DropQueryWatchStmt         "DROP QUERY WATCH statement"
 	DropResourceGroupStmt      "DROP RESOURCE GROUP statement"
 	DropStatisticsStmt         "DROP STATISTICS statement"
 	DropStatsStmt              "DROP STATS statement"
@@ -995,7 +976,6 @@ import (
 	InsertIntoStmt             "INSERT INTO statement"
 	CallStmt                   "CALL statement"
 	IndexAdviseStmt            "INDEX ADVISE statement"
-	ImportIntoStmt             "IMPORT INTO statement"
 	KillStmt                   "Kill statement"
 	LoadDataStmt               "Load data statement"
 	LoadStatsStmt              "Load statistic statement"
@@ -1044,7 +1024,7 @@ import (
 	ShardableStmt              "Shardable statement that can be used in non-transactional DMLs"
 	PauseLoadDataStmt          "PAUSE LOAD DATA JOB statement"
 	ResumeLoadDataStmt         "RESUME LOAD DATA JOB statement"
-	CancelImportStmt           "CANCEL IMPORT JOB statement"
+	CancelLoadDataStmt         "CANCEL LOAD DATA JOB statement"
 	DropLoadDataStmt           "DROP LOAD DATA JOB statement"
 	ProcedureUnlabeledBlock    "The statement block without label in procedure"
 	ProcedureBlockContent      "The statement block in procedure expressed with 'Begin ... End'"
@@ -1106,6 +1086,7 @@ import (
 	IdentListWithParenOpt                  "column name list opt with parentheses"
 	ColumnNameOrUserVarListOpt             "column name or user vairiabe list opt"
 	ColumnNameOrUserVarListOptWithBrackets "column name or user variable list opt with brackets"
+	ColumnSetValue                         "insert statement set value by column name"
 	ColumnSetValueList                     "insert statement set value by column name list"
 	CompareOp                              "Compare opcode"
 	ColumnOption                           "column definition option"
@@ -1137,7 +1118,6 @@ import (
 	ExpressionList                         "expression list"
 	ExtendedPriv                           "Extended privileges like LOAD FROM S3 or dynamic privileges"
 	MaxValueOrExpressionList               "maxvalue or expression list"
-	DefaultOrExpressionList                "default or expression list"
 	ExpressionListOpt                      "expression list opt"
 	FetchFirstOpt                          "Fetch First/Next Option"
 	FuncDatetimePrecListOpt                "Function datetime precision list opt"
@@ -1245,7 +1225,6 @@ import (
 	PasswordOrLockOption                   "Single password or lock option for create user statement"
 	PasswordOrLockOptionList               "Password or lock options for create user statement"
 	PasswordOrLockOptions                  "Optional password or lock options for create user statement"
-	PlanReplayerDumpOpt                    "Plan Replayer Dump option"
 	CommentOrAttributeOption               "Optional comment or attribute option for CREATE/ALTER USER statements"
 	ColumnPosition                         "Column position [First|After ColumnName]"
 	PrepareSQL                             "Prepare statement sql string"
@@ -1406,7 +1385,6 @@ import (
 	WindowNameOrSpec                       "WINDOW name or spec"
 	WindowSpec                             "WINDOW spec"
 	WindowSpecDetails                      "WINDOW spec details"
-	WithRollupClause                       "With rollup clause"
 	BetweenOrNotOp                         "Between predicate"
 	IsOrNotOp                              "Is predicate"
 	InOrNotOp                              "In predicate"
@@ -1460,13 +1438,6 @@ import (
 	PlacementPolicyOption                  "Anonymous or placement policy option"
 	DirectPlacementOption                  "Subset of anonymous or direct placement option"
 	PlacementOptionList                    "Anomymous or direct placement option list"
-	DirectResourceGroupBackgroundOption    "Subset of direct resource group background option"
-	DirectResourceGroupRunawayOption       "Subset of anonymous or direct resource group runaway option"
-	ResourceGroupBackgroundOptionList      "Direct resource group background option list"
-	ResourceGroupRunawayActionOption       "Resource group runaway action option"
-	ResourceGroupRunawayWatchOption        "Resource group runaway watch option"
-	ResourceGroupRunawayOptionList         "Anomymous or direct resource group runaway option list"
-	WatchDurationOption                    "Runaway watch duration option"
 	DirectResourceGroupOption              "Subset of anonymous or direct resource group option"
 	ResourceGroupOptionList                "Anomymous or direct resource group option list"
 	ResourceGroupPriorityOption            "Resource group priority option"
@@ -1474,9 +1445,6 @@ import (
 	CalibrateOption                        "Dynamic or static calibrate option"
 	DynamicCalibrateOptionList             "Anomymous or direct dynamic resource calibrate option list"
 	CalibrateResourceWorkloadOption        "Calibrate Resource workload option"
-	QueryWatchOptionList                   "Query watch option list"
-	QueryWatchOption                       "Query watch option"
-	QueryWatchTextOption                   "Query watch text option"
 	AttributesOpt                          "Attributes options"
 	AllColumnsOrPredicateColumnsOpt        "all columns or predicate columns option"
 	StatsOptionsOpt                        "Stats options"
@@ -1589,8 +1557,6 @@ import (
 %precedence next
 %precedence lowerThanValueKeyword
 %precedence value
-%precedence lowerThanWith
-%precedence with
 %precedence lowerThanStringLitToken
 %precedence stringLit
 %precedence lowerThanSetKeyword
@@ -1723,7 +1689,8 @@ ResourceGroupOptionList:
 	}
 |	ResourceGroupOptionList DirectResourceGroupOption
 	{
-		if !ast.CheckAppend($1.([]*ast.ResourceGroupOption), $2.(*ast.ResourceGroupOption)) {
+		if $1.([]*ast.ResourceGroupOption)[0].Tp == $2.(*ast.ResourceGroupOption).Tp ||
+			(len($1.([]*ast.ResourceGroupOption)) > 1 && $1.([]*ast.ResourceGroupOption)[1].Tp == $2.(*ast.ResourceGroupOption).Tp) {
 			yylex.AppendError(yylex.Errorf("Dupliated options specified"))
 			return 1
 		}
@@ -1731,7 +1698,8 @@ ResourceGroupOptionList:
 	}
 |	ResourceGroupOptionList ',' DirectResourceGroupOption
 	{
-		if !ast.CheckAppend($1.([]*ast.ResourceGroupOption), $3.(*ast.ResourceGroupOption)) {
+		if $1.([]*ast.ResourceGroupOption)[0].Tp == $3.(*ast.ResourceGroupOption).Tp ||
+			(len($1.([]*ast.ResourceGroupOption)) > 1 && $1.([]*ast.ResourceGroupOption)[1].Tp == $3.(*ast.ResourceGroupOption).Tp) {
 			yylex.AppendError(yylex.Errorf("Dupliated options specified"))
 			return 1
 		}
@@ -1752,99 +1720,6 @@ ResourceGroupPriorityOption:
 		$$ = uint64(16)
 	}
 
-ResourceGroupRunawayOptionList:
-	DirectResourceGroupRunawayOption
-	{
-		$$ = []*ast.ResourceGroupRunawayOption{$1.(*ast.ResourceGroupRunawayOption)}
-	}
-|	ResourceGroupRunawayOptionList DirectResourceGroupRunawayOption
-	{
-		if !ast.CheckRunawayAppend($1.([]*ast.ResourceGroupRunawayOption), $2.(*ast.ResourceGroupRunawayOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated runaway options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.ResourceGroupRunawayOption), $2.(*ast.ResourceGroupRunawayOption))
-	}
-|	ResourceGroupRunawayOptionList ',' DirectResourceGroupRunawayOption
-	{
-		if !ast.CheckRunawayAppend($1.([]*ast.ResourceGroupRunawayOption), $3.(*ast.ResourceGroupRunawayOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated runaway options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.ResourceGroupRunawayOption), $3.(*ast.ResourceGroupRunawayOption))
-	}
-
-ResourceGroupRunawayWatchOption:
-	"EXACT"
-	{
-		$$ = int32(model.WatchExact)
-	}
-|	"SIMILAR"
-	{
-		$$ = int32(model.WatchSimilar)
-	}
-|	"PLAN"
-	{
-		$$ = int32(model.WatchPlan)
-	}
-
-ResourceGroupRunawayActionOption:
-	"DRYRUN"
-	{
-		$$ = int32(model.RunawayActionDryRun)
-	}
-|	"COOLDOWN"
-	{
-		$$ = int32(model.RunawayActionCooldown)
-	}
-|	"KILL"
-	{
-		$$ = int32(model.RunawayActionKill)
-	}
-
-DirectResourceGroupRunawayOption:
-	"EXEC_ELAPSED" EqOpt stringLit
-	{
-		_, err := time.ParseDuration($3)
-		if err != nil {
-			yylex.AppendError(yylex.Errorf("The EXEC_ELAPSED option is not a valid duration: %s", err.Error()))
-			return 1
-		}
-		$$ = &ast.ResourceGroupRunawayOption{Tp: ast.RunawayRule, StrValue: $3}
-	}
-|	"ACTION" EqOpt ResourceGroupRunawayActionOption
-	{
-		$$ = &ast.ResourceGroupRunawayOption{Tp: ast.RunawayAction, IntValue: $3.(int32)}
-	}
-|	"WATCH" EqOpt ResourceGroupRunawayWatchOption WatchDurationOption
-	{
-		dur := strings.ToLower($4.(string))
-		if dur == "unlimited" {
-			dur = ""
-		}
-		if len(dur) > 0 {
-			_, err := time.ParseDuration(dur)
-			if err != nil {
-				yylex.AppendError(yylex.Errorf("The WATCH DURATION option is not a valid duration: %s", err.Error()))
-				return 1
-			}
-		}
-		$$ = &ast.ResourceGroupRunawayOption{Tp: ast.RunawayWatch, StrValue: dur, IntValue: $3.(int32)}
-	}
-
-WatchDurationOption:
-	{
-		$$ = ""
-	}
-|	"DURATION" EqOpt stringLit
-	{
-		$$ = $3
-	}
-|	"DURATION" EqOpt "UNLIMITED"
-	{
-		$$ = ""
-	}
-
 DirectResourceGroupOption:
 	"RU_PER_SEC" EqOpt LengthNum
 	{
@@ -1857,62 +1732,6 @@ DirectResourceGroupOption:
 |	"BURSTABLE"
 	{
 		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceBurstableOpiton, BoolValue: true}
-	}
-|	"BURSTABLE" EqOpt Boolean
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceBurstableOpiton, BoolValue: $3.(bool)}
-	}
-|	"QUERY_LIMIT" EqOpt '(' ResourceGroupRunawayOptionList ')'
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupRunaway, RunawayOptionList: $4.([]*ast.ResourceGroupRunawayOption)}
-	}
-|	"QUERY_LIMIT" EqOpt '(' ')'
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupRunaway, RunawayOptionList: nil}
-	}
-|	"QUERY_LIMIT" EqOpt "NULL"
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupRunaway, RunawayOptionList: nil}
-	}
-|	"BACKGROUND" EqOpt '(' ResourceGroupBackgroundOptionList ')'
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupBackground, BackgroundOptions: $4.([]*ast.ResourceGroupBackgroundOption)}
-	}
-|	"BACKGROUND" EqOpt '(' ')'
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupBackground, BackgroundOptions: nil}
-	}
-|	"BACKGROUND" EqOpt "NULL"
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceGroupBackground, BackgroundOptions: nil}
-	}
-
-ResourceGroupBackgroundOptionList:
-	DirectResourceGroupBackgroundOption
-	{
-		$$ = []*ast.ResourceGroupBackgroundOption{$1.(*ast.ResourceGroupBackgroundOption)}
-	}
-|	ResourceGroupBackgroundOptionList DirectResourceGroupBackgroundOption
-	{
-		if !ast.CheckBackgroundAppend($1.([]*ast.ResourceGroupBackgroundOption), $2.(*ast.ResourceGroupBackgroundOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated background options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.ResourceGroupBackgroundOption), $2.(*ast.ResourceGroupBackgroundOption))
-	}
-|	ResourceGroupBackgroundOptionList ',' DirectResourceGroupBackgroundOption
-	{
-		if !ast.CheckBackgroundAppend($1.([]*ast.ResourceGroupBackgroundOption), $3.(*ast.ResourceGroupBackgroundOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated background options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.ResourceGroupBackgroundOption), $3.(*ast.ResourceGroupBackgroundOption))
-	}
-
-DirectResourceGroupBackgroundOption:
-	"TASK_TYPES" EqOpt stringLit
-	{
-		$$ = &ast.ResourceGroupBackgroundOption{Type: ast.BackgroundOptionTaskNames, StrValue: $3}
 	}
 
 PlacementOptionList:
@@ -2117,18 +1936,6 @@ AlterTableSpec:
 		tiflashReplicaSpec := &ast.TiFlashReplicaSpec{
 			Count:  $4.(uint64),
 			Labels: $5.([]string),
-		}
-		$$ = &ast.AlterTableSpec{
-			Tp:             ast.AlterTableSetTiFlashReplica,
-			TiFlashReplica: tiflashReplicaSpec,
-		}
-	}
-|	"SET" "HYPO" "TIFLASH" "REPLICA" LengthNum LocationLabelList
-	{
-		tiflashReplicaSpec := &ast.TiFlashReplicaSpec{
-			Count:  $5.(uint64),
-			Labels: $6.([]string),
-			Hypo:   true,
 		}
 		$$ = &ast.AlterTableSpec{
 			Tp:             ast.AlterTableSetTiFlashReplica,
@@ -3238,7 +3045,7 @@ AnalyzeOption:
 
 /*******************************************************************************************/
 Assignment:
-	ColumnName EqOrAssignmentEq ExprOrDefault
+	ColumnName eq ExprOrDefault
 	{
 		$$ = &ast.Assignment{Column: $1.(*ast.ColumnName), Expr: $3}
 	}
@@ -3329,8 +3136,8 @@ ColumnDef:
 	ColumnName Type ColumnOptionListOpt
 	{
 		colDef := &ast.ColumnDef{Name: $1.(*ast.ColumnName), Tp: $2.(*types.FieldType), Options: $3.([]*ast.ColumnOption)}
-		if err := colDef.Validate(); err != nil {
-			yylex.AppendError(err)
+		if !colDef.Validate() {
+			yylex.AppendError(yylex.Errorf("Invalid column definition"))
 			return 1
 		}
 		$$ = colDef
@@ -3343,8 +3150,8 @@ ColumnDef:
 		options = append(options, $3.([]*ast.ColumnOption)...)
 		tp.AddFlag(mysql.UnsignedFlag)
 		colDef := &ast.ColumnDef{Name: $1.(*ast.ColumnName), Tp: tp, Options: options}
-		if err := colDef.Validate(); err != nil {
-			yylex.AppendError(err)
+		if !colDef.Validate() {
+			yylex.AppendError(yylex.Errorf("Invalid column definition"))
 			return 1
 		}
 		$$ = colDef
@@ -4241,7 +4048,6 @@ PolicyName:
 
 ResourceGroupName:
 	Identifier
-|	"DEFAULT"
 
 DatabaseOption:
 	DefaultKwdOpt CharsetKw EqOpt CharsetName
@@ -4742,11 +4548,9 @@ PartDefValuesOpt:
 	}
 |	"DEFAULT"
 	{
-		$$ = &ast.PartitionDefinitionClauseIn{
-			Values: [][]ast.ExprNode{{&ast.DefaultExpr{}}},
-		}
+		$$ = &ast.PartitionDefinitionClauseIn{}
 	}
-|	"VALUES" "IN" '(' DefaultOrExpressionList ')'
+|	"VALUES" "IN" '(' MaxValueOrExpressionList ')'
 	{
 		exprs := $4.([]ast.ExprNode)
 		values := make([][]ast.ExprNode, 0, len(exprs))
@@ -5107,10 +4911,6 @@ DropIndexStmt:
 		}
 		$$ = &ast.DropIndexStmt{IfExists: $3.(bool), IndexName: $4, Table: $6.(*ast.TableName), LockAlg: indexLockAndAlgorithm}
 	}
-|	"DROP" "HYPO" "INDEX" IfExists Identifier "ON" TableName
-	{
-		$$ = &ast.DropIndexStmt{IfExists: $4.(bool), IndexName: $5, Table: $7.(*ast.TableName), IsHypo: true}
-	}
 
 DropTableStmt:
 	"DROP" OptTemporary TableOrTables IfExists TableNameList RestrictOrCascadeOpt
@@ -5179,7 +4979,7 @@ DropStatsStmt:
 	}
 |	"DROP" "STATS" TableName "PARTITION" PartitionNameList
 	{
-		yylex.AppendError(ErrWarnDeprecatedSyntaxNoReplacement.FastGenByArgs("'DROP STATS ... PARTITION ...'", ""))
+		yylex.AppendError(ErrWarnDeprecatedSyntaxNoReplacement.FastGenByArgs("DROP STATS ... PARTITION ..."))
 		parser.lastErrorAsWarn()
 		$$ = &ast.DropStatsStmt{
 			Tables:         []*ast.TableName{$3.(*ast.TableName)},
@@ -5826,12 +5626,12 @@ ResumeLoadDataStmt:
 		}
 	}
 
-CancelImportStmt:
-	"CANCEL" "IMPORT" "JOB" Int64Num
+CancelLoadDataStmt:
+	"CANCEL" "LOAD" "DATA" "JOB" Int64Num
 	{
-		$$ = &ast.ImportIntoActionStmt{
-			Tp:    ast.ImportIntoCancel,
-			JobID: $4.(int64),
+		$$ = &ast.LoadDataActionStmt{
+			Tp:    ast.LoadDataCancel,
+			JobID: $5.(int64),
 		}
 	}
 
@@ -5901,13 +5701,6 @@ Expression:
 	}
 |	BoolPri
 
-DefaultOrExpression:
-	"DEFAULT"
-	{
-		$$ = &ast.DefaultExpr{}
-	}
-|	BitExpr
-
 MaxValueOrExpression:
 	"MAXVALUE"
 	{
@@ -5961,16 +5754,6 @@ MaxValueOrExpressionList:
 		$$ = []ast.ExprNode{$1}
 	}
 |	MaxValueOrExpressionList ',' MaxValueOrExpression
-	{
-		$$ = append($1.([]ast.ExprNode), $3)
-	}
-
-DefaultOrExpressionList:
-	DefaultOrExpression
-	{
-		$$ = []ast.ExprNode{$1}
-	}
-|	DefaultOrExpressionList ',' DefaultOrExpression
 	{
 		$$ = append($1.([]ast.ExprNode), $3)
 	}
@@ -6273,20 +6056,10 @@ FieldList:
 		$$ = append(fl, field)
 	}
 
-WithRollupClause:
-	%prec lowerThanWith
-	{
-		$$ = false
-	}
-|	"WITH" "ROLLUP"
-	{
-		$$ = true
-	}
-
 GroupByClause:
-	"GROUP" "BY" ByList WithRollupClause
+	"GROUP" "BY" ByList
 	{
-		$$ = &ast.GroupByClause{Items: $3.([]*ast.ByItem), Rollup: $4.(bool)}
+		$$ = &ast.GroupByClause{Items: $3.([]*ast.ByItem)}
 	}
 
 HavingClause:
@@ -6486,10 +6259,6 @@ IndexTypeName:
 	{
 		$$ = model.IndexTypeRtree
 	}
-|	"HYPO"
-	{
-		$$ = model.IndexTypeHypo
-	}
 
 IndexInvisible:
 	"VISIBLE"
@@ -6599,7 +6368,6 @@ UnReservedKeyword:
 |	"RESTART"
 |	"ROLE"
 |	"ROLLBACK"
-|	"ROLLUP"
 |	"SESSION"
 |	"SIGNED"
 |	"SHARD_ROW_ID_BITS"
@@ -6764,7 +6532,6 @@ UnReservedKeyword:
 |	"VALIDATION"
 |	"WITHOUT"
 |	"RTREE"
-|	"HYPO"
 |	"EXCHANGE"
 |	"COLUMN_FORMAT"
 |	"REPAIR"
@@ -6873,7 +6640,6 @@ UnReservedKeyword:
 |	"OLTP_READ_WRITE"
 |	"OLTP_READ_ONLY"
 |	"OLTP_WRITE_ONLY"
-|	"TPCH_10"
 
 TiDBKeyword:
 	"ADMIN"
@@ -7029,15 +6795,6 @@ NotKeywordToken:
 |	"UNTIL_TS"
 |	"RESTORED_TS"
 |	"FULL_BACKUP_STORAGE"
-|	"EXEC_ELAPSED"
-|	"DRYRUN"
-|	"COOLDOWN"
-|	"WATCH"
-|	"SIMILAR"
-|	"QUERY_LIMIT"
-|	"BACKGROUND"
-|	"TASK_TYPES"
-|	"UNLIMITED"
 
 /************************************************************************************
  *
@@ -7180,7 +6937,7 @@ InsertValues:
 	}
 |	"SET" ColumnSetValueList
 	{
-		$$ = $2.(*ast.InsertStmt)
+		$$ = &ast.InsertStmt{Setlist: $2.([]*ast.Assignment)}
 	}
 
 ValueSym:
@@ -7226,21 +6983,26 @@ ExprOrDefault:
 		$$ = &ast.DefaultExpr{}
 	}
 
-ColumnSetValueList:
-	ColumnName EqOrAssignmentEq ExprOrDefault
+ColumnSetValue:
+	ColumnName eq ExprOrDefault
 	{
-		$$ = &ast.InsertStmt{
-			Columns: []*ast.ColumnName{$1.(*ast.ColumnName)},
-			Lists:   [][]ast.ExprNode{{$3.(ast.ExprNode)}},
-			Setlist: true,
+		$$ = &ast.Assignment{
+			Column: $1.(*ast.ColumnName),
+			Expr:   $3,
 		}
 	}
-|	ColumnSetValueList ',' ColumnName EqOrAssignmentEq ExprOrDefault
+
+ColumnSetValueList:
 	{
-		ins := $1.(*ast.InsertStmt)
-		ins.Columns = append(ins.Columns, $3.(*ast.ColumnName))
-		ins.Lists[0] = append(ins.Lists[0], $5.(ast.ExprNode))
-		$$ = ins
+		$$ = []*ast.Assignment{}
+	}
+|	ColumnSetValue
+	{
+		$$ = []*ast.Assignment{$1.(*ast.Assignment)}
+	}
+|	ColumnSetValueList ',' ColumnSetValue
+	{
+		$$ = append($1.([]*ast.Assignment), $3.(*ast.Assignment))
 	}
 
 /*
@@ -8164,7 +7926,7 @@ SumExpr:
 	"AVG" '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8180,7 +7942,7 @@ SumExpr:
 |	builtinBitAnd '(' Expression ')' OptWindowingClause
 	{
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
@@ -8188,7 +7950,7 @@ SumExpr:
 |	builtinBitAnd '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
 		}
@@ -8196,7 +7958,7 @@ SumExpr:
 |	builtinBitOr '(' Expression ')' OptWindowingClause
 	{
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
@@ -8204,7 +7966,7 @@ SumExpr:
 |	builtinBitOr '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
 		}
@@ -8212,7 +7974,7 @@ SumExpr:
 |	builtinBitXor '(' Expression ')' OptWindowingClause
 	{
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
@@ -8220,7 +7982,7 @@ SumExpr:
 |	builtinBitXor '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
 		}
@@ -8232,7 +7994,7 @@ SumExpr:
 |	builtinCount '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
 		}
@@ -8240,7 +8002,7 @@ SumExpr:
 |	builtinCount '(' Expression ')' OptWindowingClause
 	{
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
@@ -8249,7 +8011,7 @@ SumExpr:
 	{
 		args := []ast.ExprNode{ast.NewValueExpr(1, parser.charset, parser.collation)}
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: args, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: args, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: args}
 		}
@@ -8259,7 +8021,7 @@ SumExpr:
 		args := $4.([]ast.ExprNode)
 		args = append(args, $6.(ast.ExprNode))
 		if $8 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: args, Distinct: $3.(bool), Spec: *($8.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: args, Distinct: $3.(bool), Spec: *($8.(*ast.WindowSpec))}
 		} else {
 			agg := &ast.AggregateFuncExpr{F: $1, Args: args, Distinct: $3.(bool)}
 			if $5 != nil {
@@ -8271,7 +8033,7 @@ SumExpr:
 |	builtinMax '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8279,7 +8041,7 @@ SumExpr:
 |	builtinMin '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8287,7 +8049,7 @@ SumExpr:
 |	builtinSum '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8295,7 +8057,7 @@ SumExpr:
 |	builtinStddevPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: ast.AggFuncStddevPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: ast.AggFuncStddevPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: ast.AggFuncStddevPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8303,7 +8065,7 @@ SumExpr:
 |	builtinStddevSamp '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8311,7 +8073,7 @@ SumExpr:
 |	builtinVarPop '(' BuggyDefaultFalseDistinctOpt Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: ast.AggFuncVarPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: ast.AggFuncVarPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool), Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: ast.AggFuncVarPop, Args: []ast.ExprNode{$4}, Distinct: $3.(bool)}
 		}
@@ -8323,7 +8085,7 @@ SumExpr:
 |	"JSON_ARRAYAGG" '(' Expression ')' OptWindowingClause
 	{
 		if $5 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: *($5.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3}}
 		}
@@ -8331,7 +8093,7 @@ SumExpr:
 |	"JSON_ARRAYAGG" '(' "ALL" Expression ')' OptWindowingClause
 	{
 		if $6 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4}, Spec: *($6.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4}}
 		}
@@ -8339,7 +8101,7 @@ SumExpr:
 |	"JSON_OBJECTAGG" '(' Expression ',' Expression ')' OptWindowingClause
 	{
 		if $7 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3, $5}, Spec: *($7.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3, $5}, Spec: *($7.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3, $5}}
 		}
@@ -8347,7 +8109,7 @@ SumExpr:
 |	"JSON_OBJECTAGG" '(' "ALL" Expression ',' Expression ')' OptWindowingClause
 	{
 		if $8 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4, $6}, Spec: *($8.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4, $6}, Spec: *($8.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4, $6}}
 		}
@@ -8355,7 +8117,7 @@ SumExpr:
 |	"JSON_OBJECTAGG" '(' Expression ',' "ALL" Expression ')' OptWindowingClause
 	{
 		if $8 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3, $6}, Spec: *($8.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3, $6}, Spec: *($8.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$3, $6}}
 		}
@@ -8363,7 +8125,7 @@ SumExpr:
 |	"JSON_OBJECTAGG" '(' "ALL" Expression ',' "ALL" Expression ')' OptWindowingClause
 	{
 		if $9 != nil {
-			$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$4, $7}, Spec: *($9.(*ast.WindowSpec))}
+			$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$4, $7}, Spec: *($9.(*ast.WindowSpec))}
 		} else {
 			$$ = &ast.AggregateFuncExpr{F: $1, Args: []ast.ExprNode{$4, $7}}
 		}
@@ -9437,27 +9199,27 @@ WindowNameOrSpec:
 WindowFuncCall:
 	"ROW_NUMBER" '(' ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Spec: $4.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Spec: $4.(ast.WindowSpec)}
 	}
 |	"RANK" '(' ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Spec: $4.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Spec: $4.(ast.WindowSpec)}
 	}
 |	"DENSE_RANK" '(' ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Spec: $4.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Spec: $4.(ast.WindowSpec)}
 	}
 |	"CUME_DIST" '(' ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Spec: $4.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Spec: $4.(ast.WindowSpec)}
 	}
 |	"PERCENT_RANK" '(' ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Spec: $4.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Spec: $4.(ast.WindowSpec)}
 	}
 |	"NTILE" '(' SimpleExpr ')' WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, Spec: $5.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, Spec: $5.(ast.WindowSpec)}
 	}
 |	"LEAD" '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause
 	{
@@ -9465,7 +9227,7 @@ WindowFuncCall:
 		if $4 != nil {
 			args = append(args, $4.([]ast.ExprNode)...)
 		}
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: args, IgnoreNull: $6.(bool), Spec: $7.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: args, IgnoreNull: $6.(bool), Spec: $7.(ast.WindowSpec)}
 	}
 |	"LAG" '(' Expression OptLeadLagInfo ')' OptNullTreatment WindowingClause
 	{
@@ -9473,19 +9235,19 @@ WindowFuncCall:
 		if $4 != nil {
 			args = append(args, $4.([]ast.ExprNode)...)
 		}
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: args, IgnoreNull: $6.(bool), Spec: $7.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: args, IgnoreNull: $6.(bool), Spec: $7.(ast.WindowSpec)}
 	}
 |	"FIRST_VALUE" '(' Expression ')' OptNullTreatment WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, IgnoreNull: $5.(bool), Spec: $6.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, IgnoreNull: $5.(bool), Spec: $6.(ast.WindowSpec)}
 	}
 |	"LAST_VALUE" '(' Expression ')' OptNullTreatment WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3}, IgnoreNull: $5.(bool), Spec: $6.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3}, IgnoreNull: $5.(bool), Spec: $6.(ast.WindowSpec)}
 	}
 |	"NTH_VALUE" '(' Expression ',' SimpleExpr ')' OptFromFirstLast OptNullTreatment WindowingClause
 	{
-		$$ = &ast.WindowFuncExpr{Name: $1, Args: []ast.ExprNode{$3, $5}, FromLast: $7.(bool), IgnoreNull: $8.(bool), Spec: $9.(ast.WindowSpec)}
+		$$ = &ast.WindowFuncExpr{F: $1, Args: []ast.ExprNode{$3, $5}, FromLast: $7.(bool), IgnoreNull: $8.(bool), Spec: $9.(ast.WindowSpec)}
 	}
 
 OptLeadLagInfo:
@@ -10039,19 +9801,13 @@ SubSelect:
 	}
 |	'(' SelectStmtWithClause ')'
 	{
-		switch rs := $2.(type) {
-		case *ast.SelectStmt:
-			endOffset := parser.endOffset(&yyS[yypt])
-			parser.setLastSelectFieldText(rs, endOffset)
-			src := parser.src
-			// See the implementation of yyParse function
-			rs.SetText(parser.lexer.client, src[yyS[yypt-1].offset:yyS[yypt].offset])
-			$$ = &ast.SubqueryExpr{Query: rs}
-		case *ast.SetOprStmt:
-			src := parser.src
-			rs.SetText(parser.lexer.client, src[yyS[yypt-1].offset:yyS[yypt].offset])
-			$$ = &ast.SubqueryExpr{Query: rs}
-		}
+		rs := $2.(*ast.SelectStmt)
+		endOffset := parser.endOffset(&yyS[yypt])
+		parser.setLastSelectFieldText(rs, endOffset)
+		src := parser.src
+		// See the implementation of yyParse function
+		rs.SetText(parser.lexer.client, src[yyS[yypt-1].offset:yyS[yypt].offset])
+		$$ = &ast.SubqueryExpr{Query: rs}
 	}
 |	'(' SubSelect ')'
 	{
@@ -10429,11 +10185,11 @@ SetStmt:
 	{
 		$$ = &ast.SetStmt{Variables: $2.([]*ast.VariableAssignment)}
 	}
-|	"SET" "PASSWORD" EqOrAssignmentEq PasswordOpt
+|	"SET" "PASSWORD" eq PasswordOpt
 	{
 		$$ = &ast.SetPwdStmt{Password: $4}
 	}
-|	"SET" "PASSWORD" "FOR" Username EqOrAssignmentEq PasswordOpt
+|	"SET" "PASSWORD" "FOR" Username eq PasswordOpt
 	{
 		$$ = &ast.SetPwdStmt{User: $4.(*auth.UserIdentity), Password: $6}
 	}
@@ -11319,12 +11075,12 @@ ShowStmt:
 	{
 		$$ = $4.(*ast.ShowStmt)
 	}
-|	"SHOW" "IMPORT" "JOB" Int64Num
+|	"SHOW" "LOAD" "DATA" "JOB" Int64Num
 	{
-		v := $4.(int64)
+		v := $5.(int64)
 		$$ = &ast.ShowStmt{
-			Tp:          ast.ShowImportJobs,
-			ImportJobID: &v,
+			Tp:            ast.ShowLoadDataJobs,
+			LoadDataJobID: &v,
 		}
 	}
 |	"SHOW" "CREATE" "PROCEDURE" TableName
@@ -11673,9 +11429,9 @@ ShowTargetFilterable:
 	{
 		$$ = &ast.ShowStmt{Tp: ast.ShowPlacementLabels}
 	}
-|	"IMPORT" "JOBS"
+|	"LOAD" "DATA" "JOBS"
 	{
-		$$ = &ast.ShowStmt{Tp: ast.ShowImportJobs}
+		$$ = &ast.ShowStmt{Tp: ast.ShowLoadDataJobs}
 	}
 
 ShowLikeOrWhereOpt:
@@ -11912,7 +11668,6 @@ Statement:
 |	CreatePolicyStmt
 |	CreateProcedureStmt
 |	CreateResourceGroupStmt
-|	AddQueryWatchStmt
 |	CreateSequenceStmt
 |	CreateStatisticsStmt
 |	DoStmt
@@ -11925,7 +11680,6 @@ Statement:
 |	DropViewStmt
 |	DropUserStmt
 |	DropResourceGroupStmt
-|	DropQueryWatchStmt
 |	DropRoleStmt
 |	DropStatisticsStmt
 |	DropStatsStmt
@@ -11938,7 +11692,6 @@ Statement:
 |	GrantProxyStmt
 |	GrantRoleStmt
 |	CallStmt
-|	ImportIntoStmt
 |	InsertIntoStmt
 |	IndexAdviseStmt
 |	KillStmt
@@ -11991,7 +11744,7 @@ Statement:
 |	NonTransactionalDMLStmt
 |	PauseLoadDataStmt
 |	ResumeLoadDataStmt
-|	CancelImportStmt
+|	CancelLoadDataStmt
 |	DropLoadDataStmt
 
 TraceableStmt:
@@ -12463,6 +12216,10 @@ NumericType:
 		// TODO: check flen 0
 		tp := types.NewFieldType($1.(byte))
 		tp.SetFlen($2.(int))
+		if $2.(int) != types.UnspecifiedLength && types.TiDBStrictIntegerDisplayWidth {
+			yylex.AppendError(ErrWarnDeprecatedIntegerDisplayWidth)
+			parser.lastErrorAsWarn()
+		}
 		for _, o := range $3.([]*ast.TypeOpt) {
 			if o.IsUnsigned {
 				tp.AddFlag(mysql.UnsignedFlag)
@@ -12556,10 +12313,6 @@ IntegerType:
 	{
 		$$ = mysql.TypeInt24
 	}
-|	"MIDDLEINT"
-	{
-		$$ = mysql.TypeInt24
-	}
 |	"INT"
 	{
 		$$ = mysql.TypeLong
@@ -12640,14 +12393,6 @@ FloatingPointType:
 		$$ = mysql.TypeDouble
 	}
 |	"DOUBLE" "PRECISION"
-	{
-		$$ = mysql.TypeDouble
-	}
-|	"FLOAT4"
-	{
-		$$ = mysql.TypeFloat
-	}
-|	"FLOAT8"
 	{
 		$$ = mysql.TypeDouble
 	}
@@ -14493,19 +14238,6 @@ LoadDataOption:
 		$$ = &ast.LoadDataOpt{Name: strings.ToLower($1), Value: $3.(ast.ExprNode)}
 	}
 
-ImportIntoStmt:
-	"IMPORT" "INTO" TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt "FROM" stringLit FormatOpt LoadDataOptionListOpt
-	{
-		$$ = &ast.ImportIntoStmt{
-			Table:              $3.(*ast.TableName),
-			ColumnsAndUserVars: $4.([]*ast.ColumnNameOrUserVar),
-			ColumnAssignments:  $5.([]*ast.Assignment),
-			Path:               $7,
-			Format:             $8.(*string),
-			Options:            $9.([]*ast.LoadDataOpt),
-		}
-	}
-
 /*********************************************************************
  * Lock/Unlock Tables
  * See http://dev.mysql.com/doc/refman/5.7/en/lock-tables.html
@@ -14671,44 +14403,12 @@ LockStatsStmt:
 			Tables: $3.([]*ast.TableName),
 		}
 	}
-|	"LOCK" "STATS" TableName "PARTITION" PartitionNameList
-	{
-		x := $3.(*ast.TableName)
-		x.PartitionNames = $5.([]model.CIStr)
-		$$ = &ast.LockStatsStmt{
-			Tables: []*ast.TableName{x},
-		}
-	}
-|	"LOCK" "STATS" TableName "PARTITION" '(' PartitionNameList ')'
-	{
-		x := $3.(*ast.TableName)
-		x.PartitionNames = $6.([]model.CIStr)
-		$$ = &ast.LockStatsStmt{
-			Tables: []*ast.TableName{x},
-		}
-	}
 
 UnlockStatsStmt:
 	"UNLOCK" "STATS" TableNameList
 	{
 		$$ = &ast.UnlockStatsStmt{
 			Tables: $3.([]*ast.TableName),
-		}
-	}
-|	"UNLOCK" "STATS" TableName "PARTITION" PartitionNameList
-	{
-		x := $3.(*ast.TableName)
-		x.PartitionNames = $5.([]model.CIStr)
-		$$ = &ast.UnlockStatsStmt{
-			Tables: []*ast.TableName{x},
-		}
-	}
-|	"UNLOCK" "STATS" TableName "PARTITION" '(' PartitionNameList ')'
-	{
-		x := $3.(*ast.TableName)
-		x.PartitionNames = $6.([]model.CIStr)
-		$$ = &ast.UnlockStatsStmt{
-			Tables: []*ast.TableName{x},
 		}
 	}
 
@@ -15080,10 +14780,10 @@ RowStmt:
  *		| CAPTURE `sql_digest` `plan_digest`]
  *******************************************************************/
 PlanReplayerStmt:
-	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" ExplainableStmt
+	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" ExplainableStmt
 	{
 		x := &ast.PlanReplayerStmt{
-			Stmt:    $6,
+			Stmt:    $5,
 			Analyze: false,
 			Load:    false,
 			File:    "",
@@ -15091,18 +14791,15 @@ PlanReplayerStmt:
 			OrderBy: nil,
 			Limit:   nil,
 		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
-		}
 		startOffset := parser.startOffset(&yyS[yypt])
 		x.Stmt.SetText(parser.lexer.client, strings.TrimSpace(parser.src[startOffset:]))
 
 		$$ = x
 	}
-|	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" "ANALYZE" ExplainableStmt
+|	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" "ANALYZE" ExplainableStmt
 	{
 		x := &ast.PlanReplayerStmt{
-			Stmt:    $7,
+			Stmt:    $6,
 			Analyze: true,
 			Load:    false,
 			File:    "",
@@ -15110,15 +14807,12 @@ PlanReplayerStmt:
 			OrderBy: nil,
 			Limit:   nil,
 		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
-		}
 		startOffset := parser.startOffset(&yyS[yypt])
 		x.Stmt.SetText(parser.lexer.client, strings.TrimSpace(parser.src[startOffset:]))
 
 		$$ = x
 	}
-|	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" "SLOW" "QUERY" WhereClauseOptional OrderByOptional SelectStmtLimitOpt
+|	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" "SLOW" "QUERY" WhereClauseOptional OrderByOptional SelectStmtLimitOpt
 	{
 		x := &ast.PlanReplayerStmt{
 			Stmt:    nil,
@@ -15126,8 +14820,25 @@ PlanReplayerStmt:
 			Load:    false,
 			File:    "",
 		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
+		if $7 != nil {
+			x.Where = $7.(ast.ExprNode)
+		}
+		if $8 != nil {
+			x.OrderBy = $8.(*ast.OrderByClause)
+		}
+		if $9 != nil {
+			x.Limit = $9.(*ast.Limit)
+		}
+
+		$$ = x
+	}
+|	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" "ANALYZE" "SLOW" "QUERY" WhereClauseOptional OrderByOptional SelectStmtLimitOpt
+	{
+		x := &ast.PlanReplayerStmt{
+			Stmt:    nil,
+			Analyze: true,
+			Load:    false,
+			File:    "",
 		}
 		if $8 != nil {
 			x.Where = $8.(ast.ExprNode)
@@ -15141,52 +14852,23 @@ PlanReplayerStmt:
 
 		$$ = x
 	}
-|	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" "ANALYZE" "SLOW" "QUERY" WhereClauseOptional OrderByOptional SelectStmtLimitOpt
-	{
-		x := &ast.PlanReplayerStmt{
-			Stmt:    nil,
-			Analyze: true,
-			Load:    false,
-			File:    "",
-		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
-		}
-		if $9 != nil {
-			x.Where = $9.(ast.ExprNode)
-		}
-		if $10 != nil {
-			x.OrderBy = $10.(*ast.OrderByClause)
-		}
-		if $11 != nil {
-			x.Limit = $11.(*ast.Limit)
-		}
-
-		$$ = x
-	}
-|	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" stringLit
+|	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" stringLit
 	{
 		x := &ast.PlanReplayerStmt{
 			Stmt:    nil,
 			Analyze: false,
 			Load:    false,
-			File:    $6,
-		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
+			File:    $5,
 		}
 		$$ = x
 	}
-|	"PLAN" "REPLAYER" "DUMP" PlanReplayerDumpOpt "EXPLAIN" "ANALYZE" stringLit
+|	"PLAN" "REPLAYER" "DUMP" "EXPLAIN" "ANALYZE" stringLit
 	{
 		x := &ast.PlanReplayerStmt{
 			Stmt:    nil,
 			Analyze: true,
 			Load:    false,
-			File:    $7,
-		}
-		if $4 != nil {
-			x.HistoricalStatsInfo = $4.(*ast.AsOfClause)
+			File:    $6,
 		}
 		$$ = x
 	}
@@ -15233,15 +14915,6 @@ PlanReplayerStmt:
 		}
 
 		$$ = x
-	}
-
-PlanReplayerDumpOpt:
-	{
-		$$ = nil
-	}
-|	"WITH" "STATS" AsOfClause
-	{
-		$$ = $3.(*ast.AsOfClause)
 	}
 
 /* Stored PROCEDURE parameter declaration list */
@@ -15890,13 +15563,13 @@ DynamicCalibrateOptionList:
 	}
 
 DynamicCalibrateResourceOption:
-	"START_TIME" EqOpt Expression
+	"START_TIME" EqOpt stringLit
 	{
-		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateStartTime, Ts: $3.(ast.ExprNode)}
+		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateStartTime, Ts: ast.NewValueExpr($3, "", "")}
 	}
-|	"END_TIME" EqOpt Expression
+|	"END_TIME" EqOpt stringLit
 	{
-		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateEndTime, Ts: $3.(ast.ExprNode)}
+		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateEndTime, Ts: ast.NewValueExpr($3, "", "")}
 	}
 |	"DURATION" EqOpt stringLit
 	{
@@ -15906,10 +15579,6 @@ DynamicCalibrateResourceOption:
 			return 1
 		}
 		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateDuration, StrValue: $3}
-	}
-|	"DURATION" EqOpt "INTERVAL" Expression TimeUnit
-	{
-		$$ = &ast.DynamicCalibrateResourceOption{Tp: ast.CalibrateDuration, Ts: $4.(ast.ExprNode), Unit: $5.(ast.TimeUnitType)}
 	}
 
 CalibrateResourceWorkloadOption:
@@ -15928,85 +15597,5 @@ CalibrateResourceWorkloadOption:
 |	"WORKLOAD" "OLTP_WRITE_ONLY"
 	{
 		$$ = ast.OLTPWRITEONLY
-	}
-|	"WORKLOAD" "TPCH_10"
-	{
-		$$ = ast.TPCH10
-	}
-
-/********************************************************************
- *
- * Query Watch Statement
- *
- * Query Watch
- *******************************************************************/
-AddQueryWatchStmt:
-	"QUERY" "WATCH" "ADD" QueryWatchOptionList
-	{
-		$$ = &ast.AddQueryWatchStmt{
-			QueryWatchOptionList: $4.([]*ast.QueryWatchOption),
-		}
-	}
-
-QueryWatchOptionList:
-	QueryWatchOption
-	{
-		$$ = []*ast.QueryWatchOption{$1.(*ast.QueryWatchOption)}
-	}
-|	QueryWatchOptionList QueryWatchOption
-	{
-		if !ast.CheckQueryWatchAppend($1.([]*ast.QueryWatchOption), $2.(*ast.QueryWatchOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.QueryWatchOption), $2.(*ast.QueryWatchOption))
-	}
-|	QueryWatchOptionList ',' QueryWatchOption
-	{
-		if !ast.CheckQueryWatchAppend($1.([]*ast.QueryWatchOption), $3.(*ast.QueryWatchOption)) {
-			yylex.AppendError(yylex.Errorf("Dupliated options specified"))
-			return 1
-		}
-		$$ = append($1.([]*ast.QueryWatchOption), $3.(*ast.QueryWatchOption))
-	}
-
-QueryWatchOption:
-	"RESOURCE" "GROUP" ResourceGroupName
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchResourceGroup, StrValue: model.NewCIStr($3)}
-	}
-|	"RESOURCE" "GROUP" UserVariable
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchResourceGroup, ExprValue: $3}
-	}
-|	"ACTION" EqOpt ResourceGroupRunawayActionOption
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchAction, IntValue: $3.(int32)}
-	}
-|	QueryWatchTextOption
-	{
-		$$ = $1.(*ast.QueryWatchOption)
-	}
-
-QueryWatchTextOption:
-	"SQL" "DIGEST" SimpleExpr
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchType, IntValue: int32(model.WatchSimilar), ExprValue: $3}
-	}
-|	"PLAN" "DIGEST" SimpleExpr
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchType, IntValue: int32(model.WatchPlan), ExprValue: $3}
-	}
-|	"SQL" "TEXT" ResourceGroupRunawayWatchOption "TO" SimpleExpr
-	{
-		$$ = &ast.QueryWatchOption{Tp: ast.QueryWatchType, IntValue: $3.(int32), ExprValue: $5, BoolValue: true}
-	}
-
-DropQueryWatchStmt:
-	"QUERY" "WATCH" "REMOVE" NUM
-	{
-		$$ = &ast.DropQueryWatchStmt{
-			IntValue: $4.(int64),
-		}
 	}
 %%

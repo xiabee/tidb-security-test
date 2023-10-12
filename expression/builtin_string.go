@@ -1059,7 +1059,7 @@ func (b *builtinReplaceSig) evalString(row chunk.Row) (d string, isNull bool, er
 	if oldStr == "" {
 		return str, false, nil
 	}
-	return strings.ReplaceAll(str, oldStr, newStr), false, nil
+	return strings.Replace(str, oldStr, newStr, -1), false, nil
 }
 
 type convertFunctionClass struct {
@@ -1717,9 +1717,6 @@ func (c *unhexFunctionClass) getFunction(ctx sessionctx.Context, args []Expressi
 		retFlen = (argType.GetFlen() + 1) / 2
 	default:
 		return nil, errors.Errorf("Unhex invalid args, need int or string but get %s", argType)
-	}
-	if argType.GetFlen() == types.UnspecifiedLength {
-		retFlen = types.UnspecifiedLength
 	}
 
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, types.ETString)
@@ -3509,8 +3506,8 @@ func (b *builtinFromBase64Sig) evalString(row chunk.Row) (string, bool, error) {
 		return "", true, handleAllowedPacketOverflowed(b.ctx, "from_base64", b.maxAllowedPacket)
 	}
 
-	str = strings.ReplaceAll(str, "\t", "")
-	str = strings.ReplaceAll(str, " ", "")
+	str = strings.Replace(str, "\t", "", -1)
+	str = strings.Replace(str, " ", "", -1)
 	result, err := base64.StdEncoding.DecodeString(str)
 	if err != nil {
 		// When error happens, take `from_base64("asc")` as an example, we should return NULL.
@@ -3959,7 +3956,6 @@ func (c *weightStringFunctionClass) getFunction(ctx sessionctx.Context, args []E
 	if err != nil {
 		return nil, err
 	}
-	types.SetBinChsClnFlag(bf.tp)
 	var sig builtinFunc
 	if padding == weightStringPaddingNull {
 		sig = &builtinWeightStringNullSig{bf}

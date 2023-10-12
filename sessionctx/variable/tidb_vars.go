@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/paging"
 	"github.com/pingcap/tidb/util/size"
-	"github.com/pingcap/tidb/util/tiflash"
 	"github.com/pingcap/tidb/util/tiflashcompute"
 	"go.uber.org/atomic"
 )
@@ -70,8 +69,6 @@ const (
 
 	// TiDBOptEnable3StageMultiDistinctAgg is used to indicate whether to plan and execute the multi distinct agg in 3 stages
 	TiDBOptEnable3StageMultiDistinctAgg = "tidb_opt_enable_three_stage_multi_distinct_agg"
-
-	TiDBOptExplainNoEvaledSubQuery = "tidb_opt_enable_non_eval_scalar_subquery"
 
 	// TiDBBCJThresholdSize is used to limit the size of small table for mpp broadcast join.
 	// Its unit is bytes, if the size of small table is larger than it, we will not use bcj.
@@ -277,10 +274,6 @@ const (
 
 	// TiDBUseAlloc indicates whether the last statement used chunk alloc
 	TiDBUseAlloc = "last_sql_use_alloc"
-
-	// TiDBExplicitRequestSourceType indicates the source of the request, it's a complement of RequestSourceType.
-	// The value maybe "lightning", "br", "dumpling" etc.
-	TiDBExplicitRequestSourceType = "tidb_request_source_type"
 )
 
 // TiDB system variable names that both in session and global scope.
@@ -380,11 +373,6 @@ const (
 	// Value set to `false` means never use mpp.
 	TiDBAllowMPPExecution = "tidb_allow_mpp"
 
-	// TiDBAllowTiFlashCop means we only use MPP mode to query data.
-	// Default value is `true`, means to be determined by the optimizer.
-	// Value set to `false` means we may fall back to TiFlash cop plan if possible.
-	TiDBAllowTiFlashCop = "tidb_allow_tiflash_cop"
-
 	// TiDBHashExchangeWithNewCollation means if hash exchange is supported when new collation is on.
 	// Default value is `true`, means support hash exchange when new collation is on.
 	// Value set to `false` means not support hash exchange when new collation is on.
@@ -409,12 +397,6 @@ const (
 
 	// TiDBMaxBytesBeforeTiFlashExternalSort is the maximum bytes used by a TiFlash sort/TopN before spill to disk
 	TiDBMaxBytesBeforeTiFlashExternalSort = "tidb_max_bytes_before_tiflash_external_sort"
-
-	// TiFlashMemQuotaQueryPerNode is the maximum bytes used by a TiFlash Query on each TiFlash node
-	TiFlashMemQuotaQueryPerNode = "tiflash_mem_quota_query_per_node"
-
-	// TiFlashQuerySpillRatio is the threshold that TiFlash will trigger auto spill when the memory usage is above this percentage
-	TiFlashQuerySpillRatio = "tiflash_query_spill_ratio"
 
 	// TiDBMPPStoreFailTTL is the unavailable time when a store is detected failed. During that time, tidb will not send any task to
 	// TiFlash even though the failed TiFlash node has been recovered.
@@ -558,9 +540,6 @@ const (
 
 	// TiDBExpensiveQueryTimeThreshold indicates the time threshold of expensive query.
 	TiDBExpensiveQueryTimeThreshold = "tidb_expensive_query_time_threshold"
-
-	// TiDBExpensiveTxnTimeThreshold indicates the time threshold of expensive transaction.
-	TiDBExpensiveTxnTimeThreshold = "tidb_expensive_txn_time_threshold"
 
 	// TiDBEnableIndexMerge indicates to generate IndexMergePath.
 	TiDBEnableIndexMerge = "tidb_enable_index_merge"
@@ -885,13 +864,8 @@ const (
 	// TiDBOptOrderingIdxSelThresh is the threshold for optimizer to consider the ordering index.
 	TiDBOptOrderingIdxSelThresh = "tidb_opt_ordering_index_selectivity_threshold"
 
-	// TiDBOptEnableMPPSharedCTEExecution indicates whehter the optimizer try to build shared CTE scan during MPP execution.
-	TiDBOptEnableMPPSharedCTEExecution = "tidb_opt_enable_mpp_shared_cte_execution"
 	// TiDBOptFixControl makes the user able to control some details of the optimizer behavior.
 	TiDBOptFixControl = "tidb_opt_fix_control"
-
-	// TiFlashReplicaRead is used to set the policy of TiFlash replica read when the query needs the TiFlash engine.
-	TiFlashReplicaRead = "tiflash_replica_read"
 
 	// TiDBLockUnchangedKeys indicates whether to lock duplicate keys in INSERT IGNORE and REPLACE statements,
 	// or unchanged unique keys in UPDATE statements, see PR #42210 and #42713
@@ -903,15 +877,8 @@ const (
 	// TiDBAnalyzeSkipColumnTypes indicates the column types whose statistics would not be collected when executing the ANALYZE command.
 	TiDBAnalyzeSkipColumnTypes = "tidb_analyze_skip_column_types"
 
-	// TiDBEnableCheckConstraint indicates whether to enable check constraint feature.
-	TiDBEnableCheckConstraint = "tidb_enable_check_constraint"
-
 	// TiDBOptEnableHashJoin indicates whether to enable hash join.
 	TiDBOptEnableHashJoin = "tidb_opt_enable_hash_join"
-
-	// TiDBOptObjective indicates whether the optimizer should be more stable, predictable or more aggressive.
-	// Please see comments of SessionVars.OptObjective for details.
-	TiDBOptObjective = "tidb_opt_objective"
 )
 
 // TiDB vars that have only global scope
@@ -980,8 +947,6 @@ const (
 	TiDBDDLEnableFastReorg = "tidb_ddl_enable_fast_reorg"
 	// TiDBDDLDiskQuota used to set disk quota for lightning add index.
 	TiDBDDLDiskQuota = "tidb_ddl_disk_quota"
-	// TiDBCloudStorageURI used to set a cloud storage uri for ddl add index and import into.
-	TiDBCloudStorageURI = "tidb_cloud_storage_uri"
 	// TiDBAutoBuildStatsConcurrency is used to set the build concurrency of auto-analyze.
 	TiDBAutoBuildStatsConcurrency = "tidb_auto_build_stats_concurrency"
 	// TiDBSysProcScanConcurrency is used to set the scan concurrency of for backend system processes, like auto-analyze.
@@ -996,10 +961,6 @@ const (
 	TiDBEnableGOGCTuner = "tidb_enable_gogc_tuner"
 	// TiDBGOGCTunerThreshold is to control the threshold of GOGC tuner.
 	TiDBGOGCTunerThreshold = "tidb_gogc_tuner_threshold"
-	// TiDBGOGCTunerMaxValue is the max value of GOGC that GOGC tuner can change to.
-	TiDBGOGCTunerMaxValue = "tidb_gogc_tuner_max_value"
-	// TiDBGOGCTunerMinValue is the min value of GOGC that GOGC tuner can change to.
-	TiDBGOGCTunerMinValue = "tidb_gogc_tuner_min_value"
 	// TiDBExternalTS is the ts to read through when the `TiDBEnableExternalTsRead` is on
 	TiDBExternalTS = "tidb_external_ts"
 	// TiDBTTLJobEnable is used to enable/disable scheduling ttl job
@@ -1089,23 +1050,6 @@ const (
 	AuthenticationLDAPSimpleInitPoolSize = "authentication_ldap_simple_init_pool_size"
 	// AuthenticationLDAPSimpleMaxPoolSize defines the max size of connection pool to LDAP server for SASL plugin.
 	AuthenticationLDAPSimpleMaxPoolSize = "authentication_ldap_simple_max_pool_size"
-	// TiDBRuntimeFilterTypeName the value of is string, a runtime filter type list split by ",", such as: "IN,MIN_MAX"
-	TiDBRuntimeFilterTypeName = "tidb_runtime_filter_type"
-	// TiDBRuntimeFilterModeName the mode of runtime filter, such as "OFF", "LOCAL"
-	TiDBRuntimeFilterModeName = "tidb_runtime_filter_mode"
-	// TiDBSkipMissingPartitionStats controls how to handle missing partition stats when merging partition stats to global stats.
-	// When set to true, skip missing partition stats and continue to merge other partition stats to global stats.
-	// When set to false, give up merging partition stats to global stats.
-	TiDBSkipMissingPartitionStats = "tidb_skip_missing_partition_stats"
-	// TiDBSessionAlias indicates the alias of a session which is used for tracing.
-	TiDBSessionAlias = "tidb_session_alias"
-	// TiDBServiceScope indicates the role for tidb for distributed task framework.
-	TiDBServiceScope = "tidb_service_scope"
-	// TiDBSchemaVersionCacheLimit defines the capacity size of domain infoSchema cache.
-	TiDBSchemaVersionCacheLimit = "tidb_schema_version_cache_limit"
-	// TiDBEnableTiFlashPipelineMode means if we should use pipeline model to execute query or not in tiflash.
-	// It's deprecated and setting it will not have any effect.
-	TiDBEnableTiFlashPipelineMode = "tidb_enable_tiflash_pipeline_model"
 )
 
 // TiDB intentional limits
@@ -1186,16 +1130,12 @@ const (
 	DefTiDBEnableNAAJ                              = true
 	DefTiDBAllowBatchCop                           = 1
 	DefTiDBAllowMPPExecution                       = true
-	DefTiDBAllowTiFlashCop                         = false
 	DefTiDBHashExchangeWithNewCollation            = true
 	DefTiDBEnforceMPPExecution                     = false
 	DefTiFlashMaxThreads                           = -1
 	DefTiFlashMaxBytesBeforeExternalJoin           = -1
 	DefTiFlashMaxBytesBeforeExternalGroupBy        = -1
 	DefTiFlashMaxBytesBeforeExternalSort           = -1
-	DefTiFlashMemQuotaQueryPerNode                 = 0
-	DefTiFlashQuerySpillRatio                      = 0.7
-	DefTiDBEnableTiFlashPipelineMode               = true
 	DefTiDBMPPStoreFailTTL                         = "60s"
 	DefTiDBTxnMode                                 = ""
 	DefTiDBRowFormatV1                             = 1
@@ -1221,8 +1161,7 @@ const (
 	DefTiDBDDLSlowOprThreshold                     = 300
 	DefTiDBUseFastAnalyze                          = false
 	DefTiDBSkipIsolationLevelCheck                 = false
-	DefTiDBExpensiveQueryTimeThreshold             = 60      // 60s
-	DefTiDBExpensiveTxnTimeThreshold               = 60 * 10 // 10 minutes
+	DefTiDBExpensiveQueryTimeThreshold             = 60 // 60s
 	DefTiDBScatterRegion                           = false
 	DefTiDBWaitSplitRegionFinish                   = true
 	DefWaitSplitRegionTimeout                      = 300 // 300s
@@ -1289,11 +1228,10 @@ const (
 	DefTiDBIgnorePreparedCacheCloseStmt            = false
 	DefTiDBBatchPendingTiFlashCount                = 4000
 	DefRCReadCheckTS                               = false
-	DefTiDBRemoveOrderbyInSubquery                 = true
+	DefTiDBRemoveOrderbyInSubquery                 = false
 	DefTiDBSkewDistinctAgg                         = false
 	DefTiDB3StageDistinctAgg                       = true
 	DefTiDB3StageMultiDistinctAgg                  = false
-	DefTiDBOptExplainEvaledSubquery                = false
 	DefTiDBReadStaleness                           = 0
 	DefTiDBGCMaxWaitTime                           = 24 * 60 * 60
 	DefMaxAllowedPacket                     uint64 = 67108864
@@ -1341,7 +1279,6 @@ const (
 	MaxDDLReorgBatchSize                  int32  = 10240
 	MinDDLReorgBatchSize                  int32  = 32
 	MinExpensiveQueryTimeThreshold        uint64 = 10 // 10s
-	MinExpensiveTxnTimeThreshold          uint64 = 60 // 60s
 	DefTiDBAutoBuildStatsConcurrency             = 1
 	DefTiDBSysProcScanConcurrency                = 1
 	DefTiDBRcWriteCheckTs                        = false
@@ -1356,14 +1293,12 @@ const (
 	DefTiDBEnableGOGCTuner                       = true
 	// DefTiDBGOGCTunerThreshold is to limit TiDBGOGCTunerThreshold.
 	DefTiDBGOGCTunerThreshold                 float64 = 0.6
-	DefTiDBGOGCMaxValue                               = 500
-	DefTiDBGOGCMinValue                               = 100
 	DefTiDBOptPrefixIndexSingleScan                   = true
 	DefTiDBExternalTS                                 = 0
 	DefTiDBEnableExternalTSRead                       = false
 	DefTiDBEnableReusechunk                           = true
 	DefTiDBUseAlloc                                   = false
-	DefTiDBEnablePlanReplayerCapture                  = true
+	DefTiDBEnablePlanReplayerCapture                  = false
 	DefTiDBIndexMergeIntersectionConcurrency          = ConcurrencyUnset
 	DefTiDBTTLJobEnable                               = true
 	DefTiDBTTLScanBatchSize                           = 500
@@ -1392,7 +1327,6 @@ const (
 	DefTiDBLoadBasedReplicaReadThreshold              = time.Second
 	DefTiDBOptEnableLateMaterialization               = true
 	DefTiDBOptOrderingIdxSelThresh                    = 0.0
-	DefTiDBOptEnableMPPSharedCTEExecution             = false
 	DefTiDBPlanCacheInvalidationOnFreshStats          = true
 	DefTiDBEnableRowLevelChecksum                     = false
 	DefAuthenticationLDAPSASLAuthMethodName           = "SCRAM-SHA-1"
@@ -1407,16 +1341,11 @@ const (
 	DefAuthenticationLDAPSimpleUserSearchAttr         = "uid"
 	DefAuthenticationLDAPSimpleInitPoolSize           = 10
 	DefAuthenticationLDAPSimpleMaxPoolSize            = 1000
-	DefTiFlashReplicaRead                             = tiflash.AllReplicaStr
 	DefTiDBEnableFastCheckTable                       = true
 	DefRuntimeFilterType                              = "IN"
 	DefRuntimeFilterMode                              = "OFF"
 	DefTiDBLockUnchangedKeys                          = true
-	DefTiDBEnableCheckConstraint                      = false
-	DefTiDBSkipMissingPartitionStats                  = true
 	DefTiDBOptEnableHashJoin                          = true
-	DefTiDBOptObjective                               = OptObjectiveModerate
-	DefTiDBSchemaVersionCacheLimit                    = 16
 )
 
 // Process global variables.
@@ -1439,7 +1368,6 @@ var (
 	ForcePriority                        = int32(DefTiDBForcePriority)
 	MaxOfMaxAllowedPacket         uint64 = 1073741824
 	ExpensiveQueryTimeThreshold   uint64 = DefTiDBExpensiveQueryTimeThreshold
-	ExpensiveTxnTimeThreshold     uint64 = DefTiDBExpensiveTxnTimeThreshold
 	MemoryUsageAlarmRatio                = atomic.NewFloat64(DefMemoryUsageAlarmRatio)
 	MemoryUsageAlarmKeepRecordNum        = atomic.NewInt64(DefMemoryUsageAlarmKeepRecordNum)
 	EnableLocalTxn                       = atomic.NewBool(DefTiDBEnableLocalTxn)
@@ -1509,13 +1437,7 @@ var (
 	TTLRunningTasks                 = atomic.NewInt32(DefTiDBTTLRunningTasks)
 	// always set the default value to false because the resource control in kv-client is not inited
 	// It will be initialized to the right value after the first call of `rebuildSysVarCache`
-	EnableResourceControl     = atomic.NewBool(false)
-	EnableCheckConstraint     = atomic.NewBool(DefTiDBEnableCheckConstraint)
-	SkipMissingPartitionStats = atomic.NewBool(DefTiDBSkipMissingPartitionStats)
-	TiFlashEnablePipelineMode = atomic.NewBool(DefTiDBEnableTiFlashPipelineMode)
-	ServiceScope              = atomic.NewString("")
-	SchemaVersionCacheLimit   = atomic.NewInt64(DefTiDBSchemaVersionCacheLimit)
-	CloudStorageURI           = atomic.NewString("")
+	EnableResourceControl = atomic.NewBool(false)
 )
 
 var (
@@ -1524,7 +1446,7 @@ var (
 	// GetMemQuotaAnalyze is the func registered by global/subglobal tracker to get memory quota.
 	GetMemQuotaAnalyze func() int64 = nil
 	// SetStatsCacheCapacity is the func registered by domain to set statsCache memory quota.
-	SetStatsCacheCapacity atomic.Pointer[func(int64)]
+	SetStatsCacheCapacity atomic.Value
 	// SetPDClientDynamicOption is the func registered by domain
 	SetPDClientDynamicOption atomic.Pointer[func(string, string)]
 	// SwitchMDL is the func registered by DDL to switch MDL.
@@ -1539,8 +1461,6 @@ var (
 	GetExternalTimestamp func(ctx context.Context) (uint64, error)
 	// SetGlobalResourceControl is the func registered by domain to set cluster resource control.
 	SetGlobalResourceControl atomic.Pointer[func(bool)]
-	// ValidateCloudStorageURI validates the cloud storage URI.
-	ValidateCloudStorageURI func(ctx context.Context, uri string) error
 )
 
 // Hooks functions for Cluster Resource Control.

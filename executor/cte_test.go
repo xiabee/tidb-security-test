@@ -17,7 +17,6 @@ package executor_test
 import (
 	"fmt"
 	"math/rand"
-	"slices"
 	"testing"
 
 	"github.com/pingcap/failpoint"
@@ -25,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 )
 
 func TestBasicCTE(t *testing.T) {

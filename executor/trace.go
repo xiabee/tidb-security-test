@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -31,7 +30,6 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
@@ -45,13 +43,14 @@ import (
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"sourcegraph.com/sourcegraph/appdash"
 	traceImpl "sourcegraph.com/sourcegraph/appdash/opentracing"
 )
 
 // TraceExec represents a root executor of trace query.
 type TraceExec struct {
-	exec.BaseExecutor
+	baseExecutor
 	// CollectedSpans collects all span during execution. Span is appended via
 	// callback method which passes into tracer implementation.
 	CollectedSpans []basictracer.RawSpan
@@ -74,26 +73,26 @@ func (e *TraceExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if e.exhausted {
 		return nil
 	}
-	se, ok := e.Ctx().(sqlexec.SQLExecutor)
+	se, ok := e.ctx.(sqlexec.SQLExecutor)
 	if !ok {
 		e.exhausted = true
 		return nil
 	}
 
 	// For audit log plugin to set the correct statement.
-	stmtCtx := e.Ctx().GetSessionVars().StmtCtx
+	stmtCtx := e.ctx.GetSessionVars().StmtCtx
 	defer func() {
-		e.Ctx().GetSessionVars().StmtCtx = stmtCtx
+		e.ctx.GetSessionVars().StmtCtx = stmtCtx
 	}()
 
 	if e.optimizerTrace {
 		switch e.optimizerTraceTarget {
 		case core.TracePlanTargetEstimation:
-			return e.nextOptimizerCEPlanTrace(ctx, e.Ctx(), req)
+			return e.nextOptimizerCEPlanTrace(ctx, e.ctx, req)
 		case core.TracePlanTargetDebug:
-			return e.nextOptimizerDebugPlanTrace(ctx, e.Ctx(), req)
+			return e.nextOptimizerDebugPlanTrace(ctx, e.ctx, req)
 		default:
-			return e.nextOptimizerPlanTrace(ctx, e.Ctx(), req)
+			return e.nextOptimizerPlanTrace(ctx, e.ctx, req)
 		}
 	}
 
@@ -272,7 +271,7 @@ func (e *TraceExec) nextRowJSON(ctx context.Context, se sqlexec.SQLExecutor, req
 func (e *TraceExec) executeChild(ctx context.Context, se sqlexec.SQLExecutor) {
 	// For audit log plugin to log the statement correctly.
 	// Should be logged as 'explain ...', instead of the executed SQL.
-	vars := e.Ctx().GetSessionVars()
+	vars := e.ctx.GetSessionVars()
 	origin := vars.InRestrictedSQL
 	vars.InRestrictedSQL = true
 	defer func() {
@@ -288,12 +287,12 @@ func (e *TraceExec) executeChild(ctx context.Context, se sqlexec.SQLExecutor) {
 		logutil.Eventf(ctx, "execute with error(%d): %s", errCode, err.Error())
 	}
 	if rs != nil {
-		drainRecordSet(ctx, e.Ctx(), rs)
+		drainRecordSet(ctx, e.ctx, rs)
 		if err = rs.Close(); err != nil {
 			logutil.Logger(ctx).Error("run trace close result with error", zap.Error(err))
 		}
 	}
-	logutil.Eventf(ctx, "execute done, modify row: %d", e.Ctx().GetSessionVars().StmtCtx.AffectedRows())
+	logutil.Eventf(ctx, "execute done, modify row: %d", e.ctx.GetSessionVars().StmtCtx.AffectedRows())
 }
 
 func drainRecordSet(ctx context.Context, sctx sessionctx.Context, rs sqlexec.RecordSet) {
@@ -345,7 +344,7 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, chk *chunk.Chunk) {
 	chk.AppendString(2, duration.String())
 
 	// Sort events by their start time
-	slices.SortFunc(t.Sub, func(i, j *appdash.Trace) int {
+	slices.SortFunc(t.Sub, func(i, j *appdash.Trace) bool {
 		var istart, jstart time.Time
 		if ievent, err := i.TimespanEvent(); err == nil {
 			istart = ievent.Start()
@@ -353,7 +352,7 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, chk *chunk.Chunk) {
 		if jevent, err := j.TimespanEvent(); err == nil {
 			jstart = jevent.Start()
 		}
-		return istart.Compare(jstart)
+		return istart.Before(jstart)
 	})
 
 	for i, sp := range t.Sub {

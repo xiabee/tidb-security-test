@@ -20,18 +20,17 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/util/chunk"
 )
 
-var _ exec.Executor = &LoadStatsExec{}
+var _ Executor = &LoadStatsExec{}
 
 // LoadStatsExec represents a load statistic executor.
 type LoadStatsExec struct {
-	exec.BaseExecutor
+	baseExecutor
 	info *LoadStatsInfo
 }
 
@@ -45,7 +44,7 @@ type LoadStatsInfo struct {
 type loadStatsVarKeyType int
 
 // String defines a Stringer function for debugging and pretty printing.
-func (loadStatsVarKeyType) String() string {
+func (k loadStatsVarKeyType) String() string {
 	return "load_stats_var"
 }
 
@@ -54,26 +53,26 @@ const LoadStatsVarKey loadStatsVarKeyType = 0
 
 // Next implements the Executor Next interface.
 func (e *LoadStatsExec) Next(_ context.Context, req *chunk.Chunk) error {
-	req.GrowAndReset(e.MaxChunkSize())
+	req.GrowAndReset(e.maxChunkSize)
 	if len(e.info.Path) == 0 {
 		return errors.New("Load Stats: file path is empty")
 	}
-	val := e.Ctx().Value(LoadStatsVarKey)
+	val := e.ctx.Value(LoadStatsVarKey)
 	if val != nil {
-		e.Ctx().SetValue(LoadStatsVarKey, nil)
+		e.ctx.SetValue(LoadStatsVarKey, nil)
 		return errors.New("Load Stats: previous load stats option isn't closed normally")
 	}
-	e.Ctx().SetValue(LoadStatsVarKey, e.info)
+	e.ctx.SetValue(LoadStatsVarKey, e.info)
 	return nil
 }
 
 // Close implements the Executor Close interface.
-func (*LoadStatsExec) Close() error {
+func (e *LoadStatsExec) Close() error {
 	return nil
 }
 
 // Open implements the Executor Open interface.
-func (*LoadStatsExec) Open(context.Context) error {
+func (e *LoadStatsExec) Open(_ context.Context) error {
 	return nil
 }
 

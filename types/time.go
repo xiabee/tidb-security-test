@@ -35,13 +35,12 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/parser"
-	"go.uber.org/zap"
 )
 
 // Time format without fractional seconds precision.
 const (
-	DateFormat = gotime.DateOnly
-	TimeFormat = gotime.DateTime
+	DateFormat = "2006-01-02"
+	TimeFormat = "2006-01-02 15:04:05"
 	// TimeFSPFormat is time format with fractional seconds precision.
 	TimeFSPFormat = "2006-01-02 15:04:05.000000"
 	// UTCTimeFormat is used to parse and format gotime.
@@ -439,7 +438,7 @@ func (t Time) FillNumber(dec *MyDecimal) {
 
 	s, err := t.DateFormat(tfStr)
 	if err != nil {
-		logutil.BgLogger().Error("never happen because we've control the format!", zap.String("category", "fatal"))
+		logutil.BgLogger().Error("[fatal] never happen because we've control the format!")
 	}
 
 	fsp := t.Fsp()
@@ -772,7 +771,7 @@ func ParseDateFormat(format string) []string {
 
 	start := 0
 	// Initialize `seps` with capacity of 6. The input `format` is typically
-	// a date time of the form time.DateTime, which has 6 numeric parts
+	// a date time of the form "2006-01-02 15:04:05", which has 6 numeric parts
 	// (the fractional second part is usually removed by `splitDateTime`).
 	// Setting `seps`'s capacity to 6 avoids reallocation in this common case.
 	seps := make([]string, 0, 6)
@@ -1646,19 +1645,19 @@ func matchHHMMSSDelimited(str string, requireColon bool) ([3]int, string, error)
 	hhmmss[0] = hour
 
 	for i := 1; i < 3; i++ {
-		remain, err := matchColon(rest)
-		if err != nil {
+		if remain, err := matchColon(rest); err == nil {
+			num, remain, err := parser.Number(remain)
+			if err != nil {
+				return [3]int{}, str, err
+			}
+			hhmmss[i] = num
+			rest = remain
+		} else {
 			if i == 1 && requireColon {
 				return [3]int{}, str, err
 			}
 			break
 		}
-		num, remain, err := parser.Number(remain)
-		if err != nil {
-			return [3]int{}, str, err
-		}
-		hhmmss[i] = num
-		rest = remain
 	}
 
 	return hhmmss, rest, nil
@@ -3482,10 +3481,11 @@ func DateTimeIsOverflow(sc *stmtctx.StatementContext, date Time) (bool, error) {
 func skipAllNums(_ *CoreTime, input string, _ map[string]int) (string, bool) {
 	retIdx := 0
 	for i, ch := range input {
-		if !unicode.IsNumber(ch) {
+		if unicode.IsNumber(ch) {
+			retIdx = i + 1
+		} else {
 			break
 		}
-		retIdx = i + 1
 	}
 	return input[retIdx:], true
 }
@@ -3493,10 +3493,11 @@ func skipAllNums(_ *CoreTime, input string, _ map[string]int) (string, bool) {
 func skipAllPunct(_ *CoreTime, input string, _ map[string]int) (string, bool) {
 	retIdx := 0
 	for i, ch := range input {
-		if !unicode.IsPunct(ch) {
+		if unicode.IsPunct(ch) {
+			retIdx = i + 1
+		} else {
 			break
 		}
-		retIdx = i + 1
 	}
 	return input[retIdx:], true
 }
@@ -3504,10 +3505,11 @@ func skipAllPunct(_ *CoreTime, input string, _ map[string]int) (string, bool) {
 func skipAllAlpha(_ *CoreTime, input string, _ map[string]int) (string, bool) {
 	retIdx := 0
 	for i, ch := range input {
-		if !unicode.IsLetter(ch) {
+		if unicode.IsLetter(ch) {
+			retIdx = i + 1
+		} else {
 			break
 		}
-		retIdx = i + 1
 	}
 	return input[retIdx:], true
 }

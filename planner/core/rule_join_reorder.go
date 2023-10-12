@@ -18,13 +18,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/plancodec"
 	"github.com/pingcap/tidb/util/tracing"
+	"golang.org/x/exp/slices"
 )
 
 // extractJoinGroup extracts all the join nodes connected with continuous
@@ -233,10 +233,6 @@ func (s *joinReOrderSolver) optimize(_ context.Context, p LogicalPlan, opt *logi
 
 // optimizeRecursive recursively collects join groups and applies join reorder algorithm for each group.
 func (s *joinReOrderSolver) optimizeRecursive(ctx sessionctx.Context, p LogicalPlan, tracer *joinReorderTrace) (LogicalPlan, error) {
-	if _, ok := p.(*LogicalCTE); ok {
-		return p, nil
-	}
-
 	var err error
 
 	result := extractJoinGroup(p)
@@ -481,7 +477,7 @@ func (s *baseSingleGroupJoinOrderSolver) generateJoinOrderNode(joinNodePlans []L
 
 // baseNodeCumCost calculate the cumulative cost of the node in the join group.
 func (s *baseSingleGroupJoinOrderSolver) baseNodeCumCost(groupNode LogicalPlan) float64 {
-	cost := groupNode.StatsInfo().RowCount
+	cost := groupNode.statsInfo().RowCount
 	for _, child := range groupNode.Children() {
 		cost += s.baseNodeCumCost(child)
 	}
@@ -647,8 +643,8 @@ func (s *baseSingleGroupJoinOrderSolver) setNewJoinWithHint(newJoin *LogicalJoin
 }
 
 // calcJoinCumCost calculates the cumulative cost of the join node.
-func (*baseSingleGroupJoinOrderSolver) calcJoinCumCost(join LogicalPlan, lNode, rNode *jrNode) float64 {
-	return join.StatsInfo().RowCount + lNode.cumCost + rNode.cumCost
+func (s *baseSingleGroupJoinOrderSolver) calcJoinCumCost(join LogicalPlan, lNode, rNode *jrNode) float64 {
+	return join.statsInfo().RowCount + lNode.cumCost + rNode.cumCost
 }
 
 func (*joinReOrderSolver) name() string {
@@ -673,7 +669,7 @@ func appendJoinReorderTraceStep(tracer *joinReorderTrace, plan LogicalPlan, opt 
 			if i > 0 {
 				buffer.WriteString(",")
 			}
-			fmt.Fprintf(buffer, "[%s, cost:%v]", join, tracer.cost[join])
+			buffer.WriteString(fmt.Sprintf("[%s, cost:%v]", join, tracer.cost[join]))
 		}
 		buffer.WriteString("]")
 		return buffer.String()
@@ -776,16 +772,16 @@ func (t *joinReorderTrace) traceJoinReorder(p LogicalPlan) {
 		return
 	}
 	if len(t.initial) > 0 {
-		t.final = allJoinOrderToString(extractJoinAndDataSource(p.BuildPlanTrace()))
+		t.final = allJoinOrderToString(extractJoinAndDataSource(p.buildPlanTrace()))
 		return
 	}
-	t.initial = allJoinOrderToString(extractJoinAndDataSource(p.BuildPlanTrace()))
+	t.initial = allJoinOrderToString(extractJoinAndDataSource(p.buildPlanTrace()))
 }
 
 func (t *joinReorderTrace) appendLogicalJoinCost(join LogicalPlan, cost float64) {
 	if t == nil || t.opt == nil || t.opt.tracer == nil {
 		return
 	}
-	joinMapKey := allJoinOrderToString(extractJoinAndDataSource(join.BuildPlanTrace()))
+	joinMapKey := allJoinOrderToString(extractJoinAndDataSource(join.buildPlanTrace()))
 	t.cost[joinMapKey] = cost
 }

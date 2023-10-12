@@ -46,7 +46,6 @@ import (
 	"github.com/pingcap/tidb/parser/opcode"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
@@ -65,7 +64,6 @@ import (
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/tikv/client-go/v2/tikv"
-	kvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
 
@@ -91,7 +89,6 @@ func checkAddPartition(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.P
 	return tblInfo, partInfo, []model.PartitionDefinition{}, nil
 }
 
-// TODO: Move this into reorganize partition!
 func (w *worker) onAddTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	// Handle the rolling back job
 	if job.IsRollingback() {
@@ -218,8 +215,6 @@ func (w *worker) onAddTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (v
 		// For normal and replica finished table, move the `addingDefinitions` into `Definitions`.
 		updatePartitionInfo(tblInfo)
 
-		preSplitAndScatter(w.sess.Context, d.store, tblInfo, addingDefinitions)
-
 		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -341,63 +336,36 @@ func rollbackAddingPartitionInfo(tblInfo *model.TableInfo) ([]int64, []string, [
 	return physicalTableIDs, partNames, rollbackBundles
 }
 
-// Check if current table already contains DEFAULT list partition
-func checkAddListPartitions(tblInfo *model.TableInfo) error {
-	for i := range tblInfo.Partition.Definitions {
-		for j := range tblInfo.Partition.Definitions[i].InValues {
-			for _, val := range tblInfo.Partition.Definitions[i].InValues[j] {
-				if val == "DEFAULT" { // should already be normalized
-					return dbterror.ErrGeneralUnsupportedDDL.GenWithStackByArgs("ADD List partition, already contains DEFAULT partition. Please use REORGANIZE PARTITION instead")
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// checkAddPartitionValue check add Partition Values,
-// For Range: values less than value must be strictly increasing for each partition.
-// For List: if a Default partition exists,
-//
-//	no ADD partition can be allowed
-//	(needs reorganize partition instead).
+// checkAddPartitionValue values less than value must be strictly increasing for each partition.
 func checkAddPartitionValue(meta *model.TableInfo, part *model.PartitionInfo) error {
-	switch meta.Partition.Type {
-	case model.PartitionTypeRange:
-		if len(meta.Partition.Columns) == 0 {
-			newDefs, oldDefs := part.Definitions, meta.Partition.Definitions
-			rangeValue := oldDefs[len(oldDefs)-1].LessThan[0]
-			if strings.EqualFold(rangeValue, "MAXVALUE") {
+	if meta.Partition.Type == model.PartitionTypeRange && len(meta.Partition.Columns) == 0 {
+		newDefs, oldDefs := part.Definitions, meta.Partition.Definitions
+		rangeValue := oldDefs[len(oldDefs)-1].LessThan[0]
+		if strings.EqualFold(rangeValue, "MAXVALUE") {
+			return errors.Trace(dbterror.ErrPartitionMaxvalue)
+		}
+
+		currentRangeValue, err := strconv.Atoi(rangeValue)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		for i := 0; i < len(newDefs); i++ {
+			ifMaxvalue := strings.EqualFold(newDefs[i].LessThan[0], "MAXVALUE")
+			if ifMaxvalue && i == len(newDefs)-1 {
+				return nil
+			} else if ifMaxvalue && i != len(newDefs)-1 {
 				return errors.Trace(dbterror.ErrPartitionMaxvalue)
 			}
 
-			currentRangeValue, err := strconv.Atoi(rangeValue)
+			nextRangeValue, err := strconv.Atoi(newDefs[i].LessThan[0])
 			if err != nil {
 				return errors.Trace(err)
 			}
-
-			for i := 0; i < len(newDefs); i++ {
-				ifMaxvalue := strings.EqualFold(newDefs[i].LessThan[0], "MAXVALUE")
-				if ifMaxvalue && i == len(newDefs)-1 {
-					return nil
-				} else if ifMaxvalue && i != len(newDefs)-1 {
-					return errors.Trace(dbterror.ErrPartitionMaxvalue)
-				}
-
-				nextRangeValue, err := strconv.Atoi(newDefs[i].LessThan[0])
-				if err != nil {
-					return errors.Trace(err)
-				}
-				if nextRangeValue <= currentRangeValue {
-					return errors.Trace(dbterror.ErrRangeNotIncreasing)
-				}
-				currentRangeValue = nextRangeValue
+			if nextRangeValue <= currentRangeValue {
+				return errors.Trace(dbterror.ErrRangeNotIncreasing)
 			}
-		}
-	case model.PartitionTypeList:
-		err := checkAddListPartitions(meta)
-		if err != nil {
-			return err
+			currentRangeValue = nextRangeValue
 		}
 	}
 	return nil
@@ -407,11 +375,6 @@ func checkPartitionReplica(replicaCount uint64, addingDefinitions []model.Partit
 	failpoint.Inject("mockWaitTiFlashReplica", func(val failpoint.Value) {
 		if val.(bool) {
 			failpoint.Return(true, nil)
-		}
-	})
-	failpoint.Inject("mockWaitTiFlashReplicaOK", func(val failpoint.Value) {
-		if val.(bool) {
-			failpoint.Return(false, nil)
 		}
 	})
 
@@ -454,11 +417,11 @@ func checkPartitionReplica(replicaCount uint64, addingDefinitions []model.Partit
 				continue
 			}
 			needWait = true
-			logutil.BgLogger().Info("partition replicas check failed in replica-only DDL state", zap.String("category", "ddl"), zap.Int64("pID", pd.ID), zap.Uint64("wait region ID", region.Meta.Id), zap.Bool("tiflash peer at least one", tiflashPeerAtLeastOne), zap.Time("check time", time.Now()))
+			logutil.BgLogger().Info("[ddl] partition replicas check failed in replica-only DDL state", zap.Int64("pID", pd.ID), zap.Uint64("wait region ID", region.Meta.Id), zap.Bool("tiflash peer at least one", tiflashPeerAtLeastOne), zap.Time("check time", time.Now()))
 			return needWait, nil
 		}
 	}
-	logutil.BgLogger().Info("partition replicas check ok in replica-only DDL state", zap.String("category", "ddl"))
+	logutil.BgLogger().Info("[ddl] partition replicas check ok in replica-only DDL state")
 	return needWait, nil
 }
 
@@ -482,23 +445,6 @@ func storeHasEngineTiFlashLabel(store *metapb.Store) bool {
 	return false
 }
 
-func checkListPartitions(defs []*ast.PartitionDefinition) error {
-	for _, def := range defs {
-		_, ok := def.Clause.(*ast.PartitionDefinitionClauseIn)
-		if !ok {
-			switch def.Clause.(type) {
-			case *ast.PartitionDefinitionClauseLessThan:
-				return ast.ErrPartitionWrongValues.GenWithStackByArgs("RANGE", "LESS THAN")
-			case *ast.PartitionDefinitionClauseNone:
-				return ast.ErrPartitionRequiresValues.GenWithStackByArgs("LIST", "IN")
-			default:
-				return dbterror.ErrUnsupportedCreatePartition.GenWithStack("Only VALUES IN () is supported for LIST partitioning")
-			}
-		}
-	}
-	return nil
-}
-
 // buildTablePartitionInfo builds partition info and checks for some errors.
 func buildTablePartitionInfo(ctx sessionctx.Context, s *ast.PartitionOptions, tbInfo *model.TableInfo) error {
 	if s == nil {
@@ -513,37 +459,34 @@ func buildTablePartitionInfo(ctx sessionctx.Context, s *ast.PartitionOptions, tb
 	var enable bool
 	switch s.Tp {
 	case model.PartitionTypeRange:
-		enable = true
+		if s.Sub == nil {
+			enable = true
+		}
+	case model.PartitionTypeHash:
+		// Partition by hash is enabled by default.
+		// Note that linear hash is simply ignored, and creates non-linear hash.
+		if s.Linear {
+			ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrUnsupportedCreatePartition.GenWithStack("LINEAR HASH is not supported, using non-linear HASH instead"))
+		}
+		if s.Sub == nil {
+			enable = true
+		}
+	case model.PartitionTypeKey:
+		// Note that linear key is simply ignored, and creates non-linear hash.
+		if s.Linear {
+			ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrUnsupportedCreatePartition.GenWithStack("LINEAR KEY is not supported, using non-linear KEY instead"))
+		}
+		if s.Sub == nil && len(s.ColumnNames) != 0 {
+			enable = true
+		}
 	case model.PartitionTypeList:
 		// Partition by list is enabled only when tidb_enable_list_partition is 'ON'.
 		enable = ctx.GetSessionVars().EnableListTablePartition
-		if enable {
-			err := checkListPartitions(s.Definitions)
-			if err != nil {
-				return err
-			}
-		}
-	case model.PartitionTypeHash, model.PartitionTypeKey:
-		// Partition by hash and key is enabled by default.
-		if s.Sub != nil {
-			// Subpartitioning only allowed with Range or List
-			return ast.ErrSubpartition
-		}
-		// Note that linear hash is simply ignored, and creates non-linear hash/key.
-		if s.Linear {
-			ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrUnsupportedCreatePartition.GenWithStack(fmt.Sprintf("LINEAR %s is not supported, using non-linear %s instead", s.Tp.String(), s.Tp.String())))
-		}
-		if s.Tp == model.PartitionTypeHash || len(s.ColumnNames) != 0 {
-			enable = true
-		}
 	}
 
 	if !enable {
 		ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrUnsupportedCreatePartition.GenWithStack(fmt.Sprintf("Unsupported partition type %v, treat as normal table", s.Tp)))
 		return nil
-	}
-	if s.Sub != nil {
-		ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrUnsupportedCreatePartition.GenWithStack(fmt.Sprintf("Unsupported subpartitioning, only using %v partitioning", s.Tp)))
 	}
 
 	pi := &model.PartitionInfo{
@@ -1157,22 +1100,12 @@ func GeneratePartDefsFromInterval(ctx sessionctx.Context, tp ast.AlterTableType,
 // buildPartitionDefinitionsInfo build partition definitions info without assign partition id. tbInfo will be constant
 func buildPartitionDefinitionsInfo(ctx sessionctx.Context, defs []*ast.PartitionDefinition, tbInfo *model.TableInfo, numParts uint64) (partitions []model.PartitionDefinition, err error) {
 	switch tbInfo.Partition.Type {
-	case model.PartitionTypeNone:
-		if len(defs) != 1 {
-			return nil, dbterror.ErrUnsupportedPartitionType
-		}
-		partitions = []model.PartitionDefinition{{Name: defs[0].Name}}
-		if comment, set := defs[0].Comment(); set {
-			partitions[0].Comment = comment
-		}
 	case model.PartitionTypeRange:
 		partitions, err = buildRangePartitionDefinitions(ctx, defs, tbInfo)
 	case model.PartitionTypeHash, model.PartitionTypeKey:
 		partitions, err = buildHashPartitionDefinitions(ctx, defs, tbInfo, numParts)
 	case model.PartitionTypeList:
 		partitions, err = buildListPartitionDefinitions(ctx, defs, tbInfo)
-	default:
-		err = dbterror.ErrUnsupportedPartitionType
 	}
 
 	if err != nil {
@@ -1190,7 +1123,8 @@ func setPartitionPlacementFromOptions(partition *model.PartitionDefinition, opti
 	// append p2 range to the coverage of table t's rules. This mechanism is good for cascading change
 	// when policy x is altered.
 	for _, opt := range options {
-		if opt.Tp == ast.TableOptionPlacementPolicy {
+		switch opt.Tp {
+		case ast.TableOptionPlacementPolicy:
 			partition.PlacementPolicyRef = &model.PolicyRefInfo{
 				Name: model.NewCIStr(opt.StrValue),
 			}
@@ -1407,12 +1341,6 @@ func checkPartitionValuesIsInt(ctx sessionctx.Context, defName interface{}, expr
 		if _, ok := exp.(*ast.MaxValueExpr); ok {
 			continue
 		}
-		if d, ok := exp.(*ast.DefaultExpr); ok {
-			if d.Name != nil {
-				return dbterror.ErrPartitionConstDomain.GenWithStackByArgs()
-			}
-			continue
-		}
 		val, err := expression.EvalAstExpr(ctx, exp)
 		if err != nil {
 			return err
@@ -1466,18 +1394,17 @@ func checkAddPartitionNameUnique(tbInfo *model.TableInfo, pi *model.PartitionInf
 	return nil
 }
 
-func checkReorgPartitionNames(p *model.PartitionInfo, droppedNames []string, pi *model.PartitionInfo) error {
+func checkReorgPartitionNames(p *model.PartitionInfo, droppedNames []model.CIStr, pi *model.PartitionInfo) error {
 	partNames := make(map[string]struct{})
 	oldDefs := p.Definitions
 	for _, oldDef := range oldDefs {
 		partNames[oldDef.Name.L] = struct{}{}
 	}
 	for _, delName := range droppedNames {
-		droppedName := strings.ToLower(delName)
-		if _, ok := partNames[droppedName]; !ok {
+		if _, ok := partNames[delName.L]; !ok {
 			return dbterror.ErrSameNamePartition.GenWithStackByArgs(delName)
 		}
-		delete(partNames, droppedName)
+		delete(partNames, delName.L)
 	}
 	newDefs := pi.Definitions
 	for _, newDef := range newDefs {
@@ -1663,26 +1590,12 @@ func formatListPartitionValue(ctx sessionctx.Context, tblInfo *model.TableInfo) 
 		}
 	}
 
-	haveDefault := false
 	exprStrs := make([]string, 0)
 	inValueStrs := make([]string, 0, mathutil.Max(len(pi.Columns), 1))
 	for i := range defs {
-	inValuesLoop:
 		for j, vs := range defs[i].InValues {
 			inValueStrs = inValueStrs[:0]
 			for k, v := range vs {
-				// if DEFAULT would be given as string, like "DEFAULT",
-				// it would be stored as "'DEFAULT'",
-				if strings.EqualFold(v, "DEFAULT") && k == 0 && len(vs) == 1 {
-					if haveDefault {
-						return nil, dbterror.ErrMultipleDefConstInListPart
-					}
-					haveDefault = true
-					continue inValuesLoop
-				}
-				if strings.EqualFold(v, "MAXVALUE") {
-					return nil, errors.Trace(dbterror.ErrMaxvalueInValuesIn)
-				}
 				expr, err := expression.ParseSimpleExprCastWithTableInfo(ctx, v, &model.TableInfo{}, colTps[k])
 				if err != nil {
 					return nil, errors.Trace(err)
@@ -1695,17 +1608,13 @@ func formatListPartitionValue(ctx sessionctx.Context, tblInfo *model.TableInfo) 
 				if err != nil {
 					return nil, errors.Trace(err)
 				}
-				if eval.IsNull() {
-					s = "NULL"
-				} else {
-					if colTps[k].EvalType() == types.ETInt {
-						defs[i].InValues[j][k] = s
-					}
-					if colTps[k].EvalType() == types.ETString {
-						s = string(hack.String(collate.GetCollator(cols[k].GetCollate()).Key(s)))
-						s = driver.WrapInSingleQuotes(s)
-					}
+				if !eval.IsNull() && colTps[k].EvalType() == types.ETInt {
+					defs[i].InValues[j][k] = s
 				}
+				if colTps[k].EvalType() == types.ETString {
+					s = string(hack.String(collate.GetCollator(cols[k].GetCollate()).Key(s)))
+				}
+				s = strings.ReplaceAll(s, ",", `\,`)
 				inValueStrs = append(inValueStrs, s)
 			}
 			exprStrs = append(exprStrs, strings.Join(inValueStrs, ","))
@@ -1855,35 +1764,7 @@ func getTableInfoWithDroppingPartitions(t *model.TableInfo) *model.TableInfo {
 	return nt
 }
 
-// getTableInfoWithOriginalPartitions builds oldTableInfo including truncating partitions, only used by onTruncateTablePartition.
-func getTableInfoWithOriginalPartitions(t *model.TableInfo, oldIDs []int64, newIDs []int64) *model.TableInfo {
-	nt := t.Clone()
-	np := nt.Partition
-
-	// reconstruct original definitions
-	for _, oldDef := range np.DroppingDefinitions {
-		var newID int64
-		for i := range newIDs {
-			if oldDef.ID == oldIDs[i] {
-				newID = newIDs[i]
-				break
-			}
-		}
-		for i := range np.Definitions {
-			newDef := &np.Definitions[i]
-			if newDef.ID == newID {
-				newDef.ID = oldDef.ID
-				break
-			}
-		}
-	}
-
-	np.DroppingDefinitions = nil
-	np.NewPartitionIDs = nil
-	return nt
-}
-
-func dropLabelRules(_ *ddlCtx, schemaName, tableName string, partNames []string) error {
+func dropLabelRules(d *ddlCtx, schemaName, tableName string, partNames []string) error {
 	deleteRules := make([]string, 0, len(partNames))
 	for _, partName := range partNames {
 		deleteRules = append(deleteRules, fmt.Sprintf(label.PartitionIDFormat, label.IDPrefix, schemaName, tableName, partName))
@@ -1896,8 +1777,7 @@ func dropLabelRules(_ *ddlCtx, schemaName, tableName string, partNames []string)
 // onDropTablePartition deletes old partition meta.
 func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	var partNames []string
-	partInfo := model.PartitionInfo{}
-	if err := job.DecodeArgs(&partNames, &partInfo); err != nil {
+	if err := job.DecodeArgs(&partNames); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
@@ -1905,18 +1785,16 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
-	if job.Type == model.ActionAddTablePartition || job.Type == model.ActionReorganizePartition ||
-		job.Type == model.ActionRemovePartitioning || job.Type == model.ActionAlterTablePartitioning {
+	if job.Type == model.ActionAddTablePartition || job.Type == model.ActionReorganizePartition {
 		// It is rollback from reorganize partition, just remove DroppingDefinitions from tableInfo
 		tblInfo.Partition.DroppingDefinitions = nil
-		// It is rollbacked from adding table partition, just remove addingDefinitions from tableInfo.
+		// It is rollback from adding table partition, just remove addingDefinitions from tableInfo.
 		physicalTableIDs, pNames, rollbackBundles := rollbackAddingPartitionInfo(tblInfo)
 		err = infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), rollbackBundles)
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Wrapf(err, "failed to notify PD the placement rules")
 		}
-		// TODO: Will this drop LabelRules for existing partitions, if the new partitions have the same name?
 		err = dropLabelRules(d, job.SchemaName, tblInfo.Name.L, pNames)
 		if err != nil {
 			job.State = model.JobStateCancelled
@@ -1926,19 +1804,6 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 		if _, err := alterTableLabelRule(job.SchemaName, tblInfo, getIDs([]*model.TableInfo{tblInfo})); err != nil {
 			job.State = model.JobStateCancelled
 			return ver, err
-		}
-		if partInfo.DDLType != model.PartitionTypeNone {
-			// Also remove anything with the new table id
-			physicalTableIDs = append(physicalTableIDs, tblInfo.Partition.NewTableID)
-			// Reset if it was normal table before
-			if tblInfo.Partition.Type == model.PartitionTypeNone {
-				tblInfo.Partition = nil
-			} else {
-				tblInfo.Partition.NewTableID = 0
-				tblInfo.Partition.DDLExpr = ""
-				tblInfo.Partition.DDLColumns = nil
-				tblInfo.Partition.DDLType = model.PartitionTypeNone
-			}
 		}
 
 		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
@@ -2034,14 +1899,14 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 			}
 			defer w.sessPool.Put(sctx)
 			rh := newReorgHandler(sess.NewSession(sctx))
-			reorgInfo, err := getReorgInfoFromPartitions(d.jobContext(job.ID, job.ReorgMeta), d, rh, job, dbInfo, pt, physicalTableIDs, elements)
+			reorgInfo, err := getReorgInfoFromPartitions(d.jobContext(job.ID), d, rh, job, dbInfo, pt, physicalTableIDs, elements)
 
 			if err != nil || reorgInfo.first {
 				// If we run reorg firstly, we should update the job snapshot version
 				// and then run the reorg next time.
 				return ver, errors.Trace(err)
 			}
-			err = w.runReorgJob(reorgInfo, tbl.Meta(), d.lease, func() (dropIndexErr error) {
+			err = w.runReorgJob(rh, reorgInfo, tbl.Meta(), d.lease, func() (dropIndexErr error) {
 				defer tidbutil.Recover(metrics.LabelDDL, "onDropTablePartition",
 					func() {
 						dropIndexErr = dbterror.ErrCancelledDDLJob.GenWithStack("drop partition panic")
@@ -2060,10 +1925,6 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 				return ver, errors.Trace(err)
 			}
 		}
-		if tblInfo.TiFlashReplica != nil {
-			removeTiFlashAvailablePartitionIDs(tblInfo, physicalTableIDs)
-		}
-		droppedDefs := tblInfo.Partition.DroppingDefinitions
 		tblInfo.Partition.DroppingDefinitions = nil
 		// used by ApplyDiff in updateSchemaVersion
 		job.CtxVars = []interface{}{physicalTableIDs}
@@ -2073,7 +1934,7 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 		}
 		job.SchemaState = model.StateNone
 		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
-		asyncNotifyEvent(d, &util.Event{Tp: model.ActionDropTablePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: droppedDefs}})
+		asyncNotifyEvent(d, &util.Event{Tp: model.ActionDropTablePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: tblInfo.Partition.Definitions}})
 		// A background job will be created to delete old partition data.
 		job.Args = []interface{}{physicalTableIDs}
 	default:
@@ -2082,34 +1943,13 @@ func (w *worker) onDropTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (
 	return ver, errors.Trace(err)
 }
 
-func removeTiFlashAvailablePartitionIDs(tblInfo *model.TableInfo, pids []int64) {
-	// Remove the partitions
-	ids := tblInfo.TiFlashReplica.AvailablePartitionIDs
-	// Rarely called, so OK to take some time, to make it easy
-	for _, id := range pids {
-		for i, avail := range ids {
-			if id == avail {
-				tmp := ids[:i]
-				tmp = append(tmp, ids[i+1:]...)
-				ids = tmp
-				break
-			}
-		}
-	}
-	tblInfo.TiFlashReplica.AvailablePartitionIDs = ids
-}
-
 // onTruncateTablePartition truncates old partition meta.
-func (w *worker) onTruncateTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (int64, error) {
+func onTruncateTablePartition(d *ddlCtx, t *meta.Meta, job *model.Job) (int64, error) {
 	var ver int64
-	var oldIDs, newIDs []int64
-	if err := job.DecodeArgs(&oldIDs, &newIDs); err != nil {
+	var oldIDs []int64
+	if err := job.DecodeArgs(&oldIDs); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
-	}
-	if len(oldIDs) != len(newIDs) {
-		job.State = model.JobStateCancelled
-		return ver, errors.Trace(errors.New("len(oldIDs) must be the same as len(newIDs)"))
 	}
 	tblInfo, err := GetTableInfoAndCancelFaultJob(t, job, job.SchemaID)
 	if err != nil {
@@ -2120,190 +1960,29 @@ func (w *worker) onTruncateTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 		return ver, errors.Trace(dbterror.ErrPartitionMgmtOnNonpartitioned)
 	}
 
-	if !hasGlobalIndex(tblInfo) {
-		oldPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
-		newPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
-		for k, oldID := range oldIDs {
-			for i := 0; i < len(pi.Definitions); i++ {
-				def := &pi.Definitions[i]
-				if def.ID == oldID {
-					oldPartitions = append(oldPartitions, def.Clone())
-					def.ID = newIDs[k]
-					// Shallow copy only use the def.ID in event handle.
-					newPartitions = append(newPartitions, *def)
-					break
+	oldPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
+	newPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
+	for _, oldID := range oldIDs {
+		for i := 0; i < len(pi.Definitions); i++ {
+			def := &pi.Definitions[i]
+			if def.ID == oldID {
+				oldPartitions = append(oldPartitions, def.Clone())
+				pid, err1 := t.GenGlobalID()
+				if err1 != nil {
+					return ver, errors.Trace(err1)
 				}
+				def.ID = pid
+				// Shallow copy only use the def.ID in event handle.
+				newPartitions = append(newPartitions, *def)
+				break
 			}
 		}
-		if len(newPartitions) == 0 {
-			job.State = model.JobStateCancelled
-			return ver, table.ErrUnknownPartition.GenWithStackByArgs(fmt.Sprintf("pid:%v", oldIDs), tblInfo.Name.O)
-		}
-
-		if err = clearTruncatePartitionTiflashStatus(tblInfo, newPartitions, oldIDs); err != nil {
-			job.State = model.JobStateCancelled
-			return ver, err
-		}
-
-		if err = updateTruncatePartitionLabelRules(job, t, oldPartitions, newPartitions, tblInfo, oldIDs); err != nil {
-			job.State = model.JobStateCancelled
-			return ver, err
-		}
-
-		preSplitAndScatter(w.sess.Context, d.store, tblInfo, newPartitions)
-
-		job.CtxVars = []interface{}{oldIDs, newIDs}
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-
-		// Finish this job.
-		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
-		asyncNotifyEvent(d, &util.Event{Tp: model.ActionTruncateTablePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: newPartitions}})
-		// A background job will be created to delete old partition data.
-		job.Args = []interface{}{oldIDs}
-
-		return ver, err
+	}
+	if len(newPartitions) == 0 {
+		job.State = model.JobStateCancelled
+		return ver, table.ErrUnknownPartition.GenWithStackByArgs(fmt.Sprintf("pid:%v", oldIDs), tblInfo.Name.O)
 	}
 
-	// When table has global index, public->deleteOnly->deleteReorg->none schema changes should be handled.
-	switch job.SchemaState {
-	case model.StatePublic:
-		// Step1: generate new partition ids
-		truncatingDefinitions := make([]model.PartitionDefinition, 0, len(oldIDs))
-		for i, oldID := range oldIDs {
-			for j := 0; j < len(pi.Definitions); j++ {
-				def := &pi.Definitions[j]
-				if def.ID == oldID {
-					truncatingDefinitions = append(truncatingDefinitions, def.Clone())
-					def.ID = newIDs[i]
-					break
-				}
-			}
-		}
-		pi.DroppingDefinitions = truncatingDefinitions
-		pi.NewPartitionIDs = newIDs[:]
-
-		job.SchemaState = model.StateDeleteOnly
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-	case model.StateDeleteOnly:
-		// This state is not a real 'DeleteOnly' state, because tidb does not maintaining the state check in partitionDefinition.
-		// Insert this state to confirm all servers can not see the old partitions when reorg is running,
-		// so that no new data will be inserted into old partitions when reorganizing.
-		job.SchemaState = model.StateDeleteReorganization
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-	case model.StateDeleteReorganization:
-		// Step2: clear global index rows.
-		physicalTableIDs := oldIDs
-		oldTblInfo := getTableInfoWithOriginalPartitions(tblInfo, oldIDs, newIDs)
-
-		tbl, err := getTable(d.store, job.SchemaID, oldTblInfo)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		dbInfo, err := t.GetDatabase(job.SchemaID)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		// If table has global indexes, we need reorg to clean up them.
-		if pt, ok := tbl.(table.PartitionedTable); ok && hasGlobalIndex(tblInfo) {
-			// Build elements for compatible with modify column type. elements will not be used when reorganizing.
-			elements := make([]*meta.Element, 0, len(tblInfo.Indices))
-			for _, idxInfo := range tblInfo.Indices {
-				if idxInfo.Global {
-					elements = append(elements, &meta.Element{ID: idxInfo.ID, TypeKey: meta.IndexElementKey})
-				}
-			}
-			sctx, err1 := w.sessPool.Get()
-			if err1 != nil {
-				return ver, err1
-			}
-			defer w.sessPool.Put(sctx)
-			rh := newReorgHandler(sess.NewSession(sctx))
-			reorgInfo, err := getReorgInfoFromPartitions(d.jobContext(job.ID, job.ReorgMeta), d, rh, job, dbInfo, pt, physicalTableIDs, elements)
-
-			if err != nil || reorgInfo.first {
-				// If we run reorg firstly, we should update the job snapshot version
-				// and then run the reorg next time.
-				return ver, errors.Trace(err)
-			}
-			err = w.runReorgJob(reorgInfo, tbl.Meta(), d.lease, func() (dropIndexErr error) {
-				defer tidbutil.Recover(metrics.LabelDDL, "onDropTablePartition",
-					func() {
-						dropIndexErr = dbterror.ErrCancelledDDLJob.GenWithStack("drop partition panic")
-					}, false)
-				return w.cleanupGlobalIndexes(pt, physicalTableIDs, reorgInfo)
-			})
-			if err != nil {
-				if dbterror.ErrWaitReorgTimeout.Equal(err) {
-					// if timeout, we should return, check for the owner and re-wait job done.
-					return ver, nil
-				}
-				return ver, errors.Trace(err)
-			}
-		}
-
-		// Step3: generate new partition ids and finish rest works
-		oldPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
-		newPartitions := make([]model.PartitionDefinition, 0, len(oldIDs))
-		for _, oldDef := range pi.DroppingDefinitions {
-			var newID int64
-			for i := range oldIDs {
-				if oldDef.ID == oldIDs[i] {
-					newID = newIDs[i]
-					break
-				}
-			}
-			for i := 0; i < len(pi.Definitions); i++ {
-				def := &pi.Definitions[i]
-				if newID == def.ID {
-					oldPartitions = append(oldPartitions, oldDef.Clone())
-					newPartitions = append(newPartitions, def.Clone())
-					break
-				}
-			}
-		}
-		if len(newPartitions) == 0 {
-			job.State = model.JobStateCancelled
-			return ver, table.ErrUnknownPartition.GenWithStackByArgs(fmt.Sprintf("pid:%v", oldIDs), tblInfo.Name.O)
-		}
-
-		if err = clearTruncatePartitionTiflashStatus(tblInfo, newPartitions, oldIDs); err != nil {
-			job.State = model.JobStateCancelled
-			return ver, err
-		}
-
-		if err = updateTruncatePartitionLabelRules(job, t, oldPartitions, newPartitions, tblInfo, oldIDs); err != nil {
-			job.State = model.JobStateCancelled
-			return ver, err
-		}
-
-		// Step4: clear DroppingDefinitions and finish job.
-		tblInfo.Partition.DroppingDefinitions = nil
-		tblInfo.Partition.NewPartitionIDs = nil
-
-		preSplitAndScatter(w.sess.Context, d.store, tblInfo, newPartitions)
-
-		// used by ApplyDiff in updateSchemaVersion
-		job.CtxVars = []interface{}{oldIDs, newIDs}
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		// Finish this job.
-		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
-		asyncNotifyEvent(d, &util.Event{Tp: model.ActionTruncateTablePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: newPartitions}})
-		// A background job will be created to delete old partition data.
-		job.Args = []interface{}{oldIDs}
-	default:
-		err = dbterror.ErrInvalidDDLState.GenWithStackByArgs("partition", job.SchemaState)
-	}
-
-	return ver, errors.Trace(err)
-}
-
-func clearTruncatePartitionTiflashStatus(tblInfo *model.TableInfo, newPartitions []model.PartitionDefinition, oldIDs []int64) error {
 	// Clear the tiflash replica available status.
 	if tblInfo.TiFlashReplica != nil {
 		e := infosync.ConfigureTiFlashPDForPartitions(true, &newPartitions, tblInfo.TiFlashReplica.Count, &tblInfo.TiFlashReplica.LocationLabels, tblInfo.ID)
@@ -2312,25 +1991,33 @@ func clearTruncatePartitionTiflashStatus(tblInfo *model.TableInfo, newPartitions
 		})
 		if e != nil {
 			logutil.BgLogger().Error("ConfigureTiFlashPDForPartitions fails", zap.Error(e))
-			return e
+			job.State = model.JobStateCancelled
+			return ver, e
 		}
 		tblInfo.TiFlashReplica.Available = false
 		// Set partition replica become unavailable.
-		removeTiFlashAvailablePartitionIDs(tblInfo, oldIDs)
+		for _, oldID := range oldIDs {
+			for i, id := range tblInfo.TiFlashReplica.AvailablePartitionIDs {
+				if id == oldID {
+					newIDs := tblInfo.TiFlashReplica.AvailablePartitionIDs[:i]
+					newIDs = append(newIDs, tblInfo.TiFlashReplica.AvailablePartitionIDs[i+1:]...)
+					tblInfo.TiFlashReplica.AvailablePartitionIDs = newIDs
+					break
+				}
+			}
+		}
 	}
-	return nil
-}
 
-func updateTruncatePartitionLabelRules(job *model.Job, t *meta.Meta, oldPartitions, newPartitions []model.PartitionDefinition, tblInfo *model.TableInfo, oldIDs []int64) error {
 	bundles, err := placement.NewPartitionListBundles(t, newPartitions)
 	if err != nil {
-		return errors.Trace(err)
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
 	}
 
 	tableBundle, err := placement.NewTableBundle(t, tblInfo)
 	if err != nil {
 		job.State = model.JobStateCancelled
-		return errors.Trace(err)
+		return ver, errors.Trace(err)
 	}
 
 	if tableBundle != nil {
@@ -2342,13 +2029,14 @@ func updateTruncatePartitionLabelRules(job *model.Job, t *meta.Meta, oldPartitio
 	keepDroppedBundles, err := droppedPartitionBundles(t, tblInfo, oldPartitions)
 	if err != nil {
 		job.State = model.JobStateCancelled
-		return errors.Trace(err)
+		return ver, errors.Trace(err)
 	}
 	bundles = append(bundles, keepDroppedBundles...)
 
 	err = infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
 	if err != nil {
-		return errors.Wrapf(err, "failed to notify PD the placement rules")
+		job.State = model.JobStateCancelled
+		return ver, errors.Wrapf(err, "failed to notify PD the placement rules")
 	}
 
 	tableID := fmt.Sprintf(label.TableIDFormat, label.IDPrefix, job.SchemaName, tblInfo.Name.L)
@@ -2360,7 +2048,8 @@ func updateTruncatePartitionLabelRules(job *model.Job, t *meta.Meta, oldPartitio
 
 	rules, err := infosync.GetLabelRules(context.TODO(), append(oldPartRules, tableID))
 	if err != nil {
-		return errors.Wrapf(err, "failed to get label rules from PD")
+		job.State = model.JobStateCancelled
+		return ver, errors.Wrapf(err, "failed to get label rules from PD")
 	}
 
 	newPartIDs := getPartitionIDs(tblInfo)
@@ -2378,10 +2067,26 @@ func updateTruncatePartitionLabelRules(job *model.Job, t *meta.Meta, oldPartitio
 	patch := label.NewRulePatch(newRules, []string{})
 	err = infosync.UpdateLabelRules(context.TODO(), patch)
 	if err != nil {
-		return errors.Wrapf(err, "failed to notify PD the label rules")
+		job.State = model.JobStateCancelled
+		return ver, errors.Wrapf(err, "failed to notify PD the label rules")
 	}
 
-	return nil
+	newIDs := make([]int64, len(oldIDs))
+	for i := range oldIDs {
+		newIDs[i] = newPartitions[i].ID
+	}
+	job.CtxVars = []interface{}{oldIDs, newIDs}
+	ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
+	if err != nil {
+		return ver, errors.Trace(err)
+	}
+
+	// Finish this job.
+	job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
+	asyncNotifyEvent(d, &util.Event{Tp: model.ActionTruncateTablePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: newPartitions}})
+	// A background job will be created to delete old partition data.
+	job.Args = []interface{}{oldIDs}
+	return ver, nil
 }
 
 // onExchangeTablePartition exchange partition data
@@ -2406,12 +2111,6 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 		return ver, errors.Trace(err)
 	}
 
-	ptDbInfo, err := t.GetDatabase(ptSchemaID)
-	if err != nil {
-		job.State = model.JobStateCancelled
-		return ver, errors.Trace(err)
-	}
-
 	nt, err := GetTableInfoAndCancelFaultJob(t, job, job.SchemaID)
 	if err != nil {
 		return ver, errors.Trace(err)
@@ -2428,7 +2127,24 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 		return ver, errors.Trace(err)
 	}
 
-	_, partDef, err := getPartitionDef(pt, partName)
+	if pt.State != model.StatePublic {
+		job.State = model.JobStateCancelled
+		return ver, dbterror.ErrInvalidDDLState.GenWithStack("table %s is not in public, but %s", pt.Name, pt.State)
+	}
+
+	err = checkExchangePartition(pt, nt)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	err = checkTableDefCompatible(pt, nt)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return ver, errors.Trace(err)
+	}
+
+	index, partDef, err := getPartitionDef(pt, partName)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -2465,27 +2181,16 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 				return ver, errors.Trace(err)
 			}
 		}
-		var ptInfo []schemaIDAndTableInfo
-		if len(nt.Constraints) > 0 {
-			pt.ExchangePartitionInfo = &model.ExchangePartitionInfo{
-				ExchangePartitionTableID: nt.ID,
-				ExchangePartitionDefID:   defID,
-			}
-			ptInfo = append(ptInfo, schemaIDAndTableInfo{
-				schemaID: ptSchemaID,
-				tblInfo:  pt,
-			})
-		}
 		nt.ExchangePartitionInfo = &model.ExchangePartitionInfo{
-			ExchangePartitionTableID: ptID,
-			ExchangePartitionDefID:   defID,
+			ExchangePartitionID:    ptID,
+			ExchangePartitionDefID: defID,
 		}
 		// We need an interim schema version,
 		// so there are no non-matching rows inserted
 		// into the table using the schema version
 		// before the exchange is made.
 		job.SchemaState = model.StateWriteOnly
-		return updateVersionAndTableInfoWithCheck(d, t, job, nt, true, ptInfo...)
+		return updateVersionAndTableInfoWithCheck(d, t, job, nt, true)
 	}
 	// From now on, nt (the non-partitioned table) has
 	// ExchangePartitionInfo set, meaning it is restricted
@@ -2510,15 +2215,7 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 	}
 
 	if withValidation {
-		ntbl, err := getTable(d.store, job.SchemaID, nt)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		ptbl, err := getTable(d.store, ptSchemaID, pt)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		err = checkExchangePartitionRecordValidation(w, ptbl, ntbl, ptDbInfo.Name.L, ntDbInfo.Name.L, partName)
+		err = checkExchangePartitionRecordValidation(w, pt, index, ntDbInfo.Name, nt.Name)
 		if err != nil {
 			job.State = model.JobStateRollingback
 			return ver, errors.Trace(err)
@@ -2553,7 +2250,6 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 	}
 
 	// exchange table meta id
-	pt.ExchangePartitionInfo = nil
 	partDef.ID, nt.ID = nt.ID, partDef.ID
 
 	err = t.UpdateTable(ptSchemaID, pt)
@@ -2660,35 +2356,21 @@ func (w *worker) onExchangeTablePartition(d *ddlCtx, t *meta.Meta, job *model.Jo
 	return ver, nil
 }
 
-func getReorgPartitionInfo(t *meta.Meta, job *model.Job) (*model.TableInfo, []string, *model.PartitionInfo, []model.PartitionDefinition, []model.PartitionDefinition, error) {
+func checkReorgPartition(t *meta.Meta, job *model.Job) (*model.TableInfo, []model.CIStr, *model.PartitionInfo, []model.PartitionDefinition, []model.PartitionDefinition, error) {
 	schemaID := job.SchemaID
 	tblInfo, err := GetTableInfoAndCancelFaultJob(t, job, schemaID)
 	if err != nil {
 		return nil, nil, nil, nil, nil, errors.Trace(err)
 	}
 	partInfo := &model.PartitionInfo{}
-	var partNames []string
+	var partNames []model.CIStr
 	err = job.DecodeArgs(&partNames, &partInfo)
 	if err != nil {
 		job.State = model.JobStateCancelled
 		return nil, nil, nil, nil, nil, errors.Trace(err)
 	}
-	var addingDefs, droppingDefs []model.PartitionDefinition
-	if tblInfo.Partition != nil {
-		addingDefs = tblInfo.Partition.AddingDefinitions
-		droppingDefs = tblInfo.Partition.DroppingDefinitions
-		tblInfo.Partition.NewTableID = partInfo.NewTableID
-		tblInfo.Partition.DDLType = partInfo.Type
-		tblInfo.Partition.DDLExpr = partInfo.Expr
-		tblInfo.Partition.DDLColumns = partInfo.Columns
-	} else {
-		tblInfo.Partition = getPartitionInfoTypeNone()
-		tblInfo.Partition.NewTableID = partInfo.NewTableID
-		tblInfo.Partition.Definitions[0].ID = tblInfo.ID
-		tblInfo.Partition.DDLType = partInfo.Type
-		tblInfo.Partition.DDLExpr = partInfo.Expr
-		tblInfo.Partition.DDLColumns = partInfo.Columns
-	}
+	addingDefs := tblInfo.Partition.AddingDefinitions
+	droppingDefs := tblInfo.Partition.DroppingDefinitions
 	if len(addingDefs) == 0 {
 		addingDefs = []model.PartitionDefinition{}
 	}
@@ -2708,11 +2390,18 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		return ver, nil
 	}
 
-	tblInfo, partNames, partInfo, _, addingDefinitions, err := getReorgPartitionInfo(t, job)
+	tblInfo, partNamesCIStr, partInfo, _, addingDefinitions, err := checkReorgPartition(t, job)
 	if err != nil {
 		return ver, err
 	}
+	partNames := make([]string, len(partNamesCIStr))
+	for i := range partNamesCIStr {
+		partNames[i] = partNamesCIStr[i].L
+	}
 
+	// In order to skip maintaining the state check in partitionDefinition, TiDB use dropping/addingDefinition instead of state field.
+	// So here using `job.SchemaState` to judge what the stage of this job is.
+	originalState := job.SchemaState
 	switch job.SchemaState {
 	case model.StateNone:
 		// job.SchemaState == model.StateNone means the job is in the initial state of reorg partition.
@@ -2722,27 +2411,28 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		// The partInfo may have been checked against an older schema version for example.
 		// If the check is done here, it does not need to be repeated, since no other
 		// DDL on the same table can be run concurrently.
-		num := len(partInfo.Definitions) - len(partNames) + len(tblInfo.Partition.Definitions)
-		err = checkAddPartitionTooManyPartitions(uint64(num))
+		err = checkAddPartitionTooManyPartitions(uint64(len(tblInfo.Partition.Definitions) +
+			len(partInfo.Definitions) -
+			len(partNames)))
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
 
-		err = checkReorgPartitionNames(tblInfo.Partition, partNames, partInfo)
+		err = checkReorgPartitionNames(tblInfo.Partition, partNamesCIStr, partInfo)
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
 
 		// Re-check that the dropped/added partitions are compatible with current definition
-		firstPartIdx, lastPartIdx, idMap, err := getReplacedPartitionIDs(partNames, tblInfo.Partition)
+		firstPartIdx, lastPartIdx, idMap, err := getReplacedPartitionIDs(partNamesCIStr, tblInfo.Partition)
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, err
 		}
 		sctx := w.sess.Context
-		if err = checkReorgPartitionDefs(sctx, job.Type, tblInfo, partInfo, firstPartIdx, lastPartIdx, idMap); err != nil {
+		if err = checkReorgPartitionDefs(sctx, tblInfo, partInfo, firstPartIdx, lastPartIdx, idMap); err != nil {
 			job.State = model.JobStateCancelled
 			return ver, err
 		}
@@ -2813,7 +2503,7 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		// and we will soon start writing to the new partitions.
 		if s, ok := d.store.(kv.SplittableStore); ok && s != nil {
 			// partInfo only contains the AddingPartitions
-			splitPartitionTableRegion(w.sess.Context, s, tblInfo, partInfo.Definitions, true)
+			splitPartitionTableRegion(w.sess.Context, s, tblInfo, partInfo, true)
 		}
 
 		// Assume we cannot have more than MaxUint64 rows, set the progress to 1/10 of that.
@@ -2871,18 +2561,18 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 			}
 		}
 
+		job.SchemaState = model.StateWriteOnly
 		tblInfo.Partition.DDLState = model.StateWriteOnly
 		metrics.GetBackfillProgressByLabel(metrics.LblReorgPartition, job.SchemaName, tblInfo.Name.String()).Set(0.2 / float64(math.MaxUint64))
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-		job.SchemaState = model.StateWriteOnly
+		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != job.SchemaState)
 	case model.StateWriteOnly:
 		// Insert this state to confirm all servers can see the new partitions when reorg is running,
 		// so that new data will be updated in both old and new partitions when reorganizing.
 		job.SnapshotVer = 0
+		job.SchemaState = model.StateWriteReorganization
 		tblInfo.Partition.DDLState = model.StateWriteReorganization
 		metrics.GetBackfillProgressByLabel(metrics.LblReorgPartition, job.SchemaName, tblInfo.Name.String()).Set(0.3 / float64(math.MaxUint64))
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
-		job.SchemaState = model.StateWriteReorganization
+		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != job.SchemaState)
 	case model.StateWriteReorganization:
 		physicalTableIDs := getPartitionIDsFromDefinitions(tblInfo.Partition.DroppingDefinitions)
 		tbl, err2 := getTable(d.store, job.SchemaID, tblInfo)
@@ -2902,7 +2592,7 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 			return ver, err
 		}
 
-		firstPartIdx, lastPartIdx, idMap, err2 := getReplacedPartitionIDs(partNames, tblInfo.Partition)
+		firstPartIdx, lastPartIdx, idMap, err2 := getReplacedPartitionIDs(partNamesCIStr, tblInfo.Partition)
 		failpoint.Inject("reorgPartWriteReorgReplacedPartIDsFail", func(val failpoint.Value) {
 			if val.(bool) {
 				err2 = errors.New("Injected error by reorgPartWriteReorgReplacedPartIDsFail")
@@ -2913,22 +2603,16 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		}
 		newDefs := getReorganizedDefinitions(tblInfo.Partition, firstPartIdx, lastPartIdx, idMap)
 
-		// From now on, use the new partitioning, but keep the Adding and Dropping for double write
+		// From now on, use the new definitions, but keep the Adding and Dropping for double write
 		tblInfo.Partition.Definitions = newDefs
 		tblInfo.Partition.Num = uint64(len(newDefs))
-		if job.Type == model.ActionAlterTablePartitioning ||
-			job.Type == model.ActionRemovePartitioning {
-			tblInfo.Partition.Type, tblInfo.Partition.DDLType = tblInfo.Partition.DDLType, tblInfo.Partition.Type
-			tblInfo.Partition.Expr, tblInfo.Partition.DDLExpr = tblInfo.Partition.DDLExpr, tblInfo.Partition.Expr
-			tblInfo.Partition.Columns, tblInfo.Partition.DDLColumns = tblInfo.Partition.DDLColumns, tblInfo.Partition.Columns
-		}
 
 		// Now all the data copying is done, but we cannot simply remove the droppingDefinitions
 		// since they are a part of the normal Definitions that other nodes with
 		// the current schema version. So we need to double write for one more schema version
-		tblInfo.Partition.DDLState = model.StateDeleteReorganization
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
 		job.SchemaState = model.StateDeleteReorganization
+		tblInfo.Partition.DDLState = model.StateDeleteReorganization
+		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != job.SchemaState)
 
 	case model.StateDeleteReorganization:
 		// Drop the droppingDefinitions and finish the DDL
@@ -2944,63 +2628,10 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		// and the addingDefinitions for handling in the updateSchemaVersion
 		physicalTableIDs := getPartitionIDsFromDefinitions(tblInfo.Partition.DroppingDefinitions)
 		newIDs := getPartitionIDsFromDefinitions(partInfo.Definitions)
-		statisticsPartInfo := &model.PartitionInfo{Definitions: tblInfo.Partition.AddingDefinitions}
-
+		job.CtxVars = []interface{}{physicalTableIDs, newIDs}
+		definitionsToAdd := tblInfo.Partition.AddingDefinitions
 		tblInfo.Partition.DroppingDefinitions = nil
 		tblInfo.Partition.AddingDefinitions = nil
-		tblInfo.Partition.DDLState = model.StateNone
-
-		if job.Type != model.ActionReorganizePartition {
-			// ALTER TABLE ... PARTITION BY
-			// REMOVE PARTITIONING
-			// New Table ID, so needs to recreate the table by drop+create.
-			oldTblID := tblInfo.ID
-			// Overloading the NewTableID here with the oldTblID instead,
-			// for keeping the old global statistics
-			statisticsPartInfo.NewTableID = oldTblID
-			// TODO: Handle bundles?
-			// TODO: Add concurrent test!
-			// TODO: Will this result in big gaps?
-			// TODO: How to carrie over AUTO_INCREMENT etc.?
-			// Check if they are carried over in ApplyDiff?!?
-			autoIDs, err := t.GetAutoIDAccessors(job.SchemaID, tblInfo.ID).Get()
-			if err != nil {
-				job.State = model.JobStateCancelled
-				return ver, errors.Trace(err)
-			}
-			err = t.DropTableOrView(job.SchemaID, tblInfo.ID)
-			if err != nil {
-				job.State = model.JobStateCancelled
-				return ver, errors.Trace(err)
-			}
-			tblInfo.ID = partInfo.NewTableID
-			if partInfo.DDLType != model.PartitionTypeNone {
-				// if partitioned before, then also add the old table ID,
-				// otherwise it will be the already included first partition
-				physicalTableIDs = append(physicalTableIDs, oldTblID)
-			}
-			if job.Type == model.ActionRemovePartitioning {
-				tblInfo.Partition = nil
-			} else {
-				// ALTER TABLE ... PARTITION BY
-				tblInfo.Partition.DDLType = model.PartitionTypeNone
-				tblInfo.Partition.DDLExpr = ""
-				tblInfo.Partition.DDLColumns = nil
-				tblInfo.Partition.NewTableID = 0
-			}
-			err = t.GetAutoIDAccessors(job.SchemaID, tblInfo.ID).Put(autoIDs)
-			if err != nil {
-				job.State = model.JobStateCancelled
-				return ver, errors.Trace(err)
-			}
-			// TODO: Add failpoint here?
-			err = t.CreateTableOrView(job.SchemaID, tblInfo)
-			if err != nil {
-				job.State = model.JobStateCancelled
-				return ver, errors.Trace(err)
-			}
-		}
-		job.CtxVars = []interface{}{physicalTableIDs, newIDs}
 		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
 		failpoint.Inject("reorgPartWriteReorgSchemaVersionUpdateFail", func(val failpoint.Value) {
 			if val.(bool) {
@@ -3010,13 +2641,13 @@ func (w *worker) onReorganizePartition(d *ddlCtx, t *meta.Meta, job *model.Job) 
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		job.SchemaState = model.StateNone
+		tblInfo.Partition.DDLState = model.StateNone
 		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
 		// How to handle this?
 		// Seems to only trigger asynchronous update of statistics.
 		// Should it actually be synchronous?
-		// Include the old table ID, if changed, which may contain global statistics,
-		// so it can be reused for the new (non)partitioned table.
-		asyncNotifyEvent(d, &util.Event{Tp: job.Type, TableInfo: tblInfo, PartInfo: statisticsPartInfo})
+		asyncNotifyEvent(d, &util.Event{Tp: model.ActionReorganizePartition, TableInfo: tblInfo, PartInfo: &model.PartitionInfo{Definitions: definitionsToAdd}})
 		// A background job will be created to delete old partition data.
 		job.Args = []interface{}{physicalTableIDs}
 
@@ -3044,8 +2675,8 @@ func doPartitionReorgWork(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tb
 	if err != nil {
 		return false, ver, errors.Trace(err)
 	}
-	reorgInfo, err := getReorgInfoFromPartitions(d.jobContext(job.ID, job.ReorgMeta), d, rh, job, dbInfo, partTbl, physTblIDs, elements)
-	err = w.runReorgJob(reorgInfo, tbl.Meta(), d.lease, func() (reorgErr error) {
+	reorgInfo, err := getReorgInfoFromPartitions(d.jobContext(job.ID), d, rh, job, dbInfo, partTbl, physTblIDs, elements)
+	err = w.runReorgJob(rh, reorgInfo, tbl.Meta(), d.lease, func() (reorgErr error) {
 		defer tidbutil.Recover(metrics.LabelDDL, "doPartitionReorgWork",
 			func() {
 				reorgErr = dbterror.ErrCancelledDDLJob.GenWithStack("reorganize partition for table `%v` panic", tbl.Meta().Name)
@@ -3065,10 +2696,10 @@ func doPartitionReorgWork(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tb
 			return false, ver, errors.Trace(err)
 		}
 		if err1 := rh.RemoveDDLReorgHandle(job, reorgInfo.elements); err1 != nil {
-			logutil.BgLogger().Warn("reorg partition job failed, RemoveDDLReorgHandle failed, can't convert job to rollback", zap.String("category", "ddl"),
+			logutil.BgLogger().Warn("[ddl] reorg partition job failed, RemoveDDLReorgHandle failed, can't convert job to rollback",
 				zap.String("job", job.String()), zap.Error(err1))
 		}
-		logutil.BgLogger().Warn("reorg partition job failed, convert job to rollback", zap.String("category", "ddl"), zap.String("job", job.String()), zap.Error(err))
+		logutil.BgLogger().Warn("[ddl] reorg partition job failed, convert job to rollback", zap.String("job", job.String()), zap.Error(err))
 		ver, err = convertAddTablePartitionJob2RollbackJob(d, t, job, err, tbl.Meta())
 		return false, ver, errors.Trace(err)
 	}
@@ -3095,19 +2726,22 @@ func newReorgPartitionWorker(sessCtx sessionctx.Context, i int, t table.Physical
 	if pt == nil {
 		return nil, dbterror.ErrUnsupportedReorganizePartition.GenWithStackByArgs()
 	}
-	partColIDs := reorgedTbl.GetPartitionColumnIDs()
+	partColIDs := pt.GetPartitionColumnIDs()
 	writeColOffsetMap := make(map[int64]int, len(partColIDs))
 	maxOffset := 0
-	for _, id := range partColIDs {
-		var offset int
-		for _, col := range pt.Cols() {
+	for _, col := range pt.Cols() {
+		found := false
+		for _, id := range partColIDs {
 			if col.ID == id {
-				offset = col.Offset
+				found = true
 				break
 			}
 		}
-		writeColOffsetMap[id] = offset
-		maxOffset = mathutil.Max[int](maxOffset, offset)
+		if !found {
+			continue
+		}
+		writeColOffsetMap[col.ID] = col.Offset
+		maxOffset = mathutil.Max[int](maxOffset, col.Offset)
 	}
 	return &reorgPartitionWorker{
 		backfillCtx:       newBackfillCtx(reorgInfo.d, i, sessCtx, reorgInfo.SchemaName, t, jc, "reorg_partition_rate", false),
@@ -3121,7 +2755,7 @@ func newReorgPartitionWorker(sessCtx sessionctx.Context, i int, t table.Physical
 
 func (w *reorgPartitionWorker) BackfillData(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	oprStartTime := time.Now()
-	ctx := kv.WithInternalSourceAndTaskType(context.Background(), w.jobContext.ddlJobSourceType(), kvutil.ExplicitTypeDDL)
+	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
@@ -3129,7 +2763,6 @@ func (w *reorgPartitionWorker) BackfillData(handleRange reorgBackfillTask) (task
 		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(handleRange.getJobID()); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
-		txn.SetOption(kv.ResourceGroupName, w.jobContext.resourceGroupName)
 
 		rowRecords, nextKey, taskDone, err := w.fetchRowColVals(txn, handleRange)
 		if err != nil {
@@ -3192,14 +2825,16 @@ func (w *reorgPartitionWorker) fetchRowColVals(txn kv.Transaction, taskRange reo
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in reorgPartitionWorker fetchRowColVals", 0)
 			oprStartTime = oprEndTime
 
-			taskDone = recordKey.Cmp(taskRange.endKey) >= 0
+			if taskRange.endInclude {
+				taskDone = recordKey.Cmp(taskRange.endKey) > 0
+			} else {
+				taskDone = recordKey.Cmp(taskRange.endKey) >= 0
+			}
 
 			if taskDone || len(w.rowRecords) >= w.batchCnt {
 				return false, nil
 			}
 
-			// TODO: Extend for normal tables
-			// TODO: Extend for REMOVE PARTITIONING
 			_, err := w.rowDecoder.DecodeTheExistedColumnMap(w.sessCtx, handle, rawRow, sysTZ, w.rowMap)
 			if err != nil {
 				return false, errors.Trace(err)
@@ -3207,11 +2842,11 @@ func (w *reorgPartitionWorker) fetchRowColVals(txn kv.Transaction, taskRange reo
 
 			// Set the partitioning columns and calculate which partition to write to
 			for colID, offset := range w.writeColOffsetMap {
-				d, ok := w.rowMap[colID]
-				if !ok {
+				if d, ok := w.rowMap[colID]; ok {
+					tmpRow[offset] = d
+				} else {
 					return false, dbterror.ErrUnsupportedReorganizePartition.GenWithStackByArgs()
 				}
-				tmpRow[offset] = d
 			}
 			p, err := w.reorgedTbl.GetPartitionByRow(w.sessCtx, tmpRow)
 			if err != nil {
@@ -3237,7 +2872,7 @@ func (w *reorgPartitionWorker) fetchRowColVals(txn kv.Transaction, taskRange reo
 		taskDone = true
 	}
 
-	logutil.BgLogger().Debug("txn fetches handle info", zap.String("category", "ddl"), zap.Uint64("txnStartTS", txn.StartTS()), zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
+	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Uint64("txnStartTS", txn.StartTS()), zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
 	return w.rowRecords, getNextHandleKey(taskRange, taskDone, lastAccessedHandle), taskDone, errors.Trace(err)
 }
 
@@ -3251,7 +2886,7 @@ func (w *reorgPartitionWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
 }
 
-func (*reorgPartitionWorker) String() string {
+func (w *reorgPartitionWorker) String() string {
 	return typeReorgPartitionWorker.String()
 }
 
@@ -3322,7 +2957,7 @@ func (w *worker) reorgPartitionDataAndIndex(t table.Table, reorgInfo *reorgInfo)
 		// like where the regInfo PhysicalTableID and element is the same,
 		// and the tableid in the key-prefix regInfo.StartKey and regInfo.EndKey matches with PhysicalTableID
 		// do not change the reorgInfo start/end key
-		startHandle, endHandle, err := getTableRange(reorgInfo.NewJobContext(), reorgInfo.d, physTbl, currentVer.Ver, reorgInfo.Job.Priority)
+		startHandle, endHandle, err := getTableRange(reorgInfo.d.jobContext(reorgInfo.Job.ID), reorgInfo.d, physTbl, currentVer.Ver, reorgInfo.Job.Priority)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -3334,7 +2969,7 @@ func (w *worker) reorgPartitionDataAndIndex(t table.Table, reorgInfo *reorgInfo)
 		reorgInfo.currElement = reorgInfo.elements[i+1]
 		// Write the reorg info to store so the whole reorganize process can recover from panic.
 		err = reorgInfo.UpdateReorgMeta(reorgInfo.StartKey, w.sessPool)
-		logutil.BgLogger().Info("update column and indexes", zap.String("category", "ddl"),
+		logutil.BgLogger().Info("[ddl] update column and indexes",
 			zap.Int64("jobID", reorgInfo.Job.ID),
 			zap.ByteString("elementType", reorgInfo.currElement.TypeKey),
 			zap.Int64("elementID", reorgInfo.currElement.ID),
@@ -3401,135 +3036,61 @@ func bundlesForExchangeTablePartition(t *meta.Meta, pt *model.TableInfo, newPar 
 	return bundles, nil
 }
 
-func checkExchangePartitionRecordValidation(w *worker, ptbl, ntbl table.Table, pschemaName, nschemaName, partitionName string) error {
-	verifyFunc := func(sql string, params ...interface{}) error {
-		var ctx sessionctx.Context
-		ctx, err := w.sessPool.Get()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		defer w.sessPool.Put(ctx)
-
-		rows, _, err := ctx.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(w.ctx, nil, sql, params...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		rowCount := len(rows)
-		if rowCount != 0 {
-			return errors.Trace(dbterror.ErrRowDoesNotMatchPartition)
-		}
-		// Check warnings!
-		// Is it possible to check how many rows where checked as well?
-		return nil
-	}
-	genConstraintCondition := func(constraints []*table.Constraint) string {
-		var buf strings.Builder
-		buf.WriteString("not (")
-		for i, cons := range constraints {
-			if i != 0 {
-				buf.WriteString(" and ")
-			}
-			buf.WriteString(fmt.Sprintf("(%s)", cons.ExprString))
-		}
-		buf.WriteString(")")
-		return buf.String()
-	}
-	type CheckConstraintTable interface {
-		WritableConstraint() []*table.Constraint
-	}
-
-	pt := ptbl.Meta()
-	index, _, err := getPartitionDef(pt, partitionName)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	var buf strings.Builder
-	buf.WriteString("select 1 from %n.%n where ")
-	paramList := []interface{}{nschemaName, ntbl.Meta().Name.L}
-	checkNt := true
+func checkExchangePartitionRecordValidation(w *worker, pt *model.TableInfo, index int, schemaName, tableName model.CIStr) error {
+	var sql string
+	var paramList []interface{}
 
 	pi := pt.Partition
+
 	switch pi.Type {
 	case model.PartitionTypeHash:
 		if pi.Num == 1 {
-			checkNt = false
-		} else {
-			buf.WriteString("mod(")
-			buf.WriteString(pi.Expr)
-			buf.WriteString(", %?) != %?")
-			paramList = append(paramList, pi.Num, index)
+			return nil
 		}
+		var buf strings.Builder
+		buf.WriteString("select 1 from %n.%n where mod(")
+		buf.WriteString(pi.Expr)
+		buf.WriteString(", %?) != %? limit 1")
+		sql = buf.String()
+		paramList = append(paramList, schemaName.L, tableName.L, pi.Num, index)
 	case model.PartitionTypeRange:
 		// Table has only one partition and has the maximum value
 		if len(pi.Definitions) == 1 && strings.EqualFold(pi.Definitions[index].LessThan[0], partitionMaxValue) {
-			checkNt = false
+			return nil
+		}
+		// For range expression and range columns
+		if len(pi.Columns) == 0 {
+			sql, paramList = buildCheckSQLForRangeExprPartition(pi, index, schemaName, tableName)
 		} else {
-			// For range expression and range columns
-			if len(pi.Columns) == 0 {
-				conds, params := buildCheckSQLConditionForRangeExprPartition(pi, index)
-				buf.WriteString(conds)
-				paramList = append(paramList, params...)
-			} else {
-				conds, params := buildCheckSQLConditionForRangeColumnsPartition(pi, index)
-				buf.WriteString(conds)
-				paramList = append(paramList, params...)
-			}
+			sql, paramList = buildCheckSQLForRangeColumnsPartition(pi, index, schemaName, tableName)
 		}
 	case model.PartitionTypeList:
 		if len(pi.Columns) == 0 {
-			conds := buildCheckSQLConditionForListPartition(pi, index)
-			buf.WriteString(conds)
+			sql, paramList = buildCheckSQLForListPartition(pi, index, schemaName, tableName)
 		} else {
-			conds := buildCheckSQLConditionForListColumnsPartition(pi, index)
-			buf.WriteString(conds)
+			sql, paramList = buildCheckSQLForListColumnsPartition(pi, index, schemaName, tableName)
 		}
 	default:
 		return dbterror.ErrUnsupportedPartitionType.GenWithStackByArgs(pt.Name.O)
 	}
 
-	if variable.EnableCheckConstraint.Load() {
-		pcc, ok := ptbl.(CheckConstraintTable)
-		if !ok {
-			return errors.Errorf("exchange partition process assert table partition failed")
-		}
-		pCons := pcc.WritableConstraint()
-		if len(pCons) > 0 {
-			if !checkNt {
-				checkNt = true
-			} else {
-				buf.WriteString(" or ")
-			}
-			buf.WriteString(genConstraintCondition(pCons))
-		}
+	var ctx sessionctx.Context
+	ctx, err := w.sessPool.Get()
+	if err != nil {
+		return errors.Trace(err)
 	}
-	// Check non-partition table records.
-	if checkNt {
-		buf.WriteString(" limit 1")
-		err = verifyFunc(buf.String(), paramList...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-	}
+	defer w.sessPool.Put(ctx)
 
-	// Check partition table records.
-	if variable.EnableCheckConstraint.Load() {
-		ncc, ok := ntbl.(CheckConstraintTable)
-		if !ok {
-			return errors.Errorf("exchange partition process assert table partition failed")
-		}
-		nCons := ncc.WritableConstraint()
-		if len(nCons) > 0 {
-			buf.Reset()
-			buf.WriteString("select 1 from %n.%n partition(%n) where ")
-			buf.WriteString(genConstraintCondition(nCons))
-			buf.WriteString(" limit 1")
-			err = verifyFunc(buf.String(), pschemaName, pt.Name.L, partitionName)
-			if err != nil {
-				return errors.Trace(err)
-			}
-		}
+	rows, _, err := ctx.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(w.ctx, nil, sql, paramList...)
+	if err != nil {
+		return errors.Trace(err)
 	}
+	rowCount := len(rows)
+	if rowCount != 0 {
+		return errors.Trace(dbterror.ErrRowDoesNotMatchPartition)
+	}
+	// Check warnings!
+	// Is it possible to check how many rows where checked as well?
 	return nil
 }
 
@@ -3561,47 +3122,53 @@ func checkExchangePartitionPlacementPolicy(t *meta.Meta, ntPPRef, ptPPRef, partP
 	return nil
 }
 
-func buildCheckSQLConditionForRangeExprPartition(pi *model.PartitionInfo, index int) (string, []interface{}) {
+func buildCheckSQLForRangeExprPartition(pi *model.PartitionInfo, index int, schemaName, tableName model.CIStr) (string, []interface{}) {
 	var buf strings.Builder
-	paramList := make([]interface{}, 0, 2)
+	paramList := make([]interface{}, 0, 4)
 	// Since the pi.Expr string may contain the identifier, which couldn't be escaped in our ParseWithParams(...)
 	// So we write it to the origin sql string here.
 	if index == 0 {
+		buf.WriteString("select 1 from %n.%n where ")
 		buf.WriteString(pi.Expr)
-		buf.WriteString(" >= %?")
-		paramList = append(paramList, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		buf.WriteString(" >= %? limit 1")
+		paramList = append(paramList, schemaName.L, tableName.L, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		return buf.String(), paramList
 	} else if index == len(pi.Definitions)-1 && strings.EqualFold(pi.Definitions[index].LessThan[0], partitionMaxValue) {
+		buf.WriteString("select 1 from %n.%n where ")
 		buf.WriteString(pi.Expr)
-		buf.WriteString(" < %?")
-		paramList = append(paramList, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]))
+		buf.WriteString(" < %? limit 1")
+		paramList = append(paramList, schemaName.L, tableName.L, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]))
+		return buf.String(), paramList
 	} else {
+		buf.WriteString("select 1 from %n.%n where ")
 		buf.WriteString(pi.Expr)
 		buf.WriteString(" < %? or ")
 		buf.WriteString(pi.Expr)
-		buf.WriteString(" >= %?")
-		paramList = append(paramList, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]), driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		buf.WriteString(" >= %? limit 1")
+		paramList = append(paramList, schemaName.L, tableName.L, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]), driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		return buf.String(), paramList
 	}
-	return buf.String(), paramList
 }
 
-func buildCheckSQLConditionForRangeColumnsPartition(pi *model.PartitionInfo, index int) (string, []interface{}) {
-	paramList := make([]interface{}, 0, 2)
+func buildCheckSQLForRangeColumnsPartition(pi *model.PartitionInfo, index int, schemaName, tableName model.CIStr) (string, []interface{}) {
+	paramList := make([]interface{}, 0, 6)
 	colName := pi.Columns[0].L
 	if index == 0 {
-		paramList = append(paramList, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
-		return "%n >= %?", paramList
+		paramList = append(paramList, schemaName.L, tableName.L, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		return "select 1 from %n.%n where %n >= %? limit 1", paramList
 	} else if index == len(pi.Definitions)-1 && strings.EqualFold(pi.Definitions[index].LessThan[0], partitionMaxValue) {
-		paramList = append(paramList, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]))
-		return "%n < %?", paramList
+		paramList = append(paramList, schemaName.L, tableName.L, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]))
+		return "select 1 from %n.%n where %n < %? limit 1", paramList
 	} else {
-		paramList = append(paramList, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]), colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
-		return "%n < %? or %n >= %?", paramList
+		paramList = append(paramList, schemaName.L, tableName.L, colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index-1].LessThan[0]), colName, driver.UnwrapFromSingleQuotes(pi.Definitions[index].LessThan[0]))
+		return "select 1 from %n.%n where %n < %? or %n >= %? limit 1", paramList
 	}
 }
 
-func buildCheckSQLConditionForListPartition(pi *model.PartitionInfo, index int) string {
+func buildCheckSQLForListPartition(pi *model.PartitionInfo, index int, schemaName, tableName model.CIStr) (string, []interface{}) {
 	var buf strings.Builder
-	buf.WriteString("not (")
+	buf.WriteString("select 1 from %n.%n where ")
+	buf.WriteString(" not (")
 	for i, inValue := range pi.Definitions[index].InValues {
 		if i != 0 {
 			buf.WriteString(" OR ")
@@ -3616,17 +3183,19 @@ func buildCheckSQLConditionForListPartition(pi *model.PartitionInfo, index int) 
 			buf.WriteString(fmt.Sprintf("(%s) <=> %s", pi.Expr, val))
 		}
 	}
-	buf.WriteString(")")
-	return buf.String()
+	buf.WriteString(") limit 1")
+	paramList := make([]interface{}, 0, 2)
+	paramList = append(paramList, schemaName.L, tableName.L)
+	return buf.String(), paramList
 }
 
-func buildCheckSQLConditionForListColumnsPartition(pi *model.PartitionInfo, index int) string {
+func buildCheckSQLForListColumnsPartition(pi *model.PartitionInfo, index int, schemaName, tableName model.CIStr) (string, []interface{}) {
 	var buf strings.Builder
 	// How to find a match?
 	// (row <=> vals1) OR (row <=> vals2)
 	// How to find a non-matching row:
 	// NOT ( (row <=> vals1) OR (row <=> vals2) ... )
-	buf.WriteString("not (")
+	buf.WriteString("select 1 from %n.%n where not (")
 	colNames := make([]string, 0, len(pi.Columns))
 	for i := range pi.Columns {
 		// TODO: check if there are no proper quoting function for this?
@@ -3646,8 +3215,10 @@ func buildCheckSQLConditionForListColumnsPartition(pi *model.PartitionInfo, inde
 			buf.WriteString(fmt.Sprintf("%s <=> %s", colNames[j], val))
 		}
 	}
-	buf.WriteString(")")
-	return buf.String()
+	buf.WriteString(") limit 1")
+	paramList := make([]interface{}, 0, 2)
+	paramList = append(paramList, schemaName.L, tableName.L)
+	return buf.String(), paramList
 }
 
 func checkAddPartitionTooManyPartitions(piDefs uint64) error {
@@ -3678,7 +3249,7 @@ func checkPartitionColumnsUnique(tbInfo *model.TableInfo) error {
 	return nil
 }
 
-func checkNoHashPartitions(_ sessionctx.Context, partitionNum uint64) error {
+func checkNoHashPartitions(ctx sessionctx.Context, partitionNum uint64) error {
 	if partitionNum == 0 {
 		return ast.ErrNoParts.GenWithStackByArgs("partitions")
 	}
@@ -3788,7 +3359,7 @@ type columnNameExtractor struct {
 	err              error
 }
 
-func (*columnNameExtractor) Enter(node ast.Node) (ast.Node, bool) {
+func (cne *columnNameExtractor) Enter(node ast.Node) (ast.Node, bool) {
 	return node, false
 }
 
@@ -3981,7 +3552,7 @@ func checkPartitionExprAllowed(_ sessionctx.Context, tb *model.TableInfo, e ast.
 			return errors.Trace(checkNoTimestampArgs(tb, v.V))
 		}
 	case *ast.ColumnNameExpr, *ast.ParenthesesExpr, *driver.ValueExpr, *ast.MaxValueExpr,
-		*ast.DefaultExpr, *ast.TimeUnitExpr:
+		*ast.TimeUnitExpr:
 		return nil
 	}
 	return errors.Trace(dbterror.ErrPartitionFunctionIsNotAllowed)
@@ -4118,11 +3689,12 @@ func hexIfNonPrint(s string) string {
 		case 26: // ctrl-z / Substitute
 			res += `\Z`
 		default:
-			if !strconv.IsPrint(runeVal) {
+			if strconv.IsPrint(runeVal) {
+				res += string(runeVal)
+			} else {
 				isPrint = false
 				break
 			}
-			res += string(runeVal)
 		}
 	}
 	if isPrint {
@@ -4215,35 +3787,27 @@ func AppendPartitionDefs(partitionInfo *model.PartitionInfo, buf *bytes.Buffer, 
 			}
 			fmt.Fprintf(buf, " VALUES LESS THAN (%s)", strings.Join(lessThans, ","))
 		} else if partitionInfo.Type == model.PartitionTypeList {
-			if len(def.InValues) == 0 {
-				fmt.Fprintf(buf, " DEFAULT")
-			} else if len(def.InValues) == 1 &&
-				len(def.InValues[0]) == 1 &&
-				strings.EqualFold(def.InValues[0][0], "DEFAULT") {
-				fmt.Fprintf(buf, " DEFAULT")
-			} else {
-				values := bytes.NewBuffer(nil)
-				for j, inValues := range def.InValues {
-					if j > 0 {
-						values.WriteString(",")
-					}
-					if len(inValues) > 1 {
-						values.WriteString("(")
-						tmpVals := make([]string, len(inValues))
-						for idx, v := range inValues {
-							tmpVals[idx] = hexIfNonPrint(v)
-						}
-						values.WriteString(strings.Join(tmpVals, ","))
-						values.WriteString(")")
-					} else if len(inValues) == 1 {
-						values.WriteString(hexIfNonPrint(inValues[0]))
-					}
+			values := bytes.NewBuffer(nil)
+			for j, inValues := range def.InValues {
+				if j > 0 {
+					values.WriteString(",")
 				}
-				fmt.Fprintf(buf, " VALUES IN (%s)", values.String())
+				if len(inValues) > 1 {
+					values.WriteString("(")
+					tmpVals := make([]string, len(inValues))
+					for idx, v := range inValues {
+						tmpVals[idx] = hexIfNonPrint(v)
+					}
+					values.WriteString(strings.Join(tmpVals, ","))
+					values.WriteString(")")
+				} else if len(inValues) == 1 {
+					values.WriteString(hexIfNonPrint(inValues[0]))
+				}
 			}
+			fmt.Fprintf(buf, " VALUES IN (%s)", values.String())
 		}
 		if len(def.Comment) > 0 {
-			fmt.Fprintf(buf, " COMMENT '%s'", format.OutputFormat(def.Comment))
+			buf.WriteString(fmt.Sprintf(" COMMENT '%s'", format.OutputFormat(def.Comment)))
 		}
 		if def.PlacementPolicyRef != nil {
 			// add placement ref info here

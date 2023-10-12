@@ -20,17 +20,14 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
@@ -40,11 +37,11 @@ import (
 )
 
 var (
-	_ exec.Executor = &UpdateExec{}
-	_ exec.Executor = &DeleteExec{}
-	_ exec.Executor = &InsertExec{}
-	_ exec.Executor = &ReplaceExec{}
-	_ exec.Executor = &LoadDataExec{}
+	_ Executor = &UpdateExec{}
+	_ Executor = &DeleteExec{}
+	_ Executor = &InsertExec{}
+	_ Executor = &ReplaceExec{}
+	_ Executor = &LoadDataExec{}
 )
 
 // updateRecord updates the row specified by the handle `h`, from `oldData` to `newData`.
@@ -56,7 +53,7 @@ var (
 func updateRecord(
 	ctx context.Context, sctx sessionctx.Context, h kv.Handle, oldData, newData []types.Datum, modified []bool,
 	t table.Table,
-	onDup bool, _ *memory.Tracker, fkChecks []*FKCheckExec, fkCascades []*FKCascadeExec,
+	onDup bool, memTracker *memory.Tracker, fkChecks []*FKCheckExec, fkCascades []*FKCascadeExec,
 ) (bool, error) {
 	r, ctx := tracing.StartRegionEx(ctx, "executor.updateRecord")
 	defer r.End()
@@ -81,8 +78,23 @@ func updateRecord(
 
 	// Handle exchange partition
 	tbl := t.Meta()
-	if tbl.ExchangePartitionInfo != nil && tbl.GetPartitionInfo() == nil {
-		if err := checkRowForExchangePartition(sctx, newData, tbl); err != nil {
+	if tbl.ExchangePartitionInfo != nil {
+		is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
+		pt, tableFound := is.TableByID(tbl.ExchangePartitionInfo.ExchangePartitionID)
+		if !tableFound {
+			return false, errors.Errorf("exchange partition process table by id failed")
+		}
+		p, ok := pt.(table.PartitionedTable)
+		if !ok {
+			return false, errors.Errorf("exchange partition process assert table partition failed")
+		}
+		err := p.CheckForExchangePartition(
+			sctx,
+			pt.Meta().Partition,
+			newData,
+			tbl.ExchangePartitionInfo.ExchangePartitionDefID,
+		)
+		if err != nil {
 			return false, err
 		}
 	}
@@ -144,19 +156,19 @@ func updateRecord(
 	// Fill values into on-update-now fields, only if they are really changed.
 	for i, col := range t.Cols() {
 		if mysql.HasOnUpdateNowFlag(col.GetFlag()) && !modified[i] && !onUpdateSpecified[i] {
-			v, err := expression.GetTimeValue(sctx, strings.ToUpper(ast.CurrentTimestamp), col.GetType(), col.GetDecimal(), nil)
-			if err != nil {
+			if v, err := expression.GetTimeValue(sctx, strings.ToUpper(ast.CurrentTimestamp), col.GetType(), col.GetDecimal(), nil); err == nil {
+				newData[i] = v
+				modified[i] = true
+				// Only TIMESTAMP and DATETIME columns can be automatically updated, so it cannot be PKIsHandle.
+				// Ref: https://dev.mysql.com/doc/refman/8.0/en/timestamp-initialization.html
+				if col.IsPKHandleColumn(t.Meta()) {
+					return false, errors.Errorf("on-update-now column should never be pk-is-handle")
+				}
+				if col.IsCommonHandleColumn(t.Meta()) {
+					handleChanged = true
+				}
+			} else {
 				return false, err
-			}
-			newData[i] = v
-			modified[i] = true
-			// Only TIMESTAMP and DATETIME columns can be automatically updated, so it cannot be PKIsHandle.
-			// Ref: https://dev.mysql.com/doc/refman/8.0/en/timestamp-initialization.html
-			if col.IsPKHandleColumn(t.Meta()) {
-				return false, errors.Errorf("on-update-now column should never be pk-is-handle")
-			}
-			if col.IsCommonHandleColumn(t.Meta()) {
-				handleChanged = true
 			}
 		}
 	}
@@ -309,46 +321,7 @@ func rebaseAutoRandomValue(
 // resetErrDataTooLong reset ErrDataTooLong error msg.
 // types.ErrDataTooLong is produced in types.ProduceStrWithSpecifiedTp, there is no column info in there,
 // so we reset the error msg here, and wrap old err with errors.Wrap.
-func resetErrDataTooLong(colName string, rowIdx int, _ error) error {
+func resetErrDataTooLong(colName string, rowIdx int, err error) error {
 	newErr := types.ErrDataTooLong.GenWithStack("Data too long for column '%v' at row %v", colName, rowIdx)
 	return newErr
-}
-
-// checkRowForExchangePartition is only used for ExchangePartition by non-partitionTable during write only state.
-// It check if rowData inserted or updated violate partition definition or checkConstraints of partitionTable.
-func checkRowForExchangePartition(sctx sessionctx.Context, row []types.Datum, tbl *model.TableInfo) error {
-	is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
-	pt, tableFound := is.TableByID(tbl.ExchangePartitionInfo.ExchangePartitionTableID)
-	if !tableFound {
-		return errors.Errorf("exchange partition process table by id failed")
-	}
-	p, ok := pt.(table.PartitionedTable)
-	if !ok {
-		return errors.Errorf("exchange partition process assert table partition failed")
-	}
-	err := p.CheckForExchangePartition(
-		sctx,
-		pt.Meta().Partition,
-		row,
-		tbl.ExchangePartitionInfo.ExchangePartitionDefID,
-		tbl.ID,
-	)
-	if err != nil {
-		return err
-	}
-	if variable.EnableCheckConstraint.Load() {
-		type CheckConstraintTable interface {
-			CheckRowConstraint(sctx sessionctx.Context, rowToCheck []types.Datum) error
-		}
-		cc, ok := pt.(CheckConstraintTable)
-		if !ok {
-			return errors.Errorf("exchange partition process assert check constraint failed")
-		}
-		err := cc.CheckRowConstraint(sctx, row)
-		if err != nil {
-			// TODO: make error include ExchangePartition info.
-			return err
-		}
-	}
-	return nil
 }

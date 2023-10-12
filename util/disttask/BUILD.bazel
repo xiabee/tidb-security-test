@@ -5,7 +5,6 @@ go_library(
     srcs = ["idservice.go"],
     importpath = "github.com/pingcap/tidb/util/disttask",
     visibility = ["//visibility:public"],
-    deps = ["//domain/infosync"],
 )
 
 go_test(

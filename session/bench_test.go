@@ -75,16 +75,6 @@ func prepareBenchData(se Session, colType string, valueFormat string, valueCount
 	mustExecute(se, "commit")
 }
 
-func prepareNonclusteredBenchData(se Session, colType string, valueFormat string, valueCount int) {
-	mustExecute(se, "drop table if exists t")
-	mustExecute(se, fmt.Sprintf("create table t (pk int primary key /*T![clustered_index] NONCLUSTERED */ auto_increment, col %s, index idx (col))", colType))
-	mustExecute(se, "begin")
-	for i := 0; i < valueCount; i++ {
-		mustExecute(se, "insert t (col) values ("+fmt.Sprintf(valueFormat, i)+")")
-	}
-	mustExecute(se, "commit")
-}
-
 func prepareSortBenchData(se Session, colType string, valueFormat string, valueCount int) {
 	mustExecute(se, "drop table if exists t")
 	mustExecute(se, fmt.Sprintf("create table t (pk int primary key auto_increment, col %s)", colType))
@@ -123,26 +113,6 @@ func readResult(ctx context.Context, rs sqlexec.RecordSet, count int) {
 		count -= req.NumRows()
 	}
 	rs.Close()
-}
-
-func hasPlan(ctx context.Context, b *testing.B, se Session, plan string) {
-	find := false
-	rs, err := se.Execute(ctx, "explain select * from t where col = 'hello 64'")
-	if err != nil {
-		b.Fatal(err)
-	}
-	rows, err := ResultSetToStringSlice(ctx, se, rs[0])
-	if err != nil {
-		b.Fatal(err)
-	}
-	for i := range rows {
-		if strings.Contains(rows[i][0], plan) {
-			find = true
-		}
-	}
-	if !find {
-		b.Fatal(fmt.Printf("plan not contain `%s`", plan))
-	}
 }
 
 func BenchmarkBasic(b *testing.B) {
@@ -378,9 +348,7 @@ func BenchmarkStringIndexLookup(b *testing.B) {
 		do.Close()
 		st.Close()
 	}()
-	prepareNonclusteredBenchData(se, "varchar(255)", "'hello %d'", smallCount)
-	hasPlan(ctx, b, se, "IndexLookUp")
-
+	prepareBenchData(se, "varchar(255)", "'hello %d'", smallCount)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rs, err := se.Execute(ctx, "select * from t where col = 'hello 64'")
@@ -420,9 +388,7 @@ func BenchmarkIntegerIndexLookup(b *testing.B) {
 		do.Close()
 		st.Close()
 	}()
-	prepareNonclusteredBenchData(se, "int", "%v", smallCount)
-	hasPlan(ctx, b, se, "IndexLookUp")
-
+	prepareBenchData(se, "int", "%v", smallCount)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rs, err := se.Execute(ctx, "select * from t where col = 64")
@@ -462,9 +428,7 @@ func BenchmarkDecimalIndexLookup(b *testing.B) {
 		do.Close()
 		st.Close()
 	}()
-	prepareNonclusteredBenchData(se, "decimal(32,6)", "%v.1234", smallCount)
-	hasPlan(ctx, b, se, "IndexLookUp")
-
+	prepareBenchData(se, "decimal(32,6)", "%v.1234", smallCount)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rs, err := se.Execute(ctx, "select * from t where col = 64.1234")
@@ -1660,7 +1624,7 @@ func BenchmarkRangeColumnPartitionPruning(b *testing.B) {
 	start := time.Date(2020, 5, 15, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 1023; i++ {
 		start = start.Add(24 * time.Hour)
-		fmt.Fprintf(&build, "partition p%d values less than ('%s'),\n", i, start.Format(time.DateOnly))
+		fmt.Fprintf(&build, "partition p%d values less than ('%s'),\n", i, start.Format("2006-01-02"))
 	}
 	build.WriteString("partition p1023 values less than maxvalue)")
 	mustExecute(se, build.String())

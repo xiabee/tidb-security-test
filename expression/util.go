@@ -444,7 +444,7 @@ func ColumnSubstituteImpl(expr Expression, schema *Schema, newExprs []Expression
 	case *ScalarFunction:
 		substituted := false
 		hasFail := false
-		if v.FuncName.L == ast.Cast || v.FuncName.L == ast.Grouping {
+		if v.FuncName.L == ast.Cast {
 			var newArg Expression
 			substituted, hasFail, newArg = ColumnSubstituteImpl(v.GetArgs()[0], schema, newExprs, fail1Return)
 			if fail1Return && hasFail {
@@ -452,14 +452,7 @@ func ColumnSubstituteImpl(expr Expression, schema *Schema, newExprs []Expression
 			}
 			if substituted {
 				flag := v.RetType.GetFlag()
-				var e Expression
-				if v.FuncName.L == ast.Cast {
-					e = BuildCastFunction(v.GetCtx(), newArg, v.RetType)
-				} else {
-					// for grouping function recreation, use clone (meta included) instead of newFunction
-					e = v.Clone()
-					e.(*ScalarFunction).Function.getArgs()[0] = newArg
-				}
+				e := BuildCastFunction(v.GetCtx(), newArg, v.RetType)
 				e.SetCoercibility(v.Coercibility())
 				e.GetType().SetFlag(flag)
 				return true, false, e
@@ -565,10 +558,11 @@ Loop:
 		switch {
 		case unicode.IsDigit(c) || unicode.IsLower(c) || unicode.IsUpper(c):
 			c = unicode.ToUpper(c)
-			if c >= upper {
+			if c < upper {
+				validLen = i + 1
+			} else {
 				break Loop
 			}
-			validLen = i + 1
 		case c == '+' || c == '-':
 			if i != 0 {
 				break Loop
@@ -606,19 +600,13 @@ func SubstituteCorCol2Constant(expr Expression) (Expression, error) {
 			}
 			return &Constant{Value: val, RetType: x.GetType()}, nil
 		}
-		var (
-			err   error
-			newSf Expression
-		)
+		var newSf Expression
 		if x.FuncName.L == ast.Cast {
 			newSf = BuildCastFunction(x.GetCtx(), newArgs[0], x.RetType)
-		} else if x.FuncName.L == ast.Grouping {
-			newSf = x.Clone()
-			newSf.(*ScalarFunction).GetArgs()[0] = newArgs[0]
 		} else {
-			newSf, err = NewFunction(x.GetCtx(), x.FuncName.L, x.GetType(), newArgs...)
+			newSf = NewFunctionInternal(x.GetCtx(), x.FuncName.L, x.GetType(), newArgs...)
 		}
-		return newSf, err
+		return newSf, nil
 	case *CorrelatedColumn:
 		return &Constant{Value: *x.Data, RetType: x.GetType()}, nil
 	case *Constant:

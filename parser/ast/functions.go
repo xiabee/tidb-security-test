@@ -187,7 +187,6 @@ const (
 	// For more info, please see AsOfClause.
 	TiDBBoundedStaleness = "tidb_bounded_staleness"
 	TiDBParseTso         = "tidb_parse_tso"
-	TiDBParseTsoLogical  = "tidb_parse_tso_logical"
 	TiDBCurrentTso       = "tidb_current_tso"
 
 	// string functions
@@ -266,7 +265,6 @@ const (
 	TiDBDecodePlan       = "tidb_decode_plan"
 	TiDBDecodeBinaryPlan = "tidb_decode_binary_plan"
 	TiDBDecodeSQLDigests = "tidb_decode_sql_digests"
-	TiDBEncodeSQLDigest  = "tidb_encode_sql_digest"
 	FormatBytes          = "format_bytes"
 	FormatNanoTime       = "format_nano_time"
 	CurrentResourceGroup = "current_resource_group"
@@ -303,7 +301,6 @@ const (
 	TiDBRowChecksum = "tidb_row_checksum"
 	GetLock         = "get_lock"
 	ReleaseLock     = "release_lock"
-	Grouping        = "grouping"
 
 	// encryption and compression functions
 	AesDecrypt               = "aes_decrypt"
@@ -896,8 +893,8 @@ const (
 type WindowFuncExpr struct {
 	funcNode
 
-	// Name is the function name.
-	Name string
+	// F is the function name.
+	F string
 	// Args is the function args.
 	Args []ExprNode
 	// Distinct cannot be true for most window functions, except `max` and `min`.
@@ -915,7 +912,7 @@ type WindowFuncExpr struct {
 
 // Restore implements Node interface.
 func (n *WindowFuncExpr) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord(n.Name)
+	ctx.WriteKeyWord(n.F)
 	ctx.WritePlain("(")
 	for i, v := range n.Args {
 		if i != 0 {

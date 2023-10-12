@@ -40,17 +40,17 @@ type partialResult4LeadLag struct {
 	curIdx uint64
 }
 
-func (*baseLeadLag) AllocPartialResult() (pr PartialResult, memDelta int64) {
+func (v *baseLeadLag) AllocPartialResult() (pr PartialResult, memDelta int64) {
 	return PartialResult(&partialResult4LeadLag{}), DefPartialResult4LeadLagSize
 }
 
-func (*baseLeadLag) ResetPartialResult(pr PartialResult) {
+func (v *baseLeadLag) ResetPartialResult(pr PartialResult) {
 	p := (*partialResult4LeadLag)(pr)
 	p.rows = p.rows[:0]
 	p.curIdx = 0
 }
 
-func (*baseLeadLag) UpdatePartialResult(_ sessionctx.Context, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
+func (v *baseLeadLag) UpdatePartialResult(sctx sessionctx.Context, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
 	p := (*partialResult4LeadLag)(pr)
 	p.rows = append(p.rows, rowsInGroup...)
 	memDelta += int64(len(rowsInGroup)) * DefRowSize

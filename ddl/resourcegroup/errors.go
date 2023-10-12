@@ -31,8 +31,4 @@ var (
 	ErrUnknownResourceGroupMode = errors.New("unknown resource group mode")
 	// ErrDroppingInternalResourceGroup is from group.go
 	ErrDroppingInternalResourceGroup = errors.New("can't drop reserved resource group")
-	// ErrInvalidResourceGroupRunawayExecElapsedTime is from group.go.
-	ErrInvalidResourceGroupRunawayExecElapsedTime = errors.New("invalid exec elapsed time")
-	// ErrUnknownResourceGroupRunawayAction is from group.go.
-	ErrUnknownResourceGroupRunawayAction = errors.New("unknown resource group runaway action")
 )

@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -87,8 +86,6 @@ const (
 	DefDDLSlowOprThreshold = 300
 	// DefExpensiveQueryTimeThreshold indicates the time threshold of expensive query.
 	DefExpensiveQueryTimeThreshold = 60
-	// DefExpensiveTxnTimeThreshold indicates the time threshold of expensive txn.
-	DefExpensiveTxnTimeThreshold = 600
 	// DefMemoryUsageAlarmRatio is the threshold triggering an alarm which the memory usage of tidb-server instance exceeds.
 	DefMemoryUsageAlarmRatio = 0.8
 	// DefTempDir is the default temporary directory path for TiDB.
@@ -266,12 +263,10 @@ type Config struct {
 	// one quarter of the total physical memory in the current system.
 	MaxBallastObjectSize int `toml:"max-ballast-object-size" json:"max-ballast-object-size"`
 	// BallastObjectSize set the initial size of the ballast object, the unit is byte.
-	BallastObjectSize int        `toml:"ballast-object-size" json:"ballast-object-size"`
-	TrxSummary        TrxSummary `toml:"transaction-summary" json:"transaction-summary"`
+	BallastObjectSize int `toml:"ballast-object-size" json:"ballast-object-size"`
 	// EnableGlobalKill indicates whether to enable global kill.
-	EnableGlobalKill bool `toml:"enable-global-kill" json:"enable-global-kill"`
-	// Enable32BitsConnectionID indicates whether to enable 32bits connection ID for global kill.
-	Enable32BitsConnectionID bool `toml:"enable-32bits-connection-id" json:"enable-32bits-connection-id"`
+	TrxSummary       TrxSummary `toml:"transaction-summary" json:"transaction-summary"`
+	EnableGlobalKill bool       `toml:"enable-global-kill" json:"enable-global-kill"`
 	// InitializeSQLFile is a file that will be executed after first bootstrap only.
 	// It can be used to set GLOBAL system variable values
 	InitializeSQLFile string `toml:"initialize-sql-file" json:"initialize-sql-file"`
@@ -308,11 +303,6 @@ type Config struct {
 	TiDBMaxReuseColumn uint32 `toml:"tidb-max-reuse-column" json:"tidb-max-reuse-column"`
 	// TiDBEnableExitCheck indicates whether exit-checking in domain for background process
 	TiDBEnableExitCheck bool `toml:"tidb-enable-exit-check" json:"tidb-enable-exit-check"`
-
-	// InMemSlowQueryTopNNum indicates the number of TopN slow queries stored in memory.
-	InMemSlowQueryTopNNum int `toml:"in-mem-slow-query-topn-num" json:"in-mem-slow-query-topn-num"`
-	// InMemSlowQueryRecentNum indicates the number of recent slow queries stored in memory.
-	InMemSlowQueryRecentNum int `toml:"in-mem-slow-query-recent-num" json:"in-mem-slow-query-recent-num"`
 }
 
 // UpdateTempStoragePath is to update the `TempStoragePath` if port/statusPort was changed
@@ -514,8 +504,6 @@ type Instance struct {
 	DDLSlowOprThreshold uint32 `toml:"ddl_slow_threshold" json:"ddl_slow_threshold"`
 	// ExpensiveQueryTimeThreshold indicates the time threshold of expensive query.
 	ExpensiveQueryTimeThreshold uint64 `toml:"tidb_expensive_query_time_threshold" json:"tidb_expensive_query_time_threshold"`
-	// ExpensiveTxnTimeThreshold indicates the time threshold of expensive transaction.
-	ExpensiveTxnTimeThreshold uint64 `toml:"tidb_expensive_txn_time_threshold" json:"tidb_expensive_txn_time_threshold"`
 	// StmtSummaryEnablePersistent indicates whether to enable file persistence for stmtsummary.
 	StmtSummaryEnablePersistent bool `toml:"tidb_stmt_summary_enable_persistent" json:"tidb_stmt_summary_enable_persistent"`
 	// StmtSummaryFilename indicates the file name written by stmtsummary
@@ -548,8 +536,6 @@ type Instance struct {
 	MaxConnections    uint32     `toml:"max_connections" json:"max_connections"`
 	TiDBEnableDDL     AtomicBool `toml:"tidb_enable_ddl" json:"tidb_enable_ddl"`
 	TiDBRCReadCheckTS bool       `toml:"tidb_rc_read_check_ts" json:"tidb_rc_read_check_ts"`
-	// TiDBServiceScope indicates the role for tidb for distributed task framework.
-	TiDBServiceScope string `toml:"tidb_service_scope" json:"tidb_service_scope"`
 }
 
 func (l *Log) getDisableTimestamp() bool {
@@ -942,7 +928,6 @@ var defaultConf = Config{
 		EnablePProfSQLCPU:           false,
 		DDLSlowOprThreshold:         DefDDLSlowOprThreshold,
 		ExpensiveQueryTimeThreshold: DefExpensiveQueryTimeThreshold,
-		ExpensiveTxnTimeThreshold:   DefExpensiveTxnTimeThreshold,
 		StmtSummaryEnablePersistent: false,
 		StmtSummaryFilename:         "tidb-statements.log",
 		StmtSummaryFileMaxDays:      3,
@@ -960,7 +945,6 @@ var defaultConf = Config{
 		MaxConnections:              0,
 		TiDBEnableDDL:               *NewAtomicBool(true),
 		TiDBRCReadCheckTS:           false,
-		TiDBServiceScope:            "",
 	},
 	Status: Status{
 		ReportStatus:          true,
@@ -1002,11 +986,11 @@ var defaultConf = Config{
 		StatsLoadQueueSize:                1000,
 		AnalyzePartitionConcurrencyQuota:  16,
 		PlanReplayerDumpWorkerConcurrency: 1,
-		EnableStatsCacheMemQuota:          true,
+		EnableStatsCacheMemQuota:          false,
 		RunAutoAnalyze:                    true,
 		EnableLoadFMSketch:                false,
-		LiteInitStats:                     true,
-		ForceInitStats:                    true,
+		LiteInitStats:                     false,
+		ForceInitStats:                    false,
 	},
 	ProxyProtocol: ProxyProtocol{
 		Networks:      "",
@@ -1060,7 +1044,6 @@ var defaultConf = Config{
 	EnableForwarding:                     defTiKVCfg.EnableForwarding,
 	NewCollationsEnabledOnFirstBootstrap: true,
 	EnableGlobalKill:                     true,
-	Enable32BitsConnectionID:             true,
 	TrxSummary:                           DefaultTrxSummary(),
 	DisaggregatedTiFlash:                 false,
 	TiFlashComputeAutoScalerType:         tiflashcompute.DefASStr,
@@ -1071,8 +1054,6 @@ var defaultConf = Config{
 	TiDBMaxReuseChunk:                    64,
 	TiDBMaxReuseColumn:                   256,
 	TiDBEnableExitCheck:                  false,
-	InMemSlowQueryTopNNum:                30,
-	InMemSlowQueryRecentNum:              500,
 }
 
 var (
@@ -1171,7 +1152,7 @@ func isAllRemovedConfigItems(items []string) bool {
 // The function enforceCmdArgs is used to merge the config file with command arguments:
 // For example, if you start TiDB by the command "./tidb-server --port=3000", the port number should be
 // overwritten to 3000 and ignore the port number in the config file.
-func InitializeConfig(confPath string, configCheck, configStrict bool, enforceCmdArgs func(*Config, *flag.FlagSet), fset *flag.FlagSet) {
+func InitializeConfig(confPath string, configCheck, configStrict bool, enforceCmdArgs func(*Config)) {
 	cfg := GetGlobalConfig()
 	var err error
 	if confPath != "" {
@@ -1209,7 +1190,7 @@ func InitializeConfig(confPath string, configCheck, configStrict bool, enforceCm
 			os.Exit(1)
 		}
 	}
-	enforceCmdArgs(cfg, fset)
+	enforceCmdArgs(cfg)
 
 	if err := cfg.Valid(); err != nil {
 		if !filepath.IsAbs(confPath) {
@@ -1508,14 +1489,17 @@ func GetJSONConfig() (string, error) {
 			if i == len(s)-1 {
 				delete(curValue, key)
 			}
-			if curValue[key] == nil {
+
+			if curValue[key] != nil {
+				mapValue, ok := curValue[key].(map[string]interface{})
+				if !ok {
+					break
+				}
+
+				curValue = mapValue
+			} else {
 				break
 			}
-			mapValue, ok := curValue[key].(map[string]interface{})
-			if !ok {
-				break
-			}
-			curValue = mapValue
 		}
 	}
 

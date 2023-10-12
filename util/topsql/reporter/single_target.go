@@ -90,7 +90,7 @@ func (ds *SingleTargetDataSink) recoverRun() {
 		}
 		err := ds.conn.Close()
 		if err != nil {
-			logutil.BgLogger().Warn("single target dataSink close connection failed", zap.String("category", "top-sql"), zap.Error(err))
+			logutil.BgLogger().Warn("[top-sql] single target dataSink close connection failed", zap.Error(err))
 		}
 		ds.conn = nil
 	}()
@@ -104,7 +104,7 @@ func (ds *SingleTargetDataSink) run() (rerun bool) {
 		r := recover()
 		if r != nil {
 			logutil.BgLogger().Error("panic in SingleTargetDataSink, rerun",
-				zap.Any("r", r),
+				zap.Reflect("r", r),
 				zap.Stack("stack trace"))
 			rerun = true
 		}
@@ -189,7 +189,7 @@ func (ds *SingleTargetDataSink) doSend(addr string, task sendTask) {
 	start := time.Now()
 	defer func() {
 		if err != nil {
-			logutil.BgLogger().Warn("single target data sink failed to send data to receiver", zap.String("category", "top-sql"), zap.Error(err))
+			logutil.BgLogger().Warn("[top-sql] single target data sink failed to send data to receiver", zap.Error(err))
 			reporter_metrics.ReportAllDurationFailedHistogram.Observe(time.Since(start).Seconds())
 		} else {
 			reporter_metrics.ReportAllDurationSuccHistogram.Observe(time.Since(start).Seconds())
@@ -341,7 +341,7 @@ func (ds *SingleTargetDataSink) tryEstablishConnection(ctx context.Context, targ
 
 	if ds.conn != nil {
 		err := ds.conn.Close()
-		logutil.BgLogger().Warn("grpc dataSink close connection failed", zap.String("category", "top-sql"), zap.Error(err))
+		logutil.BgLogger().Warn("[top-sql] grpc dataSink close connection failed", zap.Error(err))
 	}
 
 	ds.conn, err = ds.dial(ctx, targetRPCAddr)

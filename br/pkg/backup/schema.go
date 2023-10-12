@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/statistics/handle"
-	kvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -188,7 +187,6 @@ func (s *schemaInfo) calculateChecksum(
 	concurrency uint,
 ) error {
 	exe, err := checksum.NewExecutorBuilder(s.tableInfo, backupTS).
-		SetExplicitRequestSourceType(kvutil.ExplicitTypeBR).
 		SetConcurrency(concurrency).
 		Build()
 	if err != nil {

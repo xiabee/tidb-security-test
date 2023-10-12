@@ -44,16 +44,11 @@ func (m *SyncMap[K, V]) Load(key K) (V, bool) {
 	return val, exist
 }
 
-// Delete deletes the value for a key, returning the previous value if any.
-// The exist result reports whether the key was present.
-func (m *SyncMap[K, V]) Delete(key K) (val V, exist bool) {
+// Delete deletes a key value.
+func (m *SyncMap[K, V]) Delete(key K) {
 	m.mu.Lock()
-	val, exist = m.item[key]
-	if exist {
-		delete(m.item, key)
-	}
+	delete(m.item, key)
 	m.mu.Unlock()
-	return val, exist
 }
 
 // Keys returns all the keys in the map.

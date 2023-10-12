@@ -91,23 +91,19 @@ func TestSnapshotWithoutInterceptor(t *testing.T) {
 	checkIter(t, iter, [][]interface{}{})
 
 	// Test for IterReverse
-	iter, err = snap.IterReverse(kv.Key("k5"), nil)
+	iter, err = snap.IterReverse(kv.Key("k5"))
 	require.NoError(t, err)
 	checkIter(t, iter, [][]interface{}{{"k3", "v3"}, {"k2", "v2"}, {"k1", "v1"}})
 
-	iter, err = snap.IterReverse(kv.Key("k3"), nil)
+	iter, err = snap.IterReverse(kv.Key("k3"))
 	require.NoError(t, err)
 	checkIter(t, iter, [][]interface{}{{"k2", "v2"}, {"k1", "v1"}})
 
-	iter, err = snap.IterReverse(kv.Key("k4"), kv.Key("k2"))
-	require.NoError(t, err)
-	checkIter(t, iter, [][]interface{}{{"k3", "v3"}, {"k2", "v2"}})
-
-	iter, err = snap.IterReverse(kv.Key("k1"), nil)
+	iter, err = snap.IterReverse(kv.Key("k1"))
 	require.NoError(t, err)
 	checkIter(t, iter, [][]interface{}{})
 
-	iter, err = snap.IterReverse(kv.Key("k0"), nil)
+	iter, err = snap.IterReverse(kv.Key("k0"))
 	require.NoError(t, err)
 	checkIter(t, iter, [][]interface{}{})
 }
@@ -140,12 +136,12 @@ func (m *mockSnapshotInterceptor) OnIter(snap kv.Snapshot, k kv.Key, upperBound 
 	return snap.Iter(k, upperBound)
 }
 
-func (m *mockSnapshotInterceptor) OnIterReverse(snap kv.Snapshot, k kv.Key, lowerBound kv.Key) (kv.Iterator, error) {
-	m.spy = []interface{}{"OnIterReverse", k, lowerBound}
+func (m *mockSnapshotInterceptor) OnIterReverse(snap kv.Snapshot, k kv.Key) (kv.Iterator, error) {
+	m.spy = []interface{}{"OnIterReverse", k}
 	if len(k) == 0 {
 		return nil, fmt.Errorf("MockErr%s", m.spy[0])
 	}
-	return snap.IterReverse(k, lowerBound)
+	return snap.IterReverse(k)
 }
 
 func TestSnapshotWitInterceptor(t *testing.T) {
@@ -205,22 +201,15 @@ func TestSnapshotWitInterceptor(t *testing.T) {
 
 	// Test for IterReverse
 	k = kv.Key("k3")
-	iter, err = snap.IterReverse(k, nil)
+	iter, err = snap.IterReverse(k)
 	require.NoError(t, err)
 	checkIter(t, iter, [][]interface{}{{"k2", "v2"}, {"k1", "v1"}})
-	require.Equal(t, []interface{}{"OnIterReverse", k, kv.Key(nil)}, mockInterceptor.spy)
+	require.Equal(t, []interface{}{"OnIterReverse", k}, mockInterceptor.spy)
 
-	iter, err = snap.IterReverse(k, kv.Key("k2"))
-	require.NoError(t, err)
-	checkIter(t, iter, [][]interface{}{{"k2", "v2"}})
-	require.Equal(t, []interface{}{"OnIterReverse", k, kv.Key("k2")}, mockInterceptor.spy)
-
-	iter, err = snap.IterReverse(kv.Key{}, nil)
+	iter, err = snap.IterReverse(kv.Key{})
 	require.Equal(t, "MockErrOnIterReverse", err.Error())
 	require.Nil(t, iter)
-	require.Equal(t, []interface{}{"OnIterReverse", kv.Key{}, kv.Key(nil)}, mockInterceptor.spy)
-
-	snap.SetOption(kv.TiKVClientReadTimeout, uint64(10))
+	require.Equal(t, []interface{}{"OnIterReverse", kv.Key{}}, mockInterceptor.spy)
 }
 
 func checkIter(t *testing.T, iter kv.Iterator, expected [][]interface{}) {

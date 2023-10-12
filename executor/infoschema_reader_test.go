@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/domain/infosync"
+	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -39,6 +40,7 @@ import (
 )
 
 func TestInspectionTables(t *testing.T) {
+	t.Skip("unstable, skip it and fix it before 20210624")
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	instances := []string{
@@ -172,10 +174,6 @@ func TestColumnsTables(t *testing.T) {
 	tk.MustExec("CREATE TABLE t (`COL3` bit(1) NOT NULL,b year) ;")
 	tk.MustQuery("select column_type from  information_schema.columns where TABLE_SCHEMA = 'test' and TABLE_NAME = 't';").
 		Check(testkit.Rows("bit(1)", "year(4)"))
-
-	// For issue: https://github.com/pingcap/tidb/issues/43379
-	tk.MustQuery("select ordinal_position from information_schema.columns where table_schema=database() and table_name='t' and column_name='b'").
-		Check(testkit.Rows("2"))
 }
 
 func TestEngines(t *testing.T) {
@@ -260,7 +258,7 @@ func TestDDLJobs(t *testing.T) {
 	tk.MustExec("create table tt (a int);")
 	tk.MustExec("alter table tt add index t(a), add column b int")
 	tk.MustQuery("select db_name, table_name, job_type from information_schema.DDL_JOBS limit 3").Check(
-		testkit.Rows("test_ddl_jobs tt alter table multi-schema change", "test_ddl_jobs tt add column /* subjob */", "test_ddl_jobs tt add index /* subjob */ /* txn-merge */"))
+		testkit.Rows("test_ddl_jobs tt alter table multi-schema change", "test_ddl_jobs tt add index /* subjob */ /* txn-merge */", "test_ddl_jobs tt add column /* subjob */"))
 }
 
 func TestKeyColumnUsage(t *testing.T) {
@@ -381,6 +379,9 @@ func TestUserPrivilegesTable(t *testing.T) {
 
 func TestDataForTableStatsField(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
+	oldExpiryTime := executor.TableStatsCacheExpiry
+	executor.TableStatsCacheExpiry = 0
+	defer func() { executor.TableStatsCacheExpiry = oldExpiryTime }()
 	h := dom.StatsHandle()
 	h.Clear()
 	is := dom.InfoSchema()
@@ -426,6 +427,9 @@ func TestDataForTableStatsField(t *testing.T) {
 
 func TestPartitionsTable(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
+	oldExpiryTime := executor.TableStatsCacheExpiry
+	executor.TableStatsCacheExpiry = 0
+	defer func() { executor.TableStatsCacheExpiry = oldExpiryTime }()
 	h := dom.StatsHandle()
 	h.Clear()
 	is := dom.InfoSchema()
@@ -433,6 +437,7 @@ func TestPartitionsTable(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("USE test;")
 	testkit.WithPruneMode(tk, variable.Static, func() {
+		require.NoError(t, h.RefreshVars())
 		tk.MustExec("DROP TABLE IF EXISTS `test_partitions`;")
 		tk.MustExec(`CREATE TABLE test_partitions (a int, b int, c varchar(5), primary key(a), index idx(c)) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (6), PARTITION p1 VALUES LESS THAN (11), PARTITION p2 VALUES LESS THAN (16));`)
 		require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
@@ -561,10 +566,7 @@ func TestForAnalyzeStatus(t *testing.T) {
 		"  `STATE` varchar(64) DEFAULT NULL,\n" +
 		"  `FAIL_REASON` longtext DEFAULT NULL,\n" +
 		"  `INSTANCE` varchar(512) DEFAULT NULL,\n" +
-		"  `PROCESS_ID` bigint(64) unsigned DEFAULT NULL,\n" +
-		"  `REMAINING_SECONDS` bigint(64) unsigned DEFAULT NULL,\n" +
-		"  `PROGRESS` double(22,6) DEFAULT NULL,\n" +
-		"  `ESTIMATED_TOTAL_ROWS` bigint(64) unsigned DEFAULT NULL\n" +
+		"  `PROCESS_ID` bigint(64) unsigned DEFAULT NULL\n" +
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
 	tk.MustQuery("show create table information_schema.analyze_status").Check(testkit.Rows("ANALYZE_STATUS " + analyzeStatusTable))
 	tk.MustExec("delete from mysql.analyze_jobs")
@@ -592,7 +594,7 @@ func TestForAnalyzeStatus(t *testing.T) {
 	tk.MustExec("create table t1 (a int, b int, index idx(a))")
 	tk.MustExec("insert into t1 values (1,2),(3,4)")
 	tk.MustExec("analyze table t1")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t1, reason to use this rate is \"use min(1, 110000/10000) as the sample-rate=1\"")) // 1 note.
+	tk.MustQuery("show warnings").Check(testkit.Rows("Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t1")) // 1 note.
 	require.NoError(t, dom.StatsHandle().LoadNeededHistograms())
 	tk.MustExec("CREATE ROLE r_t1 ;")
 	tk.MustExec("GRANT ALL PRIVILEGES ON test.t1 TO r_t1;")
@@ -601,19 +603,17 @@ func TestForAnalyzeStatus(t *testing.T) {
 	rows := tk.MustQuery("select * from information_schema.analyze_status where TABLE_NAME='t1'").Sort().Rows()
 	require.Greater(t, len(rows), 0)
 	for _, row := range rows {
-		require.Len(t, row, 14) // test length of row
+		require.Len(t, row, 11) // test length of row
 		// test `End_time` field
 		str, ok := row[6].(string)
 		require.True(t, ok)
-		_, err := time.Parse(time.DateTime, str)
+		_, err := time.Parse("2006-01-02 15:04:05", str)
 		require.NoError(t, err)
 	}
 	rows2 := tk.MustQuery("show analyze status where TABLE_NAME='t1'").Sort().Rows()
 	require.Equal(t, len(rows), len(rows2))
-	for i, row := range rows {
-		for j, r := range row {
-			require.Equal(t, r, rows2[i][j])
-		}
+	for i, row2 := range rows2 {
+		require.Equal(t, rows[i], row2)
 	}
 }
 

@@ -24,9 +24,9 @@ import (
 const (
 	alphabet       = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	yearFormat     = "2006"
-	dateFormat     = time.DateOnly
-	timeFormat     = time.TimeOnly
-	dateTimeFormat = time.DateTime
+	dateFormat     = "2006-01-02"
+	timeFormat     = "15:04:05"
+	dateTimeFormat = "2006-01-02 15:04:05"
 
 	// Used by randString
 	letterIdxBits = 6                    // 6 bits to represent a letter index

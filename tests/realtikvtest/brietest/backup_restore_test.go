@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func initTestKit(t *testing.T) *testkit.TestKit {
+func TestBackupAndRestore(t *testing.T) {
 	if !*realtikvtest.WithRealTiKV {
 		t.Skip("only run BR SQL integration test with tikv store")
 	}
@@ -38,11 +38,6 @@ func initTestKit(t *testing.T) *testkit.TestKit {
 	config.StoreGlobalConfig(cfg)
 
 	tk := testkit.NewTestKit(t, store)
-	return tk
-}
-
-func TestBackupAndRestore(t *testing.T) {
-	tk := initTestKit(t)
 	tk.MustExec("create database if not exists br")
 	tk.MustExec("use br")
 	tk.MustExec("create table t1(v int)")

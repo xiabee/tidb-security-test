@@ -17,6 +17,7 @@ package expression
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -229,8 +230,6 @@ func TestDate(t *testing.T) {
 		{nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
 		{"0000-00-00 00:00:00", 0, 0, nil, 0, nil, nil, nil, nil, nil, nil, nil},
 		{"0000-00-00", 0, 0, nil, 0, nil, nil, nil, nil, nil, nil, nil},
-		{"2007-00-03", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
-		{"2007-02-00", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil},
 	}
 
 	dtblNil := tblToDtbl(tblNil)
@@ -1234,24 +1233,21 @@ func builtinDateFormat(ctx sessionctx.Context, args []types.Datum) (d types.Datu
 func TestFromUnixTime(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		isDecimal    bool
-		integralPart int64
-		decimal      float64
-		format       string
-		expect       string
+		isDecimal      bool
+		integralPart   int64
+		fractionalPart int64
+		decimal        float64
+		format         string
+		expect         string
 	}{
-		{false, 1451606400, 0, "", "2016-01-01 00:00:00"},
-		{true, 1451606400, 1451606400.123456, "", "2016-01-01 00:00:00.123456"},
-		{true, 1451606400, 1451606400.999999, "", "2016-01-01 00:00:00.999999"},
-		{true, 1451606400, 1451606400.9999999, "", "2016-01-01 00:00:01.000000"},
-		{false, 1451606400, 0, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00"},
-		{true, 1451606400, 1451606400.123456, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00.123456"},
-		{true, 1451606400, 1451606400.999999, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00.999999"},
-		{true, 1451606400, 1451606400.9999999, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:01.000000"},
-
-		// TestIssue22206
-		{false, 5000000000, 0, "", "2128-06-11 08:53:20"},
-		{true, 32536771199, 32536771199.99999, "", "3001-01-18 23:59:59.999990"},
+		{false, 1451606400, 0, 0, "", "2016-01-01 00:00:00"},
+		{true, 1451606400, 123456000, 1451606400.123456, "", "2016-01-01 00:00:00.123456"},
+		{true, 1451606400, 999999000, 1451606400.999999, "", "2016-01-01 00:00:00.999999"},
+		{true, 1451606400, 999999900, 1451606400.9999999, "", "2016-01-01 00:00:01.000000"},
+		{false, 1451606400, 0, 0, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00"},
+		{true, 1451606400, 123456000, 1451606400.123456, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00.123456"},
+		{true, 1451606400, 999999000, 1451606400.999999, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:00.999999"},
+		{true, 1451606400, 999999900, 1451606400.9999999, `%Y %D %M %h:%i:%s %x`, "2016-01-01 00:00:01.000000"},
 	}
 	sc := ctx.GetSessionVars().StmtCtx
 	originTZ := sc.TimeZone
@@ -1303,10 +1299,9 @@ func TestFromUnixTime(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
-	// TestIssue22206
-	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(32536771200)))
+	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(math.MaxInt32+1)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, chunk.Row{})
+	_, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 }
@@ -1326,7 +1321,7 @@ func TestCurrentDate(t *testing.T) {
 
 func TestCurrentTime(t *testing.T) {
 	ctx := createContext(t)
-	tfStr := time.TimeOnly
+	tfStr := "15:04:05"
 
 	last := time.Now()
 	fc := funcs[ast.CurrentTime]
@@ -1751,14 +1746,11 @@ func TestTimestampDiff(t *testing.T) {
 		unit   string
 		t1     string
 		t2     string
-		isNull bool
 		expect int64
 	}{
-		{"MONTH", "2003-02-01", "2003-05-01", false, 3},
-		{"YEAR", "2002-05-01", "2001-01-01", false, -1},
-		{"MINUTE", "2003-02-01", "2003-05-01 12:05:55", false, 128885},
-		{"MONTH", "2003-00-01", "2003-05-01", true, 0},
-		{"MONTH", "2003-02-01", "2003-05-00", true, 0},
+		{"MONTH", "2003-02-01", "2003-05-01", 3},
+		{"YEAR", "2002-05-01", "2001-01-01", -1},
+		{"MINUTE", "2003-02-01", "2003-05-01 12:05:55", 128885},
 	}
 
 	fc := funcs[ast.TimestampDiff]
@@ -1773,13 +1765,8 @@ func TestTimestampDiff(t *testing.T) {
 		require.NoError(t, err)
 		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		if test.isNull {
-			require.True(t, d.IsNull())
-		} else {
-			require.Equal(t, test.expect, d.GetInt64())
-		}
+		require.Equal(t, test.expect, d.GetInt64())
 	}
-
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.IgnoreTruncate.Store(true)
 	sc.IgnoreZeroInDate = true
@@ -1865,11 +1852,11 @@ func TestUnixTimestamp(t *testing.T) {
 		{0, types.NewIntDatum(20151113102019), types.KindInt64, "1447410019"},                                                          // YYYYMMDDHHMMSS
 		{0, types.NewStringDatum("2015-11-13 10:20:19"), types.KindInt64, "1447410019"},
 		{0, types.NewStringDatum("2015-11-13 10:20:19.012"), types.KindMysqlDecimal, "1447410019.012"},
-		{0, types.NewStringDatum("1970-01-01 00:00:00"), types.KindInt64, "0"},                                // Min timestamp
-		{0, types.NewStringDatum("3001-01-18 23:59:59.999999"), types.KindMysqlDecimal, "32536771199.999999"}, // Max timestamp
-		{0, types.NewStringDatum("2017-00-02"), types.KindInt64, "0"},                                         // Invalid date
-		{0, types.NewStringDatum("1969-12-31 23:59:59.999999"), types.KindMysqlDecimal, "0"},                  // Invalid timestamp
-		{0, types.NewStringDatum("3001-01-19 00:00:00.000000"), types.KindMysqlDecimal, "0"},                  // Invalid timestamp
+		{0, types.NewStringDatum("1970-01-01 00:00:00"), types.KindInt64, "0"},                               // Min timestamp
+		{0, types.NewStringDatum("2038-01-19 03:14:07.999999"), types.KindMysqlDecimal, "2147483647.999999"}, // Max timestamp
+		{0, types.NewStringDatum("2017-00-02"), types.KindInt64, "0"},                                        // Invalid date
+		{0, types.NewStringDatum("1969-12-31 23:59:59.999999"), types.KindMysqlDecimal, "0"},                 // Invalid timestamp
+		{0, types.NewStringDatum("2038-01-19 03:14:08"), types.KindInt64, "0"},                               // Invalid timestamp
 		// Below tests irregular inputs.
 		// {0, types.NewIntDatum(0), types.KindInt64, "0"},
 		// {0, types.NewIntDatum(-1), types.KindInt64, "0"},
@@ -1900,24 +1887,18 @@ func TestDateArithFuncs(t *testing.T) {
 	tests := []struct {
 		inputDate    string
 		fc           functionClass
-		inputDecimal interface{}
+		inputDecimal float64
 		expect       string
 	}{
 		{date[0], fcAdd, 1, date[1]},
 		{date[1], fcAdd, -1, date[0]},
 		{date[1], fcAdd, -0.5, date[0]},
 		{date[1], fcAdd, -1.4, date[0]},
-		{"1998-10-00", fcAdd, 1, ""},
-		{"2004-00-01", fcAdd, 1, ""},
-		{"20111111", fcAdd, "-123", "2011-07-11"},
 
 		{date[1], fcSub, 1, date[0]},
 		{date[0], fcSub, -1, date[1]},
 		{date[0], fcSub, -0.5, date[1]},
 		{date[0], fcSub, -1.4, date[1]},
-		{"1998-10-00", fcSub, 31, ""},
-		{"2004-00-01", fcSub, 31, ""},
-		{"20111111", fcSub, "-123", "2012-03-13"},
 	}
 	for _, test := range tests {
 		args := types.MakeDatums(test.inputDate, test.inputDecimal, "DAY")
@@ -1926,8 +1907,7 @@ func TestDateArithFuncs(t *testing.T) {
 		require.NotNil(t, f)
 		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
-		s, _ := v.ToString()
-		require.Equal(t, test.expect, s)
+		require.Equal(t, test.expect, v.GetString())
 	}
 
 	args := types.MakeDatums(date[0], nil, "DAY")
@@ -1945,38 +1925,6 @@ func TestDateArithFuncs(t *testing.T) {
 	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, v.IsNull())
-
-	// TestIssue11645
-	testHours := []struct {
-		input    string
-		hours    int
-		isNull   bool
-		expected string
-	}{
-		{"1000-01-01 00:00:00", -2, false, "0999-12-31 22:00:00"},
-		{"1000-01-01 00:00:00", -200, false, "0999-12-23 16:00:00"},
-		{"0001-01-01 00:00:00", -2, false, "0000-00-00 22:00:00"},
-		{"0001-01-01 00:00:00", -25, false, "0000-00-00 23:00:00"},
-		{"0001-01-01 00:00:00", -8784, false, "0000-00-00 00:00:00"},
-		{"0001-01-01 00:00:00", -8785, true, ""},
-		{"0001-01-02 00:00:00", -2, false, "0001-01-01 22:00:00"},
-		{"0001-01-02 00:00:00", -24, false, "0001-01-01 00:00:00"},
-		{"0001-01-02 00:00:00", -25, false, "0000-00-00 23:00:00"},
-		{"0001-01-02 00:00:00", -8785, false, "0000-00-00 23:00:00"},
-	}
-	for _, test := range testHours {
-		args := types.MakeDatums(test.input, test.hours, "HOUR")
-		f, err := fcAdd.getFunction(ctx, datumsToConstants(args))
-		require.NoError(t, err)
-		require.NotNil(t, f)
-		v, err := evalBuiltinFunc(f, chunk.Row{})
-		require.NoError(t, err)
-		if test.isNull {
-			require.True(t, v.IsNull())
-		} else {
-			require.Equal(t, test.expected, v.GetString())
-		}
-	}
 
 	testMonths := []struct {
 		input    string
@@ -2027,29 +1975,32 @@ func TestDateArithFuncs(t *testing.T) {
 		require.Equal(t, test.expected, v.GetString())
 	}
 
-	testOverflow := []struct {
+	testOverflowYears := []struct {
 		input string
-		v     int
-		unit  string
+		year  int
 	}{
-		{"2008-11-23", -1465647104, "YEAR"},
-		{"2008-11-23", 1465647104, "YEAR"},
-		{"2000-04-13 07:17:02", -1465647104, "YEAR"},
-		{"2000-04-13 07:17:02", 1465647104, "YEAR"},
-		{"2008-11-23 22:47:31", 266076160, "QUARTER"},
-		{"2008-11-23 22:47:31", -266076160, "QUARTER"},
+		{"2008-11-23", -1465647104},
+		{"2008-11-23", 1465647104},
 	}
 
-	for _, test := range testOverflow {
-		for _, fc := range []functionClass{fcAdd, fcSub} {
-			args = types.MakeDatums(test.input, test.v, test.unit)
-			f, err = fc.getFunction(ctx, datumsToConstants(args))
-			require.NoError(t, err)
-			require.NotNil(t, f)
-			v, err = evalBuiltinFunc(f, chunk.Row{})
-			require.NoError(t, err)
-			require.True(t, v.IsNull())
-		}
+	for _, test := range testOverflowYears {
+		args = types.MakeDatums(test.input, test.year, "YEAR")
+		f, err = fcAdd.getFunction(ctx, datumsToConstants(args))
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		v, err = evalBuiltinFunc(f, chunk.Row{})
+		require.NoError(t, err)
+		require.True(t, v.IsNull())
+	}
+
+	for _, test := range testOverflowYears {
+		args = types.MakeDatums(test.input, test.year, "YEAR")
+		f, err = fcSub.getFunction(ctx, datumsToConstants(args))
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		v, err = evalBuiltinFunc(f, chunk.Row{})
+		require.NoError(t, err)
+		require.True(t, v.IsNull())
 	}
 
 	testDurations := []struct {
@@ -2210,14 +2161,6 @@ func TestTimestamp(t *testing.T) {
 		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("20170118123950.123"))}, "2017-01-18 12:39:50.123"},
 		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("20170118123950.999"))}, "2017-01-18 12:39:50.999"},
 		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("20170118123950.999"))}, "2017-01-18 12:39:50.999"},
-
-		// TestIssue25093
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("0.123"))}, "0000-00-00 00:00:00.123"},
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("0.4352"))}, "0000-00-00 00:00:00.4352"},
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("0.12345678"))}, "0000-00-00 00:00:00.123457"},
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("101.234"))}, "2000-01-01 00:00:00.000"},
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("0.9999999"))}, ""},
-		{[]types.Datum{types.NewDecimalDatum(types.NewDecFromStringForTest("1.234"))}, ""},
 	}
 	fc := funcs[ast.Timestamp]
 	for _, test := range tests {
@@ -2505,8 +2448,6 @@ func TestToSeconds(t *testing.T) {
 		"0000-00-00",
 		"1992-13-00",
 		"2007-10-07 23:59:61",
-		"1998-10-00",
-		"1998-00-11",
 		123456789}
 
 	for _, i := range testsNull {
@@ -2549,7 +2490,6 @@ func TestToDays(t *testing.T) {
 		"0000-00-00",
 		"1992-13-00",
 		"2007-10-07 23:59:61",
-		"1998-10-00",
 		123456789}
 
 	for _, i := range testsNull {
@@ -2753,11 +2693,6 @@ func TestSecToTime(t *testing.T) {
 		{0, types.NewStringDatum("123.4567891"), "00:02:03.456789"},
 		{0, types.NewStringDatum("123"), "00:02:03.000000"},
 		{0, types.NewStringDatum("abc"), "00:00:00.000000"},
-		// Issue #15613
-		{0, types.NewStringDatum("1e-4"), "00:00:00.000100"},
-		{0, types.NewStringDatum("1e-5"), "00:00:00.000010"},
-		{0, types.NewStringDatum("1e-6"), "00:00:00.000001"},
-		{0, types.NewStringDatum("1e-7"), "00:00:00.000000"},
 	}
 	for _, test := range tests {
 		comment := fmt.Sprintf("%+v", test)
@@ -2826,13 +2761,6 @@ func TestConvertTz(t *testing.T) {
 		{"2021-03-28 02:30:00", "Europe/Amsterdam", "UTC", true, "2021-03-28 01:00:00"},
 		{"2021-10-22 10:00:00", "Europe/Tallinn", "SYSTEM", true, t1.In(loc2).Format("2006-01-02 15:04:00")},
 		{"2021-10-22 10:00:00", "SYSTEM", "Europe/Tallinn", true, t2.In(loc1).Format("2006-01-02 15:04:00")},
-
-		// TestIssue30081
-		{"2007-03-11 2:00:00", "US/Eastern", "US/Central", true, "2007-03-11 01:00:00"},
-		{"2007-03-11 3:00:00", "US/Eastern", "US/Central", true, "2007-03-11 01:00:00"},
-
-		{"2004-10-00 12:00:00", "GMT", "MET", true, ""},
-		{"2004-00-01 12:00:00", "GMT", "MET", true, ""},
 	}
 	fc := funcs[ast.ConvertTz]
 	for _, test := range tests {
@@ -2846,11 +2774,11 @@ func TestConvertTz(t *testing.T) {
 		d, err := evalBuiltinFunc(f, chunk.Row{})
 		if test.Success {
 			require.NoError(t, err)
-			result, _ := d.ToString()
-			require.Equalf(t, test.expect, result, "convert_tz(\"%v\", \"%s\", \"%s\")", test.t, test.fromTz, test.toTz)
 		} else {
 			require.Error(t, err)
 		}
+		result, _ := d.ToString()
+		require.Equalf(t, test.expect, result, "convert_tz(\"%v\", \"%s\", \"%s\")", test.t, test.fromTz, test.toTz)
 	}
 }
 
@@ -3039,43 +2967,6 @@ func TestTidbParseTso(t *testing.T) {
 	}
 
 	fc := funcs[ast.TiDBParseTso]
-	for _, test := range tests {
-		dat := []types.Datum{types.NewDatum(test.param)}
-		f, err := fc.getFunction(ctx, datumsToConstants(dat))
-		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, chunk.Row{})
-		require.NoError(t, err)
-		result, _ := d.ToString()
-		require.Equal(t, test.expect, result)
-	}
-
-	testsNull := []interface{}{
-		0,
-		-1,
-		"-1"}
-
-	for _, i := range testsNull {
-		dat := []types.Datum{types.NewDatum(i)}
-		f, err := fc.getFunction(ctx, datumsToConstants(dat))
-		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, chunk.Row{})
-		require.NoError(t, err)
-		require.True(t, d.IsNull())
-	}
-}
-
-func TestTidbParseTsoLogical(t *testing.T) {
-	ctx := createContext(t)
-	tests := []struct {
-		param  int64
-		expect string
-	}{
-		{404411537129996288, "0"},
-		{404411537129996289, "1"},
-		{404411537129996290, "2"},
-	}
-
-	fc := funcs[ast.TiDBParseTsoLogical]
 	for _, test := range tests {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))

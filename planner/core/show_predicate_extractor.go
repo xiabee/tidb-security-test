@@ -81,7 +81,7 @@ func (e *ShowBaseExtractor) Extract() bool {
 				e.field = strings.ToLower(string(patValue))
 				return true
 			}
-			e.fieldPattern = strings.ToLower(ptn)
+			e.fieldPattern = strings.ToLower(string(patValue))
 			return true
 		case *ast.ColumnNameExpr:
 			// It is used in `SHOW COLUMNS FROM t LIKE abc`.
@@ -114,11 +114,11 @@ func (e *ShowBaseExtractor) explainInfo() string {
 
 	r := new(bytes.Buffer)
 	if len(e.field) > 0 {
-		fmt.Fprintf(r, "%s:[%s], ", key, e.field)
+		r.WriteString(fmt.Sprintf("%s:[%s], ", key, e.field))
 	}
 
 	if len(e.fieldPattern) > 0 {
-		fmt.Fprintf(r, "%s_pattern:[%s], ", key, e.fieldPattern)
+		r.WriteString(fmt.Sprintf("%s_pattern:[%s], ", key, e.fieldPattern))
 	}
 
 	// remove the last ", " in the message info

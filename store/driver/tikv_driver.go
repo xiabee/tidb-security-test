@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/errors"
 	deadlockpb "github.com/pingcap/kvproto/pkg/deadlock"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/executor/importer"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -35,12 +36,12 @@ import (
 	txn_driver "github.com/pingcap/tidb/store/driver/txn"
 	"github.com/pingcap/tidb/store/gcworker"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
+	rmclient "github.com/tikv/pd/client/resource_group/controller"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -93,6 +94,26 @@ func WithPDClientConfig(client config.PDClient) Option {
 	return func(c *TiKVDriver) {
 		c.pdConfig = client
 	}
+}
+
+// TrySetupGlobalResourceController tries to setup global resource controller.
+func TrySetupGlobalResourceController(ctx context.Context, serverID uint64, s kv.Storage) error {
+	var (
+		store *tikvStore
+		ok    bool
+	)
+	if store, ok = s.(*tikvStore); !ok {
+		return errors.New("cannot setup up resource controller, should use tikv storage")
+	}
+
+	control, err := rmclient.NewResourceGroupController(ctx, serverID, store.GetPDClient(), nil, rmclient.WithMaxWaitDuration(time.Second*30))
+	if err != nil {
+		return err
+	}
+	executor.SetResourceGroupController(control)
+	tikv.SetResourceControlInterceptor(control)
+	control.Start(ctx)
+	return nil
 }
 
 func getKVStore(path string, tls config.Security) (kv.Storage, error) {
@@ -214,7 +235,7 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		tikv.WithCodec(codec),
 	)
 
-	s, err = tikv.NewKVStore(uuid, pdClient, spkv, &injectTraceClient{Client: rpcClient}, tikv.WithPDHTTPClient(tlsConfig, etcdAddrs))
+	s, err = tikv.NewKVStore(uuid, pdClient, spkv, rpcClient, tikv.WithPDHTTPClient(tlsConfig, etcdAddrs))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -406,23 +427,4 @@ func (s *tikvStore) GetLockWaits() ([]*deadlockpb.WaitForEntry, error) {
 
 func (s *tikvStore) GetCodec() tikv.Codec {
 	return s.codec
-}
-
-// injectTraceClient injects trace info to the tikv request
-type injectTraceClient struct {
-	tikv.Client
-}
-
-// SendRequest sends Request.
-func (c *injectTraceClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error) {
-	if info := tracing.TraceInfoFromContext(ctx); info != nil {
-		source := req.Context.SourceStmt
-		if source == nil {
-			source = &kvrpcpb.SourceStmt{}
-			req.Context.SourceStmt = source
-		}
-		source.ConnectionId = info.ConnectionID
-		source.SessionAlias = info.SessionAlias
-	}
-	return c.Client.SendRequest(ctx, addr, req, timeout)
 }

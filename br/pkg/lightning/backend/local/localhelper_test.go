@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/kv"
@@ -250,8 +249,6 @@ func (c *testSplitClient) GetOperator(ctx context.Context, regionID uint64) (*pd
 }
 
 func (c *testSplitClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*split.RegionInfo, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.hook != nil {
 		key, endKey, limit = c.hook.BeforeScanRegions(ctx, key, endKey, limit)
 	}
@@ -472,21 +469,23 @@ func doTestBatchSplitRegionByRanges(ctx context.Context, t *testing.T, hook clie
 	checkRegionRanges(t, regions, [][]byte{[]byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca")})
 
 	// generate:  ranges [b, ba), [ba, bb), [bb, bc), ... [by, bz)
-	ranges := make([]common.Range, 0)
+	ranges := make([]Range, 0)
 	start := []byte{'b'}
 	for i := byte('a'); i <= 'z'; i++ {
 		end := []byte{'b', i}
-		ranges = append(ranges, common.Range{Start: start, End: end})
+		ranges = append(ranges, Range{start: start, end: end})
 		start = end
 	}
 
-	err = local.SplitAndScatterRegionByRanges(ctx, ranges, true)
-	if len(errPat) != 0 {
+	err = local.SplitAndScatterRegionByRanges(ctx, ranges, nil, true, 1000)
+	if len(errPat) == 0 {
+		require.NoError(t, err)
+	} else {
 		require.Error(t, err)
 		require.Regexp(t, errPat, err.Error())
 		return
 	}
-	require.NoError(t, err)
+
 	splitHook.check(t, client)
 
 	// check split ranges
@@ -562,15 +561,15 @@ func TestMissingScatter(t *testing.T) {
 	checkRegionRanges(t, regions, [][]byte{[]byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca")})
 
 	// generate:  ranges [b, ba), [ba, bb), [bb, bc), ... [by, bz)
-	ranges := make([]common.Range, 0)
+	ranges := make([]Range, 0)
 	start := []byte{'b'}
 	for i := byte('a'); i <= 'z'; i++ {
 		end := []byte{'b', i}
-		ranges = append(ranges, common.Range{Start: start, End: end})
+		ranges = append(ranges, Range{start: start, end: end})
 		start = end
 	}
 
-	err = local.SplitAndScatterRegionByRanges(ctx, ranges, true)
+	err = local.SplitAndScatterRegionByRanges(ctx, ranges, nil, true, 1000)
 	require.NoError(t, err)
 
 	splitHook.check(t, client)
@@ -725,15 +724,15 @@ func TestSplitAndScatterRegionInBatches(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var ranges []common.Range
+	var ranges []Range
 	for i := 0; i < 20; i++ {
-		ranges = append(ranges, common.Range{
-			Start: []byte(fmt.Sprintf("a%02d", i)),
-			End:   []byte(fmt.Sprintf("a%02d", i+1)),
+		ranges = append(ranges, Range{
+			start: []byte(fmt.Sprintf("a%02d", i)),
+			end:   []byte(fmt.Sprintf("a%02d", i+1)),
 		})
 	}
 
-	err := local.SplitAndScatterRegionInBatches(ctx, ranges, true, 4)
+	err := local.SplitAndScatterRegionInBatches(ctx, ranges, nil, true, 1000, 4)
 	require.NoError(t, err)
 
 	rangeStart := codec.EncodeBytes([]byte{}, []byte("a"))
@@ -823,13 +822,13 @@ func doTestBatchSplitByRangesWithClusteredIndex(t *testing.T, hook clientHook) {
 	}
 
 	start := rangeKeys[0]
-	ranges := make([]common.Range, 0, len(rangeKeys)-1)
+	ranges := make([]Range, 0, len(rangeKeys)-1)
 	for _, e := range rangeKeys[1:] {
-		ranges = append(ranges, common.Range{Start: start, End: e})
+		ranges = append(ranges, Range{start: start, end: e})
 		start = e
 	}
 
-	err := local.SplitAndScatterRegionByRanges(ctx, ranges, true)
+	err := local.SplitAndScatterRegionByRanges(ctx, ranges, nil, true, 1000)
 	require.NoError(t, err)
 
 	startKey := codec.EncodeBytes([]byte{}, rangeKeys[0])

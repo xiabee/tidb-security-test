@@ -121,8 +121,7 @@ func IsNonBinaryStr(ft *FieldType) bool {
 func NeedRestoredData(ft *FieldType) bool {
 	if collate.NewCollationEnabled() &&
 		IsNonBinaryStr(ft) &&
-		(!collate.IsBinCollation(ft.GetCollate()) || IsTypeVarchar(ft.GetType())) &&
-		ft.GetCollate() != "utf8mb4_0900_bin" {
+		!(collate.IsBinCollation(ft.GetCollate()) && !IsTypeVarchar(ft.GetType())) {
 		return true
 	}
 	return false

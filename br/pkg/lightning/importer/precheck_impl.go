@@ -14,12 +14,10 @@
 package importer
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +47,7 @@ import (
 	"github.com/pingcap/tidb/util/set"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 )
@@ -362,8 +361,8 @@ func (ci *regionDistributionCheckItem) Check(ctx context.Context) (*precheck.Che
 	if len(stores) <= 1 {
 		return theResult, nil
 	}
-	slices.SortFunc(stores, func(i, j *pdtypes.StoreInfo) int {
-		return cmp.Compare(i.Status.RegionCount, j.Status.RegionCount)
+	slices.SortFunc(stores, func(i, j *pdtypes.StoreInfo) bool {
+		return i.Status.RegionCount < j.Status.RegionCount
 	})
 	minStore := stores[0]
 	maxStore := stores[len(stores)-1]
@@ -747,19 +746,17 @@ func (ci *checkpointCheckItem) checkpointIsValid(ctx context.Context, tableInfo 
 // CDCPITRCheckItem check downstream has enabled CDC or PiTR. It's exposed to let
 // caller override the Instruction message.
 type CDCPITRCheckItem struct {
-	cfg              *config.Config
-	Instruction      string
-	leaderAddrGetter func() string
+	cfg         *config.Config
+	Instruction string
 	// used in test
 	etcdCli *clientv3.Client
 }
 
 // NewCDCPITRCheckItem creates a checker to check downstream has enabled CDC or PiTR.
-func NewCDCPITRCheckItem(cfg *config.Config, leaderAddrGetter func() string) precheck.Checker {
+func NewCDCPITRCheckItem(cfg *config.Config) precheck.Checker {
 	return &CDCPITRCheckItem{
-		cfg:              cfg,
-		Instruction:      "local backend is not compatible with them. Please switch to tidb backend then try again.",
-		leaderAddrGetter: leaderAddrGetter,
+		cfg:         cfg,
+		Instruction: "local backend is not compatible with them. Please switch to tidb backend then try again.",
 	}
 }
 
@@ -768,11 +765,7 @@ func (*CDCPITRCheckItem) GetCheckItemID() precheck.CheckItemID {
 	return precheck.CheckTargetUsingCDCPITR
 }
 
-func dialEtcdWithCfg(
-	ctx context.Context,
-	cfg *config.Config,
-	leaderAddr string,
-) (*clientv3.Client, error) {
+func dialEtcdWithCfg(ctx context.Context, cfg *config.Config) (*clientv3.Client, error) {
 	cfg2, err := cfg.ToTLS()
 	if err != nil {
 		return nil, err
@@ -781,7 +774,7 @@ func dialEtcdWithCfg(
 
 	return clientv3.New(clientv3.Config{
 		TLS:              tlsConfig,
-		Endpoints:        []string{leaderAddr},
+		Endpoints:        []string{cfg.TiDB.PdAddr},
 		AutoSyncInterval: 30 * time.Second,
 		DialTimeout:      5 * time.Second,
 		DialOptions: []grpc.DialOption{
@@ -808,7 +801,7 @@ func (ci *CDCPITRCheckItem) Check(ctx context.Context) (*precheck.CheckResult, e
 
 	if ci.etcdCli == nil {
 		var err error
-		ci.etcdCli, err = dialEtcdWithCfg(ctx, ci.cfg, ci.leaderAddrGetter())
+		ci.etcdCli, err = dialEtcdWithCfg(ctx, ci.cfg)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

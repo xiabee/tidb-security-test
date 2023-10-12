@@ -7,6 +7,7 @@ import (
 	"time"
 
 	gmysql "github.com/go-sql-driver/mysql"
+	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
@@ -15,7 +16,6 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
-	"go.uber.org/mock/gomock"
 )
 
 type backendSuite struct {

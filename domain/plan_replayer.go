@@ -17,6 +17,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,32 +87,20 @@ func (p *dumpFileGcChecker) setupSctx(sctx sessionctx.Context) {
 }
 
 func (p *dumpFileGcChecker) gcDumpFilesByPath(path string, gcDurationDefault, gcDurationForCapture time.Duration) {
-	entries, err := os.ReadDir(path)
+	files, err := ioutil.ReadDir(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			absPath, err2 := filepath.Abs(path)
-			if err2 != nil {
-				logutil.BgLogger().Warn("failed to get absolute path",
-					zap.Error(err2), zap.String("category", "dumpFileGcChecker"))
-				absPath = path
-			}
-			logutil.BgLogger().Warn("open plan replayer directory failed",
-				zap.Error(err), zap.String("category", "dumpFileGcChecker"),
-				zap.String("path", absPath))
+			logutil.BgLogger().Warn("[dumpFileGcChecker] open plan replayer directory failed", zap.Error(err))
 		}
 	}
 
 	gcTargetTimeDefault := time.Now().Add(-gcDurationDefault)
 	gcTargetTimeForCapture := time.Now().Add(-gcDurationForCapture)
-	for _, entry := range entries {
-		f, err := entry.Info()
-		if err != nil {
-			logutil.BgLogger().Warn("open plan replayer directory failed", zap.String("category", "dumpFileGcChecker"), zap.Error(err))
-		}
+	for _, f := range files {
 		fileName := f.Name()
 		createTime, err := parseTime(fileName)
 		if err != nil {
-			logutil.BgLogger().Error("parseTime failed", zap.String("category", "dumpFileGcChecker"), zap.Error(err), zap.String("filename", fileName))
+			logutil.BgLogger().Error("[dumpFileGcChecker] parseTime failed", zap.Error(err), zap.String("filename", fileName))
 			continue
 		}
 		isPlanReplayer := strings.Contains(fileName, "replayer")
@@ -125,7 +114,7 @@ func (p *dumpFileGcChecker) gcDumpFilesByPath(path string, gcDurationDefault, gc
 		if canGC {
 			err := os.Remove(filepath.Join(path, f.Name()))
 			if err != nil {
-				logutil.BgLogger().Warn("remove file failed", zap.String("category", "dumpFileGcChecker"), zap.Error(err), zap.String("filename", fileName))
+				logutil.BgLogger().Warn("[dumpFileGcChecker] remove file failed", zap.Error(err), zap.String("filename", fileName))
 				continue
 			}
 			logutil.BgLogger().Info("dumpFileGcChecker successful", zap.String("filename", fileName))
@@ -243,11 +232,11 @@ func (h *planReplayerTaskCollectorHandle) CollectPlanReplayerTask() error {
 	for _, key := range allKeys {
 		unhandled, err := checkUnHandledReplayerTask(h.ctx, h.sctx, key)
 		if err != nil {
-			logutil.BgLogger().Warn("collect plan replayer task failed", zap.String("category", "plan-replayer-task"), zap.Error(err))
+			logutil.BgLogger().Warn("[plan-replayer-task] collect plan replayer task failed", zap.Error(err))
 			return err
 		}
 		if unhandled {
-			logutil.BgLogger().Debug("collect plan replayer task success", zap.String("category", "plan-replayer-task"),
+			logutil.BgLogger().Debug("[plan-replayer-task] collect plan replayer task success",
 				zap.String("sql-digest", key.SQLDigest),
 				zap.String("plan-digest", key.PlanDigest))
 			tasks = append(tasks, key)
@@ -403,7 +392,7 @@ func (w *planReplayerTaskDumpWorker) handleTask(task *PlanReplayerDumpTask) {
 	occupy := true
 	handleTask := true
 	defer func() {
-		logutil.BgLogger().Debug("handle task", zap.String("category", "plan-replayer-capture"),
+		logutil.BgLogger().Debug("[plan-replayer-capture] handle task",
 			zap.String("sql-digest", sqlDigest),
 			zap.String("plan-digest", planDigest),
 			zap.Bool("check", check),
@@ -436,7 +425,7 @@ func (w *planReplayerTaskDumpWorker) HandleTask(task *PlanReplayerDumpTask) (suc
 	taskKey := task.PlanReplayerTaskKey
 	unhandled, err := checkUnHandledReplayerTask(w.ctx, w.sctx, taskKey)
 	if err != nil {
-		logutil.BgLogger().Warn("check task failed", zap.String("category", "plan-replayer-capture"),
+		logutil.BgLogger().Warn("[plan-replayer-capture] check task failed",
 			zap.String("sqlDigest", taskKey.SQLDigest),
 			zap.String("planDigest", taskKey.PlanDigest),
 			zap.Error(err))
@@ -449,7 +438,7 @@ func (w *planReplayerTaskDumpWorker) HandleTask(task *PlanReplayerDumpTask) (suc
 
 	file, fileName, err := replayer.GeneratePlanReplayerFile(task.IsCapture, task.IsContinuesCapture, variable.EnableHistoricalStatsForCapture.Load())
 	if err != nil {
-		logutil.BgLogger().Warn("generate task file failed", zap.String("category", "plan-replayer-capture"),
+		logutil.BgLogger().Warn("[plan-replayer-capture] generate task file failed",
 			zap.String("sqlDigest", taskKey.SQLDigest),
 			zap.String("planDigest", taskKey.PlanDigest),
 			zap.Error(err))
@@ -459,7 +448,7 @@ func (w *planReplayerTaskDumpWorker) HandleTask(task *PlanReplayerDumpTask) (suc
 	task.FileName = fileName
 	err = DumpPlanReplayerInfo(w.ctx, w.sctx, task)
 	if err != nil {
-		logutil.BgLogger().Warn("dump task result failed", zap.String("category", "plan-replayer-capture"),
+		logutil.BgLogger().Warn("[plan-replayer-capture] dump task result failed",
 			zap.String("sqlDigest", taskKey.SQLDigest),
 			zap.String("planDigest", taskKey.PlanDigest),
 			zap.Error(err))
@@ -553,14 +542,13 @@ type PlanReplayerDumpTask struct {
 	TblStats map[int64]interface{}
 
 	// variables used to dump the plan
-	StartTS           uint64
-	SessionBindings   []*bindinfo.BindRecord
-	EncodedPlan       string
-	SessionVars       *variable.SessionVars
-	ExecStmts         []ast.StmtNode
-	Analyze           bool
-	HistoricalStatsTS uint64
-	DebugTrace        []interface{}
+	StartTS         uint64
+	SessionBindings []*bindinfo.BindRecord
+	EncodedPlan     string
+	SessionVars     *variable.SessionVars
+	ExecStmts       []ast.StmtNode
+	Analyze         bool
+	DebugTrace      []interface{}
 
 	FileName string
 	Zf       *os.File

@@ -597,6 +597,3 @@ func (m *MockExpr) SetCharsetAndCollation(chs, coll string) {}
 func (m *MockExpr) MemoryUsage() (sum int64) {
 	return
 }
-func (m *MockExpr) Traverse(action TraverseAction) Expression {
-	return action.Transform(m)
-}

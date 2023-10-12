@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 	"unicode/utf8"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/stringutil"
+	"golang.org/x/exp/slices"
 )
 
 // Type returns type of BinaryJSON as string.
@@ -200,7 +200,7 @@ func quoteJSONString(s string) string {
 				i++
 			}
 		} else {
-			c, size := utf8.DecodeRuneInString(s[i:])
+			c, size := utf8.DecodeRune([]byte(s[i:]))
 			if c == utf8.RuneError && size == 1 { // refer to codes of `binary.jsonMarshalStringTo`
 				if start < i {
 					ret.WriteString(s[start:i])
@@ -933,7 +933,9 @@ func mergePatchBinaryJSON(target, patch *BinaryJSON) (result *BinaryJSON, err er
 		for key := range keyValMap {
 			keys = append(keys, []byte(key))
 		}
-		slices.SortFunc(keys, bytes.Compare)
+		slices.SortFunc(keys, func(i, j []byte) bool {
+			return bytes.Compare(i, j) < 0
+		})
 		length = len(keys)
 		values := make([]BinaryJSON, 0, len(keys))
 		for i := 0; i < length; i++ {
@@ -1014,7 +1016,9 @@ func mergeBinaryObject(objects []BinaryJSON) BinaryJSON {
 			}
 		}
 	}
-	slices.SortFunc(keys, bytes.Compare)
+	slices.SortFunc(keys, func(i, j []byte) bool {
+		return bytes.Compare(i, j) < 0
+	})
 	values := make([]BinaryJSON, len(keys))
 	for i, key := range keys {
 		values[i] = keyValMap[string(key)]

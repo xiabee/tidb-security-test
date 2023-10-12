@@ -25,7 +25,6 @@
 package expression
 
 import (
-	"slices"
 	"strings"
 	"sync"
 	"unsafe"
@@ -43,6 +42,7 @@ import (
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/set"
 	"github.com/pingcap/tipb/go-tipb"
+	"golang.org/x/exp/slices"
 )
 
 // baseBuiltinFunc will be contained in every struct that implement builtinFunc interface.
@@ -70,7 +70,7 @@ func (b *baseBuiltinFunc) PbCode() tipb.ScalarFuncSig {
 // metadata returns the metadata of a function.
 // metadata means some functions contain extra inner fields which will not
 // contain in `tipb.Expr.children` but must be pushed down to coprocessor
-func (*baseBuiltinFunc) metadata() proto.Message {
+func (b *baseBuiltinFunc) metadata() proto.Message {
 	// We will not use a field to store them because of only
 	// a few functions contain implicit parameters
 	return nil
@@ -136,36 +136,6 @@ func newBaseBuiltinFunc(ctx sessionctx.Context, funcName string, args []Expressi
 	return bf, nil
 }
 
-func newReturnFieldTypeForBaseBuiltinFunc(funcName string, retType types.EvalType, ec *ExprCollation) *types.FieldType {
-	var fieldType *types.FieldType
-	switch retType {
-	case types.ETInt:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxIntWidth).BuildP()
-	case types.ETReal:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDouble).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxRealWidth).SetDecimal(types.UnspecifiedLength).BuildP()
-	case types.ETDecimal:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeNewDecimal).SetFlag(mysql.BinaryFlag).SetFlen(11).BuildP()
-	case types.ETString:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeVarString).SetFlen(types.UnspecifiedLength).SetDecimal(types.UnspecifiedLength).SetCharset(ec.Charset).SetCollate(ec.Collation).BuildP()
-	case types.ETDatetime:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDatetime).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
-	case types.ETTimestamp:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeTimestamp).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
-	case types.ETDuration:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDuration).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDurationWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
-	case types.ETJson:
-		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeJSON).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxBlobWidth).SetCharset(mysql.DefaultCharset).SetCollate(mysql.DefaultCollationName).BuildP()
-	}
-	if mysql.HasBinaryFlag(fieldType.GetFlag()) && fieldType.GetType() != mysql.TypeJSON {
-		fieldType.SetCharset(charset.CharsetBin)
-		fieldType.SetCollate(charset.CollationBin)
-	}
-	if _, ok := booleanFunctions[funcName]; ok {
-		fieldType.AddFlag(mysql.IsBooleanFlag)
-	}
-	return fieldType
-}
-
 // newBaseBuiltinFuncWithTp creates a built-in function signature with specified types of arguments and the return type of the function.
 // argTps indicates the types of the args, retType indicates the return type of the built-in function.
 // Every built-in function needs to be determined argTps and retType when we create it.
@@ -206,70 +176,32 @@ func newBaseBuiltinFuncWithTp(ctx sessionctx.Context, funcName string, args []Ex
 		}
 	}
 
-	fieldType := newReturnFieldTypeForBaseBuiltinFunc(funcName, retType, ec)
-	bf = baseBuiltinFunc{
-		bufAllocator:           newLocalColumnPool(),
-		childrenVectorizedOnce: new(sync.Once),
-		childrenReversedOnce:   new(sync.Once),
-
-		args: args,
-		ctx:  ctx,
-		tp:   fieldType,
+	var fieldType *types.FieldType
+	switch retType {
+	case types.ETInt:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxIntWidth).BuildP()
+	case types.ETReal:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDouble).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxRealWidth).SetDecimal(types.UnspecifiedLength).BuildP()
+	case types.ETDecimal:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeNewDecimal).SetFlag(mysql.BinaryFlag).SetFlen(11).BuildP()
+	case types.ETString:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeVarString).SetFlen(types.UnspecifiedLength).SetDecimal(types.UnspecifiedLength).SetCharset(ec.Charset).SetCollate(ec.Collation).BuildP()
+	case types.ETDatetime:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDatetime).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+	case types.ETTimestamp:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeTimestamp).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDatetimeWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+	case types.ETDuration:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeDuration).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxDurationWidthWithFsp).SetDecimal(types.MaxFsp).BuildP()
+	case types.ETJson:
+		fieldType = types.NewFieldTypeBuilder().SetType(mysql.TypeJSON).SetFlag(mysql.BinaryFlag).SetFlen(mysql.MaxBlobWidth).SetCharset(mysql.DefaultCharset).SetCollate(mysql.DefaultCollationName).BuildP()
 	}
-	bf.SetCharsetAndCollation(ec.Charset, ec.Collation)
-	bf.setCollator(collate.GetCollator(ec.Collation))
-	bf.SetCoercibility(ec.Coer)
-	bf.SetRepertoire(ec.Repe)
-	// note this function must be called after wrap cast function to the args
-	adjustNullFlagForReturnType(funcName, args, bf)
-	return bf, nil
-}
-
-// newBaseBuiltinFuncWithFieldTypes creates a built-in function signature with specified field types of arguments and the return type of the function.
-// argTps indicates the field types of the args, retType indicates the return type of the built-in function.
-// newBaseBuiltinFuncWithTp and newBaseBuiltinFuncWithFieldTypes are essentially the same, but newBaseBuiltinFuncWithFieldTypes uses FieldType to cast args.
-// If there are specific requirements for decimal/datetime/timestamp, newBaseBuiltinFuncWithFieldTypes should be used, such as if,ifnull and casewhen.
-func newBaseBuiltinFuncWithFieldTypes(ctx sessionctx.Context, funcName string, args []Expression, retType types.EvalType, argTps ...*types.FieldType) (bf baseBuiltinFunc, err error) {
-	if len(args) != len(argTps) {
-		panic("unexpected length of args and argTps")
+	if mysql.HasBinaryFlag(fieldType.GetFlag()) && fieldType.GetType() != mysql.TypeJSON {
+		fieldType.SetCharset(charset.CharsetBin)
+		fieldType.SetCollate(charset.CollationBin)
 	}
-	if ctx == nil {
-		return baseBuiltinFunc{}, errors.New("unexpected nil session ctx")
+	if _, ok := booleanFunctions[funcName]; ok {
+		fieldType.AddFlag(mysql.IsBooleanFlag)
 	}
-
-	// derive collation information for string function, and we must do it
-	// before doing implicit cast.
-	argEvalTps := make([]types.EvalType, 0, len(argTps))
-	for i := range args {
-		argEvalTps = append(argEvalTps, argTps[i].EvalType())
-	}
-	ec, err := deriveCollation(ctx, funcName, args, retType, argEvalTps...)
-	if err != nil {
-		return
-	}
-
-	for i := range args {
-		switch argTps[i].EvalType() {
-		case types.ETInt:
-			args[i] = WrapWithCastAsInt(ctx, args[i])
-		case types.ETReal:
-			args[i] = WrapWithCastAsReal(ctx, args[i])
-		case types.ETString:
-			args[i] = WrapWithCastAsString(ctx, args[i])
-			args[i] = HandleBinaryLiteral(ctx, args[i], ec, funcName)
-		case types.ETJson:
-			args[i] = WrapWithCastAsJSON(ctx, args[i])
-		// https://github.com/pingcap/tidb/issues/44196
-		// For decimal/datetime/timestamp/duration types, it is necessary to ensure that decimal are consistent with the output type,
-		// so adding a cast function here.
-		case types.ETDecimal, types.ETDatetime, types.ETTimestamp, types.ETDuration:
-			if !args[i].GetType().Equal(argTps[i]) {
-				args[i] = BuildCastFunction(ctx, args[i], argTps[i])
-			}
-		}
-	}
-
-	fieldType := newReturnFieldTypeForBaseBuiltinFunc(funcName, retType, ec)
 	bf = baseBuiltinFunc{
 		bufAllocator:           newLocalColumnPool(),
 		childrenVectorizedOnce: new(sync.Once),
@@ -312,67 +244,67 @@ func (b *baseBuiltinFunc) getArgs() []Expression {
 	return b.args
 }
 
-func (*baseBuiltinFunc) vecEvalInt(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalInt(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalInt() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalReal(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalReal(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalReal() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalString(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalString(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalString() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalDecimal(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalDecimal(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalDecimal() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalTime(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalTime(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalTime() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalDuration(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalDuration(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalDuration() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vecEvalJSON(*chunk.Chunk, *chunk.Column) error {
+func (b *baseBuiltinFunc) vecEvalJSON(input *chunk.Chunk, result *chunk.Column) error {
 	return errors.Errorf("baseBuiltinFunc.vecEvalJSON() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalInt(chunk.Row) (int64, bool, error) {
+func (b *baseBuiltinFunc) evalInt(row chunk.Row) (int64, bool, error) {
 	return 0, false, errors.Errorf("baseBuiltinFunc.evalInt() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalReal(chunk.Row) (float64, bool, error) {
+func (b *baseBuiltinFunc) evalReal(row chunk.Row) (float64, bool, error) {
 	return 0, false, errors.Errorf("baseBuiltinFunc.evalReal() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalString(chunk.Row) (string, bool, error) {
+func (b *baseBuiltinFunc) evalString(row chunk.Row) (string, bool, error) {
 	return "", false, errors.Errorf("baseBuiltinFunc.evalString() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalDecimal(chunk.Row) (*types.MyDecimal, bool, error) {
+func (b *baseBuiltinFunc) evalDecimal(row chunk.Row) (*types.MyDecimal, bool, error) {
 	return nil, false, errors.Errorf("baseBuiltinFunc.evalDecimal() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalTime(chunk.Row) (types.Time, bool, error) {
+func (b *baseBuiltinFunc) evalTime(row chunk.Row) (types.Time, bool, error) {
 	return types.ZeroTime, false, errors.Errorf("baseBuiltinFunc.evalTime() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalDuration(chunk.Row) (types.Duration, bool, error) {
+func (b *baseBuiltinFunc) evalDuration(row chunk.Row) (types.Duration, bool, error) {
 	return types.Duration{}, false, errors.Errorf("baseBuiltinFunc.evalDuration() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) evalJSON(chunk.Row) (types.BinaryJSON, bool, error) {
+func (b *baseBuiltinFunc) evalJSON(row chunk.Row) (types.BinaryJSON, bool, error) {
 	return types.BinaryJSON{}, false, errors.Errorf("baseBuiltinFunc.evalJSON() should never be called, please contact the TiDB team for help")
 }
 
-func (*baseBuiltinFunc) vectorized() bool {
+func (b *baseBuiltinFunc) vectorized() bool {
 	return false
 }
 
-func (*baseBuiltinFunc) supportReverseEval() bool {
+func (b *baseBuiltinFunc) supportReverseEval() bool {
 	return false
 }
 
@@ -389,7 +321,7 @@ func (b *baseBuiltinFunc) isChildrenReversed() bool {
 	return b.childrenReversed
 }
 
-func (*baseBuiltinFunc) reverseEval(*stmtctx.StatementContext, types.Datum, types.RoundingType) (types.Datum, error) {
+func (b *baseBuiltinFunc) reverseEval(sc *stmtctx.StatementContext, res types.Datum, rType types.RoundingType) (types.Datum, error) {
 	return types.Datum{}, errors.Errorf("baseBuiltinFunc.reverseEvalInt() should never be called, please contact the TiDB team for help")
 }
 
@@ -407,7 +339,8 @@ func (b *baseBuiltinFunc) isChildrenVectorized() bool {
 }
 
 func (b *baseBuiltinFunc) getRetTp() *types.FieldType {
-	if b.tp.EvalType() == types.ETString {
+	switch b.tp.EvalType() {
+	case types.ETString:
 		if b.tp.GetFlen() >= mysql.MaxBlobWidth {
 			b.tp.SetType(mysql.TypeLongBlob)
 		} else if b.tp.GetFlen() >= 65536 {
@@ -453,7 +386,7 @@ func (b *baseBuiltinFunc) cloneFrom(from *baseBuiltinFunc) {
 	b.ctor = from.ctor
 }
 
-func (*baseBuiltinFunc) Clone() builtinFunc {
+func (b *baseBuiltinFunc) Clone() builtinFunc {
 	panic("you should not call this method.")
 }
 
@@ -757,7 +690,6 @@ var funcs = map[string]functionClass{
 	// TSO functions
 	ast.TiDBBoundedStaleness: &tidbBoundedStalenessFunctionClass{baseFunctionClass{ast.TiDBBoundedStaleness, 2, 2}},
 	ast.TiDBParseTso:         &tidbParseTsoFunctionClass{baseFunctionClass{ast.TiDBParseTso, 1, 1}},
-	ast.TiDBParseTsoLogical:  &tidbParseTsoLogicalFunctionClass{baseFunctionClass{ast.TiDBParseTsoLogical, 1, 1}},
 	ast.TiDBCurrentTso:       &tidbCurrentTsoFunctionClass{baseFunctionClass{ast.TiDBCurrentTso, 0, 0}},
 
 	// string functions
@@ -868,7 +800,6 @@ var funcs = map[string]functionClass{
 	ast.BinToUUID:       &binToUUIDFunctionClass{baseFunctionClass{ast.BinToUUID, 1, 2}},
 	ast.TiDBShard:       &tidbShardFunctionClass{baseFunctionClass{ast.TiDBShard, 1, 1}},
 	ast.TiDBRowChecksum: &tidbRowChecksumFunctionClass{baseFunctionClass{ast.TiDBRowChecksum, 0, 0}},
-	ast.Grouping:        &groupingImplFunctionClass{baseFunctionClass{ast.Grouping, 1, 1}},
 
 	ast.GetLock:     &lockFunctionClass{baseFunctionClass{ast.GetLock, 2, 2}},
 	ast.ReleaseLock: &releaseLockFunctionClass{baseFunctionClass{ast.ReleaseLock, 1, 1}},
@@ -972,7 +903,6 @@ var funcs = map[string]functionClass{
 	ast.TiDBDecodePlan:       &tidbDecodePlanFunctionClass{baseFunctionClass{ast.TiDBDecodePlan, 1, 1}},
 	ast.TiDBDecodeBinaryPlan: &tidbDecodePlanFunctionClass{baseFunctionClass{ast.TiDBDecodeBinaryPlan, 1, 1}},
 	ast.TiDBDecodeSQLDigests: &tidbDecodeSQLDigestsFunctionClass{baseFunctionClass{ast.TiDBDecodeSQLDigests, 1, 2}},
-	ast.TiDBEncodeSQLDigest:  &tidbEncodeSQLDigestFunctionClass{baseFunctionClass{ast.TiDBEncodeSQLDigest, 1, 1}},
 
 	// TiDB Sequence function.
 	ast.NextVal: &nextValFunctionClass{baseFunctionClass{ast.NextVal, 1, 1}},

@@ -16,12 +16,10 @@ package privileges
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -43,6 +41,7 @@ import (
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/stringutil"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -446,17 +445,21 @@ func (p *MySQLPrivilege) buildUserMap() {
 	p.UserMap = userMap
 }
 
-func compareBaseRecord(x, y *baseRecord) int {
+func compareBaseRecord(x, y *baseRecord) bool {
 	// Compare two item by user's host first.
 	c1 := compareHost(x.Host, y.Host)
-	if c1 != 0 {
-		return c1
+	if c1 < 0 {
+		return true
 	}
+	if c1 > 0 {
+		return false
+	}
+
 	// Then, compare item by user's name value.
-	return cmp.Compare(x.User, y.User)
+	return x.User < y.User
 }
 
-func compareUserRecord(x, y UserRecord) int {
+func compareUserRecord(x, y UserRecord) bool {
 	return compareBaseRecord(&x.baseRecord, &y.baseRecord)
 }
 
@@ -534,7 +537,7 @@ func (p *MySQLPrivilege) LoadDBTable(ctx sessionctx.Context) error {
 	return nil
 }
 
-func compareDBRecord(x, y dbRecord) int {
+func compareDBRecord(x, y dbRecord) bool {
 	return compareBaseRecord(&x.baseRecord, &y.baseRecord)
 }
 
@@ -743,7 +746,8 @@ func (p *MySQLPrivilege) decodeUserTableRow(row chunk.Row, fs []*ast.ResultField
 func (p *MySQLPrivilege) decodeGlobalPrivTableRow(row chunk.Row, fs []*ast.ResultField) error {
 	var value globalPrivRecord
 	for i, f := range fs {
-		if f.ColumnAsName.L == "priv" {
+		switch {
+		case f.ColumnAsName.L == "priv":
 			privData := row.GetString(i)
 			if len(privData) > 0 {
 				var privValue GlobalPrivValue
@@ -766,7 +770,7 @@ func (p *MySQLPrivilege) decodeGlobalPrivTableRow(row chunk.Row, fs []*ast.Resul
 					}
 				}
 			}
-		} else {
+		default:
 			value.assignUserOrHost(row, i, f)
 		}
 	}
@@ -780,10 +784,10 @@ func (p *MySQLPrivilege) decodeGlobalPrivTableRow(row chunk.Row, fs []*ast.Resul
 func (p *MySQLPrivilege) decodeGlobalGrantsTableRow(row chunk.Row, fs []*ast.ResultField) error {
 	var value dynamicPrivRecord
 	for i, f := range fs {
-		switch f.ColumnAsName.L {
-		case "priv":
+		switch {
+		case f.ColumnAsName.L == "priv":
 			value.PrivilegeName = strings.ToUpper(row.GetString(i))
-		case "with_grant_option":
+		case f.ColumnAsName.L == "with_grant_option":
 			value.GrantOption = row.GetEnum(i).String() == "Y"
 		default:
 			value.assignUserOrHost(row, i, f)
@@ -823,14 +827,14 @@ func (p *MySQLPrivilege) decodeDBTableRow(row chunk.Row, fs []*ast.ResultField) 
 func (p *MySQLPrivilege) decodeTablesPrivTableRow(row chunk.Row, fs []*ast.ResultField) error {
 	var value tablesPrivRecord
 	for i, f := range fs {
-		switch f.ColumnAsName.L {
-		case "db":
+		switch {
+		case f.ColumnAsName.L == "db":
 			value.DB = row.GetString(i)
-		case "table_name":
+		case f.ColumnAsName.L == "table_name":
 			value.TableName = row.GetString(i)
-		case "table_priv":
+		case f.ColumnAsName.L == "table_priv":
 			value.TablePriv = decodeSetToPrivilege(row.GetSet(i))
-		case "column_priv":
+		case f.ColumnAsName.L == "column_priv":
 			value.ColumnPriv = decodeSetToPrivilege(row.GetSet(i))
 		default:
 			value.assignUserOrHost(row, i, f)
@@ -843,14 +847,14 @@ func (p *MySQLPrivilege) decodeTablesPrivTableRow(row chunk.Row, fs []*ast.Resul
 func (p *MySQLPrivilege) decodeRoleEdgesTable(row chunk.Row, fs []*ast.ResultField) error {
 	var fromUser, fromHost, toHost, toUser string
 	for i, f := range fs {
-		switch f.ColumnAsName.L {
-		case "from_host":
+		switch {
+		case f.ColumnAsName.L == "from_host":
 			fromHost = row.GetString(i)
-		case "from_user":
+		case f.ColumnAsName.L == "from_user":
 			fromUser = row.GetString(i)
-		case "to_host":
+		case f.ColumnAsName.L == "to_host":
 			toHost = row.GetString(i)
-		case "to_user":
+		case f.ColumnAsName.L == "to_user":
 			toUser = row.GetString(i)
 		}
 	}
@@ -868,10 +872,10 @@ func (p *MySQLPrivilege) decodeRoleEdgesTable(row chunk.Row, fs []*ast.ResultFie
 func (p *MySQLPrivilege) decodeDefaultRoleTableRow(row chunk.Row, fs []*ast.ResultField) error {
 	var value defaultRoleRecord
 	for i, f := range fs {
-		switch f.ColumnAsName.L {
-		case "default_role_host":
+		switch {
+		case f.ColumnAsName.L == "default_role_host":
 			value.DefaultRoleHost = row.GetString(i)
-		case "default_role_user":
+		case f.ColumnAsName.L == "default_role_user":
 			value.DefaultRoleUser = row.GetString(i)
 		default:
 			value.assignUserOrHost(row, i, f)
@@ -884,20 +888,20 @@ func (p *MySQLPrivilege) decodeDefaultRoleTableRow(row chunk.Row, fs []*ast.Resu
 func (p *MySQLPrivilege) decodeColumnsPrivTableRow(row chunk.Row, fs []*ast.ResultField) error {
 	var value columnsPrivRecord
 	for i, f := range fs {
-		switch f.ColumnAsName.L {
-		case "db":
+		switch {
+		case f.ColumnAsName.L == "db":
 			value.DB = row.GetString(i)
-		case "table_name":
+		case f.ColumnAsName.L == "table_name":
 			value.TableName = row.GetString(i)
-		case "column_name":
+		case f.ColumnAsName.L == "column_name":
 			value.ColumnName = row.GetString(i)
-		case "timestamp":
+		case f.ColumnAsName.L == "timestamp":
 			var err error
 			value.Timestamp, err = row.GetTime(i).GoTime(time.Local)
 			if err != nil {
 				return errors.Trace(err)
 			}
-		case "column_priv":
+		case f.ColumnAsName.L == "column_priv":
 			value.ColumnPriv = decodeSetToPrivilege(row.GetSet(i))
 		default:
 			value.assignUserOrHost(row, i, f)
@@ -1247,7 +1251,7 @@ func (p *MySQLPrivilege) DBIsVisible(user, host, db string) bool {
 	return false
 }
 
-func (p *MySQLPrivilege) showGrants(ctx sessionctx.Context, user, host string, roles []*auth.RoleIdentity) []string {
+func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentity) []string {
 	var gs []string //nolint: prealloc
 	var sortFromIdx int
 	var hasGlobalGrant = false
@@ -1319,10 +1323,7 @@ func (p *MySQLPrivilege) showGrants(ctx sessionctx.Context, user, host string, r
 			}
 		}
 	}
-
-	sqlMode := ctx.GetSessionVars().SQLMode
 	for dbName, priv := range dbPrivTable {
-		dbName = stringutil.Escape(dbName, sqlMode)
 		g := dbPrivToString(priv)
 		if len(g) > 0 {
 			var s string
@@ -1345,7 +1346,7 @@ func (p *MySQLPrivilege) showGrants(ctx sessionctx.Context, user, host string, r
 	sortFromIdx = len(gs)
 	tablePrivTable := make(map[string]mysql.PrivilegeType)
 	for _, record := range p.TablesPriv {
-		recordKey := stringutil.Escape(record.DB, sqlMode) + "." + stringutil.Escape(record.TableName, sqlMode)
+		recordKey := record.DB + "." + record.TableName
 		if user == record.User && host == record.Host {
 			tablePrivTable[recordKey] |= record.TablePriv
 		} else {
@@ -1381,9 +1382,9 @@ func (p *MySQLPrivilege) showGrants(ctx sessionctx.Context, user, host string, r
 	columnPrivTable := make(map[string]privOnColumns)
 	for i := range p.ColumnsPriv {
 		record := p.ColumnsPriv[i]
-		if !collectColumnGrant(&record, user, host, columnPrivTable, sqlMode) {
+		if !collectColumnGrant(&record, user, host, columnPrivTable) {
 			for _, r := range allRoles {
-				collectColumnGrant(&record, r.Username, r.Hostname, columnPrivTable, sqlMode)
+				collectColumnGrant(&record, r.Username, r.Hostname, columnPrivTable)
 			}
 		}
 	}
@@ -1494,10 +1495,9 @@ func privOnColumnsToString(p privOnColumns) string {
 	return buf.String()
 }
 
-func collectColumnGrant(record *columnsPrivRecord, user, host string, columnPrivTable map[string]privOnColumns, sqlMode mysql.SQLMode) bool {
+func collectColumnGrant(record *columnsPrivRecord, user, host string, columnPrivTable map[string]privOnColumns) bool {
 	if record.baseRecord.match(user, host) {
-		recordKey := stringutil.Escape(record.DB, sqlMode) + "." + stringutil.Escape(record.TableName, sqlMode)
-
+		recordKey := record.DB + "." + record.TableName
 		privColumns, ok := columnPrivTable[recordKey]
 		if !ok {
 			privColumns = make(map[mysql.PrivilegeType]columnStrs)

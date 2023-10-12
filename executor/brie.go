@@ -24,10 +24,8 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
-	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/task"
@@ -35,12 +33,10 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
@@ -56,7 +52,6 @@ import (
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
-	"go.uber.org/zap"
 )
 
 const clearInterval = 10 * time.Minute
@@ -99,17 +94,11 @@ func (p *brieTaskProgress) GetCurrent() int64 {
 // Close implements glue.Progress
 func (p *brieTaskProgress) Close() {
 	p.lock.Lock()
-	current := atomic.LoadInt64(&p.current)
-	if current < p.total {
-		p.cmd = fmt.Sprintf("%s Cacneled", p.cmd)
-	}
 	atomic.StoreInt64(&p.current, p.total)
 	p.lock.Unlock()
 }
 
 type brieTaskInfo struct {
-	id          uint64
-	query       string
 	queueTime   types.Time
 	execTime    types.Time
 	finishTime  types.Time
@@ -143,15 +132,6 @@ var globalBRIEQueue = &brieQueue{
 	workerCh: make(chan struct{}, 1),
 }
 
-// ResetGlobalBRIEQueueForTest resets the ID allocation for the global BRIE queue.
-// In some of our test cases, we rely on the ID is allocated from 1.
-// When batch executing test cases, the assumation may be broken and make the cases fail.
-func ResetGlobalBRIEQueueForTest() {
-	globalBRIEQueue = &brieQueue{
-		workerCh: make(chan struct{}, 1),
-	}
-}
-
 // registerTask registers a BRIE task in the queue.
 func (bq *brieQueue) registerTask(
 	ctx context.Context,
@@ -169,17 +149,8 @@ func (bq *brieQueue) registerTask(
 
 	taskID := atomic.AddUint64(&bq.nextID, 1)
 	bq.tasks.Store(taskID, item)
-	info.id = taskID
 
 	return taskCtx, taskID
-}
-
-// query task queries a task from the queue.
-func (bq *brieQueue) queryTask(taskID uint64) (*brieTaskInfo, bool) {
-	if item, ok := bq.tasks.Load(taskID); ok {
-		return item.(*brieQueueItem).info, true
-	}
-	return nil, false
 }
 
 // acquireTask prepares to execute a BRIE task. Only one BRIE task can be
@@ -205,16 +176,12 @@ func (bq *brieQueue) releaseTask() {
 	<-bq.workerCh
 }
 
-func (bq *brieQueue) cancelTask(taskID uint64) bool {
+func (bq *brieQueue) cancelTask(taskID uint64) {
 	item, ok := bq.tasks.Load(taskID)
 	if !ok {
-		return false
+		return
 	}
-	i := item.(*brieQueueItem)
-	i.cancel()
-	i.progress.Close()
-	log.Info("BRIE job canceled.", zap.Uint64("ID", i.info.id))
-	return true
+	item.(*brieQueueItem).cancel()
 }
 
 func (bq *brieQueue) clearTask(sc *stmtctx.StatementContext) {
@@ -247,33 +214,17 @@ func (b *executorBuilder) parseTSString(ts string) (uint64, error) {
 	return oracle.GoTimeToTS(t1), nil
 }
 
-func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) exec.Executor {
-	if s.Kind == ast.BRIEKindShowBackupMeta {
-		return execOnce(&showMetaExec{
-			BaseExecutor: exec.NewBaseExecutor(b.ctx, schema, 0),
-			showConfig:   buildShowMetadataConfigFrom(s),
-		})
-	}
-
-	if s.Kind == ast.BRIEKindShowQuery {
-		return execOnce(&showQueryExec{
-			BaseExecutor: exec.NewBaseExecutor(b.ctx, schema, 0),
-			targetID:     uint64(s.JobID),
-		})
-	}
-
-	if s.Kind == ast.BRIEKindCancelJob {
-		return &cancelJobExec{
-			BaseExecutor: exec.NewBaseExecutor(b.ctx, schema, 0),
-			targetID:     uint64(s.JobID),
-		}
-	}
-
+func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) Executor {
 	e := &BRIEExec{
-		BaseExecutor: exec.NewBaseExecutor(b.ctx, schema, 0),
+		baseExecutor: newBaseExecutor(b.ctx, schema, 0),
 		info: &brieTaskInfo{
 			kind: s.Kind,
 		},
+	}
+
+	if s.Kind == ast.BRIEKindShowBackupMeta {
+		e.fillByShowMetadata(s)
+		return e
 	}
 
 	tidbCfg := config.GetGlobalConfig()
@@ -357,11 +308,6 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 	// is expected to be performed insensitive.
 	cfg.TableFilter = filter.CaseInsensitive(cfg.TableFilter)
 
-	// We cannot directly use the query string, or the secret may be print.
-	// NOTE: the ownership of `s.Storage` is taken here.
-	s.Storage = e.info.storage
-	e.info.query = restoreQuery(s)
-
 	switch s.Kind {
 	case ast.BRIEKindBackup:
 		e.backupCfg = &task.BackupConfig{Config: cfg}
@@ -394,7 +340,8 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 	case ast.BRIEKindRestore:
 		e.restoreCfg = &task.RestoreConfig{Config: cfg}
 		for _, opt := range s.Options {
-			if opt.Tp == ast.BRIEOptionOnline {
+			switch opt.Tp {
+			case ast.BRIEOptionOnline:
 				e.restoreCfg.Online = opt.UintValue != 0
 			}
 		}
@@ -407,70 +354,9 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 	return e
 }
 
-// oneshotExecutor wraps a executor, making its `Next` would only be called once.
-type oneshotExecutor struct {
-	exec.Executor
-	finished bool
-}
-
-func (o *oneshotExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
-	if o.finished {
-		req.Reset()
-		return nil
-	}
-
-	if err := o.Executor.Next(ctx, req); err != nil {
-		return err
-	}
-	o.finished = true
-	return nil
-}
-
-func execOnce(ex exec.Executor) exec.Executor {
-	return &oneshotExecutor{Executor: ex}
-}
-
-type showQueryExec struct {
-	exec.BaseExecutor
-
-	targetID uint64
-}
-
-func (s *showQueryExec) Next(_ context.Context, req *chunk.Chunk) error {
-	req.Reset()
-
-	tsk, ok := globalBRIEQueue.queryTask(s.targetID)
-	if !ok {
-		return nil
-	}
-
-	req.AppendString(0, tsk.query)
-	return nil
-}
-
-type cancelJobExec struct {
-	exec.BaseExecutor
-
-	targetID uint64
-}
-
-func (s cancelJobExec) Next(_ context.Context, req *chunk.Chunk) error {
-	req.Reset()
-	if !globalBRIEQueue.cancelTask(s.targetID) {
-		s.Ctx().GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrLoadDataJobNotFound.FastGenByArgs(s.targetID))
-	}
-	return nil
-}
-
-type showMetaExec struct {
-	exec.BaseExecutor
-
-	showConfig show.Config
-}
-
 // BRIEExec represents an executor for BRIE statements (BACKUP, RESTORE, etc)
 type BRIEExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	backupCfg  *task.BackupConfig
 	restoreCfg *task.RestoreConfig
@@ -478,23 +364,23 @@ type BRIEExec struct {
 	info       *brieTaskInfo
 }
 
-func buildShowMetadataConfigFrom(s *ast.BRIEStmt) show.Config {
+func (e *BRIEExec) fillByShowMetadata(s *ast.BRIEStmt) {
 	if s.Kind != ast.BRIEKindShowBackupMeta {
 		panic(fmt.Sprintf("precondition failed: `fillByShowMetadata` should always called by a ast.BRIEKindShowBackupMeta, but it is %s.", s.Kind))
 	}
 
 	store := s.Storage
-	cfg := show.Config{
+	e.showConfig = &show.Config{
 		Storage: store,
 		Cipher: backuppb.CipherInfo{
 			CipherType: encryptionpb.EncryptionMethod_PLAINTEXT,
 		},
 	}
-	return cfg
+	e.info.kind = ast.BRIEKindShowBackupMeta
 }
 
-func (e *showMetaExec) Next(ctx context.Context, req *chunk.Chunk) error {
-	exe, err := show.CreateExec(ctx, e.showConfig)
+func (e *BRIEExec) runShowMetadata(ctx context.Context, req *chunk.Chunk) error {
+	exe, err := show.CreateExec(ctx, *e.showConfig)
 	if err != nil {
 		return errors.Annotate(err, "failed to create show exec")
 	}
@@ -518,6 +404,7 @@ func (e *showMetaExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 		req.AppendTime(5, types.NewTime(types.FromGoTime(endTime), mysql.TypeDatetime, 0))
 	}
+	e.info = nil
 	return nil
 }
 
@@ -528,20 +415,21 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		return nil
 	}
 
-	bq := globalBRIEQueue
-	bq.clearTask(e.Ctx().GetSessionVars().StmtCtx)
+	if e.info.kind == ast.BRIEKindShowBackupMeta {
+		// This should be able to execute without the queue.
+		// NOTE: maybe extract the procedure of executing task in queue
+		// into a function, make it more tidy.
+		return e.runShowMetadata(ctx, req)
+	}
 
-	e.info.connID = e.Ctx().GetSessionVars().ConnectionID
+	bq := globalBRIEQueue
+	bq.clearTask(e.ctx.GetSessionVars().StmtCtx)
+
+	e.info.connID = e.ctx.GetSessionVars().ConnectionID
 	e.info.queueTime = types.CurrentTime(mysql.TypeDatetime)
 	taskCtx, taskID := bq.registerTask(ctx, e.info)
 	defer bq.cancelTask(taskID)
-	failpoint.Inject("block-on-brie", func() {
-		log.Warn("You shall not pass, nya. :3")
-		<-taskCtx.Done()
-		if taskCtx.Err() != nil {
-			failpoint.Return(taskCtx.Err())
-		}
-	})
+
 	// manually monitor the Killed status...
 	go func() {
 		ticker := time.NewTicker(3 * time.Second)
@@ -549,7 +437,7 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		for {
 			select {
 			case <-ticker.C:
-				if atomic.LoadUint32(&e.Ctx().GetSessionVars().Killed) == 1 {
+				if atomic.LoadUint32(&e.ctx.GetSessionVars().Killed) == 1 {
 					bq.cancelTask(taskID)
 					return
 				}
@@ -566,7 +454,7 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	defer bq.releaseTask()
 
 	e.info.execTime = types.CurrentTime(mysql.TypeDatetime)
-	glue := &tidbGlueSession{se: e.Ctx(), progress: progress, info: e.info}
+	glue := &tidbGlueSession{se: e.ctx, progress: progress, info: e.info}
 
 	switch e.info.kind {
 	case ast.BRIEKindBackup:
@@ -614,23 +502,22 @@ func (e *ShowExec) fetchShowBRIE(kind ast.BRIEKind) error {
 			item.progress.lock.Lock()
 			defer item.progress.lock.Unlock()
 			current := atomic.LoadInt64(&item.progress.current)
-			e.result.AppendUint64(0, item.info.id)
-			e.result.AppendString(1, item.info.storage)
-			e.result.AppendString(2, item.progress.cmd)
-			e.result.AppendFloat64(3, 100.0*float64(current)/float64(item.progress.total))
-			e.result.AppendTime(4, item.info.queueTime)
-			e.result.AppendTime(5, item.info.execTime)
-			e.result.AppendTime(6, item.info.finishTime)
-			e.result.AppendUint64(7, item.info.connID)
+			e.result.AppendString(0, item.info.storage)
+			e.result.AppendString(1, item.progress.cmd)
+			e.result.AppendFloat64(2, 100.0*float64(current)/float64(item.progress.total))
+			e.result.AppendTime(3, item.info.queueTime)
+			e.result.AppendTime(4, item.info.execTime)
+			e.result.AppendTime(5, item.info.finishTime)
+			e.result.AppendUint64(6, item.info.connID)
 			if len(item.info.message) > 0 {
-				e.result.AppendString(8, item.info.message)
+				e.result.AppendString(7, item.info.message)
 			} else {
-				e.result.AppendNull(8)
+				e.result.AppendNull(7)
 			}
 		}
 		return true
 	})
-	globalBRIEQueue.clearTask(e.Ctx().GetSessionVars().StmtCtx)
+	globalBRIEQueue.clearTask(e.ctx.GetSessionVars().StmtCtx)
 	return nil
 }
 
@@ -646,12 +533,12 @@ func (gs *tidbGlueSession) GetSessionCtx() sessionctx.Context {
 }
 
 // GetDomain implements glue.Glue
-func (gs *tidbGlueSession) GetDomain(_ kv.Storage) (*domain.Domain, error) {
+func (gs *tidbGlueSession) GetDomain(store kv.Storage) (*domain.Domain, error) {
 	return domain.GetDomain(gs.se), nil
 }
 
 // CreateSession implements glue.Glue
-func (gs *tidbGlueSession) CreateSession(_ kv.Storage) (glue.Session, error) {
+func (gs *tidbGlueSession) CreateSession(store kv.Storage) (glue.Session, error) {
 	return gs, nil
 }
 
@@ -673,7 +560,7 @@ func (gs *tidbGlueSession) ExecuteInternal(ctx context.Context, sql string, args
 }
 
 // CreateDatabase implements glue.Session
-func (gs *tidbGlueSession) CreateDatabase(_ context.Context, schema *model.DBInfo) error {
+func (gs *tidbGlueSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
 	d := domain.GetDomain(gs.se).DDL()
 	// 512 is defaultCapOfCreateTable.
 	result := bytes.NewBuffer(make([]byte, 0, 512))
@@ -689,7 +576,7 @@ func (gs *tidbGlueSession) CreateDatabase(_ context.Context, schema *model.DBInf
 }
 
 // CreateTable implements glue.Session
-func (gs *tidbGlueSession) CreateTable(_ context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	d := domain.GetDomain(gs.se).DDL()
 
 	// 512 is defaultCapOfCreateTable.
@@ -713,7 +600,7 @@ func (gs *tidbGlueSession) CreateTable(_ context.Context, dbName model.CIStr, ta
 }
 
 // CreatePlacementPolicy implements glue.Session
-func (gs *tidbGlueSession) CreatePlacementPolicy(_ context.Context, policy *model.PolicyInfo) error {
+func (gs *tidbGlueSession) CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error {
 	gs.se.SetValue(sessionctx.QueryString, ConstructResultOfShowCreatePlacementPolicy(policy))
 	d := domain.GetDomain(gs.se).DDL()
 	// the default behaviour is ignoring duplicated policy during restore.
@@ -721,7 +608,7 @@ func (gs *tidbGlueSession) CreatePlacementPolicy(_ context.Context, policy *mode
 }
 
 // Close implements glue.Session
-func (*tidbGlueSession) Close() {
+func (gs *tidbGlueSession) Close() {
 }
 
 // GetGlobalVariables implements glue.Session.
@@ -735,12 +622,12 @@ func (gs *tidbGlueSession) Open(string, pd.SecurityOption) (kv.Storage, error) {
 }
 
 // OwnsStorage implements glue.Glue
-func (*tidbGlueSession) OwnsStorage() bool {
+func (gs *tidbGlueSession) OwnsStorage() bool {
 	return false
 }
 
 // StartProgress implements glue.Glue
-func (gs *tidbGlueSession) StartProgress(_ context.Context, cmdName string, total int64, _ bool) glue.Progress {
+func (gs *tidbGlueSession) StartProgress(ctx context.Context, cmdName string, total int64, redirectLog bool) glue.Progress {
 	gs.progress.lock.Lock()
 	gs.progress.cmd = cmdName
 	gs.progress.total = total
@@ -761,21 +648,12 @@ func (gs *tidbGlueSession) Record(name string, value uint64) {
 	}
 }
 
-func (*tidbGlueSession) GetVersion() string {
+func (gs *tidbGlueSession) GetVersion() string {
 	return "TiDB\n" + printer.GetTiDBInfo()
 }
 
 // UseOneShotSession implements glue.Glue
-func (gs *tidbGlueSession) UseOneShotSession(_ kv.Storage, _ bool, fn func(se glue.Session) error) error {
+func (gs *tidbGlueSession) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(se glue.Session) error) error {
 	// in SQL backup. we don't need to close domain.
 	return fn(gs)
-}
-
-func restoreQuery(stmt *ast.BRIEStmt) string {
-	out := bytes.NewBuffer(nil)
-	rc := format.NewRestoreCtx(format.RestoreNameBackQuotes|format.RestoreStringSingleQuotes, out)
-	if err := stmt.Restore(rc); err != nil {
-		return "N/A"
-	}
-	return out.String()
 }

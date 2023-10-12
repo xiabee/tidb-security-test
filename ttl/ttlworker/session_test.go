@@ -66,10 +66,6 @@ func newMockInfoSchema(tbl ...*model.TableInfo) infoschema.InfoSchema {
 	return infoschema.MockInfoSchema(tbl)
 }
 
-func newMockInfoSchemaWithVer(ver int64, tbl ...*model.TableInfo) infoschema.InfoSchema {
-	return infoschema.MockInfoSchemaWithSchemaVer(tbl, ver)
-}
-
 type mockRows struct {
 	t          *testing.T
 	fieldTypes []*types.FieldType

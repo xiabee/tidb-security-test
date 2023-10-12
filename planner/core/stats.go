@@ -18,18 +18,14 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/expression"
-	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/planner/cardinality"
 	"github.com/pingcap/tidb/planner/property"
 	"github.com/pingcap/tidb/planner/util"
 	"github.com/pingcap/tidb/planner/util/debugtrace"
@@ -42,16 +38,17 @@ import (
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/ranger"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 func (p *basePhysicalPlan) StatsCount() float64 {
-	return p.StatsInfo().RowCount
+	return p.stats.RowCount
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalTableDual) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
 	profile := &property.StatsInfo{
 		RowCount: float64(p.RowCount),
@@ -60,16 +57,16 @@ func (p *LogicalTableDual) DeriveStats(_ []*property.StatsInfo, selfSchema *expr
 	for _, col := range selfSchema.Columns {
 		profile.ColNDVs[col.UniqueID] = float64(p.RowCount)
 	}
-	p.SetStats(profile)
-	return p.StatsInfo(), nil
+	p.stats = profile
+	return p.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalMemTable) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	statsTable := statistics.PseudoTable(p.TableInfo, false)
+	statsTable := statistics.PseudoTable(p.TableInfo)
 	stats := &property.StatsInfo{
 		RowCount:     float64(statsTable.RealtimeCount),
 		ColNDVs:      make(map[int64]float64, len(p.TableInfo.Columns)),
@@ -79,18 +76,18 @@ func (p *LogicalMemTable) DeriveStats(_ []*property.StatsInfo, selfSchema *expre
 	for _, col := range selfSchema.Columns {
 		stats.ColNDVs[col.UniqueID] = float64(statsTable.RealtimeCount)
 	}
-	p.SetStats(stats)
-	return p.StatsInfo(), nil
+	p.stats = stats
+	return p.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalShow) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
 	// A fake count, just to avoid panic now.
-	p.SetStats(getFakeStats(selfSchema))
-	return p.StatsInfo(), nil
+	p.stats = getFakeStats(selfSchema)
+	return p.stats, nil
 }
 
 func getFakeStats(schema *expression.Schema) *property.StatsInfo {
@@ -106,12 +103,12 @@ func getFakeStats(schema *expression.Schema) *property.StatsInfo {
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalShowDDLJobs) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
 	// A fake count, just to avoid panic now.
-	p.SetStats(getFakeStats(selfSchema))
-	return p.StatsInfo(), nil
+	p.stats = getFakeStats(selfSchema)
+	return p.stats, nil
 }
 
 // RecursiveDeriveStats4Test is a exporter just for test.
@@ -121,7 +118,7 @@ func RecursiveDeriveStats4Test(p LogicalPlan) (*property.StatsInfo, error) {
 
 // GetStats4Test is a exporter just for test.
 func GetStats4Test(p LogicalPlan) *property.StatsInfo {
-	return p.StatsInfo()
+	return p.statsInfo()
 }
 
 func (p *baseLogicalPlan) recursiveDeriveStats(colGroups [][]*expression.Column) (*property.StatsInfo, error) {
@@ -140,22 +137,22 @@ func (p *baseLogicalPlan) recursiveDeriveStats(colGroups [][]*expression.Column)
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
-func (*baseLogicalPlan) ExtractColGroups(_ [][]*expression.Column) [][]*expression.Column {
+func (p *baseLogicalPlan) ExtractColGroups(_ [][]*expression.Column) [][]*expression.Column {
 	return nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *baseLogicalPlan) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
 	if len(childStats) == 1 {
-		p.SetStats(childStats[0])
-		return p.StatsInfo(), nil
+		p.stats = childStats[0]
+		return p.stats, nil
 	}
 	if len(childStats) > 1 {
 		err := ErrInternal.GenWithStack("LogicalPlans with more than one child should implement their own DeriveStats().")
 		return nil, err
 	}
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
 	profile := &property.StatsInfo{
 		RowCount: float64(1),
@@ -164,8 +161,45 @@ func (p *baseLogicalPlan) DeriveStats(childStats []*property.StatsInfo, selfSche
 	for _, col := range selfSchema.Columns {
 		profile.ColNDVs[col.UniqueID] = 1
 	}
-	p.SetStats(profile)
+	p.stats = profile
 	return profile, nil
+}
+
+// getTotalRowCount returns the total row count, which is obtained when collecting colHist.
+func getTotalRowCount(statsTbl *statistics.Table, colHist *statistics.Column) int64 {
+	if colHist.IsFullLoad() {
+		return int64(colHist.TotalRowCount())
+	}
+	// If colHist is not fully loaded, we may still get its total row count from other index/column stats.
+	for _, idx := range statsTbl.Indices {
+		if idx.IsFullLoad() && idx.LastUpdateVersion == colHist.LastUpdateVersion {
+			return int64(idx.TotalRowCount())
+		}
+	}
+	for _, col := range statsTbl.Columns {
+		if col.IsFullLoad() && col.LastUpdateVersion == colHist.LastUpdateVersion {
+			return int64(col.TotalRowCount())
+		}
+	}
+	return 0
+}
+
+// getColumnNDV computes estimated NDV of specified column using the original
+// histogram of `DataSource` which is retrieved from storage(not the derived one).
+func (ds *DataSource) getColumnNDV(colID int64) (ndv float64) {
+	hist, ok := ds.statisticTable.Columns[colID]
+	if ok && hist.IsStatsInitialized() {
+		ndv = float64(hist.Histogram.NDV)
+		// TODO: a better way to get the total row count derived from the last analyze.
+		analyzeCount := getTotalRowCount(ds.statisticTable, hist)
+		if analyzeCount > 0 {
+			factor := float64(ds.statisticTable.RealtimeCount) / float64(analyzeCount)
+			ndv *= factor
+		}
+	} else {
+		ndv = float64(ds.statisticTable.RealtimeCount) * distinctFactor
+	}
+	return ndv
 }
 
 func (ds *DataSource) getGroupNDVs(colGroups [][]*expression.Column) []property.GroupNDV {
@@ -215,7 +249,7 @@ func (ds *DataSource) getGroupNDVs(colGroups [][]*expression.Column) []property.
 
 func init() {
 	// To handle cycle import, we have to define this function here.
-	cardinality.GetTblInfoForUsedStatsByPhysicalID = getTblInfoForUsedStatsByPhysicalID
+	statistics.GetTblInfoForUsedStatsByPhysicalID = getTblInfoForUsedStatsByPhysicalID
 }
 
 // getTblInfoForUsedStatsByPhysicalID get table name, partition name and TableInfo that will be used to record used stats.
@@ -226,7 +260,10 @@ func getTblInfoForUsedStatsByPhysicalID(sctx sessionctx.Context, id int64) (full
 	var tbl table.Table
 	var partDef *model.PartitionDefinition
 
-	tbl, partDef = infoschema.FindTableByTblOrPartID(is, id)
+	tbl, ok := is.TableByID(id)
+	if !ok {
+		tbl, _, partDef = is.FindTableByPartitionID(id)
+	}
 	if tbl == nil || tbl.Meta() == nil {
 		return
 	}
@@ -247,20 +284,20 @@ func (ds *DataSource) initStats(colGroups [][]*expression.Column) {
 		return
 	}
 	if ds.statisticTable == nil {
-		ds.statisticTable = getStatsTable(ds.SCtx(), ds.tableInfo, ds.physicalTableID)
+		ds.statisticTable = getStatsTable(ds.ctx, ds.tableInfo, ds.physicalTableID)
 	}
 	tableStats := &property.StatsInfo{
 		RowCount:     float64(ds.statisticTable.RealtimeCount),
 		ColNDVs:      make(map[int64]float64, ds.schema.Len()),
-		HistColl:     ds.statisticTable.GenerateHistCollFromColumnInfo(ds.tableInfo, ds.TblCols),
+		HistColl:     ds.statisticTable.GenerateHistCollFromColumnInfo(ds.tableInfo, ds.schema.Columns),
 		StatsVersion: ds.statisticTable.Version,
 	}
 	if ds.statisticTable.Pseudo {
 		tableStats.StatsVersion = statistics.PseudoVersion
 	}
 
-	statsRecord := ds.SCtx().GetSessionVars().StmtCtx.GetUsedStatsInfo(true)
-	name, tblInfo := getTblInfoForUsedStatsByPhysicalID(ds.SCtx(), ds.physicalTableID)
+	statsRecord := ds.ctx.GetSessionVars().StmtCtx.GetUsedStatsInfo(true)
+	name, tblInfo := getTblInfoForUsedStatsByPhysicalID(ds.ctx, ds.physicalTableID)
 	statsRecord[ds.physicalTableID] = &stmtctx.UsedStatsInfoForTable{
 		Name:          name,
 		TblInfo:       tblInfo,
@@ -270,7 +307,7 @@ func (ds *DataSource) initStats(colGroups [][]*expression.Column) {
 	}
 
 	for _, col := range ds.schema.Columns {
-		tableStats.ColNDVs[col.UniqueID] = cardinality.EstimateColumnNDV(ds.statisticTable, col.ID)
+		tableStats.ColNDVs[col.UniqueID] = ds.getColumnNDV(col.ID)
 	}
 	ds.tableStats = tableStats
 	ds.tableStats.GroupNDVs = ds.getGroupNDVs(colGroups)
@@ -278,29 +315,28 @@ func (ds *DataSource) initStats(colGroups [][]*expression.Column) {
 }
 
 func (ds *DataSource) deriveStatsByFilter(conds expression.CNFExprs, filledPaths []*util.AccessPath) *property.StatsInfo {
-	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
-		debugtrace.EnterContextCommon(ds.SCtx())
-		defer debugtrace.LeaveContextCommon(ds.SCtx())
+	if ds.ctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
+		debugtrace.EnterContextCommon(ds.ctx)
+		defer debugtrace.LeaveContextCommon(ds.ctx)
 	}
-	selectivity, _, err := cardinality.Selectivity(ds.SCtx(), ds.tableStats.HistColl, conds, filledPaths)
+	selectivity, nodes, err := ds.tableStats.HistColl.Selectivity(ds.ctx, conds, filledPaths)
 	if err != nil {
 		logutil.BgLogger().Debug("something wrong happened, use the default selectivity", zap.Error(err))
 		selectivity = SelectionFactor
 	}
-	// TODO: remove NewHistCollBySelectivity later on.
-	// if ds.SCtx().GetSessionVars().OptimizerSelectivityLevel >= 1 {
-	// Only '0' is suggested, see https://docs.pingcap.com/zh/tidb/stable/system-variables#tidb_optimizer_selectivity_level.
-	// stats.HistColl = stats.HistColl.NewHistCollBySelectivity(ds.SCtx(), nodes)
-	// }
-	return ds.tableStats.Scale(selectivity)
+	stats := ds.tableStats.Scale(selectivity)
+	if ds.ctx.GetSessionVars().OptimizerSelectivityLevel >= 1 {
+		stats.HistColl = stats.HistColl.NewHistCollBySelectivity(ds.ctx, nodes)
+	}
+	return stats
 }
 
 // We bind logic of derivePathStats and tryHeuristics together. When some path matches the heuristic rule, we don't need
 // to derive stats of subsequent paths. In this way we can save unnecessary computation of derivePathStats.
 func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
-	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
-		debugtrace.EnterContextCommon(ds.SCtx())
-		defer debugtrace.LeaveContextCommon(ds.SCtx())
+	if ds.ctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
+		debugtrace.EnterContextCommon(ds.ctx)
+		defer debugtrace.LeaveContextCommon(ds.ctx)
 	}
 	uniqueIdxsWithDoubleScan := make([]*util.AccessPath, 0, len(ds.possibleAccessPaths))
 	singleScanIdxs := make([]*util.AccessPath, 0, len(ds.possibleAccessPaths))
@@ -379,14 +415,8 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 			selected = uniqueBest
 		}
 	}
-	// heuristic rule pruning other path should consider hint prefer.
-	// If no hints and some path matches a heuristic rule, just remove other possible paths.
+	// If some path matches a heuristic rule, just remove other possible paths
 	if selected != nil {
-		// if user wanna tiFlash read, while current heuristic choose a TiKV path. so we shouldn't prune other paths.
-		keep := ds.preferStoreType&preferTiFlash != 0 && selected.StoreType != kv.TiFlash
-		if keep {
-			return nil
-		}
 		ds.possibleAccessPaths[0] = selected
 		ds.possibleAccessPaths = ds.possibleAccessPaths[:1]
 		var tableName string
@@ -398,7 +428,7 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 		var sb strings.Builder
 		if selected.IsTablePath() {
 			// TODO: primary key / handle / real name?
-			fmt.Fprintf(&sb, "handle of %s is selected since the path only has point ranges", tableName)
+			sb.WriteString(fmt.Sprintf("handle of %s is selected since the path only has point ranges", tableName))
 		} else {
 			if selected.Index.Unique {
 				sb.WriteString("unique ")
@@ -415,10 +445,10 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 				sb.WriteString(" with double scan")
 			}
 		}
-		if ds.SCtx().GetSessionVars().StmtCtx.InVerboseExplain {
-			ds.SCtx().GetSessionVars().StmtCtx.AppendNote(errors.New(sb.String()))
+		if ds.ctx.GetSessionVars().StmtCtx.InVerboseExplain {
+			ds.ctx.GetSessionVars().StmtCtx.AppendNote(errors.New(sb.String()))
 		} else {
-			ds.SCtx().GetSessionVars().StmtCtx.AppendExtraNote(errors.New(sb.String()))
+			ds.ctx.GetSessionVars().StmtCtx.AppendExtraNote(errors.New(sb.String()))
 		}
 	}
 	return nil
@@ -426,19 +456,19 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, colGroups [][]*expression.Column) (*property.StatsInfo, error) {
-	if ds.StatsInfo() != nil && len(colGroups) == 0 {
-		return ds.StatsInfo(), nil
+	if ds.stats != nil && len(colGroups) == 0 {
+		return ds.stats, nil
 	}
 	ds.initStats(colGroups)
-	if ds.StatsInfo() != nil {
+	if ds.stats != nil {
 		// Just reload the GroupNDVs.
-		selectivity := ds.StatsInfo().RowCount / ds.tableStats.RowCount
-		ds.SetStats(ds.tableStats.Scale(selectivity))
-		return ds.StatsInfo(), nil
+		selectivity := ds.stats.RowCount / ds.tableStats.RowCount
+		ds.stats = ds.tableStats.Scale(selectivity)
+		return ds.stats, nil
 	}
-	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
-		debugtrace.EnterContextCommon(ds.SCtx())
-		defer debugtrace.LeaveContextCommon(ds.SCtx())
+	if ds.ctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
+		debugtrace.EnterContextCommon(ds.ctx)
+		defer debugtrace.LeaveContextCommon(ds.ctx)
 	}
 	// two preprocess here.
 	// 1: PushDownNot here can convert query 'not (a != 1)' to 'a = 1'.
@@ -458,7 +488,7 @@ func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema,
 	}
 	// TODO: Can we move ds.deriveStatsByFilter after pruning by heuristics? In this way some computation can be avoided
 	// when ds.possibleAccessPaths are pruned.
-	ds.SetStats(ds.deriveStatsByFilter(ds.pushedDownConds, ds.possibleAccessPaths))
+	ds.stats = ds.deriveStatsByFilter(ds.pushedDownConds, ds.possibleAccessPaths)
 	err := ds.derivePathStatsAndTryHeuristics()
 	if err != nil {
 		return nil, err
@@ -468,12 +498,12 @@ func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema,
 		return nil, err
 	}
 
-	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
-		debugTraceAccessPaths(ds.SCtx(), ds.possibleAccessPaths)
+	if ds.ctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
+		debugTraceAccessPaths(ds.ctx, ds.possibleAccessPaths)
 	}
 	ds.accessPathMinSelectivity = getMinSelectivityFromPaths(ds.possibleAccessPaths, float64(ds.TblColHists.RealtimeCount))
 
-	return ds.StatsInfo(), nil
+	return ds.stats, nil
 }
 
 func getMinSelectivityFromPaths(paths []*util.AccessPath, totalRowCount float64) float64 {
@@ -500,14 +530,14 @@ func (ts *LogicalTableScan) DeriveStats(_ []*property.StatsInfo, _ *expression.S
 	for i, expr := range ts.AccessConds {
 		// TODO The expressions may be shared by TableScan and several IndexScans, there would be redundant
 		// `PushDownNot` function call in multiple `DeriveStats` then.
-		ts.AccessConds[i] = expression.PushDownNot(ts.SCtx(), expr)
+		ts.AccessConds[i] = expression.PushDownNot(ts.ctx, expr)
 	}
-	ts.SetStats(ts.Source.deriveStatsByFilter(ts.AccessConds, nil))
+	ts.stats = ts.Source.deriveStatsByFilter(ts.AccessConds, nil)
 	// ts.Handle could be nil if PK is Handle, and PK column has been pruned.
 	// TODO: support clustered index.
 	if ts.HandleCols != nil {
 		// TODO: restrict mem usage of table ranges.
-		ts.Ranges, _, _, err = ranger.BuildTableRange(ts.AccessConds, ts.SCtx(), ts.HandleCols.GetCol(0).RetType, 0)
+		ts.Ranges, _, _, err = ranger.BuildTableRange(ts.AccessConds, ts.ctx, ts.HandleCols.GetCol(0).RetType, 0)
 	} else {
 		isUnsigned := false
 		if ts.Source.tableInfo.PKIsHandle {
@@ -520,16 +550,16 @@ func (ts *LogicalTableScan) DeriveStats(_ []*property.StatsInfo, _ *expression.S
 	if err != nil {
 		return nil, err
 	}
-	return ts.StatsInfo(), nil
+	return ts.stats, nil
 }
 
 // DeriveStats implements LogicalPlan DeriveStats interface.
 func (is *LogicalIndexScan) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
 	is.Source.initStats(nil)
 	for i, expr := range is.AccessConds {
-		is.AccessConds[i] = expression.PushDownNot(is.SCtx(), expr)
+		is.AccessConds[i] = expression.PushDownNot(is.ctx, expr)
 	}
-	is.SetStats(is.Source.deriveStatsByFilter(is.AccessConds, nil))
+	is.stats = is.Source.deriveStatsByFilter(is.AccessConds, nil)
 	if len(is.AccessConds) == 0 {
 		is.Ranges = ranger.FullRange()
 	}
@@ -542,34 +572,34 @@ func (is *LogicalIndexScan) DeriveStats(_ []*property.StatsInfo, selfSchema *exp
 			is.IdxColLens = append(is.IdxColLens, types.UnspecifiedLength)
 		}
 	}
-	return is.StatsInfo(), nil
+	return is.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalSelection) DeriveStats(childStats []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	p.SetStats(childStats[0].Scale(SelectionFactor))
-	p.StatsInfo().GroupNDVs = nil
-	return p.StatsInfo(), nil
+	p.stats = childStats[0].Scale(SelectionFactor)
+	p.stats.GroupNDVs = nil
+	return p.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalUnionAll) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	p.SetStats(&property.StatsInfo{
+	p.stats = &property.StatsInfo{
 		ColNDVs: make(map[int64]float64, selfSchema.Len()),
-	})
+	}
 	for _, childProfile := range childStats {
-		p.StatsInfo().RowCount += childProfile.RowCount
+		p.stats.RowCount += childProfile.RowCount
 		for _, col := range selfSchema.Columns {
-			p.StatsInfo().ColNDVs[col.UniqueID] += childProfile.ColNDVs[col.UniqueID]
+			p.stats.ColNDVs[col.UniqueID] += childProfile.ColNDVs[col.UniqueID]
 		}
 	}
-	return p.StatsInfo(), nil
+	return p.stats, nil
 }
 
 func deriveLimitStats(childProfile *property.StatsInfo, limitCount float64) *property.StatsInfo {
@@ -585,20 +615,74 @@ func deriveLimitStats(childProfile *property.StatsInfo, limitCount float64) *pro
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalLimit) DeriveStats(childStats []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	p.SetStats(deriveLimitStats(childStats[0], float64(p.Count)))
-	return p.StatsInfo(), nil
+	p.stats = deriveLimitStats(childStats[0], float64(p.Count))
+	return p.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (lt *LogicalTopN) DeriveStats(childStats []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if lt.StatsInfo() != nil {
-		return lt.StatsInfo(), nil
+	if lt.stats != nil {
+		return lt.stats, nil
 	}
-	lt.SetStats(deriveLimitStats(childStats[0], float64(lt.Count)))
-	return lt.StatsInfo(), nil
+	lt.stats = deriveLimitStats(childStats[0], float64(lt.Count))
+	return lt.stats, nil
+}
+
+func getGroupNDV4Cols(cols []*expression.Column, stats *property.StatsInfo) *property.GroupNDV {
+	if len(cols) == 0 || len(stats.GroupNDVs) == 0 {
+		return nil
+	}
+	cols = expression.SortColumns(cols)
+	for _, groupNDV := range stats.GroupNDVs {
+		if len(cols) != len(groupNDV.Cols) {
+			continue
+		}
+		match := true
+		for i, col := range groupNDV.Cols {
+			if col != cols[i].UniqueID {
+				match = false
+				break
+			}
+		}
+		if match {
+			return &groupNDV
+		}
+	}
+	return nil
+}
+
+// getColsNDVWithMatchedLen returns the NDV of a couple of columns.
+// If the columns match any GroupNDV maintained by child operator, we can get an accurate NDV.
+// Otherwise, we simply return the max NDV among the columns, which is a lower bound.
+func getColsNDVWithMatchedLen(cols []*expression.Column, schema *expression.Schema, profile *property.StatsInfo) (float64, int) {
+	NDV := 1.0
+	if groupNDV := getGroupNDV4Cols(cols, profile); groupNDV != nil {
+		return math.Max(groupNDV.NDV, NDV), len(groupNDV.Cols)
+	}
+	indices := schema.ColumnsIndices(cols)
+	if indices == nil {
+		logutil.BgLogger().Error("column not found in schema", zap.Any("columns", cols), zap.String("schema", schema.String()))
+		return NDV, 1
+	}
+	for _, idx := range indices {
+		// It is a very naive estimation.
+		col := schema.Columns[idx]
+		NDV = math.Max(NDV, profile.ColNDVs[col.UniqueID])
+	}
+	return NDV, 1
+}
+
+func getColsDNVWithMatchedLenFromUniqueIDs(ids []int64, schema *expression.Schema, profile *property.StatsInfo) (float64, int) {
+	cols := make([]*expression.Column, 0, len(ids))
+	for _, id := range ids {
+		cols = append(cols, &expression.Column{
+			UniqueID: id,
+		})
+	}
+	return getColsNDVWithMatchedLen(cols, schema, profile)
 }
 
 func (p *LogicalProjection) getGroupNDVs(colGroups [][]*expression.Column, childProfile *property.StatsInfo, selfSchema *expression.Schema) []property.GroupNDV {
@@ -640,21 +724,21 @@ func (p *LogicalProjection) getGroupNDVs(colGroups [][]*expression.Column, child
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalProjection) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, childSchema []*expression.Schema, colGroups [][]*expression.Column) (*property.StatsInfo, error) {
 	childProfile := childStats[0]
-	if p.StatsInfo() != nil {
+	if p.stats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childProfile, selfSchema)
-		return p.StatsInfo(), nil
+		p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childProfile, selfSchema)
+		return p.stats, nil
 	}
-	p.SetStats(&property.StatsInfo{
+	p.stats = &property.StatsInfo{
 		RowCount: childProfile.RowCount,
 		ColNDVs:  make(map[int64]float64, len(p.Exprs)),
-	})
+	}
 	for i, expr := range p.Exprs {
 		cols := expression.ExtractColumns(expr)
-		p.StatsInfo().ColNDVs[selfSchema.Columns[i].UniqueID], _ = cardinality.EstimateColsNDVWithMatchedLen(cols, childSchema[0], childProfile)
+		p.stats.ColNDVs[selfSchema.Columns[i].UniqueID], _ = getColsNDVWithMatchedLen(cols, childSchema[0], childProfile)
 	}
-	p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childProfile, selfSchema)
-	return p.StatsInfo(), nil
+	p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childProfile, selfSchema)
+	return p.stats, nil
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
@@ -686,7 +770,7 @@ func (p *LogicalProjection) ExtractColGroups(colGroups [][]*expression.Column) [
 	return extracted
 }
 
-func (*LogicalAggregation) getGroupNDVs(colGroups [][]*expression.Column, childProfile *property.StatsInfo, gbyCols []*expression.Column) []property.GroupNDV {
+func (la *LogicalAggregation) getGroupNDVs(colGroups [][]*expression.Column, childProfile *property.StatsInfo, gbyCols []*expression.Column) []property.GroupNDV {
 	if len(colGroups) == 0 {
 		return nil
 	}
@@ -694,7 +778,7 @@ func (*LogicalAggregation) getGroupNDVs(colGroups [][]*expression.Column, childP
 	// Note that gbyCols may not be the exact GROUP BY columns, e.g, GROUP BY a+b,
 	// but we have no other approaches for the NDV estimation of these cases
 	// except for using the independent assumption, unless we can use stats of expression index.
-	groupNDV := childProfile.GetGroupNDV4Cols(gbyCols)
+	groupNDV := getGroupNDV4Cols(gbyCols, childProfile)
 	if groupNDV == nil {
 		return nil
 	}
@@ -709,23 +793,23 @@ func (la *LogicalAggregation) DeriveStats(childStats []*property.StatsInfo, self
 		cols := expression.ExtractColumns(gbyExpr)
 		gbyCols = append(gbyCols, cols...)
 	}
-	if la.StatsInfo() != nil {
+	if la.stats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		la.StatsInfo().GroupNDVs = la.getGroupNDVs(colGroups, childProfile, gbyCols)
-		return la.StatsInfo(), nil
+		la.stats.GroupNDVs = la.getGroupNDVs(colGroups, childProfile, gbyCols)
+		return la.stats, nil
 	}
-	ndv, _ := cardinality.EstimateColsNDVWithMatchedLen(gbyCols, childSchema[0], childProfile)
-	la.SetStats(&property.StatsInfo{
-		RowCount: ndv,
+	NDV, _ := getColsNDVWithMatchedLen(gbyCols, childSchema[0], childProfile)
+	la.stats = &property.StatsInfo{
+		RowCount: NDV,
 		ColNDVs:  make(map[int64]float64, selfSchema.Len()),
-	})
+	}
 	// We cannot estimate the ColNDVs for every output, so we use a conservative strategy.
 	for _, col := range selfSchema.Columns {
-		la.StatsInfo().ColNDVs[col.UniqueID] = ndv
+		la.stats.ColNDVs[col.UniqueID] = NDV
 	}
 	la.inputCount = childProfile.RowCount
-	la.StatsInfo().GroupNDVs = la.getGroupNDVs(colGroups, childProfile, gbyCols)
-	return la.StatsInfo(), nil
+	la.stats.GroupNDVs = la.getGroupNDVs(colGroups, childProfile, gbyCols)
+	return la.stats, nil
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
@@ -767,40 +851,45 @@ func (p *LogicalJoin) getGroupNDVs(colGroups [][]*expression.Column, childStats 
 // This is a quite simple strategy: We assume every bucket of relation which will participate join has the same number of rows, and apply cross join for
 // every matched bucket.
 func (p *LogicalJoin) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, childSchema []*expression.Schema, colGroups [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
+	if p.stats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
-		return p.StatsInfo(), nil
+		p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childStats)
+		return p.stats, nil
 	}
 	leftProfile, rightProfile := childStats[0], childStats[1]
 	leftJoinKeys, rightJoinKeys, _, _ := p.GetJoinKeys()
-	p.equalCondOutCnt = cardinality.EstimateFullJoinRowCount(p.SCtx(),
-		0 == len(p.EqualConditions),
-		leftProfile, rightProfile,
-		leftJoinKeys, rightJoinKeys,
-		childSchema[0], childSchema[1],
-		nil, nil)
+	helper := &fullJoinRowCountHelper{
+		sctx:          p.SCtx(),
+		cartesian:     0 == len(p.EqualConditions),
+		leftProfile:   leftProfile,
+		rightProfile:  rightProfile,
+		leftJoinKeys:  leftJoinKeys,
+		rightJoinKeys: rightJoinKeys,
+		leftSchema:    childSchema[0],
+		rightSchema:   childSchema[1],
+	}
+	p.equalCondOutCnt = helper.estimate()
 	if p.JoinType == SemiJoin || p.JoinType == AntiSemiJoin {
-		p.SetStats(&property.StatsInfo{
+		p.stats = &property.StatsInfo{
 			RowCount: leftProfile.RowCount * SelectionFactor,
 			ColNDVs:  make(map[int64]float64, len(leftProfile.ColNDVs)),
-		})
-		for id, c := range leftProfile.ColNDVs {
-			p.StatsInfo().ColNDVs[id] = c * SelectionFactor
 		}
-		return p.StatsInfo(), nil
+		for id, c := range leftProfile.ColNDVs {
+			p.stats.ColNDVs[id] = c * SelectionFactor
+		}
+		return p.stats, nil
 	}
 	if p.JoinType == LeftOuterSemiJoin || p.JoinType == AntiLeftOuterSemiJoin {
-		p.SetStats(&property.StatsInfo{
+		p.stats = &property.StatsInfo{
 			RowCount: leftProfile.RowCount,
 			ColNDVs:  make(map[int64]float64, selfSchema.Len()),
-		})
-		for id, c := range leftProfile.ColNDVs {
-			p.StatsInfo().ColNDVs[id] = c
 		}
-		p.StatsInfo().ColNDVs[selfSchema.Columns[selfSchema.Len()-1].UniqueID] = 2.0
-		p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
-		return p.StatsInfo(), nil
+		for id, c := range leftProfile.ColNDVs {
+			p.stats.ColNDVs[id] = c
+		}
+		p.stats.ColNDVs[selfSchema.Columns[selfSchema.Len()-1].UniqueID] = 2.0
+		p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childStats)
+		return p.stats, nil
 	}
 	count := p.equalCondOutCnt
 	if p.JoinType == LeftOuterJoin {
@@ -815,12 +904,12 @@ func (p *LogicalJoin) DeriveStats(childStats []*property.StatsInfo, selfSchema *
 	for id, c := range rightProfile.ColNDVs {
 		colNDVs[id] = math.Min(c, count)
 	}
-	p.SetStats(&property.StatsInfo{
+	p.stats = &property.StatsInfo{
 		RowCount: count,
 		ColNDVs:  colNDVs,
-	})
-	p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
-	return p.StatsInfo(), nil
+	}
+	p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childStats)
+	return p.stats, nil
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
@@ -849,6 +938,42 @@ func (p *LogicalJoin) ExtractColGroups(colGroups [][]*expression.Column) [][]*ex
 	return extracted
 }
 
+type fullJoinRowCountHelper struct {
+	sctx          sessionctx.Context
+	cartesian     bool
+	leftProfile   *property.StatsInfo
+	rightProfile  *property.StatsInfo
+	leftJoinKeys  []*expression.Column
+	rightJoinKeys []*expression.Column
+	leftSchema    *expression.Schema
+	rightSchema   *expression.Schema
+
+	leftNAJoinKeys  []*expression.Column
+	rightNAJoinKeys []*expression.Column
+}
+
+func (h *fullJoinRowCountHelper) estimate() float64 {
+	if h.cartesian {
+		return h.leftProfile.RowCount * h.rightProfile.RowCount
+	}
+	var leftKeyNDV, rightKeyNDV float64
+	var leftColCnt, rightColCnt int
+	if len(h.leftJoinKeys) > 0 || len(h.rightJoinKeys) > 0 {
+		leftKeyNDV, leftColCnt = getColsNDVWithMatchedLen(h.leftJoinKeys, h.leftSchema, h.leftProfile)
+		rightKeyNDV, rightColCnt = getColsNDVWithMatchedLen(h.rightJoinKeys, h.rightSchema, h.rightProfile)
+	} else {
+		leftKeyNDV, leftColCnt = getColsNDVWithMatchedLen(h.leftNAJoinKeys, h.leftSchema, h.leftProfile)
+		rightKeyNDV, rightColCnt = getColsNDVWithMatchedLen(h.rightNAJoinKeys, h.rightSchema, h.rightProfile)
+	}
+	count := h.leftProfile.RowCount * h.rightProfile.RowCount / math.Max(leftKeyNDV, rightKeyNDV)
+	if h.sctx.GetSessionVars().TiDBOptJoinReorderThreshold <= 0 {
+		return count
+	}
+	// If we enable the DP choice, we multiple the 0.9 for each remained join key supposing that 0.9 is the correlation factor between them.
+	// This estimation logic is referred to Presto.
+	return count * math.Pow(0.9, float64(len(h.leftJoinKeys)-mathutil.Max(leftColCnt, rightColCnt)))
+}
+
 func (la *LogicalApply) getGroupNDVs(colGroups [][]*expression.Column, childStats []*property.StatsInfo) []property.GroupNDV {
 	if len(colGroups) > 0 && (la.JoinType == LeftOuterSemiJoin || la.JoinType == AntiLeftOuterSemiJoin || la.JoinType == LeftOuterJoin) {
 		return childStats[0].GroupNDVs
@@ -858,28 +983,28 @@ func (la *LogicalApply) getGroupNDVs(colGroups [][]*expression.Column, childStat
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (la *LogicalApply) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, childSchema []*expression.Schema, colGroups [][]*expression.Column) (*property.StatsInfo, error) {
-	if la.StatsInfo() != nil {
+	if la.stats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		la.StatsInfo().GroupNDVs = la.getGroupNDVs(colGroups, childStats)
-		return la.StatsInfo(), nil
+		la.stats.GroupNDVs = la.getGroupNDVs(colGroups, childStats)
+		return la.stats, nil
 	}
 	leftProfile := childStats[0]
-	la.SetStats(&property.StatsInfo{
+	la.stats = &property.StatsInfo{
 		RowCount: leftProfile.RowCount,
 		ColNDVs:  make(map[int64]float64, selfSchema.Len()),
-	})
+	}
 	for id, c := range leftProfile.ColNDVs {
-		la.StatsInfo().ColNDVs[id] = c
+		la.stats.ColNDVs[id] = c
 	}
 	if la.JoinType == LeftOuterSemiJoin || la.JoinType == AntiLeftOuterSemiJoin {
-		la.StatsInfo().ColNDVs[selfSchema.Columns[selfSchema.Len()-1].UniqueID] = 2.0
+		la.stats.ColNDVs[selfSchema.Columns[selfSchema.Len()-1].UniqueID] = 2.0
 	} else {
 		for i := childSchema[0].Len(); i < selfSchema.Len(); i++ {
-			la.StatsInfo().ColNDVs[selfSchema.Columns[i].UniqueID] = leftProfile.RowCount
+			la.stats.ColNDVs[selfSchema.Columns[i].UniqueID] = leftProfile.RowCount
 		}
 	}
-	la.StatsInfo().GroupNDVs = la.getGroupNDVs(colGroups, childStats)
-	return la.StatsInfo(), nil
+	la.stats.GroupNDVs = la.getGroupNDVs(colGroups, childStats)
+	return la.stats, nil
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
@@ -917,14 +1042,14 @@ func getSingletonStats(schema *expression.Schema) *property.StatsInfo {
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalMaxOneRow) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	p.SetStats(getSingletonStats(selfSchema))
-	return p.StatsInfo(), nil
+	p.stats = getSingletonStats(selfSchema)
+	return p.stats, nil
 }
 
-func (*LogicalWindow) getGroupNDVs(colGroups [][]*expression.Column, childStats []*property.StatsInfo) []property.GroupNDV {
+func (p *LogicalWindow) getGroupNDVs(colGroups [][]*expression.Column, childStats []*property.StatsInfo) []property.GroupNDV {
 	if len(colGroups) > 0 {
 		return childStats[0].GroupNDVs
 	}
@@ -933,26 +1058,26 @@ func (*LogicalWindow) getGroupNDVs(colGroups [][]*expression.Column, childStats 
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalWindow) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, colGroups [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
+	if p.stats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
-		return p.StatsInfo(), nil
+		p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childStats)
+		return p.stats, nil
 	}
 	childProfile := childStats[0]
-	p.SetStats(&property.StatsInfo{
+	p.stats = &property.StatsInfo{
 		RowCount: childProfile.RowCount,
 		ColNDVs:  make(map[int64]float64, selfSchema.Len()),
-	})
+	}
 	childLen := selfSchema.Len() - len(p.WindowFuncDescs)
 	for i := 0; i < childLen; i++ {
 		id := selfSchema.Columns[i].UniqueID
-		p.StatsInfo().ColNDVs[id] = childProfile.ColNDVs[id]
+		p.stats.ColNDVs[id] = childProfile.ColNDVs[id]
 	}
 	for i := childLen; i < selfSchema.Len(); i++ {
-		p.StatsInfo().ColNDVs[selfSchema.Columns[i].UniqueID] = childProfile.RowCount
+		p.stats.ColNDVs[selfSchema.Columns[i].UniqueID] = childProfile.RowCount
 	}
-	p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
-	return p.StatsInfo(), nil
+	p.stats.GroupNDVs = p.getGroupNDVs(colGroups, childStats)
+	return p.stats, nil
 }
 
 // ExtractColGroups implements LogicalPlan ExtractColGroups interface.
@@ -974,69 +1099,59 @@ func (p *LogicalWindow) ExtractColGroups(colGroups [][]*expression.Column) [][]*
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalCTE) DeriveStats(_ []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
 
 	var err error
 	if p.cte.seedPartPhysicalPlan == nil {
 		// Build push-downed predicates.
 		if len(p.cte.pushDownPredicates) > 0 {
-			newCond := expression.ComposeDNFCondition(p.SCtx(), p.cte.pushDownPredicates...)
+			newCond := expression.ComposeDNFCondition(p.ctx, p.cte.pushDownPredicates...)
 			newSel := LogicalSelection{Conditions: []expression.Expression{newCond}}.Init(p.SCtx(), p.cte.seedPartLogicalPlan.SelectBlockOffset())
 			newSel.SetChildren(p.cte.seedPartLogicalPlan)
 			p.cte.seedPartLogicalPlan = newSel
-			p.cte.optFlag |= flagPredicatePushDown
 		}
-		p.cte.seedPartLogicalPlan, p.cte.seedPartPhysicalPlan, _, err = DoOptimizeAndLogicAsRet(context.TODO(), p.SCtx(), p.cte.optFlag, p.cte.seedPartLogicalPlan)
+		p.cte.seedPartPhysicalPlan, _, err = DoOptimize(context.TODO(), p.ctx, p.cte.optFlag|flagPredicatePushDown, p.cte.seedPartLogicalPlan)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if p.onlyUsedAsStorage {
-		p.SetChildren(p.cte.seedPartLogicalPlan)
-	}
-	resStat := p.cte.seedPartPhysicalPlan.StatsInfo()
+	resStat := p.cte.seedPartPhysicalPlan.Stats()
 	// Changing the pointer so that seedStat in LogicalCTETable can get the new stat.
 	*p.seedStat = *resStat
-	p.SetStats(&property.StatsInfo{
+	p.stats = &property.StatsInfo{
 		RowCount: resStat.RowCount,
 		ColNDVs:  make(map[int64]float64, selfSchema.Len()),
-	})
+	}
 	for i, col := range selfSchema.Columns {
-		p.StatsInfo().ColNDVs[col.UniqueID] += resStat.ColNDVs[p.cte.seedPartLogicalPlan.Schema().Columns[i].UniqueID]
+		p.stats.ColNDVs[col.UniqueID] += resStat.ColNDVs[p.cte.seedPartLogicalPlan.Schema().Columns[i].UniqueID]
 	}
 	if p.cte.recursivePartLogicalPlan != nil {
 		if p.cte.recursivePartPhysicalPlan == nil {
-			p.cte.recursivePartPhysicalPlan, _, err = DoOptimize(context.TODO(), p.SCtx(), p.cte.optFlag, p.cte.recursivePartLogicalPlan)
+			p.cte.recursivePartPhysicalPlan, _, err = DoOptimize(context.TODO(), p.ctx, p.cte.optFlag, p.cte.recursivePartLogicalPlan)
 			if err != nil {
 				return nil, err
 			}
 		}
-		recurStat := p.cte.recursivePartLogicalPlan.StatsInfo()
+		recurStat := p.cte.recursivePartPhysicalPlan.Stats()
 		for i, col := range selfSchema.Columns {
-			p.StatsInfo().ColNDVs[col.UniqueID] += recurStat.ColNDVs[p.cte.recursivePartLogicalPlan.Schema().Columns[i].UniqueID]
+			p.stats.ColNDVs[col.UniqueID] += recurStat.ColNDVs[p.cte.recursivePartLogicalPlan.Schema().Columns[i].UniqueID]
 		}
 		if p.cte.IsDistinct {
-			p.StatsInfo().RowCount, _ = cardinality.EstimateColsNDVWithMatchedLen(p.schema.Columns, p.schema, p.StatsInfo())
+			p.stats.RowCount, _ = getColsNDVWithMatchedLen(p.schema.Columns, p.schema, p.stats)
 		} else {
-			p.StatsInfo().RowCount += recurStat.RowCount
+			p.stats.RowCount += recurStat.RowCount
 		}
 	}
-	return p.StatsInfo(), nil
+	return p.stats, nil
 }
 
 // DeriveStats implement LogicalPlan DeriveStats interface.
 func (p *LogicalCTETable) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	if p.StatsInfo() != nil {
-		return p.StatsInfo(), nil
+	if p.stats != nil {
+		return p.stats, nil
 	}
-	p.SetStats(p.seedStat)
-	return p.StatsInfo(), nil
-}
-
-// DeriveStats implement LogicalPlan DeriveStats interface.
-func (p *LogicalSequence) DeriveStats(childStats []*property.StatsInfo, _ *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
-	p.SetStats(childStats[len(childStats)-1])
-	return p.StatsInfo(), nil
+	p.stats = p.seedStat
+	return p.stats, nil
 }

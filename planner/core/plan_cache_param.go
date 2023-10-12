@@ -16,6 +16,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync"
 
@@ -82,7 +83,7 @@ func (pr *paramReplacer) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 	return in, false
 }
 
-func (*paramReplacer) Leave(in ast.Node) (out ast.Node, ok bool) {
+func (pr *paramReplacer) Leave(in ast.Node) (out ast.Node, ok bool) {
 	return in, true
 }
 
@@ -93,9 +94,9 @@ func (pr *paramReplacer) Reset() {
 // GetParamSQLFromAST returns the parameterized SQL of this AST.
 // NOTICE: this function does not modify the original AST.
 // paramVals are copied from this AST.
-func GetParamSQLFromAST(stmt ast.StmtNode) (paramSQL string, paramVals []types.Datum, err error) {
+func GetParamSQLFromAST(ctx context.Context, sctx sessionctx.Context, stmt ast.StmtNode) (paramSQL string, paramVals []types.Datum, err error) {
 	var params []*driver.ValueExpr
-	paramSQL, params, err = ParameterizeAST(stmt)
+	paramSQL, params, err = ParameterizeAST(ctx, sctx, stmt)
 	if err != nil {
 		return "", nil, err
 	}
@@ -104,14 +105,14 @@ func GetParamSQLFromAST(stmt ast.StmtNode) (paramSQL string, paramVals []types.D
 		p.Datum.Copy(&paramVals[i])
 	}
 
-	err = RestoreASTWithParams(stmt, params)
+	err = RestoreASTWithParams(ctx, sctx, stmt, params)
 	return
 }
 
 // ParameterizeAST parameterizes this StmtNode.
 // e.g. `select * from t where a<10 and b<23` --> `select * from t where a<? and b<?`, [10, 23].
 // NOTICE: this function may modify the input stmt.
-func ParameterizeAST(stmt ast.StmtNode) (paramSQL string, params []*driver.ValueExpr, err error) {
+func ParameterizeAST(ctx context.Context, sctx sessionctx.Context, stmt ast.StmtNode) (paramSQL string, params []*driver.ValueExpr, err error) {
 	pr := paramReplacerPool.Get().(*paramReplacer)
 	pCtx := paramCtxPool.Get().(*format.RestoreCtx)
 	defer func() {
@@ -134,7 +135,8 @@ type paramRestorer struct {
 }
 
 func (pr *paramRestorer) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
-	if n, ok := in.(*driver.ParamMarkerExpr); ok {
+	switch n := in.(type) {
+	case *driver.ParamMarkerExpr:
 		if n.Offset >= len(pr.params) {
 			pr.err = errors.New("failed to restore ast.Node")
 			return nil, true
@@ -150,7 +152,7 @@ func (pr *paramRestorer) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 	return in, false
 }
 
-func (*paramRestorer) Leave(in ast.Node) (out ast.Node, ok bool) {
+func (pr *paramRestorer) Leave(in ast.Node) (out ast.Node, ok bool) {
 	return in, true
 }
 
@@ -160,7 +162,7 @@ func (pr *paramRestorer) Reset() {
 
 // RestoreASTWithParams restore this parameterized AST with specific parameters.
 // e.g. `select * from t where a<? and b<?`, [10, 23] --> `select * from t where a<10 and b<23`.
-func RestoreASTWithParams(stmt ast.StmtNode, params []*driver.ValueExpr) error {
+func RestoreASTWithParams(ctx context.Context, _ sessionctx.Context, stmt ast.StmtNode, params []*driver.ValueExpr) error {
 	pr := paramRestorerPool.Get().(*paramRestorer)
 	defer func() {
 		pr.Reset()

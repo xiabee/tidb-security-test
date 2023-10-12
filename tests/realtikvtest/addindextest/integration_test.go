@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/ingest"
 	"github.com/pingcap/tidb/ddl/testutil"
-	"github.com/pingcap/tidb/ddl/util/callback"
+	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -84,7 +84,7 @@ func TestAddIndexIngestLimitOneBackend(t *testing.T) {
 	tk2.MustExec("insert into t2 values (1, 1), (2, 2), (3, 3);")
 
 	// Mock there is a running ingest job.
-	_, err := ingest.LitBackCtxMgr.Register(context.Background(), false, 65535, nil, "")
+	_, err := ingest.LitBackCtxMgr.Register(context.Background(), false, 65535, nil)
 	require.NoError(t, err)
 	wg := &sync.WaitGroup{}
 	wg.Add(2)
@@ -341,6 +341,45 @@ func TestAddIndexIngestUniqueKey(t *testing.T) {
 	tk.MustGetErrMsg("alter table t add unique index idx(b, c);", "[kv:1062]Duplicate entry '1-c1' for key 't.idx'")
 }
 
+func TestAddIndexIngestCancel(t *testing.T) {
+	store, dom := realtikvtest.CreateMockStoreAndDomainAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("drop database if exists addindexlit;")
+	tk.MustExec("create database addindexlit;")
+	tk.MustExec("use addindexlit;")
+	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
+	tk.MustExec("create table t (a int, b int);")
+	tk.MustExec("insert into t (a, b) values (1, 1), (2, 2), (3, 3);")
+	defHook := dom.DDL().GetHook()
+	customHook := newTestCallBack(t, dom)
+	cancelled := false
+	customHook.OnJobRunBeforeExported = func(job *model.Job) {
+		if cancelled {
+			return
+		}
+		if job.Type == model.ActionAddIndex && job.SchemaState == model.StateWriteReorganization {
+			idx := testutil.FindIdxInfo(dom, "addindexlit", "t", "idx")
+			if idx == nil {
+				return
+			}
+			if idx.BackfillState == model.BackfillStateRunning {
+				tk2 := testkit.NewTestKit(t, store)
+				rs, err := tk2.Exec(fmt.Sprintf("admin cancel ddl jobs %d", job.ID))
+				assert.NoError(t, err)
+				assert.NoError(t, rs.Close())
+				cancelled = true
+			}
+		}
+	}
+	dom.DDL().SetHook(customHook)
+	tk.MustGetErrCode("alter table t add index idx(b);", errno.ErrCancelledDDLJob)
+	require.True(t, cancelled)
+	dom.DDL().SetHook(defHook)
+	ok, err := ingest.LitBackCtxMgr.CheckAvailable()
+	require.NoError(t, err)
+	require.True(t, ok)
+}
+
 func TestAddIndexSplitTableRanges(t *testing.T) {
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 	tk := testkit.NewTestKit(t, store)
@@ -374,6 +413,26 @@ func TestAddIndexSplitTableRanges(t *testing.T) {
 	ddl.SetBackfillTaskChanSizeForTest(1024)
 }
 
+type testCallback struct {
+	ddl.Callback
+	OnJobRunBeforeExported func(job *model.Job)
+	OnJobRunAfterExported  func(job *model.Job)
+}
+
+func newTestCallBack(t *testing.T, dom *domain.Domain) *testCallback {
+	defHookFactory, err := ddl.GetCustomizedHook("default_hook")
+	require.NoError(t, err)
+	return &testCallback{
+		Callback: defHookFactory(dom),
+	}
+}
+
+func (c *testCallback) OnJobRunBefore(job *model.Job) {
+	if c.OnJobRunBeforeExported != nil {
+		c.OnJobRunBeforeExported(job)
+	}
+}
+
 func TestAddIndexFinishImportError(t *testing.T) {
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 	tk := testkit.NewTestKit(t, store)
@@ -396,25 +455,10 @@ func TestAddIndexFinishImportError(t *testing.T) {
 	require.True(t, strings.Contains(jobTp, "ingest"), jobTp)
 }
 
-func TestAddIndexRemoteDuplicateCheck(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("drop database if exists addindexlit;")
-	tk.MustExec("create database addindexlit;")
-	tk.MustExec("use addindexlit;")
-	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-	tk.MustExec("set global tidb_ddl_reorg_worker_cnt=1;")
-
-	tk.MustExec("create table t(id int primary key, b int, k int);")
-	tk.MustQuery("split table t by (30000);").Check(testkit.Rows("1 1"))
-	tk.MustExec("insert into t values(1, 1, 1);")
-	tk.MustExec("insert into t values(100000, 1, 1);")
-
-	ingest.ForceSyncFlagForTest = true
-	tk.MustGetErrCode("alter table t add unique index idx(b);", errno.ErrDupEntry)
-	ingest.ForceSyncFlagForTest = false
-
-	tk.MustExec("set global tidb_ddl_reorg_worker_cnt=4;")
+func (c *testCallback) OnJobRunAfter(job *model.Job) {
+	if c.OnJobRunAfterExported != nil {
+		c.OnJobRunAfterExported(job)
+	}
 }
 
 func TestAddIndexBackfillLostUpdate(t *testing.T) {
@@ -433,7 +477,7 @@ func TestAddIndexBackfillLostUpdate(t *testing.T) {
 	d := dom.DDL()
 	originalCallback := d.GetHook()
 	defer d.SetHook(originalCallback)
-	hook := &callback.TestDDLCallback{}
+	hook := newTestCallBack(t, dom)
 	var runDML bool
 	hook.OnJobRunAfterExported = func(job *model.Job) {
 		if t.Failed() || runDML {

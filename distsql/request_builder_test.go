@@ -17,12 +17,14 @@ package distsql
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/domain/resourcegroup"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/memory"
@@ -104,7 +106,7 @@ func TestTableRangesToKVRanges(t *testing.T) {
 		},
 	}
 
-	actual := TableRangesToKVRanges(13, ranges)
+	actual := TableRangesToKVRanges(13, ranges, nil)
 	expect := []kv.KeyRange{
 		{
 			StartKey: kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xd, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1},
@@ -189,7 +191,7 @@ func TestIndexRangesToKVRanges(t *testing.T) {
 		},
 	}
 
-	actual, err := IndexRangesToKVRanges(new(stmtctx.StatementContext), 12, 15, ranges)
+	actual, err := IndexRangesToKVRanges(new(stmtctx.StatementContext), 12, 15, ranges, nil)
 	require.NoError(t, err)
 	for i := range actual.FirstPartitionRange() {
 		require.Equal(t, expect[i], actual.FirstPartitionRange()[i])
@@ -230,7 +232,7 @@ func TestRequestBuilder1(t *testing.T) {
 		},
 	}
 
-	actual, err := (&RequestBuilder{}).SetHandleRanges(nil, 12, false, ranges).
+	actual, err := (&RequestBuilder{}).SetHandleRanges(nil, 12, false, ranges, nil).
 		SetDAGRequest(&tipb.DAGRequest{}).
 		SetDesc(false).
 		SetKeepOrder(false).
@@ -263,16 +265,15 @@ func TestRequestBuilder1(t *testing.T) {
 				EndKey:   kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xc, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x23},
 			},
 		}),
-		Cacheable:         true,
-		KeepOrder:         false,
-		Desc:              false,
-		Concurrency:       variable.DefDistSQLScanConcurrency,
-		IsolationLevel:    0,
-		Priority:          0,
-		NotFillCache:      false,
-		ReplicaRead:       kv.ReplicaReadLeader,
-		ReadReplicaScope:  kv.GlobalReplicaScope,
-		ResourceGroupName: resourcegroup.DefaultResourceGroupName,
+		Cacheable:        true,
+		KeepOrder:        false,
+		Desc:             false,
+		Concurrency:      variable.DefDistSQLScanConcurrency,
+		IsolationLevel:   0,
+		Priority:         0,
+		NotFillCache:     false,
+		ReplicaRead:      kv.ReplicaReadLeader,
+		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
 	expect.Paging.MinPagingSize = paging.MinPagingSize
 	expect.Paging.MaxPagingSize = paging.MaxPagingSize
@@ -347,16 +348,15 @@ func TestRequestBuilder2(t *testing.T) {
 				EndKey:   kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xc, 0x5f, 0x69, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf, 0x3, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x23},
 			},
 		}),
-		Cacheable:         true,
-		KeepOrder:         false,
-		Desc:              false,
-		Concurrency:       variable.DefDistSQLScanConcurrency,
-		IsolationLevel:    0,
-		Priority:          0,
-		NotFillCache:      false,
-		ReplicaRead:       kv.ReplicaReadLeader,
-		ReadReplicaScope:  kv.GlobalReplicaScope,
-		ResourceGroupName: resourcegroup.DefaultResourceGroupName,
+		Cacheable:        true,
+		KeepOrder:        false,
+		Desc:             false,
+		Concurrency:      variable.DefDistSQLScanConcurrency,
+		IsolationLevel:   0,
+		Priority:         0,
+		NotFillCache:     false,
+		ReplicaRead:      kv.ReplicaReadLeader,
+		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
 	expect.Paging.MinPagingSize = paging.MinPagingSize
 	expect.Paging.MaxPagingSize = paging.MaxPagingSize
@@ -397,16 +397,15 @@ func TestRequestBuilder3(t *testing.T) {
 				EndKey:   kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x65},
 			},
 		}, []int{1, 4, 2, 1}),
-		Cacheable:         true,
-		KeepOrder:         false,
-		Desc:              false,
-		Concurrency:       variable.DefDistSQLScanConcurrency,
-		IsolationLevel:    0,
-		Priority:          0,
-		NotFillCache:      false,
-		ReplicaRead:       kv.ReplicaReadLeader,
-		ReadReplicaScope:  kv.GlobalReplicaScope,
-		ResourceGroupName: resourcegroup.DefaultResourceGroupName,
+		Cacheable:        true,
+		KeepOrder:        false,
+		Desc:             false,
+		Concurrency:      variable.DefDistSQLScanConcurrency,
+		IsolationLevel:   0,
+		Priority:         0,
+		NotFillCache:     false,
+		ReplicaRead:      kv.ReplicaReadLeader,
+		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
 	expect.Paging.MinPagingSize = paging.MinPagingSize
 	expect.Paging.MaxPagingSize = paging.MaxPagingSize
@@ -442,20 +441,19 @@ func TestRequestBuilder4(t *testing.T) {
 		Build()
 	require.NoError(t, err)
 	expect := &kv.Request{
-		Tp:                103,
-		StartTs:           0x0,
-		Data:              []uint8{0x18, 0x0, 0x20, 0x0, 0x40, 0x0, 0x5a, 0x0},
-		KeyRanges:         kv.NewNonParitionedKeyRanges(keyRanges),
-		Cacheable:         true,
-		KeepOrder:         false,
-		Desc:              false,
-		Concurrency:       variable.DefDistSQLScanConcurrency,
-		IsolationLevel:    0,
-		Priority:          0,
-		NotFillCache:      false,
-		ReplicaRead:       kv.ReplicaReadLeader,
-		ReadReplicaScope:  kv.GlobalReplicaScope,
-		ResourceGroupName: resourcegroup.DefaultResourceGroupName,
+		Tp:               103,
+		StartTs:          0x0,
+		Data:             []uint8{0x18, 0x0, 0x20, 0x0, 0x40, 0x0, 0x5a, 0x0},
+		KeyRanges:        kv.NewNonParitionedKeyRanges(keyRanges),
+		Cacheable:        true,
+		KeepOrder:        false,
+		Desc:             false,
+		Concurrency:      variable.DefDistSQLScanConcurrency,
+		IsolationLevel:   0,
+		Priority:         0,
+		NotFillCache:     false,
+		ReplicaRead:      kv.ReplicaReadLeader,
+		ReadReplicaScope: kv.GlobalReplicaScope,
 	}
 	expect.Paging.MinPagingSize = paging.MinPagingSize
 	expect.Paging.MaxPagingSize = paging.MaxPagingSize
@@ -556,18 +554,17 @@ func TestRequestBuilder7(t *testing.T) {
 				Build()
 			require.NoError(t, err)
 			expect := &kv.Request{
-				Tp:                0,
-				StartTs:           0x0,
-				KeepOrder:         false,
-				KeyRanges:         kv.NewNonParitionedKeyRanges(nil),
-				Desc:              false,
-				Concurrency:       concurrency,
-				IsolationLevel:    0,
-				Priority:          0,
-				NotFillCache:      false,
-				ReplicaRead:       replicaRead.replicaReadType,
-				ReadReplicaScope:  kv.GlobalReplicaScope,
-				ResourceGroupName: resourcegroup.DefaultResourceGroupName,
+				Tp:               0,
+				StartTs:          0x0,
+				KeepOrder:        false,
+				KeyRanges:        kv.NewNonParitionedKeyRanges(nil),
+				Desc:             false,
+				Concurrency:      concurrency,
+				IsolationLevel:   0,
+				Priority:         0,
+				NotFillCache:     false,
+				ReplicaRead:      replicaRead.replicaReadType,
+				ReadReplicaScope: kv.GlobalReplicaScope,
 			}
 			expect.Paging.MinPagingSize = paging.MinPagingSize
 			expect.Paging.MaxPagingSize = paging.MaxPagingSize
@@ -603,33 +600,6 @@ func TestRequestBuilder8(t *testing.T) {
 	require.Equal(t, expect, actual)
 }
 
-func TestRequestBuilderTiKVClientReadTimeout(t *testing.T) {
-	sv := variable.NewSessionVars(nil)
-	sv.TiKVClientReadTimeout = 100
-	actual, err := (&RequestBuilder{}).
-		SetFromSessionVars(sv).
-		Build()
-	require.NoError(t, err)
-	expect := &kv.Request{
-		Tp:                    0,
-		StartTs:               0x0,
-		Data:                  []uint8(nil),
-		KeyRanges:             kv.NewNonParitionedKeyRanges(nil),
-		Concurrency:           variable.DefDistSQLScanConcurrency,
-		IsolationLevel:        0,
-		Priority:              0,
-		MemTracker:            (*memory.Tracker)(nil),
-		SchemaVar:             0,
-		ReadReplicaScope:      kv.GlobalReplicaScope,
-		TiKVClientReadTimeout: 100,
-		ResourceGroupName:     resourcegroup.DefaultResourceGroupName,
-	}
-	expect.Paging.MinPagingSize = paging.MinPagingSize
-	expect.Paging.MaxPagingSize = paging.MaxPagingSize
-	actual.ResourceGroupTagger = nil
-	require.Equal(t, expect, actual)
-}
-
 func TestTableRangesToKVRangesWithFbs(t *testing.T) {
 	ranges := []*ranger.Range{
 		{
@@ -638,7 +608,8 @@ func TestTableRangesToKVRangesWithFbs(t *testing.T) {
 			Collators: collate.GetBinaryCollatorSlice(1),
 		},
 	}
-	actual := TableRangesToKVRanges(0, ranges)
+	fb := newTestFb()
+	actual := TableRangesToKVRanges(0, ranges, fb)
 	expect := []kv.KeyRange{
 		{
 			StartKey: kv.Key{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1},
@@ -659,7 +630,8 @@ func TestIndexRangesToKVRangesWithFbs(t *testing.T) {
 			Collators: collate.GetBinaryCollatorSlice(1),
 		},
 	}
-	actual, err := IndexRangesToKVRanges(new(stmtctx.StatementContext), 0, 0, ranges)
+	fb := newTestFb()
+	actual, err := IndexRangesToKVRanges(new(stmtctx.StatementContext), 0, 0, ranges, fb)
 	require.NoError(t, err)
 	expect := []kv.KeyRange{
 		{
@@ -720,4 +692,19 @@ func getExpectedRanges(tid int64, hrs []*handleRange) []kv.KeyRange {
 		krs = append(krs, kv.KeyRange{StartKey: startKey, EndKey: endKey})
 	}
 	return krs
+}
+
+func newTestFb() *statistics.QueryFeedback {
+	hist := statistics.NewHistogram(1, 30, 30, 0, types.NewFieldType(mysql.TypeLonglong), chunk.InitialCapacity, 0)
+	for i := 0; i < 10; i++ {
+		hist.Bounds.AppendInt64(0, int64(i))
+		hist.Bounds.AppendInt64(0, int64(i+2))
+		hist.Buckets = append(hist.Buckets, statistics.Bucket{Repeat: 10, Count: int64(i + 30)})
+	}
+	fb := statistics.NewQueryFeedback(0, hist, 0, false)
+	lower, upper := types.NewIntDatum(2), types.NewIntDatum(3)
+	fb.Feedback = []statistics.Feedback{
+		{Lower: &lower, Upper: &upper, Count: 1, Repeat: 1},
+	}
+	return fb
 }

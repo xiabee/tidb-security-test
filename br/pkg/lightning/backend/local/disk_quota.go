@@ -15,11 +15,9 @@
 package local
 
 import (
-	"cmp"
-	"slices"
-
 	"github.com/google/uuid"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
+	"golang.org/x/exp/slices"
 )
 
 // DiskUsage is an interface to obtain the size occupied locally of all engines
@@ -40,14 +38,11 @@ func CheckDiskQuota(mgr DiskUsage, quota int64) (
 	totalMemSize int64,
 ) {
 	sizes := mgr.EngineFileSizes()
-	slices.SortFunc(sizes, func(i, j backend.EngineFileSize) int {
+	slices.SortFunc(sizes, func(i, j backend.EngineFileSize) bool {
 		if i.IsImporting != j.IsImporting {
-			if i.IsImporting {
-				return -1
-			}
-			return 1
+			return i.IsImporting
 		}
-		return cmp.Compare(i.DiskSize+i.MemSize, j.DiskSize+j.MemSize)
+		return i.DiskSize+i.MemSize < j.DiskSize+j.MemSize
 	})
 	for _, size := range sizes {
 		totalDiskSize += size.DiskSize

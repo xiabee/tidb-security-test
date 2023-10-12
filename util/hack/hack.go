@@ -15,6 +15,7 @@
 package hack
 
 import (
+	"reflect"
 	"unsafe"
 )
 
@@ -24,17 +25,26 @@ type MutableString string
 // String converts slice to MutableString without copy.
 // The MutableString can be converts to string without copy.
 // Use it at your own risk.
-func String(b []byte) MutableString {
+func String(b []byte) (s MutableString) {
 	if len(b) == 0 {
 		return ""
 	}
-	return MutableString(unsafe.String(unsafe.SliceData(b), len(b)))
+	pbytes := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	pstring := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	pstring.Data = pbytes.Data
+	pstring.Len = pbytes.Len
+	return s
 }
 
 // Slice converts string to slice without copy.
 // Use at your own risk.
-func Slice(s string) []byte {
-	return unsafe.Slice(unsafe.StringData(s), len(s))
+func Slice(s string) (b []byte) {
+	pbytes := (*reflect.SliceHeader)(unsafe.Pointer(&b))
+	pstring := (*reflect.StringHeader)(unsafe.Pointer(&s))
+	pbytes.Data = pstring.Data
+	pbytes.Len = pstring.Len
+	pbytes.Cap = pstring.Len
+	return b
 }
 
 // LoadFactor is the maximum average load of a bucket that triggers growth is 6.5 in Golang Map.

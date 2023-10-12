@@ -108,7 +108,7 @@ func (e *AnalyzeColumnsExec) open(ranges []*ranger.Range) error {
 
 func (e *AnalyzeColumnsExec) buildResp(ranges []*ranger.Range) (distsql.SelectResult, error) {
 	var builder distsql.RequestBuilder
-	reqBuilder := builder.SetHandleRangesForTables(e.ctx.GetSessionVars().StmtCtx, []int64{e.TableID.GetStatisticsID()}, e.handleCols != nil && !e.handleCols.IsInt(), ranges)
+	reqBuilder := builder.SetHandleRangesForTables(e.ctx.GetSessionVars().StmtCtx, []int64{e.TableID.GetStatisticsID()}, e.handleCols != nil && !e.handleCols.IsInt(), ranges, nil)
 	builder.SetResourceGroupTagger(e.ctx.GetSessionVars().StmtCtx.GetResourceGroupTagger())
 	startTS := uint64(math.MaxUint64)
 	isoLevel := kv.RC
@@ -125,7 +125,6 @@ func (e *AnalyzeColumnsExec) buildResp(ranges []*ranger.Range) (distsql.SelectRe
 		SetConcurrency(e.concurrency).
 		SetMemTracker(e.memTracker).
 		SetResourceGroupName(e.ctx.GetSessionVars().ResourceGroupName).
-		SetExplicitRequestSourceType(e.ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 	if err != nil {
 		return nil, err
@@ -177,7 +176,7 @@ func (e *AnalyzeColumnsExec) buildStats(ranges []*ranger.Range, needExtStats boo
 	for {
 		failpoint.Inject("mockKillRunningV1AnalyzeJob", func() {
 			dom := domain.GetDomain(e.ctx)
-			dom.SysProcTracker().KillSysProcess(dom.GetAutoAnalyzeProcID())
+			dom.SysProcTracker().KillSysProcess(util.GetAutoAnalyzeProcID(dom.ServerID))
 		})
 		if atomic.LoadUint32(&e.ctx.GetSessionVars().Killed) == 1 {
 			return nil, nil, nil, nil, nil, errors.Trace(exeerrors.ErrQueryInterrupted)
@@ -325,7 +324,7 @@ func (e *AnalyzeColumnsExecV1) analyzeColumnsPushDownV1() *statistics.AnalyzeRes
 	}
 
 	if hasPkHist(e.handleCols) {
-		pkResult := &statistics.AnalyzeResult{
+		PKresult := &statistics.AnalyzeResult{
 			Hist:  hists[:1],
 			Cms:   cms[:1],
 			TopNs: topNs[:1],
@@ -339,11 +338,11 @@ func (e *AnalyzeColumnsExecV1) analyzeColumnsPushDownV1() *statistics.AnalyzeRes
 		}
 		return &statistics.AnalyzeResults{
 			TableID:  e.tableID,
-			Ars:      []*statistics.AnalyzeResult{pkResult, restResult},
+			Ars:      []*statistics.AnalyzeResult{PKresult, restResult},
 			ExtStats: extStats,
 			Job:      e.job,
 			StatsVer: e.StatsVersion,
-			Count:    int64(pkResult.Hist[0].TotalRowCount()),
+			Count:    int64(PKresult.Hist[0].TotalRowCount()),
 			Snapshot: e.snapshot,
 		}
 	}

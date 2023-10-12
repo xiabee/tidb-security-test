@@ -20,7 +20,6 @@ import (
 
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/session/txninfo"
@@ -30,14 +29,13 @@ import (
 
 // MockSessionManager is a mocked session manager which is used for test.
 type MockSessionManager struct {
-	PS       []*util.ProcessInfo
-	PSMu     sync.RWMutex
-	SerID    uint64
-	TxnInfo  []*txninfo.TxnInfo
-	Dom      *domain.Domain
-	Conn     map[uint64]session.Session
-	mu       sync.Mutex
-	ConAttrs map[uint64]map[string]string
+	PS      []*util.ProcessInfo
+	PSMu    sync.RWMutex
+	SerID   uint64
+	TxnInfo []*txninfo.TxnInfo
+	Dom     *domain.Domain
+	Conn    map[uint64]session.Session
+	mu      sync.Mutex
 
 	internalSessions map[interface{}]struct{}
 }
@@ -105,13 +103,8 @@ func (msm *MockSessionManager) GetProcessInfo(id uint64) (*util.ProcessInfo, boo
 	return &util.ProcessInfo{}, false
 }
 
-// GetConAttrs returns the connection attributes of all connections
-func (msm *MockSessionManager) GetConAttrs(user *auth.UserIdentity) map[uint64]map[string]string {
-	return msm.ConAttrs
-}
-
 // Kill implements the SessionManager.Kill interface.
-func (*MockSessionManager) Kill(uint64, bool, bool) {
+func (*MockSessionManager) Kill(uint64, bool) {
 }
 
 // KillAllConnections implements the SessionManager.KillAllConnections interface.
@@ -125,11 +118,6 @@ func (*MockSessionManager) UpdateTLSConfig(*tls.Config) {
 // ServerID get server id.
 func (msm *MockSessionManager) ServerID() uint64 {
 	return msm.SerID
-}
-
-// GetAutoAnalyzeProcID implement SessionManager interface.
-func (msm *MockSessionManager) GetAutoAnalyzeProcID() uint64 {
-	return uint64(1)
 }
 
 // StoreInternalSession is to store internal session.
@@ -171,12 +159,12 @@ func (msm *MockSessionManager) KillNonFlashbackClusterConn() {
 		processInfo := se.ShowProcess()
 		ddl, ok := processInfo.StmtCtx.GetPlan().(*core.DDL)
 		if !ok {
-			msm.Kill(se.GetSessionVars().ConnectionID, false, false)
+			msm.Kill(se.GetSessionVars().ConnectionID, false)
 			continue
 		}
 		_, ok = ddl.Statement.(*ast.FlashBackToTimestampStmt)
 		if !ok {
-			msm.Kill(se.GetSessionVars().ConnectionID, false, false)
+			msm.Kill(se.GetSessionVars().ConnectionID, false)
 			continue
 		}
 	}

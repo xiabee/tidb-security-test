@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/ttl/session"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikvrpc"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 )
@@ -553,31 +552,28 @@ func (m *taskManager) meetTTLRunningTask(count int, taskStatus cache.TaskStatus)
 		// always return true for already running task because it is already included in count
 		return true
 	}
-	return getMaxRunningTasksLimit(m.store) > count
-}
 
-func getMaxRunningTasksLimit(store kv.Storage) int {
 	ttlRunningTask := variable.TTLRunningTasks.Load()
+	// `-1` is the auto value, means we should calculate the limit according to the count of TiKV
 	if ttlRunningTask != -1 {
-		return int(ttlRunningTask)
+		return int(ttlRunningTask) > count
 	}
 
-	tikvStore, ok := store.(tikv.Storage)
+	store, ok := m.store.(tikv.Storage)
 	if !ok {
-		return variable.MaxConfigurableConcurrency
+		return variable.MaxConfigurableConcurrency > count
 	}
 
-	regionCache := tikvStore.GetRegionCache()
+	regionCache := store.GetRegionCache()
 	if regionCache == nil {
-		return variable.MaxConfigurableConcurrency
+		return true
 	}
-
-	limit := len(regionCache.GetStoresByType(tikvrpc.TiKV))
+	limit := len(regionCache.GetAllStores())
 	if limit > variable.MaxConfigurableConcurrency {
 		limit = variable.MaxConfigurableConcurrency
 	}
 
-	return limit
+	return limit > count
 }
 
 type runningScanTask struct {

@@ -779,7 +779,6 @@ func (c *jsonMemberOfFunctionClass) getFunction(ctx sessionctx.Context, args []E
 	}
 	DisableParseJSONFlag4Expr(args[0])
 	sig := &builtinJSONMemberOfSig{bf}
-	sig.setPbCode(tipb.ScalarFuncSig_JsonMemberOfSig)
 	return sig, nil
 }
 

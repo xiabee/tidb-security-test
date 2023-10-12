@@ -23,7 +23,7 @@ import (
 	"github.com/pingcap/tidb/util/chunk"
 )
 
-func (*builtinTimeIsNullSig) vectorized() bool {
+func (b *builtinTimeIsNullSig) vectorized() bool {
 	return true
 }
 

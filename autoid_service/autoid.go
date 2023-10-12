@@ -25,14 +25,12 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/autoid"
 	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/keyspace"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	autoid1 "github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/owner"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/util/etcd"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -290,9 +288,6 @@ func New(selfAddr string, etcdAddr []string, store kv.Storage, tlsConfig *tls.Co
 		},
 		TLS: tlsConfig,
 	})
-	if store.GetCodec().GetKeyspace() != nil {
-		etcd.SetEtcdCliByNamespace(cli, keyspace.MakeKeyspaceEtcdNamespaceSlash(store.GetCodec()))
-	}
 	if err != nil {
 		panic(err)
 	}
@@ -323,11 +318,11 @@ type mockClient struct {
 	Service
 }
 
-func (m *mockClient) AllocAutoID(ctx context.Context, in *autoid.AutoIDRequest, _ ...grpc.CallOption) (*autoid.AutoIDResponse, error) {
+func (m *mockClient) AllocAutoID(ctx context.Context, in *autoid.AutoIDRequest, opts ...grpc.CallOption) (*autoid.AutoIDResponse, error) {
 	return m.Service.AllocAutoID(ctx, in)
 }
 
-func (m *mockClient) Rebase(ctx context.Context, in *autoid.RebaseRequest, _ ...grpc.CallOption) (*autoid.RebaseResponse, error) {
+func (m *mockClient) Rebase(ctx context.Context, in *autoid.RebaseRequest, opts ...grpc.CallOption) (*autoid.RebaseResponse, error) {
 	return m.Service.Rebase(ctx, in)
 }
 
@@ -357,7 +352,7 @@ func (s *Service) Close() {
 			if v.base > 0 {
 				err := v.forceRebase(context.Background(), s.store, k.dbID, k.tblID, v.base, v.isUnsigned)
 				if err != nil {
-					logutil.BgLogger().Warn("save cached ID fail when service exit", zap.String("category", "autoid service"),
+					logutil.BgLogger().Warn("[autoid service] save cached ID fail when service exit",
 						zap.Int64("db id", k.dbID),
 						zap.Int64("table id", k.tblID),
 						zap.Int64("value", v.base),
@@ -404,11 +399,6 @@ const batch = 4000
 
 // AllocAutoID implements gRPC AutoIDAlloc interface.
 func (s *Service) AllocAutoID(ctx context.Context, req *autoid.AutoIDRequest) (*autoid.AutoIDResponse, error) {
-	serviceKeyspaceID := uint32(s.store.GetCodec().GetKeyspaceID())
-	if req.KeyspaceID != serviceKeyspaceID {
-		logutil.BgLogger().Info("Current service is not request keyspace leader.", zap.Uint32("req-keyspace-id", req.KeyspaceID), zap.Uint32("service-keyspace-id", serviceKeyspaceID))
-		return nil, errors.Trace(errors.New("not leader"))
-	}
 	var res *autoid.AutoIDResponse
 	for {
 		var err error
@@ -442,7 +432,7 @@ func (s *Service) getAlloc(dbID, tblID int64, isUnsigned bool) *autoIDValue {
 
 func (s *Service) allocAutoID(ctx context.Context, req *autoid.AutoIDRequest) (*autoid.AutoIDResponse, error) {
 	if s.leaderShip != nil && !s.leaderShip.IsOwner() {
-		logutil.BgLogger().Info("Alloc AutoID fail, not leader", zap.String("category", "autoid service"))
+		logutil.BgLogger().Info("[autoid service] Alloc AutoID fail, not leader")
 		return nil, errors.New("not leader")
 	}
 
@@ -465,7 +455,7 @@ func (s *Service) allocAutoID(ctx context.Context, req *autoid.AutoIDRequest) (*
 		var currentEnd int64
 		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 		err := kv.RunInNewTxn(ctx, s.store, true, func(ctx context.Context, txn kv.Transaction) error {
-			idAcc := meta.NewMeta(txn).GetAutoIDAccessors(req.DbID, req.TblID).IncrementID(model.TableInfoVersion5)
+			idAcc := meta.NewMeta(txn).GetAutoIDAccessors(req.DbID, req.TblID).RowID()
 			var err1 error
 			currentEnd, err1 = idAcc.Get()
 			if err1 != nil {
@@ -541,7 +531,7 @@ func (alloc *autoIDValue) forceRebase(ctx context.Context, store kv.Storage, dbI
 // req.N = 0 is handled specially, it is used to return the current auto ID value.
 func (s *Service) Rebase(ctx context.Context, req *autoid.RebaseRequest) (*autoid.RebaseResponse, error) {
 	if s.leaderShip != nil && !s.leaderShip.IsOwner() {
-		logutil.BgLogger().Info("Rebase() fail, not leader", zap.String("category", "autoid service"))
+		logutil.BgLogger().Info("[autoid service] Rebase() fail, not leader")
 		return nil, errors.New("not leader")
 	}
 

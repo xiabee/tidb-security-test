@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -40,6 +39,7 @@ import (
 	pd "github.com/tikv/pd/client"
 	gatomic "go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -887,10 +887,11 @@ func (d *Dumper) concurrentDumpTiDBTables(tctx *tcontext.Context, conn *BaseConn
 			partitions, err = GetPartitionNames(tctx, conn, db, tbl)
 		}
 		if err == nil {
-			if len(partitions) != 0 {
+			if len(partitions) == 0 {
+				handleColNames, handleVals, err = d.selectTiDBTableRegionFunc(tctx, conn, meta)
+			} else {
 				return d.concurrentDumpTiDBPartitionTables(tctx, conn, meta, taskChan, partitions)
 			}
-			handleColNames, handleVals, err = d.selectTiDBTableRegionFunc(tctx, conn, meta)
 		}
 	}
 	if err != nil {
@@ -1145,7 +1146,7 @@ func getListTableTypeByConf(conf *Config) listTableType {
 }
 
 func prepareTableListToDump(tctx *tcontext.Context, conf *Config, db *sql.Conn) error {
-	if conf.SpecifiedTables || conf.SQL != "" {
+	if conf.specifiedTables || conf.SQL != "" {
 		return nil
 	}
 	databases, err := prepareDumpingDatabases(tctx, conf, db)

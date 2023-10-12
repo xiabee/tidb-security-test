@@ -282,11 +282,12 @@ func onCreateView(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) 
 		if infoschema.ErrDatabaseNotExists.Equal(err) {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
-		} else if !infoschema.ErrTableExists.Equal(err) {
-			return ver, errors.Trace(err)
-		}
-		if !orReplace {
-			job.State = model.JobStateCancelled
+		} else if infoschema.ErrTableExists.Equal(err) {
+			if !orReplace {
+				job.State = model.JobStateCancelled
+				return ver, errors.Trace(err)
+			}
+		} else {
 			return ver, errors.Trace(err)
 		}
 	}
@@ -388,11 +389,6 @@ func onDropTableOrView(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ er
 		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
 		startKey := tablecodec.EncodeTablePrefix(job.TableID)
 		job.Args = append(job.Args, startKey, oldIDs, ruleIDs)
-		if tblInfo.IsSequence() {
-			asyncNotifyEvent(d, &util.Event{Tp: model.ActionDropSequence, TableInfo: tblInfo})
-		} else if !tblInfo.IsView() {
-			asyncNotifyEvent(d, &util.Event{Tp: model.ActionDropTable, TableInfo: tblInfo})
-		}
 	default:
 		return ver, errors.Trace(dbterror.ErrInvalidDDLState.GenWithStackByArgs("table", tblInfo.State))
 	}
@@ -687,7 +683,7 @@ func getTableInfo(t *meta.Meta, tableID, schemaID int64) (*model.TableInfo, erro
 // onTruncateTable delete old table meta, and creates a new table identical to old table except for table ID.
 // As all the old data is encoded with old table ID, it can not be accessed anymore.
 // A background job will be created to delete old data.
-func (w *worker) onTruncateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
+func onTruncateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	schemaID := job.SchemaID
 	tableID := job.TableID
 	var newTableID int64
@@ -818,12 +814,6 @@ func (w *worker) onTruncateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver i
 			failpoint.Return(ver, errors.New("mock update version error"))
 		}
 	})
-
-	var partitions []model.PartitionDefinition
-	if pi := tblInfo.GetPartitionInfo(); pi != nil {
-		partitions = tblInfo.GetPartitionInfo().Definitions
-	}
-	preSplitAndScatter(w.sess.Context, d.store, tblInfo, partitions)
 
 	ver, err = updateSchemaVersion(d, t, job)
 	if err != nil {

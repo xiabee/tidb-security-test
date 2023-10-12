@@ -317,7 +317,7 @@ func newHashReverseIter(t *TxStructure, key []byte, field []byte) (*ReverseHashI
 		iterStart = t.encodeHashDataKey(key, field).PrefixNext()
 	}
 
-	it, err := t.reader.IterReverse(iterStart, nil)
+	it, err := t.reader.IterReverse(iterStart)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -330,7 +330,7 @@ func newHashReverseIter(t *TxStructure, key []byte, field []byte) (*ReverseHashI
 
 func (t *TxStructure) iterReverseHash(key []byte, fn func(k []byte, v []byte) (bool, error)) error {
 	dataPrefix := t.hashDataKeyPrefix(key)
-	it, err := t.reader.IterReverse(dataPrefix.PrefixNext(), nil)
+	it, err := t.reader.IterReverse(dataPrefix.PrefixNext())
 	if err != nil {
 		return errors.Trace(err)
 	}

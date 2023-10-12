@@ -33,12 +33,10 @@ const (
 type IDPool interface {
 	fmt.Stringer
 	// Init initiates pool.
-	Init(size uint64)
+	Init(sizeInBits uint32)
 	// Len returns length of available id's in pool.
 	// Note that Len() would return -1 when this method is NOT supported.
 	Len() int
-	// Cap returns the capacity of pool.
-	Cap() int
 	// Put puts value to pool. "ok" is false when pool is full.
 	Put(val uint64) (ok bool)
 	// Get gets value from pool. "ok" is false when pool is empty.
@@ -53,7 +51,7 @@ var (
 // AutoIncPool simply do auto-increment to allocate ID. Wrapping will happen.
 type AutoIncPool struct {
 	lastID uint64
-	cap    uint64
+	idMask uint64
 	tryCnt int
 
 	mu      *sync.Mutex
@@ -61,13 +59,13 @@ type AutoIncPool struct {
 }
 
 // Init initiates AutoIncPool.
-func (p *AutoIncPool) Init(size uint64) {
-	p.InitExt(size, false, 1)
+func (p *AutoIncPool) Init(sizeInBits uint32) {
+	p.InitExt(sizeInBits, false, 1)
 }
 
 // InitExt initiates AutoIncPool with more parameters.
-func (p *AutoIncPool) InitExt(size uint64, checkExisted bool, tryCnt int) {
-	p.cap = size
+func (p *AutoIncPool) InitExt(sizeInBits uint32, checkExisted bool, tryCnt int) {
+	p.idMask = 1<<sizeInBits - 1
 	if checkExisted {
 		p.existed = make(map[uint64]struct{})
 		p.mu = &sync.Mutex{}
@@ -78,10 +76,7 @@ func (p *AutoIncPool) InitExt(size uint64, checkExisted bool, tryCnt int) {
 // Get id by auto-increment.
 func (p *AutoIncPool) Get() (id uint64, ok bool) {
 	for i := 0; i < p.tryCnt; i++ {
-		id := atomic.AddUint64(&p.lastID, 1)
-		if p.cap < math.MaxUint64 {
-			id = id % p.cap
-		}
+		id := atomic.AddUint64(&p.lastID, 1) & p.idMask
 		if p.existed != nil {
 			p.mu.Lock()
 			_, occupied := p.existed[id]
@@ -118,11 +113,6 @@ func (p *AutoIncPool) Len() int {
 	return -1
 }
 
-// Cap implements IDPool interface.
-func (p *AutoIncPool) Cap() int {
-	return int(p.cap)
-}
-
 // String implements IDPool interface.
 func (p AutoIncPool) String() string {
 	return fmt.Sprintf("lastID: %v", p.lastID)
@@ -154,14 +144,14 @@ type lockFreePoolItem struct {
 }
 
 // Init implements IDPool interface.
-func (p *LockFreeCircularPool) Init(size uint64) {
-	p.InitExt(uint32(size), 0)
+func (p *LockFreeCircularPool) Init(sizeInBits uint32) {
+	p.InitExt(sizeInBits, 0)
 }
 
 // InitExt initializes LockFreeCircularPool with more parameters.
 // fillCount: fills pool with [1, min(fillCount, 1<<(sizeInBits-1)]. Pass "math.MaxUint32" to fulfill the pool.
-func (p *LockFreeCircularPool) InitExt(size uint32, fillCount uint32) {
-	p.cap = size
+func (p *LockFreeCircularPool) InitExt(sizeInBits uint32, fillCount uint32) {
+	p.cap = 1 << sizeInBits
 	p.slots = make([]lockFreePoolItem, p.cap)
 
 	fillCount = mathutil.MinUint32(p.cap-1, fillCount)
@@ -195,11 +185,6 @@ func (p *LockFreeCircularPool) InitForTest(head uint32, fillCount uint32) {
 // Len implements IDPool interface.
 func (p *LockFreeCircularPool) Len() int {
 	return int(p.tail.Load() - p.head.Load())
-}
-
-// Cap implements IDPool interface.
-func (p *LockFreeCircularPool) Cap() int {
-	return int(p.cap - 1)
 }
 
 // String implements IDPool interface.

@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/hack"
@@ -51,9 +50,6 @@ func TestLRUPCPut(t *testing.T) {
 	// test initialize
 	mockCtx := MockContext()
 	mockCtx.GetSessionVars().EnablePlanCacheForParamLimit = true
-	defer func() {
-		domain.GetDomain(mockCtx).StatsHandle().Close()
-	}()
 	lruA := NewLRUPlanCache(0, 0, 0, mockCtx, false)
 	require.Equal(t, lruA.capacity, uint(100))
 
@@ -141,9 +137,6 @@ func TestLRUPCPut(t *testing.T) {
 func TestLRUPCGet(t *testing.T) {
 	mockCtx := MockContext()
 	mockCtx.GetSessionVars().EnablePlanCacheForParamLimit = true
-	defer func() {
-		domain.GetDomain(mockCtx).StatsHandle().Close()
-	}()
 	lru := NewLRUPlanCache(3, 0, 0, mockCtx, false)
 
 	keys := make([]*planCacheKey, 5)
@@ -209,9 +202,6 @@ func TestLRUPCGet(t *testing.T) {
 func TestLRUPCDelete(t *testing.T) {
 	mockCtx := MockContext()
 	mockCtx.GetSessionVars().EnablePlanCacheForParamLimit = true
-	defer func() {
-		domain.GetDomain(mockCtx).StatsHandle().Close()
-	}()
 	lru := NewLRUPlanCache(3, 0, 0, mockCtx, false)
 
 	keys := make([]*planCacheKey, 3)
@@ -260,11 +250,8 @@ func TestLRUPCDelete(t *testing.T) {
 }
 
 func TestLRUPCDeleteAll(t *testing.T) {
-	ctx := MockContext()
-	lru := NewLRUPlanCache(3, 0, 0, ctx, false)
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
+	lru := NewLRUPlanCache(3, 0, 0, MockContext(), false)
+
 	keys := make([]*planCacheKey, 3)
 	vals := make([]*PlanCacheValue, 3)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
@@ -300,11 +287,7 @@ func TestLRUPCDeleteAll(t *testing.T) {
 
 func TestLRUPCSetCapacity(t *testing.T) {
 	maxMemDroppedKv := make(map[kvcache.Key]kvcache.Value)
-	ctx := MockContext()
-	lru := NewLRUPlanCache(5, 0, 0, ctx, false)
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
+	lru := NewLRUPlanCache(5, 0, 0, MockContext(), false)
 	lru.onEvict = func(key kvcache.Key, value kvcache.Value) {
 		maxMemDroppedKv[key] = value
 	}
@@ -372,11 +355,8 @@ func TestLRUPCSetCapacity(t *testing.T) {
 }
 
 func TestIssue37914(t *testing.T) {
-	ctx := MockContext()
-	lru := NewLRUPlanCache(3, 0.1, 1, ctx, false)
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
+	lru := NewLRUPlanCache(3, 0.1, 1, MockContext(), false)
+
 	pTypes := []*types.FieldType{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)}
 	key := &planCacheKey{database: strconv.FormatInt(int64(1), 10)}
 	opts := &utilpc.PlanCacheMatchOpts{
@@ -391,11 +371,7 @@ func TestIssue37914(t *testing.T) {
 }
 
 func TestIssue38244(t *testing.T) {
-	ctx := MockContext()
-	lru := NewLRUPlanCache(3, 0, 0, ctx, false)
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
+	lru := NewLRUPlanCache(3, 0, 0, MockContext(), false)
 	require.Equal(t, uint(3), lru.capacity)
 
 	keys := make([]*planCacheKey, 5)
@@ -425,9 +401,6 @@ func TestIssue38244(t *testing.T) {
 func TestLRUPlanCacheMemoryUsage(t *testing.T) {
 	pTypes := []*types.FieldType{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)}
 	ctx := MockContext()
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
 	ctx.GetSessionVars().EnablePreparedPlanCacheMemoryMonitor = true
 	lru := NewLRUPlanCache(3, 0, 0, ctx, false)
 	evict := make(map[kvcache.Key]kvcache.Value)

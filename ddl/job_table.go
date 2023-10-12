@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/ddl/ingest"
 	sess "github.com/pingcap/tidb/ddl/internal/session"
 	"github.com/pingcap/tidb/ddl/syncer"
-	"github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/metrics"
@@ -45,6 +43,7 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -188,13 +187,13 @@ func (d *ddl) processJobDuringUpgrade(sess *sess.Session, job *model.Job) (isRun
 
 		if err != nil {
 			isCannotPauseDDLJobErr := dbterror.ErrCannotPauseDDLJob.Equal(err)
-			logutil.BgLogger().Warn("pause the job failed", zap.String("category", "ddl-upgrading"), zap.Stringer("job", job),
+			logutil.BgLogger().Warn("[ddl-upgrading] pause the job failed", zap.Stringer("job", job),
 				zap.Bool("isRunnable", isCannotPauseDDLJobErr), zap.Error(err))
 			if isCannotPauseDDLJobErr {
 				return true, nil
 			}
 		} else {
-			logutil.BgLogger().Warn("pause the job successfully", zap.String("category", "ddl-upgrading"), zap.Stringer("job", job))
+			logutil.BgLogger().Warn("[ddl-upgrading] pause the job successfully", zap.Stringer("job", job))
 		}
 
 		return false, nil
@@ -203,16 +202,15 @@ func (d *ddl) processJobDuringUpgrade(sess *sess.Session, job *model.Job) (isRun
 	if job.IsPausedBySystem() {
 		var errs []error
 		errs, err = ResumeJobsBySystem(sess.Session(), []int64{job.ID})
-		if len(errs) > 0 && errs[0] != nil {
-			logutil.BgLogger().Warn("normal cluster state, resume the job failed", zap.String("category", "ddl-upgrading"), zap.Stringer("job", job), zap.Error(errs[0]))
+		if len(errs) > 0 {
+			logutil.BgLogger().Warn("[ddl-upgrading] normal cluster state, resume the job failed", zap.Stringer("job", job), zap.Error(errs[0]))
 			return false, errs[0]
 		}
 		if err != nil {
-			logutil.BgLogger().Warn("normal cluster state, resume the job failed", zap.String("category", "ddl-upgrading"), zap.Stringer("job", job), zap.Error(err))
+			logutil.BgLogger().Warn("[ddl-upgrading] normal cluster state, resume the job failed", zap.Stringer("job", job), zap.Error(err))
 			return false, err
 		}
-		logutil.BgLogger().Warn("normal cluster state, resume the job successfully", zap.String("category", "ddl-upgrading"), zap.Stringer("job", job))
-		return false, errors.Errorf("system paused job:%d need to be resumed", job.ID)
+		logutil.BgLogger().Warn("[ddl-upgrading] normal cluster state, resume the job successfully", zap.Stringer("job", job))
 	}
 
 	if job.IsPaused() {
@@ -237,7 +235,7 @@ func (d *ddl) getGeneralJob(sess *sess.Session) (*model.Job, error) {
 	})
 }
 
-func (*ddl) NoConflictJob(se *sess.Session, sql string) (bool, error) {
+func (d *ddl) NoConflictJob(se *sess.Session, sql string) (bool, error) {
 	rows, err := se.Execute(context.Background(), sql, "check conflict jobs")
 	return len(rows) == 0, err
 }
@@ -265,10 +263,10 @@ func (d *ddl) startDispatchLoop() {
 	if d.etcdCli != nil {
 		notifyDDLJobByEtcdCh = d.etcdCli.Watch(d.ctx, addingDDLJobConcurrent)
 	}
-	if err := d.checkAndUpdateClusterState(true); err != nil {
+	ticker := time.NewTicker(dispatchLoopWaitingDuration)
+	if err := d.doCheckClusterState(false); err != nil {
 		logutil.BgLogger().Fatal("dispatch loop get cluster state failed, it should not happen, please try restart TiDB", zap.Error(err))
 	}
-	ticker := time.NewTicker(dispatchLoopWaitingDuration)
 	defer ticker.Stop()
 	isOnce := false
 	for {
@@ -277,7 +275,7 @@ func (d *ddl) startDispatchLoop() {
 		}
 		if !d.isOwner() {
 			isOnce = true
-			d.onceMap = make(map[int64]struct{}, jobOnceCapacity)
+			d.once.Store(true)
 			time.Sleep(dispatchLoopWaitingDuration)
 			continue
 		}
@@ -286,7 +284,7 @@ func (d *ddl) startDispatchLoop() {
 		case <-ticker.C:
 		case _, ok := <-notifyDDLJobByEtcdCh:
 			if !ok {
-				logutil.BgLogger().Warn("start worker watch channel closed", zap.String("category", "ddl"), zap.String("watch key", addingDDLJobConcurrent))
+				logutil.BgLogger().Warn("[ddl] start worker watch channel closed", zap.String("watch key", addingDDLJobConcurrent))
 				notifyDDLJobByEtcdCh = d.etcdCli.Watch(d.ctx, addingDDLJobConcurrent)
 				time.Sleep(time.Second)
 				continue
@@ -294,7 +292,7 @@ func (d *ddl) startDispatchLoop() {
 		case <-d.ctx.Done():
 			return
 		}
-		if err := d.checkAndUpdateClusterState(isOnce); err != nil {
+		if err := d.needCheckClusterState(isOnce); err != nil {
 			continue
 		}
 		isOnce = false
@@ -303,25 +301,31 @@ func (d *ddl) startDispatchLoop() {
 	}
 }
 
-func (d *ddl) checkAndUpdateClusterState(needUpdate bool) error {
+func (d *ddl) needCheckClusterState(mustCheck bool) error {
 	select {
 	case _, ok := <-d.stateSyncer.WatchChan():
-		if !ok {
-			d.stateSyncer.Rewatch(d.ctx)
-		}
+		return d.doCheckClusterState(!ok)
 	default:
-		if !needUpdate {
-			return nil
+		if mustCheck {
+			return d.doCheckClusterState(false)
 		}
+	}
+	return nil
+}
+
+func (d *ddl) doCheckClusterState(needRewatch bool) error {
+	if needRewatch {
+		d.stateSyncer.Rewatch(d.ctx)
+		return nil
 	}
 
 	oldState := d.stateSyncer.IsUpgradingState()
 	stateInfo, err := d.stateSyncer.GetGlobalState(d.ctx)
 	if err != nil {
-		logutil.BgLogger().Warn("get global state failed", zap.String("category", "ddl"), zap.Error(err))
+		logutil.BgLogger().Warn("[ddl] get global state failed", zap.Error(err))
 		return errors.Trace(err)
 	}
-	logutil.BgLogger().Info("get global state and global state change", zap.String("category", "ddl"),
+	logutil.BgLogger().Info("[ddl] get global state and global state change",
 		zap.Bool("oldState", oldState), zap.Bool("currState", d.stateSyncer.IsUpgradingState()))
 	if !d.isOwner() {
 		return nil
@@ -333,10 +337,10 @@ func (d *ddl) checkAndUpdateClusterState(needUpdate bool) error {
 	}
 	err = d.ownerManager.SetOwnerOpValue(d.ctx, ownerOp)
 	if err != nil {
-		logutil.BgLogger().Warn("the owner sets global state to owner operator value failed", zap.String("category", "ddl"), zap.Error(err))
+		logutil.BgLogger().Warn("[ddl] the owner sets global state to owner operator value failed", zap.Error(err))
 		return errors.Trace(err)
 	}
-	logutil.BgLogger().Info("the owner sets owner operator value", zap.String("category", "ddl"), zap.Stringer("ownerOp", ownerOp))
+	logutil.BgLogger().Info("[ddl] the owner sets owner operator value", zap.Stringer("ownerOp", ownerOp))
 	return nil
 }
 
@@ -354,7 +358,7 @@ func (d *ddl) loadDDLJobAndRun(se *sess.Session, pool *workerPool, getJob func(*
 	job, err := getJob(se)
 	if job == nil || err != nil {
 		if err != nil {
-			logutil.BgLogger().Warn("get job met error", zap.String("category", "ddl"), zap.Error(err))
+			logutil.BgLogger().Warn("[ddl] get job met error", zap.Error(err))
 		}
 		pool.put(wk)
 		return
@@ -378,11 +382,11 @@ func (d *ddl) delivery2worker(wk *worker, pool *workerPool, job *model.Job) {
 			metrics.DDLRunningJobCount.WithLabelValues(pool.tp().String()).Dec()
 		}()
 		// check if this ddl job is synced to all servers.
-		if !job.NotStarted() && (!d.isSynced(job) || !d.maybeAlreadyRunOnce(job.ID)) {
+		if !d.isSynced(job) || d.once.Load() {
 			if variable.EnableMDL.Load() {
 				exist, version, err := checkMDLInfo(job.ID, d.sessPool)
 				if err != nil {
-					logutil.BgLogger().Warn("check MDL info failed", zap.String("category", "ddl"), zap.Error(err), zap.String("job", job.String()))
+					logutil.BgLogger().Warn("[ddl] check MDL info failed", zap.Error(err), zap.String("job", job.String()))
 					// Release the worker resource.
 					pool.put(wk)
 					return
@@ -393,7 +397,7 @@ func (d *ddl) delivery2worker(wk *worker, pool *workerPool, job *model.Job) {
 					if err != nil {
 						return
 					}
-					d.setAlreadyRunOnce(job.ID)
+					d.once.Store(false)
 					cleanMDLInfo(d.sessPool, job.ID, d.etcdCli)
 					// Don't have a worker now.
 					return
@@ -401,20 +405,20 @@ func (d *ddl) delivery2worker(wk *worker, pool *workerPool, job *model.Job) {
 			} else {
 				err := waitSchemaSynced(d.ddlCtx, job, 2*d.lease)
 				if err != nil {
-					logutil.BgLogger().Warn("wait ddl job sync failed", zap.String("category", "ddl"), zap.Error(err), zap.String("job", job.String()))
+					logutil.BgLogger().Warn("[ddl] wait ddl job sync failed", zap.Error(err), zap.String("job", job.String()))
 					time.Sleep(time.Second)
 					// Release the worker resource.
 					pool.put(wk)
 					return
 				}
-				d.setAlreadyRunOnce(job.ID)
+				d.once.Store(false)
 			}
 		}
 
 		schemaVer, err := wk.HandleDDLJobTable(d.ddlCtx, job)
 		pool.put(wk)
 		if err != nil {
-			logutil.BgLogger().Info("handle ddl job failed", zap.String("category", "ddl"), zap.Error(err), zap.String("job", job.String()))
+			logutil.BgLogger().Info("[ddl] handle ddl job failed", zap.Error(err), zap.String("job", job.String()))
 		} else {
 			failpoint.Inject("mockDownBeforeUpdateGlobalVersion", func(val failpoint.Value) {
 				if val.(bool) {
@@ -426,14 +430,9 @@ func (d *ddl) delivery2worker(wk *worker, pool *workerPool, job *model.Job) {
 			})
 
 			// Here means the job enters another state (delete only, write only, public, etc...) or is cancelled.
-			// If the job is done or still running or rolling back, we will wait 2 * lease time or util MDL synced to guarantee other servers to update
+			// If the job is done or still running or rolling back, we will wait 2 * lease time to guarantee other servers to update
 			// the newest schema.
-			err := waitSchemaChanged(d.ddlCtx, d.lease*2, schemaVer, job)
-			if err != nil {
-				// May be caused by server closing, shouldn't clean the MDL info.
-				logutil.BgLogger().Info("wait latest schema version error", zap.String("category", "ddl"), zap.Error(err))
-				return
-			}
+			waitSchemaChanged(d.ddlCtx, d.lease*2, schemaVer, job)
 			cleanMDLInfo(d.sessPool, job.ID, d.etcdCli)
 			d.synced(job)
 
@@ -503,12 +502,12 @@ func insertDDLJobs2Table(se *sess.Session, updateRawArgs bool, jobs ...*model.Jo
 		if i != 0 {
 			sql.WriteString(",")
 		}
-		fmt.Fprintf(&sql, "(%d, %t, %s, %s, %s, %d, %t)", job.ID, job.MayNeedReorg(), strconv.Quote(job2SchemaIDs(job)), strconv.Quote(job2TableIDs(job)), util.WrapKey2String(b), job.Type, !job.NotStarted())
+		sql.WriteString(fmt.Sprintf("(%d, %t, %s, %s, %s, %d, %t)", job.ID, job.MayNeedReorg(), strconv.Quote(job2SchemaIDs(job)), strconv.Quote(job2TableIDs(job)), wrapKey2String(b), job.Type, !job.NotStarted()))
 	}
 	se.SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
 	_, err := se.Execute(ctx, sql.String(), "insert_job")
-	logutil.BgLogger().Debug("add job to mysql.tidb_ddl_job table", zap.String("category", "ddl"), zap.String("sql", sql.String()))
+	logutil.BgLogger().Debug("[ddl] add job to mysql.tidb_ddl_job table", zap.String("sql", sql.String()))
 	return errors.Trace(err)
 }
 
@@ -554,8 +553,9 @@ func job2SchemaNames(job *model.Job) []string {
 		var oldSchemaID int64
 		var oldSchemaName model.CIStr
 		var tableName model.CIStr
-		// TODO: Handle this error
-		_ = job.DecodeArgs(&oldSchemaID, &tableName, &oldSchemaName)
+		if err := job.DecodeArgs(&oldSchemaID, &tableName, &oldSchemaName); err != nil {
+			// TODO: Handle this error
+		}
 		names := make([]string, 0, 2)
 		names = append(names, strings.ToLower(job.SchemaName))
 		names = append(names, oldSchemaName.O)
@@ -577,7 +577,7 @@ func updateDDLJob2Table(se *sess.Session, job *model.Job, updateRawArgs bool) er
 	if err != nil {
 		return err
 	}
-	sql := fmt.Sprintf(updateDDLJobSQL, util.WrapKey2String(b), job.ID)
+	sql := fmt.Sprintf(updateDDLJobSQL, wrapKey2String(b), job.ID)
 	_, err = se.Execute(context.Background(), sql, "update_job")
 	return errors.Trace(err)
 }
@@ -625,7 +625,7 @@ func getCheckpointReorgHandle(se *sess.Session, job *model.Job) (startKey, endKe
 			return nil, nil, 0, errors.Trace(err)
 		}
 		if cp := reorgMeta.Checkpoint; cp != nil {
-			logutil.BgLogger().Info("resume physical table ID from checkpoint", zap.String("category", "ddl-ingest"),
+			logutil.BgLogger().Info("[ddl-ingest] resume physical table ID from checkpoint",
 				zap.Int64("jobID", job.ID),
 				zap.String("start", hex.EncodeToString(cp.StartKey)),
 				zap.String("end", hex.EncodeToString(cp.EndKey)),
@@ -646,7 +646,7 @@ func getCheckpointReorgHandle(se *sess.Session, job *model.Job) (startKey, endKe
 // Caller should wrap this in a separate transaction, to avoid conflicts.
 func updateDDLReorgHandle(se *sess.Session, jobID int64, startKey kv.Key, endKey kv.Key, physicalTableID int64, element *meta.Element) error {
 	sql := fmt.Sprintf("update mysql.tidb_ddl_reorg set ele_id = %d, ele_type = %s, start_key = %s, end_key = %s, physical_id = %d where job_id = %d",
-		element.ID, util.WrapKey2String(element.TypeKey), util.WrapKey2String(startKey), util.WrapKey2String(endKey), physicalTableID, jobID)
+		element.ID, wrapKey2String(element.TypeKey), wrapKey2String(startKey), wrapKey2String(endKey), physicalTableID, jobID)
 	_, err := se.Execute(context.Background(), sql, "update_handle")
 	return err
 }
@@ -665,7 +665,7 @@ func initDDLReorgHandle(s *sess.Session, jobID int64, startKey kv.Key, endKey kv
 	}
 	del := fmt.Sprintf("delete from mysql.tidb_ddl_reorg where job_id = %d", jobID)
 	ins := fmt.Sprintf("insert into mysql.tidb_ddl_reorg(job_id, ele_id, ele_type, start_key, end_key, physical_id, reorg_meta) values (%d, %d, %s, %s, %s, %d, %s)",
-		jobID, element.ID, util.WrapKey2String(element.TypeKey), util.WrapKey2String(startKey), util.WrapKey2String(endKey), physicalTableID, util.WrapKey2String(rawReorgMeta))
+		jobID, element.ID, wrapKey2String(element.TypeKey), wrapKey2String(startKey), wrapKey2String(endKey), physicalTableID, wrapKey2String(rawReorgMeta))
 	return s.RunInTxn(func(se *sess.Session) error {
 		_, err := se.Execute(context.Background(), del, "init_handle")
 		if err != nil {
@@ -704,6 +704,13 @@ func cleanDDLReorgHandles(se *sess.Session, job *model.Job) error {
 		_, err := se.Execute(context.Background(), sql, "clean_handle")
 		return err
 	})
+}
+
+func wrapKey2String(key []byte) string {
+	if len(key) == 0 {
+		return "''"
+	}
+	return fmt.Sprintf("0x%x", key)
 }
 
 func getJobsBySQL(se *sess.Session, tbl, condition string) ([]*model.Job, error) {

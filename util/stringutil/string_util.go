@@ -17,13 +17,13 @@ package stringutil
 import (
 	"bytes"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/hack"
+	"golang.org/x/exp/slices"
 )
 
 // ErrSyntax indicates that a value does not have the right syntax for the target type.
@@ -336,7 +336,7 @@ func Escape(str string, sqlMode mysql.SQLMode) string {
 	} else {
 		quote = "`"
 	}
-	return quote + strings.ReplaceAll(str, quote, quote+quote) + quote
+	return quote + strings.Replace(str, quote, quote+quote, -1) + quote
 }
 
 // BuildStringFromLabels construct config labels into string by following format:
@@ -350,10 +350,10 @@ func BuildStringFromLabels(labels map[string]string) string {
 		s = append(s, k)
 	}
 	slices.Sort(s)
-	var r bytes.Buffer
+	r := new(bytes.Buffer)
 	// visit labels by sorted key in order to make sure that result should be consistency
 	for _, key := range s {
-		fmt.Fprintf(&r, "%s=%s,", key, labels[key])
+		r.WriteString(fmt.Sprintf("%s=%s,", key, labels[key]))
 	}
 	returned := r.String()
 	return returned[:len(returned)-1]
@@ -441,11 +441,6 @@ func LowerOneString(str []byte) {
 	}
 }
 
-// IsNumericASCII judges if a byte is numeric
-func IsNumericASCII(c byte) bool {
-	return (c >= '0' && c <= '9')
-}
-
 // LowerOneStringExcludeEscapeChar lowers strings and exclude an escape char
 //
 // When escape_char is a capital char, we shouldn't lower the escape char.
@@ -470,11 +465,12 @@ func LowerOneStringExcludeEscapeChar(str []byte, escapeChar byte) byte {
 			// Do not lower the escape char, however when a char is equal to
 			// an escape char and it's after an escape char, we still lower it
 			// For example: "AA" (escape 'A'), -> "Aa"
-			if !(str[i] != escapeChar || escaped) {
+			if str[i] != escapeChar || escaped {
+				str[i] = toLowerIfAlphaASCII(str[i])
+			} else {
 				escaped = true
 				continue
 			}
-			str[i] = toLowerIfAlphaASCII(str[i])
 		} else {
 			if str[i] == escapeChar && !escaped {
 				escaped = true

@@ -34,14 +34,12 @@ func TestMain(m *testing.M) {
 	flag.Parse()
 	testDataMap.LoadTestSuiteData("testdata", "plan_suite_unexported")
 	testDataMap.LoadTestSuiteData("testdata", "index_merge_suite")
-	testDataMap.LoadTestSuiteData("testdata", "runtime_filter_generator_suite")
 	testDataMap.LoadTestSuiteData("testdata", "join_reorder_suite")
-	testDataMap.LoadTestSuiteData("testdata", "rule_constant_propagation_suite")
 
 	indexMergeSuiteData = testDataMap["index_merge_suite"]
 	planSuiteUnexportedData = testDataMap["plan_suite_unexported"]
 	opts := []goleak.Option{
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
 		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
 		goleak.IgnoreTopFunction("gopkg.in/natefinch/lumberjack%2ev2.(*Logger).millRun"),
@@ -61,14 +59,6 @@ func GetIndexMergeSuiteData() testdata.TestData {
 	return testDataMap["index_merge_suite"]
 }
 
-func GetRuntimeFilterGeneratorData() testdata.TestData {
-	return testDataMap["runtime_filter_generator_suite"]
-}
-
 func GetJoinReorderData() testdata.TestData {
 	return testDataMap["join_reorder_suite"]
-}
-
-func GetRuleConstantPropagationData() testdata.TestData {
-	return testDataMap["rule_constant_propagation_suite"]
 }

@@ -158,7 +158,7 @@ func (f *indentFormatter) format(flat bool, format string, args ...interface{}) 
 	case stPERC, stBOLPERC:
 		buf = append(buf, '%')
 	}
-	return fmt.Fprintf(f, string(buf), args...)
+	return f.Write([]byte(fmt.Sprintf(string(buf), args...)))
 }
 
 // Format implements Format interface.

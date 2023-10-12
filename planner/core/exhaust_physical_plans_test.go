@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
@@ -57,10 +56,7 @@ type indexJoinContext struct {
 
 func prepareForAnalyzeLookUpFilters() *indexJoinContext {
 	ctx := MockContext()
-	defer func() {
-		do := domain.GetDomain(ctx)
-		do.StatsHandle().Close()
-	}()
+
 	ctx.GetSessionVars().PlanID.Store(-1)
 	joinNode := LogicalJoin{}.Init(ctx, 0)
 	dataSourceNode := DataSource{}.Init(ctx, 0)
@@ -112,7 +108,7 @@ func prepareForAnalyzeLookUpFilters() *indexJoinContext {
 		DBName:  model.NewCIStr("test"),
 	})
 	dataSourceNode.schema = dsSchema
-	dataSourceNode.SetStats(&property.StatsInfo{StatsVersion: statistics.PseudoVersion})
+	dataSourceNode.stats = &property.StatsInfo{StatsVersion: statistics.PseudoVersion}
 	path := &util.AccessPath{
 		IdxCols:    append(make([]*expression.Column, 0, 5), dsSchema.Columns...),
 		IdxColLens: []int{types.UnspecifiedLength, types.UnspecifiedLength, 2, types.UnspecifiedLength, 2},
@@ -183,7 +179,7 @@ type indexJoinTestCase struct {
 }
 
 func testAnalyzeLookUpFilters(t *testing.T, testCtx *indexJoinContext, testCase *indexJoinTestCase, msgAndArgs ...interface{}) *indexJoinBuildHelper {
-	ctx := testCtx.dataSourceNode.SCtx()
+	ctx := testCtx.dataSourceNode.ctx
 	ctx.GetSessionVars().RangeMaxSize = testCase.rangeMaxSize
 	dataSourceNode := testCtx.dataSourceNode
 	joinNode := testCtx.joinNode
@@ -347,7 +343,7 @@ func checkRangeFallbackAndReset(t *testing.T, ctx sessionctx.Context, expectedRa
 
 func TestRangeFallbackForAnalyzeLookUpFilters(t *testing.T) {
 	ijCtx := prepareForAnalyzeLookUpFilters()
-	ctx := ijCtx.dataSourceNode.SCtx()
+	ctx := ijCtx.dataSourceNode.ctx
 	dsSchema := ijCtx.dataSourceNode.schema
 
 	type testOutput struct {

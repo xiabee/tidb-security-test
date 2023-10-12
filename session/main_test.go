@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/testkit/testmain"
 	"github.com/pingcap/tidb/testkit/testsetup"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/goleak"
@@ -44,7 +45,7 @@ func TestMain(m *testing.M) {
 	tikv.EnableFailpoints()
 	opts := []goleak.Option{
 		// TODO: figure the reason and shorten this list
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
 		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 		goleak.IgnoreTopFunction("github.com/tikv/client-go/v2/internal/retry.newBackoffFn.func1"),
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/v3.waitRetryBackoff"),
@@ -64,6 +65,20 @@ func TestMain(m *testing.M) {
 		return i
 	}
 	goleak.VerifyTestMain(testmain.WrapTestingM(m, callback), opts...)
+}
+
+func mustExec(t *testing.T, se Session, sql string, args ...interface{}) {
+	rs, err := exec(se, sql, args...)
+	require.NoError(t, err)
+	if rs != nil {
+		require.NoError(t, rs.Close())
+	}
+}
+
+func mustExecToRecodeSet(t *testing.T, se Session, sql string, args ...interface{}) sqlexec.RecordSet {
+	rs, err := exec(se, sql, args...)
+	require.NoError(t, err)
+	return rs
 }
 
 func match(t *testing.T, row []types.Datum, expected ...interface{}) {

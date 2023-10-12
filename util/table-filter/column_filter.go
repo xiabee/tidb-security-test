@@ -14,10 +14,7 @@
 
 package filter
 
-import (
-	"slices"
-	"strings"
-)
+import "strings"
 
 // ColumnFilter is a structure to check if a column should be included for processing.
 type ColumnFilter interface {
@@ -46,7 +43,7 @@ func ParseColumnFilter(args []string) (ColumnFilter, error) {
 		}
 	}
 
-	slices.Reverse(p.rules)
+	reverse(p.rules)
 
 	return columnFilter(p.rules), nil
 }

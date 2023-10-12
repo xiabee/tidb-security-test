@@ -20,7 +20,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/statistics/handle/cache"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
@@ -33,18 +32,23 @@ const (
 	StatsMetaHistorySourceLoadStats = "load stats"
 	// StatsMetaHistorySourceFlushStats indicates stats history meta source from flush stats
 	StatsMetaHistorySourceFlushStats = "flush stats"
+	// StatsMetaHistorySourceExtendedStats indicates stats history meta source from extended stats
+	StatsMetaHistorySourceExtendedStats = "extended stats"
 	// StatsMetaHistorySourceSchemaChange indicates stats history meta source from schema change
 	StatsMetaHistorySourceSchemaChange = "schema change"
+	// StatsMetaHistorySourceFeedBack indicates stats history meta source from feedback
+	StatsMetaHistorySourceFeedBack = "feedback"
 )
 
 func recordHistoricalStatsMeta(sctx sessionctx.Context, tableID int64, version uint64, source string) error {
 	if tableID == 0 || version == 0 {
 		return errors.Errorf("tableID %d, version %d are invalid", tableID, version)
 	}
-	if err := UpdateSCtxVarsForStats(sctx); err != nil {
+	historicalStatsEnabled, err := checkHistoricalStatsEnable(sctx)
+	if err != nil {
 		return errors.Errorf("check tidb_enable_historical_stats failed: %v", err)
 	}
-	if !sctx.GetSessionVars().EnableHistoricalStats {
+	if !historicalStatsEnabled {
 		return nil
 	}
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnStats)
@@ -71,7 +75,6 @@ func recordHistoricalStatsMeta(sctx sessionctx.Context, tableID int64, version u
 	if _, err := exec.ExecuteInternal(ctx, sql, tableID, modifyCount, count, version, source); err != nil {
 		return errors.Trace(err)
 	}
-	cache.TableRowStatsCache.Invalidate(tableID)
 	return nil
 }
 
@@ -80,7 +83,7 @@ func (h *Handle) recordHistoricalStatsMeta(tableID int64, version uint64, source
 	if v == nil {
 		return
 	}
-	sc := v
+	sc := v.(statsCache)
 	tbl, ok := sc.Get(tableID)
 	if !ok {
 		return
@@ -88,23 +91,14 @@ func (h *Handle) recordHistoricalStatsMeta(tableID int64, version uint64, source
 	if !tbl.IsInitialized() {
 		return
 	}
-	se, err := h.pool.Get()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	err := recordHistoricalStatsMeta(h.mu.ctx, tableID, version, source)
 	if err != nil {
 		logutil.BgLogger().Error("record historical stats meta failed",
 			zap.Int64("table-id", tableID),
 			zap.Uint64("version", version),
 			zap.String("source", source),
 			zap.Error(err))
-		return
-	}
-	defer h.pool.Put(se)
-	sctx := se.(sessionctx.Context)
-	if err := recordHistoricalStatsMeta(sctx, tableID, version, source); err != nil {
-		logutil.BgLogger().Error("record historical stats meta failed",
-			zap.Int64("table-id", tableID),
-			zap.Uint64("version", version),
-			zap.String("source", source),
-			zap.Error(err))
-		return
 	}
 }

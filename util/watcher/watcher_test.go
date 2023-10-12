@@ -15,6 +15,7 @@
 package watcher
 
 import (
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -33,7 +34,9 @@ func TestWatcher(t *testing.T) {
 	)
 
 	// create dir
-	dir := t.TempDir()
+	dir, err := ioutil.TempDir("", "test_watcher")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
 
 	// join the path
 	oldFilePath = filepath.Join(dir, oldFileName)
@@ -43,7 +46,7 @@ func TestWatcher(t *testing.T) {
 	w := NewWatcher()
 
 	// watch directory
-	err := w.Add(dir)
+	err = w.Add(dir)
 	require.NoError(t, err)
 
 	// start watcher
@@ -124,7 +127,9 @@ func TestWatcher(t *testing.T) {
 	wg.Wait()
 
 	// create another dir
-	dir2 := t.TempDir()
+	dir2, err := ioutil.TempDir("", "test_watcher")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir2)
 	oldFilePath2 := filepath.Join(dir2, oldFileName)
 
 	// add another directory for watching

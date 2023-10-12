@@ -5,7 +5,6 @@ go_library(
     srcs = ["checksum.go"],
     importpath = "github.com/pingcap/tidb/util/checksum",
     visibility = ["//visibility:public"],
-    deps = ["//util/zeropool"],
 )
 
 go_test(

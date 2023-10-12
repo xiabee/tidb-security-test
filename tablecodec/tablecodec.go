@@ -276,19 +276,6 @@ func DecodeKeyHead(key kv.Key) (tableID int64, indexID int64, isRecordKey bool, 
 	return
 }
 
-// DecodeIndexID decodes indexID from the key.
-// this method simply extract index id part, and no other checking.
-// Caller should make sure the key is an index key.
-func DecodeIndexID(key kv.Key) (int64, error) {
-	key = key[len(tablePrefix)+8+len(indexPrefixSep):]
-
-	_, indexID, err := codec.DecodeInt(key)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	return indexID, nil
-}
-
 // DecodeTableID decodes the table ID of the key, if the key is not table key, returns 0.
 func DecodeTableID(key kv.Key) int64 {
 	if !key.HasPrefix(tablePrefix) {
@@ -1003,6 +990,22 @@ func EncodeTablePrefix(tableID int64) kv.Key {
 	key = append(key, tablePrefix...)
 	key = codec.EncodeInt(key, tableID)
 	return key
+}
+
+// EncodeTablePrefixSeekKey encodes the table prefix and encodecValue into a kv.Key.
+// It used for seek justly.
+func EncodeTablePrefixSeekKey(tableID int64, encodecValue []byte) kv.Key {
+	key := make([]byte, 0, tablePrefixLength+idLen+len(encodecValue))
+	key = appendTablePrefix(key, tableID)
+	key = append(key, encodecValue...)
+	return key
+}
+
+// appendTablePrefix appends table prefix "t[tableID]" into buf.
+func appendTablePrefix(buf []byte, tableID int64) []byte {
+	buf = append(buf, tablePrefix...)
+	buf = codec.EncodeInt(buf, tableID)
+	return buf
 }
 
 // appendTableRecordPrefix appends table record prefix  "t[tableID]_r".

@@ -373,26 +373,26 @@ var vecBuiltinStringCases = map[string][]vecExprBenchCase{
 
 var vecBuiltinStringCases2 = map[string][]vecExprBenchCase{
 	ast.MakeSet: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString, types.ETString}},
 	},
 	ast.Oct: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt}},
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{&numStrGener{*newRangeInt64Gener(-10, 10)}}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{&numStrGener{*newRangeInt64Gener(-10, 10)}}},
 	},
 	ast.Quote: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
 	},
 	ast.Ord: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}},
+		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}},
 	},
 	ast.Bin: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETInt}},
 	},
 	ast.ToBase64: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(0, 10)}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(0, 10)}},
 	},
 	ast.FromBase64: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(10, 100)}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(10, 100)}},
 	},
 	ast.ExportSet: {
 		{
@@ -412,24 +412,24 @@ var vecBuiltinStringCases2 = map[string][]vecExprBenchCase{
 		},
 	},
 	ast.Repeat: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt}, geners: []dataGenerator{newRandLenStrGener(10, 20), newRangeInt64Gener(-10, 10)}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt}, geners: []dataGenerator{newRandLenStrGener(10, 20), newRangeInt64Gener(-10, 10)}},
 	},
 	ast.Lower: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newSelectStringGener([]string{"one week’s time TEST", "one week's time TEST", "ABC测试DEF", "ABCテストABC"})}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newSelectStringGener([]string{"one week’s time TEST", "one week's time TEST", "ABC测试DEF", "ABCテストABC"})}},
 	},
 	ast.IsNull: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(10, 20)}},
-		{aesModes: "aes-128-ecb", retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newDefaultGener(0.2, types.ETString)}},
+		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newRandLenStrGener(10, 20)}},
+		{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newDefaultGener(0.2, types.ETString)}},
 	},
 	ast.Upper: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newSelectStringGener([]string{"one week’s time TEST", "one week's time TEST", "abc测试DeF", "AbCテストAbC"})}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString}, geners: []dataGenerator{newSelectStringGener([]string{"one week’s time TEST", "one week's time TEST", "abc测试DeF", "AbCテストAbC"})}},
 	},
 	ast.Right: {
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt}},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt}},
 		// need to add BinaryFlag for the Binary func
-		{aesModes: "aes-128-ecb", retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt},
+		{retEvalType: types.ETString, childrenTypes: []types.EvalType{types.ETString, types.ETInt},
 			childrenFieldTypes: []*types.FieldType{
 				types.NewFieldTypeBuilder().SetType(mysql.TypeString).SetFlag(mysql.BinaryFlag).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin).BuildP(),
 				types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).BuildP()},

@@ -1053,10 +1053,17 @@ func TestErrorCreateUnionIter(t *testing.T) {
 		{Key: kv.Key("k1"), Value: []byte("v1")},
 	}))
 
+	// test for not allow iter with lowerBound
+	iter, err := createUnionIter(retriever, snap, kv.Key("k1"), kv.Key("k2"), true)
+	require.Error(t, err, "k should be nil for iter reverse")
+	require.Nil(t, iter)
+	require.Equal(t, 0, len(retriever.GetInvokes()))
+	require.Equal(t, 0, len(snap.GetInvokes()))
+
 	// test for iter next error
 	iterNextErr := errors.New("iterNextErr")
 	retriever.InjectMethodError("IterNext", iterNextErr)
-	iter, err := createUnionIter(retriever, snap, kv.Key("k1"), kv.Key("k2"), false)
+	iter, err = createUnionIter(retriever, snap, kv.Key("k1"), kv.Key("k2"), false)
 	require.Equal(t, iterNextErr, err)
 	require.Nil(t, iter)
 	checkCreatedIterClosed(t, retriever, snap, false)
@@ -1580,7 +1587,7 @@ func TestOnIterReverse(t *testing.T) {
 		result     []kv.Entry
 	}{
 		{
-			args: []kv.Key{nil, nil},
+			args: []kv.Key{nil},
 			result: []kv.Entry{
 				{Key: kv.Key("u0"), Value: []byte("vu0")},
 				{Key: kv.Key("u"), Value: []byte("vu")},
@@ -1602,7 +1609,7 @@ func TestOnIterReverse(t *testing.T) {
 			},
 		},
 		{
-			args: []kv.Key{kv.Key("u"), nil},
+			args: []kv.Key{kv.Key("u")},
 			result: []kv.Entry{
 				{Key: encodeTableKey(math.MaxInt64, 1), Value: []byte("vm1")},
 				{Key: encodeTableKey(math.MaxInt64), Value: []byte("vm")},
@@ -1622,7 +1629,7 @@ func TestOnIterReverse(t *testing.T) {
 			},
 		},
 		{
-			args: []kv.Key{encodeTableKey(5, 0, 1), nil},
+			args: []kv.Key{encodeTableKey(5, 0, 1)},
 			result: []kv.Entry{
 				{Key: encodeTableKey(5, 0), Value: []byte("v50")},
 				{Key: encodeTableKey(5), Value: []byte("v5")},
@@ -1638,13 +1645,13 @@ func TestOnIterReverse(t *testing.T) {
 			},
 		},
 		{
-			args: []kv.Key{kv.Key("s0"), nil},
+			args: []kv.Key{kv.Key("s0")},
 			result: []kv.Entry{
 				{Key: kv.Key("s"), Value: []byte("vs")},
 			},
 		},
 		{
-			args:       []kv.Key{encodeTableKey(5, 0, 1), nil},
+			args:       []kv.Key{encodeTableKey(5, 0, 1)},
 			nilSession: true,
 			result: []kv.Entry{
 				{Key: encodeTableKey(2, 1), Value: []byte("v21")},
@@ -1656,29 +1663,6 @@ func TestOnIterReverse(t *testing.T) {
 				{Key: tablecodec.TablePrefix(), Value: []byte("vt")},
 				{Key: kv.Key("s0"), Value: []byte("vs0")},
 				{Key: kv.Key("s"), Value: []byte("vs")},
-			},
-		},
-		{
-			args:       []kv.Key{encodeTableKey(5, 0, 1), kv.Key("s0")},
-			nilSession: true,
-			result: []kv.Entry{
-				{Key: encodeTableKey(2, 1), Value: []byte("v21")},
-				{Key: encodeTableKey(2), Value: []byte("v2")},
-				{Key: encodeTableKey(1, 1), Value: []byte("v11")},
-				{Key: encodeTableKey(1), Value: []byte("v1")},
-				{Key: encodeTableKey(0, 1), Value: []byte("v01")},
-				{Key: encodeTableKey(0), Value: []byte("v0")},
-				{Key: tablecodec.TablePrefix(), Value: []byte("vt")},
-				{Key: kv.Key("s0"), Value: []byte("vs0")},
-			},
-		},
-		{
-			args: []kv.Key{kv.Key("u"), encodeTableKey(5, 0, 1)},
-			result: []kv.Entry{
-				{Key: encodeTableKey(math.MaxInt64, 1), Value: []byte("vm1")},
-				{Key: encodeTableKey(math.MaxInt64), Value: []byte("vm")},
-				{Key: encodeTableKey(5, 1), Value: []byte("v51")},
-				{Key: encodeTableKey(5, 0, 1), Value: []byte("v501")},
 			},
 		},
 	}
@@ -1689,7 +1673,7 @@ func TestOnIterReverse(t *testing.T) {
 			inter = emptyRetrieverInterceptor
 		}
 
-		iter, err := inter.OnIterReverse(snap, c.args[0], c.args[1])
+		iter, err := inter.OnIterReverse(snap, c.args[0])
 		require.NoError(t, err, i)
 		require.NotNil(t, iter, i)
 		result := make([]kv.Entry, 0, i)
@@ -1704,11 +1688,11 @@ func TestOnIterReverse(t *testing.T) {
 	snapErr := errors.New("snapErr")
 	snap.InjectMethodError("IterReverse", snapErr)
 
-	iter, err := interceptor.OnIterReverse(snap, nil, nil)
+	iter, err := interceptor.OnIterReverse(snap, nil)
 	require.Nil(t, iter)
 	require.Equal(t, snapErr, err)
 
-	iter, err = interceptor.OnIterReverse(snap, kv.Key("o"), nil)
+	iter, err = interceptor.OnIterReverse(snap, kv.Key("o"))
 	require.Nil(t, iter)
 	require.Equal(t, snapErr, err)
 
@@ -1718,7 +1702,7 @@ func TestOnIterReverse(t *testing.T) {
 	retrieverErr := errors.New("retrieverErr")
 	retriever.InjectMethodError("IterReverse", retrieverErr)
 
-	iter, err = interceptor.OnIterReverse(snap, nil, nil)
+	iter, err = interceptor.OnIterReverse(snap, nil)
 	require.Nil(t, iter)
 	require.Equal(t, retrieverErr, err)
 }

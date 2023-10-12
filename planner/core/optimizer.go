@@ -15,14 +15,11 @@
 package core
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"math"
 	"runtime"
-	"slices"
 	"strconv"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -43,7 +40,6 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util"
 	utilhint "github.com/pingcap/tidb/util/hint"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
@@ -52,6 +48,7 @@ import (
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // OptimizeAstNode optimizes the query to a physical plan directly.
@@ -74,7 +71,6 @@ const (
 	flagSkewDistinctAgg
 	flagEliminateProjection
 	flagMaxMinEliminate
-	flagConstantPropagation
 	flagPredicatePushDown
 	flagEliminateOuterJoin
 	flagPartitionProcessor
@@ -86,8 +82,6 @@ const (
 	flagSyncWaitStatsLoadPoint
 	flagJoinReOrder
 	flagPrunColumnsAgain
-	flagPushDownSequence
-	flagResolveExpand
 )
 
 var optRuleList = []logicalOptRule{
@@ -101,7 +95,6 @@ var optRuleList = []logicalOptRule{
 	&skewDistinctAggRewriter{},
 	&projectionEliminator{},
 	&maxMinEliminator{},
-	&constantPropagationSolver{},
 	&ppdSolver{},
 	&outerJoinEliminator{},
 	&partitionProcessor{},
@@ -113,8 +106,6 @@ var optRuleList = []logicalOptRule{
 	&syncWaitStatsLoadPoint{},
 	&joinReOrderSolver{},
 	&columnPruner{}, // column pruning again at last, note it will mess up the results of buildKeySolver
-	&pushDownSequenceSolver{},
-	&resolveExpand{},
 }
 
 type logicalOptimizeOp struct {
@@ -135,7 +126,7 @@ func (op *logicalOptimizeOp) appendBeforeRuleOptimize(index int, name string, be
 	if op == nil || op.tracer == nil {
 		return
 	}
-	op.tracer.AppendRuleTracerBeforeRuleOptimize(index, name, before.BuildPlanTrace())
+	op.tracer.AppendRuleTracerBeforeRuleOptimize(index, name, before.buildPlanTrace())
 }
 
 func (op *logicalOptimizeOp) appendStepToCurrent(id int, tp string, reason, action func() string) {
@@ -149,7 +140,7 @@ func (op *logicalOptimizeOp) recordFinalLogicalPlan(final LogicalPlan) {
 	if op == nil || op.tracer == nil {
 		return
 	}
-	op.tracer.RecordFinalLogicalPlan(final.BuildPlanTrace())
+	op.tracer.RecordFinalLogicalPlan(final.buildPlanTrace())
 }
 
 // logicalOptRule means a logical optimizing rule, which contains decorrelate, ppd, column pruning, etc.
@@ -286,52 +277,6 @@ func checkStableResultMode(sctx sessionctx.Context) bool {
 	return s.EnableStableResultMode && (!st.InInsertStmt && !st.InUpdateStmt && !st.InDeleteStmt && !st.InLoadDataStmt)
 }
 
-// DoOptimizeAndLogicAsRet optimizes a logical plan to a physical plan and return the optimized logical plan.
-func DoOptimizeAndLogicAsRet(ctx context.Context, sctx sessionctx.Context, flag uint64, logic LogicalPlan) (LogicalPlan, PhysicalPlan, float64, error) {
-	sessVars := sctx.GetSessionVars()
-	// if there is something after flagPrunColumns, do flagPrunColumnsAgain
-	if flag&flagPrunColumns > 0 && flag-flagPrunColumns > flagPrunColumns {
-		flag |= flagPrunColumnsAgain
-	}
-	if checkStableResultMode(logic.SCtx()) {
-		flag |= flagStabilizeResults
-	}
-	if logic.SCtx().GetSessionVars().StmtCtx.StraightJoinOrder {
-		// When we use the straight Join Order hint, we should disable the join reorder optimization.
-		flag &= ^flagJoinReOrder
-	}
-	flag |= flagCollectPredicateColumnsPoint
-	flag |= flagSyncWaitStatsLoadPoint
-	logic, err := logicalOptimize(ctx, flag, logic)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-
-	if !AllowCartesianProduct.Load() && existsCartesianProduct(logic) {
-		return nil, nil, 0, errors.Trace(ErrCartesianProductUnsupported)
-	}
-	planCounter := PlanCounterTp(sessVars.StmtCtx.StmtHints.ForceNthPlan)
-	if planCounter == 0 {
-		planCounter = -1
-	}
-	physical, cost, err := physicalOptimize(logic, &planCounter)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	finalPlan, err := postOptimize(ctx, sctx, physical)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-
-	if sessVars.StmtCtx.EnableOptimizerCETrace {
-		refineCETrace(sctx)
-	}
-	if sessVars.StmtCtx.EnableOptimizeTrace {
-		sessVars.StmtCtx.OptimizeTracer.RecordFinalPlan(finalPlan.BuildPlanTrace())
-	}
-	return logic, finalPlan, cost, nil
-}
-
 // DoOptimize optimizes a logical plan to a physical plan.
 func DoOptimize(ctx context.Context, sctx sessionctx.Context, flag uint64, logic LogicalPlan) (PhysicalPlan, float64, error) {
 	sessVars := sctx.GetSessionVars()
@@ -339,8 +284,47 @@ func DoOptimize(ctx context.Context, sctx sessionctx.Context, flag uint64, logic
 		debugtrace.EnterContextCommon(sctx)
 		defer debugtrace.LeaveContextCommon(sctx)
 	}
-	_, finalPlan, cost, err := DoOptimizeAndLogicAsRet(ctx, sctx, flag, logic)
-	return finalPlan, cost, err
+
+	// if there is something after flagPrunColumns, do flagPrunColumnsAgain
+	if flag&flagPrunColumns > 0 && flag-flagPrunColumns > flagPrunColumns {
+		flag |= flagPrunColumnsAgain
+	}
+	if checkStableResultMode(sctx) {
+		flag |= flagStabilizeResults
+	}
+	if sessVars.StmtCtx.StraightJoinOrder {
+		// When we use the straight Join Order hint, we should disable the join reorder optimization.
+		flag &= ^flagJoinReOrder
+	}
+	flag |= flagCollectPredicateColumnsPoint
+	flag |= flagSyncWaitStatsLoadPoint
+	logic, err := logicalOptimize(ctx, flag, logic)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !AllowCartesianProduct.Load() && existsCartesianProduct(logic) {
+		return nil, 0, errors.Trace(ErrCartesianProductUnsupported)
+	}
+	planCounter := PlanCounterTp(sessVars.StmtCtx.StmtHints.ForceNthPlan)
+	if planCounter == 0 {
+		planCounter = -1
+	}
+	physical, cost, err := physicalOptimize(logic, &planCounter)
+	if err != nil {
+		return nil, 0, err
+	}
+	finalPlan, err := postOptimize(ctx, sctx, physical)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if sessVars.StmtCtx.EnableOptimizerCETrace {
+		refineCETrace(sctx)
+	}
+	if sessVars.StmtCtx.EnableOptimizeTrace {
+		sessVars.StmtCtx.OptimizeTracer.RecordFinalPlan(finalPlan.buildPlanTrace())
+	}
+	return finalPlan, cost, nil
 }
 
 // refineCETrace will adjust the content of CETrace.
@@ -348,34 +332,39 @@ func DoOptimize(ctx context.Context, sctx sessionctx.Context, flag uint64, logic
 func refineCETrace(sctx sessionctx.Context) {
 	stmtCtx := sctx.GetSessionVars().StmtCtx
 	stmtCtx.OptimizerCETrace = tracing.DedupCETrace(stmtCtx.OptimizerCETrace)
-	slices.SortFunc(stmtCtx.OptimizerCETrace, func(i, j *tracing.CETraceRecord) int {
+	slices.SortFunc(stmtCtx.OptimizerCETrace, func(i, j *tracing.CETraceRecord) bool {
 		if i == nil && j != nil {
-			return -1
+			return true
 		}
 		if i == nil || j == nil {
-			return 1
+			return false
 		}
 
-		if c := cmp.Compare(i.TableID, j.TableID); c != 0 {
-			return c
+		if i.TableID != j.TableID {
+			return i.TableID < j.TableID
 		}
-		if c := cmp.Compare(i.Type, j.Type); c != 0 {
-			return c
+		if i.Type != j.Type {
+			return i.Type < j.Type
 		}
-		if c := cmp.Compare(i.Expr, j.Expr); c != 0 {
-			return c
+		if i.Expr != j.Expr {
+			return i.Expr < j.Expr
 		}
-		return cmp.Compare(i.RowCount, j.RowCount)
+		return i.RowCount < j.RowCount
 	})
 	traceRecords := stmtCtx.OptimizerCETrace
 	is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
 	for _, rec := range traceRecords {
-		tbl, _ := infoschema.FindTableByTblOrPartID(is, rec.TableID)
+		tbl, ok := is.TableByID(rec.TableID)
+		if ok {
+			rec.TableName = tbl.Meta().Name.O
+			continue
+		}
+		tbl, _, _ = is.FindTableByPartitionID(rec.TableID)
 		if tbl != nil {
 			rec.TableName = tbl.Meta().Name.O
 			continue
 		}
-		logutil.BgLogger().Warn("Failed to find table in infoschema", zap.String("category", "OptimizerTrace"),
+		logutil.BgLogger().Warn("[OptimizerTrace] Failed to find table in infoschema",
 			zap.Int64("table id", rec.TableID))
 	}
 }
@@ -385,12 +374,12 @@ func mergeContinuousSelections(p PhysicalPlan) {
 	if sel, ok := p.(*PhysicalSelection); ok {
 		for {
 			childSel := sel.children[0]
-			tmp, ok := childSel.(*PhysicalSelection)
-			if !ok {
+			if tmp, ok := childSel.(*PhysicalSelection); ok {
+				sel.Conditions = append(sel.Conditions, tmp.Conditions...)
+				sel.SetChild(0, tmp.children[0])
+			} else {
 				break
 			}
-			sel.Conditions = append(sel.Conditions, tmp.Conditions...)
-			sel.SetChild(0, tmp.children[0])
 		}
 	}
 	for _, child := range p.Children() {
@@ -421,24 +410,7 @@ func postOptimize(ctx context.Context, sctx sessionctx.Context, plan PhysicalPla
 	countStarRewrite(plan)
 	disableReuseChunkIfNeeded(sctx, plan)
 	tryEnableLateMaterialization(sctx, plan)
-	generateRuntimeFilter(sctx, plan)
 	return plan, nil
-}
-
-func generateRuntimeFilter(sctx sessionctx.Context, plan PhysicalPlan) {
-	if !sctx.GetSessionVars().IsRuntimeFilterEnabled() || sctx.GetSessionVars().InRestrictedSQL {
-		return
-	}
-	logutil.BgLogger().Debug("Start runtime filter generator")
-	rfGenerator := &RuntimeFilterGenerator{
-		rfIDGenerator:      &util.IDGenerator{},
-		columnUniqueIDToRF: map[int64][]*RuntimeFilter{},
-		parentPhysicalPlan: plan,
-	}
-	startRFGenerator := time.Now()
-	rfGenerator.GenerateRuntimeFilter(plan)
-	logutil.BgLogger().Debug("Finish runtime filter generator",
-		zap.Duration("Cost", time.Since(startRFGenerator)))
 }
 
 // prunePhysicalColumns currently only work for MPP(HashJoin<-Exchange).
@@ -513,7 +485,7 @@ func prunePhysicalColumnForHashJoinChild(sctx sessionctx.Context, hashJoin *Phys
 		ch := sender.children[0]
 		proj := PhysicalProjection{
 			Exprs: usedExprs,
-		}.Init(sctx, ch.StatsInfo(), ch.SelectBlockOffset())
+		}.Init(sctx, ch.statsInfo(), ch.SelectBlockOffset())
 
 		proj.SetSchema(prunedSchema)
 		proj.SetChildren(ch)
@@ -687,7 +659,7 @@ func rewriteTableScanAndAggArgs(physicalTableScan *PhysicalTableScan, aggFuncs [
 			if columnInfo.GetFlen() < resultColumnInfo.GetFlen() {
 				resultColumnInfo = columnInfo
 				resultColumn = &expression.Column{
-					UniqueID: physicalTableScan.SCtx().GetSessionVars().AllocPlanColumnID(),
+					UniqueID: physicalTableScan.ctx.GetSessionVars().AllocPlanColumnID(),
 					ID:       resultColumnInfo.ID,
 					RetType:  resultColumnInfo.FieldType.Clone(),
 					OrigName: fmt.Sprintf("%s.%s.%s", physicalTableScan.DBName.L, physicalTableScan.Table.Name.L, resultColumnInfo.Name),
@@ -806,7 +778,7 @@ func calculateTiFlashStreamCountUsingMinLogicalCores(ctx context.Context, sctx s
 		return false, 0
 	}
 	var initialMaxCores uint64 = 10000
-	var minLogicalCores = initialMaxCores // set to a large enough value here
+	var minLogicalCores uint64 = initialMaxCores // set to a large enough value here
 	for _, row := range rows {
 		if row[4].GetString() == "cpu-logical-cores" {
 			logicalCpus, err := strconv.Atoi(row[5].GetString())
@@ -839,7 +811,7 @@ func checkFineGrainedShuffleForJoinAgg(ctx context.Context, sctx sessionctx.Cont
 		return false, 0 // probably won't reach this path
 	}
 
-	var tiflashServerCount uint64
+	var tiflashServerCount uint64 = 0
 	switch (*tiflashServerCountInfo).itemStatus {
 	case unInitialized:
 		serversInfo, err := infoschema.GetTiFlashServerInfo(sctx)
@@ -1167,17 +1139,13 @@ func physicalOptimize(logic LogicalPlan, planCounter *PlanCounterTp) (plan Physi
 	stmtCtx := logic.SCtx().GetSessionVars().StmtCtx
 	if stmtCtx.EnableOptimizeTrace {
 		tracer := &tracing.PhysicalOptimizeTracer{
-			PhysicalPlanCostDetails: make(map[string]*tracing.PhysicalPlanCostDetail),
+			PhysicalPlanCostDetails: make(map[int]*tracing.PhysicalPlanCostDetail),
 			Candidates:              make(map[int]*tracing.CandidatePlanTrace),
 		}
 		opt = opt.withEnableOptimizeTracer(tracer)
 		defer func() {
-			r := recover()
-			if r != nil {
-				panic(r) /* pass panic to upper function to handle */
-			}
 			if err == nil {
-				tracer.RecordFinalPlanTrace(plan.BuildPlanTrace())
+				tracer.RecordFinalPlanTrace(plan.buildPlanTrace())
 				stmtCtx.OptimizeTracer.Physical = tracer
 			}
 		}()
@@ -1192,11 +1160,7 @@ func physicalOptimize(logic LogicalPlan, planCounter *PlanCounterTp) (plan Physi
 		logic.SCtx().GetSessionVars().StmtCtx.AppendWarning(errors.Errorf("The parameter of nth_plan() is out of range"))
 	}
 	if t.invalid() {
-		errMsg := "Can't find a proper physical plan for this query"
-		if config.GetGlobalConfig().DisaggregatedTiFlash && !logic.SCtx().GetSessionVars().IsMPPAllowed() {
-			errMsg += ": cop and batchCop are not allowed in disaggregated tiflash mode, you should turn on tidb_allow_mpp switch"
-		}
-		return nil, 0, ErrInternal.GenWithStackByArgs(errMsg)
+		return nil, 0, ErrInternal.GenWithStackByArgs("Can't find a proper physical plan for this query")
 	}
 
 	if err = t.plan().ResolveIndices(); err != nil {

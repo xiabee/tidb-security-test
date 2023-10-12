@@ -262,8 +262,7 @@ func TestPatternLikeToExpression(t *testing.T) {
 	tk.MustQuery("select 0.00 like '0.00';").Check(testkit.Rows("1"))
 }
 
-func TestExpressionRewriterIssue(t *testing.T) {
-	// Issue20007
+func TestIssue20007(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
@@ -277,30 +276,27 @@ func TestExpressionRewriterIssue(t *testing.T) {
 		tk.MustQuery("select * from t1 where c_int != any (select c_int from t2 where t1.c_str <= t2.c_str); ").Check(
 			testkit.Rows("2 epic wiles 2020-01-02 23:29:51", "3 silly burnell 2020-02-25 07:43:07"))
 	}
+}
 
-	// Issue9869
+func TestIssue9869(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t1;")
 	tk.MustExec("create table t1(a int, b bigint unsigned);")
 	tk.MustExec("insert into t1 (a, b) values (1,4572794622775114594), (2,18196094287899841997),(3,11120436154190595086);")
 	tk.MustQuery("select (case t1.a when 0 then 0 else t1.b end), cast(t1.b as signed)  from t1;").Check(
 		testkit.Rows("4572794622775114594 4572794622775114594", "18196094287899841997 -250649785809709619", "11120436154190595086 -7326307919518956530"))
+}
 
-	// Issue17652
+func TestIssue17652(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t;")
 	tk.MustExec("create table t(x bigint unsigned);")
 	tk.MustExec("insert into t values( 9999999703771440633);")
 	tk.MustQuery("select ifnull(max(x), 0) from t").Check(testkit.Rows("9999999703771440633"))
-	// Issue22818
-	tk.MustExec("drop table if exists t;")
-	tk.MustExec("create table t(a time);")
-	tk.MustExec("insert into t values(\"23:22:22\");")
-	tk.MustQuery("select * from t where a between \"23:22:22\" and \"23:22:22\"").Check(testkit.Rows("23:22:22"))
-	// Issue24705
-	tk.MustExec("drop table if exists t1,t2;")
-	tk.MustExec("create table t1 (c_int int, c_str varchar(40) character set utf8 collate utf8_general_ci);")
-	tk.MustExec("create table t2 (c_int int, c_str varchar(40) character set utf8 collate utf8_unicode_ci);")
-	err := tk.ExecToErr("select * from t1 where c_str < any (select c_str from t2 where c_int between 6 and 9);")
-	require.EqualError(t, err, "[expression:1267]Illegal mix of collations (utf8_general_ci,IMPLICIT) and (utf8_unicode_ci,IMPLICIT) for operation '<'")
 }
 
 func TestCompareMultiFieldsInSubquery(t *testing.T) {
@@ -328,6 +324,27 @@ func TestCompareMultiFieldsInSubquery(t *testing.T) {
 	tk.MustExec("INSERT INTO t4 VALUES (1, 2);")
 	tk.MustQuery("SELECT * FROM t3 WHERE (SELECT c1 FROM t3 LIMIT 1) != ALL(SELECT c1 FROM t4);").Check(testkit.Rows())
 	tk.MustQuery("SELECT * FROM t3 WHERE (SELECT c1, c2 FROM t3 LIMIT 1) != ALL(SELECT c1, c2 FROM t4);").Check(testkit.Rows())
+}
+
+func TestIssue22818(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t;")
+	tk.MustExec("create table t(a time);")
+	tk.MustExec("insert into t values(\"23:22:22\");")
+	tk.MustQuery("select * from t where a between \"23:22:22\" and \"23:22:22\"").Check(testkit.Rows("23:22:22"))
+}
+
+func TestIssue24705(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1,t2;")
+	tk.MustExec("create table t1 (c_int int, c_str varchar(40) character set utf8 collate utf8_general_ci);")
+	tk.MustExec("create table t2 (c_int int, c_str varchar(40) character set utf8 collate utf8_unicode_ci);")
+	err := tk.ExecToErr("select * from t1 where c_str < any (select c_str from t2 where c_int between 6 and 9);")
+	require.EqualError(t, err, "[expression:1267]Illegal mix of collations (utf8_general_ci,IMPLICIT) and (utf8_unicode_ci,IMPLICIT) for operation '<'")
 }
 
 func TestBetweenExprCollation(t *testing.T) {
@@ -376,48 +393,44 @@ func TestConvertIfNullToCast(t *testing.T) {
 	))
 }
 
-func TestColResolutionPriBetweenOuterAndNatureJoin(t *testing.T) {
+func TestCompareIssue38361(t *testing.T) {
 	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test;")
-	tk.MustExec("DROP TABLE if exists t0;")
-	tk.MustExec("DROP VIEW if exists t0;")
-	tk.MustExec("CREATE TABLE t0(c0 TEXT(328) );")
-	tk.MustExec("CREATE definer='root'@'localhost' VIEW v0(c0) AS SELECT 'c' FROM t0;")
-	tk.MustExec("INSERT INTO t0 VALUES (-12);")
-	tk.MustQuery("SELECT v0.c0 AS c0 FROM  v0 NATURAL RIGHT JOIN t0  WHERE (1 !=((v0.c0)REGEXP(-7)));").Check(testkit.Rows())
-	tk.MustQuery("SELECT COUNT(v0.c0) AS c0 FROM v0 WHERE EXISTS(SELECT v0.c0 AS c0 FROM v0 NATURAL RIGHT JOIN t0  WHERE (1 !=((v0.c0)REGEXP(-7))));").Check(testkit.Rows("0"))
-}
 
-func TestColResolutionSubqueryWithUnionAll(t *testing.T) {
-	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test;")
-	tk.MustExec("DROP TABLE if exists t1;")
-	tk.MustExec("DROP TABLE if exists t2;")
-	tk.MustExec("DROP TABLE if exists t;")
-	tk.MustExec("create table t1(a int);")
-	tk.MustExec("create table t2(a int);")
-	tk.MustExec("create table t(a int);")
-	tk.MustQuery("select * from t where  exists ( select a from ( select a from t1 union all select a from t2) u where t.a=u.a);").Check(testkit.Rows())
-}
+	tk.MustExec("drop database if exists TEST1")
+	tk.MustExec("create database TEST1")
+	tk.MustExec("use TEST1")
+	tk.MustExec("create table t(a datetime, b bigint, c bigint)")
+	tk.MustExec("insert into t values(cast('2023-08-09 00:00:00' as datetime), 20230809, 20231310)")
 
-func TestDefaultCollationForUTF8MB4(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test;")
-	tk.MustExec(`set @a = 'xx'`)
-	// utf8mb4_bin
-	tk.MustQuery("select * from information_schema.COLLATIONS where IS_DEFAULT='Yes' and CHARACTER_SET_NAME='utf8mb4'").Check(testkit.Rows("utf8mb4_bin utf8mb4 46 Yes Yes 1"))
-	tk.MustQuery("select collation(_utf8mb4'12345')").Check(testkit.Rows("utf8mb4_bin"))
-	tk.MustQuery("select collation(_utf8mb4'xxx' collate utf8mb4_general_ci);").Check(testkit.Rows("utf8mb4_general_ci"))
-	tk.MustQuery("select collation(_utf8mb4'@a')").Check(testkit.Rows("utf8mb4_bin"))
-	tk.MustQuery("select collation(_utf8mb4'@a' collate utf8mb4_general_ci);").Check(testkit.Rows("utf8mb4_general_ci"))
-	// utf8mb4_0900_ai_ci
-	tk.MustExec("set @@session.default_collation_for_utf8mb4='utf8mb4_0900_ai_ci'")
-	tk.MustQuery("select * from information_schema.COLLATIONS where IS_DEFAULT='Yes' and CHARACTER_SET_NAME='utf8mb4'").Check(testkit.Rows("utf8mb4_bin utf8mb4 46 Yes Yes 1"))
-	tk.MustQuery("select collation(_utf8mb4'12345')").Check(testkit.Rows("utf8mb4_0900_ai_ci"))
-	tk.MustQuery("select collation(_utf8mb4'12345' collate utf8mb4_general_ci);").Check(testkit.Rows("utf8mb4_general_ci"))
-	tk.MustQuery("select collation(_utf8mb4'@a')").Check(testkit.Rows("utf8mb4_0900_ai_ci"))
-	tk.MustQuery("select collation(_utf8mb4'@a' collate utf8mb4_general_ci);").Check(testkit.Rows("utf8mb4_general_ci"))
+	tk.MustQuery("select a > 20230809 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a = 20230809 from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select a < 20230810 from t").Check(testkit.Rows("1"))
+	//// 20231310 can't be converted to valid datetime, thus should be compared using real date type,and datetime will be
+	//// converted to something like 'YYYYMMDDHHMMSS', bigger than 20231310
+	tk.MustQuery("select a < 20231310 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 < a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 = a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20230810 > a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20231310 > a from t").Check(testkit.Rows("0"))
+
+	//// constant datetime cmp numeric constant should be compared as real data type
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) > 20230809 from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) = 20230809 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) < 20230810 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) < 20231310 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 < cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20230809 = cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230810 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20231310 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+
+	//// datetime column cmp numeric column should be compared as real data type
+	tk.MustQuery("select a > b from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select a = b from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a < b + 1 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a < c from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select b < a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select b = a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select b > a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select c > a from t").Check(testkit.Rows("0"))
 }

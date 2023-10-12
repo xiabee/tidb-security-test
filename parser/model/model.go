@@ -15,7 +15,6 @@ package model
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -127,11 +126,6 @@ type ColumnInfo struct {
 	// Version = 1: For OriginDefaultValue and DefaultValue of timestamp column will stores the default time in UTC time zone.
 	//              This will fix bug in version 0. For compatibility with version 0, we add version field in column info struct.
 	Version uint64 `json:"version"`
-}
-
-// IsVirtualGenerated checks the column if it is virtual.
-func (c *ColumnInfo) IsVirtualGenerated() bool {
-	return c.IsGenerated() && !c.GeneratedStored
 }
 
 // Clone clones ColumnInfo.
@@ -924,8 +918,6 @@ func NewExtraPartitionIDColInfo() *ColumnInfo {
 	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	colInfo.SetFlen(flen)
 	colInfo.SetDecimal(decimal)
-	colInfo.SetCharset(charset.CharsetBin)
-	colInfo.SetCollate(charset.CollationBin)
 	return colInfo
 }
 
@@ -939,8 +931,6 @@ func NewExtraPhysTblIDColInfo() *ColumnInfo {
 	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
 	colInfo.SetFlen(flen)
 	colInfo.SetDecimal(decimal)
-	colInfo.SetCharset(charset.CharsetBin)
-	colInfo.SetCollate(charset.CollationBin)
 	return colInfo
 }
 
@@ -1141,10 +1131,6 @@ type PartitionType int
 
 // Partition types.
 const (
-	// Actually non-partitioned, but during DDL keeping the table as
-	// a single partition
-	PartitionTypeNone PartitionType = 0
-
 	PartitionTypeRange      PartitionType = 1
 	PartitionTypeHash       PartitionType = 2
 	PartitionTypeList       PartitionType = 3
@@ -1164,8 +1150,6 @@ func (p PartitionType) String() string {
 		return "KEY"
 	case PartitionTypeSystemTime:
 		return "SYSTEM_TIME"
-	case PartitionTypeNone:
-		return "NONE"
 	default:
 		return ""
 	}
@@ -1173,9 +1157,8 @@ func (p PartitionType) String() string {
 
 // ExchangePartitionInfo provides exchange partition info.
 type ExchangePartitionInfo struct {
-	// It is nt tableID when table which has the info is a partition table, else pt tableID.
-	ExchangePartitionTableID int64 `json:"exchange_partition_id"`
-	ExchangePartitionDefID   int64 `json:"exchange_partition_def_id"`
+	ExchangePartitionID    int64 `json:"exchange_partition_id"`
+	ExchangePartitionDefID int64 `json:"exchange_partition_def_id"`
 	// Deprecated, not used
 	XXXExchangePartitionFlag bool `json:"exchange_partition_flag"`
 }
@@ -1192,27 +1175,14 @@ type PartitionInfo struct {
 	Enable bool `json:"enable"`
 
 	Definitions []PartitionDefinition `json:"definitions"`
-	// AddingDefinitions is filled when adding partitions that is in the mid state.
+	// AddingDefinitions is filled when adding a partition that is in the mid state.
 	AddingDefinitions []PartitionDefinition `json:"adding_definitions"`
-	// DroppingDefinitions is filled when dropping/truncating partitions that is in the mid state.
+	// DroppingDefinitions is filled when dropping a partition that is in the mid state.
 	DroppingDefinitions []PartitionDefinition `json:"dropping_definitions"`
-	// NewPartitionIDs is filled when truncating partitions that is in the mid state.
-	NewPartitionIDs []int64
-
-	States []PartitionState `json:"states"`
-	Num    uint64           `json:"num"`
+	States              []PartitionState      `json:"states"`
+	Num                 uint64                `json:"num"`
 	// Only used during ReorganizePartition so far
 	DDLState SchemaState `json:"ddl_state"`
-	// Set during ALTER TABLE ... if the table id needs to change
-	// like if there is a global index or going between non-partitioned
-	// and partitioned table, to make the data dropping / range delete
-	// optimized.
-	NewTableID int64 `json:"new_table_id"`
-	// Set during ALTER TABLE ... PARTITION BY ...
-	// First as the new partition scheme, then in StateDeleteReorg as the old
-	DDLType    PartitionType `json:"ddl_type"`
-	DDLExpr    string        `json:"ddl_expr"`
-	DDLColumns []CIStr       `json:"ddl_columns"`
 }
 
 // Clone clones itself.
@@ -1298,16 +1268,6 @@ func (pi *PartitionInfo) GCPartitionStates() {
 	pi.States = newStates
 }
 
-// HasTruncatingPartitionID checks whether the pid is truncating.
-func (pi *PartitionInfo) HasTruncatingPartitionID(pid int64) bool {
-	for i := range pi.NewPartitionIDs {
-		if pi.NewPartitionIDs[i] == pid {
-			return true
-		}
-	}
-	return false
-}
-
 // PartitionState is the state of the partition.
 type PartitionState struct {
 	ID    int64       `json:"id"`
@@ -1368,17 +1328,6 @@ func (pi *PartitionInfo) FindPartitionDefinitionByName(partitionDefinitionName s
 	return -1
 }
 
-// GetPartitionIDByName gets the partition ID by name.
-func (pi *PartitionInfo) GetPartitionIDByName(partitionDefinitionName string) int64 {
-	lowConstrName := strings.ToLower(partitionDefinitionName)
-	for _, definition := range pi.Definitions {
-		if definition.Name.L == lowConstrName {
-			return definition.ID
-		}
-	}
-	return -1
-}
-
 // IndexColumn provides index column info.
 type IndexColumn struct {
 	Name   CIStr `json:"name"`   // Index name
@@ -1431,8 +1380,6 @@ func (t IndexType) String() string {
 		return "HASH"
 	case IndexTypeRtree:
 		return "RTREE"
-	case IndexTypeHypo:
-		return "HYPO"
 	default:
 		return ""
 	}
@@ -1444,7 +1391,6 @@ const (
 	IndexTypeBtree
 	IndexTypeHash
 	IndexTypeRtree
-	IndexTypeHypo
 )
 
 // IndexInfo provides meta data describing a DB index.
@@ -1709,8 +1655,8 @@ func (db *DBInfo) Copy() *DBInfo {
 }
 
 // LessDBInfo is used for sorting DBInfo by DBInfo.Name.
-func LessDBInfo(a *DBInfo, b *DBInfo) int {
-	return cmp.Compare(a.Name.L, b.Name.L)
+func LessDBInfo(a *DBInfo, b *DBInfo) bool {
+	return a.Name.L < b.Name.L
 }
 
 // CIStr is case insensitive string.
@@ -1837,26 +1783,17 @@ func (t *TTLInfo) GetJobInterval() (time.Duration, error) {
 	return duration.ParseDuration(t.JobInterval)
 }
 
-func writeSettingItemToBuilder(sb *strings.Builder, item string, separatorFns ...func()) {
+func writeSettingItemToBuilder(sb *strings.Builder, item string) {
 	if sb.Len() != 0 {
-		for _, fn := range separatorFns {
-			fn()
-		}
-		if len(separatorFns) == 0 {
-			sb.WriteString(" ")
-		}
+		sb.WriteString(" ")
 	}
 	sb.WriteString(item)
 }
-func writeSettingStringToBuilder(sb *strings.Builder, item string, value string, separatorFns ...func()) {
-	writeSettingItemToBuilder(sb, fmt.Sprintf("%s=\"%s\"", item, strings.ReplaceAll(value, "\"", "\\\"")), separatorFns...)
+func writeSettingStringToBuilder(sb *strings.Builder, item string, value string) {
+	writeSettingItemToBuilder(sb, fmt.Sprintf("%s=\"%s\"", item, strings.ReplaceAll(value, "\"", "\\\"")))
 }
-func writeSettingIntegerToBuilder(sb *strings.Builder, item string, value uint64, separatorFns ...func()) {
-	writeSettingItemToBuilder(sb, fmt.Sprintf("%s=%d", item, value), separatorFns...)
-}
-
-func writeSettingDurationToBuilder(sb *strings.Builder, item string, dur time.Duration, separatorFns ...func()) {
-	writeSettingStringToBuilder(sb, item, dur.String(), separatorFns...)
+func writeSettingIntegerToBuilder(sb *strings.Builder, item string, value uint64) {
+	writeSettingItemToBuilder(sb, fmt.Sprintf("%s=%d", item, value))
 }
 
 func (p *PlacementSettings) String() string {
@@ -1914,92 +1851,20 @@ func (p *PlacementSettings) Clone() *PlacementSettings {
 	return &cloned
 }
 
-// RunawayActionType is the type of runaway action.
-type RunawayActionType int32
-
-//revive:disable:exported
-const (
-	RunawayActionNone RunawayActionType = iota
-	RunawayActionDryRun
-	RunawayActionCooldown
-	RunawayActionKill
-)
-
-// RunawayWatchType is the type of runaway watch.
-type RunawayWatchType int32
-
-//revive:disable:exported
-const (
-	WatchNone RunawayWatchType = iota
-	WatchExact
-	WatchSimilar
-	WatchPlan
-)
-
-func (t RunawayWatchType) String() string {
-	switch t {
-	case WatchExact:
-		return "EXACT"
-	case WatchSimilar:
-		return "SIMILAR"
-	case WatchPlan:
-		return "PLAN"
-	default:
-		return "NONE"
-	}
-}
-
-// RunawayOptionType is the runaway's option type.
-type RunawayOptionType int
-
-//revive:disable:exported
-const (
-	RunawayRule RunawayOptionType = iota
-	RunawayAction
-	RunawayWatch
-)
-
-func (t RunawayActionType) String() string {
-	switch t {
-	case RunawayActionDryRun:
-		return "DRYRUN"
-	case RunawayActionCooldown:
-		return "COOLDOWN"
-	case RunawayActionKill:
-		return "KILL"
-	default:
-		return "DRYRUN"
-	}
-}
-
 // ResourceGroupRefInfo is the struct to refer the resource group.
 type ResourceGroupRefInfo struct {
 	ID   int64 `json:"id"`
 	Name CIStr `json:"name"`
 }
 
-// ResourceGroupRunawaySettings is the runaway settings of the resource group
-type ResourceGroupRunawaySettings struct {
-	ExecElapsedTimeMs uint64            `json:"exec_elapsed_time_ms"`
-	Action            RunawayActionType `json:"action"`
-	WatchType         RunawayWatchType  `json:"watch_type"`
-	WatchDurationMs   int64             `json:"watch_duration_ms"`
-}
-
-type ResourceGroupBackgroundSettings struct {
-	JobTypes []string `json:"job_types"`
-}
-
 // ResourceGroupSettings is the settings of the resource group
 type ResourceGroupSettings struct {
-	RURate           uint64                           `json:"ru_per_sec"`
-	Priority         uint64                           `json:"priority"`
-	CPULimiter       string                           `json:"cpu_limit"`
-	IOReadBandwidth  string                           `json:"io_read_bandwidth"`
-	IOWriteBandwidth string                           `json:"io_write_bandwidth"`
-	BurstLimit       int64                            `json:"burst_limit"`
-	Runaway          *ResourceGroupRunawaySettings    `json:"runaway"`
-	Background       *ResourceGroupBackgroundSettings `json:"background"`
+	RURate           uint64 `json:"ru_per_sec"`
+	Priority         uint64 `json:"priority"`
+	CPULimiter       string `json:"cpu_limit"`
+	IOReadBandwidth  string `json:"io_read_bandwidth"`
+	IOWriteBandwidth string `json:"io_write_bandwidth"`
+	BurstLimit       int64  `json:"burst_limit"`
 }
 
 // NewResourceGroupSettings creates a new ResourceGroupSettings.
@@ -2037,43 +1902,23 @@ const (
 
 func (p *ResourceGroupSettings) String() string {
 	sb := new(strings.Builder)
-	separatorFn := func() {
-		sb.WriteString(", ")
-	}
 	if p.RURate != 0 {
-		writeSettingIntegerToBuilder(sb, "RU_PER_SEC", p.RURate, separatorFn)
+		writeSettingIntegerToBuilder(sb, "RU_PER_SEC", p.RURate)
 	}
-	writeSettingItemToBuilder(sb, "PRIORITY="+PriorityValueToName(p.Priority), separatorFn)
+	writeSettingItemToBuilder(sb, "PRIORITY="+PriorityValueToName(p.Priority))
 	if len(p.CPULimiter) > 0 {
-		writeSettingStringToBuilder(sb, "CPU", p.CPULimiter, separatorFn)
+		writeSettingStringToBuilder(sb, "CPU", p.CPULimiter)
 	}
 	if len(p.IOReadBandwidth) > 0 {
-		writeSettingStringToBuilder(sb, "IO_READ_BANDWIDTH", p.IOReadBandwidth, separatorFn)
+		writeSettingStringToBuilder(sb, "IO_READ_BANDWIDTH", p.IOReadBandwidth)
 	}
 	if len(p.IOWriteBandwidth) > 0 {
-		writeSettingStringToBuilder(sb, "IO_WRITE_BANDWIDTH", p.IOWriteBandwidth, separatorFn)
+		writeSettingStringToBuilder(sb, "IO_WRITE_BANDWIDTH", p.IOWriteBandwidth)
 	}
 	// Once burst limit is negative, meaning allow burst with unlimit.
 	if p.BurstLimit < 0 {
-		writeSettingItemToBuilder(sb, "BURSTABLE", separatorFn)
+		writeSettingItemToBuilder(sb, "BURSTABLE")
 	}
-	if p.Runaway != nil {
-		writeSettingDurationToBuilder(sb, "QUERY_LIMIT=(EXEC_ELAPSED", time.Duration(p.Runaway.ExecElapsedTimeMs)*time.Millisecond, separatorFn)
-		writeSettingItemToBuilder(sb, "ACTION="+p.Runaway.Action.String())
-		if p.Runaway.WatchType != WatchNone {
-			writeSettingItemToBuilder(sb, "WATCH="+p.Runaway.WatchType.String())
-			if p.Runaway.WatchDurationMs > 0 {
-				writeSettingDurationToBuilder(sb, "DURATION", time.Duration(p.Runaway.WatchDurationMs)*time.Millisecond)
-			} else {
-				writeSettingItemToBuilder(sb, "DURATION=UNLIMITED")
-			}
-		}
-		sb.WriteString(")")
-	}
-	if p.Background != nil {
-		fmt.Fprintf(sb, ", BACKGROUND=(TASK_TYPES='%s')", strings.Join(p.Background.JobTypes, ","))
-	}
-
 	return sb.String()
 }
 
@@ -2193,12 +2038,4 @@ func (s WindowRepeatType) String() string {
 	default:
 		return ""
 	}
-}
-
-// TraceInfo is the information for trace.
-type TraceInfo struct {
-	// ConnectionID is the id of the connection
-	ConnectionID uint64 `json:"connection_id"`
-	// SessionAlias is the alias of session
-	SessionAlias string `json:"session_alias"`
 }

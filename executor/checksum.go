@@ -19,7 +19,6 @@ import (
 	"strconv"
 
 	"github.com/pingcap/tidb/distsql"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
@@ -31,11 +30,11 @@ import (
 	"go.uber.org/zap"
 )
 
-var _ exec.Executor = &ChecksumTableExec{}
+var _ Executor = &ChecksumTableExec{}
 
 // ChecksumTableExec represents ChecksumTable executor.
 type ChecksumTableExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	tables map[int64]*checksumContext
 	done   bool
@@ -43,11 +42,11 @@ type ChecksumTableExec struct {
 
 // Open implements the Executor Open interface.
 func (e *ChecksumTableExec) Open(ctx context.Context) error {
-	if err := e.BaseExecutor.Open(ctx); err != nil {
+	if err := e.baseExecutor.Open(ctx); err != nil {
 		return err
 	}
 
-	concurrency, err := getChecksumTableConcurrency(e.Ctx())
+	concurrency, err := getChecksumTableConcurrency(e.ctx)
 	if err != nil {
 		return err
 	}
@@ -85,7 +84,7 @@ func (e *ChecksumTableExec) Open(ctx context.Context) error {
 }
 
 // Next implements the Executor Next interface.
-func (e *ChecksumTableExec) Next(_ context.Context, req *chunk.Chunk) error {
+func (e *ChecksumTableExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.Reset()
 	if e.done {
 		return nil
@@ -104,7 +103,7 @@ func (e *ChecksumTableExec) Next(_ context.Context, req *chunk.Chunk) error {
 func (e *ChecksumTableExec) buildTasks() ([]*checksumTask, error) {
 	var tasks []*checksumTask
 	for id, t := range e.tables {
-		reqs, err := t.BuildRequests(e.Ctx())
+		reqs, err := t.BuildRequests(e.ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -129,8 +128,8 @@ func (e *ChecksumTableExec) checksumWorker(taskCh <-chan *checksumTask, resultCh
 }
 
 func (e *ChecksumTableExec) handleChecksumRequest(req *kv.Request) (resp *tipb.ChecksumResponse, err error) {
-	ctx := distsql.WithSQLKvExecCounterInterceptor(context.TODO(), e.Ctx().GetSessionVars().StmtCtx)
-	res, err := distsql.Checksum(ctx, e.Ctx().GetClient(), req, e.Ctx().GetSessionVars().KVVars)
+	ctx := distsql.WithSQLKvExecCounterInterceptor(context.TODO(), e.ctx.GetSessionVars().StmtCtx)
+	res, err := distsql.Checksum(ctx, e.ctx.GetClient(), req, e.ctx.GetSessionVars().KVVars)
 	if err != nil {
 		return nil, err
 	}
@@ -243,12 +242,11 @@ func (c *checksumContext) buildTableRequest(ctx sessionctx.Context, tableID int6
 
 	var builder distsql.RequestBuilder
 	builder.SetResourceGroupTagger(ctx.GetSessionVars().StmtCtx.GetResourceGroupTagger())
-	return builder.SetHandleRanges(ctx.GetSessionVars().StmtCtx, tableID, c.TableInfo.IsCommonHandle, ranges).
+	return builder.SetHandleRanges(ctx.GetSessionVars().StmtCtx, tableID, c.TableInfo.IsCommonHandle, ranges, nil).
 		SetChecksumRequest(checksum).
 		SetStartTS(c.StartTs).
 		SetConcurrency(ctx.GetSessionVars().DistSQLScanConcurrency()).
 		SetResourceGroupName(ctx.GetSessionVars().ResourceGroupName).
-		SetExplicitRequestSourceType(ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 }
 
@@ -267,7 +265,6 @@ func (c *checksumContext) buildIndexRequest(ctx sessionctx.Context, tableID int6
 		SetStartTS(c.StartTs).
 		SetConcurrency(ctx.GetSessionVars().DistSQLScanConcurrency()).
 		SetResourceGroupName(ctx.GetSessionVars().ResourceGroupName).
-		SetExplicitRequestSourceType(ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 }
 

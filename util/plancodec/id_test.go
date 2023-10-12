@@ -81,7 +81,6 @@ func TestPlanIDChanged(t *testing.T) {
 		{typePartitionUnionID, 53},
 		{typeShuffleID, 54},
 		{typeShuffleReceiverID, 55},
-		{typeImportIntoID, 59},
 	}
 
 	for _, testcase := range testCases {

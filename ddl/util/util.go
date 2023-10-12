@@ -18,12 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
@@ -32,7 +30,7 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/tikv/client-go/v2/tikvrpc"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3"
 	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
@@ -232,7 +230,7 @@ func GetTimeZone(sctx sessionctx.Context) (string, int) {
 		}
 	}
 	_, offset := time.Now().In(loc).Zone()
-	return "UTC", offset
+	return "", offset
 }
 
 // enableEmulatorGC means whether to enable emulator GC. The default is enable.
@@ -280,7 +278,7 @@ func DeleteKeyFromEtcd(key string, etcdCli *clientv3.Client, retryCnt int, timeo
 		if err == nil {
 			return nil
 		}
-		logutil.BgLogger().Warn("etcd-cli delete key failed", zap.String("category", "ddl"), zap.String("key", key), zap.Error(err), zap.Int("retryCnt", i))
+		logutil.BgLogger().Warn("[ddl] etcd-cli delete key failed", zap.String("key", key), zap.Error(err), zap.Int("retryCnt", i))
 	}
 	return errors.Trace(err)
 }
@@ -303,7 +301,7 @@ func PutKVToEtcd(ctx context.Context, etcdCli *clientv3.Client, retryCnt int, ke
 		if err == nil {
 			return nil
 		}
-		logutil.BgLogger().Warn("etcd-cli put kv failed", zap.String("category", "ddl"), zap.String("key", key), zap.String("value", val), zap.Error(err), zap.Int("retryCnt", i))
+		logutil.BgLogger().Warn("[ddl] etcd-cli put kv failed", zap.String("key", key), zap.String("value", val), zap.Error(err), zap.Int("retryCnt", i))
 		time.Sleep(KeyOpRetryInterval)
 	}
 	return errors.Trace(err)
@@ -317,48 +315,4 @@ func IsContextDone(ctx context.Context) bool {
 	default:
 	}
 	return false
-}
-
-// WrapKey2String wraps the key to a string.
-func WrapKey2String(key []byte) string {
-	if len(key) == 0 {
-		return "''"
-	}
-	return fmt.Sprintf("0x%x", key)
-}
-
-const (
-	getRaftKvVersionSQL = "show config where type = 'tikv' and name = 'storage.engine'"
-	raftKv2             = "raft-kv2"
-)
-
-// IsRaftKv2 checks whether the raft-kv2 is enabled
-func IsRaftKv2(ctx context.Context, sctx sessionctx.Context) (bool, error) {
-	// Mock store does not support `show config` now, so we  use failpoint here
-	// to control whether we are in raft-kv2
-	failpoint.Inject("IsRaftKv2", func(v failpoint.Value) (bool, error) {
-		v2, _ := v.(bool)
-		return v2, nil
-	})
-
-	rs, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, getRaftKvVersionSQL)
-	if err != nil {
-		return false, err
-	}
-	if rs == nil {
-		return false, nil
-	}
-
-	defer terror.Call(rs.Close)
-	rows, err := sqlexec.DrainRecordSet(ctx, rs, sctx.GetSessionVars().MaxChunkSize)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	if len(rows) == 0 {
-		return false, nil
-	}
-
-	// All nodes should have the same type of engine
-	raftVersion := rows[0].GetString(3)
-	return raftVersion == raftKv2, nil
 }

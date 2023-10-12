@@ -22,20 +22,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/planner/cardinality"
-	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
-	"github.com/pingcap/tidb/statistics/handle/autoanalyze"
+	"github.com/pingcap/tidb/statistics/handle/internal"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/ranger"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
 func TestSingleSessionInsert(t *testing.T) {
@@ -88,7 +90,7 @@ func TestSingleSessionInsert(t *testing.T) {
 	require.Equal(t, int64(rowCount1*2), stats1.RealtimeCount)
 
 	// Test IncreaseFactor.
-	count, err := cardinality.ColumnEqualRowCount(testKit.Session(), stats1, types.NewIntDatum(1), tableInfo1.Columns[0].ID)
+	count, err := stats1.ColumnEqualRowCount(testKit.Session(), types.NewIntDatum(1), tableInfo1.Columns[0].ID)
 	require.NoError(t, err)
 	require.Equal(t, float64(rowCount1*2), count)
 
@@ -295,11 +297,10 @@ func TestTxnWithFailure(t *testing.T) {
 func TestUpdatePartition(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
-	pruneMode, err := dom.StatsHandle().GetCurrentPruneMode()
-	require.NoError(t, err)
-	testKit.MustQuery("select @@tidb_partition_prune_mode").Check(testkit.Rows(pruneMode))
+	testKit.MustQuery("select @@tidb_partition_prune_mode").Check(testkit.Rows(string(dom.StatsHandle().CurrentPruneMode())))
 	testKit.MustExec("use test")
 	testkit.WithPruneMode(testKit, variable.Static, func() {
+		err := dom.StatsHandle().RefreshVars()
 		require.NoError(t, err)
 		testKit.MustExec("drop table if exists t")
 		createTable := `CREATE TABLE t (a int, b char(5)) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (6),PARTITION p1 VALUES LESS THAN (11))`
@@ -347,7 +348,7 @@ func TestUpdatePartition(t *testing.T) {
 		}
 		// assert WithGetTableStatsByQuery get the same result
 		for _, def := range pi.Definitions {
-			statsTbl := h.GetPartitionStats(tableInfo, def.ID)
+			statsTbl := h.GetPartitionStats(tableInfo, def.ID, handle.WithTableStatsByQuery())
 			require.Equal(t, int64(3), statsTbl.ModifyCount)
 			require.Equal(t, int64(0), statsTbl.RealtimeCount)
 			require.Equal(t, int64(0), statsTbl.Columns[bColID].TotColSize)
@@ -362,10 +363,10 @@ func TestAutoUpdate(t *testing.T) {
 		testKit.MustExec("use test")
 		testKit.MustExec("create table t (a varchar(20))")
 
-		autoanalyze.AutoAnalyzeMinCnt = 0
+		handle.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.2")
 		defer func() {
-			autoanalyze.AutoAnalyzeMinCnt = 1000
+			handle.AutoAnalyzeMinCnt = 1000
 			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
@@ -445,8 +446,6 @@ func TestAutoUpdate(t *testing.T) {
 		tableInfo = tbl.Meta()
 		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
-		testKit.MustExec("explain select * from t where a > 'a'")
-		require.NoError(t, h.LoadNeededHistograms())
 		stats = h.GetTableStats(tableInfo)
 		require.Equal(t, int64(8), stats.RealtimeCount)
 		require.Equal(t, int64(0), stats.ModifyCount)
@@ -467,10 +466,10 @@ func TestAutoUpdatePartition(t *testing.T) {
 		testKit.MustExec("create table t (a int) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (6))")
 		testKit.MustExec("analyze table t")
 
-		autoanalyze.AutoAnalyzeMinCnt = 0
+		handle.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.6")
 		defer func() {
-			autoanalyze.AutoAnalyzeMinCnt = 1000
+			handle.AutoAnalyzeMinCnt = 1000
 			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
@@ -481,6 +480,7 @@ func TestAutoUpdatePartition(t *testing.T) {
 		tableInfo := tbl.Meta()
 		pi := tableInfo.GetPartitionInfo()
 		h := do.StatsHandle()
+		require.NoError(t, h.RefreshVars())
 
 		require.NoError(t, h.Update(is))
 		stats := h.GetPartitionStats(tableInfo, pi.Definitions[0].ID)
@@ -494,6 +494,79 @@ func TestAutoUpdatePartition(t *testing.T) {
 		require.Equal(t, int64(1), stats.RealtimeCount)
 		require.Equal(t, int64(0), stats.ModifyCount)
 	})
+}
+
+func TestAutoAnalyzeOnEmptyTable(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+
+	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
+	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
+	defer func() {
+		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
+		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
+	}()
+
+	tt := time.Now().Add(-1 * time.Minute)
+	h, m := tt.Hour(), tt.Minute()
+	start, end := fmt.Sprintf("%02d:%02d +0000", h, m), fmt.Sprintf("%02d:%02d +0000", h, m)
+	tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", start))
+	tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", end))
+	dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema())
+
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int, index idx(a))")
+	// to pass the stats.Pseudo check in autoAnalyzeTable
+	tk.MustExec("analyze table t")
+	// to pass the AutoAnalyzeMinCnt check in autoAnalyzeTable
+	tk.MustExec("insert into t values (1)" + strings.Repeat(", (1)", int(handle.AutoAnalyzeMinCnt)))
+	require.NoError(t, dom.StatsHandle().DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, dom.StatsHandle().Update(dom.InfoSchema()))
+
+	// test if it will be limited by the time range
+	require.False(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
+
+	tk.MustExec("set global tidb_auto_analyze_start_time='00:00 +0000'")
+	tk.MustExec("set global tidb_auto_analyze_end_time='23:59 +0000'")
+	require.True(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
+}
+
+func TestAutoAnalyzeOutOfSpecifiedTime(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+
+	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
+	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
+	defer func() {
+		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
+		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
+	}()
+
+	tt := time.Now().Add(-1 * time.Minute)
+	h, m := tt.Hour(), tt.Minute()
+	start, end := fmt.Sprintf("%02d:%02d +0000", h, m), fmt.Sprintf("%02d:%02d +0000", h, m)
+	tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", start))
+	tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", end))
+	dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema())
+
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int)")
+	// to pass the stats.Pseudo check in autoAnalyzeTable
+	tk.MustExec("analyze table t")
+	// to pass the AutoAnalyzeMinCnt check in autoAnalyzeTable
+	tk.MustExec("insert into t values (1)" + strings.Repeat(", (1)", int(handle.AutoAnalyzeMinCnt)))
+	require.NoError(t, dom.StatsHandle().DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, dom.StatsHandle().Update(dom.InfoSchema()))
+
+	require.False(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
+	tk.MustExec("analyze table t")
+
+	tk.MustExec("alter table t add index ia(a)")
+	require.False(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
+
+	tk.MustExec("set global tidb_auto_analyze_start_time='00:00 +0000'")
+	tk.MustExec("set global tidb_auto_analyze_end_time='23:59 +0000'")
+	require.True(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
 }
 
 func TestIssue25700(t *testing.T) {
@@ -512,12 +585,262 @@ func TestIssue25700(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("CREATE TABLE `t` ( `ldecimal` decimal(32,4) DEFAULT NULL, `rdecimal` decimal(32,4) DEFAULT NULL, `gen_col` decimal(36,4) GENERATED ALWAYS AS (`ldecimal` + `rdecimal`) VIRTUAL, `col_timestamp` timestamp(3) NULL DEFAULT NULL ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;")
 	tk.MustExec("analyze table t")
-	tk.MustExec("INSERT INTO `t` (`ldecimal`, `rdecimal`, `col_timestamp`) VALUES (2265.2200, 9843.4100, '1999-12-31 16:00:00')" + strings.Repeat(", (2265.2200, 9843.4100, '1999-12-31 16:00:00')", int(autoanalyze.AutoAnalyzeMinCnt)))
+	tk.MustExec("INSERT INTO `t` (`ldecimal`, `rdecimal`, `col_timestamp`) VALUES (2265.2200, 9843.4100, '1999-12-31 16:00:00')" + strings.Repeat(", (2265.2200, 9843.4100, '1999-12-31 16:00:00')", int(handle.AutoAnalyzeMinCnt)))
 	require.NoError(t, dom.StatsHandle().DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, dom.StatsHandle().Update(dom.InfoSchema()))
 
 	require.True(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
 	require.Equal(t, "finished", tk.MustQuery("show analyze status").Rows()[1][7])
+}
+
+func TestAutoAnalyzeOnChangeAnalyzeVer(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int, index idx(a))")
+	tk.MustExec("insert into t values(1)")
+	tk.MustExec("set @@global.tidb_analyze_version = 1")
+	do := dom
+	handle.AutoAnalyzeMinCnt = 0
+	defer func() {
+		handle.AutoAnalyzeMinCnt = 1000
+	}()
+	h := do.StatsHandle()
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is := do.InfoSchema()
+	err = h.UpdateSessionVar()
+	require.NoError(t, err)
+	require.NoError(t, h.Update(is))
+	// Auto analyze when global ver is 1.
+	h.HandleAutoAnalyze(is)
+	require.NoError(t, h.Update(is))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	statsTbl1 := h.GetTableStats(tbl.Meta())
+	// Check that all the version of t's stats are 1.
+	for _, col := range statsTbl1.Columns {
+		require.Equal(t, int64(1), col.StatsVer)
+	}
+	for _, idx := range statsTbl1.Indices {
+		require.Equal(t, int64(1), idx.StatsVer)
+	}
+	tk.MustExec("set @@global.tidb_analyze_version = 2")
+	err = h.UpdateSessionVar()
+	require.NoError(t, err)
+	tk.MustExec("insert into t values(1), (2), (3), (4)")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.Update(is))
+	// Auto analyze t whose version is 1 after setting global ver to 2.
+	h.HandleAutoAnalyze(is)
+	require.NoError(t, h.Update(is))
+	statsTbl1 = h.GetTableStats(tbl.Meta())
+	require.Equal(t, int64(5), statsTbl1.RealtimeCount)
+	// All of its statistics should still be version 1.
+	for _, col := range statsTbl1.Columns {
+		require.Equal(t, int64(1), col.StatsVer)
+	}
+	for _, idx := range statsTbl1.Indices {
+		require.Equal(t, int64(1), idx.StatsVer)
+	}
+	// Add a new table after the analyze version set to 2.
+	tk.MustExec("create table tt(a int, index idx(a))")
+	tk.MustExec("insert into tt values(1), (2), (3), (4), (5)")
+	err = h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is = do.InfoSchema()
+	tbl2, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("tt"))
+	require.NoError(t, err)
+	require.NoError(t, h.Update(is))
+	h.HandleAutoAnalyze(is)
+	require.NoError(t, h.Update(is))
+	statsTbl2 := h.GetTableStats(tbl2.Meta())
+	// Since it's a newly created table. Auto analyze should analyze it's statistics to version2.
+	for _, idx := range statsTbl2.Indices {
+		require.Equal(t, int64(2), idx.StatsVer)
+	}
+	for _, col := range statsTbl2.Columns {
+		require.Equal(t, int64(2), col.StatsVer)
+	}
+	tk.MustExec("set @@global.tidb_analyze_version = 1")
+}
+
+func TestTableAnalyzed(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("create table t (a int)")
+	testKit.MustExec("insert into t values (1)")
+
+	is := dom.InfoSchema()
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tableInfo := tbl.Meta()
+	h := dom.StatsHandle()
+
+	require.NoError(t, h.Update(is))
+	statsTbl := h.GetTableStats(tableInfo)
+	require.False(t, handle.TableAnalyzed(statsTbl))
+
+	testKit.MustExec("analyze table t")
+	require.NoError(t, h.Update(is))
+	statsTbl = h.GetTableStats(tableInfo)
+	require.True(t, handle.TableAnalyzed(statsTbl))
+
+	h.Clear()
+	oriLease := h.Lease()
+	// set it to non-zero so we will use load by need strategy
+	h.SetLease(1)
+	defer func() {
+		h.SetLease(oriLease)
+	}()
+	require.NoError(t, h.Update(is))
+	statsTbl = h.GetTableStats(tableInfo)
+	require.True(t, handle.TableAnalyzed(statsTbl))
+}
+
+func TestUpdateErrorRate(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	h.SetLease(0)
+	require.NoError(t, h.Update(is))
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_enable_pseudo_for_outdated_stats = 1")
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), primary key(a), index idx(b))")
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+
+	testKit.MustExec("insert into t values (1, 3)")
+
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("analyze table t")
+
+	testKit.MustExec("insert into t values (2, 3)")
+	testKit.MustExec("insert into t values (5, 3)")
+	testKit.MustExec("insert into t values (8, 3)")
+	testKit.MustExec("insert into t values (12, 3)")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is = dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	tbl := h.GetTableStats(tblInfo)
+	aID := tblInfo.Columns[0].ID
+	bID := tblInfo.Indices[0].ID
+
+	// The statistic table is outdated now.
+	require.True(t, tbl.Columns[aID].NotAccurate())
+
+	testKit.MustQuery("select * from t where a between 1 and 10")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	require.NoError(t, h.HandleUpdateStats(is))
+	h.UpdateErrorRate(is)
+	require.NoError(t, h.Update(is))
+	tbl = h.GetTableStats(tblInfo)
+
+	// The error rate of this column is not larger than MaxErrorRate now.
+	require.False(t, tbl.Columns[aID].NotAccurate())
+
+	require.True(t, tbl.Indices[bID].NotAccurate())
+	testKit.MustQuery("select * from t where b between 2 and 10")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	require.NoError(t, h.HandleUpdateStats(is))
+	h.UpdateErrorRate(is)
+	require.NoError(t, h.Update(is))
+	tbl = h.GetTableStats(tblInfo)
+	require.False(t, tbl.Indices[bID].NotAccurate())
+	require.Equal(t, int64(1), tbl.Indices[bID].QueryTotal)
+
+	testKit.MustExec("analyze table t")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.Update(is))
+	tbl = h.GetTableStats(tblInfo)
+	require.Equal(t, int64(0), tbl.Indices[bID].QueryTotal)
+}
+
+func TestUpdatePartitionErrorRate(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	h.SetLease(0)
+	require.NoError(t, h.Update(is))
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec(`set @@tidb_partition_prune_mode='` + string(variable.Static) + `'`)
+	testKit.MustExec("create table t (a bigint(64), primary key(a)) partition by range (a) (partition p0 values less than (30))")
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+
+	testKit.MustExec("insert into t values (1)")
+
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("analyze table t")
+
+	testKit.MustExec("insert into t values (2)")
+	testKit.MustExec("insert into t values (5)")
+	testKit.MustExec("insert into t values (8)")
+	testKit.MustExec("insert into t values (12)")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is = dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	pid := tblInfo.Partition.Definitions[0].ID
+	tbl := h.GetPartitionStats(tblInfo, pid)
+	aID := tblInfo.Columns[0].ID
+
+	// The statistic table is outdated now.
+	require.True(t, tbl.Columns[aID].NotAccurate())
+
+	testKit.MustQuery("select * from t where a between 1 and 10")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	require.NoError(t, h.HandleUpdateStats(is))
+	h.UpdateErrorRate(is)
+	require.NoError(t, h.Update(is))
+	tbl = h.GetPartitionStats(tblInfo, pid)
+
+	// Feedback will not take effect under partition table.
+	require.True(t, tbl.Columns[aID].NotAccurate())
 }
 
 func appendBucket(h *statistics.Histogram, l, r int64) {
@@ -580,6 +903,232 @@ func TestSplitRange(t *testing.T) {
 	}
 }
 
+func TestQueryFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), primary key(a), index idx(b))")
+	testKit.MustExec("insert into t values (1,2),(2,2),(4,5)")
+	testKit.MustExec("analyze table t with 0 topn")
+	testKit.MustExec("insert into t values (3,4)")
+
+	h := dom.StatsHandle()
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		statistics.MaxNumberOfRanges = oriNumber
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+	tests := []struct {
+		sql     string
+		hist    string
+		idxCols int
+	}{
+		{
+			// test primary key feedback
+			sql: "select * from t where t.a <= 5 order by a desc",
+			hist: "column:1 ndv:4 totColSize:0\n" +
+				"num: 1 lower_bound: -9223372036854775808 upper_bound: 2 repeats: 0 ndv: 0\n" +
+				"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n" +
+				"num: 1 lower_bound: 4 upper_bound: 4 repeats: 1 ndv: 0",
+			idxCols: 0,
+		},
+		{
+			// test index feedback by double read
+			sql: "select * from t use index(idx) where t.b <= 5",
+			hist: "index:1 ndv:2\n" +
+				"num: 3 lower_bound: -inf upper_bound: 5 repeats: 0 ndv: 0\n" +
+				"num: 1 lower_bound: 5 upper_bound: 5 repeats: 1 ndv: 0",
+			idxCols: 1,
+		},
+		{
+			// test index feedback by single read
+			sql: "select b from t use index(idx) where t.b <= 5",
+			hist: "index:1 ndv:2\n" +
+				"num: 3 lower_bound: -inf upper_bound: 5 repeats: 0 ndv: 0\n" +
+				"num: 1 lower_bound: 5 upper_bound: 5 repeats: 1 ndv: 0",
+			idxCols: 1,
+		},
+	}
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	for i, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, err)
+		require.NoError(t, h.Update(is))
+		tblInfo := table.Meta()
+		tbl := h.GetTableStats(tblInfo)
+		if test.idxCols == 0 {
+			require.Equal(t, tests[i].hist, tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+		} else {
+			require.Equal(t, tests[i].hist, tbl.Indices[tblInfo.Indices[0].ID].ToString(1))
+		}
+	}
+
+	// Feedback from limit executor may not be accurate.
+	testKit.MustQuery("select * from t where t.a <= 5 limit 1")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	feedback := h.GetQueryFeedback()
+	require.Equal(t, 0, feedback.Size)
+
+	// Test only collect for max number of Ranges.
+	statistics.MaxNumberOfRanges = 0
+	for _, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		feedback := h.GetQueryFeedback()
+		require.Equal(t, 0, feedback.Size)
+	}
+
+	// Test collect feedback by probability.
+	statistics.FeedbackProbability.Store(0)
+	statistics.MaxNumberOfRanges = oriNumber
+	for _, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		feedback := h.GetQueryFeedback()
+		require.Equal(t, 0, feedback.Size)
+	}
+
+	// Test that after drop stats, the feedback won't cause panic.
+	statistics.FeedbackProbability.Store(1)
+	for _, test := range tests {
+		testKit.MustQuery(test.sql)
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	testKit.MustExec("drop stats t")
+	require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+
+	// Test that the outdated feedback won't cause panic.
+	testKit.MustExec("analyze table t")
+	for _, test := range tests {
+		testKit.MustQuery(test.sql)
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	testKit.MustExec("drop table t")
+	require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+}
+
+func TestQueryFeedbackForPartition(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec(`set @@tidb_partition_prune_mode='` + string(variable.Static) + `'`)
+	testKit.MustExec(`create table t (a bigint(64), b bigint(64), primary key(a), index idx(b))
+			    partition by range (a) (
+			    partition p0 values less than (3),
+			    partition p1 values less than (6))`)
+	testKit.MustExec("insert into t values (1,2),(2,2),(3,4),(4,1),(5,6)")
+	testKit.MustExec("analyze table t")
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	h := dom.StatsHandle()
+	// Feedback will not take effect under partition table.
+	tests := []struct {
+		sql     string
+		hist    string
+		idxCols int
+	}{
+		{
+			// test primary key feedback
+			sql: "select * from t where t.a <= 5",
+			hist: "column:1 ndv:2 totColSize:2\n" +
+				"num: 1 lower_bound: 1 upper_bound: 1 repeats: 1 ndv: 0\n" +
+				"num: 1 lower_bound: 2 upper_bound: 2 repeats: 1 ndv: 0",
+			idxCols: 0,
+		},
+		{
+			// test index feedback by double read
+			sql: "select * from t use index(idx) where t.b <= 5",
+			hist: "index:1 ndv:1\n" +
+				"num: 2 lower_bound: 2 upper_bound: 2 repeats: 2 ndv: 0",
+			idxCols: 1,
+		},
+		{
+			// test index feedback by single read
+			sql: "select b from t use index(idx) where t.b <= 5",
+			hist: "index:1 ndv:1\n" +
+				"num: 2 lower_bound: 2 upper_bound: 2 repeats: 2 ndv: 0",
+			idxCols: 1,
+		},
+	}
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	pi := tblInfo.GetPartitionInfo()
+	require.NotNil(t, pi)
+
+	// This test will check the result of partition p0.
+	var pid int64
+	for _, def := range pi.Definitions {
+		if def.Name.L == "p0" {
+			pid = def.ID
+			break
+		}
+	}
+
+	for i, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, err)
+		require.NoError(t, h.Update(is))
+		tbl := h.GetPartitionStats(tblInfo, pid)
+		if test.idxCols == 0 {
+			require.Equal(t, tests[i].hist, tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+		} else {
+			require.Equal(t, tests[i].hist, tbl.Indices[tblInfo.Indices[0].ID].ToString(1))
+		}
+	}
+	testKit.MustExec("drop table t")
+}
+
+func TestUpdateSystemTable(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("create table t (a int, b int)")
+	testKit.MustExec("insert into t values (1,2)")
+	testKit.MustExec("analyze table t")
+	testKit.MustExec("analyze table mysql.stats_histograms")
+	h := dom.StatsHandle()
+	require.NoError(t, h.Update(dom.InfoSchema()))
+	feedback := h.GetQueryFeedback()
+	// We may have query feedback for system tables, but we do not need to store them.
+	require.Equal(t, 0, feedback.Size)
+}
+
 func TestOutOfOrderUpdate(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
@@ -614,6 +1163,742 @@ func TestOutOfOrderUpdate(t *testing.T) {
 	testKit.MustQuery(fmt.Sprintf("select count from mysql.stats_meta where table_id = %d", tableInfo.ID)).Check(testkit.Rows("3"))
 }
 
+func TestUpdateStatsByLocalFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec(`set @@tidb_partition_prune_mode='` + string(variable.Static) + `'`)
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), primary key(a), index idx(b))")
+	testKit.MustExec("insert into t values (1,2),(2,2),(4,5)")
+	testKit.MustExec("analyze table t with 0 topn")
+	testKit.MustExec("insert into t values (3,5)")
+	h := dom.StatsHandle()
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+		statistics.MaxNumberOfRanges = oriNumber
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+
+	tblInfo := table.Meta()
+	h.GetTableStats(tblInfo)
+
+	testKit.MustQuery("select * from t use index(idx) where b <= 5")
+	testKit.MustQuery("select * from t where a > 1")
+	testKit.MustQuery("select * from t use index(idx) where b = 5")
+
+	h.UpdateStatsByLocalFeedback(dom.InfoSchema())
+	tbl := h.GetTableStats(tblInfo)
+
+	require.Equal(t, "column:1 ndv:3 totColSize:0\n"+
+		"num: 1 lower_bound: 1 upper_bound: 1 repeats: 1 ndv: 0\n"+
+		"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n"+
+		"num: 1 lower_bound: 4 upper_bound: 9223372036854775807 repeats: 0 ndv: 0", tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+	sc := &stmtctx.StatementContext{TimeZone: time.Local}
+	low, err := codec.EncodeKey(sc, nil, types.NewIntDatum(5))
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(2), tbl.Indices[tblInfo.Indices[0].ID].CMSketch.QueryBytes(low))
+
+	require.Equal(t, "index:1 ndv:2\n"+
+		"num: 2 lower_bound: -inf upper_bound: 5 repeats: 0 ndv: 0\n"+
+		"num: 1 lower_bound: 5 upper_bound: 5 repeats: 1 ndv: 0", tbl.Indices[tblInfo.Indices[0].ID].ToString(1))
+
+	// Test that it won't cause panic after update.
+	testKit.MustQuery("select * from t use index(idx) where b > 0")
+
+	// Test that after drop stats, it won't cause panic.
+	testKit.MustExec("drop stats t")
+	h.UpdateStatsByLocalFeedback(dom.InfoSchema())
+}
+
+func TestUpdatePartitionStatsByLocalFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec(`set @@tidb_partition_prune_mode='` + string(variable.Static) + `'`)
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), primary key(a)) partition by range (a) (partition p0 values less than (6))")
+	testKit.MustExec("insert into t values (1,2),(2,2),(4,5)")
+	testKit.MustExec("analyze table t")
+	testKit.MustExec("insert into t values (3,5)")
+	h := dom.StatsHandle()
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+
+	testKit.MustQuery("select * from t where a > 1").Check(testkit.Rows("2 2", "3 5", "4 5"))
+
+	h.UpdateStatsByLocalFeedback(dom.InfoSchema())
+
+	tblInfo := table.Meta()
+	pid := tblInfo.Partition.Definitions[0].ID
+	tbl := h.GetPartitionStats(tblInfo, pid)
+
+	// Feedback will not take effect under partition table.
+	require.Equal(t, "column:1 ndv:3 totColSize:0\n"+
+		"num: 1 lower_bound: 1 upper_bound: 1 repeats: 1 ndv: 0\n"+
+		"num: 1 lower_bound: 2 upper_bound: 2 repeats: 1 ndv: 0\n"+
+		"num: 1 lower_bound: 4 upper_bound: 4 repeats: 1 ndv: 0", tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+}
+
+func TestFeedbackWithStatsVer2(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+	testKit.MustExec("set global tidb_analyze_version = 1")
+	testKit.MustExec("set @@tidb_analyze_version = 1")
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		statistics.MaxNumberOfRanges = oriNumber
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	// Case 1: You can't set tidb_analyze_version to 2 if feedback is enabled.
+	statistics.FeedbackProbability.Store(1)
+	testKit.MustQuery("select @@tidb_analyze_version").Check(testkit.Rows("1"))
+	testKit.MustExec("set @@tidb_analyze_version = 2")
+	testKit.MustQuery("show warnings").Check(testkit.Rows(`Error 1105 variable tidb_analyze_version not updated because analyze version 2 is incompatible with query feedback. Please consider setting feedback-probability to 0.0 in config file to disable query feedback`))
+	testKit.MustQuery("select @@tidb_analyze_version").Check(testkit.Rows("1"))
+
+	// Case 2: Feedback wouldn't be applied on version 2 statistics.
+	statistics.FeedbackProbability.Store(0)
+	testKit.MustExec("set @@tidb_analyze_version = 2")
+	testKit.MustQuery("select @@tidb_analyze_version").Check(testkit.Rows("2"))
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), index idx(b))")
+	for i := 0; i < 200; i++ {
+		testKit.MustExec("insert into t values (1,2),(2,2),(4,5),(2,3),(3,4)")
+	}
+	testKit.MustExec("analyze table t with 0 topn")
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	testKit.MustExec("analyze table t")
+	err = h.Update(dom.InfoSchema())
+	require.NoError(t, err)
+	statsTblBefore := h.GetTableStats(tblInfo)
+	statistics.FeedbackProbability.Store(1)
+	// make the statistics inaccurate.
+	for i := 0; i < 200; i++ {
+		testKit.MustExec("insert into t values (3,4), (3,4), (3,4), (3,4), (3,4)")
+	}
+	// trigger feedback
+	testKit.MustExec("select * from t where t.a <= 5 order by a desc")
+	testKit.MustExec("select b from t use index(idx) where t.b <= 5")
+
+	h.UpdateStatsByLocalFeedback(dom.InfoSchema())
+	err = h.DumpStatsFeedbackToKV()
+	require.NoError(t, err)
+	err = h.HandleUpdateStats(dom.InfoSchema())
+	require.NoError(t, err)
+	statsTblAfter := h.GetTableStats(tblInfo)
+	// assert that statistics not changed
+	internal.AssertTableEqual(t, statsTblBefore, statsTblAfter)
+
+	// Case 3: Feedback is still effective on version 1 statistics.
+	testKit.MustExec("set tidb_analyze_version = 1")
+	testKit.MustExec("create table t1 (a bigint(64), b bigint(64), index idx(b))")
+	for i := 0; i < 200; i++ {
+		testKit.MustExec("insert into t1 values (1,2),(2,2),(4,5),(2,3),(3,4)")
+	}
+	testKit.MustExec("analyze table t1 with 0 topn")
+	// make the statistics inaccurate.
+	for i := 0; i < 200; i++ {
+		testKit.MustExec("insert into t1 values (3,4), (3,4), (3,4), (3,4), (3,4)")
+	}
+	is = dom.InfoSchema()
+	table, err = is.TableByName(model.NewCIStr("test"), model.NewCIStr("t1"))
+	require.NoError(t, err)
+	tblInfo = table.Meta()
+	statsTblBefore = h.GetTableStats(tblInfo)
+	// trigger feedback
+	testKit.MustExec("select b from t1 use index(idx) where t1.b <= 5")
+
+	h.UpdateStatsByLocalFeedback(dom.InfoSchema())
+	err = h.DumpStatsFeedbackToKV()
+	require.NoError(t, err)
+	err = h.HandleUpdateStats(dom.InfoSchema())
+	require.NoError(t, err)
+	statsTblAfter = h.GetTableStats(tblInfo)
+	// assert that statistics changed(feedback worked)
+	require.False(t, statistics.HistogramEqual(&statsTblBefore.Indices[1].Histogram, &statsTblAfter.Indices[1].Histogram, false))
+
+	// Case 4: When existing version 1 stats + tidb_analyze_version=2 + feedback enabled, explicitly running `analyze table` still results in version 1 stats.
+	statistics.FeedbackProbability.Store(0)
+	testKit.MustExec("set tidb_analyze_version = 2")
+	statistics.FeedbackProbability.Store(1)
+	testKit.MustExec("analyze table t1 with 0 topn")
+	testKit.MustQuery("show warnings").Check(testkit.Rows(
+		"Warning 1105 Use analyze version 1 on table `t1` because this table already has version 1 statistics and query feedback is also enabled." +
+			" If you want to switch to version 2 statistics, please first disable query feedback by setting feedback-probability to 0.0 in the config file."))
+	testKit.MustQuery(fmt.Sprintf("select stats_ver from mysql.stats_histograms where table_id = %d", tblInfo.ID)).Check(testkit.Rows("1", "1", "1"))
+
+	testKit.MustExec("set global tidb_analyze_version = 1")
+}
+
+func TestNeedAnalyzeTable(t *testing.T) {
+	columns := map[int64]*statistics.Column{}
+	columns[1] = &statistics.Column{StatsVer: statistics.Version2}
+	tests := []struct {
+		tbl    *statistics.Table
+		ratio  float64
+		limit  time.Duration
+		result bool
+		reason string
+	}{
+		// table was never analyzed and has reach the limit
+		{
+			tbl:    &statistics.Table{Version: oracle.GoTimeToTS(time.Now())},
+			limit:  0,
+			ratio:  0,
+			result: true,
+			reason: "table unanalyzed",
+		},
+		// table was never analyzed but has not reached the limit
+		{
+			tbl:    &statistics.Table{Version: oracle.GoTimeToTS(time.Now())},
+			limit:  time.Hour,
+			ratio:  0,
+			result: true,
+			reason: "table unanalyzed",
+		},
+		// table was already analyzed but auto analyze is disabled
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 1, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0,
+			result: false,
+			reason: "",
+		},
+		// table was already analyzed but modify count is small
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 0, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0.3,
+			result: false,
+			reason: "",
+		},
+		// table was already analyzed
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 1, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0.3,
+			result: true,
+			reason: "too many modifications",
+		},
+		// table was already analyzed
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 1, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0.3,
+			result: true,
+			reason: "too many modifications",
+		},
+		// table was already analyzed
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 1, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0.3,
+			result: true,
+			reason: "too many modifications",
+		},
+		// table was already analyzed
+		{
+			tbl:    &statistics.Table{HistColl: statistics.HistColl{Columns: columns, ModifyCount: 1, RealtimeCount: 1}},
+			limit:  0,
+			ratio:  0.3,
+			result: true,
+			reason: "too many modifications",
+		},
+	}
+	for _, test := range tests {
+		needAnalyze, reason := handle.NeedAnalyzeTable(test.tbl, test.limit, test.ratio)
+		require.Equal(t, test.result, needAnalyze)
+		require.True(t, strings.HasPrefix(reason, test.reason))
+	}
+}
+
+func TestIndexQueryFeedback(t *testing.T) {
+	t.Skip("support update the topn of index equal conditions")
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+	}()
+	statistics.FeedbackProbability.Store(1)
+
+	testKit.MustExec("use test")
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), c bigint(64), d float, e double, f decimal(17,2), " +
+		"g time, h date, index idx_b(b), index idx_ab(a,b), index idx_ac(a,c), index idx_ad(a, d), index idx_ae(a, e), index idx_af(a, f)," +
+		" index idx_ag(a, g), index idx_ah(a, h))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf(`insert into t values (1, %d, %d, %d, %d, %d, %d, "%s")`, i, i, i, i, i, i, fmt.Sprintf("1000-01-%02d", i+1)))
+	}
+	h := dom.StatsHandle()
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("analyze table t with 3 buckets")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf(`insert into t values (1, %d, %d, %d, %d, %d, %d, "%s")`, i, i, i, i, i, i, fmt.Sprintf("1000-01-%02d", i+1)))
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is := dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	tests := []struct {
+		sql     string
+		hist    string
+		idxCols int
+		rangeID int64
+		idxID   int64
+		eqCount uint32
+	}{
+		{
+			sql: "select * from t use index(idx_ab) where a = 1 and b < 21",
+			hist: "index:1 ndv:20\n" +
+				"num: 16 lower_bound: -inf upper_bound: 7 repeats: 0\n" +
+				"num: 16 lower_bound: 8 upper_bound: 15 repeats: 0\n" +
+				"num: 9 lower_bound: 16 upper_bound: 21 repeats: 0",
+			rangeID: tblInfo.Indices[0].ID,
+			idxID:   tblInfo.Indices[1].ID,
+			idxCols: 1,
+			eqCount: 32,
+		},
+		{
+			sql: "select * from t use index(idx_ac) where a = 1 and c < 21",
+			hist: "column:3 ndv:20 totColSize:40\n" +
+				"num: 13 lower_bound: -9223372036854775808 upper_bound: 6 repeats: 0\n" +
+				"num: 13 lower_bound: 7 upper_bound: 13 repeats: 0\n" +
+				"num: 12 lower_bound: 14 upper_bound: 21 repeats: 0",
+			rangeID: tblInfo.Columns[2].ID,
+			idxID:   tblInfo.Indices[2].ID,
+			idxCols: 0,
+			eqCount: 32,
+		},
+		{
+			sql: "select * from t use index(idx_ad) where a = 1 and d < 21",
+			hist: "column:4 ndv:20 totColSize:320\n" +
+				"num: 13 lower_bound: -10000000000000 upper_bound: 6 repeats: 0\n" +
+				"num: 12 lower_bound: 7 upper_bound: 13 repeats: 0\n" +
+				"num: 10 lower_bound: 14 upper_bound: 21 repeats: 0",
+			rangeID: tblInfo.Columns[3].ID,
+			idxID:   tblInfo.Indices[3].ID,
+			idxCols: 0,
+			eqCount: 32,
+		},
+		{
+			sql: "select * from t use index(idx_ae) where a = 1 and e < 21",
+			hist: "column:5 ndv:20 totColSize:320\n" +
+				"num: 13 lower_bound: -100000000000000000000000 upper_bound: 6 repeats: 0\n" +
+				"num: 12 lower_bound: 7 upper_bound: 13 repeats: 0\n" +
+				"num: 10 lower_bound: 14 upper_bound: 21 repeats: 0",
+			rangeID: tblInfo.Columns[4].ID,
+			idxID:   tblInfo.Indices[4].ID,
+			idxCols: 0,
+			eqCount: 32,
+		},
+		{
+			sql: "select * from t use index(idx_af) where a = 1 and f < 21",
+			hist: "column:6 ndv:20 totColSize:400\n" +
+				"num: 13 lower_bound: -999999999999999.99 upper_bound: 6.00 repeats: 0\n" +
+				"num: 12 lower_bound: 7.00 upper_bound: 13.00 repeats: 0\n" +
+				"num: 10 lower_bound: 14.00 upper_bound: 21.00 repeats: 0",
+			rangeID: tblInfo.Columns[5].ID,
+			idxID:   tblInfo.Indices[5].ID,
+			idxCols: 0,
+			eqCount: 32,
+		},
+		{
+			sql: "select * from t use index(idx_ag) where a = 1 and g < 21",
+			hist: "column:7 ndv:20 totColSize:196\n" +
+				"num: 13 lower_bound: -838:59:59 upper_bound: 00:00:06 repeats: 0\n" +
+				"num: 12 lower_bound: 00:00:07 upper_bound: 00:00:13 repeats: 0\n" +
+				"num: 10 lower_bound: 00:00:14 upper_bound: 00:00:21 repeats: 0",
+			rangeID: tblInfo.Columns[6].ID,
+			idxID:   tblInfo.Indices[6].ID,
+			idxCols: 0,
+			eqCount: 30,
+		},
+		{
+			sql: `select * from t use index(idx_ah) where a = 1 and h < "1000-01-21"`,
+			hist: "column:8 ndv:20 totColSize:360\n" +
+				"num: 13 lower_bound: 1000-01-01 upper_bound: 1000-01-07 repeats: 0\n" +
+				"num: 12 lower_bound: 1000-01-08 upper_bound: 1000-01-14 repeats: 0\n" +
+				"num: 10 lower_bound: 1000-01-15 upper_bound: 1000-01-21 repeats: 0",
+			rangeID: tblInfo.Columns[7].ID,
+			idxID:   tblInfo.Indices[7].ID,
+			idxCols: 0,
+			eqCount: 32,
+		},
+	}
+	for i, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, h.Update(is))
+		tbl := h.GetTableStats(tblInfo)
+		if test.idxCols == 0 {
+			require.Equal(t, tests[i].hist, tbl.Columns[test.rangeID].ToString(0))
+		} else {
+			require.Equal(t, tests[i].hist, tbl.Indices[test.rangeID].ToString(1))
+		}
+		val, err := codec.EncodeKey(testKit.Session().GetSessionVars().StmtCtx, nil, types.NewIntDatum(1))
+		require.NoError(t, err)
+		require.Equal(t, uint64(test.eqCount), tbl.Indices[test.idxID].CMSketch.QueryBytes(val))
+	}
+}
+
+func TestIndexQueryFeedback4TopN(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec("create table t (a bigint(64), index idx(a))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(`insert into t values (1)`)
+	}
+	h := dom.StatsHandle()
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("set @@session.tidb_analyze_version = 1")
+	testKit.MustExec("set @@tidb_enable_fast_analyze = 1")
+	testKit.MustExec("analyze table t with 3 buckets")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(`insert into t values (1)`)
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	is := dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+
+	testKit.MustQuery("select * from t use index(idx) where a = 1")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.NoError(t, h.DumpStatsFeedbackToKV())
+	require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+	require.NoError(t, h.Update(is))
+	tbl := h.GetTableStats(tblInfo)
+	val, err := codec.EncodeKey(testKit.Session().GetSessionVars().StmtCtx, nil, types.NewIntDatum(1))
+	require.NoError(t, err)
+	require.Equal(t, uint64(40), tbl.Indices[1].CMSketch.QueryBytes(val))
+}
+
+func TestAbnormalIndexFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), index idx_ab(a,b))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d, %d)", i/5, i))
+	}
+	testKit.MustExec("set @@session.tidb_analyze_version = 1")
+	testKit.MustExec("analyze table t with 3 buckets, 0 topn")
+	testKit.MustExec("delete from t where a = 1")
+	testKit.MustExec("delete from t where b > 10")
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := table.Meta()
+	h := dom.StatsHandle()
+	tests := []struct {
+		sql     string
+		hist    string
+		rangeID int64
+		idxID   int64
+		eqCount uint32
+	}{
+		{
+			// The real count of `a = 1` is 0.
+			sql: "select * from t where a = 1 and b < 21",
+			hist: "column:2 ndv:20 totColSize:20\n" +
+				"num: 5 lower_bound: -9223372036854775808 upper_bound: 7 repeats: 0 ndv: 0\n" +
+				"num: 4 lower_bound: 7 upper_bound: 14 repeats: 0 ndv: 0\n" +
+				"num: 4 lower_bound: 14 upper_bound: 21 repeats: 0 ndv: 0",
+			rangeID: tblInfo.Columns[1].ID,
+			idxID:   tblInfo.Indices[0].ID,
+			eqCount: 3,
+		},
+		{
+			// The real count of `b > 10` is 0.
+			sql: "select * from t where a = 2 and b > 10",
+			hist: "column:2 ndv:20 totColSize:20\n" +
+				"num: 5 lower_bound: -9223372036854775808 upper_bound: 7 repeats: 0 ndv: 0\n" +
+				"num: 6 lower_bound: 7 upper_bound: 14 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 14 upper_bound: 9223372036854775807 repeats: 0 ndv: 0",
+			rangeID: tblInfo.Columns[1].ID,
+			idxID:   tblInfo.Indices[0].ID,
+			eqCount: 3,
+		},
+	}
+	for i, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, h.Update(is))
+		tbl := h.GetTableStats(tblInfo)
+		require.Equal(t, tests[i].hist, tbl.Columns[test.rangeID].ToString(0))
+		val, err := codec.EncodeKey(testKit.Session().GetSessionVars().StmtCtx, nil, types.NewIntDatum(1))
+		require.NoError(t, err)
+		require.Equal(t, uint64(test.eqCount), tbl.Indices[test.idxID].CMSketch.QueryBytes(val))
+	}
+}
+
+func TestFeedbackRanges(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		statistics.MaxNumberOfRanges = oriNumber
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("create table t (a tinyint, b tinyint, primary key(a), index idx(a, b))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d, %d)", i, i))
+	}
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("set @@session.tidb_analyze_version=1")
+	testKit.MustExec("analyze table t with 3 buckets")
+	for i := 30; i < 40; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d, %d)", i, i))
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	tests := []struct {
+		sql   string
+		hist  string
+		colID int64
+	}{
+		{
+			sql: "select * from t where a <= 50 or (a > 130 and a < 140)",
+			hist: "column:1 ndv:30 totColSize:0\n" +
+				"num: 8 lower_bound: -128 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 50 repeats: 0 ndv: 0",
+			colID: 1,
+		},
+		{
+			sql: "select * from t where a >= 10",
+			hist: "column:1 ndv:30 totColSize:0\n" +
+				"num: 8 lower_bound: -128 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 127 repeats: 0 ndv: 0",
+			colID: 1,
+		},
+		{
+			sql: "select * from t use index(idx) where a = 1 and (b <= 50 or (b > 130 and b < 140))",
+			hist: "column:2 ndv:20 totColSize:30\n" +
+				"num: 8 lower_bound: -128 upper_bound: 7 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 7 upper_bound: 14 repeats: 0 ndv: 0\n" +
+				"num: 7 lower_bound: 14 upper_bound: 51 repeats: 0 ndv: 0",
+			colID: 2,
+		},
+	}
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	for _, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, err)
+		require.NoError(t, h.Update(is))
+		tblInfo := table.Meta()
+		tbl := h.GetTableStats(tblInfo)
+		require.Equal(t, test.hist, tbl.Columns[test.colID].ToString(0))
+	}
+}
+
+func TestUnsignedFeedbackRanges(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+		statistics.MaxNumberOfRanges = oriNumber
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec("create table t (a tinyint unsigned, primary key(a))")
+	testKit.MustExec("create table t1 (a bigint unsigned, primary key(a))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d)", i))
+		testKit.MustExec(fmt.Sprintf("insert into t1 values (%d)", i))
+	}
+	err := h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	err = h.HandleDDLEvent(<-h.DDLEventCh())
+	require.NoError(t, err)
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("analyze table t, t1 with 3 buckets")
+	for i := 30; i < 40; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d)", i))
+		testKit.MustExec(fmt.Sprintf("insert into t1 values (%d)", i))
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	tests := []struct {
+		sql     string
+		hist    string
+		tblName string
+	}{
+		{
+			sql: "select * from t where a <= 50",
+			hist: "column:1 ndv:30 totColSize:10\n" +
+				"num: 8 lower_bound: 0 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 50 repeats: 0 ndv: 0",
+			tblName: "t",
+		},
+		{
+			sql: "select count(*) from t",
+			hist: "column:1 ndv:30 totColSize:10\n" +
+				"num: 8 lower_bound: 0 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 255 repeats: 0 ndv: 0",
+			tblName: "t",
+		},
+		{
+			sql: "select * from t1 where a <= 50",
+			hist: "column:1 ndv:30 totColSize:10\n" +
+				"num: 8 lower_bound: 0 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 50 repeats: 0 ndv: 0",
+			tblName: "t1",
+		},
+		{
+			sql: "select count(*) from t1",
+			hist: "column:1 ndv:30 totColSize:10\n" +
+				"num: 8 lower_bound: 0 upper_bound: 8 repeats: 0 ndv: 0\n" +
+				"num: 8 lower_bound: 8 upper_bound: 16 repeats: 0 ndv: 0\n" +
+				"num: 14 lower_bound: 16 upper_bound: 18446744073709551615 repeats: 0 ndv: 0",
+			tblName: "t1",
+		},
+	}
+	is := dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+	for _, test := range tests {
+		table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr(test.tblName))
+		require.NoError(t, err)
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, err)
+		require.NoError(t, h.Update(is))
+		tblInfo := table.Meta()
+		tbl := h.GetTableStats(tblInfo)
+		require.Equal(t, test.hist, tbl.Columns[1].ToString(0))
+	}
+}
+
 func TestLoadHistCorrelation(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
@@ -639,6 +1924,36 @@ func TestLoadHistCorrelation(t *testing.T) {
 	require.Equal(t, "1", result.Rows()[0][9])
 }
 
+func TestDeleteUpdateFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+	}()
+	statistics.FeedbackProbability.Store(1)
+
+	h := dom.StatsHandle()
+	testKit.MustExec("use test")
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), index idx_ab(a,b))")
+	for i := 0; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values (%d, %d)", i/5, i))
+	}
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	testKit.MustExec("analyze table t with 3 buckets")
+
+	testKit.MustExec("delete from t where a = 1")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.Equal(t, 0, h.GetQueryFeedback().Size)
+	testKit.MustExec("update t set a = 6 where a = 2")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.Equal(t, 0, h.GetQueryFeedback().Size)
+	testKit.MustExec("explain analyze delete from t where a = 3")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	require.Equal(t, 0, h.GetQueryFeedback().Size)
+}
+
 func BenchmarkHandleAutoAnalyze(b *testing.B) {
 	store, dom := testkit.CreateMockStoreAndDomain(b)
 	testKit := testkit.NewTestKit(b, store)
@@ -653,7 +1968,69 @@ func BenchmarkHandleAutoAnalyze(b *testing.B) {
 // subtraction parses the number for counter and returns new - old.
 // string for counter will be `label:<name:"type" value:"ok" > counter:<value:0 > `
 func subtraction(newMetric *dto.Metric, oldMetric *dto.Metric) int {
-	return int(*(newMetric.Counter.Value) - *(oldMetric.Counter.Value))
+	newStr := newMetric.String()
+	oldStr := oldMetric.String()
+	newIdx := strings.LastIndex(newStr, ":")
+	newNum, _ := strconv.Atoi(newStr[newIdx+1 : len(newStr)-3])
+	oldIdx := strings.LastIndex(oldStr, ":")
+	oldNum, _ := strconv.Atoi(oldStr[oldIdx+1 : len(oldStr)-3])
+	return newNum - oldNum
+}
+
+func TestDisableFeedback(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+	}()
+	statistics.FeedbackProbability.Store(0.0)
+	oldNum := &dto.Metric{}
+	err := metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblOK).Write(oldNum)
+	require.NoError(t, err)
+	testKit.MustExec("use test")
+	testKit.MustExec("create table t (a int, b int, index idx_a(a))")
+	testKit.MustExec("insert into t values (1, 1), (2, 2), (3, 3), (5, 5)")
+	testKit.MustExec("analyze table t with 0 topn")
+	for i := 0; i < 20; i++ {
+		testKit.MustQuery("select /*+ use_index(t, idx_a) */ * from t where a < 4")
+	}
+
+	newNum := &dto.Metric{}
+	err = metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblOK).Write(newNum)
+	require.NoError(t, err)
+	require.Equal(t, 0, subtraction(newNum, oldNum))
+}
+
+func TestFeedbackCounter(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	testKit := testkit.NewTestKit(t, store)
+
+	oriProbability := statistics.FeedbackProbability.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	oldNum := &dto.Metric{}
+	err := metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblOK).Write(oldNum)
+	require.NoError(t, err)
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("create table t (a int, b int, index idx_a(a))")
+	testKit.MustExec("insert into t values (1, 1), (2, 2), (3, 3), (5, 5)")
+	testKit.MustExec("analyze table t with 0 topn")
+	for i := 0; i < 20; i++ {
+		testKit.MustQuery("select /*+ use_index(t, idx_a) */ * from t where a < 4")
+	}
+
+	newNum := &dto.Metric{}
+	err = metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblOK).Write(newNum)
+	require.NoError(t, err)
+	require.Equal(t, 20, subtraction(newNum, oldNum))
 }
 
 func TestMergeTopN(t *testing.T) {
@@ -744,41 +2121,6 @@ func TestMergeTopN(t *testing.T) {
 	}
 }
 
-func TestStatsVariables(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	tk := testkit.NewTestKit(t, store)
-	h := dom.StatsHandle()
-	sctx := tk.Session().(sessionctx.Context)
-
-	pruneMode, err := h.GetCurrentPruneMode()
-	require.NoError(t, err)
-	require.Equal(t, string(variable.Dynamic), pruneMode)
-	err = handle.UpdateSCtxVarsForStats(sctx)
-	require.NoError(t, err)
-	require.Equal(t, 2, sctx.GetSessionVars().AnalyzeVersion)
-	require.Equal(t, true, sctx.GetSessionVars().EnableHistoricalStats)
-	require.Equal(t, string(variable.Dynamic), sctx.GetSessionVars().PartitionPruneMode.Load())
-	require.Equal(t, false, sctx.GetSessionVars().EnableAnalyzeSnapshot)
-	require.Equal(t, true, sctx.GetSessionVars().SkipMissingPartitionStats)
-
-	tk.MustExec(`set global tidb_analyze_version=1`)
-	tk.MustExec(`set global tidb_partition_prune_mode='static'`)
-	tk.MustExec(`set global tidb_enable_historical_stats=0`)
-	tk.MustExec(`set global tidb_enable_analyze_snapshot=1`)
-	tk.MustExec(`set global tidb_skip_missing_partition_stats=0`)
-
-	pruneMode, err = h.GetCurrentPruneMode()
-	require.NoError(t, err)
-	require.Equal(t, string(variable.Static), pruneMode)
-	err = handle.UpdateSCtxVarsForStats(sctx)
-	require.NoError(t, err)
-	require.Equal(t, 1, sctx.GetSessionVars().AnalyzeVersion)
-	require.Equal(t, false, sctx.GetSessionVars().EnableHistoricalStats)
-	require.Equal(t, string(variable.Static), sctx.GetSessionVars().PartitionPruneMode.Load())
-	require.Equal(t, true, sctx.GetSessionVars().EnableAnalyzeSnapshot)
-	require.Equal(t, false, sctx.GetSessionVars().SkipMissingPartitionStats)
-}
-
 func TestAutoUpdatePartitionInDynamicOnlyMode(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
@@ -795,6 +2137,7 @@ func TestAutoUpdatePartitionInDynamicOnlyMode(t *testing.T) {
 		do := dom
 		is := do.InfoSchema()
 		h := do.StatsHandle()
+		require.NoError(t, h.RefreshVars())
 		require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
 
 		testKit.MustExec("insert into t values (1, 'a'), (2, 'b'), (11, 'c'), (12, 'd'), (21, 'e'), (22, 'f')")
@@ -802,10 +2145,10 @@ func TestAutoUpdatePartitionInDynamicOnlyMode(t *testing.T) {
 		testKit.MustExec("set @@tidb_analyze_version = 2")
 		testKit.MustExec("analyze table t")
 
-		autoanalyze.AutoAnalyzeMinCnt = 0
+		handle.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.1")
 		defer func() {
-			autoanalyze.AutoAnalyzeMinCnt = 1000
+			handle.AutoAnalyzeMinCnt = 1000
 			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
@@ -848,9 +2191,9 @@ func TestAutoAnalyzeRatio(t *testing.T) {
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
-	autoanalyze.AutoAnalyzeMinCnt = 0
+	handle.AutoAnalyzeMinCnt = 0
 	defer func() {
-		autoanalyze.AutoAnalyzeMinCnt = 1000
+		handle.AutoAnalyzeMinCnt = 1000
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
@@ -1076,9 +2419,9 @@ func TestStatsLockUnlockForAutoAnalyze(t *testing.T) {
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
-	autoanalyze.AutoAnalyzeMinCnt = 0
+	handle.AutoAnalyzeMinCnt = 0
 	defer func() {
-		autoanalyze.AutoAnalyzeMinCnt = 1000
+		handle.AutoAnalyzeMinCnt = 1000
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
@@ -1133,6 +2476,98 @@ func TestStatsLockUnlockForAutoAnalyze(t *testing.T) {
 
 	tblStats2 := h.GetTableStats(tbl.Meta())
 	require.Equal(t, int64(15), tblStats2.RealtimeCount)
+}
+
+func TestStatsLockForFeedback(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	testKit.MustExec("use test")
+
+	// TODO(tiancaiamao): query feedback is broken when paging is on.
+	testKit.MustExec("set @@tidb_enable_paging = off")
+
+	testKit.MustExec("set @@session.tidb_analyze_version = 0")
+	testKit.MustExec("create table t (a bigint(64), b bigint(64), primary key(a), index idx(b))")
+	testKit.MustExec("insert into t values (1,2),(2,2),(4,5)")
+	testKit.MustExec("analyze table t with 0 topn")
+	testKit.MustExec("insert into t values (3,4)")
+	for i := 5; i < 20; i++ {
+		testKit.MustExec(fmt.Sprintf("insert into t values(%d, %d)", i, i+1))
+	}
+
+	h := dom.StatsHandle()
+	oriProbability := statistics.FeedbackProbability.Load()
+	oriNumber := statistics.MaxNumberOfRanges
+	oriMinLogCount := handle.MinLogScanCount.Load()
+	oriErrorRate := handle.MinLogErrorRate.Load()
+	defer func() {
+		statistics.FeedbackProbability.Store(oriProbability)
+		statistics.MaxNumberOfRanges = oriNumber
+		handle.MinLogScanCount.Store(oriMinLogCount)
+		handle.MinLogErrorRate.Store(oriErrorRate)
+	}()
+	statistics.FeedbackProbability.Store(1)
+	handle.MinLogScanCount.Store(0)
+	handle.MinLogErrorRate.Store(0)
+	tests := []struct {
+		sql  string
+		hist string
+	}{
+		{
+			// test primary key feedback
+			sql: "select * from t where t.a <= 4 order by a desc",
+			hist: "column:1 ndv:4 totColSize:0\n" +
+				"num: 1 lower_bound: -9223372036854775808 upper_bound: 2 repeats: 0 ndv: 0\n" +
+				"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n" +
+				"num: 1 lower_bound: 4 upper_bound: 4 repeats: 1 ndv: 0",
+		},
+		//run 1st sql after table locked, hist should not changed
+		{
+			sql: "select * from t where t.a <= 8 order by a desc",
+			hist: "column:1 ndv:4 totColSize:0\n" +
+				"num: 1 lower_bound: -9223372036854775808 upper_bound: 2 repeats: 0 ndv: 0\n" +
+				"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n" +
+				"num: 1 lower_bound: 4 upper_bound: 4 repeats: 1 ndv: 0",
+		},
+		//run 2nd sql after table unlocked, hist should not changed
+		{
+			sql: "select * from t where t.a <= 12 order by a desc",
+			hist: "column:1 ndv:12 totColSize:0\n" +
+				"num: 1 lower_bound: -9223372036854775808 upper_bound: 2 repeats: 0 ndv: 0\n" +
+				"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n" +
+				"num: 9 lower_bound: 4 upper_bound: 12 repeats: 0 ndv: 0",
+		},
+		//run 4th sql after table locked, hist should not changed
+		{
+			sql: "select * from t",
+			hist: "column:1 ndv:12 totColSize:0\n" +
+				"num: 1 lower_bound: -9223372036854775808 upper_bound: 2 repeats: 0 ndv: 0\n" +
+				"num: 2 lower_bound: 2 upper_bound: 4 repeats: 0 ndv: 0\n" +
+				"num: 9 lower_bound: 4 upper_bound: 12 repeats: 0 ndv: 0",
+		},
+	}
+	is := dom.InfoSchema()
+	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	for i, test := range tests {
+		testKit.MustQuery(test.sql)
+		require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+		require.NoError(t, h.DumpStatsFeedbackToKV())
+		require.NoError(t, h.HandleUpdateStats(dom.InfoSchema()))
+		require.NoError(t, err)
+		require.NoError(t, h.Update(is))
+		tblInfo := table.Meta()
+		tbl := h.GetTableStats(tblInfo)
+		//fmt.Printf("\n i: %d, exp: %s, \nact: %s\n", i, tests[i].hist, tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+		require.Equal(t, tests[i].hist, tbl.Columns[tblInfo.Columns[0].ID].ToString(0))
+		// add table lock after 2nd
+		if i == 0 {
+			testKit.MustExec("lock stats t")
+		} else if i == 1 {
+			testKit.MustExec("unlock stats t")
+		} else if i == 2 {
+			testKit.MustExec("lock stats t")
+		}
+	}
 }
 
 func TestStatsLockForDelta(t *testing.T) {
@@ -1276,15 +2711,15 @@ func TestNotDumpSysTable(t *testing.T) {
 func TestAutoAnalyzePartitionTableAfterAddingIndex(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
-	oriMinCnt := autoanalyze.AutoAnalyzeMinCnt
+	oriMinCnt := handle.AutoAnalyzeMinCnt
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
 	defer func() {
-		autoanalyze.AutoAnalyzeMinCnt = oriMinCnt
+		handle.AutoAnalyzeMinCnt = oriMinCnt
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
-	autoanalyze.AutoAnalyzeMinCnt = 0
+	handle.AutoAnalyzeMinCnt = 0
 	tk.MustExec("set global tidb_auto_analyze_start_time='00:00 +0000'")
 	tk.MustExec("set global tidb_auto_analyze_end_time='23:59 +0000'")
 	tk.MustExec("set global tidb_analyze_version = 2")

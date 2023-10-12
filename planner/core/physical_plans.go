@@ -17,7 +17,6 @@ package core
 import (
 	"fmt"
 	"strconv"
-	"strings"
 	"unsafe"
 
 	"github.com/pingcap/errors"
@@ -26,8 +25,6 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/planner/cardinality"
 	"github.com/pingcap/tidb/planner/property"
 	"github.com/pingcap/tidb/planner/util"
 	"github.com/pingcap/tidb/sessionctx"
@@ -201,7 +198,7 @@ func (p *PhysicalTableReader) GetTableScan() (*PhysicalTableScan, error) {
 
 // GetAvgRowSize return the average row size of this plan.
 func (p *PhysicalTableReader) GetAvgRowSize() float64 {
-	return cardinality.GetAvgRowSize(p.SCtx(), getTblStats(p.tablePlan), p.tablePlan.Schema().Columns, false, false)
+	return getTblStats(p.tablePlan).GetAvgRowSize(p.ctx, p.tablePlan.Schema().Columns, false, false)
 }
 
 // MemoryUsage return the memory usage of PhysicalTableReader
@@ -234,14 +231,14 @@ func setMppOrBatchCopForTableScan(curPlan PhysicalPlan) {
 
 // GetPhysicalTableReader returns PhysicalTableReader for logical TiKVSingleGather.
 func (sg *TiKVSingleGather) GetPhysicalTableReader(schema *expression.Schema, stats *property.StatsInfo, props ...*property.PhysicalProperty) *PhysicalTableReader {
-	reader := PhysicalTableReader{}.Init(sg.SCtx(), sg.SelectBlockOffset())
+	reader := PhysicalTableReader{}.Init(sg.ctx, sg.blockOffset)
 	reader.PartitionInfo = PartitionInfo{
 		PruningConds:   sg.Source.allConds,
 		PartitionNames: sg.Source.partitionNames,
 		Columns:        sg.Source.TblCols,
 		ColumnNames:    sg.Source.names,
 	}
-	reader.SetStats(stats)
+	reader.stats = stats
 	reader.SetSchema(schema)
 	reader.childrenReqProps = props
 	return reader
@@ -249,8 +246,8 @@ func (sg *TiKVSingleGather) GetPhysicalTableReader(schema *expression.Schema, st
 
 // GetPhysicalIndexReader returns PhysicalIndexReader for logical TiKVSingleGather.
 func (sg *TiKVSingleGather) GetPhysicalIndexReader(schema *expression.Schema, stats *property.StatsInfo, props ...*property.PhysicalProperty) *PhysicalIndexReader {
-	reader := PhysicalIndexReader{}.Init(sg.SCtx(), sg.SelectBlockOffset())
-	reader.SetStats(stats)
+	reader := PhysicalIndexReader{}.Init(sg.ctx, sg.blockOffset)
+	reader.stats = stats
 	reader.SetSchema(schema)
 	reader.childrenReqProps = props
 	return reader
@@ -289,11 +286,10 @@ func (p *PhysicalTableReader) ExtractCorrelatedCols() (corCols []*expression.Cor
 	return corCols
 }
 
-// BuildPlanTrace implements PhysicalPlan interface.
-func (p *PhysicalTableReader) BuildPlanTrace() *tracing.PlanTrace {
-	rp := p.basePhysicalPlan.BuildPlanTrace()
+func (p *PhysicalTableReader) buildPlanTrace() *tracing.PlanTrace {
+	rp := p.basePhysicalPlan.buildPlanTrace()
 	if p.tablePlan != nil {
-		rp.Children = append(rp.Children, p.tablePlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, p.tablePlan.buildPlanTrace())
 	}
 	return rp
 }
@@ -365,11 +361,10 @@ func (p *PhysicalIndexReader) ExtractCorrelatedCols() (corCols []*expression.Cor
 	return corCols
 }
 
-// BuildPlanTrace implements PhysicalPlan interface.
-func (p *PhysicalIndexReader) BuildPlanTrace() *tracing.PlanTrace {
-	rp := p.basePhysicalPlan.BuildPlanTrace()
+func (p *PhysicalIndexReader) buildPlanTrace() *tracing.PlanTrace {
+	rp := p.basePhysicalPlan.buildPlanTrace()
 	if p.indexPlan != nil {
-		rp.Children = append(rp.Children, p.indexPlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, p.indexPlan.buildPlanTrace())
 	}
 	return rp
 }
@@ -493,22 +488,21 @@ func (p *PhysicalIndexLookUpReader) ExtractCorrelatedCols() (corCols []*expressi
 
 // GetIndexNetDataSize return the estimated total size in bytes via network transfer.
 func (p *PhysicalIndexLookUpReader) GetIndexNetDataSize() float64 {
-	return cardinality.GetAvgRowSize(p.SCtx(), getTblStats(p.indexPlan), p.indexPlan.Schema().Columns, true, false) * p.indexPlan.StatsCount()
+	return getTblStats(p.indexPlan).GetAvgRowSize(p.ctx, p.indexPlan.Schema().Columns, true, false) * p.indexPlan.StatsCount()
 }
 
 // GetAvgTableRowSize return the average row size of each final row.
 func (p *PhysicalIndexLookUpReader) GetAvgTableRowSize() float64 {
-	return cardinality.GetAvgRowSize(p.SCtx(), getTblStats(p.tablePlan), p.tablePlan.Schema().Columns, false, false)
+	return getTblStats(p.tablePlan).GetAvgRowSize(p.ctx, p.tablePlan.Schema().Columns, false, false)
 }
 
-// BuildPlanTrace implements PhysicalPlan interface.
-func (p *PhysicalIndexLookUpReader) BuildPlanTrace() *tracing.PlanTrace {
-	rp := p.basePhysicalPlan.BuildPlanTrace()
+func (p *PhysicalIndexLookUpReader) buildPlanTrace() *tracing.PlanTrace {
+	rp := p.basePhysicalPlan.buildPlanTrace()
 	if p.indexPlan != nil {
-		rp.Children = append(rp.Children, p.indexPlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, p.indexPlan.buildPlanTrace())
 	}
 	if p.tablePlan != nil {
-		rp.Children = append(rp.Children, p.tablePlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, p.tablePlan.buildPlanTrace())
 	}
 	return rp
 }
@@ -579,13 +573,11 @@ type PhysicalIndexMergeReader struct {
 	PartitionInfo PartitionInfo
 
 	KeepOrder bool
-
-	HandleCols HandleCols
 }
 
 // GetAvgTableRowSize return the average row size of table plan.
 func (p *PhysicalIndexMergeReader) GetAvgTableRowSize() float64 {
-	return cardinality.GetAvgRowSize(p.SCtx(), getTblStats(p.TablePlans[len(p.TablePlans)-1]), p.Schema().Columns, false, false)
+	return getTblStats(p.TablePlans[len(p.TablePlans)-1]).GetAvgRowSize(p.SCtx(), p.Schema().Columns, false, false)
 }
 
 // ExtractCorrelatedCols implements PhysicalPlan interface.
@@ -604,14 +596,13 @@ func (p *PhysicalIndexMergeReader) ExtractCorrelatedCols() (corCols []*expressio
 	return corCols
 }
 
-// BuildPlanTrace implements PhysicalPlan interface.
-func (p *PhysicalIndexMergeReader) BuildPlanTrace() *tracing.PlanTrace {
-	rp := p.basePhysicalPlan.BuildPlanTrace()
+func (p *PhysicalIndexMergeReader) buildPlanTrace() *tracing.PlanTrace {
+	rp := p.basePhysicalPlan.buildPlanTrace()
 	if p.tablePlan != nil {
-		rp.Children = append(rp.Children, p.tablePlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, p.tablePlan.buildPlanTrace())
 	}
 	for _, partialPlan := range p.partialPlans {
-		rp.Children = append(rp.Children, partialPlan.BuildPlanTrace())
+		rp.Children = append(rp.Children, partialPlan.buildPlanTrace())
 	}
 	return rp
 }
@@ -672,6 +663,10 @@ type PhysicalIndexScan struct {
 	// will be different. The schema of index scan will decode all columns of index but the TiDB only need some of them.
 	dataSourceSchema *expression.Schema
 
+	// Hist is the histogram when the query was issued.
+	// It is used for query feedback.
+	Hist *statistics.Histogram
+
 	rangeInfo string
 
 	// The index scan may be on a partition.
@@ -731,7 +726,9 @@ func (p *PhysicalIndexScan) Clone() (PhysicalPlan, error) {
 	if p.dataSourceSchema != nil {
 		cloned.dataSourceSchema = p.dataSourceSchema.Clone()
 	}
-
+	if p.Hist != nil {
+		cloned.Hist = p.Hist.Copy()
+	}
 	return cloned, nil
 }
 
@@ -782,24 +779,6 @@ func (p *PhysicalIndexScan) MemoryUsage() (sum int64) {
 	return
 }
 
-// AddExtraPhysTblIDColumn for partition table.
-// For keepOrder with partition table,
-// we need use partitionHandle to distinct two handles,
-// the `_tidb_rowid` in different partitions can have the same value.
-func AddExtraPhysTblIDColumn(sctx sessionctx.Context, columns []*model.ColumnInfo, schema *expression.Schema) ([]*model.ColumnInfo, *expression.Schema, bool) {
-	// Not adding the ExtraPhysTblID if already exists
-	if FindColumnInfoByID(columns, model.ExtraPhysTblID) != nil {
-		return columns, schema, false
-	}
-	columns = append(columns, model.NewExtraPhysTblIDColInfo())
-	schema.Append(&expression.Column{
-		RetType:  types.NewFieldType(mysql.TypeLonglong),
-		UniqueID: sctx.GetSessionVars().AllocPlanColumnID(),
-		ID:       model.ExtraPhysTblID,
-	})
-	return columns, schema, true
-}
-
 // PhysicalMemTable reads memory table.
 type PhysicalMemTable struct {
 	physicalSchemaProducer
@@ -840,6 +819,10 @@ type PhysicalTableScan struct {
 	Ranges  []*ranger.Range
 
 	TableAsName *model.CIStr
+
+	// Hist is the histogram when the query was issued.
+	// It is used for query feedback.
+	Hist *statistics.Histogram
 
 	physicalTableID int64
 
@@ -883,10 +866,6 @@ type PhysicalTableScan struct {
 	// usedStatsInfo records stats status of this physical table.
 	// It's for printing stats related information when display execution plan.
 	usedStatsInfo *stmtctx.UsedStatsInfoForTable
-
-	// for runtime filter
-	runtimeFilterList []*RuntimeFilter
-	maxWaitTimeMs     int
 }
 
 // Clone implements PhysicalPlan interface.
@@ -906,12 +885,10 @@ func (ts *PhysicalTableScan) Clone() (PhysicalPlan, error) {
 	clonedScan.Columns = util.CloneColInfos(ts.Columns)
 	clonedScan.Ranges = util.CloneRanges(ts.Ranges)
 	clonedScan.TableAsName = ts.TableAsName
-	clonedScan.rangeInfo = ts.rangeInfo
-	clonedScan.runtimeFilterList = make([]*RuntimeFilter, len(ts.runtimeFilterList))
-	for i, rf := range ts.runtimeFilterList {
-		clonedRF := rf.Clone()
-		clonedScan.runtimeFilterList[i] = clonedRF
+	if ts.Hist != nil {
+		clonedScan.Hist = ts.Hist.Copy()
 	}
+	clonedScan.rangeInfo = ts.rangeInfo
 	return clonedScan, nil
 }
 
@@ -1052,11 +1029,11 @@ type PhysicalProjection struct {
 func (p *PhysicalProjection) Clone() (PhysicalPlan, error) {
 	cloned := new(PhysicalProjection)
 	*cloned = *p
-	base, err := p.physicalSchemaProducer.cloneWithSelf(cloned)
+	base, err := p.basePhysicalPlan.cloneWithSelf(cloned)
 	if err != nil {
 		return nil, err
 	}
-	cloned.physicalSchemaProducer = *base
+	cloned.basePhysicalPlan = *base
 	cloned.Exprs = util.CloneExprs(p.Exprs)
 	return cloned, err
 }
@@ -1315,7 +1292,6 @@ type PhysicalHashJoin struct {
 	Concurrency     uint
 	EqualConditions []*expression.ScalarFunction
 
-	// null aware equal conditions
 	NAEqualConditions []*expression.ScalarFunction
 
 	// use the outer table to build a hash table when the outer table is smaller.
@@ -1324,9 +1300,6 @@ type PhysicalHashJoin struct {
 	// on which store the join executes.
 	storeTp        kv.StoreType
 	mppShuffleJoin bool
-
-	// for runtime filter
-	runtimeFilterList []*RuntimeFilter
 }
 
 // Clone implements PhysicalPlan interface.
@@ -1344,10 +1317,6 @@ func (p *PhysicalHashJoin) Clone() (PhysicalPlan, error) {
 	}
 	for _, c := range p.NAEqualConditions {
 		cloned.NAEqualConditions = append(cloned.NAEqualConditions, c.Clone().(*expression.ScalarFunction))
-	}
-	for _, rf := range p.runtimeFilterList {
-		clonedRF := rf.Clone()
-		cloned.runtimeFilterList = append(cloned.runtimeFilterList, clonedRF)
 	}
 	return cloned, nil
 }
@@ -1390,14 +1359,6 @@ func (p *PhysicalHashJoin) MemoryUsage() (sum int64) {
 	return
 }
 
-// RightIsBuildSide return true when right side is build side
-func (p *PhysicalHashJoin) RightIsBuildSide() bool {
-	if p.UseOuterToBuild {
-		return p.InnerChildIdx == 0
-	}
-	return p.InnerChildIdx != 0
-}
-
 // NewPhysicalHashJoin creates a new PhysicalHashJoin from LogicalJoin.
 func NewPhysicalHashJoin(p *LogicalJoin, innerIdx int, useOuterToBuild bool, newStats *property.StatsInfo, prop ...*property.PhysicalProperty) *PhysicalHashJoin {
 	leftJoinKeys, rightJoinKeys, isNullEQ, _ := p.GetJoinKeys()
@@ -1420,9 +1381,9 @@ func NewPhysicalHashJoin(p *LogicalJoin, innerIdx int, useOuterToBuild bool, new
 		basePhysicalJoin:  baseJoin,
 		EqualConditions:   p.EqualConditions,
 		NAEqualConditions: p.NAEQConditions,
-		Concurrency:       uint(p.SCtx().GetSessionVars().HashJoinConcurrency()),
+		Concurrency:       uint(p.ctx.GetSessionVars().HashJoinConcurrency()),
 		UseOuterToBuild:   useOuterToBuild,
-	}.Init(p.SCtx(), newStats, p.SelectBlockOffset(), prop...)
+	}.Init(p.ctx, newStats, p.blockOffset, prop...)
 	return hashJoin
 }
 
@@ -1546,8 +1507,6 @@ type PhysicalExchangeReceiver struct {
 
 	Tasks []*kv.MPPTask
 	frags []*Fragment
-
-	IsCTEReader bool
 }
 
 // Clone implment PhysicalPlan interface.
@@ -1558,8 +1517,6 @@ func (p *PhysicalExchangeReceiver) Clone() (PhysicalPlan, error) {
 		return nil, errors.Trace(err)
 	}
 	np.basePhysicalPlan = *base
-
-	np.IsCTEReader = p.IsCTEReader
 	return np, nil
 }
 
@@ -1592,33 +1549,23 @@ type PhysicalExpand struct {
 	// GroupingSets is used to define what kind of group layout should the underlying data follow.
 	// For simple case: select count(distinct a), count(distinct b) from t; the grouping expressions are [a] and [b].
 	GroupingSets expression.GroupingSets
-
-	// The level projections is generated from grouping sets，make execution more clearly.
-	LevelExprs [][]expression.Expression
-
-	// The generated column names. Eg: "grouping_id" and so on.
-	ExtraGroupingColNames []string
 }
 
 // Init only assigns type and context.
-func (p PhysicalExpand) Init(ctx sessionctx.Context, stats *property.StatsInfo, offset int, props ...*property.PhysicalProperty) *PhysicalExpand {
+func (p PhysicalExpand) Init(ctx sessionctx.Context, stats *property.StatsInfo, offset int) *PhysicalExpand {
 	p.basePhysicalPlan = newBasePhysicalPlan(ctx, plancodec.TypeExpand, &p, offset)
-	p.childrenReqProps = props
-	p.SetStats(stats)
+	p.stats = stats
 	return &p
 }
 
 // Clone implements PhysicalPlan interface.
 func (p *PhysicalExpand) Clone() (PhysicalPlan, error) {
-	if len(p.LevelExprs) > 0 {
-		return p.cloneV2()
-	}
 	np := new(PhysicalExpand)
-	base, err := p.physicalSchemaProducer.cloneWithSelf(np)
+	base, err := p.basePhysicalPlan.cloneWithSelf(np)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	np.physicalSchemaProducer = *base
+	np.basePhysicalPlan = *base
 	// clone ID cols.
 	np.GroupingIDCol = p.GroupingIDCol.Clone().(*expression.Column)
 
@@ -1628,25 +1575,6 @@ func (p *PhysicalExpand) Clone() (PhysicalPlan, error) {
 		clonedGroupingSets = append(clonedGroupingSets, one.Clone())
 	}
 	np.GroupingSets = p.GroupingSets
-	return np, nil
-}
-
-func (p *PhysicalExpand) cloneV2() (PhysicalPlan, error) {
-	np := new(PhysicalExpand)
-	base, err := p.physicalSchemaProducer.cloneWithSelf(np)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	np.physicalSchemaProducer = *base
-	// clone level projection expressions.
-	for _, oneLevelProjExprs := range p.LevelExprs {
-		np.LevelExprs = append(np.LevelExprs, util.CloneExprs(oneLevelProjExprs))
-	}
-
-	// clone generated column names.
-	for _, name := range p.ExtraGroupingColNames {
-		np.ExtraGroupingColNames = append(np.ExtraGroupingColNames, strings.Clone(name))
-	}
 	return np, nil
 }
 
@@ -1668,10 +1596,9 @@ func (p *PhysicalExpand) MemoryUsage() (sum int64) {
 type PhysicalExchangeSender struct {
 	basePhysicalPlan
 
-	TargetTasks          []*kv.MPPTask
-	TargetCTEReaderTasks [][]*kv.MPPTask
-	ExchangeType         tipb.ExchangeType
-	HashCols             []*property.MPPPartitionColumn
+	TargetTasks  []*kv.MPPTask
+	ExchangeType tipb.ExchangeType
+	HashCols     []*property.MPPPartitionColumn
 	// Tasks is the mpp task for current PhysicalExchangeSender.
 	Tasks           []*kv.MPPTask
 	CompressionMode kv.ExchangeCompressionMode
@@ -1963,20 +1890,10 @@ func (p *PhysicalHashAgg) MemoryUsage() (sum int64) {
 
 // NewPhysicalHashAgg creates a new PhysicalHashAgg from a LogicalAggregation.
 func NewPhysicalHashAgg(la *LogicalAggregation, newStats *property.StatsInfo, prop *property.PhysicalProperty) *PhysicalHashAgg {
-	newGbyItems := make([]expression.Expression, len(la.GroupByItems))
-	copy(newGbyItems, la.GroupByItems)
-	newAggFuncs := make([]*aggregation.AggFuncDesc, len(la.AggFuncs))
-	// There's some places that rewrites the aggFunc in-place.
-	// I clone it first.
-	// It needs a well refactor to make sure that the physical optimize should not change the things of logical plan.
-	// It's bad for cascades
-	for i, aggFunc := range la.AggFuncs {
-		newAggFuncs[i] = aggFunc.Clone()
-	}
 	agg := basePhysicalAgg{
-		GroupByItems: newGbyItems,
-		AggFuncs:     newAggFuncs,
-	}.initForHash(la.SCtx(), newStats, la.SelectBlockOffset(), prop)
+		GroupByItems: la.GroupByItems,
+		AggFuncs:     la.AggFuncs,
+	}.initForHash(la.ctx, newStats, la.blockOffset, prop)
 	return agg
 }
 
@@ -2140,13 +2057,6 @@ type PhysicalSelection struct {
 	// The flag is only used by cost model for compatibility and will be removed later.
 	// Please see https://github.com/pingcap/tidb/issues/36243 for more details.
 	fromDataSource bool
-
-	// todo Since the feature of adding filter operators has not yet been implemented,
-	// the following code for this function will not be used for now.
-	// The flag indicates whether this Selection is used for RuntimeFilter
-	// True: Used for RuntimeFilter
-	// False: Only for normal conditions
-	// hasRFConditions bool
 }
 
 // Clone implements PhysicalPlan interface.
@@ -2422,9 +2332,9 @@ func CollectPlanStatsVersion(plan PhysicalPlan, statsInfos map[string]uint64) ma
 		// because they use the same stats and we do not set the stats info for tablePlan.
 		statsInfos = CollectPlanStatsVersion(copPlan.indexPlan, statsInfos)
 	case *PhysicalIndexScan:
-		statsInfos[copPlan.Table.Name.O] = copPlan.StatsInfo().StatsVersion
+		statsInfos[copPlan.Table.Name.O] = copPlan.stats.StatsVersion
 	case *PhysicalTableScan:
-		statsInfos[copPlan.Table.Name.O] = copPlan.StatsInfo().StatsVersion
+		statsInfos[copPlan.Table.Name.O] = copPlan.stats.StatsVersion
 	}
 
 	return statsInfos
@@ -2538,9 +2448,6 @@ type PhysicalCTE struct {
 	CTE       *CTEClass
 	cteAsName model.CIStr
 	cteName   model.CIStr
-
-	readerReceiver *PhysicalExchangeReceiver
-	storageSender  *PhysicalExchangeSender
 }
 
 // PhysicalCTETable is for CTE table.
@@ -2572,50 +2479,11 @@ func (p *PhysicalCTE) ExplainInfo() string {
 // ExplainID overrides the ExplainID.
 func (p *PhysicalCTE) ExplainID() fmt.Stringer {
 	return stringutil.MemoizeStr(func() string {
-		if p.SCtx() != nil && p.SCtx().GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
+		if p.ctx != nil && p.ctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
 			return p.TP()
 		}
-		return p.TP() + "_" + strconv.Itoa(p.ID())
+		return p.TP() + "_" + strconv.Itoa(p.id)
 	})
-}
-
-// Clone implements PhysicalPlan interface.
-func (p *PhysicalCTE) Clone() (PhysicalPlan, error) {
-	cloned := new(PhysicalCTE)
-	base, err := p.physicalSchemaProducer.cloneWithSelf(cloned)
-	if err != nil {
-		return nil, err
-	}
-	cloned.physicalSchemaProducer = *base
-	if p.SeedPlan != nil {
-		cloned.SeedPlan, err = p.SeedPlan.Clone()
-		if err != nil {
-			return nil, err
-		}
-	}
-	if p.RecurPlan != nil {
-		cloned.RecurPlan, err = p.RecurPlan.Clone()
-		if err != nil {
-			return nil, err
-		}
-	}
-	cloned.cteAsName, cloned.cteName = p.cteAsName, p.cteName
-	cloned.CTE = p.CTE
-	if p.storageSender != nil {
-		clonedSender, err := p.storageSender.Clone()
-		if err != nil {
-			return nil, err
-		}
-		cloned.storageSender = clonedSender.(*PhysicalExchangeSender)
-	}
-	if p.readerReceiver != nil {
-		clonedReceiver, err := p.readerReceiver.Clone()
-		if err != nil {
-			return nil, err
-		}
-		cloned.readerReceiver = clonedReceiver.(*PhysicalExchangeReceiver)
-	}
-	return cloned, nil
 }
 
 // MemoryUsage return the memory usage of PhysicalCTE
@@ -2694,43 +2562,6 @@ func (p *CTEDefinition) MemoryUsage() (sum int64) {
 	return
 }
 
-// PhysicalCTEStorage is used for representing CTE storage, or CTE producer in other words.
-type PhysicalCTEStorage PhysicalCTE
-
-// ExplainInfo overrides the ExplainInfo
-func (*PhysicalCTEStorage) ExplainInfo() string {
-	return "Non-Recursive CTE Storage"
-}
-
-// ExplainID overrides the ExplainID.
-func (p *PhysicalCTEStorage) ExplainID() fmt.Stringer {
-	return stringutil.MemoizeStr(func() string {
-		return "CTE_" + strconv.Itoa(p.CTE.IDForStorage)
-	})
-}
-
-// MemoryUsage return the memory usage of CTEDefinition
-func (p *PhysicalCTEStorage) MemoryUsage() (sum int64) {
-	if p == nil {
-		return
-	}
-
-	sum = p.physicalSchemaProducer.MemoryUsage() + p.cteAsName.MemoryUsage()
-	if p.CTE != nil {
-		sum += p.CTE.MemoryUsage()
-	}
-	return
-}
-
-// Clone implements PhysicalPlan interface.
-func (p *PhysicalCTEStorage) Clone() (PhysicalPlan, error) {
-	cloned, err := (*PhysicalCTE)(p).Clone()
-	if err != nil {
-		return nil, err
-	}
-	return (*PhysicalCTEStorage)(cloned.(*PhysicalCTE)), nil
-}
-
 func appendChildCandidate(origin PhysicalPlan, pp PhysicalPlan, op *physicalOptimizeOp) {
 	candidate := &tracing.CandidatePlanTrace{
 		PlanTrace: &tracing.PlanTrace{
@@ -2743,52 +2574,4 @@ func appendChildCandidate(origin PhysicalPlan, pp PhysicalPlan, op *physicalOpti
 	op.tracer.AppendCandidate(candidate)
 	pp.appendChildCandidate(op)
 	op.tracer.Candidates[origin.ID()].AppendChildrenID(pp.ID())
-}
-
-// PhysicalSequence is the physical representation of LogicalSequence. Used to mark the CTE producers in the plan tree.
-type PhysicalSequence struct {
-	physicalSchemaProducer
-}
-
-// MemoryUsage returns the memory usage of the PhysicalSequence.
-func (p *PhysicalSequence) MemoryUsage() (sum int64) {
-	if p == nil {
-		return
-	}
-
-	sum = p.physicalSchemaProducer.MemoryUsage()
-
-	return
-}
-
-// ExplainID overrides the ExplainID.
-func (p *PhysicalSequence) ExplainID() fmt.Stringer {
-	return stringutil.MemoizeStr(func() string {
-		if p.SCtx() != nil && p.SCtx().GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
-			return p.TP()
-		}
-		return p.TP() + "_" + strconv.Itoa(p.ID())
-	})
-}
-
-// ExplainInfo overrides the ExplainInfo.
-func (*PhysicalSequence) ExplainInfo() string {
-	res := "Sequence Node"
-	return res
-}
-
-// Clone implements PhysicalPlan interface.
-func (p *PhysicalSequence) Clone() (PhysicalPlan, error) {
-	cloned := new(PhysicalSequence)
-	base, err := p.physicalSchemaProducer.cloneWithSelf(cloned)
-	if err != nil {
-		return nil, err
-	}
-	cloned.physicalSchemaProducer = *base
-	return cloned, nil
-}
-
-// Schema returns its last child(which is the main query tree)'s schema.
-func (p *PhysicalSequence) Schema() *expression.Schema {
-	return p.Children()[len(p.Children())-1].Schema()
 }

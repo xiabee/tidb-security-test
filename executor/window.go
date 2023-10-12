@@ -19,8 +19,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/executor/aggfuncs"
-	"github.com/pingcap/tidb/executor/internal/exec"
-	"github.com/pingcap/tidb/executor/internal/vecgroupchecker"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/planner/core"
@@ -31,9 +29,9 @@ import (
 
 // WindowExec is the executor for window functions.
 type WindowExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
-	groupChecker *vecgroupchecker.VecGroupChecker
+	groupChecker *vecGroupChecker
 	// childResult stores the child chunk
 	childResult *chunk.Chunk
 	// executed indicates the child executor is drained or something unexpected happened.
@@ -49,7 +47,7 @@ type WindowExec struct {
 
 // Close implements the Executor Close interface.
 func (e *WindowExec) Close() error {
-	return errors.Trace(e.BaseExecutor.Close())
+	return errors.Trace(e.baseExecutor.Close())
 }
 
 // Next implements the Executor Next interface.
@@ -77,7 +75,7 @@ func (e *WindowExec) preparedChunkAvailable() bool {
 
 func (e *WindowExec) consumeOneGroup(ctx context.Context) error {
 	var groupRows []chunk.Row
-	if e.groupChecker.IsExhausted() {
+	if e.groupChecker.isExhausted() {
 		eof, err := e.fetchChild(ctx)
 		if err != nil {
 			return errors.Trace(err)
@@ -86,12 +84,12 @@ func (e *WindowExec) consumeOneGroup(ctx context.Context) error {
 			e.executed = true
 			return e.consumeGroupRows(groupRows)
 		}
-		_, err = e.groupChecker.SplitIntoGroups(e.childResult)
+		_, err = e.groupChecker.splitIntoGroups(e.childResult)
 		if err != nil {
 			return errors.Trace(err)
 		}
 	}
-	begin, end := e.groupChecker.GetNextGroup()
+	begin, end := e.groupChecker.getNextGroup()
 	for i := begin; i < end; i++ {
 		groupRows = append(groupRows, e.childResult.GetRow(i))
 	}
@@ -107,13 +105,13 @@ func (e *WindowExec) consumeOneGroup(ctx context.Context) error {
 			return e.consumeGroupRows(groupRows)
 		}
 
-		isFirstGroupSameAsPrev, err := e.groupChecker.SplitIntoGroups(e.childResult)
+		isFirstGroupSameAsPrev, err := e.groupChecker.splitIntoGroups(e.childResult)
 		if err != nil {
 			return errors.Trace(err)
 		}
 
 		if isFirstGroupSameAsPrev {
-			begin, end = e.groupChecker.GetNextGroup()
+			begin, end = e.groupChecker.getNextGroup()
 			for i := begin; i < end; i++ {
 				groupRows = append(groupRows, e.childResult.GetRow(i))
 			}
@@ -136,11 +134,11 @@ func (e *WindowExec) consumeGroupRows(groupRows []chunk.Row) (err error) {
 		// TODO: Combine these three methods.
 		// The old implementation needs the processor has these three methods
 		// but now it does not have to.
-		groupRows, err = e.processor.consumeGroupRows(e.Ctx(), groupRows)
+		groupRows, err = e.processor.consumeGroupRows(e.ctx, groupRows)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		_, err = e.processor.appendResult2Chunk(e.Ctx(), groupRows, e.resultChunks[i], remained)
+		_, err = e.processor.appendResult2Chunk(e.ctx, groupRows, e.resultChunks[i], remained)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -152,9 +150,9 @@ func (e *WindowExec) consumeGroupRows(groupRows []chunk.Row) (err error) {
 	return nil
 }
 
-func (e *WindowExec) fetchChild(ctx context.Context) (eof bool, err error) {
-	childResult := exec.TryNewCacheChunk(e.Children(0))
-	err = exec.Next(ctx, e.Children(0), childResult)
+func (e *WindowExec) fetchChild(ctx context.Context) (EOF bool, err error) {
+	childResult := tryNewCacheChunk(e.children[0])
+	err = Next(ctx, e.children[0], childResult)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
@@ -164,7 +162,7 @@ func (e *WindowExec) fetchChild(ctx context.Context) (eof bool, err error) {
 		return true, nil
 	}
 
-	resultChk := e.Ctx().GetSessionVars().GetNewChunkWithCapacity(e.RetFieldTypes(), 0, numRows, e.AllocPool)
+	resultChk := e.ctx.GetSessionVars().GetNewChunkWithCapacity(e.retFieldTypes, 0, numRows, e.AllocPool)
 	err = e.copyChk(childResult, resultChk)
 	if err != nil {
 		return false, err
@@ -289,7 +287,7 @@ func (p *rowFrameWindowProcessor) getEndOffset(numRows uint64) uint64 {
 	return 0
 }
 
-func (*rowFrameWindowProcessor) consumeGroupRows(_ sessionctx.Context, rows []chunk.Row) ([]chunk.Row, error) {
+func (p *rowFrameWindowProcessor) consumeGroupRows(ctx sessionctx.Context, rows []chunk.Row) ([]chunk.Row, error) {
 	return rows, nil
 }
 
@@ -399,7 +397,7 @@ func (p *rangeFrameWindowProcessor) getStartOffset(ctx sessionctx.Context, rows 
 		var res int64
 		var err error
 		for i := range p.orderByCols {
-			res, _, err = p.start.CmpFuncs[i](ctx, p.start.CompareCols[i], p.start.CalcFuncs[i], rows[p.lastStartOffset], rows[p.curRowIdx])
+			res, _, err = p.start.CmpFuncs[i](ctx, p.orderByCols[i], p.start.CalcFuncs[i], rows[p.lastStartOffset], rows[p.curRowIdx])
 			if err != nil {
 				return 0, err
 			}
@@ -425,7 +423,7 @@ func (p *rangeFrameWindowProcessor) getEndOffset(ctx sessionctx.Context, rows []
 		var res int64
 		var err error
 		for i := range p.orderByCols {
-			res, _, err = p.end.CmpFuncs[i](ctx, p.end.CalcFuncs[i], p.end.CompareCols[i], rows[p.curRowIdx], rows[p.lastEndOffset])
+			res, _, err = p.end.CmpFuncs[i](ctx, p.end.CalcFuncs[i], p.orderByCols[i], rows[p.curRowIdx], rows[p.lastEndOffset])
 			if err != nil {
 				return 0, err
 			}
@@ -524,7 +522,7 @@ func (p *rangeFrameWindowProcessor) appendResult2Chunk(ctx sessionctx.Context, r
 	return rows, nil
 }
 
-func (*rangeFrameWindowProcessor) consumeGroupRows(_ sessionctx.Context, rows []chunk.Row) ([]chunk.Row, error) {
+func (p *rangeFrameWindowProcessor) consumeGroupRows(ctx sessionctx.Context, rows []chunk.Row) ([]chunk.Row, error) {
 	return rows, nil
 }
 

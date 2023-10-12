@@ -62,10 +62,9 @@ func TestStateSyncerSimple(t *testing.T) {
 		WithLease(testLease),
 		WithInfoCache(ic),
 	)
-	var wg util.WaitGroupWrapper
-	wg.Run(func() {
+	go func() {
 		require.NoError(t, d.OwnerManager().CampaignOwner())
-	})
+	}()
 	defer d.OwnerManager().Cancel()
 	// TODO: We can remove it when we call it in newDDL.
 	require.NoError(t, d.StateSyncer().Init(ctx))
@@ -78,6 +77,7 @@ func TestStateSyncerSimple(t *testing.T) {
 	require.Equal(t, stateInfo, respState)
 	require.False(t, d.StateSyncer().IsUpgradingState())
 	// for watchCh
+	var wg util.WaitGroupWrapper
 	var checkErr string
 	stateInfo.State = syncer.StateUpgrading
 	stateInfoByte, err := stateInfo.Marshal()

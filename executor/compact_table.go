@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -39,7 +38,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var _ exec.Executor = &CompactTableTiFlashExec{}
+var _ Executor = &CompactTableTiFlashExec{}
 
 const (
 	compactRequestTimeout         = time.Minute * 60 // A single compact request may take at most 1 hour.
@@ -65,7 +64,7 @@ func getTiFlashStores(ctx sessionctx.Context) ([]infoschema.ServerInfo, error) {
 
 // CompactTableTiFlashExec represents an executor for "ALTER TABLE [NAME] COMPACT TIFLASH REPLICA" statement.
 type CompactTableTiFlashExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	tableInfo    *model.TableInfo
 	partitionIDs []int64
@@ -85,7 +84,7 @@ func (e *CompactTableTiFlashExec) Next(ctx context.Context, chk *chunk.Chunk) er
 }
 
 func (e *CompactTableTiFlashExec) doCompact(execCtx context.Context) error {
-	vars := e.Ctx().GetSessionVars()
+	vars := e.ctx.GetSessionVars()
 	if e.tableInfo.TiFlashReplica == nil || e.tableInfo.TiFlashReplica.Count == 0 {
 		vars.StmtCtx.AppendWarning(errors.Errorf("compact skipped: no tiflash replica in the table"))
 		return nil
@@ -96,7 +95,7 @@ func (e *CompactTableTiFlashExec) doCompact(execCtx context.Context) error {
 	//     For each partition (in series):
 	//         Send a series of compact request for this partition.  <--- Handled by "compactOnePhysicalTable"
 
-	tiFlashStores, err := getTiFlashStores(e.Ctx())
+	tiFlashStores, err := getTiFlashStores(e.ctx)
 	if err != nil {
 		return err
 	}
@@ -237,7 +236,7 @@ func (task *storeCompactTask) logProgressOptionally() {
 //
 //	Returns: (stopAllTasks, err)
 func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bool, error) {
-	var startKey []byte
+	var startKey []byte = nil
 	for { // This loop is to compact incrementally for all data. Each RPC request will only compact a partial of data.
 		if task.ctx.Err() != nil {
 			return true, task.ctx.Err()
@@ -258,7 +257,7 @@ func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bo
 			// Even after backoff, the request is still failed.., or the request is cancelled or timed out
 			// For example, the store is down. Let's simply don't compact other partitions.
 			warn := errors.Errorf("compact on store %s failed: %v", task.targetStore.Address, err)
-			task.parentExec.Ctx().GetSessionVars().StmtCtx.AppendWarning(warn)
+			task.parentExec.ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
 			task.logFailure(
 				zap.Int64("physical-table-id", physicalTableID),
 				zap.Error(err))
@@ -268,7 +267,7 @@ func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bo
 			switch resp.GetError().GetError().(type) {
 			case *kvrpcpb.CompactError_ErrCompactInProgress:
 				warn := errors.Errorf("compact on store %s failed: table is compacting in progress", task.targetStore.Address)
-				task.parentExec.Ctx().GetSessionVars().StmtCtx.AppendWarning(warn)
+				task.parentExec.ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
 				task.logFailure(
 					zap.Int64("physical-table-id", physicalTableID),
 					zap.Error(warn))
@@ -279,7 +278,7 @@ func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bo
 			case *kvrpcpb.CompactError_ErrTooManyPendingTasks:
 				// The store is already very busy, don't retry and don't compact other partitions.
 				warn := errors.Errorf("compact on store %s failed: store is too busy", task.targetStore.Address)
-				task.parentExec.Ctx().GetSessionVars().StmtCtx.AppendWarning(warn)
+				task.parentExec.ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
 				task.logFailure(
 					zap.Int64("physical-table-id", physicalTableID),
 					zap.Error(warn))
@@ -297,7 +296,7 @@ func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bo
 			default:
 				// Others are unexpected errors, don't retry and don't compact other partitions.
 				warn := errors.Errorf("compact on store %s failed: internal error (check logs for details)", task.targetStore.Address)
-				task.parentExec.Ctx().GetSessionVars().StmtCtx.AppendWarning(warn)
+				task.parentExec.ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
 				task.logFailure(
 					zap.Int64("physical-table-id", physicalTableID),
 					zap.Any("response-error", resp.GetError().GetError()))
@@ -315,7 +314,7 @@ func (task *storeCompactTask) compactOnePhysicalTable(physicalTableID int64) (bo
 			// The TiFlash server returned an invalid compacted end key.
 			// This is unexpected...
 			warn := errors.Errorf("compact on store %s failed: internal error (check logs for details)", task.targetStore.Address)
-			task.parentExec.Ctx().GetSessionVars().StmtCtx.AppendWarning(warn)
+			task.parentExec.ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
 			task.logFailure(
 				zap.Int64("physical-table-id", physicalTableID),
 				zap.String("compacted-start-key", hex.EncodeToString(resp.GetCompactedStartKey())),

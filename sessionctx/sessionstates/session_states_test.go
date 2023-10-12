@@ -26,11 +26,9 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/expression"
-	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/server"
-	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util/sem"
@@ -173,28 +171,6 @@ func TestSystemVars(t *testing.T) {
 			checkStmt:       "select rand()",
 			expectedValue:   "0.11641535266900002",
 		},
-		{
-			// tidb_enforce_mpp depends on tidb_allow_mpp.
-			stmts: []string{
-				"set @@global.tidb_allow_mpp=0",
-				"set @@tidb_allow_mpp=1",
-				"set @@tidb_enforce_mpp=1",
-			},
-			inSessionStates: true,
-			varName:         variable.TiDBEnforceMPPExecution,
-			expectedValue:   "1",
-		},
-		{
-			// tx_read_only depends on tidb_enable_noop_functions.
-			stmts: []string{
-				"set @@global.tidb_enable_noop_functions=0",
-				"set @@tidb_enable_noop_functions=1",
-				"set @@tx_read_only=1",
-			},
-			inSessionStates: true,
-			varName:         variable.TxReadOnly,
-			expectedValue:   "1",
-		},
 	}
 
 	if !sem.IsEnabled() {
@@ -236,103 +212,6 @@ func TestSystemVars(t *testing.T) {
 		tk3 := testkit.NewTestKit(t, store)
 		showSessionStatesAndSet(t, tk1, tk3)
 		tk3.MustQuery("select @@autocommit").Check(testkit.Rows("1"))
-	}
-}
-
-func TestInvisibleVars(t *testing.T) {
-	tests := []struct {
-		hasPriv       bool
-		stmt          string
-		cleanStmt     string
-		varName       string
-		expectedValue string
-		showErr       int
-	}{
-		{
-			// Make sure the session can be migrated in normal cases.
-			hasPriv: false,
-		},
-		{
-			// The value is set but the same with before.
-			hasPriv: false,
-			stmt:    "set tidb_opt_write_row_id=false",
-		},
-		{
-			// The value is changed but the privilege is revoked.
-			hasPriv: false,
-			stmt:    "set tidb_opt_write_row_id=true",
-			showErr: errno.ErrCannotMigrateSession,
-		},
-		{
-			// The value is changed and the user has the privilege.
-			hasPriv:       true,
-			stmt:          "set tidb_opt_write_row_id=true",
-			varName:       variable.TiDBOptWriteRowID,
-			expectedValue: "1",
-		},
-		{
-			// The value has a global scope.
-			hasPriv:       true,
-			stmt:          "set tidb_row_format_version=1",
-			varName:       variable.TiDBRowFormatVersion,
-			expectedValue: "1",
-		},
-		{
-			// The global value is changed, so the session value is still different with global.
-			hasPriv:       true,
-			stmt:          "set global tidb_row_format_version=1",
-			varName:       variable.TiDBRowFormatVersion,
-			cleanStmt:     "set global tidb_row_format_version=2",
-			expectedValue: "2",
-		},
-		{
-			// The global value is changed, so the session value is still different with global.
-			hasPriv:   false,
-			stmt:      "set global tidb_row_format_version=1",
-			showErr:   errno.ErrCannotMigrateSession,
-			cleanStmt: "set global tidb_row_format_version=2",
-		},
-	}
-
-	sessionstates.SetupSigningCertForTest(t)
-	store := testkit.CreateMockStore(t)
-	if !sem.IsEnabled() {
-		sem.Enable()
-		defer sem.Disable()
-	}
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("CREATE USER u1, u2")
-	tk.MustExec("GRANT RESTRICTED_VARIABLES_ADMIN ON *.* to u1")
-
-	for _, tt := range tests {
-		tk1 := testkit.NewTestKit(t, store)
-		if len(tt.stmt) > 0 {
-			tk1.MustExec(tt.stmt)
-		}
-
-		username := "u2"
-		if tt.hasPriv {
-			username = "u1"
-		}
-		err := tk1.Session().Auth(&auth.UserIdentity{Username: username, Hostname: "%"}, nil, nil, nil)
-		require.NoError(t, err)
-
-		if tt.showErr == 0 {
-			tk2 := testkit.NewTestKit(t, store)
-			err = tk2.Session().Auth(&auth.UserIdentity{Username: username, Hostname: "%"}, nil, nil, nil)
-			require.NoError(t, err)
-			showSessionStatesAndSet(t, tk1, tk2)
-			if len(tt.expectedValue) > 0 {
-				checkStmt := fmt.Sprintf("select @@%s", tt.varName)
-				tk2.MustQuery(checkStmt).Check(testkit.Rows(tt.expectedValue))
-			}
-		} else {
-			err := tk1.QueryToErr("show session_states")
-			errEqualsCode(t, err, tt.showErr)
-		}
-		if len(tt.cleanStmt) > 0 {
-			tk.MustExec(tt.cleanStmt)
-		}
 	}
 }
 
@@ -554,78 +433,6 @@ func TestSessionCtx(t *testing.T) {
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("SELECT CURRENT_RESOURCE_GROUP()").Check(testkit.Rows("rg1"))
-			},
-		},
-		{
-			// check HypoTiFlashReplicas
-			setFunc: func(tk *testkit.TestKit) any {
-				tk.MustExec(`alter table test.t1 set hypo tiflash replica 1`)
-				require.NotNil(t, tk.Session().GetSessionVars().HypoTiFlashReplicas["test"]["t1"])
-				return nil
-			},
-			checkFunc: func(tk *testkit.TestKit, param any) {
-				tk.MustQuery(`explain select id from test.t1`).Check(testkit.Rows(
-					`TableReader_12 10000.00 root  MppVersion: 2, data:ExchangeSender_11`,
-					`└─ExchangeSender_11 10000.00 mpp[tiflash]  ExchangeType: PassThrough`,
-					`  └─TableFullScan_10 10000.00 mpp[tiflash] table:t1 keep order:false, stats:pseudo`))
-			},
-		},
-		{
-			// check empty HypoTiFlashReplicas
-			setFunc: func(tk *testkit.TestKit) any {
-				tk.MustExec(`alter table test.t1 set hypo tiflash replica 1`)
-				tk.MustExec(`alter table test.t1 set hypo tiflash replica 0`)
-				require.Empty(t, tk.Session().GetSessionVars().HypoTiFlashReplicas["test"])
-				return nil
-			},
-			checkFunc: func(tk *testkit.TestKit, param any) {
-				tk.MustQuery(`explain select id from test.t1`).Check(testkit.Rows(
-					`TableReader_5 10000.00 root  data:TableFullScan_4`,
-					`└─TableFullScan_4 10000.00 cop[tikv] table:t1 keep order:false, stats:pseudo`))
-			},
-		},
-		{
-			// check HypoIndexes
-			setFunc: func(tk *testkit.TestKit) any {
-				tk.MustExec(`create index hypo_id type hypo on test.t1(id)`)
-				require.NotNil(t, tk.Session().GetSessionVars().HypoIndexes["test"]["t1"])
-				return nil
-			},
-			checkFunc: func(tk *testkit.TestKit, param any) {
-				tk.MustQuery(`show create table test.t1`).Check(testkit.Rows("t1 CREATE TABLE `t1` (\n" +
-					"  `id` int(11) DEFAULT NULL,\n" +
-					"  KEY `hypo_id` (`id`) /* HYPO INDEX */\n" +
-					") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-				tk.MustQuery(`explain select id from test.t1`).Check(testkit.Rows(`IndexReader_7 10000.00 root  index:IndexFullScan_6`,
-					`└─IndexFullScan_6 10000.00 cop[tikv] table:t1, index:hypo_id(id) keep order:false, stats:pseudo`))
-			},
-		},
-		{
-			// check empty HypoIndexes
-			setFunc: func(tk *testkit.TestKit) any {
-				tk.MustExec(`create index hypo_id type hypo on test.t1(id)`)
-				tk.MustExec(`drop hypo index hypo_id on test.t1`)
-				require.Empty(t, tk.Session().GetSessionVars().HypoIndexes["test"]["t1"])
-				return nil
-			},
-			checkFunc: func(tk *testkit.TestKit, param any) {
-				tk.MustQuery(`show create table test.t1`).Check(testkit.Rows("t1 CREATE TABLE `t1` (\n" +
-					"  `id` int(11) DEFAULT NULL\n" +
-					") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-				tk.MustQuery(`explain select id from test.t1`).Check(testkit.Rows(`TableReader_5 10000.00 root  data:TableFullScan_4`,
-					`└─TableFullScan_4 10000.00 cop[tikv] table:t1 keep order:false, stats:pseudo`))
-			},
-		},
-		{
-			// check request source
-			setFunc: func(tk *testkit.TestKit) any {
-				tk.MustExec(`set @@tidb_request_source_type="lightning"`)
-				require.Equal(t, "lightning", tk.Session().GetSessionVars().ExplicitRequestSourceType)
-				return nil
-			},
-			checkFunc: func(tk *testkit.TestKit, param any) {
-				tk.MustExec(`select count(*) from test.t1`)
-				tk.MustQuery(`select @@tidb_request_source_type`).Check(testkit.Rows("lightning"))
 			},
 		},
 	}
@@ -1225,7 +1032,7 @@ func TestSQLBinding(t *testing.T) {
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("show session bindings").Check(param.([][]any))
-				tk.MustHavePlan("select * from test.t1", "IndexFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "IndexFullScan"))
 				tk.MustExec("drop session binding for select * from test.t1")
 				tk.MustQuery("show session bindings").Check(testkit.Rows())
 			},
@@ -1240,7 +1047,7 @@ func TestSQLBinding(t *testing.T) {
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("show session bindings").Check(param.([][]any))
-				tk.MustHavePlan("select * from test.t1", "IndexFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "IndexFullScan"))
 				tk.MustExec("drop session binding for select * from test.t1")
 				tk.MustQuery("show session bindings").Check(testkit.Rows())
 			},
@@ -1268,7 +1075,7 @@ func TestSQLBinding(t *testing.T) {
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("show session bindings").Check(param.([][]any))
-				tk.MustHavePlan("select * from test.t1", "IndexFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "IndexFullScan"))
 			},
 		},
 		{
@@ -1322,9 +1129,9 @@ func TestSQLBinding(t *testing.T) {
 				rows := param.([][][]any)
 				tk.MustQuery("show bindings").Check(rows[0])
 				tk.MustQuery("show global bindings").Check(rows[1])
-				tk.MustHavePlan("select * from test.t1", "IndexFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "IndexFullScan"))
 				tk.MustExec("drop session binding for select * from test.t1")
-				tk.MustHavePlan("select * from test.t1", "TableFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "TableFullScan"))
 			},
 			cleanFunc: func(tk *testkit.TestKit) {
 				tk.MustExec("drop global binding for select * from test.t1")
@@ -1342,7 +1149,7 @@ func TestSQLBinding(t *testing.T) {
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("show bindings").Check(param.([][]any))
-				tk.MustHavePlan("select * from test.t1", "IndexFullScan")
+				require.True(t, tk.HasPlan("select * from test.t1", "IndexFullScan"))
 			},
 		},
 	}

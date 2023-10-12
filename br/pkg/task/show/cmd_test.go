@@ -170,7 +170,7 @@ func cloneFS(f fs.FS, base string, target string) error {
 
 func TestShowViaSQL(t *testing.T) {
 	req := require.New(t)
-	store := testkit.CreateMockStore(t)
+	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 
 	tempBackup := tempBackupDir(t)

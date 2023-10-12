@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/util/logutil"
 	pd "github.com/tikv/pd/client"
+	"go.uber.org/zap"
 )
 
 // initDomainSysVars() is called when a domain is initialized.
@@ -29,8 +31,7 @@ import (
 // because the domain is not available. Instead a noop func is specified,
 // which is overwritten here.
 func (do *Domain) initDomainSysVars() {
-	setStatsCacheCapacityFunc := do.setStatsCacheCapacity
-	variable.SetStatsCacheCapacity.Store(&setStatsCacheCapacityFunc)
+	variable.SetStatsCacheCapacity.Store(do.setStatsCacheCapacity)
 	pdClientDynamicOptionFunc := do.setPDClientDynamicOption
 	variable.SetPDClientDynamicOption.Store(&pdClientDynamicOptionFunc)
 
@@ -44,6 +45,7 @@ func (do *Domain) initDomainSysVars() {
 // setStatsCacheCapacity sets statsCache cap
 func (do *Domain) setStatsCacheCapacity(c int64) {
 	do.StatsHandle().SetStatsCacheCapacity(c)
+	logutil.BgLogger().Info("update stats cache capacity successfully", zap.Int64("capacity", c))
 }
 
 func (do *Domain) setPDClientDynamicOption(name, sVal string) {

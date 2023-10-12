@@ -355,14 +355,15 @@ func testWriteDifferentBlockSize(t *testing.T, encrypt bool) {
 	// Write data by 100 bytes one batch.
 	lastPos := 0
 	for i := 100; ; i += 100 {
-		if i >= len(w.Bytes()) {
+		if i < len(w.Bytes()) {
+			_, err = underlying2.Write(w.Bytes()[lastPos:i])
+			require.NoError(t, err)
+			lastPos = i
+		} else {
 			_, err = underlying2.Write(w.Bytes()[lastPos:])
 			require.NoError(t, err)
 			break
 		}
-		_, err = underlying2.Write(w.Bytes()[lastPos:i])
-		require.NoError(t, err)
-		lastPos = i
 	}
 	err = underlying2.Close()
 	require.NoError(t, err)

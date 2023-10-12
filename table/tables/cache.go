@@ -192,7 +192,7 @@ func (c *cachedTable) updateLockForRead(ctx context.Context, handle StateRemote,
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("panic in the recoverable goroutine",
-				zap.Any("r", r),
+				zap.Reflect("r", r),
 				zap.Stack("stack trace"))
 		}
 		c.PutStateRemoteHandle(handle)
@@ -316,7 +316,7 @@ func (c *cachedTable) WriteLockAndKeepAlive(ctx context.Context, exit chan struc
 	atomic.StoreUint64(leasePtr, writeLockLease)
 	wg <- err
 	if err != nil {
-		logutil.Logger(ctx).Warn("lock for write lock fail", zap.String("category", "cached table"), zap.Error(err))
+		logutil.Logger(ctx).Warn("[cached table] lock for write lock fail", zap.Error(err))
 		return
 	}
 
@@ -326,7 +326,7 @@ func (c *cachedTable) WriteLockAndKeepAlive(ctx context.Context, exit chan struc
 		select {
 		case <-t.C:
 			if err := c.renew(ctx, leasePtr); err != nil {
-				logutil.Logger(ctx).Warn("renew write lock lease fail", zap.String("category", "cached table"), zap.Error(err))
+				logutil.Logger(ctx).Warn("[cached table] renew write lock lease fail", zap.Error(err))
 				return
 			}
 		case <-exit:

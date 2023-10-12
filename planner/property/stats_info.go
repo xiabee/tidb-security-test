@@ -17,7 +17,6 @@ package property
 import (
 	"fmt"
 
-	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/statistics"
 )
 
@@ -89,28 +88,4 @@ func (s *StatsInfo) ScaleByExpectCnt(expectCnt float64) *StatsInfo {
 		return s.Scale(expectCnt / s.RowCount)
 	}
 	return s
-}
-
-// GetGroupNDV4Cols gets the GroupNDV for the given columns.
-func (s *StatsInfo) GetGroupNDV4Cols(cols []*expression.Column) *GroupNDV {
-	if s == nil || len(cols) == 0 || len(s.GroupNDVs) == 0 {
-		return nil
-	}
-	cols = expression.SortColumns(cols)
-	for _, groupNDV := range s.GroupNDVs {
-		if len(cols) != len(groupNDV.Cols) {
-			continue
-		}
-		match := true
-		for i, col := range groupNDV.Cols {
-			if col != cols[i].UniqueID {
-				match = false
-				break
-			}
-		}
-		if match {
-			return &groupNDV
-		}
-	}
-	return nil
 }

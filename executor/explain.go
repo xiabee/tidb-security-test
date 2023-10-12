@@ -28,24 +28,22 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
-	"github.com/pingcap/tidb/util/size"
 	clientutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
 
 // ExplainExec represents an explain executor.
 type ExplainExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	explain        *core.Explain
-	analyzeExec    exec.Executor
+	analyzeExec    Executor
 	executed       bool
 	ruRuntimeStats *clientutil.RURuntimeStats
 	rows           [][]string
@@ -80,7 +78,7 @@ func (e *ExplainExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 	}
 
-	req.GrowAndReset(e.MaxChunkSize())
+	req.GrowAndReset(e.maxChunkSize)
 	if e.cursor >= len(e.rows) {
 		return nil
 	}
@@ -107,7 +105,7 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 				}
 			}
 		}()
-		if minHeapInUse, alarmRatio := e.Ctx().GetSessionVars().MemoryDebugModeMinHeapInUse, e.Ctx().GetSessionVars().MemoryDebugModeAlarmRatio; minHeapInUse != 0 && alarmRatio != 0 {
+		if minHeapInUse, alarmRatio := e.ctx.GetSessionVars().MemoryDebugModeMinHeapInUse, e.ctx.GetSessionVars().MemoryDebugModeAlarmRatio; minHeapInUse != 0 && alarmRatio != 0 {
 			memoryDebugModeCtx, cancel := context.WithCancel(ctx)
 			waitGroup := sync.WaitGroup{}
 			waitGroup.Add(1)
@@ -121,14 +119,14 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 				minHeapInUse: mathutil.Abs(minHeapInUse),
 				alarmRatio:   alarmRatio,
 				autoGC:       minHeapInUse > 0,
-				memTracker:   e.Ctx().GetSessionVars().MemTracker,
+				memTracker:   e.ctx.GetSessionVars().MemTracker,
 				wg:           &waitGroup,
 			}).run()
 		}
 		e.executed = true
-		chk := exec.TryNewCacheChunk(e.analyzeExec)
+		chk := tryNewCacheChunk(e.analyzeExec)
 		for {
-			err = exec.Next(ctx, e.analyzeExec, chk)
+			err = Next(ctx, e.analyzeExec, chk)
 			if err != nil || chk.NumRows() == 0 {
 				break
 			}
@@ -136,7 +134,7 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 	}
 	// Register the RU runtime stats to the runtime stats collection after the analyze executor has been executed.
 	if e.analyzeExec != nil && e.executed {
-		if coll := e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl; coll != nil {
+		if coll := e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl; coll != nil {
 			coll.RegisterStats(e.explain.TargetPlan.ID(), &ruRuntimeStats{e.ruRuntimeStats})
 		}
 	}
@@ -158,7 +156,7 @@ func (e *ExplainExec) generateExplainInfo(ctx context.Context) (rows [][]string,
 // function and then commit transaction if needed.
 // Otherwise, in autocommit transaction, the table record change of analyze executor(insert/update/delete...)
 // will not be committed.
-func (e *ExplainExec) getAnalyzeExecToExecutedNoDelay() exec.Executor {
+func (e *ExplainExec) getAnalyzeExecToExecutedNoDelay() Executor {
 	if e.analyzeExec != nil && !e.executed && e.analyzeExec.Schema().Len() == 0 {
 		e.executed = true
 		return e.analyzeExec
@@ -179,7 +177,7 @@ type memoryDebugModeHandler struct {
 
 func (h *memoryDebugModeHandler) fetchCurrentMemoryUsage(gc bool) (heapInUse, trackedMem uint64) {
 	if gc {
-		runtime.GC() //nolint: revive
+		runtime.GC()
 	}
 	instanceStats := memory.ForceReadMemStats()
 	heapInUse = instanceStats.HeapInuse
@@ -215,9 +213,10 @@ func (h *memoryDebugModeHandler) getTrackerTreeMemUseLogs() []zap.Field {
 }
 
 func updateTriggerIntervalByHeapInUse(heapInUse uint64) (time.Duration, int) {
-	if heapInUse < 30*size.GB {
+	const GB uint64 = 1 << 30
+	if heapInUse < 30*GB {
 		return 5 * time.Second, 6
-	} else if heapInUse < 40*size.GB {
+	} else if heapInUse < 40*GB {
 		return 15 * time.Second, 2
 	} else {
 		return 30 * time.Second, 1
@@ -356,6 +355,6 @@ func (e *ruRuntimeStats) Merge(other execdetails.RuntimeStats) {
 }
 
 // Tp implements the RuntimeStats interface.
-func (*ruRuntimeStats) Tp() int {
+func (e *ruRuntimeStats) Tp() int {
 	return execdetails.TpRURuntimeStats
 }

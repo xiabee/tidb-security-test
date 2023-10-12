@@ -15,9 +15,7 @@
 package collate
 
 import (
-	"cmp"
 	"fmt"
-	"slices"
 	"sync/atomic"
 
 	"github.com/pingcap/errors"
@@ -27,6 +25,7 @@ import (
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 var (
@@ -256,8 +255,8 @@ func GetSupportedCollations() []*charset.Collation {
 				newSupportedCollations = append(newSupportedCollations, coll)
 			}
 		}
-		slices.SortFunc(newSupportedCollations, func(i, j *charset.Collation) int {
-			return cmp.Compare(i.Name, j.Name)
+		slices.SortFunc(newSupportedCollations, func(i, j *charset.Collation) bool {
+			return i.Name < j.Name
 		})
 		return newSupportedCollations
 	}
@@ -322,17 +321,10 @@ func runeLen(b byte) int {
 	return 4
 }
 
-// IsDefaultCollationForUTF8MB4 returns if the collation is DefaultCollationForUTF8MB4.
-func IsDefaultCollationForUTF8MB4(collate string) bool {
-	// utf8mb4_bin is used for the migrations/replication from TiDB with version prior to v7.4.0.
-	return collate == "utf8mb4_bin" || collate == "utf8mb4_general_ci" || collate == "utf8mb4_0900_ai_ci"
-}
-
 // IsCICollation returns if the collation is case-insensitive
 func IsCICollation(collate string) bool {
 	return collate == "utf8_general_ci" || collate == "utf8mb4_general_ci" ||
-		collate == "utf8_unicode_ci" || collate == "utf8mb4_unicode_ci" || collate == "gbk_chinese_ci" ||
-		collate == "utf8mb4_0900_ai_ci"
+		collate == "utf8_unicode_ci" || collate == "utf8mb4_unicode_ci" || collate == "gbk_chinese_ci"
 }
 
 // ConvertAndGetBinCollation converts collator to binary collator
@@ -346,8 +338,6 @@ func ConvertAndGetBinCollation(collate string) Collator {
 		return GetCollator("utf8mb4_bin")
 	case "utf8mb4_unicode_ci":
 		return GetCollator("utf8mb4_bin")
-	case "utf8mb4_0900_ai_ci":
-		return GetCollator("utf8mb4_bin")
 	case "gbk_chinese_ci":
 		return GetCollator("gbk_bin")
 	}
@@ -360,8 +350,7 @@ func ConvertAndGetBinCollation(collate string) Collator {
 func IsBinCollation(collate string) bool {
 	return collate == charset.CollationASCII || collate == charset.CollationLatin1 ||
 		collate == charset.CollationUTF8 || collate == charset.CollationUTF8MB4 ||
-		collate == charset.CollationBin || collate == "utf8mb4_0900_bin"
-	// TODO: define a constant to reference collations
+		collate == charset.CollationBin
 }
 
 // CollationToProto converts collation from string to int32(used by protocol).
@@ -411,16 +400,12 @@ func init() {
 	newCollatorIDMap[CollationName2ID("utf8mb4_bin")] = &binPaddingCollator{}
 	newCollatorMap["utf8_bin"] = &binPaddingCollator{}
 	newCollatorIDMap[CollationName2ID("utf8_bin")] = &binPaddingCollator{}
-	newCollatorMap["utf8mb4_0900_bin"] = &binCollator{}
-	newCollatorIDMap[CollationName2ID("utf8mb4_0900_bin")] = &binCollator{}
 	newCollatorMap["utf8mb4_general_ci"] = &generalCICollator{}
 	newCollatorIDMap[CollationName2ID("utf8mb4_general_ci")] = &generalCICollator{}
 	newCollatorMap["utf8_general_ci"] = &generalCICollator{}
 	newCollatorIDMap[CollationName2ID("utf8_general_ci")] = &generalCICollator{}
 	newCollatorMap["utf8mb4_unicode_ci"] = &unicodeCICollator{}
 	newCollatorIDMap[CollationName2ID("utf8mb4_unicode_ci")] = &unicodeCICollator{}
-	newCollatorMap["utf8mb4_0900_ai_ci"] = &unicode0900AICICollator{}
-	newCollatorIDMap[CollationName2ID("utf8mb4_0900_ai_ci")] = &unicode0900AICICollator{}
 	newCollatorMap["utf8_unicode_ci"] = &unicodeCICollator{}
 	newCollatorIDMap[CollationName2ID("utf8_unicode_ci")] = &unicodeCICollator{}
 	newCollatorMap["utf8mb4_zh_pinyin_tidb_as_cs"] = &zhPinyinTiDBASCSCollator{}

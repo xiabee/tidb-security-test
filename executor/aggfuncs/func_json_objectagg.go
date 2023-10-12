@@ -41,20 +41,20 @@ type partialResult4JsonObjectAgg struct {
 	bInMap  int // indicate there are 2^bInMap buckets in entries.
 }
 
-func (*jsonObjectAgg) AllocPartialResult() (pr PartialResult, memDelta int64) {
+func (e *jsonObjectAgg) AllocPartialResult() (pr PartialResult, memDelta int64) {
 	p := partialResult4JsonObjectAgg{}
 	p.entries = make(map[string]interface{})
 	p.bInMap = 0
 	return PartialResult(&p), DefPartialResult4JsonObjectAgg + (1<<p.bInMap)*hack.DefBucketMemoryUsageForMapStringToAny
 }
 
-func (*jsonObjectAgg) ResetPartialResult(pr PartialResult) {
+func (e *jsonObjectAgg) ResetPartialResult(pr PartialResult) {
 	p := (*partialResult4JsonObjectAgg)(pr)
 	p.entries = make(map[string]interface{})
 	p.bInMap = 0
 }
 
-func (e *jsonObjectAgg) AppendFinalResult2Chunk(_ sessionctx.Context, pr PartialResult, chk *chunk.Chunk) error {
+func (e *jsonObjectAgg) AppendFinalResult2Chunk(sctx sessionctx.Context, pr PartialResult, chk *chunk.Chunk) error {
 	p := (*partialResult4JsonObjectAgg)(pr)
 	if len(p.entries) == 0 {
 		chk.AppendNull(e.ordinal)
@@ -76,6 +76,7 @@ func (e *jsonObjectAgg) UpdatePartialResult(sctx sessionctx.Context, rowsInGroup
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
+		key = strings.Clone(key)
 
 		if keyIsNull {
 			return 0, types.ErrJSONDocumentNULLKey
@@ -85,7 +86,6 @@ func (e *jsonObjectAgg) UpdatePartialResult(sctx sessionctx.Context, rowsInGroup
 			return 0, types.ErrInvalidJSONCharset.GenWithStackByArgs(e.args[0].GetType().GetCharset())
 		}
 
-		key = strings.Clone(key)
 		value, err := e.args[1].Eval(row)
 		if err != nil {
 			return 0, errors.Trace(err)
@@ -191,7 +191,7 @@ func getValMemDelta(val interface{}) (memDelta int64) {
 	return memDelta
 }
 
-func (*jsonObjectAgg) MergePartialResult(_ sessionctx.Context, src, dst PartialResult) (memDelta int64, err error) {
+func (e *jsonObjectAgg) MergePartialResult(sctx sessionctx.Context, src, dst PartialResult) (memDelta int64, err error) {
 	p1, p2 := (*partialResult4JsonObjectAgg)(src), (*partialResult4JsonObjectAgg)(dst)
 	// When the result of this function is normalized, values having duplicate keys are discarded,
 	// and only the last value encountered is used with that key in the returned object
@@ -203,5 +203,5 @@ func (*jsonObjectAgg) MergePartialResult(_ sessionctx.Context, src, dst PartialR
 			p2.bInMap++
 		}
 	}
-	return memDelta, nil
+	return 0, nil
 }

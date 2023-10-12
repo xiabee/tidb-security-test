@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	TidbNewCollationEnabled = "new_collation_enabled"
+	tidbNewCollationEnabled = "new_collation_enabled"
 )
 
 var (
@@ -59,7 +59,7 @@ func CheckLogBackupEnabled(ctx sessionctx.Context) bool {
 	executor, ok := ctx.(sqlexec.RestrictedSQLExecutor)
 	if !ok {
 		// shouldn't happen
-		log.Error("unable to translate executor from sessionctx", zap.String("category", "backup"))
+		log.Error("[backup] unable to translate executor from sessionctx")
 		return false
 	}
 	enabled, err := IsLogBackupEnabled(executor)
@@ -68,7 +68,7 @@ func CheckLogBackupEnabled(ctx sessionctx.Context) bool {
 		// for GC worker it will scan more locks in one tick.
 		// for Add index it will skip using lightning this time.
 		// for Telemetry it will get a false positive usage count.
-		log.Warn("check log backup config failed, ignore it", zap.String("category", "backup"), zap.Error(err))
+		log.Warn("[backup] check log backup config failed, ignore it", zap.Error(err))
 		return true
 	}
 	return enabled
@@ -226,5 +226,5 @@ func IsLogBackupInUse(ctx sessionctx.Context) bool {
 
 // GetTidbNewCollationEnabled returns the variable name of NewCollationEnabled.
 func GetTidbNewCollationEnabled() string {
-	return TidbNewCollationEnabled
+	return tidbNewCollationEnabled
 }

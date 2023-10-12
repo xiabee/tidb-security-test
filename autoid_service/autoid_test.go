@@ -16,6 +16,7 @@ package autoid
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net"
 	"testing"
@@ -25,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/tikv"
 	"go.etcd.io/etcd/tests/v3/integration"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -74,7 +74,7 @@ func TestAPI(t *testing.T) {
 
 	ctx := context.Background()
 	checkCurrValue := func(t *testing.T, cli autoid.AutoIDAllocClient, min, max int64) {
-		req := &autoid.AutoIDRequest{DbID: dbInfo.ID, TblID: tbInfo.ID, N: 0, KeyspaceID: uint32(tikv.NullspaceID)}
+		req := &autoid.AutoIDRequest{DbID: dbInfo.ID, TblID: tbInfo.ID, N: 0}
 		resp, err := cli.AllocAutoID(ctx, req)
 		require.NoError(t, err)
 		require.Equal(t, resp, &autoid.AutoIDResponse{Min: min, Max: max})
@@ -88,7 +88,7 @@ func TestAPI(t *testing.T) {
 		if len(more) >= 2 {
 			offset = more[1]
 		}
-		req := &autoid.AutoIDRequest{DbID: dbInfo.ID, TblID: tbInfo.ID, IsUnsigned: unsigned, N: n, Increment: increment, Offset: offset, KeyspaceID: uint32(tikv.NullspaceID)}
+		req := &autoid.AutoIDRequest{DbID: dbInfo.ID, TblID: tbInfo.ID, IsUnsigned: unsigned, N: n, Increment: increment, Offset: offset}
 		resp, err := cli.AllocAutoID(ctx, req)
 		return autoIDResp{resp, err, t}
 	}
@@ -155,10 +155,17 @@ func TestGRPC(t *testing.T) {
 	defer cluster.Terminate(t)
 	etcdCli := cluster.RandClient()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	var addr string
+	var listener net.Listener
+	for port := 10080; ; port++ {
+		var err error
+		addr = fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err = net.Listen("tcp", addr)
+		if err == nil {
+			break
+		}
+	}
 	defer listener.Close()
-	addr := listener.Addr().String()
 
 	service := newWithCli(addr, etcdCli, store)
 	defer service.Close()
@@ -180,7 +187,7 @@ func TestGRPC(t *testing.T) {
 	}()
 	defer grpcServer.Stop()
 
-	grpcConn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	grpcConn, err := grpc.Dial("127.0.0.1:10080", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	cli := autoid.NewAutoIDAllocClient(grpcConn)
 	_, err = cli.AllocAutoID(context.Background(), &autoid.AutoIDRequest{
@@ -190,7 +197,6 @@ func TestGRPC(t *testing.T) {
 		Increment:  1,
 		Offset:     1,
 		IsUnsigned: false,
-		KeyspaceID: uint32(tikv.NullspaceID),
 	})
 	require.NoError(t, err)
 }

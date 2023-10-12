@@ -264,9 +264,10 @@ func runJobs(ctx context.Context, jobs []job, stmt *ast.NonTransactionalDMLStmt,
 	for _, col := range tableName.TableInfo.Columns {
 		if col.Name.L == stmt.ShardColumn.Name.L {
 			shardColumnRefer = &ast.ResultField{
-				Column: col,
-				Table:  tableName.TableInfo,
-				DBName: tableName.Schema,
+				Column:    col,
+				Table:     tableName.TableInfo,
+				DBName:    tableName.Schema,
+				TableName: tableName,
 			}
 			shardColumnType = col.FieldType
 		}
@@ -300,9 +301,10 @@ func runJobs(ctx context.Context, jobs []job, stmt *ast.NonTransactionalDMLStmt,
 		if shardColumnRefer == nil {
 			shardColumnType = *types.NewFieldType(mysql.TypeLonglong)
 			shardColumnRefer = &ast.ResultField{
-				Column: model.NewExtraHandleColInfo(),
-				Table:  tableName.TableInfo,
-				DBName: tableName.Schema,
+				Column:    model.NewExtraHandleColInfo(),
+				Table:     tableName.TableInfo,
+				DBName:    tableName.Schema,
+				TableName: tableName,
 			}
 		}
 		stmtBuildInfo := statementBuildInfo{

@@ -102,8 +102,6 @@ const (
 	ActionCreateResourceGroup           ActionType = 68
 	ActionAlterResourceGroup            ActionType = 69
 	ActionDropResourceGroup             ActionType = 70
-	ActionAlterTablePartitioning        ActionType = 71
-	ActionRemovePartitioning            ActionType = 72
 )
 
 var actionMap = map[ActionType]string{
@@ -172,8 +170,6 @@ var actionMap = map[ActionType]string{
 	ActionCreateResourceGroup:           "create resource group",
 	ActionAlterResourceGroup:            "alter resource group",
 	ActionDropResourceGroup:             "drop resource group",
-	ActionAlterTablePartitioning:        "alter table partition by",
-	ActionRemovePartitioning:            "alter table remove partitioning",
 
 	// `ActionAlterTableAlterPartition` is removed and will never be used.
 	// Just left a tombstone here for compatibility.
@@ -292,7 +288,6 @@ type SubJob struct {
 	RawArgs     json.RawMessage `json:"raw_args"`
 	SchemaState SchemaState     `json:"schema_state"`
 	SnapshotVer uint64          `json:"snapshot_ver"`
-	RealStartTS uint64          `json:"real_start_ts"`
 	Revertible  bool            `json:"revertible"`
 	State       JobState        `json:"state"`
 	RowCount    int64           `json:"row_count"`
@@ -339,7 +334,7 @@ func (sub *SubJob) ToProxyJob(parentJob *Job) Job {
 		RawArgs:         sub.RawArgs,
 		SchemaState:     sub.SchemaState,
 		SnapshotVer:     sub.SnapshotVer,
-		RealStartTS:     sub.RealStartTS,
+		RealStartTS:     parentJob.RealStartTS,
 		StartTS:         parentJob.StartTS,
 		DependencyID:    parentJob.DependencyID,
 		Query:           parentJob.Query,
@@ -352,7 +347,6 @@ func (sub *SubJob) ToProxyJob(parentJob *Job) Job {
 		Charset:         parentJob.Charset,
 		Collate:         parentJob.Collate,
 		AdminOperator:   parentJob.AdminOperator,
-		TraceInfo:       parentJob.TraceInfo,
 	}
 }
 
@@ -361,7 +355,6 @@ func (sub *SubJob) FromProxyJob(proxyJob *Job, ver int64) {
 	sub.Revertible = proxyJob.MultiSchemaInfo.Revertible
 	sub.SchemaState = proxyJob.SchemaState
 	sub.SnapshotVer = proxyJob.SnapshotVer
-	sub.RealStartTS = proxyJob.RealStartTS
 	sub.Args = proxyJob.Args
 	sub.State = proxyJob.State
 	sub.Warning = proxyJob.Warning
@@ -442,9 +435,6 @@ type Job struct {
 	// AdminOperator indicates where the Admin command comes, by the TiDB
 	// itself (AdminCommandBySystem) or by user (AdminCommandByEndUser).
 	AdminOperator AdminCommandOperator `json:"admin_operator"`
-
-	// TraceInfo indicates the information for SQL tracing
-	TraceInfo *TraceInfo `json:"trace_info"`
 }
 
 // FinishTableJob is called when a job is finished.
@@ -805,8 +795,7 @@ func (job *Job) NotStarted() bool {
 // MayNeedReorg indicates that this job may need to reorganize the data.
 func (job *Job) MayNeedReorg() bool {
 	switch job.Type {
-	case ActionAddIndex, ActionAddPrimaryKey, ActionReorganizePartition,
-		ActionRemovePartitioning, ActionAlterTablePartitioning:
+	case ActionAddIndex, ActionAddPrimaryKey, ActionReorganizePartition:
 		return true
 	case ActionModifyColumn:
 		if len(job.CtxVars) > 0 {
@@ -844,13 +833,13 @@ func (job *Job) IsRollbackable() bool {
 	case ActionAddTablePartition:
 		return job.SchemaState == StateNone || job.SchemaState == StateReplicaOnly
 	case ActionDropColumn, ActionDropSchema, ActionDropTable, ActionDropSequence,
-		ActionDropForeignKey, ActionDropTablePartition, ActionTruncateTablePartition:
+		ActionDropForeignKey, ActionDropTablePartition:
 		return job.SchemaState == StatePublic
 	case ActionRebaseAutoID, ActionShardRowID,
 		ActionTruncateTable, ActionAddForeignKey, ActionRenameTable, ActionRenameTables,
-		ActionModifyTableCharsetAndCollate,
+		ActionModifyTableCharsetAndCollate, ActionTruncateTablePartition,
 		ActionModifySchemaCharsetAndCollate, ActionRepairTable,
-		ActionModifyTableAutoIdCache, ActionModifySchemaDefaultPlacement, ActionDropCheckConstraint:
+		ActionModifyTableAutoIdCache, ActionModifySchemaDefaultPlacement:
 		return job.SchemaState == StateNone
 	case ActionMultiSchemaChange:
 		return job.MultiSchemaInfo.Revertible

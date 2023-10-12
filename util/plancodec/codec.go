@@ -373,8 +373,8 @@ func EncodePlanNode(depth int, pid, planType string, rowCount float64,
 }
 
 func escapeString(s string) string {
-	s = strings.ReplaceAll(s, string([]byte{separator}), "\\t")
-	return strings.ReplaceAll(s, string([]byte{lineBreaker}), "\\n")
+	s = strings.Replace(s, string([]byte{separator}), "\\t", -1)
+	return strings.Replace(s, string([]byte{lineBreaker}), "\\n", -1)
 }
 
 // NormalizePlanNode is used to normalize the plan to a string.

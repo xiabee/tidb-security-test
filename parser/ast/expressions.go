@@ -582,7 +582,7 @@ func (n *ColumnNameExpr) Restore(ctx *format.RestoreCtx) error {
 
 // Format the ExprNode into a Writer.
 func (n *ColumnNameExpr) Format(w io.Writer) {
-	name := strings.ReplaceAll(n.Name.String(), ".", "`.`")
+	name := strings.Replace(n.Name.String(), ".", "`.`", -1)
 	fmt.Fprintf(w, "`%s`", name)
 }
 
@@ -623,10 +623,7 @@ func (n *DefaultExpr) Restore(ctx *format.RestoreCtx) error {
 
 // Format the ExprNode into a Writer.
 func (n *DefaultExpr) Format(w io.Writer) {
-	fmt.Fprint(w, "DEFAULT")
-	if n.Name != nil {
-		panic("Not implemented")
-	}
+	panic("Not implemented")
 }
 
 // Accept implements Node Accept interface.

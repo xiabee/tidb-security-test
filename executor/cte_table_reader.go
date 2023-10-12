@@ -18,14 +18,13 @@ import (
 	"context"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/cteutil"
 )
 
 // CTETableReaderExec scans data in iterInTbl, which is filled by corresponding CTEExec.
 type CTETableReaderExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	iterInTbl cteutil.Storage
 	chkIdx    int
@@ -35,11 +34,11 @@ type CTETableReaderExec struct {
 // Open implements the Executor interface.
 func (e *CTETableReaderExec) Open(ctx context.Context) error {
 	e.reset()
-	return e.BaseExecutor.Open(ctx)
+	return e.baseExecutor.Open(ctx)
 }
 
 // Next implements the Executor interface.
-func (e *CTETableReaderExec) Next(_ context.Context, req *chunk.Chunk) (err error) {
+func (e *CTETableReaderExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 	req.Reset()
 
 	// We should read `iterInTbl` from the beginning when the next iteration starts.
@@ -68,7 +67,7 @@ func (e *CTETableReaderExec) Next(_ context.Context, req *chunk.Chunk) (err erro
 // Close implements the Executor interface.
 func (e *CTETableReaderExec) Close() (err error) {
 	e.reset()
-	return e.BaseExecutor.Close()
+	return e.baseExecutor.Close()
 }
 
 func (e *CTETableReaderExec) reset() {

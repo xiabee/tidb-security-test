@@ -20,7 +20,7 @@ import (
 
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/extension"
-	"github.com/pingcap/tidb/server/internal/resultset"
+	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 )
 
@@ -36,7 +36,7 @@ type PreparedStatement interface {
 	ID() int
 
 	// Execute executes the statement.
-	Execute(context.Context, []expression.Expression) (resultset.ResultSet, error)
+	Execute(context.Context, []expression.Expression) (ResultSet, error)
 
 	// AppendParam appends parameter to the statement.
 	AppendParam(paramID int, data []byte) error
@@ -54,10 +54,10 @@ type PreparedStatement interface {
 	GetParamsType() []byte
 
 	// StoreResultSet stores ResultSet for subsequent stmt fetching
-	StoreResultSet(rs resultset.CursorResultSet)
+	StoreResultSet(rs cursorResultSet)
 
 	// GetResultSet gets ResultSet associated this statement
-	GetResultSet() resultset.CursorResultSet
+	GetResultSet() cursorResultSet
 
 	// Reset removes all bound parameters and opened resultSet/rowContainer.
 	Reset() error
@@ -77,4 +77,36 @@ type PreparedStatement interface {
 
 	// GetRowContainer returns the row container of the statement
 	GetRowContainer() *chunk.RowContainer
+}
+
+// ResultSet is the result set of an query.
+type ResultSet interface {
+	Columns() []*ColumnInfo
+	NewChunk(chunk.Allocator) *chunk.Chunk
+	Next(context.Context, *chunk.Chunk) error
+	Close() error
+	// IsClosed checks whether the result set is closed.
+	IsClosed() bool
+	FieldTypes() []*types.FieldType
+}
+
+// cursorResultSet extends the `ResultSet` to provide the ability to store an iterator
+type cursorResultSet interface {
+	ResultSet
+
+	StoreRowContainerReader(reader chunk.RowContainerReader)
+	GetRowContainerReader() chunk.RowContainerReader
+}
+
+// fetchNotifier represents notifier will be called in COM_FETCH.
+type fetchNotifier interface {
+	// OnFetchReturned be called when COM_FETCH returns.
+	// it will be used in server-side cursor.
+	OnFetchReturned()
+}
+
+func wrapWithCursor(rs ResultSet) cursorResultSet {
+	return &tidbCursorResultSet{
+		rs, nil,
+	}
 }

@@ -29,9 +29,6 @@ import (
 // ParseSimpleExprWithTableInfo parses simple expression string to Expression.
 // The expression string must only reference the column in table Info.
 func ParseSimpleExprWithTableInfo(ctx sessionctx.Context, exprStr string, tableInfo *model.TableInfo) (Expression, error) {
-	if len(exprStr) == 0 {
-		return nil, nil
-	}
 	exprStr = "select " + exprStr
 	var stmts []ast.StmtNode
 	var err error
@@ -129,7 +126,9 @@ func FindFieldName(names types.NameSlice, astCol *ast.ColumnName) (int, error) {
 		if !name.NotExplicitUsable && (dbName.L == "" || dbName.L == name.DBName.L) &&
 			(tblName.L == "" || tblName.L == name.TblName.L) &&
 			(colName.L == name.ColName.L) {
-			if idx != -1 {
+			if idx == -1 {
+				idx = i
+			} else {
 				if names[idx].Redundant || name.Redundant {
 					if !name.Redundant {
 						idx = i
@@ -138,7 +137,6 @@ func FindFieldName(names types.NameSlice, astCol *ast.ColumnName) (int, error) {
 				}
 				return -1, errNonUniq.GenWithStackByArgs(astCol.String(), "field list")
 			}
-			idx = i
 		}
 	}
 	return idx, nil

@@ -18,25 +18,24 @@ import (
 	"context"
 
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/telemetry"
 	"github.com/pingcap/tidb/util/chunk"
 )
 
 // AdminShowTelemetryExec is an executor for ADMIN SHOW TELEMETRY.
 type AdminShowTelemetryExec struct {
-	exec.BaseExecutor
+	baseExecutor
 	done bool
 }
 
 // Next implements the Executor Next interface.
-func (e *AdminShowTelemetryExec) Next(_ context.Context, req *chunk.Chunk) error {
+func (e *AdminShowTelemetryExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.Reset()
 	if e.done {
 		return nil
 	}
 	e.done = true
-	dom := domain.GetDomain(e.Ctx())
+	dom := domain.GetDomain(e.ctx)
 	id, err := telemetry.GetTrackingID(dom.GetEtcdClient())
 	if err != nil {
 		return err
@@ -45,7 +44,7 @@ func (e *AdminShowTelemetryExec) Next(_ context.Context, req *chunk.Chunk) error
 	if err != nil {
 		return err
 	}
-	previewData, err := telemetry.PreviewUsageData(e.Ctx(), dom.GetEtcdClient())
+	previewData, err := telemetry.PreviewUsageData(e.ctx, dom.GetEtcdClient())
 	if err != nil {
 		return err
 	}
@@ -57,17 +56,17 @@ func (e *AdminShowTelemetryExec) Next(_ context.Context, req *chunk.Chunk) error
 
 // AdminResetTelemetryIDExec is an executor for ADMIN RESET TELEMETRY_ID.
 type AdminResetTelemetryIDExec struct {
-	exec.BaseExecutor
+	baseExecutor
 	done bool
 }
 
 // Next implements the Executor Next interface.
-func (e *AdminResetTelemetryIDExec) Next(context.Context, *chunk.Chunk) error {
+func (e *AdminResetTelemetryIDExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	if e.done {
 		return nil
 	}
 	e.done = true
-	dom := domain.GetDomain(e.Ctx())
+	dom := domain.GetDomain(e.ctx)
 	_, err := telemetry.ResetTrackingID(dom.GetEtcdClient())
 	return err
 }

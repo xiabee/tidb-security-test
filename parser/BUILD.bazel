@@ -1,10 +1,5 @@
 load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
-exports_files([
-    "go.mod",
-    "go.sum",
-])
-
 go_library(
     name = "parser",
     srcs = [

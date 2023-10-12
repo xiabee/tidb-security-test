@@ -466,7 +466,7 @@ type defaultFunctionClass struct {
 }
 
 func (c *defaultFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	return nil, ErrFunctionNotExists.GenWithStackByArgs("FUNCTION", "DEFAULT")
+	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "DEFAULT")
 }
 
 type inetAtonFunctionClass struct {
@@ -730,53 +730,7 @@ type isFreeLockFunctionClass struct {
 }
 
 func (c *isFreeLockFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETInt, types.ETString)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinFreeLockSig{bf}
-	bf.tp.SetFlen(1)
-	return sig, nil
-}
-
-type builtinFreeLockSig struct {
-	baseBuiltinFunc
-}
-
-func (b *builtinFreeLockSig) Clone() builtinFunc {
-	newSig := &builtinFreeLockSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// See https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_is-free-lock
-func (b *builtinFreeLockSig) evalInt(row chunk.Row) (int64, bool, error) {
-	lockName, isNull, err := b.args[0].EvalString(b.ctx, row)
-	if err != nil {
-		return 0, true, err
-	}
-	// Validate that lockName is NOT NULL or empty string
-	if isNull {
-		return 0, true, errUserLockWrongName.GenWithStackByArgs("NULL")
-	}
-	if lockName == "" || utf8.RuneCountInString(lockName) > 64 {
-		return 0, true, errUserLockWrongName.GenWithStackByArgs(lockName)
-	}
-
-	// Lock names are case insensitive. Because we can't rely on collations
-	// being enabled on the internal table, we have to lower it.
-	lockName = strings.ToLower(lockName)
-	if utf8.RuneCountInString(lockName) > 64 {
-		return 0, true, errIncorrectArgs.GenWithStackByArgs("is_free_lock")
-	}
-	lock := b.ctx.IsUsedAdvisoryLock(lockName)
-	if lock > 0 {
-		return 0, false, nil
-	}
-	return 1, false, nil
+	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "IS_FREE_LOCK")
 }
 
 type isIPv4FunctionClass struct {
@@ -992,50 +946,7 @@ type isUsedLockFunctionClass struct {
 }
 
 func (c *isUsedLockFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETInt, types.ETString)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinUsedLockSig{bf}
-	bf.tp.SetFlen(1)
-	return sig, nil
-}
-
-type builtinUsedLockSig struct {
-	baseBuiltinFunc
-}
-
-func (b *builtinUsedLockSig) Clone() builtinFunc {
-	newSig := &builtinUsedLockSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// See https://dev.mysql.com/doc/refman/8.0/en/locking-functions.html#function_is-used-lock
-func (b *builtinUsedLockSig) evalInt(row chunk.Row) (int64, bool, error) {
-	lockName, isNull, err := b.args[0].EvalString(b.ctx, row)
-	if err != nil {
-		return 0, isNull, err
-	}
-	// Validate that lockName is NOT NULL or empty string
-	if isNull {
-		return 0, false, errUserLockWrongName.GenWithStackByArgs("NULL")
-	}
-	if lockName == "" || utf8.RuneCountInString(lockName) > 64 {
-		return 0, false, errUserLockWrongName.GenWithStackByArgs(lockName)
-	}
-
-	// Lock names are case insensitive. Because we can't rely on collations
-	// being enabled on the internal table, we have to lower it.
-	lockName = strings.ToLower(lockName)
-	if utf8.RuneCountInString(lockName) > 64 {
-		return 0, false, errIncorrectArgs.GenWithStackByArgs("is_used_lock")
-	}
-	lock := b.ctx.IsUsedAdvisoryLock(lockName)
-	return int64(lock), lock == 0, nil // TODO, uint64
+	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "IS_USED_LOCK")
 }
 
 type isUUIDFunctionClass struct {
@@ -1084,7 +995,7 @@ type masterPosWaitFunctionClass struct {
 }
 
 func (c *masterPosWaitFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	return nil, ErrFunctionNotExists.GenWithStackByArgs("FUNCTION", "MASTER_POS_WAIT")
+	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "MASTER_POS_WAIT")
 }
 
 type nameConstFunctionClass struct {
@@ -1308,7 +1219,7 @@ type uuidShortFunctionClass struct {
 }
 
 func (c *uuidShortFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	return nil, ErrFunctionNotExists.GenWithStackByArgs("FUNCTION", "UUID_SHORT")
+	return nil, errFunctionNotExists.GenWithStackByArgs("FUNCTION", "UUID_SHORT")
 }
 
 type vitessHashFunctionClass struct {

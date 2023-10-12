@@ -76,8 +76,8 @@ import (
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
-	"github.com/pingcap/tidb/statistics/handle/usage"
 	storeerr "github.com/pingcap/tidb/store/driver/error"
 	"github.com/pingcap/tidb/store/driver/txn"
 	"github.com/pingcap/tidb/store/helper"
@@ -95,7 +95,6 @@ import (
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/logutil/consistency"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/sem"
 	"github.com/pingcap/tidb/util/sli"
@@ -240,7 +239,7 @@ type session struct {
 	mppClient kv.MPPClient
 
 	// indexUsageCollector collects index usage information.
-	idxUsageCollector *usage.SessionIndexUsageCollector
+	idxUsageCollector *handle.SessionIndexUsageCollector
 
 	functionUsageMu struct {
 		syncutil.RWMutex
@@ -446,6 +445,30 @@ func (s *session) GetSessionManager() util.SessionManager {
 	return s.sessionManager
 }
 
+func (s *session) StoreQueryFeedback(feedback interface{}) {
+	if variable.FeedbackProbability.Load() <= 0 {
+		return
+	}
+	if fb, ok := feedback.(*statistics.QueryFeedback); !ok || fb == nil || !fb.Valid.Load() {
+		return
+	}
+	if s.statsCollector != nil {
+		do, err := GetDomain(s.store)
+		if err != nil {
+			logutil.BgLogger().Debug("domain not found", zap.Error(err))
+			metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblError).Inc()
+			return
+		}
+		err = s.statsCollector.StoreQueryFeedback(feedback, do.StatsHandle(), s.GetSessionVars().GetEnablePseudoForOutdatedStats())
+		if err != nil {
+			logutil.BgLogger().Debug("store query feedback", zap.Error(err))
+			metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblError).Inc()
+			return
+		}
+		metrics.StoreQueryFeedbackCounter.WithLabelValues(metrics.LblOK).Inc()
+	}
+}
+
 func (s *session) UpdateColStatsUsage(predicateColumns []model.TableItemID) {
 	if s.statsCollector == nil {
 		return
@@ -466,7 +489,7 @@ func (s *session) StoreIndexUsage(tblID int64, idxID int64, rowsSelected int64) 
 	if s.idxUsageCollector == nil {
 		return
 	}
-	s.idxUsageCollector.Update(tblID, idxID, &usage.IndexUsageInformation{QueryCount: 1, RowsSelected: rowsSelected})
+	s.idxUsageCollector.Update(tblID, idxID, &handle.IndexUsageInformation{QueryCount: 1, RowsSelected: rowsSelected})
 }
 
 // FieldList returns fields list of a table.
@@ -620,7 +643,6 @@ func (s *session) doCommit(ctx context.Context) error {
 	s.txn.SetOption(kv.EnableAsyncCommit, sessVars.EnableAsyncCommit)
 	s.txn.SetOption(kv.Enable1PC, sessVars.Enable1PC)
 	s.txn.SetOption(kv.ResourceGroupTagger, sessVars.StmtCtx.GetResourceGroupTagger())
-	s.txn.SetOption(kv.ExplicitRequestSourceType, sessVars.ExplicitRequestSourceType)
 	if sessVars.StmtCtx.KvExecCounter != nil {
 		// Bind an interceptor for client-go to count the number of SQL executions of each TiKV.
 		s.txn.SetOption(kv.RPCInterceptor, sessVars.StmtCtx.KvExecCounter.RPCInterceptor())
@@ -700,7 +722,7 @@ func (c *cachedTableRenewLease) start(ctx context.Context) error {
 	return err
 }
 
-func (c *cachedTableRenewLease) stop(_ context.Context) {
+func (c *cachedTableRenewLease) stop(ctx context.Context) {
 	close(c.exit)
 }
 
@@ -1132,7 +1154,7 @@ func (s *session) isInternal() bool {
 	return s.sessionVars.InRestrictedSQL
 }
 
-func (*session) isTxnRetryableError(err error) bool {
+func (s *session) isTxnRetryableError(err error) bool {
 	if atomic.LoadUint32(&SchemaChangedWithoutRetry) == 1 {
 		return kv.IsTxnRetryableError(err)
 	}
@@ -1141,10 +1163,11 @@ func (*session) isTxnRetryableError(err error) bool {
 
 func (s *session) checkTxnAborted(stmt sqlexec.Statement) error {
 	var err error
-	if atomic.LoadUint32(&s.GetSessionVars().TxnCtx.LockExpire) == 0 {
+	if atomic.LoadUint32(&s.GetSessionVars().TxnCtx.LockExpire) > 0 {
+		err = kv.ErrLockExpire
+	} else {
 		return nil
 	}
-	err = kv.ErrLockExpire
 	// If the transaction is aborted, the following statements do not need to execute, except `commit` and `rollback`,
 	// because they are used to finish the aborted transaction.
 	if _, ok := stmt.(*executor.ExecStmt).StmtNode.(*ast.CommitStmt); ok {
@@ -1521,10 +1544,8 @@ func (s *session) SetProcessInfo(sql string, t time.Time, command byte, maxExecu
 	// Because the select statement and other statements need this timestamp to read data,
 	// after the transaction is committed. e.g. SHOW MASTER STATUS;
 	var curTxnStartTS uint64
-	var curTxnCreateTime time.Time
 	if command != mysql.ComSleep || s.GetSessionVars().InTxn() {
 		curTxnStartTS = s.sessionVars.TxnCtx.StartTS
-		curTxnCreateTime = s.sessionVars.TxnCtx.CreateTime
 	}
 	// Set curTxnStartTS to SnapshotTS directly when the session is trying to historic read.
 	// It will avoid the session meet GC lifetime too short error.
@@ -1548,7 +1569,6 @@ func (s *session) SetProcessInfo(sql string, t time.Time, command byte, maxExecu
 		State:                 s.Status(),
 		Info:                  sql,
 		CurTxnStartTS:         curTxnStartTS,
-		CurTxnCreateTime:      curTxnCreateTime,
 		StmtCtx:               s.sessionVars.StmtCtx,
 		RefCountOfStmtCtx:     &s.sessionVars.RefCountOfStmtCtx,
 		MemTracker:            s.sessionVars.MemTracker,
@@ -1560,7 +1580,6 @@ func (s *session) SetProcessInfo(sql string, t time.Time, command byte, maxExecu
 		MaxExecutionTime:      maxExecutionTime,
 		RedactSQL:             s.sessionVars.EnableRedactLog,
 		ResourceGroupName:     s.sessionVars.ResourceGroupName,
-		SessionAlias:          s.sessionVars.SessionAlias,
 	}
 	oldPi := s.ShowProcess()
 	if p == nil {
@@ -1575,10 +1594,6 @@ func (s *session) SetProcessInfo(sql string, t time.Time, command byte, maxExecu
 	// We set process info before building plan, so we extended execution time.
 	if oldPi != nil && oldPi.Info == pi.Info && oldPi.Command == pi.Command {
 		pi.Time = oldPi.Time
-	}
-	if oldPi != nil && oldPi.CurTxnStartTS != 0 && oldPi.CurTxnStartTS == pi.CurTxnStartTS {
-		// Keep the last expensive txn log time, avoid print too many expensive txn logs.
-		pi.ExpensiveTxnLogTime = oldPi.ExpensiveTxnLogTime
 	}
 	_, digest := s.sessionVars.StmtCtx.SQLDigest()
 	pi.Digest = digest.String()
@@ -1602,7 +1617,6 @@ func (s *session) UpdateProcessInfo() {
 	}
 	// Update the current transaction start timestamp.
 	pi.CurTxnStartTS = s.sessionVars.TxnCtx.StartTS
-	pi.CurTxnCreateTime = s.sessionVars.TxnCtx.CreateTime
 }
 
 func (s *session) getOomAlarmVariablesInfo() util.OOMAlarmVariablesInfo {
@@ -1680,7 +1694,6 @@ func (s *session) Execute(ctx context.Context, sql string) (recordSets []sqlexec
 
 // Parse parses a query string to raw ast.StmtNode.
 func (s *session) Parse(ctx context.Context, sql string) ([]ast.StmtNode, error) {
-	logutil.Logger(ctx).Debug("parse", zap.String("sql", sql))
 	parseStartTime := time.Now()
 	stmts, warns, err := s.ParseSQL(ctx, sql, s.sessionVars.GetParseParams()...)
 	if err != nil {
@@ -1743,11 +1756,14 @@ func (s *session) ParseWithParams(ctx context.Context, sql string, args ...inter
 	}
 	if err != nil {
 		s.rollbackOnError(ctx)
-		logSQL := sql[:mathutil.Min(500, len(sql))]
-		if s.sessionVars.EnableRedactLog {
-			logutil.Logger(ctx).Debug("parse SQL failed", zap.Error(err), zap.String("SQL", logSQL))
-		} else {
-			logutil.Logger(ctx).Warn("parse SQL failed", zap.Error(err), zap.String("SQL", logSQL))
+		// Only print log message when this SQL is from the user.
+		// Mute the warning for internal SQLs.
+		if !s.sessionVars.InRestrictedSQL {
+			if s.sessionVars.EnableRedactLog {
+				logutil.Logger(ctx).Debug("parse SQL failed", zap.Error(err), zap.String("SQL", sql))
+			} else {
+				logutil.Logger(ctx).Warn("parse SQL failed", zap.Error(err), zap.String("SQL", sql))
+			}
 		}
 		return nil, util.SyntaxError(err)
 	}
@@ -1788,35 +1804,13 @@ func (s *session) GetAdvisoryLock(lockName string, timeout int64) error {
 		return err
 	}
 	infosync.StoreInternalSession(sess)
-	lock := &advisoryLock{session: sess, ctx: context.TODO(), owner: s.ShowProcess().ID}
+	lock := &advisoryLock{session: sess, ctx: context.TODO()}
 	err = lock.GetLock(lockName, timeout)
 	if err != nil {
 		return err
 	}
 	s.advisoryLocks[lockName] = lock
 	return nil
-}
-
-// IsUsedAdvisoryLock checks if a lockName is already in use
-func (s *session) IsUsedAdvisoryLock(lockName string) uint64 {
-	// Same session
-	if lock, ok := s.advisoryLocks[lockName]; ok {
-		return lock.owner
-	}
-
-	// Check for transaction on advisory_locks table
-	sess, err := createSession(s.store)
-	if err != nil {
-		return 0
-	}
-	lock := &advisoryLock{session: sess, ctx: context.TODO(), owner: s.ShowProcess().ID}
-	err = lock.IsUsedLock(lockName)
-	if err != nil {
-		// TODO: Return actual owner pid
-		// TODO: Check for mysql.ErrLockWaitTimeout and DeadLock
-		return 1
-	}
-	return 0
 }
 
 // ReleaseAdvisoryLock releases an advisory locks held by the session.
@@ -1927,9 +1921,8 @@ func (s *session) ExecRestrictedStmt(ctx context.Context, stmtNode ast.StmtNode,
 		return nil, nil, err
 	}
 
-	vars := se.GetSessionVars()
-	for _, dbName := range GetDBNames(vars) {
-		metrics.QueryDurationHistogram.WithLabelValues(metrics.LblInternal, dbName, vars.ResourceGroupName).Observe(time.Since(startTime).Seconds())
+	for _, dbName := range GetDBNames(se.GetSessionVars()) {
+		metrics.QueryDurationHistogram.WithLabelValues(metrics.LblInternal, dbName).Observe(time.Since(startTime).Seconds())
 	}
 	return rows, rs.Fields(), err
 }
@@ -2103,9 +2096,8 @@ func (s *session) ExecRestrictedSQL(ctx context.Context, opts []sqlexec.OptionFu
 			return nil, nil, err
 		}
 
-		vars := se.GetSessionVars()
-		for _, dbName := range GetDBNames(vars) {
-			metrics.QueryDurationHistogram.WithLabelValues(metrics.LblInternal, dbName, vars.ResourceGroupName).Observe(time.Since(startTime).Seconds())
+		for _, dbName := range GetDBNames(se.GetSessionVars()) {
+			metrics.QueryDurationHistogram.WithLabelValues(metrics.LblInternal, dbName).Observe(time.Since(startTime).Seconds())
 		}
 		return rows, rs.Fields(), err
 	})
@@ -2166,10 +2158,6 @@ func (s *session) ExecuteStmt(ctx context.Context, stmtNode ast.StmtNode) (sqlex
 		plannercore.DebugTraceReceivedCommand(s, cmdByte, stmtNode)
 	}
 
-	if err := s.validateStatementInTxn(stmtNode); err != nil {
-		return nil, err
-	}
-
 	if err := s.validateStatementReadOnlyInStaleness(stmtNode); err != nil {
 		return nil, err
 	}
@@ -2192,20 +2180,11 @@ func (s *session) ExecuteStmt(ctx context.Context, stmtNode ast.StmtNode) (sqlex
 		}
 	})
 
-	var stmtLabel string
-	if execStmt, ok := stmtNode.(*ast.ExecuteStmt); ok {
-		prepareStmt, err := plannercore.GetPreparedStmt(execStmt, s.sessionVars)
-		if err == nil && prepareStmt.PreparedAst != nil {
-			stmtLabel = ast.GetStmtLabel(prepareStmt.PreparedAst.Stmt)
-		}
-	}
-	if stmtLabel == "" {
-		stmtLabel = ast.GetStmtLabel(stmtNode)
-	}
+	stmtLabel := ast.GetStmtLabel(stmtNode)
 	s.setRequestSource(ctx, stmtLabel, stmtNode)
 
 	// Backup the original resource group name since sql hint might change it during optimization
-	originalResourceGroup := s.GetSessionVars().ResourceGroupName
+	originalResourceGroup := sessVars.ResourceGroupName
 
 	// Transform abstract syntax tree to a physical plan(stored in executor.ExecStmt).
 	compiler := executor.Compiler{Ctx: s}
@@ -2219,7 +2198,7 @@ func (s *session) ExecuteStmt(ctx context.Context, stmtNode ast.StmtNode) (sqlex
 			sessVars.ResourceGroupName = originalResourceGroup
 			// if we are in a txn, should also reset the txn resource group.
 			if txn, err := s.Txn(false); err == nil && txn != nil && txn.Valid() {
-				kv.SetTxnResourceGroup(txn, originalResourceGroup)
+				txn.SetOption(kv.ResourceGroupName, originalResourceGroup)
 			}
 		} else {
 			defer func() {
@@ -2308,14 +2287,6 @@ func (s *session) onTxnManagerStmtStartOrRetry(ctx context.Context, node ast.Stm
 	return sessiontxn.GetTxnManager(s).OnStmtStart(ctx, node)
 }
 
-func (s *session) validateStatementInTxn(stmtNode ast.StmtNode) error {
-	vars := s.GetSessionVars()
-	if _, ok := stmtNode.(*ast.ImportIntoStmt); ok && vars.InTxn() {
-		return errors.New("cannot run IMPORT INTO in explicit transaction")
-	}
-	return nil
-}
-
 func (s *session) validateStatementReadOnlyInStaleness(stmtNode ast.StmtNode) error {
 	vars := s.GetSessionVars()
 	if !vars.TxnCtx.IsStaleness && vars.TxnReadTS.PeakTxnReadTS() == 0 && !vars.EnableExternalTSRead || vars.InRestrictedSQL {
@@ -2350,25 +2321,26 @@ func (s *session) validateStatementReadOnlyInStaleness(stmtNode ast.StmtNode) er
 	return nil
 }
 
-// fileTransInConnKeys contains the keys of queries that will be handled by handleFileTransInConn.
-var fileTransInConnKeys = []fmt.Stringer{
+// querySpecialKeys contains the keys of special query, the special query will handled by handleQuerySpecial method.
+var querySpecialKeys = []fmt.Stringer{
 	executor.LoadDataVarKey,
 	executor.LoadStatsVarKey,
 	executor.IndexAdviseVarKey,
 	executor.PlanReplayerLoadVarKey,
 }
 
-func (s *session) hasFileTransInConn() bool {
+func (s *session) hasQuerySpecial() bool {
+	found := false
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, k := range fileTransInConnKeys {
+	for _, k := range querySpecialKeys {
 		v := s.mu.values[k]
 		if v != nil {
-			return true
+			found = true
+			break
 		}
 	}
-	return false
+	s.mu.RUnlock()
+	return found
 }
 
 // runStmt executes the sqlexec.Statement and commit or rollback the current transaction.
@@ -2439,8 +2411,8 @@ func runStmt(ctx context.Context, se *session, s sqlexec.Statement) (rs sqlexec.
 	}
 
 	err = finishStmt(ctx, se, err, s)
-	if se.hasFileTransInConn() {
-		// The query will be handled later in handleFileTransInConn,
+	if se.hasQuerySpecial() {
+		// The special query will be handled later in handleQuerySpecial,
 		// then should call the ExecStmt.FinishExecuteStmt to finish this statement.
 		se.SetValue(ExecStmtVarKey, s.(*executor.ExecStmt))
 	} else {
@@ -2455,7 +2427,7 @@ func runStmt(ctx context.Context, se *session, s sqlexec.Statement) (rs sqlexec.
 type ExecStmtVarKeyType int
 
 // String defines a Stringer function for debugging and pretty printing.
-func (ExecStmtVarKeyType) String() string {
+func (k ExecStmtVarKeyType) String() string {
 	return "exec_stmt_var_key"
 }
 
@@ -2723,8 +2695,11 @@ func (s *session) Auth(user *auth.UserIdentity, authentication, salt []byte, aut
 		return err
 	}
 
-	if variable.EnableResourceControl.Load() && info.ResourceGroupName != "" {
+	// If tidb_resource_control_enable is disabled, set resource group to empty
+	if variable.EnableResourceControl.Load() {
 		s.sessionVars.ResourceGroupName = strings.ToLower(info.ResourceGroupName)
+	} else {
+		s.sessionVars.ResourceGroupName = ""
 	}
 
 	if info.InSandBoxMode {
@@ -2820,14 +2795,15 @@ func verifyAccountAutoLock(s *session, user, host string) (bool, error) {
 		}
 		lastChanged := pl.AutoLockedLastChanged
 		d := time.Now().Unix() - lastChanged
-		if d <= lockTimeDay*24*60*60 {
+		if d > lockTimeDay*24*60*60 {
+			// Generate unlock json string.
+			plJSON = privileges.BuildPasswordLockingJSON(pl.FailedLoginAttempts,
+				pl.PasswordLockTimeDays, "N", 0, time.Now().Format(time.UnixDate))
+		} else {
 			lds := strconv.FormatInt(lockTimeDay, 10)
 			rds := strconv.FormatInt(int64(math.Ceil(float64(lockTimeDay)-float64(d)/(24*60*60))), 10)
 			return false, privileges.GenerateAccountAutoLockErr(pl.FailedLoginAttempts, user, host, lds, rds)
 		}
-		// Generate unlock json string.
-		plJSON = privileges.BuildPasswordLockingJSON(pl.FailedLoginAttempts,
-			pl.PasswordLockTimeDays, "N", 0, time.Now().Format(time.UnixDate))
 	}
 	if plJSON != "" {
 		lockStatusChanged = true
@@ -3004,6 +2980,16 @@ func (s *session) AuthWithoutVerification(user *auth.UserIdentity) bool {
 		return true
 	}
 	return false
+}
+
+// RefreshVars implements the sessionctx.Context interface.
+func (s *session) RefreshVars(ctx context.Context) error {
+	pruneMode, err := s.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.TiDBPartitionPruneMode)
+	if err != nil {
+		return err
+	}
+	s.sessionVars.PartitionPruneMode.Store(pruneMode)
+	return nil
 }
 
 // SetSessionStatesHandler implements the Session.SetSessionStatesHandler interface.
@@ -3278,17 +3264,8 @@ func InitMDLVariable(store kv.Storage) error {
 	return err
 }
 
-// BootstrapSession bootstrap session and domain.
+// BootstrapSession runs the first time when the TiDB server start.
 func BootstrapSession(store kv.Storage) (*domain.Domain, error) {
-	return bootstrapSessionImpl(store, createSessions)
-}
-
-// BootstrapSession4DistExecution bootstrap session and dom for Distributed execution test, only for unit testing.
-func BootstrapSession4DistExecution(store kv.Storage) (*domain.Domain, error) {
-	return bootstrapSessionImpl(store, createSessions4DistExecution)
-}
-
-func bootstrapSessionImpl(store kv.Storage, createSessionsImpl func(store kv.Storage, cnt int) ([]*session, error)) (*domain.Domain, error) {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnBootstrap)
 	cfg := config.GetGlobalConfig()
 	if len(cfg.Instance.PluginLoad) > 0 {
@@ -3326,7 +3303,7 @@ func bootstrapSessionImpl(store kv.Storage, createSessionsImpl func(store kv.Sto
 
 	analyzeConcurrencyQuota := int(config.GetGlobalConfig().Performance.AnalyzePartitionConcurrencyQuota)
 	concurrency := int(config.GetGlobalConfig().Performance.StatsLoadConcurrency)
-	ses, err := createSessionsImpl(store, 10)
+	ses, err := createSessions(store, 10)
 	if err != nil {
 		return nil, err
 	}
@@ -3436,7 +3413,7 @@ func bootstrapSessionImpl(store kv.Storage, createSessionsImpl func(store kv.Sto
 			Handle: dom.PrivilegeHandle(),
 		}
 		privilege.BindPrivilegeManager(ses[9], pm)
-		if err := doBootstrapSQLFile(ses[9]); err != nil && intest.InTest {
+		if err := doBootstrapSQLFile(ses[9]); err != nil {
 			failToLoadOrParseSQLFile = true
 		}
 	}
@@ -3508,10 +3485,11 @@ func bootstrapSessionImpl(store kv.Storage, createSessionsImpl func(store kv.Sto
 
 	// This only happens in testing, since the failure of loading or parsing sql file
 	// would panic the bootstrapping.
-	if intest.InTest && failToLoadOrParseSQLFile {
+	if failToLoadOrParseSQLFile {
 		dom.Close()
-		return nil, errors.New("Fail to load or parse sql file")
+		return nil, err
 	}
+
 	err = dom.InitDistTaskLoop(ctx)
 	if err != nil {
 		return nil, err
@@ -3544,27 +3522,13 @@ func runInBootstrapSession(store kv.Storage, bootstrap func(Session)) {
 
 	dom := domain.GetDomain(s)
 	dom.Close()
-	if intest.InTest {
-		infosync.MockGlobalServerInfoManagerEntry.Close()
-	}
 	domap.Delete(store)
 }
 
 func createSessions(store kv.Storage, cnt int) ([]*session, error) {
-	return createSessionsImpl(store, cnt, createSession)
-}
-
-func createSessions4DistExecution(store kv.Storage, cnt int) ([]*session, error) {
-	domap.Delete(store)
-
-	return createSessionsImpl(store, cnt, createSession4DistExecution)
-}
-
-func createSessionsImpl(store kv.Storage, cnt int, createSessionImpl func(kv.Storage) (*session, error)) ([]*session, error) {
-	// Then we can create new dom
 	ses := make([]*session, cnt)
 	for i := 0; i < cnt; i++ {
-		se, err := createSessionImpl(store)
+		se, err := createSession(store)
 		if err != nil {
 			return nil, err
 		}
@@ -3579,10 +3543,6 @@ func createSessionsImpl(store kv.Storage, cnt int, createSessionImpl func(kv.Sto
 // This means the min ts reporter is not aware of it and may report a wrong min start ts.
 // In most cases you should use a session pool in domain instead.
 func createSession(store kv.Storage) (*session, error) {
-	return createSessionWithOpt(store, nil)
-}
-
-func createSession4DistExecution(store kv.Storage) (*session, error) {
 	return createSessionWithOpt(store, nil)
 }
 
@@ -3854,7 +3814,8 @@ func (s *session) ShowProcess() *util.ProcessInfo {
 }
 
 // GetStartTSFromSession returns the startTS in the session `se`
-func GetStartTSFromSession(se interface{}) (startTS, processInfoID uint64) {
+func GetStartTSFromSession(se interface{}) (uint64, uint64) {
+	var startTS, processInfoID uint64
 	tmp, ok := se.(*session)
 	if !ok {
 		logutil.BgLogger().Error("GetStartTSFromSession failed, can't transform to session struct")
@@ -3877,26 +3838,11 @@ func GetStartTSFromSession(se interface{}) (startTS, processInfoID uint64) {
 // if variable.ProcessGeneralLog is set.
 func logStmt(execStmt *executor.ExecStmt, s *session) {
 	vars := s.GetSessionVars()
-	isCrucial := false
 	switch stmt := execStmt.StmtNode.(type) {
-	case *ast.DropIndexStmt:
-		isCrucial = true
-		if stmt.IsHypo {
-			isCrucial = false
-		}
-	case *ast.CreateIndexStmt:
-		isCrucial = true
-		if stmt.IndexOption != nil && stmt.IndexOption.Tp == model.IndexTypeHypo {
-			isCrucial = false
-		}
 	case *ast.CreateUserStmt, *ast.DropUserStmt, *ast.AlterUserStmt, *ast.SetPwdStmt, *ast.GrantStmt,
-		*ast.RevokeStmt, *ast.AlterTableStmt, *ast.CreateDatabaseStmt, *ast.CreateTableStmt,
-		*ast.DropDatabaseStmt, *ast.DropTableStmt, *ast.RenameTableStmt, *ast.TruncateTableStmt,
+		*ast.RevokeStmt, *ast.AlterTableStmt, *ast.CreateDatabaseStmt, *ast.CreateIndexStmt, *ast.CreateTableStmt,
+		*ast.DropDatabaseStmt, *ast.DropIndexStmt, *ast.DropTableStmt, *ast.RenameTableStmt, *ast.TruncateTableStmt,
 		*ast.RenameUserStmt:
-		isCrucial = true
-	}
-
-	if isCrucial {
 		user := vars.User
 		schemaVersion := s.GetInfoSchema().SchemaMetaVersion()
 		if ss, ok := execStmt.StmtNode.(ast.SensitiveStmtNode); ok {
@@ -3910,10 +3856,10 @@ func logStmt(execStmt *executor.ExecStmt, s *session) {
 				zap.Uint64("conn", vars.ConnectionID),
 				zap.Int64("schemaVersion", schemaVersion),
 				zap.String("cur_db", vars.CurrentDB),
-				zap.String("sql", execStmt.StmtNode.Text()),
+				zap.String("sql", stmt.Text()),
 				zap.Stringer("user", user))
 		}
-	} else {
+	default:
 		logGeneralQuery(execStmt, s, false)
 	}
 }
@@ -3934,7 +3880,6 @@ func logGeneralQuery(execStmt *executor.ExecStmt, s *session, isPrepared bool) {
 		}
 		logutil.BgLogger().Info("GENERAL_LOG",
 			zap.Uint64("conn", vars.ConnectionID),
-			zap.String("session_alias", vars.SessionAlias),
 			zap.String("user", vars.User.LoginString()),
 			zap.Int64("schemaVersion", s.GetInfoSchema().SchemaMetaVersion()),
 			zap.Uint64("txnStartTS", vars.TxnCtx.StartTS),
@@ -4240,8 +4185,7 @@ func (s *session) SetMemoryFootprintChangeHook() {
 }
 
 // EncodeSessionStates implements SessionStatesHandler.EncodeSessionStates interface.
-func (s *session) EncodeSessionStates(ctx context.Context,
-	_ sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+func (s *session) EncodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
 	// Transaction status is hard to encode, so we do not support it.
 	s.txn.mu.Lock()
 	valid := s.txn.Valid()
@@ -4274,48 +4218,27 @@ func (s *session) EncodeSessionStates(ctx context.Context,
 		return err
 	}
 
-	hasRestrictVarPriv := false
-	checker := privilege.GetPrivilegeManager(s)
-	if checker == nil || checker.RequestDynamicVerification(s.sessionVars.ActiveRoles, "RESTRICTED_VARIABLES_ADMIN", false) {
-		hasRestrictVarPriv = true
-	}
 	// Encode session variables. We put it here instead of SessionVars to avoid cycle import.
 	sessionStates.SystemVars = make(map[string]string)
 	for _, sv := range variable.GetSysVars() {
 		switch {
-		case sv.HasNoneScope(), !sv.HasSessionScope():
+		case sv.HasNoneScope(), sv.HasInstanceScope(), !sv.HasSessionScope():
 			// Hidden attribute is deprecated.
 			// None-scoped variables cannot be modified.
+			// Instance-scoped variables don't need to be encoded.
 			// Noop variables should also be migrated even if they are noop.
 			continue
 		case sv.ReadOnly:
 			// Skip read-only variables here. We encode them into SessionStates manually.
 			continue
+		case sem.IsEnabled() && sem.IsInvisibleSysVar(sv.Name):
+			// If they are shown, there will be a security issue.
+			continue
 		}
 		// Get all session variables because the default values may change between versions.
-		val, keep, err := s.sessionVars.GetSessionStatesSystemVar(sv.Name)
-		switch {
-		case err != nil:
+		if val, keep, err := s.sessionVars.GetSessionStatesSystemVar(sv.Name); err != nil {
 			return err
-		case !keep:
-			continue
-		case !hasRestrictVarPriv && sem.IsEnabled() && sem.IsInvisibleSysVar(sv.Name):
-			// If the variable has a global scope, it should be the same with the global one.
-			// Otherwise, it should be the same with the default value.
-			defaultVal := sv.Value
-			if sv.HasGlobalScope() {
-				// If the session value is the same with the global one, skip it.
-				if defaultVal, err = sv.GetGlobalFromHook(ctx, s.sessionVars); err != nil {
-					return err
-				}
-			}
-			if val != defaultVal {
-				// Case 1: the RESTRICTED_VARIABLES_ADMIN is revoked after setting the session variable.
-				// Case 2: the global variable is updated after the session is created.
-				// In any case, the variable can't be set in the new session, so give up.
-				return sessionstates.ErrCannotMigrateSession.GenWithStackByArgs(fmt.Sprintf("session has set invisible variable '%s'", sv.Name))
-			}
-		default:
+		} else if keep {
 			sessionStates.SystemVars[sv.Name] = val
 		}
 	}
@@ -4330,8 +4253,7 @@ func (s *session) EncodeSessionStates(ctx context.Context,
 }
 
 // DecodeSessionStates implements SessionStatesHandler.DecodeSessionStates interface.
-func (s *session) DecodeSessionStates(ctx context.Context,
-	_ sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+func (s *session) DecodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
 	// Decode prepared statements and sql bindings.
 	for _, handler := range s.sessionStatesHandlers {
 		if err := handler.DecodeSessionStates(ctx, s, sessionStates); err != nil {
@@ -4340,10 +4262,7 @@ func (s *session) DecodeSessionStates(ctx context.Context,
 	}
 
 	// Decode session variables.
-	names := variable.OrderByDependency(sessionStates.SystemVars)
-	// Some variables must be set before others, e.g. tidb_enable_noop_functions should be before noop variables.
-	for _, name := range names {
-		val := sessionStates.SystemVars[name]
+	for name, val := range sessionStates.SystemVars {
 		// Experimental system variables may change scope, data types, or even be removed.
 		// We just ignore the errors and continue.
 		if err := s.sessionVars.SetSystemVar(name, val); err != nil {
@@ -4361,8 +4280,9 @@ func (s *session) setRequestSource(ctx context.Context, stmtLabel string, stmtNo
 	if !s.isInternal() {
 		if txn, _ := s.Txn(false); txn != nil && txn.Valid() {
 			txn.SetOption(kv.RequestSourceType, stmtLabel)
+		} else {
+			s.sessionVars.RequestSourceType = stmtLabel
 		}
-		s.sessionVars.RequestSourceType = stmtLabel
 		return
 	}
 	if source := ctx.Value(kv.RequestSourceKey); source != nil {

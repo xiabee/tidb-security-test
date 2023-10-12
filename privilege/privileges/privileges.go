@@ -515,6 +515,8 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 	if SkipWithGrant {
 		p.user = authUser
 		p.host = authHost
+		// special handling to existing users or root user initialized with insecure
+		info.ResourceGroupName = "default"
 		return
 	}
 
@@ -632,7 +634,9 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 	}
 
 	// special handling to existing users or root user initialized with insecure
-	if record.ResourceGroup != "" {
+	if record.ResourceGroup == "" {
+		info.ResourceGroupName = "default"
+	} else {
 		info.ResourceGroupName = record.ResourceGroup
 	}
 	// Skip checking password expiration if the session is migrated from another session.
@@ -842,7 +846,7 @@ func (p *UserPrivileges) ShowGrants(ctx sessionctx.Context, user *auth.UserIdent
 		u = user.AuthUsername
 		h = user.AuthHostname
 	}
-	grants = mysqlPrivilege.showGrants(ctx, u, h, roles)
+	grants = mysqlPrivilege.showGrants(u, h, roles)
 	if len(grants) == 0 {
 		err = ErrNonexistingGrant.GenWithStackByArgs(u, h)
 	}

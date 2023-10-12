@@ -17,12 +17,10 @@ package tikv
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"fmt"
 	"math"
 	"os"
-	"slices"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -46,6 +44,7 @@ import (
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // MVCCStore is a wrapper of badger.DB to provide MVCC functions.
@@ -176,8 +175,8 @@ func (store *MVCCStore) getDBItems(reqCtx *requestCtx, mutations []*kvrpcpb.Muta
 }
 
 func sortMutations(mutations []*kvrpcpb.Mutation) []*kvrpcpb.Mutation {
-	fn := func(i, j *kvrpcpb.Mutation) int {
-		return bytes.Compare(i.Key, j.Key)
+	fn := func(i, j *kvrpcpb.Mutation) bool {
+		return bytes.Compare(i.Key, j.Key) < 0
 	}
 	if slices.IsSortedFunc(mutations, fn) {
 		return mutations
@@ -216,10 +215,13 @@ func (sorter pessimisticPrewriteSorter) Swap(i, j int) {
 }
 
 func sortKeys(keys [][]byte) [][]byte {
-	if slices.IsSortedFunc(keys, bytes.Compare) {
+	less := func(i, j []byte) bool {
+		return bytes.Compare(i, j) < 0
+	}
+	if slices.IsSortedFunc(keys, less) {
 		return keys
 	}
-	slices.SortFunc(keys, bytes.Compare)
+	slices.SortFunc(keys, less)
 	return keys
 }
 
@@ -588,7 +590,19 @@ func (store *MVCCStore) CheckSecondaryLocks(reqCtx *requestCtx, keys [][]byte, s
 	locks := make([]*kvrpcpb.LockInfo, 0, len(keys))
 	for i, key := range keys {
 		lock := store.getLock(reqCtx, key)
-		if !(lock != nil && lock.StartTS == startTS) {
+		if lock != nil && lock.StartTS == startTS {
+			if lock.Op == uint8(kvrpcpb.Op_PessimisticLock) {
+				batch.Rollback(key, true)
+				err := store.dbWriter.Write(batch)
+				if err != nil {
+					return SecondaryLocksStatus{}, err
+				}
+				store.lockWaiterManager.WakeUp(startTS, 0, []uint64{hashVals[i]})
+				store.DeadlockDetectCli.CleanUp(startTS)
+				return SecondaryLocksStatus{commitTS: 0}, nil
+			}
+			locks = append(locks, lock.ToLockInfo(key))
+		} else {
 			commitTS, err := store.checkCommitted(reqCtx.getDBReader(), key, startTS)
 			if err != nil {
 				return SecondaryLocksStatus{}, err
@@ -606,17 +620,6 @@ func (store *MVCCStore) CheckSecondaryLocks(reqCtx *requestCtx, keys [][]byte, s
 			}
 			return SecondaryLocksStatus{commitTS: 0}, err
 		}
-		if lock.Op == uint8(kvrpcpb.Op_PessimisticLock) {
-			batch.Rollback(key, true)
-			err := store.dbWriter.Write(batch)
-			if err != nil {
-				return SecondaryLocksStatus{}, err
-			}
-			store.lockWaiterManager.WakeUp(startTS, 0, []uint64{hashVals[i]})
-			store.DeadlockDetectCli.CleanUp(startTS)
-			return SecondaryLocksStatus{commitTS: 0}, nil
-		}
-		locks = append(locks, lock.ToLockInfo(key))
 	}
 	return SecondaryLocksStatus{locks: locks}, nil
 }
@@ -669,10 +672,11 @@ func (store *MVCCStore) buildPessimisticLock(m *kvrpcpb.Mutation, item *badger.I
 
 				if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeNormal {
 					return nil, 0, writeConflictError
-				} else if req.GetWakeUpMode() != kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock {
+				} else if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock {
+					lockedWithConflictTS = userMeta.CommitTS()
+				} else {
 					panic("unreachable")
 				}
-				lockedWithConflictTS = userMeta.CommitTS()
 			}
 		}
 		if m.Assertion == kvrpcpb.Assertion_NotExist && !item.IsEmpty() {
@@ -1562,8 +1566,8 @@ func (store *MVCCStore) MvccGetByKey(reqCtx *requestCtx, key []byte) (*kvrpcpb.M
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(mvccInfo.Writes, func(i, j *kvrpcpb.MvccWrite) int {
-		return cmp.Compare(j.CommitTs, i.CommitTs)
+	slices.SortFunc(mvccInfo.Writes, func(i, j *kvrpcpb.MvccWrite) bool {
+		return i.CommitTs > j.CommitTs
 	})
 	mvccInfo.Values = make([]*kvrpcpb.MvccValue, len(mvccInfo.Writes))
 	for i := 0; i < len(mvccInfo.Writes); i++ {

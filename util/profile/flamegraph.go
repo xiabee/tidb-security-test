@@ -15,14 +15,13 @@
 package profile
 
 import (
-	"cmp"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/google/pprof/profile"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/texttree"
+	"golang.org/x/exp/slices"
 )
 
 type flamegraphNode struct {
@@ -94,11 +93,11 @@ func (n *flamegraphNode) sortedChildren() []flamegraphNodeWithLocation {
 			locID:          locID,
 		})
 	}
-	slices.SortFunc(children, func(i, j flamegraphNodeWithLocation) int {
+	slices.SortFunc(children, func(i, j flamegraphNodeWithLocation) bool {
 		if i.cumValue != j.cumValue {
-			return cmp.Compare(j.cumValue, i.cumValue)
+			return i.cumValue > j.cumValue
 		}
-		return cmp.Compare(i.locID, j.locID)
+		return i.locID < j.locID
 	})
 
 	return children

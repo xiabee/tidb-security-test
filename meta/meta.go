@@ -19,7 +19,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +26,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/tidb/domain/resourcegroup"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
@@ -85,12 +83,12 @@ var (
 	// the default meta of the `default` group
 	defaultRGroupMeta = &model.ResourceGroupInfo{
 		ResourceGroupSettings: &model.ResourceGroupSettings{
-			RURate:     math.MaxInt32,
+			RURate:     1000000,
 			BurstLimit: -1,
 			Priority:   model.MediumPriorityValue,
 		},
 		ID:    defaultGroupID,
-		Name:  model.NewCIStr(resourcegroup.DefaultResourceGroupName),
+		Name:  model.NewCIStr("default"),
 		State: model.StatePublic,
 	}
 )
@@ -1049,7 +1047,7 @@ func (m *Meta) ListResourceGroups() ([]*model.ResourceGroupInfo, error) {
 			return nil, errors.Trace(err)
 		}
 		groups = append(groups, group)
-		hasDefault = hasDefault || (group.Name.L == resourcegroup.DefaultResourceGroupName)
+		hasDefault = hasDefault || (group.Name.L == "default")
 	}
 	if !hasDefault {
 		groups = append(groups, defaultRGroupMeta)

@@ -81,8 +81,6 @@ done
 
 clean_cluster
 
-# Run specified test case(s) by `-test.run` argument.
-# E.g.: go_tests -test.run UpgradeAndDowngrade$
 go_tests
 
 clean_cluster

@@ -19,8 +19,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
-
-	"github.com/pingcap/tidb/util/zeropool"
+	"sync"
 )
 
 const (
@@ -32,9 +31,9 @@ const (
 	checksumPayloadSize = checksumBlockSize - checksumSize
 )
 
-var checksumReaderBufPool = zeropool.New[[]byte](func() []byte {
-	return make([]byte, checksumBlockSize)
-})
+var checksumReaderBufPool = sync.Pool{
+	New: func() interface{} { return make([]byte, checksumBlockSize) },
+}
 
 // Writer implements an io.WriteCloser, it calculates and stores a CRC-32 checksum for the payload before
 // writing to the underlying object.
@@ -152,7 +151,7 @@ func (r *Reader) ReadAt(p []byte, off int64) (nn int, err error) {
 	offsetInPayload := off % checksumPayloadSize
 	cursor := off / checksumPayloadSize * checksumBlockSize
 
-	buf := checksumReaderBufPool.Get()
+	buf := checksumReaderBufPool.Get().([]byte)
 	defer checksumReaderBufPool.Put(buf)
 
 	var n int

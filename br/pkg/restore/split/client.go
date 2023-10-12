@@ -136,7 +136,7 @@ func (c *pdClient) ScatterRegions(ctx context.Context, regionInfo []*RegionInfo)
 			logutil.Key("end", v.Region.EndKey),
 			zap.Uint64("id", v.Region.Id))
 	}
-	resp, err := c.client.ScatterRegions(ctx, regionsID, pd.WithSkipStoreLimit())
+	resp, err := c.client.ScatterRegions(ctx, regionsID)
 	if err != nil {
 		return err
 	}

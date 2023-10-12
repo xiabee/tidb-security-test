@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/util/callback"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/testkit"
@@ -106,7 +107,9 @@ func TestParallelDDL(t *testing.T) {
 			for {
 				tk1 := testkit.NewTestKit(t, store)
 				tk1.MustExec("begin")
-				jobs, err := ddl.GetAllDDLJobs(tk1.Session())
+				txn, err := tk1.Session().Txn(true)
+				require.NoError(t, err)
+				jobs, err := ddl.GetAllDDLJobs(tk1.Session(), meta.NewMeta(txn))
 				require.NoError(t, err)
 				tk1.MustExec("rollback")
 				var qLen1, qLen2 int
@@ -137,7 +140,9 @@ func TestParallelDDL(t *testing.T) {
 			for {
 				tk := testkit.NewTestKit(t, store)
 				tk.MustExec("begin")
-				jobs, err := ddl.GetAllDDLJobs(tk.Session())
+				txn, err := tk.Session().Txn(true)
+				require.NoError(t, err)
+				jobs, err := ddl.GetAllDDLJobs(tk.Session(), meta.NewMeta(txn))
 				require.NoError(t, err)
 				tk.MustExec("rollback")
 				if len(jobs) == jobCnt {

@@ -20,7 +20,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
@@ -42,12 +41,12 @@ import (
  * See https://dev.mysql.com/doc/refman/5.7/en/revoke.html
  ************************************************************************************/
 var (
-	_ exec.Executor = (*RevokeExec)(nil)
+	_ Executor = (*RevokeExec)(nil)
 )
 
 // RevokeExec executes RevokeStmt.
 type RevokeExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	Privs      []*ast.PrivElem
 	ObjectType ast.ObjectTypeType
@@ -60,7 +59,7 @@ type RevokeExec struct {
 }
 
 // Next implements the Executor Next interface.
-func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
+func (e *RevokeExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if e.done {
 		return nil
 	}
@@ -68,14 +67,14 @@ func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	internalCtx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
 
 	// Commit the old transaction, like DDL.
-	if err := sessiontxn.NewTxnInStmt(ctx, e.Ctx()); err != nil {
+	if err := sessiontxn.NewTxnInStmt(ctx, e.ctx); err != nil {
 		return err
 	}
-	defer func() { e.Ctx().GetSessionVars().SetInTxn(false) }()
+	defer func() { e.ctx.GetSessionVars().SetInTxn(false) }()
 
 	// Create internal session to start internal transaction.
 	isCommit := false
-	internalSession, err := e.GetSysSession()
+	internalSession, err := e.getSysSession()
 	if err != nil {
 		return err
 	}
@@ -86,7 +85,7 @@ func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 				logutil.BgLogger().Error("rollback error occur at grant privilege", zap.Error(err))
 			}
 		}
-		e.ReleaseSysSession(internalCtx, internalSession)
+		e.releaseSysSession(internalCtx, internalSession)
 	}()
 
 	_, err = internalSession.(sqlexec.SQLExecutor).ExecuteInternal(internalCtx, "begin")
@@ -94,7 +93,7 @@ func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		return err
 	}
 
-	sessVars := e.Ctx().GetSessionVars()
+	sessVars := e.ctx.GetSessionVars()
 	// Revoke for each user.
 	for _, user := range e.Users {
 		if user.User.CurrentUser {
@@ -103,7 +102,7 @@ func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		}
 
 		// Check if user exists.
-		exists, err := userExists(ctx, e.Ctx(), user.User.Username, user.User.Hostname)
+		exists, err := userExists(ctx, e.ctx, user.User.Username, user.User.Hostname)
 		if err != nil {
 			return err
 		}
@@ -125,7 +124,7 @@ func (e *RevokeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 		return err
 	}
 	isCommit = true
-	return domain.GetDomain(e.Ctx()).NotifyUpdatePrivilege()
+	return domain.GetDomain(e.ctx).NotifyUpdatePrivilege()
 }
 
 // Checks that dynamic privileges are only of global scope.
@@ -146,7 +145,7 @@ func (e *RevokeExec) checkDynamicPrivilegeUsage() error {
 func (e *RevokeExec) revokeOneUser(internalSession sessionctx.Context, user, host string) error {
 	dbName := e.Level.DBName
 	if len(dbName) == 0 {
-		dbName = e.Ctx().GetSessionVars().CurrentDB
+		dbName = e.ctx.GetSessionVars().CurrentDB
 	}
 
 	// If there is no privilege entry in corresponding table, insert a new one.
@@ -201,8 +200,8 @@ func (e *RevokeExec) revokePriv(internalSession sessionctx.Context, priv *ast.Pr
 
 func (e *RevokeExec) revokeDynamicPriv(internalSession sessionctx.Context, privName string, user, host string) error {
 	privName = strings.ToUpper(privName)
-	if !privilege.GetPrivilegeManager(e.Ctx()).IsDynamicPrivilege(privName) { // for MySQL compatibility
-		e.Ctx().GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrDynamicPrivilegeNotRegistered.GenWithStackByArgs(privName))
+	if !privilege.GetPrivilegeManager(e.ctx).IsDynamicPrivilege(privName) { // for MySQL compatibility
+		e.ctx.GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrDynamicPrivilegeNotRegistered.GenWithStackByArgs(privName))
 	}
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
 	_, err := internalSession.(sqlexec.SQLExecutor).ExecuteInternal(ctx, "DELETE FROM mysql.global_grants WHERE user = %? AND host = %? AND priv = %?", user, host, privName)
@@ -236,7 +235,7 @@ func (e *RevokeExec) revokeDBPriv(internalSession sessionctx.Context, priv *ast.
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
 	dbName := e.Level.DBName
 	if len(dbName) == 0 {
-		dbName = e.Ctx().GetSessionVars().CurrentDB
+		dbName = e.ctx.GetSessionVars().CurrentDB
 	}
 
 	sql := new(strings.Builder)
@@ -264,7 +263,7 @@ func (e *RevokeExec) revokeDBPriv(internalSession sessionctx.Context, priv *ast.
 
 func (e *RevokeExec) revokeTablePriv(internalSession sessionctx.Context, priv *ast.PrivElem, user, host string) error {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
-	dbName, tbl, err := getTargetSchemaAndTable(e.Ctx(), e.Level.DBName, e.Level.TableName, e.is)
+	dbName, tbl, err := getTargetSchemaAndTable(e.ctx, e.Level.DBName, e.Level.TableName, e.is)
 	if err != nil && !terror.ErrorEqual(err, infoschema.ErrTableNotExists) {
 		return err
 	}
@@ -297,7 +296,7 @@ func (e *RevokeExec) revokeTablePriv(internalSession sessionctx.Context, priv *a
 
 func (e *RevokeExec) revokeColumnPriv(internalSession sessionctx.Context, priv *ast.PrivElem, user, host string) error {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
-	dbName, tbl, err := getTargetSchemaAndTable(e.Ctx(), e.Level.DBName, e.Level.TableName, e.is)
+	dbName, tbl, err := getTargetSchemaAndTable(e.ctx, e.Level.DBName, e.Level.TableName, e.is)
 	if err != nil {
 		return err
 	}

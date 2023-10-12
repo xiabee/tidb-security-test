@@ -51,8 +51,7 @@ const (
 var (
 	serviceSafePointTTL int64 = 10 * 60 // 10 min in seconds
 
-	// MinDistSQLScanConcurrency is the minimum value of tidb_distsql_scan_concurrency.
-	MinDistSQLScanConcurrency = 4
+	minDistSQLScanConcurrency = 4
 
 	// DefaultBackoffWeight is the default value of tidb_backoff_weight for checksum.
 	// when TiKV client encounters an error of "region not leader", it will keep retrying every 500 ms.
@@ -268,25 +267,21 @@ func updateGCLifeTime(ctx context.Context, db *sql.DB, gcLifeTime string) error 
 
 // TiKVChecksumManager is a manager that can compute checksum of a table using TiKV.
 type TiKVChecksumManager struct {
-	client                    kv.Client
-	manager                   gcTTLManager
-	distSQLScanConcurrency    uint
-	backoffWeight             int
-	resourceGroupName         string
-	explicitRequestSourceType string
+	client                 kv.Client
+	manager                gcTTLManager
+	distSQLScanConcurrency uint
+	backoffWeight          int
 }
 
 var _ ChecksumManager = &TiKVChecksumManager{}
 
 // NewTiKVChecksumManager return a new tikv checksum manager
-func NewTiKVChecksumManager(client kv.Client, pdClient pd.Client, distSQLScanConcurrency uint, backoffWeight int, resourceGroupName, explicitRequestSourceType string) *TiKVChecksumManager {
+func NewTiKVChecksumManager(client kv.Client, pdClient pd.Client, distSQLScanConcurrency uint, backoffWeight int) *TiKVChecksumManager {
 	return &TiKVChecksumManager{
-		client:                    client,
-		manager:                   newGCTTLManager(pdClient),
-		distSQLScanConcurrency:    distSQLScanConcurrency,
-		backoffWeight:             backoffWeight,
-		resourceGroupName:         resourceGroupName,
-		explicitRequestSourceType: explicitRequestSourceType,
+		client:                 client,
+		manager:                newGCTTLManager(pdClient),
+		distSQLScanConcurrency: distSQLScanConcurrency,
+		backoffWeight:          backoffWeight,
 	}
 }
 
@@ -294,8 +289,6 @@ func (e *TiKVChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpo
 	executor, err := checksum.NewExecutorBuilder(tableInfo.Core, ts).
 		SetConcurrency(e.distSQLScanConcurrency).
 		SetBackoffWeight(e.backoffWeight).
-		SetResourceGroupName(e.resourceGroupName).
-		SetExplicitRequestSourceType(e.explicitRequestSourceType).
 		Build()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -327,8 +320,8 @@ func (e *TiKVChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpo
 		if !common.IsRetryableError(err) {
 			break
 		}
-		if distSQLScanConcurrency > MinDistSQLScanConcurrency {
-			distSQLScanConcurrency = mathutil.Max(distSQLScanConcurrency/2, MinDistSQLScanConcurrency)
+		if distSQLScanConcurrency > minDistSQLScanConcurrency {
+			distSQLScanConcurrency = mathutil.Max(distSQLScanConcurrency/2, minDistSQLScanConcurrency)
 		}
 	}
 

@@ -20,7 +20,6 @@ package types
 
 import (
 	"math"
-	"math/big"
 	"strconv"
 	"strings"
 
@@ -176,11 +175,18 @@ func ConvertFloatToUint(sc *stmtctx.StatementContext, fval float64, upperBound u
 		return uint64(int64(val)), overflow(val, tp)
 	}
 
-	ret, acc := new(big.Float).SetFloat64(val).Uint64()
-	if acc == big.Below || ret > upperBound {
-		return upperBound, overflow(val, tp)
+	ubf := float64(upperBound)
+	// Because math.MaxUint64 can not be represented precisely in iee754(64bit),
+	// so `float64(math.MaxUint64)` will make a num bigger than math.MaxUint64,
+	// which can not be represented by 64bit integer.
+	// So `uint64(float64(math.MaxUint64))` is undefined behavior.
+	if val == ubf {
+		return math.MaxUint64, nil
 	}
-	return ret, nil
+	if val > ubf {
+		return math.MaxUint64, overflow(val, tp)
+	}
+	return uint64(val), nil
 }
 
 // convertScientificNotation converts a decimal string with scientific notation to a normal decimal string.
@@ -290,26 +296,11 @@ func StrToInt(sc *stmtctx.StatementContext, str string, isFuncCast bool) (int64,
 func StrToUint(sc *stmtctx.StatementContext, str string, isFuncCast bool) (uint64, error) {
 	str = strings.TrimSpace(str)
 	validPrefix, err := getValidIntPrefix(sc, str, isFuncCast)
-	uVal := uint64(0)
-	hasParseErr := false
-
-	if validPrefix[0] == '-' {
-		// only `-000*` is valid to be converted into unsigned integer
-		for _, v := range validPrefix[1:] {
-			if v != '0' {
-				hasParseErr = true
-				break
-			}
-		}
-	} else {
-		if validPrefix[0] == '+' {
-			validPrefix = validPrefix[1:]
-		}
-		v, e := strconv.ParseUint(validPrefix, 10, 64)
-		uVal, hasParseErr = v, e != nil
+	if validPrefix[0] == '+' {
+		validPrefix = validPrefix[1:]
 	}
-
-	if hasParseErr {
+	uVal, err1 := strconv.ParseUint(validPrefix, 10, 64)
+	if err1 != nil {
 		return uVal, ErrOverflow.GenWithStackByArgs("BIGINT UNSIGNED", validPrefix)
 	}
 	return uVal, errors.Trace(err)

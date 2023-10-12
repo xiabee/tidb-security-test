@@ -48,10 +48,10 @@ func (p *PhysicalLock) ExplainInfo() string {
 // ExplainID overrides the ExplainID in order to match different range.
 func (p *PhysicalIndexScan) ExplainID() fmt.Stringer {
 	return stringutil.MemoizeStr(func() string {
-		if p.SCtx() != nil && p.SCtx().GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
+		if p.ctx != nil && p.ctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
 			return p.TP()
 		}
-		return p.TP() + "_" + strconv.Itoa(p.ID())
+		return p.TP() + "_" + strconv.Itoa(p.id)
 	})
 }
 
@@ -120,7 +120,7 @@ func (p *PhysicalIndexScan) OperatorInfo(normalized bool) string {
 				buffer.WriteString(", ")
 				buffer.WriteString(str)
 			}
-		} else if p.StatsInfo().StatsVersion == statistics.PseudoVersion {
+		} else if p.stats.StatsVersion == statistics.PseudoVersion {
 			// This branch is not needed in fact, we add this to prevent test result changes under planner/cascades/
 			buffer.WriteString(", stats:pseudo")
 		}
@@ -152,10 +152,10 @@ func (p *PhysicalIndexScan) isFullScan() bool {
 // ExplainID overrides the ExplainID in order to match different range.
 func (p *PhysicalTableScan) ExplainID() fmt.Stringer {
 	return stringutil.MemoizeStr(func() string {
-		if p.SCtx() != nil && p.SCtx().GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
+		if p.ctx != nil && p.ctx.GetSessionVars().StmtCtx.IgnoreExplainIDSuffix {
 			return p.TP()
 		}
-		return p.TP() + "_" + strconv.Itoa(p.ID())
+		return p.TP() + "_" + strconv.Itoa(p.id)
 	})
 }
 
@@ -213,7 +213,7 @@ func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
 			}
 		}
 	}
-	if p.SCtx().GetSessionVars().EnableLateMaterialization && len(p.filterCondition) > 0 && p.StoreType == kv.TiFlash {
+	if p.ctx.GetSessionVars().EnableLateMaterialization && len(p.filterCondition) > 0 && p.StoreType == kv.TiFlash {
 		buffer.WriteString("pushed down filter:")
 		if len(p.lateMaterializationFilterCondition) > 0 {
 			if normalized {
@@ -238,22 +238,13 @@ func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
 				buffer.WriteString(", ")
 				buffer.WriteString(str)
 			}
-		} else if p.StatsInfo().StatsVersion == statistics.PseudoVersion {
+		} else if p.stats.StatsVersion == statistics.PseudoVersion {
 			// This branch is not needed in fact, we add this to prevent test result changes under planner/cascades/
 			buffer.WriteString(", stats:pseudo")
 		}
 	}
-	if p.StoreType == kv.TiFlash && p.Table.GetPartitionInfo() != nil && p.IsMPPOrBatchCop && p.SCtx().GetSessionVars().StmtCtx.UseDynamicPartitionPrune() {
+	if p.StoreType == kv.TiFlash && p.Table.GetPartitionInfo() != nil && p.IsMPPOrBatchCop && p.ctx.GetSessionVars().StmtCtx.UseDynamicPartitionPrune() {
 		buffer.WriteString(", PartitionTableScan:true")
-	}
-	if len(p.runtimeFilterList) > 0 {
-		buffer.WriteString(", runtime filter:")
-		for i, runtimeFilter := range p.runtimeFilterList {
-			if i != 0 {
-				buffer.WriteString(", ")
-			}
-			buffer.WriteString(runtimeFilter.ExplainInfo(false))
-		}
 	}
 	return buffer.String()
 }
@@ -290,7 +281,7 @@ func (p *PhysicalTableReader) ExplainInfo() string {
 	tablePlanInfo := "data:" + p.tablePlan.ExplainID().String()
 
 	if p.ReadReqType == MPP {
-		return fmt.Sprintf("MppVersion: %d, %s", p.SCtx().GetSessionVars().ChooseMppVersion(), tablePlanInfo)
+		return fmt.Sprintf("MppVersion: %d, %s", p.ctx.GetSessionVars().ChooseMppVersion(), tablePlanInfo)
 	}
 
 	return tablePlanInfo
@@ -376,30 +367,6 @@ func (p *PhysicalProjection) ExplainInfo() string {
 	return exprStr
 }
 
-func (p *PhysicalExpand) explainInfoV2() string {
-	sb := strings.Builder{}
-	for i, oneL := range p.LevelExprs {
-		if i == 0 {
-			sb.WriteString("level-projection:")
-			sb.WriteString("[")
-			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema))
-			sb.WriteString("]")
-		} else {
-			sb.WriteString(",[")
-			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema))
-			sb.WriteString("]")
-		}
-	}
-	sb.WriteString("; schema: [")
-	colStrs := make([]string, 0, len(p.schema.Columns))
-	for _, col := range p.schema.Columns {
-		colStrs = append(colStrs, col.String())
-	}
-	sb.WriteString(strings.Join(colStrs, ","))
-	sb.WriteString("]")
-	return sb.String()
-}
-
 // ExplainNormalizedInfo implements Plan interface.
 func (p *PhysicalProjection) ExplainNormalizedInfo() string {
 	return string(expression.SortedExplainNormalizedExpressionList(p.Exprs))
@@ -418,7 +385,7 @@ func (p *PhysicalSort) ExplainInfo() string {
 	buffer := bytes.NewBufferString("")
 	buffer = explainByItems(buffer, p.ByItems)
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
-		fmt.Fprintf(buffer, ", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
+		buffer.WriteString(fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount))
 	}
 	return buffer.String()
 }
@@ -437,9 +404,6 @@ func (p *PhysicalLimit) ExplainInfo() string {
 
 // ExplainInfo implements Plan interface.
 func (p *PhysicalExpand) ExplainInfo() string {
-	if len(p.LevelExprs) > 0 {
-		return p.explainInfoV2()
-	}
 	var str strings.Builder
 	str.WriteString("group set num:")
 	str.WriteString(strconv.FormatInt(int64(len(p.GroupingSets)), 10))
@@ -483,7 +447,7 @@ func (p *basePhysicalAgg) explainInfo(normalized bool) string {
 		}
 	}
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
-		fmt.Fprintf(builder, ", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
+		builder.WriteString(fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount))
 	}
 	return builder.String()
 }
@@ -528,7 +492,7 @@ func (p *PhysicalIndexJoin) explainInfo(normalized bool, isIndexMergeJoin bool) 
 	if len(p.OuterHashKeys) > 0 && !isIndexMergeJoin {
 		exprs := make([]expression.Expression, 0, len(p.OuterHashKeys))
 		for i := range p.OuterHashKeys {
-			expr, err := expression.NewFunctionBase(p.SCtx(), ast.EQ, types.NewFieldType(mysql.TypeLonglong), p.OuterHashKeys[i], p.InnerHashKeys[i])
+			expr, err := expression.NewFunctionBase(MockContext(), ast.EQ, types.NewFieldType(mysql.TypeLonglong), p.OuterHashKeys[i], p.InnerHashKeys[i])
 			if err != nil {
 				logutil.BgLogger().Warn("fail to NewFunctionBase", zap.Error(err))
 			}
@@ -644,18 +608,7 @@ func (p *PhysicalHashJoin) explainInfo(normalized bool) string {
 		buffer.Write(sortedExplainExpressionList(p.OtherConditions))
 	}
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
-		fmt.Fprintf(buffer, ", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
-	}
-
-	// for runtime filter
-	if len(p.runtimeFilterList) > 0 {
-		buffer.WriteString(", runtime filter:")
-		for i, runtimeFilter := range p.runtimeFilterList {
-			if i != 0 {
-				buffer.WriteString(", ")
-			}
-			buffer.WriteString(runtimeFilter.ExplainInfo(true))
-		}
+		buffer.WriteString(fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount))
 	}
 	return buffer.String()
 }
@@ -829,7 +782,7 @@ func (p *PhysicalWindow) ExplainInfo() string {
 	}
 	buffer.WriteString(")")
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
-		fmt.Fprintf(buffer, ", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
+		buffer.WriteString(fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount))
 	}
 	return buffer.String()
 }
@@ -965,7 +918,7 @@ func (p *PhysicalExchangeSender) ExplainInfo() string {
 		fmt.Fprintf(buffer, "]")
 	}
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
-		fmt.Fprintf(buffer, ", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
+		buffer.WriteString(fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount))
 	}
 	return buffer.String()
 }

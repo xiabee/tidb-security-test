@@ -17,8 +17,6 @@
 package expression
 
 import (
-	"cmp"
-
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -365,7 +363,7 @@ func (b *builtinInRealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 			}
 			arg0 := args0[i]
 			arg1 := args1[i]
-			compareResult = cmp.Compare(arg0, arg1)
+			compareResult = types.CompareFloat64(arg0, arg1)
 			if compareResult == 0 {
 				result.SetNull(i, false)
 				r64s[i] = 1
@@ -531,7 +529,7 @@ func (b *builtinInDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 			}
 			arg0 := args0[i]
 			arg1 := args1[i]
-			compareResult = cmp.Compare(arg0, arg1)
+			compareResult = types.CompareDuration(arg0, arg1)
 			if compareResult == 0 {
 				result.SetNull(i, false)
 				r64s[i] = 1

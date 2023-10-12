@@ -230,9 +230,6 @@ func (o OtherAccessObject) SetIntoPB(pb *tipb.ExplainOperator) {
 	if pb == nil {
 		return
 	}
-	if o == "" {
-		return
-	}
 	pb.AccessObjects = []*tipb.AccessObject{
 		{
 			AccessObject: &tipb.AccessObject_OtherObject{OtherObject: string(o)},
@@ -399,10 +396,7 @@ func (p *PhysicalTableReader) accessObject(sctx sessionctx.Context) AccessObject
 		return DynamicPartitionAccessObjects(nil)
 	}
 	if len(p.PartitionInfos) == 0 {
-		ts, ok := p.TablePlans[0].(*PhysicalTableScan)
-		if !ok {
-			return OtherAccessObject("")
-		}
+		ts := p.TablePlans[0].(*PhysicalTableScan)
 		asName := ""
 		if ts.TableAsName != nil && len(ts.TableAsName.O) > 0 {
 			asName = ts.TableAsName.O

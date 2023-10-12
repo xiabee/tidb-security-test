@@ -18,8 +18,6 @@ import (
 	"context"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/executor/internal/exec"
-	"github.com/pingcap/tidb/executor/internal/vecgroupchecker"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -36,7 +34,7 @@ import (
 // 2. For other cases its preferred not to use SMJ and operator
 // will throw error.
 type MergeJoinExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	stmtCtx      *stmtctx.StatementContext
 	compareFuncs []expression.CompareFunc
@@ -64,7 +62,7 @@ type mergeJoinTable struct {
 	executed          bool
 	childChunk        *chunk.Chunk
 	childChunkIter    *chunk.Iterator4Chunk
-	groupChecker      *vecgroupchecker.VecGroupChecker
+	groupChecker      *vecGroupChecker
 	groupRowsSelected []int
 	groupRowsIter     chunk.Iterator
 
@@ -77,23 +75,23 @@ type mergeJoinTable struct {
 	memTracker *memory.Tracker
 }
 
-func (t *mergeJoinTable) init(executor *MergeJoinExec) {
-	child := executor.Children(t.childIndex)
-	t.childChunk = exec.TryNewCacheChunk(child)
+func (t *mergeJoinTable) init(exec *MergeJoinExec) {
+	child := exec.children[t.childIndex]
+	t.childChunk = tryNewCacheChunk(child)
 	t.childChunkIter = chunk.NewIterator4Chunk(t.childChunk)
 
 	items := make([]expression.Expression, 0, len(t.joinKeys))
 	for _, col := range t.joinKeys {
 		items = append(items, col)
 	}
-	t.groupChecker = vecgroupchecker.NewVecGroupChecker(executor.Ctx(), items)
+	t.groupChecker = newVecGroupChecker(exec.ctx, items)
 	t.groupRowsIter = chunk.NewIterator4Chunk(t.childChunk)
 
 	if t.isInner {
-		t.rowContainer = chunk.NewRowContainer(child.Base().RetFieldTypes(), t.childChunk.Capacity())
-		t.rowContainer.GetMemTracker().AttachTo(executor.memTracker)
+		t.rowContainer = chunk.NewRowContainer(child.base().retFieldTypes, t.childChunk.Capacity())
+		t.rowContainer.GetMemTracker().AttachTo(exec.memTracker)
 		t.rowContainer.GetMemTracker().SetLabel(memory.LabelForInnerTable)
-		t.rowContainer.GetDiskTracker().AttachTo(executor.diskTracker)
+		t.rowContainer.GetDiskTracker().AttachTo(exec.diskTracker)
 		t.rowContainer.GetDiskTracker().SetLabel(memory.LabelForInnerTable)
 		if variable.EnableTmpStorageOnOOM.Load() {
 			actionSpill := t.rowContainer.ActionSpill()
@@ -102,15 +100,15 @@ func (t *mergeJoinTable) init(executor *MergeJoinExec) {
 					actionSpill = t.rowContainer.ActionSpillForTest()
 				}
 			})
-			executor.Ctx().GetSessionVars().MemTracker.FallbackOldAndSetNewAction(actionSpill)
+			exec.ctx.GetSessionVars().MemTracker.FallbackOldAndSetNewAction(actionSpill)
 		}
 		t.memTracker = memory.NewTracker(memory.LabelForInnerTable, -1)
 	} else {
-		t.filtersSelected = make([]bool, 0, executor.MaxChunkSize())
+		t.filtersSelected = make([]bool, 0, exec.maxChunkSize)
 		t.memTracker = memory.NewTracker(memory.LabelForOuterTable, -1)
 	}
 
-	t.memTracker.AttachTo(executor.memTracker)
+	t.memTracker.AttachTo(exec.memTracker)
 	t.inited = true
 	t.memTracker.Consume(t.childChunk.MemoryUsage())
 }
@@ -147,7 +145,7 @@ func (t *mergeJoinTable) finish() error {
 
 func (t *mergeJoinTable) selectNextGroup() {
 	t.groupRowsSelected = t.groupRowsSelected[:0]
-	begin, end := t.groupChecker.GetNextGroup()
+	begin, end := t.groupChecker.getNextGroup()
 	if t.isInner && t.hasNullInJoinKey(t.childChunk.GetRow(begin)) {
 		return
 	}
@@ -158,9 +156,9 @@ func (t *mergeJoinTable) selectNextGroup() {
 	t.childChunk.SetSel(t.groupRowsSelected)
 }
 
-func (t *mergeJoinTable) fetchNextChunk(ctx context.Context, executor *MergeJoinExec) error {
+func (t *mergeJoinTable) fetchNextChunk(ctx context.Context, exec *MergeJoinExec) error {
 	oldMemUsage := t.childChunk.MemoryUsage()
-	err := exec.Next(ctx, executor.Children(t.childIndex), t.childChunk)
+	err := Next(ctx, exec.children[t.childIndex], t.childChunk)
 	t.memTracker.Consume(t.childChunk.MemoryUsage() - oldMemUsage)
 	if err != nil {
 		return err
@@ -176,7 +174,7 @@ func (t *mergeJoinTable) fetchNextInnerGroup(ctx context.Context, exec *MergeJoi
 	}
 
 fetchNext:
-	if t.executed && t.groupChecker.IsExhausted() {
+	if t.executed && t.groupChecker.isExhausted() {
 		// Ensure iter at the end, since sel of childChunk has been cleared.
 		t.groupRowsIter.ReachEnd()
 		return nil
@@ -184,13 +182,13 @@ fetchNext:
 
 	isEmpty := true
 	// For inner table, rows have null in join keys should be skip by selectNextGroup.
-	for isEmpty && !t.groupChecker.IsExhausted() {
+	for isEmpty && !t.groupChecker.isExhausted() {
 		t.selectNextGroup()
 		isEmpty = len(t.groupRowsSelected) == 0
 	}
 
 	// For inner table, all the rows have the same join keys should be put into one group.
-	for !t.executed && t.groupChecker.IsExhausted() {
+	for !t.executed && t.groupChecker.isExhausted() {
 		if !isEmpty {
 			// Group is not empty, hand over the management of childChunk to t.rowContainer.
 			if err := t.rowContainer.Add(t.childChunk); err != nil {
@@ -211,7 +209,7 @@ fetchNext:
 			break
 		}
 
-		isFirstGroupSameAsPrev, err := t.groupChecker.SplitIntoGroups(t.childChunk)
+		isFirstGroupSameAsPrev, err := t.groupChecker.splitIntoGroups(t.childChunk)
 		if err != nil {
 			return err
 		}
@@ -241,15 +239,15 @@ fetchNext:
 }
 
 func (t *mergeJoinTable) fetchNextOuterGroup(ctx context.Context, exec *MergeJoinExec, requiredRows int) error {
-	if t.executed && t.groupChecker.IsExhausted() {
+	if t.executed && t.groupChecker.isExhausted() {
 		return nil
 	}
 
-	if !t.executed && t.groupChecker.IsExhausted() {
+	if !t.executed && t.groupChecker.isExhausted() {
 		// It's hard to calculate selectivity if there is any filter or it's inner join,
 		// so we just push the requiredRows down when it's outer join and has no filter.
 		if exec.isOuterJoin && len(t.filters) == 0 {
-			t.childChunk.SetRequiredRows(requiredRows, exec.MaxChunkSize())
+			t.childChunk.SetRequiredRows(requiredRows, exec.maxChunkSize)
 		}
 		err := t.fetchNextChunk(ctx, exec)
 		if err != nil || t.executed {
@@ -257,12 +255,12 @@ func (t *mergeJoinTable) fetchNextOuterGroup(ctx context.Context, exec *MergeJoi
 		}
 
 		t.childChunkIter.Begin()
-		t.filtersSelected, err = expression.VectorizedFilter(exec.Ctx(), t.filters, t.childChunkIter, t.filtersSelected)
+		t.filtersSelected, err = expression.VectorizedFilter(exec.ctx, t.filters, t.childChunkIter, t.filtersSelected)
 		if err != nil {
 			return err
 		}
 
-		_, err = t.groupChecker.SplitIntoGroups(t.childChunk)
+		_, err = t.groupChecker.splitIntoGroups(t.childChunk)
 		if err != nil {
 			return err
 		}
@@ -296,19 +294,19 @@ func (e *MergeJoinExec) Close() error {
 	e.hasNull = false
 	e.memTracker = nil
 	e.diskTracker = nil
-	return e.BaseExecutor.Close()
+	return e.baseExecutor.Close()
 }
 
 // Open implements the Executor Open interface.
 func (e *MergeJoinExec) Open(ctx context.Context) error {
-	if err := e.BaseExecutor.Open(ctx); err != nil {
+	if err := e.baseExecutor.Open(ctx); err != nil {
 		return err
 	}
 
-	e.memTracker = memory.NewTracker(e.ID(), -1)
-	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
-	e.diskTracker = disk.NewTracker(e.ID(), -1)
-	e.diskTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.DiskTracker)
+	e.memTracker = memory.NewTracker(e.id, -1)
+	e.memTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.MemTracker)
+	e.diskTracker = disk.NewTracker(e.id, -1)
+	e.diskTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.DiskTracker)
 
 	e.innerTable.init(e)
 	e.outerTable.init(e)
@@ -401,7 +399,7 @@ func (e *MergeJoinExec) compare(outerRow, innerRow chunk.Row) (int, error) {
 	outerJoinKeys := e.outerTable.joinKeys
 	innerJoinKeys := e.innerTable.joinKeys
 	for i := range outerJoinKeys {
-		cmp, _, err := e.compareFuncs[i](e.Ctx(), outerJoinKeys[i], innerJoinKeys[i], outerRow, innerRow)
+		cmp, _, err := e.compareFuncs[i](e.ctx, outerJoinKeys[i], innerJoinKeys[i], outerRow, innerRow)
 		if err != nil {
 			return 0, err
 		}

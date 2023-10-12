@@ -19,7 +19,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/variable"
@@ -30,11 +29,11 @@ import (
 )
 
 var (
-	_ exec.Executor = &mockErrorOperator{}
+	_ Executor = &mockErrorOperator{}
 )
 
 type mockErrorOperator struct {
-	exec.BaseExecutor
+	baseExecutor
 	toPanic bool
 	closed  bool
 }
@@ -68,9 +67,9 @@ func TestExplainAnalyzeInvokeNextAndClose(t *testing.T) {
 	ctx.GetSessionVars().InitChunkSize = variable.DefInitChunkSize
 	ctx.GetSessionVars().MaxChunkSize = variable.DefMaxChunkSize
 	schema := expression.NewSchema(getColumns()...)
-	baseExec := exec.NewBaseExecutor(ctx, schema, 0)
+	baseExec := newBaseExecutor(ctx, schema, 0)
 	explainExec := &ExplainExec{
-		BaseExecutor: baseExec,
+		baseExecutor: baseExec,
 		explain:      nil,
 	}
 	// mockErrorOperator returns errors
@@ -83,7 +82,7 @@ func TestExplainAnalyzeInvokeNextAndClose(t *testing.T) {
 
 	// mockErrorOperator panic
 	explainExec = &ExplainExec{
-		BaseExecutor: baseExec,
+		baseExecutor: baseExec,
 		explain:      nil,
 	}
 	mockOpr = mockErrorOperator{baseExec, true, false}

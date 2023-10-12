@@ -38,6 +38,7 @@ go_library(
         "//util/topsql/stmtstats",
         "@com_github_docker_go_units//:go-units",
         "@com_github_pingcap_errors//:errors",
+        "@org_golang_x_exp//slices",
         "@org_uber_go_zap//:zap",
         "@org_uber_go_zap//zapcore",
     ],
@@ -48,7 +49,6 @@ go_test(
     timeout = "short",
     srcs = [
         "base_test.go",
-        "kv2sql_test.go",
         "session_internal_test.go",
         "session_test.go",
         "sql2kv_test.go",
@@ -56,7 +56,7 @@ go_test(
     embed = [":kv"],
     flaky = True,
     race = "on",
-    shard_count = 19,
+    shard_count = 17,
     deps = [
         "//br/pkg/lightning/backend/encode",
         "//br/pkg/lightning/common",
@@ -71,7 +71,6 @@ go_test(
         "//parser/mysql",
         "//planner/core",
         "//sessionctx",
-        "//sessionctx/variable",
         "//table",
         "//table/tables",
         "//tablecodec",

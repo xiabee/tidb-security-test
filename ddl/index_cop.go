@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/ddl/copr"
 	"github.com/pingcap/tidb/ddl/ingest"
 	sess "github.com/pingcap/tidb/ddl/internal/session"
 	"github.com/pingcap/tidb/distsql"
@@ -33,6 +32,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
@@ -45,7 +45,6 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
-	kvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
 
@@ -65,7 +64,7 @@ func copReadChunkPoolSize() int {
 
 // chunkSender is used to receive the result of coprocessor request.
 type chunkSender interface {
-	AddTask(IndexRecordChunk)
+	AddTask(idxRecResult)
 }
 
 type copReqSenderPool struct {
@@ -75,7 +74,7 @@ type copReqSenderPool struct {
 	sessPool      *sess.Pool
 
 	ctx    context.Context
-	copCtx copr.CopContext
+	copCtx *copContext
 	store  kv.Storage
 
 	senders []*copReqSender
@@ -96,12 +95,12 @@ func (c *copReqSender) run() {
 	p := c.senderPool
 	defer p.wg.Done()
 	defer util.Recover(metrics.LabelDDL, "copReqSender.run", func() {
-		p.chunkSender.AddTask(IndexRecordChunk{Err: dbterror.ErrReorgPanic})
+		p.chunkSender.AddTask(idxRecResult{err: dbterror.ErrReorgPanic})
 	}, false)
 	sessCtx, err := p.sessPool.Get()
 	if err != nil {
-		logutil.Logger(p.ctx).Error("copReqSender get session from pool failed", zap.Error(err))
-		p.chunkSender.AddTask(IndexRecordChunk{Err: err})
+		logutil.BgLogger().Error("[ddl-ingest] copReqSender get session from pool failed", zap.Error(err))
+		p.chunkSender.AddTask(idxRecResult{err: err})
 		return
 	}
 	se := sess.NewSession(sessCtx)
@@ -115,29 +114,29 @@ func (c *copReqSender) run() {
 			return
 		}
 		if p.checkpointMgr != nil && p.checkpointMgr.IsComplete(task.endKey) {
-			logutil.Logger(p.ctx).Info("checkpoint detected, skip a cop-request task",
+			logutil.BgLogger().Info("[ddl-ingest] checkpoint detected, skip a cop-request task",
 				zap.Int("task ID", task.id),
 				zap.String("task end key", hex.EncodeToString(task.endKey)))
 			continue
 		}
 		err := scanRecords(p, task, se)
 		if err != nil {
-			p.chunkSender.AddTask(IndexRecordChunk{ID: task.id, Err: err})
+			p.chunkSender.AddTask(idxRecResult{id: task.id, err: err})
 			return
 		}
 	}
 }
 
 func scanRecords(p *copReqSenderPool, task *reorgBackfillTask, se *sess.Session) error {
-	logutil.Logger(p.ctx).Info("start a cop-request task",
+	logutil.BgLogger().Info("[ddl-ingest] start a cop-request task",
 		zap.Int("id", task.id), zap.String("task", task.String()))
 
 	return wrapInBeginRollback(se, func(startTS uint64) error {
-		rs, err := buildTableScan(p.ctx, p.copCtx.GetBase(), startTS, task.startKey, task.endKey)
+		rs, err := p.copCtx.buildTableScan(p.ctx, startTS, task.startKey, task.excludedEndKey())
 		if err != nil {
 			return err
 		}
-		failpoint.Inject("mockCopSenderPanic", func(val failpoint.Value) {
+		failpoint.Inject("MockCopSenderPanic", func(val failpoint.Value) {
 			if val.(bool) {
 				panic("mock panic")
 			}
@@ -148,7 +147,7 @@ func scanRecords(p *copReqSenderPool, task *reorgBackfillTask, se *sess.Session)
 		var done bool
 		for !done {
 			srcChk := p.getChunk()
-			done, err = fetchTableScanResult(p.ctx, p.copCtx.GetBase(), rs, srcChk)
+			done, err = p.copCtx.fetchTableScanResult(p.ctx, rs, srcChk)
 			if err != nil {
 				p.recycleChunk(srcChk)
 				terror.Call(rs.Close)
@@ -157,9 +156,9 @@ func scanRecords(p *copReqSenderPool, task *reorgBackfillTask, se *sess.Session)
 			if p.checkpointMgr != nil {
 				p.checkpointMgr.UpdateTotal(task.id, srcChk.NumRows(), done)
 			}
-			idxRs := IndexRecordChunk{ID: task.id, Chunk: srcChk, Done: done}
-			failpoint.Inject("mockCopSenderError", func() {
-				idxRs.Err = errors.New("mock cop error")
+			idxRs := idxRecResult{id: task.id, chunk: srcChk, done: done}
+			failpoint.Inject("MockCopSenderError", func() {
+				idxRs.err = errors.New("mock cop error")
 			})
 			p.chunkSender.AddTask(idxRs)
 		}
@@ -182,13 +181,13 @@ func wrapInBeginRollback(se *sess.Session, f func(startTS uint64) error) error {
 	return f(startTS)
 }
 
-func newCopReqSenderPool(ctx context.Context, copCtx copr.CopContext, store kv.Storage,
+func newCopReqSenderPool(ctx context.Context, copCtx *copContext, store kv.Storage,
 	taskCh chan *reorgBackfillTask, sessPool *sess.Pool,
 	checkpointMgr *ingest.CheckpointManager) *copReqSenderPool {
 	poolSize := copReadChunkPoolSize()
 	srcChkPool := make(chan *chunk.Chunk, poolSize)
 	for i := 0; i < poolSize; i++ {
-		srcChkPool <- chunk.NewChunkWithCapacity(copCtx.GetBase().FieldTypes, copReadBatchSize())
+		srcChkPool <- chunk.NewChunkWithCapacity(copCtx.fieldTps, copReadBatchSize())
 	}
 	return &copReqSenderPool{
 		tasksCh:       taskCh,
@@ -228,7 +227,7 @@ func (c *copReqSenderPool) close(force bool) {
 	if c.closed {
 		return
 	}
-	logutil.Logger(c.ctx).Info("close cop-request sender pool", zap.Bool("force", force))
+	logutil.BgLogger().Info("[ddl-ingest] close cop-request sender pool")
 	if force {
 		for _, w := range c.senders {
 			w.cancel()
@@ -243,7 +242,7 @@ func (c *copReqSenderPool) getChunk() *chunk.Chunk {
 	chk := <-c.srcChkPool
 	newCap := copReadBatchSize()
 	if chk.Capacity() != newCap {
-		chk = chunk.NewChunkWithCapacity(c.copCtx.GetBase().FieldTypes, newCap)
+		chk = chunk.NewChunkWithCapacity(c.copCtx.fieldTps, newCap)
 	}
 	chk.Reset()
 	return chk
@@ -257,8 +256,158 @@ func (c *copReqSenderPool) recycleChunk(chk *chunk.Chunk) {
 	c.srcChkPool <- chk
 }
 
-func buildTableScan(ctx context.Context, c *copr.CopContextBase, startTS uint64, start, end kv.Key) (distsql.SelectResult, error) {
-	dagPB, err := buildDAGPB(c.SessionContext, c.TableInfo, c.ColumnInfos)
+// copContext contains the information that is needed when building a coprocessor request.
+// It is unchanged after initialization.
+type copContext struct {
+	tblInfo  *model.TableInfo
+	idxInfo  *model.IndexInfo
+	pkInfo   *model.IndexInfo
+	colInfos []*model.ColumnInfo
+	fieldTps []*types.FieldType
+	sessCtx  sessionctx.Context
+
+	expColInfos         []*expression.Column
+	idxColOutputOffsets []int
+	handleOutputOffsets []int
+	virtualColOffsets   []int
+	virtualColFieldTps  []*types.FieldType
+}
+
+func newCopContext(tblInfo *model.TableInfo, idxInfo *model.IndexInfo, sessCtx sessionctx.Context) (*copContext, error) {
+	var err error
+	usedColumnIDs := make(map[int64]struct{}, len(idxInfo.Columns))
+	usedColumnIDs, err = fillUsedColumns(usedColumnIDs, idxInfo, tblInfo)
+	var handleIDs []int64
+	if err != nil {
+		return nil, err
+	}
+	var primaryIdx *model.IndexInfo
+	if tblInfo.PKIsHandle {
+		pkCol := tblInfo.GetPkColInfo()
+		usedColumnIDs[pkCol.ID] = struct{}{}
+		handleIDs = []int64{pkCol.ID}
+	} else if tblInfo.IsCommonHandle {
+		primaryIdx = tables.FindPrimaryIndex(tblInfo)
+		handleIDs = make([]int64, 0, len(primaryIdx.Columns))
+		for _, pkCol := range primaryIdx.Columns {
+			col := tblInfo.Columns[pkCol.Offset]
+			handleIDs = append(handleIDs, col.ID)
+		}
+		usedColumnIDs, err = fillUsedColumns(usedColumnIDs, primaryIdx, tblInfo)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Only collect the columns that are used by the index.
+	colInfos := make([]*model.ColumnInfo, 0, len(idxInfo.Columns))
+	fieldTps := make([]*types.FieldType, 0, len(idxInfo.Columns))
+	for i := range tblInfo.Columns {
+		col := tblInfo.Columns[i]
+		if _, found := usedColumnIDs[col.ID]; found {
+			colInfos = append(colInfos, col)
+			fieldTps = append(fieldTps, &col.FieldType)
+		}
+	}
+
+	// Append the extra handle column when _tidb_rowid is used.
+	if !tblInfo.HasClusteredIndex() {
+		extra := model.NewExtraHandleColInfo()
+		colInfos = append(colInfos, extra)
+		fieldTps = append(fieldTps, &extra.FieldType)
+		handleIDs = []int64{extra.ID}
+	}
+
+	expColInfos, _, err := expression.ColumnInfos2ColumnsAndNames(sessCtx,
+		model.CIStr{} /* unused */, tblInfo.Name, colInfos, tblInfo)
+	if err != nil {
+		return nil, err
+	}
+	idxOffsets := resolveIndicesForIndex(expColInfos, idxInfo, tblInfo)
+	hdColOffsets := resolveIndicesForHandle(expColInfos, handleIDs)
+	vColOffsets, vColFts := collectVirtualColumnOffsetsAndTypes(expColInfos)
+
+	copCtx := &copContext{
+		tblInfo:  tblInfo,
+		idxInfo:  idxInfo,
+		pkInfo:   primaryIdx,
+		colInfos: colInfos,
+		fieldTps: fieldTps,
+		sessCtx:  sessCtx,
+
+		expColInfos:         expColInfos,
+		idxColOutputOffsets: idxOffsets,
+		handleOutputOffsets: hdColOffsets,
+		virtualColOffsets:   vColOffsets,
+		virtualColFieldTps:  vColFts,
+	}
+	return copCtx, nil
+}
+
+func fillUsedColumns(usedCols map[int64]struct{}, idxInfo *model.IndexInfo, tblInfo *model.TableInfo) (map[int64]struct{}, error) {
+	colsToChecks := make([]*model.ColumnInfo, 0, len(idxInfo.Columns))
+	for _, idxCol := range idxInfo.Columns {
+		colsToChecks = append(colsToChecks, tblInfo.Columns[idxCol.Offset])
+	}
+	for len(colsToChecks) > 0 {
+		next := colsToChecks[0]
+		colsToChecks = colsToChecks[1:]
+		usedCols[next.ID] = struct{}{}
+		for depColName := range next.Dependences {
+			// Expand the virtual generated columns.
+			depCol := model.FindColumnInfo(tblInfo.Columns, depColName)
+			if depCol == nil {
+				return nil, errors.Trace(errors.Errorf("dependent column %s not found", depColName))
+			}
+			if _, ok := usedCols[depCol.ID]; !ok {
+				colsToChecks = append(colsToChecks, depCol)
+			}
+		}
+	}
+	return usedCols, nil
+}
+
+func resolveIndicesForIndex(outputCols []*expression.Column, idxInfo *model.IndexInfo, tblInfo *model.TableInfo) []int {
+	offsets := make([]int, 0, len(idxInfo.Columns))
+	for _, idxCol := range idxInfo.Columns {
+		hid := tblInfo.Columns[idxCol.Offset].ID
+		for j, col := range outputCols {
+			if col.ID == hid {
+				offsets = append(offsets, j)
+				break
+			}
+		}
+	}
+	return offsets
+}
+
+func resolveIndicesForHandle(cols []*expression.Column, handleIDs []int64) []int {
+	offsets := make([]int, 0, len(handleIDs))
+	for _, hid := range handleIDs {
+		for j, col := range cols {
+			if col.ID == hid {
+				offsets = append(offsets, j)
+				break
+			}
+		}
+	}
+	return offsets
+}
+
+func collectVirtualColumnOffsetsAndTypes(cols []*expression.Column) ([]int, []*types.FieldType) {
+	var offsets []int
+	var fts []*types.FieldType
+	for i, col := range cols {
+		if col.VirtualExpr != nil {
+			offsets = append(offsets, i)
+			fts = append(fts, col.GetType())
+		}
+	}
+	return offsets, fts
+}
+
+func (c *copContext) buildTableScan(ctx context.Context, startTS uint64, start, end kv.Key) (distsql.SelectResult, error) {
+	dagPB, err := buildDAGPB(c.sessCtx, c.tblInfo, c.colInfos)
 	if err != nil {
 		return nil, err
 	}
@@ -269,25 +418,20 @@ func buildTableScan(ctx context.Context, c *copr.CopContextBase, startTS uint64,
 		SetStartTS(startTS).
 		SetKeyRanges([]kv.KeyRange{{StartKey: start, EndKey: end}}).
 		SetKeepOrder(true).
-		SetFromSessionVars(c.SessionContext.GetSessionVars()).
-		SetFromInfoSchema(c.SessionContext.GetDomainInfoSchema()).
+		SetFromSessionVars(c.sessCtx.GetSessionVars()).
+		SetFromInfoSchema(c.sessCtx.GetDomainInfoSchema()).
 		SetConcurrency(1).
 		Build()
 	kvReq.RequestSource.RequestSourceInternal = true
 	kvReq.RequestSource.RequestSourceType = getDDLRequestSource(model.ActionAddIndex)
-	kvReq.RequestSource.ExplicitRequestSourceType = kvutil.ExplicitTypeDDL
 	if err != nil {
 		return nil, err
 	}
-	return distsql.Select(ctx, c.SessionContext, kvReq, c.FieldTypes)
+	return distsql.Select(ctx, c.sessCtx, kvReq, c.fieldTps, statistics.NewQueryFeedback(0, nil, 0, false))
 }
 
-func fetchTableScanResult(
-	ctx context.Context,
-	copCtx *copr.CopContextBase,
-	result distsql.SelectResult,
-	chk *chunk.Chunk,
-) (bool, error) {
+func (c *copContext) fetchTableScanResult(ctx context.Context, result distsql.SelectResult,
+	chk *chunk.Chunk) (bool, error) {
 	err := result.Next(ctx, chk)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -295,10 +439,11 @@ func fetchTableScanResult(
 	if chk.NumRows() == 0 {
 		return true, nil
 	}
-	err = table.FillVirtualColumnValue(
-		copCtx.VirtualColumnsFieldTypes, copCtx.VirtualColumnsOutputOffsets,
-		copCtx.ExprColumnInfos, copCtx.ColumnInfos, copCtx.SessionContext, chk)
-	return false, err
+	err = table.FillVirtualColumnValue(c.virtualColFieldTps, c.virtualColOffsets, c.expColInfos, c.colInfos, c.sessCtx, chk)
+	if err != nil {
+		return false, completeErr(err, c.idxInfo)
+	}
+	return false, nil
 }
 
 func completeErr(err error, idxInfo *model.IndexInfo) error {
@@ -337,7 +482,7 @@ func getRestoreData(tblInfo *model.TableInfo, targetIdx, pkIdx *model.IndexInfo,
 
 func buildDAGPB(sCtx sessionctx.Context, tblInfo *model.TableInfo, colInfos []*model.ColumnInfo) (*tipb.DAGRequest, error) {
 	dagReq := &tipb.DAGRequest{}
-	_, dagReq.TimeZoneOffset = timeutil.Zone(sCtx.GetSessionVars().Location())
+	dagReq.TimeZoneName, dagReq.TimeZoneOffset = timeutil.Zone(sCtx.GetSessionVars().Location())
 	sc := sCtx.GetSessionVars().StmtCtx
 	dagReq.Flags = sc.PushDownFlags()
 	for i := range colInfos {
@@ -379,4 +524,11 @@ func buildHandle(pkDts []types.Datum, tblInfo *model.TableInfo,
 		return kv.NewCommonHandle(handleBytes)
 	}
 	return kv.IntHandle(pkDts[0].GetInt64()), nil
+}
+
+type idxRecResult struct {
+	id    int
+	chunk *chunk.Chunk
+	err   error
+	done  bool
 }

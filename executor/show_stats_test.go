@@ -49,18 +49,14 @@ func TestShowStatsLocked(t *testing.T) {
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t, t1, a1, dc")
+	tk.MustExec("drop table if exists t, t1")
 	tk.MustExec("create table t (a int, b int)")
 	tk.MustExec("create table t1 (a int, b int)")
-	tk.MustExec("create table a1 (a int, b int)")
-	tk.MustExec("create table dc (a int, b int)")
-	tk.MustExec("lock stats t, t1, a1, dc")
-	result := tk.MustQuery("show stats_locked").Sort()
-	require.Len(t, result.Rows(), 4)
-	require.Equal(t, "a1", result.Rows()[0][1])
-	require.Equal(t, "dc", result.Rows()[1][1])
-	require.Equal(t, "t", result.Rows()[2][1])
-	require.Equal(t, "t1", result.Rows()[3][1])
+	tk.MustExec("lock stats t, t1")
+	result := tk.MustQuery("show stats_locked")
+	require.Len(t, result.Rows(), 2)
+	require.Equal(t, "t", result.Rows()[0][1])
+	require.Equal(t, "t1", result.Rows()[1][1])
 	result = tk.MustQuery("show stats_locked where table_name = 't'")
 	require.Len(t, result.Rows(), 1)
 	require.Equal(t, "t", result.Rows()[0][1])
@@ -282,9 +278,10 @@ func TestShowStatusSnapshot(t *testing.T) {
 
 func TestShowStatsExtended(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
+
 	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
 	dom.StatsHandle().Clear()
+	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (a int, b int, c int)")
 	tk.MustExec("insert into t values(1,1,3),(2,2,2),(3,3,1)")
@@ -386,7 +383,7 @@ func TestShowAnalyzeStatus(t *testing.T) {
 	checkTime := func(val interface{}) {
 		str, ok := val.(string)
 		require.True(t, ok)
-		_, err := time.Parse(time.DateTime, str)
+		_, err := time.Parse("2006-01-02 15:04:05", str)
 		require.NoError(t, err)
 	}
 	checkTime(rows[0][5])

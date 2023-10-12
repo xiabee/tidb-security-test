@@ -16,14 +16,12 @@ package stmtsummary
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"encoding/json"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/set"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -587,8 +586,8 @@ func newStmtFiles(ctx context.Context, timeRanges []*StmtTimeRange) (*stmtFiles,
 			return nil, err
 		}
 	}
-	slices.SortFunc(files, func(i, j *stmtFile) int {
-		return cmp.Compare(i.begin, j.begin)
+	slices.SortFunc(files, func(i, j *stmtFile) bool {
+		return i.begin < j.begin
 	})
 	return &stmtFiles{files: files}, nil
 }

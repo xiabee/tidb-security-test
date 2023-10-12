@@ -143,14 +143,15 @@ func (txn *tikvTxn) Iter(k kv.Key, upperBound kv.Key) (iter kv.Iterator, err err
 // IterReverse creates a reversed Iterator positioned on the first entry which key is less than k.
 // The returned iterator will iterate from greater key to smaller key.
 // If k is nil, the returned iterator will be positioned at the last key.
-func (txn *tikvTxn) IterReverse(k kv.Key, lowerBound kv.Key) (iter kv.Iterator, err error) {
+// TODO: Add lower bound limit
+func (txn *tikvTxn) IterReverse(k kv.Key) (iter kv.Iterator, err error) {
 	var dirtyIter, snapIter kv.Iterator
 
-	if dirtyIter, err = txn.GetMemBuffer().IterReverse(k, lowerBound); err != nil {
+	if dirtyIter, err = txn.GetMemBuffer().IterReverse(k); err != nil {
 		return nil, err
 	}
 
-	if snapIter, err = txn.GetSnapshot().IterReverse(k, lowerBound); err != nil {
+	if snapIter, err = txn.GetSnapshot().IterReverse(k); err != nil {
 		dirtyIter.Close()
 		return nil, err
 	}
@@ -260,7 +261,7 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 	case kv.CommitTSUpperBoundCheck:
 		txn.KVTxn.SetCommitTSUpperBoundCheck(val.(func(commitTS uint64) bool))
 	case kv.RPCInterceptor:
-		txn.KVTxn.AddRPCInterceptor(val.(interceptor.RPCInterceptor))
+		txn.KVTxn.SetRPCInterceptor(val.(interceptor.RPCInterceptor))
 	case kv.AssertionLevel:
 		txn.KVTxn.SetAssertionLevel(val.(kvrpcpb.AssertionLevel))
 	case kv.TableToColumnMaps:
@@ -269,8 +270,6 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 		txn.KVTxn.SetRequestSourceInternal(val.(bool))
 	case kv.RequestSourceType:
 		txn.KVTxn.SetRequestSourceType(val.(string))
-	case kv.ExplicitRequestSourceType:
-		txn.KVTxn.SetExplicitRequestSourceType(val.(string))
 	case kv.ReplicaReadAdjuster:
 		txn.KVTxn.GetSnapshot().SetReplicaReadAdjuster(val.(txnkv.ReplicaReadAdjuster))
 	case kv.TxnSource:
@@ -279,8 +278,6 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 		txn.KVTxn.SetResourceGroupName(val.(string))
 	case kv.LoadBasedReplicaReadThreshold:
 		txn.KVTxn.GetSnapshot().SetLoadBasedReplicaReadThreshold(val.(time.Duration))
-	case kv.TiKVClientReadTimeout:
-		txn.KVTxn.GetSnapshot().SetKVReadTimeout(time.Duration(val.(uint64) * uint64(time.Millisecond)))
 	}
 }
 
@@ -336,9 +333,9 @@ func (txn *tikvTxn) extractKeyExistsErr(key kv.Key) error {
 	}
 
 	if isRecord {
-		return ExtractKeyExistsErrFromHandle(key, value, tblInfo)
+		return extractKeyExistsErrFromHandle(key, value, tblInfo)
 	}
-	return ExtractKeyExistsErrFromIndex(key, value, tblInfo, indexID)
+	return extractKeyExistsErrFromIndex(key, value, tblInfo, indexID)
 }
 
 // SetAssertion sets an assertion for the key operation.

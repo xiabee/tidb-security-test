@@ -33,14 +33,11 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain/infosync"
-	"github.com/pingcap/tidb/domain/resourcegroup"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	tidbmetrics "github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/terror"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	copr_metrics "github.com/pingcap/tidb/store/copr/metrics"
 	"github.com/pingcap/tidb/store/driver/backoff"
 	derr "github.com/pingcap/tidb/store/driver/error"
@@ -56,7 +53,6 @@ import (
 	"github.com/tikv/client-go/v2/metrics"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
-	"github.com/tikv/client-go/v2/tikvrpc/interceptor"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	"github.com/tikv/client-go/v2/util"
@@ -66,7 +62,7 @@ import (
 // Maximum total sleep time(in ms) for kv/cop commands.
 const (
 	copBuildTaskMaxBackoff = 5000
-	CopNextMaxBackoff      = 20000
+	copNextMaxBackoff      = 20000
 	CopSmallTaskRow        = 32 // 32 is the initial batch size of TiKV
 	smallTaskSigma         = 0.5
 	smallConcPerCore       = 20
@@ -91,7 +87,6 @@ func (c *CopClient) Send(ctx context.Context, req *kv.Request, variables interfa
 	}
 	ctx = context.WithValue(ctx, tikv.TxnStartKey(), req.StartTs)
 	ctx = context.WithValue(ctx, util.RequestSourceKey, req.RequestSource)
-	ctx = interceptor.WithRPCInterceptor(ctx, interceptor.GetRPCInterceptorFromCtx(ctx))
 	enabledRateLimitAction := option.EnabledRateLimitAction
 	sessionMemTracker := option.SessionMemTracker
 	it, errRes := c.BuildCopIterator(ctx, req, vars, option)
@@ -188,7 +183,6 @@ func (c *CopClient) BuildCopIterator(ctx context.Context, req *kv.Request, vars 
 		replicaReadSeed:  c.replicaReadSeed,
 		rpcCancel:        tikv.NewRPCanceller(),
 		buildTaskElapsed: *buildOpt.elapsed,
-		runawayChecker:   req.RunawayChecker,
 	}
 	it.tasks = tasks
 	if it.concurrency > len(tasks) {
@@ -272,11 +266,6 @@ type copTask struct {
 	redirect2Replica *uint64
 	busyThreshold    time.Duration
 	meetLockFallback bool
-
-	// timeout value for one kv readonly request
-	tikvClientReadTimeout uint64
-	// firstReadType is used to indicate the type of first read when retrying.
-	firstReadType string
 }
 
 type batchedCopTask struct {
@@ -320,8 +309,6 @@ type buildCopTaskOpt struct {
 	respChan bool
 	rowHints []int
 	elapsed  *time.Duration
-	// ignoreTiKVClientReadTimeout is used to ignore tikv_client_read_timeout configuration, use default timeout instead.
-	ignoreTiKVClientReadTimeout bool
 }
 
 func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*copTask, error) {
@@ -411,9 +398,6 @@ func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*c
 				requestSource: req.RequestSource,
 				RowCountHint:  hint,
 				busyThreshold: req.StoreBusyThreshold,
-			}
-			if !opt.ignoreTiKVClientReadTimeout {
-				task.tikvClientReadTimeout = req.TiKVClientReadTimeout
 			}
 			// only keep-order need chan inside task.
 			// tasks by region error will reuse the channel of parent task.
@@ -699,8 +683,6 @@ type copIterator struct {
 	buildTaskElapsed        time.Duration
 	storeBatchedNum         atomic.Uint64
 	storeBatchedFallbackNum atomic.Uint64
-
-	runawayChecker *resourcegroup.RunawayChecker
 }
 
 // copIteratorWorker receives tasks from copIteratorTaskSender, handles tasks and sends the copResponse to respChan.
@@ -1098,13 +1080,7 @@ func chooseBackoffer(ctx context.Context, backoffermap map[uint64]*Backoffer, ta
 	if ok {
 		return bo
 	}
-	boMaxSleep := CopNextMaxBackoff
-	failpoint.Inject("ReduceCopNextMaxBackoff", func(value failpoint.Value) {
-		if value.(bool) {
-			boMaxSleep = 2
-		}
-	})
-	newbo := backoff.NewBackofferWithVars(ctx, boMaxSleep, worker.vars)
+	newbo := backoff.NewBackofferWithVars(ctx, copNextMaxBackoff, worker.vars)
 	backoffermap[task.region.GetID()] = newbo
 	return newbo
 }
@@ -1115,7 +1091,7 @@ func (worker *copIteratorWorker) handleTask(ctx context.Context, task *copTask, 
 		r := recover()
 		if r != nil {
 			logutil.BgLogger().Error("copIteratorWork meet panic",
-				zap.Any("r", r),
+				zap.Reflect("r", r),
 				zap.Stack("stack trace"))
 			resp := &copResponse{err: errors.Errorf("%v", r)}
 			// if panic has happened, set checkOOM to false to avoid another panic.
@@ -1141,6 +1117,9 @@ func (worker *copIteratorWorker) handleTask(ctx context.Context, task *copTask, 
 		} else {
 			remainTasks = remainTasks[1:]
 		}
+	}
+	if worker.store.coprCache != nil && worker.store.coprCache.cache.Metrics != nil {
+		copr_metrics.CoprCacheCounterEvict.Add(float64(worker.store.coprCache.cache.Metrics.KeysEvicted()))
 	}
 }
 
@@ -1170,13 +1149,6 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 	cacheKey, cacheValue := worker.buildCacheKey(task, &copReq)
 
 	replicaRead := worker.req.ReplicaRead
-	rgName := worker.req.ResourceGroupName
-	if task.storeType == kv.TiFlash && !variable.EnableResourceControl.Load() {
-		// By calling variable.EnableGlobalResourceControlFunc() and setting global variables,
-		// tikv/client-go can sense whether the rg function is enabled
-		// But for tiflash, it check if rgName is empty to decide if resource control is enabled or not.
-		rgName = ""
-	}
 	req := tikvrpc.NewReplicaReadRequest(task.cmdType, &copReq, options.GetTiKVReplicaReadType(replicaRead), &worker.replicaReadSeed, kvrpcpb.Context{
 		IsolationLevel: isolationLevelToPB(worker.req.IsolationLevel),
 		Priority:       priorityToPB(worker.req.Priority),
@@ -1184,33 +1156,14 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 		RecordTimeStat: true,
 		RecordScanStat: true,
 		TaskId:         worker.req.TaskID,
+		RequestSource:  task.requestSource.GetRequestSource(),
 		ResourceControlContext: &kvrpcpb.ResourceControlContext{
-			ResourceGroupName: rgName,
+			ResourceGroupName: worker.req.ResourceGroupName,
 		},
 		BusyThresholdMs: uint32(task.busyThreshold.Milliseconds()),
-		BucketsVersion:  task.bucketsVer,
 	})
-	req.InputRequestSource = task.requestSource.GetRequestSource()
-	if task.firstReadType != "" {
-		req.ReadType = task.firstReadType
-		req.IsRetryRequest = true
-	}
 	if worker.req.ResourceGroupTagger != nil {
 		worker.req.ResourceGroupTagger(req)
-	}
-	timeout := config.GetGlobalConfig().TiKVClient.CoprReqTimeout
-	if task.tikvClientReadTimeout > 0 {
-		timeout = time.Duration(task.tikvClientReadTimeout) * time.Millisecond
-	}
-	failpoint.Inject("sleepCoprRequest", func(v failpoint.Value) {
-		//nolint:durationcheck
-		time.Sleep(time.Millisecond * time.Duration(v.(int)))
-	})
-
-	if worker.req.RunawayChecker != nil {
-		if err := worker.req.RunawayChecker.BeforeCopRequest(req); err != nil {
-			return nil, err
-		}
 	}
 	req.StoreTp = getEndPointType(task.storeType)
 	startTime := time.Now()
@@ -1235,8 +1188,7 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 		req.ReplicaReadType = options.GetTiKVReplicaReadType(kv.ReplicaReadFollower)
 		ops = append(ops, tikv.WithMatchStores([]uint64{*task.redirect2Replica}))
 	}
-	resp, rpcCtx, storeAddr, err := worker.kvclient.SendReqCtx(bo.TiKVBackoffer(), req, task.region,
-		timeout, getEndPointType(task.storeType), task.storeAddr, ops...)
+	resp, rpcCtx, storeAddr, err := worker.kvclient.SendReqCtx(bo.TiKVBackoffer(), req, task.region, tikv.ReadTimeoutMedium, getEndPointType(task.storeType), task.storeAddr, ops...)
 	err = derr.ToTiDBErr(err)
 	if err != nil {
 		if task.storeType == kv.TiDB {
@@ -1248,17 +1200,12 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 
 	// Set task.storeAddr field so its task.String() method have the store address information.
 	task.storeAddr = storeAddr
-
 	costTime := time.Since(startTime)
 	copResp := resp.Resp.(*coprocessor.Response)
 
 	if costTime > minLogCopTaskTime {
 		worker.logTimeCopTask(costTime, task, bo, copResp)
 	}
-	if worker.req.RunawayChecker != nil {
-		worker.req.RunawayChecker.AfterCopRequest()
-	}
-
 	storeID := strconv.FormatUint(req.Context.GetPeer().GetStoreId(), 10)
 	isInternal := util.IsRequestSourceInternal(&task.requestSource)
 	scope := metrics.LblGeneral
@@ -1270,19 +1217,12 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 		tidbmetrics.DistSQLCoprRespBodySize.WithLabelValues(storeAddr).Observe(float64(len(copResp.Data)))
 	}
 
-	var remains []*copTask
 	if worker.req.Paging.Enable {
-		remains, err = worker.handleCopPagingResult(bo, rpcCtx, &copResponse{pbResp: copResp}, cacheKey, cacheValue, task, ch, costTime)
-	} else {
-		// Handles the response for non-paging copTask.
-		remains, err = worker.handleCopResponse(bo, rpcCtx, &copResponse{pbResp: copResp}, cacheKey, cacheValue, task, ch, nil, costTime)
+		return worker.handleCopPagingResult(bo, rpcCtx, &copResponse{pbResp: copResp}, cacheKey, cacheValue, task, ch, costTime)
 	}
-	if req.ReadType != "" {
-		for _, remain := range remains {
-			remain.firstReadType = req.ReadType
-		}
-	}
-	return remains, err
+
+	// Handles the response for non-paging copTask.
+	return worker.handleCopResponse(bo, rpcCtx, &copResponse{pbResp: copResp}, cacheKey, cacheValue, task, ch, nil, costTime)
 }
 
 const (
@@ -1293,7 +1233,7 @@ const (
 func (worker *copIteratorWorker) logTimeCopTask(costTime time.Duration, task *copTask, bo *Backoffer, resp *coprocessor.Response) {
 	logStr := fmt.Sprintf("[TIME_COP_PROCESS] resp_time:%s txnStartTS:%d region_id:%d store_addr:%s", costTime, worker.req.StartTs, task.region.GetID(), task.storeAddr)
 	if bo.GetTotalSleep() > minLogBackoffTime {
-		backoffTypes := strings.ReplaceAll(fmt.Sprintf("%v", bo.TiKVBackoffer().GetTypes()), " ", ",")
+		backoffTypes := strings.Replace(fmt.Sprintf("%v", bo.TiKVBackoffer().GetTypes()), " ", ",", -1)
 		logStr += fmt.Sprintf(" backoff_ms:%d backoff_types:%s", bo.GetTotalSleep(), backoffTypes)
 	}
 	// resp might be nil, but it is safe to call resp.GetXXX here.
@@ -1386,11 +1326,10 @@ func (worker *copIteratorWorker) handleCopResponse(bo *Backoffer, rpcCtx *tikv.R
 		}
 		// We may meet RegionError at the first packet, but not during visiting the stream.
 		remains, err := buildCopTasks(bo, task.ranges, &buildCopTaskOpt{
-			req:                         worker.req,
-			cache:                       worker.store.GetRegionCache(),
-			respChan:                    false,
-			eventCb:                     task.eventCb,
-			ignoreTiKVClientReadTimeout: true,
+			req:      worker.req,
+			cache:    worker.store.GetRegionCache(),
+			respChan: false,
+			eventCb:  task.eventCb,
 		})
 		if err != nil {
 			return remains, err
@@ -1513,11 +1452,10 @@ func (worker *copIteratorWorker) handleBatchCopResponse(bo *Backoffer, rpcCtx *t
 				return nil, errors.Trace(err)
 			}
 			remains, err := buildCopTasks(bo, task.ranges, &buildCopTaskOpt{
-				req:                         worker.req,
-				cache:                       worker.store.GetRegionCache(),
-				respChan:                    false,
-				eventCb:                     task.eventCb,
-				ignoreTiKVClientReadTimeout: true,
+				req:      worker.req,
+				cache:    worker.store.GetRegionCache(),
+				respChan: false,
+				eventCb:  task.eventCb,
 			})
 			if err != nil {
 				return nil, err
@@ -1580,19 +1518,20 @@ func (worker *copIteratorWorker) handleBatchCopResponse(bo *Backoffer, rpcCtx *t
 	}
 	if regionErr := resp.GetRegionError(); regionErr != nil && regionErr.ServerIsBusy != nil &&
 		regionErr.ServerIsBusy.EstimatedWaitMs > 0 && len(remainTasks) != 0 {
-		if len(batchResps) != 0 {
+		if len(batchResps) == 0 {
+			busyThresholdFallback = true
+			handler := newBatchTaskBuilder(bo, worker.req, worker.store.GetRegionCache(), kv.ReplicaReadFollower)
+			for _, task := range remainTasks {
+				// do not set busy threshold again.
+				task.busyThreshold = 0
+				if err = handler.handle(task); err != nil {
+					return nil, err
+				}
+			}
+			remainTasks = handler.build()
+		} else {
 			return nil, errors.New("store batched coprocessor with server is busy error shouldn't contain responses")
 		}
-		busyThresholdFallback = true
-		handler := newBatchTaskBuilder(bo, worker.req, worker.store.GetRegionCache(), kv.ReplicaReadFollower)
-		for _, task := range remainTasks {
-			// do not set busy threshold again.
-			task.busyThreshold = 0
-			if err = handler.handle(task); err != nil {
-				return nil, err
-			}
-		}
-		remainTasks = handler.build()
 	}
 	return remainTasks, nil
 }

@@ -412,7 +412,6 @@ func TestCheckCSVHeader(t *testing.T) {
 			dbMetas,
 			preInfoGetter,
 			nil,
-			nil,
 		)
 		preInfoGetter.dbInfosCache = rc.dbInfos
 		err = rc.checkCSVHeader(ctx)
@@ -466,7 +465,6 @@ func TestCheckTableEmpty(t *testing.T) {
 		dbMetas,
 		preInfoGetter,
 		nil,
-		nil,
 	)
 
 	rc := &Controller{
@@ -484,13 +482,13 @@ func TestCheckTableEmpty(t *testing.T) {
 	err := rc.checkTableEmpty(ctx)
 	require.NoError(t, err)
 
-	// test parallel mode
+	// test incremental mode
 	rc.cfg.TikvImporter.Backend = config.BackendLocal
-	rc.cfg.TikvImporter.ParallelImport = true
+	rc.cfg.TikvImporter.IncrementalImport = true
 	err = rc.checkTableEmpty(ctx)
 	require.NoError(t, err)
 
-	rc.cfg.TikvImporter.ParallelImport = false
+	rc.cfg.TikvImporter.IncrementalImport = false
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	mock.MatchExpectationsInOrder(false)
@@ -623,7 +621,6 @@ func TestLocalResource(t *testing.T) {
 		cfg,
 		nil,
 		preInfoGetter,
-		nil,
 		nil,
 	)
 	rc := &Controller{

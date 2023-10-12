@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
-	"golang.org/x/exp/maps"
 )
 
 // ScopeFlag is for system variable whether can be changed in global/session dynamically or not.
@@ -140,8 +139,8 @@ type SysVar struct {
 	SetSession func(*SessionVars, string) error
 	// SetGlobal is called after validation
 	SetGlobal func(context.Context, *SessionVars, string) error
-	// IsHintUpdatableVerfied indicate whether we've confirmed that SET_VAR() hint is worked for this hint.
-	IsHintUpdatableVerfied bool
+	// IsHintUpdatable indicate whether it's updatable via SET_VAR() hint (optional)
+	IsHintUpdatable bool
 	// Deprecated: Hidden previously meant that the variable still responds to SET but doesn't show up in SHOW VARIABLES
 	// However, this feature is no longer used. All variables are visble.
 	Hidden bool
@@ -156,10 +155,6 @@ type SysVar struct {
 	// GetStateValue gets the value for session states, which is used for migrating sessions.
 	// We need a function to override GetSession sometimes, because GetSession may not return the real value.
 	GetStateValue func(*SessionVars) (string, bool, error)
-	// Depended indicates whether other variables depend on this one. That is, if this one is not correctly set,
-	// another variable cannot be set either.
-	// This flag is used to decide the order to replay session variables.
-	Depended bool
 	// skipInit defines if the sysvar should be loaded into the session on init.
 	// This is only important to set for sysvars that include session scope,
 	// since global scoped sysvars are not-applicable.
@@ -523,7 +518,6 @@ func (sv *SysVar) checkBoolSystemVar(value string, vars *SessionVars) (string, e
 }
 
 // GetNativeValType attempts to convert the val to the approx MySQL non-string type
-// TODO: only return 3 types now, support others like DOUBLE, TIME later
 func (sv *SysVar) GetNativeValType(val string) (types.Datum, byte, uint) {
 	switch sv.Type {
 	case TypeUnsigned:
@@ -531,13 +525,13 @@ func (sv *SysVar) GetNativeValType(val string) (types.Datum, byte, uint) {
 		if err != nil {
 			u = 0
 		}
-		return types.NewUintDatum(u), mysql.TypeLonglong, mysql.UnsignedFlag | mysql.BinaryFlag
+		return types.NewUintDatum(u), mysql.TypeLonglong, mysql.UnsignedFlag
 	case TypeBool:
 		optVal := int64(0) // OFF
 		if TiDBOptOn(val) {
 			optVal = 1
 		}
-		return types.NewIntDatum(optVal), mysql.TypeLonglong, mysql.BinaryFlag
+		return types.NewIntDatum(optVal), mysql.TypeLong, 0
 	}
 	return types.NewStringDatum(val), mysql.TypeVarString, 0
 }
@@ -619,27 +613,8 @@ func GetSysVars() map[string]*SysVar {
 	return m
 }
 
-// OrderByDependency orders the vars by dependency. The depended sys vars are in the front.
-// Unknown sys vars are treated as not depended.
-func OrderByDependency(names map[string]string) []string {
-	depended, notDepended := make([]string, 0, len(names)), make([]string, 0, len(names))
-	sysVarsLock.RLock()
-	defer sysVarsLock.RUnlock()
-	for name := range names {
-		if sv, ok := sysVars[name]; ok && sv.Depended {
-			depended = append(depended, name)
-		} else {
-			notDepended = append(notDepended, name)
-		}
-	}
-	return append(depended, notDepended...)
-}
-
 func init() {
 	sysVars = make(map[string]*SysVar)
-	setHintUpdatable(defaultSysVars)
-	// Destroy the map after init.
-	maps.Clear(isHintUpdatableVerified)
 	for _, v := range defaultSysVars {
 		RegisterSysVar(v)
 	}

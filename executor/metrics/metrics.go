@@ -43,7 +43,6 @@ var (
 	TotalQueryProcHistogramGeneral  prometheus.Observer
 	TotalCopProcHistogramGeneral    prometheus.Observer
 	TotalCopWaitHistogramGeneral    prometheus.Observer
-	CopMVCCRatioHistogramGeneral    prometheus.Observer
 	TotalQueryProcHistogramInternal prometheus.Observer
 	TotalCopProcHistogramInternal   prometheus.Observer
 	TotalCopWaitHistogramInternal   prometheus.Observer
@@ -126,13 +125,6 @@ var (
 
 	PhaseDurationObserverMap         map[string]prometheus.Observer
 	PhaseDurationObserverMapInternal map[string]prometheus.Observer
-
-	MppCoordinatorStatsTotalRegisteredNumber prometheus.Gauge
-	MppCoordinatorStatsActiveNumber          prometheus.Gauge
-	MppCoordinatorStatsOverTimeNumber        prometheus.Gauge
-	MppCoordinatorStatsReportNotReceived     prometheus.Gauge
-
-	MppCoordinatorLatencyRcvReport prometheus.Observer
 )
 
 func init() {
@@ -145,7 +137,6 @@ func InitMetricsVars() {
 	TotalQueryProcHistogramGeneral = metrics.TotalQueryProcHistogram.WithLabelValues(metrics.LblGeneral)
 	TotalCopProcHistogramGeneral = metrics.TotalCopProcHistogram.WithLabelValues(metrics.LblGeneral)
 	TotalCopWaitHistogramGeneral = metrics.TotalCopWaitHistogram.WithLabelValues(metrics.LblGeneral)
-	CopMVCCRatioHistogramGeneral = metrics.CopMVCCRatioHistogram.WithLabelValues(metrics.LblGeneral)
 	TotalQueryProcHistogramInternal = metrics.TotalQueryProcHistogram.WithLabelValues(metrics.LblInternal)
 	TotalCopProcHistogramInternal = metrics.TotalCopProcHistogram.WithLabelValues(metrics.LblInternal)
 	TotalCopWaitHistogramInternal = metrics.TotalCopWaitHistogram.WithLabelValues(metrics.LblInternal)
@@ -217,13 +208,6 @@ func InitMetricsVars() {
 	TransactionDurationPessimisticRollbackGeneral = metrics.TransactionDuration.WithLabelValues(metrics.LblPessimistic, metrics.LblRollback, metrics.LblGeneral)
 	TransactionDurationOptimisticRollbackInternal = metrics.TransactionDuration.WithLabelValues(metrics.LblOptimistic, metrics.LblRollback, metrics.LblInternal)
 	TransactionDurationOptimisticRollbackGeneral = metrics.TransactionDuration.WithLabelValues(metrics.LblOptimistic, metrics.LblRollback, metrics.LblGeneral)
-
-	MppCoordinatorStatsTotalRegisteredNumber = metrics.MppCoordinatorStats.WithLabelValues("total")
-	MppCoordinatorStatsActiveNumber = metrics.MppCoordinatorStats.WithLabelValues("active")
-	MppCoordinatorStatsOverTimeNumber = metrics.MppCoordinatorStats.WithLabelValues("overTime")
-	MppCoordinatorStatsReportNotReceived = metrics.MppCoordinatorStats.WithLabelValues("reportNotRcv")
-
-	MppCoordinatorLatencyRcvReport = metrics.MppCoordinatorLatency.WithLabelValues("rcvReports")
 }
 
 // InitPhaseDurationObserverMap init observer map

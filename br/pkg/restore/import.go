@@ -31,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/util/codec"
-	kvutil "github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -558,7 +557,7 @@ func (importer *FileImporter) ImportSSTFiles(
 						continue regionLoop
 					}
 				}
-				log.Warn("download file failed, retry later",
+				log.Error("download file failed",
 					logutil.Files(files),
 					logutil.Region(info.Region),
 					logutil.Key("startKey", startKey),
@@ -570,7 +569,7 @@ func (importer *FileImporter) ImportSSTFiles(
 				zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)),
 				logutil.Key("start", files[0].StartKey), logutil.Key("end", files[0].EndKey))
 			if errIngest := importer.ingest(ctx, info, downloadMetas); errIngest != nil {
-				log.Warn("ingest file failed, retry later",
+				log.Error("ingest file failed",
 					logutil.Files(files),
 					logutil.SSTMetas(downloadMetas),
 					logutil.Region(info.Region),
@@ -586,11 +585,7 @@ func (importer *FileImporter) ImportSSTFiles(
 		}
 		return nil
 	}, utils.NewImportSSTBackoffer())
-	if err != nil {
-		log.Error("import sst file failed after retry, stop the whole progress", logutil.Files(files), zap.Error(err))
-		return errors.Trace(err)
-	}
-	return nil
+	return errors.Trace(err)
 }
 
 func (importer *FileImporter) setDownloadSpeedLimit(ctx context.Context, storeID, rateLimit uint64) error {
@@ -700,12 +695,6 @@ func (importer *FileImporter) downloadSST(
 		StorageCacheId: importer.cacheKey,
 		// For the older version of TiDB, the request type will  be default to `import_sstpb.RequestType_Legacy`
 		RequestType: import_sstpb.DownloadRequestType_Keyspace,
-		Context: &kvrpcpb.Context{
-			ResourceControlContext: &kvrpcpb.ResourceControlContext{
-				ResourceGroupName: "", // TODO,
-			},
-			RequestSource: kvutil.BuildRequestSource(true, kv.InternalTxnBR, kvutil.ExplicitTypeBR),
-		},
 	}
 	log.Debug("download SST",
 		logutil.SSTMeta(sstMeta),
@@ -790,12 +779,6 @@ func (importer *FileImporter) downloadRawKVSST(
 		IsRawKv:        true,
 		CipherInfo:     cipher,
 		StorageCacheId: importer.cacheKey,
-		Context: &kvrpcpb.Context{
-			ResourceControlContext: &kvrpcpb.ResourceControlContext{
-				ResourceGroupName: "", // TODO,
-			},
-			RequestSource: kvutil.BuildRequestSource(true, kv.InternalTxnBR, kvutil.ExplicitTypeBR),
-		},
 	}
 	log.Debug("download SST", logutil.SSTMeta(sstMeta), logutil.Region(regionInfo.Region))
 
@@ -905,10 +888,6 @@ func (importer *FileImporter) ingestSSTs(
 		RegionId:    regionInfo.Region.GetId(),
 		RegionEpoch: regionInfo.Region.GetRegionEpoch(),
 		Peer:        leader,
-		ResourceControlContext: &kvrpcpb.ResourceControlContext{
-			ResourceGroupName: "", // TODO,
-		},
-		RequestSource: kvutil.BuildRequestSource(true, kv.InternalTxnBR, kvutil.ExplicitTypeBR),
 	}
 
 	if !importer.supportMultiIngest {

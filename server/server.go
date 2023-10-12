@@ -34,14 +34,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
-	"net/http"         //nolint:goimports
-	_ "net/http/pprof" // #nosec G108 for pprof
+	"net/http" //nolint:goimports
+	// For pprof
+	_ "net/http/pprof" // #nosec G108
 	"os"
 	"os/user"
 	"reflect"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,21 +53,21 @@ import (
 	autoid "github.com/pingcap/tidb/autoid_service"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/extension"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/plugin"
 	"github.com/pingcap/tidb/privilege/privileges"
-	servererr "github.com/pingcap/tidb/server/err"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/session/txninfo"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/fastrand"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sys/linux"
@@ -98,14 +99,29 @@ func init() {
 	}
 }
 
+var (
+	errUnknownFieldType        = dbterror.ClassServer.NewStd(errno.ErrUnknownFieldType)
+	errInvalidSequence         = dbterror.ClassServer.NewStd(errno.ErrInvalidSequence)
+	errInvalidType             = dbterror.ClassServer.NewStd(errno.ErrInvalidType)
+	errNotAllowedCommand       = dbterror.ClassServer.NewStd(errno.ErrNotAllowedCommand)
+	errAccessDenied            = dbterror.ClassServer.NewStd(errno.ErrAccessDenied)
+	errAccessDeniedNoPassword  = dbterror.ClassServer.NewStd(errno.ErrAccessDeniedNoPassword)
+	errConCount                = dbterror.ClassServer.NewStd(errno.ErrConCount)
+	errSecureTransportRequired = dbterror.ClassServer.NewStd(errno.ErrSecureTransportRequired)
+	errMultiStatementDisabled  = dbterror.ClassServer.NewStd(errno.ErrMultiStatementDisabled)
+	errNewAbortingConnection   = dbterror.ClassServer.NewStd(errno.ErrNewAbortingConnection)
+	errNotSupportedAuthMode    = dbterror.ClassServer.NewStd(errno.ErrNotSupportedAuthMode)
+	errNetPacketTooLarge       = dbterror.ClassServer.NewStd(errno.ErrNetPacketTooLarge)
+	errMustChangePassword      = dbterror.ClassServer.NewStd(errno.ErrMustChangePassword)
+)
+
 // DefaultCapability is the capability of the server when it is created using the default configuration.
 // When server is configured with SSL, the server will have extra capabilities compared to DefaultCapability.
 const defaultCapability = mysql.ClientLongPassword | mysql.ClientLongFlag |
 	mysql.ClientConnectWithDB | mysql.ClientProtocol41 |
 	mysql.ClientTransactions | mysql.ClientSecureConnection | mysql.ClientFoundRows |
 	mysql.ClientMultiStatements | mysql.ClientMultiResults | mysql.ClientLocalFiles |
-	mysql.ClientConnectAtts | mysql.ClientPluginAuth | mysql.ClientInteractive |
-	mysql.ClientDeprecateEOF | mysql.ClientCompress | mysql.ClientZstdCompressionAlgorithm
+	mysql.ClientConnectAtts | mysql.ClientPluginAuth | mysql.ClientInteractive | mysql.ClientDeprecateEOF
 
 // Server is the MySQL protocol server
 type Server struct {
@@ -119,8 +135,9 @@ type Server struct {
 	rwlock  sync.RWMutex
 	clients map[uint64]*clientConn
 
-	capability uint32
-	dom        *domain.Domain
+	capability   uint32
+	dom          *domain.Domain
+	globalConnID util.GlobalConnID
 
 	statusAddr     string
 	statusListener net.Listener
@@ -135,57 +152,6 @@ type Server struct {
 	authTokenCancelFunc context.CancelFunc
 	wg                  sync.WaitGroup
 	printMDLLogTime     time.Time
-}
-
-// NewTestServer creates a new Server for test.
-func NewTestServer(cfg *config.Config) *Server {
-	return &Server{
-		cfg: cfg,
-	}
-}
-
-// Socket returns the server's socket file.
-func (s *Server) Socket() net.Listener {
-	return s.socket
-}
-
-// Listener returns the server's listener.
-func (s *Server) Listener() net.Listener {
-	return s.listener
-}
-
-// ListenAddr returns the server's listener's network address.
-func (s *Server) ListenAddr() net.Addr {
-	return s.listener.Addr()
-}
-
-// StatusListenerAddr returns the server's status listener's network address.
-func (s *Server) StatusListenerAddr() net.Addr {
-	return s.statusListener.Addr()
-}
-
-// BitwiseXorCapability gets the capability of the server.
-func (s *Server) BitwiseXorCapability(capability uint32) {
-	s.capability ^= capability
-}
-
-// BitwiseOrAssignCapability adds the capability to the server.
-func (s *Server) BitwiseOrAssignCapability(capability uint32) {
-	s.capability |= capability
-}
-
-// GetStatusServerAddr gets statusServer address for MppCoordinatorManager usage
-func (s *Server) GetStatusServerAddr() (on bool, addr string) {
-	if !s.cfg.Status.ReportStatus {
-		return false, ""
-	}
-	if strings.Contains(s.statusAddr, config.DefStatusHost) {
-		if len(s.cfg.AdvertiseAddress) != 0 {
-			return true, strings.ReplaceAll(s.statusAddr, config.DefStatusHost, s.cfg.AdvertiseAddress)
-		}
-		return false, ""
-	}
-	return true, s.statusAddr
 }
 
 // ConnectionCount gets current connection count.
@@ -215,6 +181,11 @@ func (s *Server) SetDomain(dom *domain.Domain) {
 	s.dom = dom
 }
 
+// InitGlobalConnID initialize global connection id.
+func (s *Server) InitGlobalConnID(serverIDGetter func() uint64) {
+	s.globalConnID = util.NewGlobalConnIDWithGetter(serverIDGetter, true)
+}
+
 // newConn creates a new *clientConn from a net.Conn.
 // It allocates a connection ID and random salt data for authentication.
 func (s *Server) newConn(conn net.Conn) *clientConn {
@@ -239,6 +210,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		driver:            driver,
 		concurrentLimiter: NewTokenLimiter(cfg.TokenLimit),
 		clients:           make(map[uint64]*clientConn),
+		globalConnID:      util.NewGlobalConnID(0, true),
 		internalSessions:  make(map[interface{}]struct{}, 100),
 		health:            uatomic.NewBool(true),
 		inShutdownMode:    uatomic.NewBool(false),
@@ -361,6 +333,9 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 			logutil.BgLogger().Error("Fail to load JWKS from the path", zap.String("jwks", s.cfg.Security.AuthTokenJWKS))
 		}
 	}
+
+	// Init rand seed for randomBuf()
+	rand.Seed(time.Now().UTC().UnixNano())
 
 	variable.RegisterStatistics(s)
 
@@ -517,7 +492,7 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 	}
 }
 
-func (*Server) checkAuditPlugin(clientConn *clientConn) error {
+func (s *Server) checkAuditPlugin(clientConn *clientConn) error {
 	return plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
 		authPlugin := plugin.DeclareAuditManifest(p.Manifest)
 		if authPlugin.OnConnectionEvent == nil {
@@ -580,6 +555,8 @@ func (s *Server) closeListener() {
 	s.wg.Wait()
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventClose).Inc()
 }
+
+var gracefulCloseConnectionsTimeout = 15 * time.Second
 
 // Close closes the server.
 func (s *Server) Close() {
@@ -655,7 +632,7 @@ func (s *Server) onConn(conn *clientConn) {
 			// `EOF` means the connection is closed normally, we do not treat it as a noticeable error and log it in 'DEBUG' level.
 			logutil.BgLogger().With(zap.Uint64("conn", conn.connectionID)).
 				Debug("EOF", zap.String("remote addr", conn.bufReadConn.RemoteAddr().String()))
-		case servererr.ErrConCount:
+		case errConCount:
 			if err := conn.writeError(ctx, err); err != nil {
 				logutil.BgLogger().With(zap.Uint64("conn", conn.connectionID)).
 					Warn("error in writing errConCount", zap.Error(err),
@@ -752,8 +729,6 @@ func (cc *clientConn) connectInfo() *variable.ConnectionInfo {
 		SSLVersion:        sslVersion,
 		PID:               serverPID,
 		DB:                cc.dbname,
-		AuthMethod:        cc.authPlugin,
-		Attributes:        cc.attrs,
 	}
 	return connInfo
 }
@@ -770,8 +745,8 @@ func (s *Server) checkConnectionCount() error {
 
 	if conns >= int(s.cfg.Instance.MaxConnections) {
 		logutil.BgLogger().Error("too many connections",
-			zap.Uint32("max connections", s.cfg.Instance.MaxConnections), zap.Error(servererr.ErrConCount))
-		return servererr.ErrConCount
+			zap.Uint32("max connections", s.cfg.Instance.MaxConnections), zap.Error(errConCount))
+		return errConCount
 	}
 	return nil
 }
@@ -834,29 +809,8 @@ func (s *Server) GetProcessInfo(id uint64) (*util.ProcessInfo, bool) {
 	return conn.ctx.ShowProcess(), ok
 }
 
-// GetConAttrs returns the connection attributes
-func (s *Server) GetConAttrs(user *auth.UserIdentity) map[uint64]map[string]string {
-	s.rwlock.RLock()
-	defer s.rwlock.RUnlock()
-	rs := make(map[uint64]map[string]string)
-	for _, client := range s.clients {
-		if user != nil {
-			if user.Username != client.user {
-				continue
-			}
-			if user.Hostname != client.peerHost {
-				continue
-			}
-		}
-		if pi := client.ctx.ShowProcess(); pi != nil {
-			rs[pi.ID] = client.attrs
-		}
-	}
-	return rs
-}
-
 // Kill implements the SessionManager interface.
-func (s *Server) Kill(connectionID uint64, query bool, maxExecutionTime bool) {
+func (s *Server) Kill(connectionID uint64, query bool) {
 	logutil.BgLogger().Info("kill", zap.Uint64("conn", connectionID), zap.Bool("query", query))
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventKill).Inc()
 
@@ -873,7 +827,7 @@ func (s *Server) Kill(connectionID uint64, query bool, maxExecutionTime bool) {
 		// this, it will end the dispatch loop and exit.
 		conn.setStatus(connStatusWaitShutdown)
 	}
-	killQuery(conn, maxExecutionTime)
+	killQuery(conn)
 }
 
 // UpdateTLSConfig implements the SessionManager interface.
@@ -881,18 +835,13 @@ func (s *Server) UpdateTLSConfig(cfg *tls.Config) {
 	atomic.StorePointer(&s.tlsConfig, unsafe.Pointer(cfg))
 }
 
-// GetTLSConfig implements the SessionManager interface.
-func (s *Server) GetTLSConfig() *tls.Config {
+func (s *Server) getTLSConfig() *tls.Config {
 	return (*tls.Config)(atomic.LoadPointer(&s.tlsConfig))
 }
 
-func killQuery(conn *clientConn, maxExecutionTime bool) {
+func killQuery(conn *clientConn) {
 	sessVars := conn.ctx.GetSessionVars()
-	if maxExecutionTime {
-		atomic.StoreUint32(&sessVars.Killed, 2)
-	} else {
-		atomic.StoreUint32(&sessVars.Killed, 1)
-	}
+	atomic.StoreUint32(&sessVars.Killed, 1)
 	conn.mu.RLock()
 	cancelFunc := conn.mu.cancelFunc
 	conn.mu.RUnlock()
@@ -921,7 +870,7 @@ func (s *Server) KillSysProcesses() {
 // KillAllConnections implements the SessionManager interface.
 // KillAllConnections kills all connections.
 func (s *Server) KillAllConnections() {
-	logutil.BgLogger().Info("kill all connections.", zap.String("category", "server"))
+	logutil.BgLogger().Info("[server] kill all connections.")
 
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
@@ -930,7 +879,7 @@ func (s *Server) KillAllConnections() {
 		if err := conn.closeWithoutLock(); err != nil {
 			terror.Log(err)
 		}
-		killQuery(conn, false)
+		killQuery(conn)
 	}
 
 	s.KillSysProcesses()
@@ -956,9 +905,6 @@ func (s *Server) DrainClients(drainWait time.Duration, cancelWait time.Duration)
 	go func() {
 		defer close(allDone)
 		for _, conn := range conns {
-			if !conn.getCtx().GetSessionVars().InTxn() {
-				continue
-			}
 			select {
 			case <-conn.quit:
 			case <-quitWaitingForConns:
@@ -988,11 +934,6 @@ func (s *Server) ServerID() uint64 {
 	return s.dom.ServerID()
 }
 
-// GetAutoAnalyzeProcID implements SessionManager interface.
-func (s *Server) GetAutoAnalyzeProcID() uint64 {
-	return s.dom.GetAutoAnalyzeProcID()
-}
-
 // StoreInternalSession implements SessionManager interface.
 // @param addr	The address of a session.session struct variable
 func (s *Server) StoreInternalSession(se interface{}) {
@@ -1014,7 +955,7 @@ func (s *Server) GetInternalSessionStartTSList() []uint64 {
 	s.sessionMapMutex.Lock()
 	defer s.sessionMapMutex.Unlock()
 	tsList := make([]uint64, 0, len(s.internalSessions))
-	analyzeProcID := s.GetAutoAnalyzeProcID()
+	analyzeProcID := util.GetAutoAnalyzeProcID(s.ServerID)
 	for se := range s.internalSessions {
 		if ts, processInfoID := session.GetStartTSFromSession(se); ts != 0 {
 			if processInfoID == analyzeProcID {
@@ -1090,6 +1031,6 @@ func (s *Server) KillNonFlashbackClusterConn() {
 	}
 	s.rwlock.RUnlock()
 	for _, id := range connIDs {
-		s.Kill(id, false, false)
+		s.Kill(id, false)
 	}
 }

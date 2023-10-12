@@ -41,15 +41,15 @@ func verifyColumnGeneration(colName2Generation map[string]columnGenerationInDDL,
 	attribute := colName2Generation[colName]
 	if attribute.generated {
 		for depCol := range attribute.dependences {
-			attr, ok := colName2Generation[depCol]
-			if !ok {
+			if attr, ok := colName2Generation[depCol]; ok {
+				if attr.generated && attribute.position <= attr.position {
+					// A generated column definition can refer to other
+					// generated columns occurring earlier in the table.
+					err := dbterror.ErrGeneratedColumnNonPrior.GenWithStackByArgs()
+					return errors.Trace(err)
+				}
+			} else {
 				err := dbterror.ErrBadField.GenWithStackByArgs(depCol, "generated column function")
-				return errors.Trace(err)
-			}
-			if attr.generated && attribute.position <= attr.position {
-				// A generated column definition can refer to other
-				// generated columns occurring earlier in the table.
-				err := dbterror.ErrGeneratedColumnNonPrior.GenWithStackByArgs()
 				return errors.Trace(err)
 			}
 		}
@@ -179,12 +179,13 @@ type generatedColumnChecker struct {
 	cols []*ast.ColumnName
 }
 
-func (*generatedColumnChecker) Enter(inNode ast.Node) (outNode ast.Node, skipChildren bool) {
+func (c *generatedColumnChecker) Enter(inNode ast.Node) (outNode ast.Node, skipChildren bool) {
 	return inNode, false
 }
 
 func (c *generatedColumnChecker) Leave(inNode ast.Node) (node ast.Node, ok bool) {
-	if x, ok := inNode.(*ast.ColumnName); ok {
+	switch x := inNode.(type) {
+	case *ast.ColumnName:
 		c.cols = append(c.cols, x)
 	}
 	return inNode, true
@@ -290,8 +291,8 @@ func (c *illegalFunctionChecker) Enter(inNode ast.Node) (outNode ast.Node, skipC
 	switch node := inNode.(type) {
 	case *ast.FuncCallExpr:
 		// Blocked functions & non-builtin functions is not allowed
-		_, isFunctionBlocked := expression.IllegalFunctions4GeneratedColumns[node.FnName.L]
-		if isFunctionBlocked || !expression.IsFunctionSupported(node.FnName.L) {
+		_, IsFunctionBlocked := expression.IllegalFunctions4GeneratedColumns[node.FnName.L]
+		if IsFunctionBlocked || !expression.IsFunctionSupported(node.FnName.L) {
 			c.hasIllegalFunc = true
 			return inNode, true
 		}
@@ -331,7 +332,7 @@ func (c *illegalFunctionChecker) Enter(inNode ast.Node) (outNode ast.Node, skipC
 	return inNode, false
 }
 
-func (*illegalFunctionChecker) Leave(inNode ast.Node) (node ast.Node, ok bool) {
+func (c *illegalFunctionChecker) Leave(inNode ast.Node) (node ast.Node, ok bool) {
 	return inNode, true
 }
 

@@ -241,12 +241,9 @@ func (w *Writer) tryToWriteTableData(tctx *tcontext.Context, meta TableMeta, ir 
 	for {
 		fileWriter, tearDown := buildInterceptFileWriter(tctx, w.extStorage, fileName, conf.CompressType)
 		n, err := format.WriteInsert(tctx, conf, meta, ir, fileWriter, w.metrics)
-		tearDownErr := tearDown(tctx)
+		tearDown(tctx)
 		if err != nil {
 			return err
-		}
-		if tearDownErr != nil {
-			return tearDownErr
 		}
 
 		if w, ok := fileWriter.(*InterceptFileWriter); ok && !w.SomethingIsWritten {
@@ -282,16 +279,13 @@ func (w *Writer) writeMetaToFile(tctx *tcontext.Context, target, metaSQL string,
 	if err != nil {
 		return errors.Trace(err)
 	}
-	err = WriteMeta(tctx, &metaData{
+	defer tearDown(tctx)
+
+	return WriteMeta(tctx, &metaData{
 		target:   target,
 		metaSQL:  metaSQL,
 		specCmts: getSpecialComments(w.conf.ServerInfo.ServerType),
 	}, fileWriter)
-	tearDownErr := tearDown(tctx)
-	if err == nil {
-		return tearDownErr
-	}
-	return err
 }
 
 type outputFileNamer struct {
@@ -304,10 +298,9 @@ type outputFileNamer struct {
 }
 
 type csvOption struct {
-	nullValue      string
-	separator      []byte
-	delimiter      []byte
-	lineTerminator []byte
+	nullValue string
+	separator []byte
+	delimiter []byte
 }
 
 func newOutputFileNamer(meta TableMeta, chunkIdx int, rows, fileSize bool) *outputFileNamer {

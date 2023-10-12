@@ -20,7 +20,6 @@ import (
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tipb/go-tipb"
 )
@@ -59,24 +58,6 @@ func NewWindowFuncDesc(ctx sessionctx.Context, name string, args []expression.Ex
 	}
 
 	base, err := newBaseFuncDesc(ctx, name, args)
-
-	// Some window functions' return column type must be nullable or not nullable
-	switch name {
-	case ast.WindowFuncRowNumber, ast.WindowFuncRank, ast.WindowFuncDenseRank, ast.WindowFuncCumeDist, ast.WindowFuncPercentRank,
-		ast.AggFuncCount, ast.AggFuncApproxCountDistinct, ast.AggFuncBitAnd, ast.AggFuncBitOr, ast.AggFuncBitXor:
-		base.RetTp.SetFlag(mysql.NotNullFlag)
-	case ast.WindowFuncLead, ast.WindowFuncLag:
-		if len(args) == 3 &&
-			((args[0].GetType().GetFlag() & mysql.NotNullFlag) != 0) &&
-			((args[2].GetType().GetFlag() & mysql.NotNullFlag) != 0) {
-			base.RetTp.SetFlag(mysql.NotNullFlag)
-			break
-		}
-		base.RetTp.DelFlag(mysql.NotNullFlag)
-	default:
-		base.RetTp.DelFlag(mysql.NotNullFlag)
-	}
-
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +131,7 @@ func (s *WindowFuncDesc) CanPushDownToTiFlash(ctx sessionctx.Context) bool {
 	}
 	// window functions
 	switch s.Name {
-	case ast.WindowFuncRowNumber, ast.WindowFuncRank, ast.WindowFuncDenseRank, ast.WindowFuncLead, ast.WindowFuncLag,
-		ast.WindowFuncFirstValue, ast.WindowFuncLastValue:
+	case ast.WindowFuncRowNumber, ast.WindowFuncRank, ast.WindowFuncDenseRank, ast.WindowFuncLead, ast.WindowFuncLag:
 		return true
 		// TODO: support aggregate functions
 		//case ast.AggFuncSum, ast.AggFuncCount, ast.AggFuncAvg, ast.AggFuncMax, ast.AggFuncMin:

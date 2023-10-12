@@ -17,158 +17,93 @@ package importer
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"github.com/pingcap/errors"
+	"github.com/jedib0t/go-pretty/v6/table"
+	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/br/pkg/streamhelper"
-	"github.com/pingcap/tidb/br/pkg/utils"
-	tidb "github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/br/pkg/lightning/precheck"
 	"github.com/pingcap/tidb/parser/terror"
-	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/dbterror/exeerrors"
-	"github.com/pingcap/tidb/util/etcd"
-	"github.com/pingcap/tidb/util/intest"
 	"github.com/pingcap/tidb/util/sqlexec"
 )
 
+// CheckRequirements checks the requirements for load data.
+func (e *LoadDataController) CheckRequirements(ctx context.Context, conn sqlexec.SQLExecutor) error {
+	collector := newPreCheckCollector()
+	if e.ImportMode == PhysicalImportMode {
+		// todo: maybe we can reuse checker in lightning
+		sql := fmt.Sprintf("SELECT 1 FROM %s USE INDEX() LIMIT 1", common.UniqueTable(e.DBName, e.Table.Meta().Name.L))
+		rs, err := conn.ExecuteInternal(ctx, sql)
+		if err != nil {
+			return err
+		}
+		defer terror.Call(rs.Close)
+		rows, err := sqlexec.DrainRecordSet(ctx, rs, 1)
+		if err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			collector.fail(precheck.CheckTargetTableEmpty, "target table is not empty")
+		} else {
+			collector.pass(precheck.CheckTargetTableEmpty)
+		}
+	}
+	if !collector.success() {
+		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("\n" + collector.output())
+	}
+	return nil
+}
+
 const (
-	etcdDialTimeout = 5 * time.Second
+	failed = "failed"
+	passed = "passed"
 )
 
-// GetEtcdClient returns an etcd client.
-// exported for testing.
-var GetEtcdClient = getEtcdClient
-
-// CheckRequirements checks the requirements for IMPORT INTO.
-// we check the following things here:
-//  1. target table should be empty
-//  2. no CDC or PiTR tasks running
-//
-// todo: check if there's running lightning tasks?
-// we check them one by one, and return the first error we meet.
-func (e *LoadDataController) CheckRequirements(ctx context.Context, conn sqlexec.SQLExecutor) error {
-	if err := e.checkTotalFileSize(); err != nil {
-		return err
-	}
-	if err := e.checkTableEmpty(ctx, conn); err != nil {
-		return err
-	}
-	if err := e.checkCDCPiTRTasks(ctx); err != nil {
-		return err
-	}
-	if e.IsGlobalSort() {
-		return e.checkGlobalSortStorePrivilege(ctx)
-	}
-	return nil
+type preCheckCollector struct {
+	failCount int
+	t         table.Writer
 }
 
-func (e *LoadDataController) checkTotalFileSize() error {
-	if e.TotalFileSize == 0 {
-		// this happens when:
-		// 1. no file matched when using wildcard
-		// 2. all matched file is empty(with or without wildcard)
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("No file matched, or the file is empty. Please provide a valid file location.")
+func newPreCheckCollector() *preCheckCollector {
+	t := table.NewWriter()
+	t.AppendHeader(table.Row{"Check Item", "Result", "Detailed Message"})
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Name: "Check Item", WidthMax: 20},
+		{Name: "Result", WidthMax: 6},
+		{Name: "Detailed Message", WidthMax: 130},
+	})
+	style := table.StyleDefault
+	style.Format.Header = text.FormatDefault
+	t.SetStyle(style)
+	return &preCheckCollector{
+		t: t,
 	}
-	return nil
 }
 
-func (e *LoadDataController) checkTableEmpty(ctx context.Context, conn sqlexec.SQLExecutor) error {
-	sql := fmt.Sprintf("SELECT 1 FROM %s USE INDEX() LIMIT 1", common.UniqueTable(e.DBName, e.Table.Meta().Name.L))
-	rs, err := conn.ExecuteInternal(ctx, sql)
-	if err != nil {
-		return err
-	}
-	defer terror.Call(rs.Close)
-	rows, err := sqlexec.DrainRecordSet(ctx, rs, 1)
-	if err != nil {
-		return err
-	}
-	if len(rows) > 0 {
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("target table is not empty")
-	}
-	return nil
+func (c *preCheckCollector) fail(item precheck.CheckItemID, msg string) {
+	c.failCount++
+	c.t.AppendRow(table.Row{item.DisplayName(), failed, msg})
+	c.t.AppendSeparator()
 }
 
-func (*LoadDataController) checkCDCPiTRTasks(ctx context.Context) error {
-	cli, err := GetEtcdClient()
-	if err != nil {
-		return err
-	}
-	defer terror.Call(cli.Close)
+func (c *preCheckCollector) success() bool {
+	return c.failCount == 0
+}
 
-	pitrCli := streamhelper.NewMetaDataClient(cli.GetClient())
-	tasks, err := pitrCli.GetAllTasks(ctx)
-	if err != nil {
-		return err
-	}
-	if len(tasks) > 0 {
-		names := make([]string, 0, len(tasks))
-		for _, task := range tasks {
-			names = append(names, task.Info.GetName())
+func (c *preCheckCollector) output() string {
+	c.t.SetAllowedRowLength(170)
+	c.t.SetRowPainter(func(row table.Row) text.Colors {
+		if result, ok := row[1].(string); ok {
+			if result == failed {
+				return text.Colors{text.FgRed}
+			}
 		}
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs(fmt.Sprintf("found PiTR log streaming task(s): %v,", names))
-	}
-
-	nameSet, err := utils.GetCDCChangefeedNameSet(ctx, cli.GetClient())
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if !nameSet.Empty() {
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs(nameSet.MessageToUser())
-	}
-	return nil
+		return nil
+	})
+	return c.t.Render() + "\n"
 }
 
-func (e *LoadDataController) checkGlobalSortStorePrivilege(ctx context.Context) error {
-	// we need read/put/delete/list privileges on global sort store.
-	// only support S3 now.
-	target := "cloud storage"
-	cloudStorageURL, err3 := storage.ParseRawURL(e.Plan.CloudStorageURI)
-	if err3 != nil {
-		return exeerrors.ErrLoadDataInvalidURI.GenWithStackByArgs(target, err3.Error())
-	}
-	b, err2 := storage.ParseBackendFromURL(cloudStorageURL, nil)
-	if err2 != nil {
-		return exeerrors.ErrLoadDataInvalidURI.GenWithStackByArgs(target, GetMsgFromBRError(err2))
-	}
-
-	if b.GetS3() == nil && b.GetGcs() == nil {
-		// we only support S3 now, but in test we are using GCS.
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("unsupported cloud storage uri scheme: " + cloudStorageURL.Scheme)
-	}
-
-	opt := &storage.ExternalStorageOptions{
-		CheckPermissions: []storage.Permission{
-			storage.GetObject,
-			storage.ListObjects,
-			storage.PutAndDeleteObject,
-		},
-	}
-	if intest.InTest {
-		opt.NoCredentials = true
-	}
-	_, err := storage.New(ctx, b, opt)
-	if err != nil {
-		return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("check cloud storage uri access: " + err.Error())
-	}
-	return nil
-}
-
-func getEtcdClient() (*etcd.Client, error) {
-	tidbCfg := tidb.GetGlobalConfig()
-	tls, err := util.NewTLSConfig(
-		util.WithCAPath(tidbCfg.Security.ClusterSSLCA),
-		util.WithCertAndKeyPath(tidbCfg.Security.ClusterSSLCert, tidbCfg.Security.ClusterSSLKey),
-	)
-	if err != nil {
-		return nil, err
-	}
-	ectdEndpoints, err := util.ParseHostPortAddr(tidbCfg.Path)
-	if err != nil {
-		return nil, err
-	}
-	return etcd.NewClientFromCfg(ectdEndpoints, etcdDialTimeout, "", tls)
+func (c *preCheckCollector) pass(item precheck.CheckItemID) {
+	c.t.AppendRow(table.Row{item.DisplayName(), passed, ""})
+	c.t.AppendSeparator()
 }

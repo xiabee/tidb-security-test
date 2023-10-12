@@ -1678,11 +1678,12 @@ func TestCastArrayFunc(t *testing.T) {
 	}
 	for _, tt := range tbl {
 		f, err := BuildCastFunctionWithCheck(ctx, datumsToConstants(types.MakeDatums(types.CreateBinaryJSON(tt.input)))[0], tt.tp)
-		if !tt.buildFuncSuccess {
+		if tt.buildFuncSuccess {
+			require.NoError(t, err, tt.input)
+		} else {
 			require.Error(t, err, tt.input)
 			continue
 		}
-		require.NoError(t, err, tt.input)
 
 		val, isNull, err := f.EvalJSON(ctx, chunk.Row{})
 		if tt.success {

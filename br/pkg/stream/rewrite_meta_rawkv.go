@@ -344,15 +344,16 @@ func (sr *SchemasReplace) rewriteKeyForTable(
 
 	dbReplace, exist := sr.DbMap[dbID]
 	if !exist {
-		if !sr.IsPreConsturctMapStatus() {
+		if sr.IsPreConsturctMapStatus() {
+			newID, err := sr.genGenGlobalID(context.Background())
+			if err != nil {
+				return nil, errors.Trace(err)
+			}
+			dbReplace = NewDBReplace("", newID)
+			sr.DbMap[dbID] = dbReplace
+		} else {
 			return nil, errors.Annotatef(berrors.ErrInvalidArgument, "failed to find id:%v in maps", dbID)
 		}
-		newID, err := sr.genGenGlobalID(context.Background())
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		dbReplace = NewDBReplace("", newID)
-		sr.DbMap[dbID] = dbReplace
 	}
 
 	tableReplace, exist := dbReplace.TableMap[tableID]
@@ -649,7 +650,7 @@ func (sr *SchemasReplace) RewriteKvEntry(e *kv.Entry, cf string) (*kv.Entry, err
 				return nil, nil
 			}
 
-			return nil, sr.restoreFromHistory(job)
+			return nil, sr.restoreFromHistory(job, false)
 		}
 		return nil, nil
 	}
@@ -661,31 +662,33 @@ func (sr *SchemasReplace) RewriteKvEntry(e *kv.Entry, cf string) (*kv.Entry, err
 
 	if meta.IsDBkey(rawKey.Field) {
 		return sr.rewriteEntryForDB(e, cf)
-	} else if !meta.IsDBkey(rawKey.Key) {
+	} else if meta.IsDBkey(rawKey.Key) {
+		if meta.IsTableKey(rawKey.Field) {
+			return sr.rewriteEntryForTable(e, cf)
+		} else if meta.IsAutoIncrementIDKey(rawKey.Field) {
+			return sr.rewriteEntryForAutoIncrementIDKey(e, cf)
+		} else if meta.IsAutoTableIDKey(rawKey.Field) {
+			return sr.rewriteEntryForAutoTableIDKey(e, cf)
+		} else if meta.IsSequenceKey(rawKey.Field) {
+			return sr.rewriteEntryForSequenceKey(e, cf)
+		} else if meta.IsAutoRandomTableIDKey(rawKey.Field) {
+			return sr.rewriteEntryForAutoRandomTableIDKey(e, cf)
+		} else {
+			return nil, nil
+		}
+	} else {
 		return nil, nil
 	}
-	if meta.IsTableKey(rawKey.Field) {
-		return sr.rewriteEntryForTable(e, cf)
-	} else if meta.IsAutoIncrementIDKey(rawKey.Field) {
-		return sr.rewriteEntryForAutoIncrementIDKey(e, cf)
-	} else if meta.IsAutoTableIDKey(rawKey.Field) {
-		return sr.rewriteEntryForAutoTableIDKey(e, cf)
-	} else if meta.IsSequenceKey(rawKey.Field) {
-		return sr.rewriteEntryForSequenceKey(e, cf)
-	} else if meta.IsAutoRandomTableIDKey(rawKey.Field) {
-		return sr.rewriteEntryForAutoRandomTableIDKey(e, cf)
-	}
-	return nil, nil
 }
 
-func (sr *SchemasReplace) restoreFromHistory(job *model.Job) error {
+func (sr *SchemasReplace) restoreFromHistory(job *model.Job, isSubJob bool) error {
 	if !job.IsCancelled() {
 		switch job.Type {
 		case model.ActionAddIndex, model.ActionAddPrimaryKey:
 			if job.State == model.JobStateRollbackDone {
 				return sr.deleteRange(job)
 			}
-			err := sr.ingestRecorder.AddJob(job)
+			err := sr.ingestRecorder.AddJob(job, isSubJob)
 			return errors.Trace(err)
 		case model.ActionDropSchema, model.ActionDropTable, model.ActionTruncateTable, model.ActionDropIndex, model.ActionDropPrimaryKey,
 			model.ActionDropTablePartition, model.ActionTruncateTablePartition, model.ActionDropColumn,
@@ -694,7 +697,8 @@ func (sr *SchemasReplace) restoreFromHistory(job *model.Job) error {
 		case model.ActionMultiSchemaChange:
 			for _, sub := range job.MultiSchemaInfo.SubJobs {
 				proxyJob := sub.ToProxyJob(job)
-				if err := sr.restoreFromHistory(&proxyJob); err != nil {
+				// ASSERT: the proxyJob can not be MultiSchemaInfo anymore
+				if err := sr.restoreFromHistory(&proxyJob, true); err != nil {
 					return err
 				}
 			}

@@ -130,6 +130,7 @@ func (e *EC2Session) CreateSnapshots(backupInfo *config.EBSBasedBRMeta) (map[str
 				instanceSpecification.SetInstanceId(aws.StringValue(ec2InstanceId)).SetExcludeBootVolume(true).SetExcludeDataVolumeIds(excludedVolumeIDs)
 
 				createSnapshotInput.SetInstanceSpecification(&instanceSpecification)
+
 				// Copy tags from source volume
 				createSnapshotInput.SetCopyTagsFromSource("volume")
 				resp, err := e.createSnapshotsWithRetry(context.TODO(), &createSnapshotInput)

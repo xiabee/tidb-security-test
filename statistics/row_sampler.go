@@ -37,7 +37,6 @@ type RowSampleCollector interface {
 	MergeCollector(collector RowSampleCollector)
 	sampleRow(row []types.Datum, rng *rand.Rand)
 	Base() *baseCollector
-	DestroyAndPutToPool()
 }
 
 type baseCollector struct {
@@ -66,9 +65,9 @@ type ReservoirRowSampleCollector struct {
 
 // ReservoirRowSampleItem is the item for the ReservoirRowSampleCollector. The weight is needed for the sampling algorithm.
 type ReservoirRowSampleItem struct {
-	Handle  kv.Handle
 	Columns []types.Datum
 	Weight  int64
+	Handle  kv.Handle
 }
 
 // EmptyReservoirSampleItemSize = (24 + 16 + 8) now.
@@ -120,15 +119,15 @@ func (h *WeightedRowSampleHeap) Pop() interface{} {
 
 // RowSampleBuilder is used to construct the ReservoirRowSampleCollector to get the samples.
 type RowSampleBuilder struct {
-	RecordSet       sqlexec.RecordSet
 	Sc              *stmtctx.StatementContext
-	Rng             *rand.Rand
+	RecordSet       sqlexec.RecordSet
 	ColsFieldType   []*types.FieldType
 	Collators       []collate.Collator
 	ColGroups       [][]int64
 	MaxSampleSize   int
 	SampleRate      float64
 	MaxFMSketchSize int
+	Rng             *rand.Rand
 }
 
 // NewRowSampleCollector creates a collector from the given inputs.
@@ -227,12 +226,6 @@ func (s *RowSampleBuilder) Collect() (RowSampleCollector, error) {
 		collector.Base().TotalSizes[colGroupIdx] = collector.Base().TotalSizes[colIdx]
 	}
 	return collector, nil
-}
-
-func (s *baseCollector) destroyAndPutToPool() {
-	for _, sketch := range s.FMSketches {
-		sketch.DestroyAndPutToPool()
-	}
 }
 
 func (s *baseCollector) collectColumns(sc *stmtctx.StatementContext, cols []types.Datum, sizes []int64) error {
@@ -396,11 +389,6 @@ func (s *ReservoirRowSampleCollector) MergeCollector(subCollector RowSampleColle
 	}
 }
 
-// DestroyAndPutToPool implements the interface RowSampleCollector.
-func (s *ReservoirRowSampleCollector) DestroyAndPutToPool() {
-	s.baseCollector.destroyAndPutToPool()
-}
-
 // RowSamplesToProto converts the samp slice to the pb struct.
 func RowSamplesToProto(samples WeightedRowSampleHeap) []*tipb.RowSample {
 	if len(samples) == 0 {
@@ -483,9 +471,4 @@ func (s *BernoulliRowSampleCollector) MergeCollector(subCollector RowSampleColle
 // Base implements the interface RowSampleCollector.
 func (s *BernoulliRowSampleCollector) Base() *baseCollector {
 	return s.baseCollector
-}
-
-// DestroyAndPutToPool implements the interface RowSampleCollector.
-func (s *BernoulliRowSampleCollector) DestroyAndPutToPool() {
-	s.baseCollector.destroyAndPutToPool()
 }

@@ -15,6 +15,7 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,7 +25,9 @@ import (
 	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tipb/go-binlog"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 )
 
 func TestInvalidReadTemporaryTable(t *testing.T) {
@@ -766,7 +769,7 @@ func TestSavepointWithBinlog(t *testing.T) {
 
 	tk := testkit.NewTestKit(t, store)
 	// mock for binlog enabled.
-	tk.Session().GetSessionVars().BinlogClient = binloginfo.MockPumpsClient(&testkit.MockPumpClient{})
+	tk.Session().GetSessionVars().BinlogClient = binloginfo.MockPumpsClient(&mockPumpClient{})
 	tk.MustExec("use test")
 	tk.MustExec("create table t(id int, a int, unique index idx(id))")
 
@@ -784,4 +787,14 @@ func TestSavepointWithBinlog(t *testing.T) {
 	tk.MustQuery("select * from t").Check(testkit.Rows("1 1"))
 	tk.MustExec("commit")
 	tk.MustQuery("select * from t").Check(testkit.Rows("1 1"))
+}
+
+type mockPumpClient struct{}
+
+func (m mockPumpClient) WriteBinlog(ctx context.Context, in *binlog.WriteBinlogReq, opts ...grpc.CallOption) (*binlog.WriteBinlogResp, error) {
+	return &binlog.WriteBinlogResp{}, nil
+}
+
+func (m mockPumpClient) PullBinlogs(ctx context.Context, in *binlog.PullBinlogReq, opts ...grpc.CallOption) (binlog.Pump_PullBinlogsClient, error) {
+	return nil, nil
 }

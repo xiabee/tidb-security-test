@@ -14,9 +14,6 @@
 package ast
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/format"
@@ -528,10 +525,10 @@ const (
 )
 
 var (
-	invalidOptionForGeneratedColumn = map[ColumnOptionType]string{
-		ColumnOptionAutoIncrement: "AUTO_INCREMENT",
-		ColumnOptionOnUpdate:      "ON UPDATE",
-		ColumnOptionDefaultValue:  "DEFAULT",
+	invalidOptionForGeneratedColumn = map[ColumnOptionType]struct{}{
+		ColumnOptionAutoIncrement: {},
+		ColumnOptionOnUpdate:      {},
+		ColumnOptionDefaultValue:  {},
 	}
 )
 
@@ -1010,22 +1007,17 @@ func (n *ColumnDef) Accept(v Visitor) (Node, bool) {
 // For example, generated column definitions that contain such
 // column options as `ON UPDATE`, `AUTO_INCREMENT`, `DEFAULT`
 // are illegal.
-func (n *ColumnDef) Validate() error {
+func (n *ColumnDef) Validate() bool {
 	generatedCol := false
-	var illegalOpt4gc string
+	illegalOpt4gc := false
 	for _, opt := range n.Options {
 		if opt.Tp == ColumnOptionGenerated {
 			generatedCol = true
 		}
-		msg, found := invalidOptionForGeneratedColumn[opt.Tp]
-		if found {
-			illegalOpt4gc = msg
-		}
+		_, found := invalidOptionForGeneratedColumn[opt.Tp]
+		illegalOpt4gc = illegalOpt4gc || found
 	}
-	if generatedCol && illegalOpt4gc != "" {
-		return ErrWrongUsage.GenWithStackByArgs(illegalOpt4gc, "generated column")
-	}
-	return nil
+	return !(generatedCol && illegalOpt4gc)
 }
 
 type TemporaryKeyword int
@@ -1301,10 +1293,6 @@ type DropResourceGroupStmt struct {
 
 // Restore implements Restore interface.
 func (n *DropResourceGroupStmt) Restore(ctx *format.RestoreCtx) error {
-	if ctx.Flags.HasTiDBSpecialCommentFlag() {
-		return restoreStmtInSpecialComment(ctx, n, tidb.FeatureIDResourceGroup)
-	}
-
 	ctx.WriteKeyWord("DROP RESOURCE GROUP ")
 	if n.IfExists {
 		ctx.WriteKeyWord("IF EXISTS ")
@@ -1593,10 +1581,6 @@ type CreateResourceGroupStmt struct {
 
 // Restore implements Node interface.
 func (n *CreateResourceGroupStmt) Restore(ctx *format.RestoreCtx) error {
-	if ctx.Flags.HasTiDBSpecialCommentFlag() {
-		return restoreStmtInSpecialComment(ctx, n, tidb.FeatureIDResourceGroup)
-	}
-
 	ctx.WriteKeyWord("CREATE ")
 
 	ctx.WriteKeyWord("RESOURCE GROUP ")
@@ -1605,12 +1589,9 @@ func (n *CreateResourceGroupStmt) Restore(ctx *format.RestoreCtx) error {
 	}
 	ctx.WriteName(n.ResourceGroupName.O)
 	for i, option := range n.ResourceGroupOptionList {
-		if i > 0 {
-			ctx.WritePlain(",")
-		}
 		ctx.WritePlain(" ")
 		if err := option.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing CreateResourceGroupStmt Option: [%v]", i)
+			return errors.Annotatef(err, "An error occurred while splicing CreatePlacementPolicy TableOption: [%v]", i)
 		}
 	}
 	return nil
@@ -1838,7 +1819,6 @@ type DropIndexStmt struct {
 	IndexName string
 	Table     *TableName
 	LockAlg   *IndexLockAndAlgorithm
-	IsHypo    bool // whether this operation is for a hypothetical index.
 }
 
 // Restore implements Node interface.
@@ -2125,12 +2105,10 @@ func (n *PlacementOption) Restore(ctx *format.RestoreCtx) error {
 
 // ResourceGroupOption is used for parsing resource group option.
 type ResourceGroupOption struct {
-	Tp                ResourceUnitType
-	StrValue          string
-	UintValue         uint64
-	BoolValue         bool
-	RunawayOptionList []*ResourceGroupRunawayOption
-	BackgroundOptions []*ResourceGroupBackgroundOption
+	Tp        ResourceUnitType
+	StrValue  string
+	UintValue uint64
+	BoolValue bool
 }
 
 type ResourceUnitType int
@@ -2146,143 +2124,40 @@ const (
 
 	// Options
 	ResourceBurstableOpiton
-	ResourceGroupRunaway
-	ResourceGroupBackground
 )
 
 func (n *ResourceGroupOption) Restore(ctx *format.RestoreCtx) error {
-	switch n.Tp {
-	case ResourceRURate:
-		ctx.WriteKeyWord("RU_PER_SEC ")
-		ctx.WritePlain("= ")
-		ctx.WritePlainf("%d", n.UintValue)
-	case ResourcePriority:
-		ctx.WriteKeyWord("PRIORITY ")
-		ctx.WritePlain("= ")
-		ctx.WriteKeyWord(model.PriorityValueToName(n.UintValue))
-	case ResourceUnitCPU:
-		ctx.WriteKeyWord("CPU ")
-		ctx.WritePlain("= ")
-		ctx.WriteString(n.StrValue)
-	case ResourceUnitIOReadBandwidth:
-		ctx.WriteKeyWord("IO_READ_BANDWIDTH ")
-		ctx.WritePlain("= ")
-		ctx.WriteString(n.StrValue)
-	case ResourceUnitIOWriteBandwidth:
-		ctx.WriteKeyWord("IO_WRITE_BANDWIDTH ")
-		ctx.WritePlain("= ")
-		ctx.WriteString(n.StrValue)
-	case ResourceBurstableOpiton:
-		ctx.WriteKeyWord("BURSTABLE ")
-		ctx.WritePlain("= ")
-		ctx.WritePlain(strings.ToUpper(fmt.Sprintf("%v", n.BoolValue)))
-	case ResourceGroupRunaway:
-		ctx.WritePlain("QUERY_LIMIT ")
-		ctx.WritePlain("= ")
-		if len(n.RunawayOptionList) > 0 {
-			ctx.WritePlain("(")
-			for i, option := range n.RunawayOptionList {
-				if i > 0 {
-					ctx.WritePlain(" ")
-				}
-				if err := option.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while splicing ResourceGroupRunaway Option: [%v]", option)
-				}
-			}
-			ctx.WritePlain(")")
-		} else {
-			ctx.WritePlain("NULL")
-		}
-	case ResourceGroupBackground:
-		ctx.WritePlain("BACKGROUND ")
-		ctx.WritePlain("= ")
-		if len(n.BackgroundOptions) > 0 {
-			ctx.WritePlain("(")
-			for i, option := range n.BackgroundOptions {
-				if i > 0 {
-					ctx.WritePlain(", ")
-				}
-				if err := option.Restore(ctx); err != nil {
-					return errors.Annotatef(err, "An error occurred while splicing ResourceGroup Background Option: [%v]", option)
-				}
-			}
-			ctx.WritePlain(")")
-		} else {
-			ctx.WritePlain("NULL")
-		}
-	default:
-		return errors.Errorf("invalid ResourceGroupOption: %d", n.Tp)
-	}
-	return nil
-}
-
-type RunawayOptionType int
-
-const (
-	RunawayRule RunawayOptionType = iota
-	RunawayAction
-	RunawayWatch
-)
-
-// ResourceGroupRunawayOption is used for parsing resource group runaway rule option.
-type ResourceGroupRunawayOption struct {
-	Tp       RunawayOptionType
-	StrValue string
-	IntValue int32
-}
-
-func (n *ResourceGroupRunawayOption) Restore(ctx *format.RestoreCtx) error {
-	switch n.Tp {
-	case RunawayRule:
-		ctx.WriteKeyWord("EXEC_ELAPSED ")
-		ctx.WritePlain("= ")
-		ctx.WriteString(n.StrValue)
-	case RunawayAction:
-		ctx.WriteKeyWord("ACTION ")
-		ctx.WritePlain("= ")
-		ctx.WriteKeyWord(model.RunawayActionType(n.IntValue).String())
-	case RunawayWatch:
-		ctx.WriteKeyWord("WATCH ")
-		ctx.WritePlain("= ")
-		ctx.WriteKeyWord(model.RunawayWatchType(n.IntValue).String())
-		ctx.WritePlain(" ")
-		ctx.WriteKeyWord("DURATION ")
-		ctx.WritePlain("= ")
-		if len(n.StrValue) > 0 {
+	fn := func() error {
+		switch n.Tp {
+		case ResourceRURate:
+			ctx.WriteKeyWord("RU_PER_SEC ")
+			ctx.WritePlain("= ")
+			ctx.WritePlainf("%d", n.UintValue)
+		case ResourcePriority:
+			ctx.WriteKeyWord("PRIORITY ")
+			ctx.WritePlain("= ")
+			ctx.WriteKeyWord(model.PriorityValueToName(n.UintValue))
+		case ResourceUnitCPU:
+			ctx.WriteKeyWord("CPU ")
+			ctx.WritePlain("= ")
 			ctx.WriteString(n.StrValue)
-		} else {
-			ctx.WriteKeyWord("UNLIMITED")
+		case ResourceUnitIOReadBandwidth:
+			ctx.WriteKeyWord("IO_READ_BANDWIDTH ")
+			ctx.WritePlain("= ")
+			ctx.WriteString(n.StrValue)
+		case ResourceUnitIOWriteBandwidth:
+			ctx.WriteKeyWord("IO_WRITE_BANDWIDTH ")
+			ctx.WritePlain("= ")
+			ctx.WriteString(n.StrValue)
+		case ResourceBurstableOpiton:
+			ctx.WriteKeyWord("BURSTABLE")
+		default:
+			return errors.Errorf("invalid PlacementOption: %d", n.Tp)
 		}
-	default:
-		return errors.Errorf("invalid ResourceGroupRunawayOption: %d", n.Tp)
+		return nil
 	}
-	return nil
-}
-
-type BackgroundOptionType int
-
-const (
-	BackgroundOptionNone BackgroundOptionType = iota
-	BackgroundOptionTaskNames
-)
-
-// ResourceGroupBackgroundOption is used to config background job settings.
-type ResourceGroupBackgroundOption struct {
-	Type     BackgroundOptionType
-	StrValue string
-}
-
-func (n *ResourceGroupBackgroundOption) Restore(ctx *format.RestoreCtx) error {
-	switch n.Type {
-	case BackgroundOptionTaskNames:
-		ctx.WriteKeyWord("TASK_TYPES ")
-		ctx.WritePlain("= ")
-		ctx.WriteString(n.StrValue)
-	default:
-		return errors.Errorf("unknown ResourceGroupBackgroundOption: %d", n.Type)
-	}
-
-	return nil
+	// WriteSpecialComment
+	return ctx.WriteWithSpecialComments(tidb.FeatureIDResourceGroup, fn)
 }
 
 type StatsOptionType int
@@ -3027,7 +2902,6 @@ type AlterTableSpec struct {
 type TiFlashReplicaSpec struct {
 	Count  uint64
 	Labels []string
-	Hypo   bool // hypothetical replica is used by index advisor
 }
 
 // AlterOrderItem represents an item in order by at alter table stmt.
@@ -3815,7 +3689,6 @@ var (
 	ErrWrongPartitionTypeExpectedSystemTime = terror.ClassDDL.NewStd(mysql.ErrWrongPartitionTypeExpectedSystemTime)
 	ErrUnknownCharacterSet                  = terror.ClassDDL.NewStd(mysql.ErrUnknownCharacterSet)
 	ErrCoalescePartitionNoPartition         = terror.ClassDDL.NewStd(mysql.ErrCoalescePartitionNoPartition)
-	ErrWrongUsage                           = terror.ClassDDL.NewStd(mysql.ErrWrongUsage)
 )
 
 type SubPartitionDefinition struct {
@@ -3923,12 +3796,6 @@ func (n *PartitionDefinitionClauseIn) restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord(" DEFAULT")
 		return nil
 	}
-	if len(n.Values) == 1 && len(n.Values[0]) == 1 {
-		if _, ok := n.Values[0][0].(*DefaultExpr); ok {
-			ctx.WriteKeyWord(" DEFAULT")
-			return nil
-		}
-	}
 
 	ctx.WriteKeyWord(" VALUES IN ")
 	ctx.WritePlain("(")
@@ -3981,23 +3848,9 @@ func (n *PartitionDefinitionClauseIn) Validate(pt model.PartitionType, columns i
 		return nil
 	}
 
-	nextIdx := 1
 	expectedColCount := len(n.Values[0])
-	// OK if one of the n.Values is DefaultExpr as only value
-	if expectedColCount == 1 {
-		if _, ok := n.Values[0][0].(*DefaultExpr); ok {
-			// Only DEFAULT in the partition definition, OK
-			if len(n.Values) > 1 {
-				expectedColCount = len(n.Values[1])
-				nextIdx++
-			}
-		}
-	}
-	for _, val := range n.Values[nextIdx:] {
+	for _, val := range n.Values[1:] {
 		if len(val) != expectedColCount {
-			if _, ok := val[0].(*DefaultExpr); ok && len(val) == 1 {
-				continue
-			}
 			return ErrPartitionColumnList
 		}
 	}
@@ -4006,12 +3859,6 @@ func (n *PartitionDefinitionClauseIn) Validate(pt model.PartitionType, columns i
 	case columns == 0 && expectedColCount != 1:
 		return ErrRowSinglePartitionField
 	case columns > 0 && expectedColCount != columns:
-		if len(n.Values) == 1 && expectedColCount == 1 {
-			if _, ok := n.Values[0][0].(*DefaultExpr); ok {
-				// Only one value, which is DEFAULT, which is OK
-				return nil
-			}
-		}
 		return ErrPartitionColumnList
 	}
 	return nil
@@ -4605,33 +4452,6 @@ func (n *AlterPlacementPolicyStmt) Accept(v Visitor) (Node, bool) {
 	return v.Leave(n)
 }
 
-func CheckAppend(ops []*ResourceGroupOption, newOp *ResourceGroupOption) bool {
-	for _, op := range ops {
-		if op.Tp == newOp.Tp {
-			return false
-		}
-	}
-	return true
-}
-
-func CheckRunawayAppend(ops []*ResourceGroupRunawayOption, newOp *ResourceGroupRunawayOption) bool {
-	for _, op := range ops {
-		if op.Tp == newOp.Tp {
-			return false
-		}
-	}
-	return true
-}
-
-func CheckBackgroundAppend(ops []*ResourceGroupBackgroundOption, newOp *ResourceGroupBackgroundOption) bool {
-	for _, op := range ops {
-		if op.Type == newOp.Type {
-			return false
-		}
-	}
-	return true
-}
-
 // AlterResourceGroupStmt is a statement to alter placement policy option.
 type AlterResourceGroupStmt struct {
 	ddlNode
@@ -4642,22 +4462,15 @@ type AlterResourceGroupStmt struct {
 }
 
 func (n *AlterResourceGroupStmt) Restore(ctx *format.RestoreCtx) error {
-	if ctx.Flags.HasTiDBSpecialCommentFlag() {
-		return restoreStmtInSpecialComment(ctx, n, tidb.FeatureIDResourceGroup)
-	}
-
 	ctx.WriteKeyWord("ALTER RESOURCE GROUP ")
 	if n.IfExists {
 		ctx.WriteKeyWord("IF EXISTS ")
 	}
 	ctx.WriteName(n.ResourceGroupName.O)
 	for i, option := range n.ResourceGroupOptionList {
-		if i > 0 {
-			ctx.WritePlain(",")
-		}
 		ctx.WritePlain(" ")
 		if err := option.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while splicing AlterResourceGroupStmt Options: [%v]", i)
+			return errors.Annotatef(err, "An error occurred while splicing AlterResourceStmt Options: [%v]", i)
 		}
 	}
 	return nil
@@ -4715,17 +4528,13 @@ func (n *AlterSequenceStmt) Accept(v Visitor) (Node, bool) {
 }
 
 func restorePlacementStmtInSpecialComment(ctx *format.RestoreCtx, n DDLNode) error {
-	return restoreStmtInSpecialComment(ctx, n, tidb.FeatureIDPlacement)
-}
-
-func restoreStmtInSpecialComment(ctx *format.RestoreCtx, n DDLNode, feature string) error {
 	origFlags := ctx.Flags
 	defer func() {
 		ctx.Flags = origFlags
 	}()
 
 	ctx.Flags |= format.RestoreTiDBSpecialComment
-	return ctx.WriteWithSpecialComments(feature, func() error {
+	return ctx.WriteWithSpecialComments(tidb.FeatureIDPlacement, func() error {
 		ctx.Flags &= ^format.RestoreTiDBSpecialComment
 		return n.Restore(ctx)
 	})

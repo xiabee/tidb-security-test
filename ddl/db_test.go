@@ -44,6 +44,7 @@ import (
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/store/mockstore"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/external"
 	"github.com/pingcap/tidb/types"
@@ -138,12 +139,12 @@ func TestGetTimeZone(t *testing.T) {
 		offset int
 		err    string
 	}{
-		{"set time_zone = '+00:00'", "", "UTC", 0, ""},
-		{"set time_zone = '-00:00'", "", "UTC", 0, ""},
+		{"set time_zone = '+00:00'", "", "", 0, ""},
+		{"set time_zone = '-00:00'", "", "", 0, ""},
 		{"set time_zone = 'UTC'", "UTC", "UTC", 0, ""},
-		{"set time_zone = '+05:00'", "", "UTC", 18000, ""},
-		{"set time_zone = '-08:00'", "", "UTC", -28800, ""},
-		{"set time_zone = '+08:00'", "", "UTC", 28800, ""},
+		{"set time_zone = '+05:00'", "", "", 18000, ""},
+		{"set time_zone = '-08:00'", "", "", -28800, ""},
+		{"set time_zone = '+08:00'", "", "", 28800, ""},
 		{"set time_zone = 'Asia/Shanghai'", "Asia/Shanghai", "Asia/Shanghai", 0, ""},
 		{"set time_zone = 'SYSTEM'", "Asia/Shanghai", "Asia/Shanghai", 0, ""},
 		{"set time_zone = DEFAULT", "Asia/Shanghai", "Asia/Shanghai", 0, ""},
@@ -347,6 +348,19 @@ func TestIssue23473(t *testing.T) {
 	require.True(t, mysql.HasNoDefaultValueFlag(tbl.Cols()[0].GetFlag()))
 }
 
+func TestDropCheck(t *testing.T) {
+	store := testkit.CreateMockStoreWithSchemaLease(t, dbTestLease)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists drop_check")
+	tk.MustExec("create table drop_check (pk int primary key)")
+	defer tk.MustExec("drop table if exists drop_check")
+	tk.MustExec("alter table drop_check drop check crcn")
+	require.Equal(t, uint16(1), tk.Session().GetSessionVars().StmtCtx.WarningCount())
+	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|8231|DROP CHECK is not supported"))
+}
+
 func TestAlterOrderBy(t *testing.T) {
 	store := testkit.CreateMockStoreWithSchemaLease(t, dbTestLease)
 
@@ -487,6 +501,34 @@ func TestSelectInViewFromAnotherDB(t *testing.T) {
 	tk.MustExec("create sql security invoker view v as select * from test.t")
 	tk.MustExec("use test")
 	tk.MustExec("select test_db2.v.a from test_db2.v")
+}
+
+func TestAddConstraintCheck(t *testing.T) {
+	store := testkit.CreateMockStoreWithSchemaLease(t, dbTestLease)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists add_constraint_check")
+	tk.MustExec("create table add_constraint_check (pk int primary key, a int)")
+	defer tk.MustExec("drop table if exists add_constraint_check")
+	tk.MustExec("alter table add_constraint_check add constraint crn check (a > 1)")
+	require.Equal(t, uint16(1), tk.Session().GetSessionVars().StmtCtx.WarningCount())
+	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|8231|ADD CONSTRAINT CHECK is not supported"))
+}
+
+func TestCreateTableIgnoreCheckConstraint(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithDDLChecker())
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists table_constraint_check")
+	tk.MustExec("CREATE TABLE admin_user (enable bool, CHECK (enable IN (0, 1)));")
+	require.Equal(t, uint16(1), tk.Session().GetSessionVars().StmtCtx.WarningCount())
+	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning|8231|CONSTRAINT CHECK is not supported"))
+	tk.MustQuery("show create table admin_user").Check(testkit.RowsWithSep("|", ""+
+		"admin_user CREATE TABLE `admin_user` (\n"+
+		"  `enable` tinyint(1) DEFAULT NULL\n"+
+		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
 }
 
 func TestAutoConvertBlobTypeByLength(t *testing.T) {
@@ -953,7 +995,7 @@ func TestAddIndexFailOnCaseWhenCanExit(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 }
 
-func TestCreateTableWithIntegerLengthWarning(t *testing.T) {
+func TestCreateTableWithIntegerLengthWaring(t *testing.T) {
 	// Inject the strict-integer-display-width variable in parser directly.
 	parsertypes.TiDBStrictIntegerDisplayWidth = true
 	defer func() { parsertypes.TiDBStrictIntegerDisplayWidth = false }()
@@ -963,47 +1005,47 @@ func TestCreateTableWithIntegerLengthWarning(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 
 	tk.MustExec("create table t(a tinyint(1))")
-	tk.MustQuery("show warnings").Check(testkit.Rows())
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a smallint(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a mediumint(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a bigint(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a integer(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int1(1))") // Note that int1(1) is tinyint(1) which is boolean-ish
-	tk.MustQuery("show warnings").Check(testkit.Rows())
+	tk.MustExec("create table t(a int1(1))")
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int2(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int3(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int4(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int8(2))")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1681 Integer display width is deprecated and will be removed in a future release."))
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1064 You have an error in your SQL syntax; check the manual that corresponds to your TiDB version for the right syntax to use [parser:1681]Integer display width is deprecated and will be removed in a future release."))
 
 	tk.MustExec("drop table if exists t")
 }
@@ -1260,7 +1302,7 @@ func TestLogAndShowSlowLog(t *testing.T) {
 	_, dom := testkit.CreateMockStoreAndDomainWithSchemaLease(t, dbTestLease)
 
 	dom.LogSlowQuery(&domain.SlowQueryInfo{SQL: "aaa", Duration: time.Second, Internal: true})
-	dom.LogSlowQuery(&domain.SlowQueryInfo{SQL: "bbb", Duration: 3 * time.Second, SessAlias: "alias1"})
+	dom.LogSlowQuery(&domain.SlowQueryInfo{SQL: "bbb", Duration: 3 * time.Second})
 	dom.LogSlowQuery(&domain.SlowQueryInfo{SQL: "ccc", Duration: 2 * time.Second})
 	// Collecting slow queries is asynchronous, wait a while to ensure it's done.
 	time.Sleep(5 * time.Millisecond)
@@ -1268,11 +1310,9 @@ func TestLogAndShowSlowLog(t *testing.T) {
 	result := dom.ShowSlowQuery(&ast.ShowSlow{Tp: ast.ShowSlowTop, Count: 2})
 	require.Len(t, result, 2)
 	require.Equal(t, "bbb", result[0].SQL)
-	require.Equal(t, "alias1", result[0].SessAlias)
 	require.Equal(t, 3*time.Second, result[0].Duration)
 	require.Equal(t, "ccc", result[1].SQL)
 	require.Equal(t, 2*time.Second, result[1].Duration)
-	require.Empty(t, result[1].SessAlias)
 
 	result = dom.ShowSlowQuery(&ast.ShowSlow{Tp: ast.ShowSlowTop, Count: 2, Kind: ast.ShowSlowKindInternal})
 	require.Len(t, result, 1)
@@ -1284,23 +1324,18 @@ func TestLogAndShowSlowLog(t *testing.T) {
 	require.Len(t, result, 3)
 	require.Equal(t, "bbb", result[0].SQL)
 	require.Equal(t, 3*time.Second, result[0].Duration)
-	require.Equal(t, "alias1", result[0].SessAlias)
 	require.Equal(t, "ccc", result[1].SQL)
 	require.Equal(t, 2*time.Second, result[1].Duration)
-	require.Empty(t, result[1].SessAlias)
 	require.Equal(t, "aaa", result[2].SQL)
 	require.Equal(t, time.Second, result[2].Duration)
 	require.True(t, result[2].Internal)
-	require.Empty(t, result[2].SessAlias)
 
 	result = dom.ShowSlowQuery(&ast.ShowSlow{Tp: ast.ShowSlowRecent, Count: 2})
 	require.Len(t, result, 2)
 	require.Equal(t, "ccc", result[0].SQL)
 	require.Equal(t, 2*time.Second, result[0].Duration)
-	require.Empty(t, result[0].SessAlias)
 	require.Equal(t, "bbb", result[1].SQL)
 	require.Equal(t, 3*time.Second, result[1].Duration)
-	require.Equal(t, "alias1", result[1].SessAlias)
 }
 
 func TestReportingMinStartTimestamp(t *testing.T) {
@@ -1519,10 +1554,11 @@ func TestSetInvalidDefaultValueAfterModifyColumn(t *testing.T) {
 		if job.SchemaState != model.StateDeleteOnly {
 			return
 		}
-		if one {
+		if !one {
+			one = true
+		} else {
 			return
 		}
-		one = true
 		wg.Add(1)
 		go func() {
 			tk2 := testkit.NewTestKit(t, store)
@@ -1557,10 +1593,11 @@ func TestMDLTruncateTable(t *testing.T) {
 
 	one := false
 	f := func(job *model.Job) {
-		if one {
+		if !one {
+			one = true
+		} else {
 			return
 		}
-		one = true
 		go func() {
 			tk3.MustExec("truncate table test.t")
 			timetk3 = time.Now()

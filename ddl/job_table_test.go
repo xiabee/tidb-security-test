@@ -17,7 +17,6 @@ package ddl_test
 import (
 	"context"
 	"fmt"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 )
 
 // TestDDLScheduling tests the DDL scheduling. See Concurrent DDL RFC for the rules of DDL scheduling.
@@ -78,7 +78,7 @@ func TestDDLScheduling(t *testing.T) {
 				})
 				for {
 					time.Sleep(time.Millisecond * 100)
-					jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session())
+					jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session(), nil)
 					require.NoError(t, err)
 					if len(jobs) == i+1 {
 						break
@@ -209,7 +209,7 @@ func TestUpgradingRelatedJobState(t *testing.T) {
 	hook.OnGetJobBeforeExported = func(jobType string) {
 		for i := 0; i < 100; i++ {
 			time.Sleep(time.Millisecond * 100)
-			jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session())
+			jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session(), nil)
 			require.NoError(t, err)
 			if len(jobs) < 1 || jobs[0].Query != testCases[num].sql {
 				continue

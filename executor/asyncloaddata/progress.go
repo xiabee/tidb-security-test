@@ -16,10 +16,8 @@ package asyncloaddata
 
 import (
 	"encoding/json"
-	"sync"
 
 	"go.uber.org/atomic"
-	"golang.org/x/exp/maps"
 )
 
 // LogicalImportProgress is the progress info of the logical import mode.
@@ -39,9 +37,6 @@ type PhysicalImportProgress struct {
 	// EncodeFileSize is the size of the file that has finished KV encoding in bytes.
 	// it should equal to SourceFileSize eventually.
 	EncodeFileSize atomic.Int64
-
-	colSizeMu  sync.Mutex
-	colSizeMap map[int64]int64
 }
 
 // Progress is the progress of the LOAD DATA task.
@@ -69,31 +64,13 @@ func NewProgress(logicalImport bool) *Progress {
 	if logicalImport {
 		li = &LogicalImportProgress{}
 	} else {
-		pi = &PhysicalImportProgress{
-			colSizeMap: make(map[int64]int64),
-		}
+		pi = &PhysicalImportProgress{}
 	}
 	return &Progress{
 		SourceFileSize:         -1,
 		LogicalImportProgress:  li,
 		PhysicalImportProgress: pi,
 	}
-}
-
-// AddColSize adds the size of the column to the progress.
-func (p *Progress) AddColSize(colSizeMap map[int64]int64) {
-	p.colSizeMu.Lock()
-	defer p.colSizeMu.Unlock()
-	for key, value := range colSizeMap {
-		p.colSizeMap[key] += value
-	}
-}
-
-// GetColSize returns the size of the column.
-func (p *Progress) GetColSize() map[int64]int64 {
-	p.colSizeMu.Lock()
-	defer p.colSizeMu.Unlock()
-	return maps.Clone(p.colSizeMap)
 }
 
 // String implements the fmt.Stringer interface.

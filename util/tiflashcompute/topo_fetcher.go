@@ -16,7 +16,7 @@ package tiflashcompute
 
 import (
 	"encoding/json"
-	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -255,7 +255,7 @@ func httpGetAndParseResp(url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	b, err := io.ReadAll(resp.Body)
+	b, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		logutil.BgLogger().Error(err.Error())
 		return nil, errTopoFetcher.GenWithStackByArgs(httpGetFailedErrMsg)

@@ -107,8 +107,6 @@ var (
 	ErrTempTableFull = dbterror.ClassTable.NewStd(mysql.ErrRecordFileFull)
 	// ErrOptOnCacheTable returns when exec unsupported opt at cache mode
 	ErrOptOnCacheTable = dbterror.ClassDDL.NewStd(mysql.ErrOptOnCacheTable)
-	// ErrCheckConstraintViolated return when check constraint is violated.
-	ErrCheckConstraintViolated = dbterror.ClassTable.NewStd(mysql.ErrCheckConstraintViolated)
 )
 
 // RecordIterFunc is used for low-level record iteration.
@@ -253,7 +251,7 @@ type PartitionedTable interface {
 	GetAllPartitionIDs() []int64
 	GetPartitionColumnIDs() []int64
 	GetPartitionColumnNames() []model.CIStr
-	CheckForExchangePartition(ctx sessionctx.Context, pi *model.PartitionInfo, r []types.Datum, partID, ntID int64) error
+	CheckForExchangePartition(ctx sessionctx.Context, pi *model.PartitionInfo, r []types.Datum, pid int64) error
 }
 
 // TableFromMeta builds a table.Table from *model.TableInfo.

@@ -118,33 +118,3 @@ func IsUpgradingClusterState(s sessionctx.Context) (bool, error) {
 
 	return stateInfo.State == syncer.StateUpgrading, nil
 }
-
-func printClusterState(s Session, ver int64) {
-	// After SupportUpgradeHTTPOpVer version, the upgrade by paused user DDL can be notified through the HTTP API.
-	// We check the global state see if we are upgrading by paused the user DDL.
-	if ver >= SupportUpgradeHTTPOpVer {
-		isUpgradingClusterStateWithRetry(s, ver, currentBootstrapVersion, time.Duration(internalSQLTimeout)*time.Second)
-	}
-}
-
-func isUpgradingClusterStateWithRetry(s sessionctx.Context, oldVer, newVer int64, timeout time.Duration) {
-	now := time.Now()
-	interval := 200 * time.Millisecond
-	logger := logutil.BgLogger().With(zap.String("category", "upgrading"))
-	for i := 0; ; i++ {
-		isUpgrading, err := IsUpgradingClusterState(s)
-		if err == nil {
-			logger.Info("get global state", zap.Int64("old version", oldVer), zap.Int64("latest version", newVer), zap.Bool("is upgrading state", isUpgrading))
-			return
-		}
-
-		if time.Since(now) >= timeout {
-			logger.Error("get global state failed", zap.Int64("old version", oldVer), zap.Int64("latest version", newVer), zap.Error(err))
-			return
-		}
-		if i%25 == 0 {
-			logger.Warn("get global state failed", zap.Int64("old version", oldVer), zap.Int64("latest version", newVer), zap.Error(err))
-		}
-		time.Sleep(interval)
-	}
-}

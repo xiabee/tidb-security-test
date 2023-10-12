@@ -18,7 +18,6 @@ import (
 	"math"
 	"testing"
 
-	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/collate"
@@ -137,9 +136,7 @@ func TestRange(t *testing.T) {
 		},
 	}
 	for _, v := range isPointTests {
-		ctx := core.MockContext()
-		require.Equal(t, v.isPoint, v.ran.IsPoint(ctx))
-		domain.GetDomain(ctx).StatsHandle().Close()
+		require.Equal(t, v.isPoint, v.ran.IsPoint(core.MockContext()))
 	}
 }
 

@@ -16,7 +16,6 @@ package sessionstates
 
 import (
 	"github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/parser/model"
 	ptypes "github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
@@ -82,8 +81,6 @@ type SessionStates struct {
 	LastInsertID         uint64                       `json:"last-insert-id,omitempty"`
 	Warnings             []stmtctx.SQLWarn            `json:"warnings,omitempty"`
 	// Define it as string to avoid cycle import.
-	Bindings            string                                            `json:"bindings,omitempty"`
-	ResourceGroupName   string                                            `json:"rs-group,omitempty"`
-	HypoIndexes         map[string]map[string]map[string]*model.IndexInfo `json:"hypo-indexes,omitempty"`
-	HypoTiFlashReplicas map[string]map[string]struct{}                    `json:"hypo-tiflash-replicas,omitempty"`
+	Bindings          string `json:"bindings,omitempty"`
+	ResourceGroupName string `json:"rs-group,omitempty"`
 }

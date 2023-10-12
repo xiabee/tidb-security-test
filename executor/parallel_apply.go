@@ -22,8 +22,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/executor/internal/applycache"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/util/chunk"
@@ -46,10 +44,10 @@ type outerRow struct {
 
 // ParallelNestedLoopApplyExec is the executor for apply.
 type ParallelNestedLoopApplyExec struct {
-	exec.BaseExecutor
+	baseExecutor
 
 	// outer-side fields
-	outerExec   exec.Executor
+	outerExec   Executor
 	outerFilter expression.CNFExprs
 	outerList   *chunk.List
 	outer       bool
@@ -58,7 +56,7 @@ type ParallelNestedLoopApplyExec struct {
 	// use slices since the inner side is paralleled
 	corCols       [][]*expression.CorrelatedColumn
 	innerFilter   []expression.CNFExprs
-	innerExecs    []exec.Executor
+	innerExecs    []Executor
 	innerList     []*chunk.List
 	innerChunk    []*chunk.Chunk
 	innerSelected [][]bool
@@ -80,7 +78,7 @@ type ParallelNestedLoopApplyExec struct {
 	notifyWg    sync.WaitGroup
 
 	// fields about cache
-	cache              *applycache.ApplyCache
+	cache              *applyCache
 	useCache           bool
 	cacheHitCounter    int64
 	cacheAccessCounter int64
@@ -94,10 +92,10 @@ func (e *ParallelNestedLoopApplyExec) Open(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	e.memTracker = memory.NewTracker(e.ID(), -1)
-	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
+	e.memTracker = memory.NewTracker(e.id, -1)
+	e.memTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.MemTracker)
 
-	e.outerList = chunk.NewList(exec.RetTypes(e.outerExec), e.InitCap(), e.MaxChunkSize())
+	e.outerList = chunk.NewList(retTypes(e.outerExec), e.initCap, e.maxChunkSize)
 	e.outerList.GetMemTracker().SetLabel(memory.LabelForOuterList)
 	e.outerList.GetMemTracker().AttachTo(e.memTracker)
 
@@ -109,8 +107,8 @@ func (e *ParallelNestedLoopApplyExec) Open(ctx context.Context) error {
 	e.hasMatch = make([]bool, e.concurrency)
 	e.hasNull = make([]bool, e.concurrency)
 	for i := 0; i < e.concurrency; i++ {
-		e.innerChunk[i] = exec.TryNewCacheChunk(e.innerExecs[i])
-		e.innerList[i] = chunk.NewList(exec.RetTypes(e.innerExecs[i]), e.InitCap(), e.MaxChunkSize())
+		e.innerChunk[i] = tryNewCacheChunk(e.innerExecs[i])
+		e.innerList[i] = chunk.NewList(retTypes(e.innerExecs[i]), e.initCap, e.maxChunkSize)
 		e.innerList[i].GetMemTracker().SetLabel(memory.LabelForInnerList)
 		e.innerList[i].GetMemTracker().AttachTo(e.memTracker)
 	}
@@ -120,11 +118,11 @@ func (e *ParallelNestedLoopApplyExec) Open(ctx context.Context) error {
 	e.outerRowCh = make(chan outerRow)
 	e.exit = make(chan struct{})
 	for i := 0; i < e.concurrency; i++ {
-		e.freeChkCh <- exec.NewFirstChunk(e)
+		e.freeChkCh <- newFirstChunk(e)
 	}
 
 	if e.useCache {
-		if e.cache, err = applycache.NewApplyCache(e.Ctx()); err != nil {
+		if e.cache, err = newApplyCache(e.ctx); err != nil {
 			return err
 		}
 		e.cache.GetMemTracker().AttachTo(e.memTracker)
@@ -176,7 +174,7 @@ func (e *ParallelNestedLoopApplyExec) Close() error {
 	// Otherwise we may got data race.
 	err := e.outerExec.Close()
 
-	if e.RuntimeStats() != nil {
+	if e.runtimeStats != nil {
 		runtimeStats := newJoinRuntimeStats()
 		if e.useCache {
 			var hitRatio float64
@@ -188,7 +186,7 @@ func (e *ParallelNestedLoopApplyExec) Close() error {
 			runtimeStats.setCacheInfo(false, 0)
 		}
 		runtimeStats.SetConcurrencyInfo(execdetails.NewConcurrencyInfo("Concurrency", e.concurrency))
-		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), runtimeStats)
+		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, runtimeStats)
 	}
 	return err
 }
@@ -208,8 +206,8 @@ func (e *ParallelNestedLoopApplyExec) outerWorker(ctx context.Context) {
 	var err error
 	for {
 		failpoint.Inject("parallelApplyOuterWorkerPanic", nil)
-		chk := exec.TryNewCacheChunk(e.outerExec)
-		if err := exec.Next(ctx, e.outerExec, chk); err != nil {
+		chk := tryNewCacheChunk(e.outerExec)
+		if err := Next(ctx, e.outerExec, chk); err != nil {
 			e.putResult(nil, err)
 			return
 		}
@@ -219,7 +217,7 @@ func (e *ParallelNestedLoopApplyExec) outerWorker(ctx context.Context) {
 		}
 		e.outerList.Add(chk)
 		outerIter := chunk.NewIterator4Chunk(chk)
-		selected, err = expression.VectorizedFilter(e.Ctx(), e.outerFilter, outerIter, selected)
+		selected, err = expression.VectorizedFilter(e.ctx, e.outerFilter, outerIter, selected)
 		if err != nil {
 			e.putResult(nil, err)
 			return
@@ -282,7 +280,7 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 	for _, col := range e.corCols[id] {
 		*col.Data = e.outerRow[id].GetDatum(col.Index, col.RetType)
 		if e.useCache {
-			if key, err = codec.EncodeKey(e.Ctx().GetSessionVars().StmtCtx, key, *col.Data); err != nil {
+			if key, err = codec.EncodeKey(e.ctx.GetSessionVars().StmtCtx, key, *col.Data); err != nil {
 				return err
 			}
 		}
@@ -309,14 +307,14 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 
 	if e.useCache {
 		// create a new one in this case since it may be in the cache
-		e.innerList[id] = chunk.NewList(exec.RetTypes(e.innerExecs[id]), e.InitCap(), e.MaxChunkSize())
+		e.innerList[id] = chunk.NewList(retTypes(e.innerExecs[id]), e.initCap, e.maxChunkSize)
 	} else {
 		e.innerList[id].Reset()
 	}
 
 	innerIter := chunk.NewIterator4Chunk(e.innerChunk[id])
 	for {
-		err := exec.Next(ctx, e.innerExecs[id], e.innerChunk[id])
+		err := Next(ctx, e.innerExecs[id], e.innerChunk[id])
 		if err != nil {
 			return err
 		}
@@ -324,7 +322,7 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 			break
 		}
 
-		e.innerSelected[id], err = expression.VectorizedFilter(e.Ctx(), e.innerFilter[id], innerIter, e.innerSelected[id])
+		e.innerSelected[id], err = expression.VectorizedFilter(e.ctx, e.innerFilter[id], innerIter, e.innerSelected[id])
 		if err != nil {
 			return err
 		}

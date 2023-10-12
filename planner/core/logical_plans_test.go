@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
@@ -37,7 +36,6 @@ import (
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit/testdata"
 	"github.com/pingcap/tidb/util/hint"
-	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,15 +99,10 @@ func createPlannerSuite() (s *plannerSuite) {
 	return
 }
 
-func (p *plannerSuite) Close() {
-	domain.GetDomain(p.ctx).StatsHandle().Close()
-}
-
 func TestPredicatePushDown(t *testing.T) {
 	var input, output []string
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for ith, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -132,7 +125,6 @@ func TestImplicitCastNotNullFlag(t *testing.T) {
 	ca := "select count(*) from t3 group by a having bit_and(b) > 1;"
 	comment := fmt.Sprintf("for %s", ca)
 	s := createPlannerSuite()
-	defer s.Close()
 	stmt, err := s.p.ParseOneStmt(ca, "", "")
 	require.NoError(t, err, comment)
 	p, _, err := BuildLogicalPlanForTest(ctx, s.ctx, stmt, s.is)
@@ -150,7 +142,6 @@ func TestEliminateProjectionUnderUnion(t *testing.T) {
 	ca := "Select a from t3 join ( (select 127 as IDD from t3) union all (select 1 as IDD from t3) ) u on t3.b = u.IDD;"
 	comment := fmt.Sprintf("for %s", ca)
 	s := createPlannerSuite()
-	defer s.Close()
 	stmt, err := s.p.ParseOneStmt(ca, "", "")
 	require.NoError(t, err, comment)
 	p, _, err := BuildLogicalPlanForTest(ctx, s.ctx, stmt, s.is)
@@ -174,7 +165,6 @@ func TestJoinPredicatePushDown(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -214,7 +204,6 @@ func TestOuterWherePredicatePushDown(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -260,7 +249,6 @@ func TestSimplifyOuterJoin(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -301,7 +289,6 @@ func TestAntiSemiJoinConstFalse(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for _, ca := range tests {
 		comment := fmt.Sprintf("for %s", ca.sql)
@@ -329,7 +316,6 @@ func TestDeriveNotNullConds(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -359,7 +345,6 @@ func TestDeriveNotNullConds(t *testing.T) {
 func TestExtraPKNotNullFlag(t *testing.T) {
 	sql := "select count(*) from t3"
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	comment := fmt.Sprintf("for %s", sql)
 	stmt, err := s.p.ParseOneStmt(sql, "", "")
@@ -430,7 +415,6 @@ func TestGroupByWhenNotExistCols(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	for _, test := range sqlTests {
 		sql := test.sql
 		p, err := buildLogicPlan4GroupBy(s, t, sql)
@@ -444,7 +428,6 @@ func TestDupRandJoinCondsPushDown(t *testing.T) {
 	sql := "select * from t as t1 join t t2 on t1.a > rand() and t1.a > rand()"
 	comment := fmt.Sprintf("for %s", sql)
 	s := createPlannerSuite()
-	defer s.Close()
 	stmt, err := s.p.ParseOneStmt(sql, "", "")
 	require.NoError(t, err, comment)
 	p, _, err := BuildLogicalPlanForTest(context.Background(), s.ctx, stmt, s.is)
@@ -508,7 +491,6 @@ func TestTablePartition(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, ca := range input {
 		comment := fmt.Sprintf("for %s", ca.SQL)
@@ -534,7 +516,6 @@ func TestSubquery(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for ith, ca := range input {
 		comment := fmt.Sprintf("for %s", ca)
@@ -561,7 +542,6 @@ func TestPlanBuilder(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	s.ctx.GetSessionVars().CostModelVersion = modelVer1
 	ctx := context.Background()
 	for i, ca := range input {
@@ -590,7 +570,6 @@ func TestJoinReOrder(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, tt := range input {
 		comment := fmt.Sprintf("for %s", tt)
@@ -615,7 +594,6 @@ func TestEagerAggregation(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	s.ctx.GetSessionVars().AllowAggPushDown = true
 	defer func() {
@@ -645,7 +623,6 @@ func TestColumnPruning(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, tt := range input {
 		comment := fmt.Sprintf("case:%v sql:\"%s\"", i, tt)
@@ -674,7 +651,6 @@ func TestSortByItemsPruning(t *testing.T) {
 	})
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, tt := range input {
 		comment := fmt.Sprintf("for %s", tt)
@@ -704,7 +680,6 @@ func TestProjectionEliminator(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for ith, tt := range tests {
 		comment := fmt.Sprintf("for %s", tt.sql)
@@ -721,7 +696,6 @@ func TestProjectionEliminator(t *testing.T) {
 
 func TestCS3389(t *testing.T) {
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	stmt, err := s.p.ParseOneStmt("select count(*) from t where a in (select b from t2 where  a is null);", "", "")
 	require.NoError(t, err)
@@ -744,12 +718,9 @@ func TestCS3389(t *testing.T) {
 
 func TestAllocID(t *testing.T) {
 	ctx := MockContext()
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
 	pA := DataSource{}.Init(ctx, 0)
 	pB := DataSource{}.Init(ctx, 0)
-	require.Equal(t, pB.ID(), pA.ID()+1)
+	require.Equal(t, pB.id, pA.id+1)
 }
 
 func checkDataSourceCols(p LogicalPlan, t *testing.T, ans map[int][]string, comment string) {
@@ -970,7 +941,6 @@ func TestValidate(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for _, tt := range tests {
 		sql := tt.sql
@@ -1024,7 +994,6 @@ func TestUniqueKeyInfo(t *testing.T) {
 	})
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for ith, tt := range input {
 		comment := fmt.Sprintf("for %s %d", tt, ith)
@@ -1047,7 +1016,6 @@ func TestAggPrune(t *testing.T) {
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for i, tt := range input {
 		comment := fmt.Sprintf("for %s", tt)
@@ -1466,14 +1434,8 @@ func TestVisitInfo(t *testing.T) {
 			},
 		},
 	}
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		// if true, test will too slow to run.
-		conf.Performance.EnableStatsCacheMemQuota = false
-	})
+
 	s := createPlannerSuite()
-	defer s.Close()
 	for _, tt := range tests {
 		comment := fmt.Sprintf("for %s", tt.sql)
 		stmt, err := s.p.ParseOneStmt(tt.sql, "", "")
@@ -1489,8 +1451,6 @@ func TestVisitInfo(t *testing.T) {
 		require.NoError(t, err, comment)
 
 		checkVisitInfo(t, builder.visitInfo, tt.ans, comment)
-
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
@@ -1557,7 +1517,6 @@ func TestUnion(t *testing.T) {
 	}
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range input {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt)
@@ -1574,7 +1533,6 @@ func TestUnion(t *testing.T) {
 		})
 		if output[i].Err {
 			require.Error(t, err)
-			domain.GetDomain(sctx).StatsHandle().Close()
 			continue
 		}
 		require.NoError(t, err, comment)
@@ -1585,21 +1543,13 @@ func TestUnion(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, output[i].Best, ToString(p), comment)
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
 func TestTopNPushDown(t *testing.T) {
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		// if true, test will too slow to run.
-		conf.Performance.EnableStatsCacheMemQuota = false
-	})
 	var input, output []string
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range input {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt)
@@ -1618,8 +1568,6 @@ func TestTopNPushDown(t *testing.T) {
 			output[i] = ToString(p)
 		})
 		require.Equal(t, output[i], ToString(p), comment)
-
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
@@ -1658,7 +1606,6 @@ func TestNameResolver(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.Background()
 	for _, test := range tests {
 		comment := fmt.Sprintf("for %s", test.sql)
@@ -1676,17 +1623,10 @@ func TestNameResolver(t *testing.T) {
 }
 
 func TestOuterJoinEliminator(t *testing.T) {
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		// if true, test will too slow to run.
-		conf.Performance.EnableStatsCacheMemQuota = false
-	})
 	var input, output []string
 	planSuiteUnexportedData.LoadTestCases(t, &input, &output)
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range input {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt)
@@ -1706,8 +1646,6 @@ func TestOuterJoinEliminator(t *testing.T) {
 			output[i] = planString
 		})
 		require.Equal(t, output[i], planString, comment)
-
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
@@ -1726,7 +1664,6 @@ func TestSelectView(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range tests {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt.sql)
@@ -1734,14 +1671,12 @@ func TestSelectView(t *testing.T) {
 		require.NoError(t, err, comment)
 		err = Preprocess(context.Background(), s.ctx, stmt, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: s.is}))
 		require.NoError(t, err)
-		sctx := MockContext()
-		builder, _ := NewPlanBuilder().Init(sctx, s.is, &hint.BlockHintProcessor{})
+		builder, _ := NewPlanBuilder().Init(MockContext(), s.is, &hint.BlockHintProcessor{})
 		p, err := builder.Build(ctx, stmt)
 		require.NoError(t, err)
 		p, err = logicalOptimize(ctx, builder.optFlag, p.(LogicalPlan))
 		require.NoError(t, err)
 		require.Equal(t, tt.best, ToString(p), comment)
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
@@ -1751,12 +1686,6 @@ type plannerSuiteWithOptimizeVars struct {
 }
 
 func TestWindowFunction(t *testing.T) {
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		// if true, test will too slow to run.
-		conf.Performance.EnableStatsCacheMemQuota = false
-	})
 	s := new(plannerSuiteWithOptimizeVars)
 	s.plannerSuite = createPlannerSuite()
 
@@ -1773,14 +1702,9 @@ func TestWindowFunction(t *testing.T) {
 }
 
 func TestWindowParallelFunction(t *testing.T) {
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		// if true, test will too slow to run.
-		conf.Performance.EnableStatsCacheMemQuota = false
-	})
 	s := new(plannerSuiteWithOptimizeVars)
 	s.plannerSuite = createPlannerSuite()
+
 	s.optimizeVars = map[string]string{
 		variable.TiDBWindowConcurrency: "4",
 		variable.TiDBCostModelVersion:  "1",
@@ -1834,9 +1758,6 @@ func (s *plannerSuiteWithOptimizeVars) optimize(ctx context.Context, sql string)
 	}
 
 	sctx := MockContext()
-	defer func() {
-		domain.GetDomain(sctx).StatsHandle().Close()
-	}()
 	for k, v := range s.optimizeVars {
 		if err = sctx.GetSessionVars().SetSystemVar(k, v); err != nil {
 			return nil, nil, err
@@ -1935,7 +1856,6 @@ func TestSkylinePruning(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range tests {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt.sql)
@@ -1949,7 +1869,6 @@ func TestSkylinePruning(t *testing.T) {
 		p, err := builder.Build(ctx, stmt)
 		if err != nil {
 			require.EqualError(t, err, tt.result, comment)
-			domain.GetDomain(sctx).StatsHandle().Close()
 			continue
 		}
 		require.NoError(t, err, comment)
@@ -1984,7 +1903,6 @@ func TestSkylinePruning(t *testing.T) {
 		}
 		paths := ds.skylinePruning(byItemsToProperty(byItems))
 		require.Equal(t, tt.result, pathsName(paths), comment)
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
@@ -2012,7 +1930,6 @@ func TestFastPlanContextTables(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	s.ctx.GetSessionVars().SnapshotInfoschema = s.is
 	for _, tt := range tests {
 		stmt, err := s.p.ParseOneStmt(tt.sql, "", "")
@@ -2044,7 +1961,6 @@ func TestUpdateEQCond(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range tests {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt.sql)
@@ -2060,23 +1976,18 @@ func TestUpdateEQCond(t *testing.T) {
 		p, err = logicalOptimize(ctx, builder.optFlag, p.(LogicalPlan))
 		require.NoError(t, err)
 		require.Equal(t, tt.best, ToString(p), comment)
-		domain.GetDomain(sctx).StatsHandle().Close()
 	}
 }
 
 func TestConflictedJoinTypeHints(t *testing.T) {
 	sql := "select /*+ INL_JOIN(t1) HASH_JOIN(t1) */ * from t t1, t t2 where t1.e = t2.e"
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	stmt, err := s.p.ParseOneStmt(sql, "", "")
 	require.NoError(t, err)
 	err = Preprocess(context.Background(), s.ctx, stmt, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: s.is}))
 	require.NoError(t, err)
 	sctx := MockContext()
-	defer func() {
-		domain.GetDomain(sctx).StatsHandle().Close()
-	}()
 	builder, _ := NewPlanBuilder().Init(sctx, s.is, &hint.BlockHintProcessor{})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(s.is)
 	p, err := builder.Build(ctx, stmt)
@@ -2093,7 +2004,6 @@ func TestConflictedJoinTypeHints(t *testing.T) {
 
 func TestSimplyOuterJoinWithOnlyOuterExpr(t *testing.T) {
 	s := createPlannerSuite()
-	defer s.Close()
 	sql := "select * from t t1 right join t t0 ON TRUE where CONCAT_WS(t0.e=t0.e, 0, NULL) IS NULL"
 	ctx := context.TODO()
 	stmt, err := s.p.ParseOneStmt(sql, "", "")
@@ -2101,9 +2011,6 @@ func TestSimplyOuterJoinWithOnlyOuterExpr(t *testing.T) {
 	err = Preprocess(context.Background(), s.ctx, stmt, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: s.is}))
 	require.NoError(t, err)
 	sctx := MockContext()
-	defer func() {
-		domain.GetDomain(sctx).StatsHandle().Close()
-	}()
 	builder, _ := NewPlanBuilder().Init(sctx, s.is, &hint.BlockHintProcessor{})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(s.is)
 	p, err := builder.Build(ctx, stmt)
@@ -2150,7 +2057,6 @@ func TestResolvingCorrelatedAggregate(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	ctx := context.TODO()
 	for i, tt := range tests {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tt.sql)
@@ -2194,7 +2100,6 @@ func TestFastPathInvalidBatchPointGet(t *testing.T) {
 		},
 	}
 	s := createPlannerSuite()
-	defer s.Close()
 	for i, tc := range tt {
 		comment := fmt.Sprintf("case:%v sql:%s", i, tc.sql)
 		stmt, err := s.p.ParseOneStmt(tc.sql, "", "")
@@ -2212,7 +2117,6 @@ func TestFastPathInvalidBatchPointGet(t *testing.T) {
 
 func TestTraceFastPlan(t *testing.T) {
 	s := createPlannerSuite()
-	defer s.Close()
 	s.ctx.GetSessionVars().StmtCtx.EnableOptimizeTrace = true
 	defer func() {
 		s.ctx.GetSessionVars().StmtCtx.EnableOptimizeTrace = false
@@ -2237,7 +2141,6 @@ func TestWindowLogicalPlanAmbiguous(t *testing.T) {
 	// The ambiguous logical plan which contains window function can usually be found in 100 iterations.
 	iterations := 100
 	s := createPlannerSuite()
-	defer s.Close()
 	for i := 0; i < iterations; i++ {
 		stmt, err := s.p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
@@ -2275,7 +2178,6 @@ func TestRemoveOrderbyInSubquery(t *testing.T) {
 	}
 
 	s := createPlannerSuite()
-	defer s.Close()
 	s.ctx.GetSessionVars().RemoveOrderbyInSubquery = true
 	ctx := context.TODO()
 	for i, tt := range tests {
@@ -2286,86 +2188,4 @@ func TestRemoveOrderbyInSubquery(t *testing.T) {
 		require.NoError(t, err, comment)
 		require.Equal(t, tt.best, ToString(p), comment)
 	}
-}
-
-func TestRollupExpand(t *testing.T) {
-	ctx := context.Background()
-	sql := "select count(a) from t group by a, b with rollup"
-	comment := fmt.Sprintf("for %s", sql)
-	s := createPlannerSuite()
-	defer s.Close()
-	stmt, err := s.p.ParseOneStmt(sql, "", "")
-	require.NoError(t, err, comment)
-
-	// manual builder
-	s.ctx.GetSessionVars().PlanID.Store(0)
-	s.ctx.GetSessionVars().PlanColumnID.Store(0)
-	builder, _ := NewPlanBuilder().Init(s.ctx, s.is, &hint.BlockHintProcessor{})
-	p, err := builder.Build(ctx, stmt)
-	require.NoError(t, err)
-
-	// fetch the current
-	require.Equal(t, builder.currentBlockExpand != nil, true)
-	require.Equal(t, builder.currentBlockExpand.GID != nil, true)
-	require.Equal(t, builder.currentBlockExpand.GPos == nil, true)
-	require.Equal(t, builder.currentBlockExpand.LevelExprs == nil, true)
-	require.Equal(t, builder.currentBlockExpand.rollupGroupingSets != nil, true)
-	require.Equal(t, builder.currentBlockExpand.rollupID2GIDS == nil, true)
-	require.Equal(t, builder.currentBlockExpand.rollupGroupingIDs == nil, true)
-	require.Equal(t, builder.currentBlockExpand.GroupingMode == tipb.GroupingMode_ModeBitAnd, true)
-	require.Equal(t, builder.currentBlockExpand.ExtraGroupingColNames[0], "gid")
-	require.Equal(t, builder.currentBlockExpand.distinctSize, 3)
-	require.Equal(t, len(builder.currentBlockExpand.distinctGroupByCol), 2)
-
-	_, err = logicalOptimize(context.TODO(), flagPredicatePushDown|flagJoinReOrder|flagPrunColumns|flagEliminateProjection|flagResolveExpand, p.(LogicalPlan))
-	require.NoError(t, err)
-
-	expand := builder.currentBlockExpand
-	// after logical optimization, the current select block's expand will generate its level-projections.
-	require.Equal(t, builder.currentBlockExpand.LevelExprs != nil, true)
-	require.Equal(t, len(builder.currentBlockExpand.LevelExprs), 3)
-	// for grouping set {}: gid = '00' = 0
-	require.Equal(t, expression.ExplainExpressionList(expand.LevelExprs[0], expand.schema), "test.t.a, <nil>->Column#13, <nil>->Column#14, 0->gid")
-	// for grouping set {a}: gid = '01' = 1
-	require.Equal(t, expression.ExplainExpressionList(expand.LevelExprs[1], expand.schema), "test.t.a, Column#13, <nil>->Column#14, 1->gid")
-	// for grouping set {a,b}: gid = '11' = 3
-	require.Equal(t, expression.ExplainExpressionList(expand.LevelExprs[2], expand.schema), "test.t.a, Column#13, Column#14, 3->gid")
-
-	require.Equal(t, expand.Schema().Len(), 4)
-	// source column a should be kept as real.
-	require.Equal(t, expand.Schema().Columns[0].RetType.GetFlag()&mysql.NotNullFlag, uint(1))
-	require.Equal(t, expand.names[0].String(), "test.t.a")
-	// the grouping column a,b should be changed as nullable.
-	require.Equal(t, expand.Schema().Columns[1].RetType.GetFlag()&mysql.NotNullFlag, uint(0))
-	require.Equal(t, expand.names[1].String(), "test.ex_t.ex_a") // column#13
-	require.Equal(t, expand.Schema().Columns[2].RetType.GetFlag()&mysql.NotNullFlag, uint(0))
-	require.Equal(t, expand.names[2].String(), "test.ex_t.ex_b") // column#14
-	// the gid col
-	require.Equal(t, expand.Schema().Columns[3].RetType.GetFlag()&mysql.NotNullFlag, uint(1))
-	require.Equal(t, expand.names[3].String(), "gid")
-
-	// Test grouping marks generation.
-	// Expand.schema.columns[0] is normal source column.
-	// Expand.schema.columns[1] is normal grouping set column a.
-	// Expand.schema.columns[2] is normal grouping set column b.
-	// Expand.schema.columns[2] is normal grouping gen column gid.
-	// mock grouping(a)
-	gm := expand.GenerateGroupingMarks([]*expression.Column{expand.schema.Columns[1]})
-	require.NotNil(t, gm)
-	require.Equal(t, len(gm), 1)
-
-	// mock grouping(b)
-	gm = expand.GenerateGroupingMarks([]*expression.Column{expand.schema.Columns[2]})
-	require.NotNil(t, gm)
-	require.Equal(t, len(gm), 1)
-
-	// mock grouping(a,b)
-	gm = expand.GenerateGroupingMarks([]*expression.Column{expand.schema.Columns[1], expand.schema.Columns[2]})
-	require.NotNil(t, gm)
-	require.Equal(t, len(gm), 2)
-
-	// mock grouping(b,a)
-	gm = expand.GenerateGroupingMarks([]*expression.Column{expand.schema.Columns[2], expand.schema.Columns[1]})
-	require.NotNil(t, gm)
-	require.Equal(t, len(gm), 2)
 }

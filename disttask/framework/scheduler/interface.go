@@ -18,25 +18,15 @@ import (
 	"context"
 
 	"github.com/pingcap/tidb/disttask/framework/proto"
-	"github.com/pingcap/tidb/disttask/framework/scheduler/execute"
 )
 
 // TaskTable defines the interface to access task table.
 type TaskTable interface {
 	GetGlobalTasksInStates(states ...interface{}) (task []*proto.Task, err error)
 	GetGlobalTaskByID(taskID int64) (task *proto.Task, err error)
-
-	GetSubtasksInStates(tidbID string, taskID int64, step int64, states ...interface{}) ([]*proto.Subtask, error)
-	GetFirstSubtaskInStates(instanceID string, taskID int64, step int64, states ...interface{}) (*proto.Subtask, error)
-	StartManager(tidbID string, role string) error
-	StartSubtask(subtaskID int64) error
-	UpdateSubtaskStateAndError(subtaskID int64, state string, err error) error
-	FinishSubtask(subtaskID int64, meta []byte) error
-
-	HasSubtasksInStates(tidbID string, taskID int64, step int64, states ...interface{}) (bool, error)
-	UpdateErrorToSubtask(tidbID string, taskID int64, err error) error
-	IsSchedulerCanceled(tidbID string, taskID int64) (bool, error)
-	PauseSubtasks(tidbID string, taskID int64) error
+	GetSubtaskInStates(instanceID string, taskID int64, states ...interface{}) (*proto.Subtask, error)
+	UpdateSubtaskStateAndError(id int64, state string, err string) error
+	HasSubtasksInStates(instanceID string, taskID int64, states ...interface{}) (bool, error)
 }
 
 // Pool defines the interface of a pool.
@@ -46,57 +36,31 @@ type Pool interface {
 	ReleaseAndWait()
 }
 
-// Scheduler is the subtask scheduler for a task.
-// Each task type should implement this interface.
-type Scheduler interface {
-	Init(context.Context) error
+// InternalScheduler defines the interface of an internal scheduler.
+type InternalScheduler interface {
+	Start()
+	Stop()
 	Run(context.Context, *proto.Task) error
 	Rollback(context.Context, *proto.Task) error
-	Pause(context.Context, *proto.Task) error
-	Close()
 }
 
-// Extension extends the scheduler.
-// each task type should implement this interface.
-type Extension interface {
-	// IsIdempotent returns whether the subtask is idempotent.
-	// when tidb restart, the subtask might be left in the running state.
-	// if it's idempotent, the scheduler can rerun the subtask, else
-	// the scheduler will mark the subtask as failed.
-	IsIdempotent(subtask *proto.Subtask) bool
-	// GetSubtaskExecutor returns the subtask executor for the subtask.
-	// Note: summary is the summary manager of all subtask of the same type now.
-	GetSubtaskExecutor(ctx context.Context, task *proto.Task, summary *execute.Summary) (execute.SubtaskExecutor, error)
+// Scheduler defines the interface of a scheduler.
+// User should implement this interface to define their own scheduler.
+type Scheduler interface {
+	// InitSubtaskExecEnv is used to initialize the environment for the subtask executor.
+	InitSubtaskExecEnv(context.Context) error
+	// SplitSubtask is used to split the subtask into multiple minimal tasks.
+	SplitSubtask(ctx context.Context, subtask []byte) ([]proto.MinimalTask, error)
+	// CleanupSubtaskExecEnv is used to clean up the environment for the subtask executor.
+	CleanupSubtaskExecEnv(context.Context) error
+	// OnSubtaskFinished is used to handle the subtask when it is finished.
+	OnSubtaskFinished(ctx context.Context, subtask []byte) error
+	// Rollback is used to rollback all subtasks.
+	Rollback(context.Context) error
 }
 
-// EmptySubtaskExecutor is an empty scheduler.
-// it can be used for the task that does not need to split into subtasks.
-type EmptySubtaskExecutor struct {
-}
-
-var _ execute.SubtaskExecutor = &EmptySubtaskExecutor{}
-
-// Init implements the SubtaskExecutor interface.
-func (*EmptySubtaskExecutor) Init(context.Context) error {
-	return nil
-}
-
-// RunSubtask implements the SubtaskExecutor interface.
-func (*EmptySubtaskExecutor) RunSubtask(context.Context, *proto.Subtask) error {
-	return nil
-}
-
-// Cleanup implements the SubtaskExecutor interface.
-func (*EmptySubtaskExecutor) Cleanup(context.Context) error {
-	return nil
-}
-
-// OnFinished implements the SubtaskExecutor interface.
-func (*EmptySubtaskExecutor) OnFinished(_ context.Context, _ *proto.Subtask) error {
-	return nil
-}
-
-// Rollback implements the SubtaskExecutor interface.
-func (*EmptySubtaskExecutor) Rollback(context.Context) error {
-	return nil
+// SubtaskExecutor defines the interface of a subtask executor.
+// User should implement this interface to define their own subtask executor.
+type SubtaskExecutor interface {
+	Run(ctx context.Context) error
 }

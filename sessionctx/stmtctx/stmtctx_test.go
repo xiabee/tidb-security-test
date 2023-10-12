@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"reflect"
 	"sort"
 	"testing"
 	"time"
@@ -273,26 +272,4 @@ func TestApproxRuntimeInfo(t *testing.T) {
 		require.Equal(t, d.TotBackoffTimes[backoff], timesSum)
 		require.Equal(t, d.TotBackoffTime[backoff], timeSum)
 	}
-}
-
-func TestStmtHintsClone(t *testing.T) {
-	hints := stmtctx.StmtHints{}
-	value := reflect.ValueOf(&hints).Elem()
-	for i := 0; i < value.NumField(); i++ {
-		field := value.Field(i)
-		switch field.Kind() {
-		case reflect.Int, reflect.Int32, reflect.Int64:
-			field.SetInt(1)
-		case reflect.Uint, reflect.Uint32, reflect.Uint64:
-			field.SetUint(1)
-		case reflect.Uint8: // byte
-			field.SetUint(1)
-		case reflect.Bool:
-			field.SetBool(true)
-		case reflect.String:
-			field.SetString("test")
-		default:
-		}
-	}
-	require.Equal(t, hints, *hints.Clone())
 }

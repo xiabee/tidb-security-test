@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -126,7 +125,7 @@ func TestSplitIndex(t *testing.T) {
 	// region10: [90 ~ +inf)
 	ctx := mock.NewContext()
 	e := &SplitIndexRegionExec{
-		BaseExecutor: exec.NewBaseExecutor(ctx, nil, 0),
+		baseExecutor: newBaseExecutor(ctx, nil, 0),
 		tableInfo:    tbInfo,
 		indexInfo:    idxInfo,
 		lower:        []types.Datum{types.NewDatum(0)},
@@ -315,7 +314,7 @@ func TestSplitTable(t *testing.T) {
 	// region10: [90 ~ +inf)
 	ctx := mock.NewContext()
 	e := &SplitTableRegionExec{
-		BaseExecutor: exec.NewBaseExecutor(ctx, nil, 0),
+		baseExecutor: newBaseExecutor(ctx, nil, 0),
 		tableInfo:    tbInfo,
 		handleCols:   core.NewIntHandleCols(&expression.Column{RetType: types.NewFieldType(mysql.TypeLonglong)}),
 		lower:        []types.Datum{types.NewDatum(0)},
@@ -375,7 +374,7 @@ func TestStepShouldLargeThanMinStep(t *testing.T) {
 		},
 	}
 	e1 := &SplitTableRegionExec{
-		BaseExecutor: exec.NewBaseExecutor(ctx, nil, 0),
+		baseExecutor: newBaseExecutor(ctx, nil, 0),
 		tableInfo:    tbInfo,
 		handleCols:   core.NewIntHandleCols(&expression.Column{RetType: types.NewFieldType(mysql.TypeLonglong)}),
 		lower:        []types.Datum{types.NewDatum(0)},
@@ -434,7 +433,7 @@ func TestClusterIndexSplitTable(t *testing.T) {
 	ctx := mock.NewContext()
 	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	e := &SplitTableRegionExec{
-		BaseExecutor: exec.NewBaseExecutor(ctx, nil, 0),
+		baseExecutor: newBaseExecutor(ctx, nil, 0),
 		tableInfo:    tbInfo,
 		handleCols:   buildHandleColsForSplit(sc, tbInfo),
 		lower:        types.MakeDatums(1, 0),

@@ -95,12 +95,12 @@ func (*aggregationEliminateChecker) tryToEliminateDistinct(agg *LogicalAggregati
 			cols := make([]*expression.Column, 0, len(af.Args))
 			canEliminate := true
 			for _, arg := range af.Args {
-				col, ok := arg.(*expression.Column)
-				if !ok {
+				if col, ok := arg.(*expression.Column); ok {
+					cols = append(cols, col)
+				} else {
 					canEliminate = false
 					break
 				}
-				cols = append(cols, col)
 			}
 			if canEliminate {
 				distinctByUniqueKey := false
@@ -183,9 +183,9 @@ func CheckCanConvertAggToProj(agg *LogicalAggregation) bool {
 func ConvertAggToProj(agg *LogicalAggregation, schema *expression.Schema) (bool, *LogicalProjection) {
 	proj := LogicalProjection{
 		Exprs: make([]expression.Expression, 0, len(agg.AggFuncs)),
-	}.Init(agg.SCtx(), agg.SelectBlockOffset())
+	}.Init(agg.ctx, agg.blockOffset)
 	for _, fun := range agg.AggFuncs {
-		ok, expr := rewriteExpr(agg.SCtx(), fun)
+		ok, expr := rewriteExpr(agg.ctx, fun)
 		if !ok {
 			return false, nil
 		}

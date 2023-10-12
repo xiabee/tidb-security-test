@@ -359,19 +359,9 @@ func doSleep(secs float64, sessVars *variable.SessionVars) (isKilled bool) {
 	for {
 		select {
 		case <-ticker.C:
-			// MySQL 8.0 sleep: https://dev.mysql.com/doc/refman/8.0/en/miscellaneous-functions.html#function_sleep
-			if len(sessVars.StmtCtx.TableIDs) == 0 {
-				// Regular kill or Killed because of max execution time
-				if atomic.CompareAndSwapUint32(&sessVars.Killed, 1, 0) || atomic.CompareAndSwapUint32(&sessVars.Killed, 2, 0) {
-					timer.Stop()
-					return true
-				}
-			} else {
-				// Regular kill or Killed because of max execution time.
-				if atomic.LoadUint32(&sessVars.Killed) == 1 || atomic.LoadUint32(&sessVars.Killed) == 2 {
-					timer.Stop()
-					return true
-				}
+			if atomic.CompareAndSwapUint32(&sessVars.Killed, 1, 0) {
+				timer.Stop()
+				return true
 			}
 		case <-timer.C:
 			return false

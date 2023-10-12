@@ -31,6 +31,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/docker/go-units"
+	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -63,14 +64,12 @@ import (
 	"github.com/pingcap/tidb/store/pdtypes"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/dbutil"
 	tmock "github.com/pingcap/tidb/util/mock"
 	"github.com/pingcap/tidb/util/promutil"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/tikv/client-go/v2/testutils"
-	pd "github.com/tikv/pd/client"
-	"go.uber.org/mock/gomock"
 )
 
 const (
@@ -938,7 +937,7 @@ func (s *tableRestoreSuite) TestTableRestoreMetrics() {
 	engineFinishedBase := metric.ReadCounter(metrics.ProcessedEngineCounter.WithLabelValues("imported", metric.TableResultSuccess))
 	tableFinishedBase := metric.ReadCounter(metrics.TableCounter.WithLabelValues("index_imported", metric.TableResultSuccess))
 
-	ctx := metric.WithMetric(context.Background(), metrics)
+	ctx := metric.NewContext(context.Background(), metrics)
 	chptCh := make(chan saveCp)
 	defer close(chptCh)
 	cfg := config.NewConfig()
@@ -1163,8 +1162,6 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 	require.NoError(s.T(), err)
 	mockStore, err := storage.NewLocalStorage(dir)
 	require.NoError(s.T(), err)
-	_, _, pdClient, err := testutils.NewMockTiKV("", nil)
-	require.NoError(s.T(), err)
 	for _, ca := range cases {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var err error
@@ -1181,18 +1178,16 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 
 		url := strings.TrimPrefix(server.URL, "https://")
 		cfg := &config.Config{TiDB: config.DBStore{PdAddr: url}}
-		pdCli := &mockPDClient{Client: pdClient, leaderAddr: url}
 		targetInfoGetter := &TargetInfoGetterImpl{
-			cfg:   cfg,
-			tls:   tls,
-			pdCli: pdCli,
+			cfg: cfg,
+			tls: tls,
 		}
 		preInfoGetter := &PreImportInfoGetterImpl{
 			cfg:              cfg,
 			targetInfoGetter: targetInfoGetter,
 			srcStorage:       mockStore,
 		}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, []*mydump.MDDatabaseMeta{}, preInfoGetter, nil, nil)
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, []*mydump.MDDatabaseMeta{}, preInfoGetter, nil)
 		rc := &Controller{
 			cfg:                 cfg,
 			tls:                 tls,
@@ -1200,7 +1195,6 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 			checkTemplate:       template,
 			preInfoGetter:       preInfoGetter,
 			precheckItemBuilder: theCheckBuilder,
-			pdCli:               pdCli,
 		}
 		var sourceSize int64
 		err = rc.store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
@@ -1237,15 +1231,6 @@ func (mockTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(ta
 	return err
 }
 
-type mockPDClient struct {
-	pd.Client
-	leaderAddr string
-}
-
-func (m *mockPDClient) GetLeaderAddr() string {
-	return m.leaderAddr
-}
-
 func (s *tableRestoreSuite) TestCheckClusterRegion() {
 	type testCase struct {
 		stores         pdtypes.StoresInfo
@@ -1261,8 +1246,6 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 		}
 		return regions
 	}
-	_, _, pdClient, err := testutils.NewMockTiKV("", nil)
-	require.NoError(s.T(), err)
 
 	testCases := []testCase{
 		{
@@ -1338,12 +1321,10 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 
 		url := strings.TrimPrefix(server.URL, "https://")
 		cfg := &config.Config{TiDB: config.DBStore{PdAddr: url}}
-		pdCli := &mockPDClient{Client: pdClient, leaderAddr: url}
 
 		targetInfoGetter := &TargetInfoGetterImpl{
-			cfg:   cfg,
-			tls:   tls,
-			pdCli: pdCli,
+			cfg: cfg,
+			tls: tls,
 		}
 		dbMetas := []*mydump.MDDatabaseMeta{}
 		preInfoGetter := &PreImportInfoGetterImpl{
@@ -1351,7 +1332,7 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 			targetInfoGetter: targetInfoGetter,
 			dbMetas:          dbMetas,
 		}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, dbMetas, preInfoGetter, checkpoints.NewNullCheckpointsDB(), nil)
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, dbMetas, preInfoGetter, checkpoints.NewNullCheckpointsDB())
 		rc := &Controller{
 			cfg:                 cfg,
 			tls:                 tls,
@@ -1360,7 +1341,6 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 			preInfoGetter:       preInfoGetter,
 			dbInfos:             make(map[string]*checkpoints.TidbDBInfo),
 			precheckItemBuilder: theCheckBuilder,
-			pdCli:               pdCli,
 		}
 
 		preInfoGetter.dbInfosCache = rc.dbInfos
@@ -1447,7 +1427,7 @@ func (s *tableRestoreSuite) TestCheckHasLargeCSV() {
 	for _, ca := range cases {
 		template := NewSimpleTemplate()
 		cfg := &config.Config{Mydumper: config.MydumperRuntime{StrictFormat: ca.strictFormat}}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, ca.dbMetas, nil, nil, nil)
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, ca.dbMetas, nil, nil)
 		rc := &Controller{
 			cfg:                 cfg,
 			checkTemplate:       template,
@@ -2320,6 +2300,94 @@ func (s *tableRestoreSuite) TestGBKEncodedSchemaIsValid() {
 	require.Len(s.T(), msgs, 0)
 }
 
+func TestBuildAddIndexSQL(t *testing.T) {
+	tests := []struct {
+		table     string
+		current   string
+		desired   string
+		singleSQL string
+		multiSQLs []string
+	}{
+		{
+			table:     "`test`.`non_pk_auto_inc`",
+			current:   "CREATE TABLE `non_pk_auto_inc` (`pk` varchar(255), `id` int(11) NOT NULL AUTO_INCREMENT, UNIQUE KEY uniq_id (`id`))",
+			desired:   "CREATE TABLE `non_pk_auto_inc` (`pk` varchar(255) PRIMARY KEY NONCLUSTERED, `id` int(11) NOT NULL AUTO_INCREMENT, UNIQUE KEY uniq_id (`id`))",
+			singleSQL: "ALTER TABLE `test`.`non_pk_auto_inc` ADD PRIMARY KEY (`pk`)",
+			multiSQLs: []string{"ALTER TABLE `test`.`non_pk_auto_inc` ADD PRIMARY KEY (`pk`)"},
+		},
+		{
+			table: "`test`.`multi_indexes`",
+			current: `
+CREATE TABLE multi_indexes (
+    c1 bigint PRIMARY KEY CLUSTERED,
+    c2 varchar(255) NOT NULL,
+    c3 varchar(255) NOT NULL,
+    c4 varchar(255) NOT NULL,
+    c5 varchar(255) NOT NULL,
+    c6 varchar(255) NOT NULL,
+    c7 varchar(255) NOT NULL,
+    c8 varchar(255) NOT NULL,
+    c9 varchar(255) NOT NULL,
+    c10 varchar(255) NOT NULL,
+    c11 varchar(255) NOT NULL
+)
+`,
+			desired: `
+CREATE TABLE multi_indexes (
+    c1 bigint PRIMARY KEY CLUSTERED,
+    c2 varchar(255) NOT NULL UNIQUE KEY,
+    c3 varchar(255) NOT NULL,
+    c4 varchar(255) NOT NULL,
+    c5 varchar(255) NOT NULL,
+    c6 varchar(255) NOT NULL,
+    c7 varchar(255) NOT NULL,
+    c8 varchar(255) NOT NULL,
+    c9 varchar(255) NOT NULL,
+    c10 varchar(255) NOT NULL,
+    c11 varchar(255) NOT NULL,
+    INDEX idx_c2 (c2) COMMENT 'single column index',
+    INDEX idx_c2_c3(c2, c3) COMMENT 'multiple column index',
+    UNIQUE KEY uniq_c4 (c4) COMMENT 'single column unique key',
+    UNIQUE KEY uniq_c4_c5 (c4, c5) COMMENT 'multiple column unique key',
+    INDEX idx_c6 (c6 ASC)  COMMENT 'single column index with asc order',
+    INDEX idx_c7 (c7 DESC) COMMENT 'single column index with desc order',
+    INDEX idx_c6_c7 (c6 ASC, c7 DESC) COMMENT 'multiple column index with asc and desc order',
+    INDEX idx_c8 (c8) VISIBLE COMMENT 'single column index with visible',
+    INDEX idx_c9 (c9) INVISIBLE COMMENT 'single column index with invisible',
+    INDEX idx_lower_c10 ((lower(c10))) COMMENT 'single column index with function',
+    INDEX idx_prefix_c11 (c11(3)) COMMENT 'single column index with prefix'
+);`,
+			singleSQL: "ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c2`(`c2`) COMMENT 'single column index', ADD KEY `idx_c2_c3`(`c2`,`c3`) COMMENT 'multiple column index', ADD UNIQUE KEY `uniq_c4`(`c4`) COMMENT 'single column unique key', ADD UNIQUE KEY `uniq_c4_c5`(`c4`,`c5`) COMMENT 'multiple column unique key', ADD KEY `idx_c6`(`c6`) COMMENT 'single column index with asc order', ADD KEY `idx_c7`(`c7`) COMMENT 'single column index with desc order', ADD KEY `idx_c6_c7`(`c6`,`c7`) COMMENT 'multiple column index with asc and desc order', ADD KEY `idx_c8`(`c8`) COMMENT 'single column index with visible', ADD KEY `idx_c9`(`c9`) INVISIBLE COMMENT 'single column index with invisible', ADD KEY `idx_lower_c10`((lower(`c10`))) COMMENT 'single column index with function', ADD KEY `idx_prefix_c11`(`c11`(3)) COMMENT 'single column index with prefix', ADD UNIQUE KEY `c2`(`c2`)",
+			multiSQLs: []string{
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c2`(`c2`) COMMENT 'single column index'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c2_c3`(`c2`,`c3`) COMMENT 'multiple column index'",
+				"ALTER TABLE `test`.`multi_indexes` ADD UNIQUE KEY `uniq_c4`(`c4`) COMMENT 'single column unique key'",
+				"ALTER TABLE `test`.`multi_indexes` ADD UNIQUE KEY `uniq_c4_c5`(`c4`,`c5`) COMMENT 'multiple column unique key'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c6`(`c6`) COMMENT 'single column index with asc order'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c7`(`c7`) COMMENT 'single column index with desc order'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c6_c7`(`c6`,`c7`) COMMENT 'multiple column index with asc and desc order'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c8`(`c8`) COMMENT 'single column index with visible'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_c9`(`c9`) INVISIBLE COMMENT 'single column index with invisible'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_lower_c10`((lower(`c10`))) COMMENT 'single column index with function'",
+				"ALTER TABLE `test`.`multi_indexes` ADD KEY `idx_prefix_c11`(`c11`(3)) COMMENT 'single column index with prefix'",
+				"ALTER TABLE `test`.`multi_indexes` ADD UNIQUE KEY `c2`(`c2`)",
+			},
+		}}
+
+	p := parser.New()
+
+	for _, tt := range tests {
+		curTblInfo, err := dbutil.GetTableInfoBySQL(tt.current, p)
+		require.NoError(t, err)
+		desiredTblInfo, err := dbutil.GetTableInfoBySQL(tt.desired, p)
+		require.NoError(t, err)
+
+		singleSQL, multiSQLs := buildAddIndexSQL(tt.table, curTblInfo, desiredTblInfo)
+		require.Equal(t, tt.singleSQL, singleSQL)
+		require.Equal(t, tt.multiSQLs, multiSQLs)
+	}
+}
+
 func TestGetDDLStatus(t *testing.T) {
 	const adminShowDDLJobQueries = "ADMIN SHOW DDL JOB QUERIES LIMIT 30"
 
@@ -2368,7 +2436,7 @@ func TestGetDDLStatus(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"JOB_ID", "DB_NAME", "TABLE_NAME", "JOB_TYPE", "SCHEMA_STATE", "SCHEMA_ID", "TABLE_ID", "ROW_COUNT", "CREATE_TIME", "START_TIME", "END_TIME", "STATE"}).
 			AddRow(59, "many_tables_test", "t4", "alter table", "public", 1, 59, 0, "2022-08-02 2:50:37", "2022-08-02 2:50:37", nil, "none"))
 
-	createTime, err = time.Parse(time.DateTime, "2022-08-02 2:50:38")
+	createTime, err = time.Parse("2006-01-02 15:04:05", "2022-08-02 2:50:38")
 	require.NoError(t, err)
 	status, err = getDDLStatus(context.Background(), db, "ALTER TABLE many_tables_test.t4 ADD x timestamp DEFAULT current_timestamp", createTime)
 	require.NoError(t, err)
@@ -2388,7 +2456,7 @@ func TestGetDDLStatus(t *testing.T) {
 		AddRow(53, "CREATE TABLE IF NOT EXISTS many_tables_test.t4(i TINYINT, j INT UNIQUE KEY)").
 		AddRow(52, "CREATE TABLE IF NOT EXISTS many_tables_test.t3(i TINYINT, j INT UNIQUE KEY)"))
 
-	createTime, err = time.Parse(time.DateTime, "2022-08-03 12:35:00")
+	createTime, err = time.Parse("2006-01-02 15:04:05", "2022-08-03 12:35:00")
 	require.NoError(t, err)
 	status, err = getDDLStatus(context.Background(), db, "CREATE TABLE IF NOT EXISTS many_tables_test.t7(i TINYINT, j INT UNIQUE KEY)", createTime)
 	require.NoError(t, err)

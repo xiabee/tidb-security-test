@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +27,6 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/domain/resourcegroup"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
@@ -46,6 +44,7 @@ import (
 	atomic2 "go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -159,7 +158,6 @@ type StatementContext struct {
 	InSelectStmt                  bool
 	InLoadDataStmt                bool
 	InExplainStmt                 bool
-	InExplainAnalyzeStmt          bool
 	ExplainFormat                 string
 	InCreateOrAlterStmt           bool
 	InSetSessionStatesStmt        bool
@@ -247,7 +245,6 @@ type StatementContext struct {
 	NotFillCache     bool
 	MemTracker       *memory.Tracker
 	DiskTracker      *disk.Tracker
-	RunawayChecker   *resourcegroup.RunawayChecker
 	IsTiFlash        atomic2.Bool
 	RuntimeStatsColl *execdetails.RuntimeStatsColl
 	TableIDs         []int64
@@ -303,8 +300,6 @@ type StatementContext struct {
 	// Map to store all CTE storages of current SQL.
 	// Will clean up at the end of the execution.
 	CTEStorageMap interface{}
-
-	SetVarHintRestore map[string]string
 
 	// If the statement read from table cache, this flag is set.
 	ReadFromTableCache bool
@@ -397,10 +392,9 @@ type StatementContext struct {
 
 	// MPPQueryInfo stores some id and timestamp of current MPP query statement.
 	MPPQueryInfo struct {
-		QueryID              atomic2.Uint64
-		QueryTS              atomic2.Uint64
-		AllocatedMPPTaskID   atomic2.Int64
-		AllocatedMPPGatherID atomic2.Uint64
+		QueryID            atomic2.Uint64
+		QueryTS            atomic2.Uint64
+		AllocatedMPPTaskID atomic2.Int64
 	}
 
 	// TableStats stores the visited runtime table stats by table id during query
@@ -409,8 +403,6 @@ type StatementContext struct {
 	useChunkAlloc bool
 	// Check if TiFlash read engine is removed due to strict sql mode.
 	TiFlashEngineRemovedDueToStrictSQLMode bool
-	// CanonicalHashCode try to get the canonical hash code from expression.
-	CanonicalHashCode bool
 	// StaleTSOProvider is used to provide stale timestamp oracle for read-only transactions.
 	StaleTSOProvider struct {
 		sync.Mutex
@@ -423,6 +415,7 @@ type StatementContext struct {
 type StmtHints struct {
 	// Hint Information
 	MemQuotaQuery           int64
+	ApplyCacheCapacity      int64
 	MaxExecutionTime        uint64
 	ReplicaRead             byte
 	AllowInSubqToJoinAndAgg bool
@@ -451,43 +444,6 @@ type StmtHints struct {
 // TaskMapNeedBackUp indicates that whether we need to back up taskMap during physical optimizing.
 func (sh *StmtHints) TaskMapNeedBackUp() bool {
 	return sh.ForceNthPlan != -1
-}
-
-// Clone the StmtHints struct and returns the pointer of the new one.
-func (sh *StmtHints) Clone() *StmtHints {
-	var (
-		vars       map[string]string
-		tableHints []*ast.TableOptimizerHint
-	)
-	if len(sh.SetVars) > 0 {
-		vars = make(map[string]string, len(sh.SetVars))
-		for k, v := range sh.SetVars {
-			vars[k] = v
-		}
-	}
-	if len(sh.OriginalTableHints) > 0 {
-		tableHints = make([]*ast.TableOptimizerHint, len(sh.OriginalTableHints))
-		copy(tableHints, sh.OriginalTableHints)
-	}
-	return &StmtHints{
-		MemQuotaQuery:                  sh.MemQuotaQuery,
-		MaxExecutionTime:               sh.MaxExecutionTime,
-		ReplicaRead:                    sh.ReplicaRead,
-		AllowInSubqToJoinAndAgg:        sh.AllowInSubqToJoinAndAgg,
-		NoIndexMergeHint:               sh.NoIndexMergeHint,
-		StraightJoinOrder:              sh.StraightJoinOrder,
-		EnableCascadesPlanner:          sh.EnableCascadesPlanner,
-		ForceNthPlan:                   sh.ForceNthPlan,
-		ResourceGroup:                  sh.ResourceGroup,
-		HasAllowInSubqToJoinAndAggHint: sh.HasAllowInSubqToJoinAndAggHint,
-		HasMemQuotaHint:                sh.HasMemQuotaHint,
-		HasReplicaReadHint:             sh.HasReplicaReadHint,
-		HasMaxExecutionTime:            sh.HasMaxExecutionTime,
-		HasEnableCascadesPlannerHint:   sh.HasEnableCascadesPlannerHint,
-		HasResourceGroup:               sh.HasResourceGroup,
-		SetVars:                        vars,
-		OriginalTableHints:             tableHints,
-	}
 }
 
 // StmtCacheKey represents the key type in the StmtCache.
@@ -1270,14 +1226,6 @@ func (sc *StatementContext) GetStaleTSO() (uint64, error) {
 	}
 	sc.StaleTSOProvider.value = &tso
 	return tso, nil
-}
-
-// AddSetVarHintRestore records the variables which are affected by SET_VAR hint. And restore them to the old value later.
-func (sc *StatementContext) AddSetVarHintRestore(name, val string) {
-	if sc.SetVarHintRestore == nil {
-		sc.SetVarHintRestore = make(map[string]string)
-	}
-	sc.SetVarHintRestore[name] = val
 }
 
 // CopTasksDetails collects some useful information of cop-tasks during execution.

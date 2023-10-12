@@ -15,7 +15,6 @@
 package decoder
 
 import (
-	"slices"
 	"time"
 
 	"github.com/pingcap/tidb/expression"
@@ -28,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/rowcodec"
+	"golang.org/x/exp/slices"
 )
 
 // Column contains the info and generated expr of column.

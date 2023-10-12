@@ -675,7 +675,7 @@ func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *ti
 	case tipb.ScalarFuncSig_RegexpInStrSig:
 		f = &builtinRegexpInStrFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpReplaceSig:
-		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}, make([]Instruction, 0), nil, sync.Once{}, false}
+		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_JsonExtractSig:
 		f = &builtinJSONExtractSig{base}
 	case tipb.ScalarFuncSig_JsonUnquoteSig:
@@ -728,8 +728,6 @@ func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *ti
 		f = &builtinJSONValidStringSig{base}
 	case tipb.ScalarFuncSig_JsonValidOthersSig:
 		f = &builtinJSONValidOthersSig{base}
-	case tipb.ScalarFuncSig_JsonMemberOfSig:
-		f = &builtinJSONMemberOfSig{base}
 	case tipb.ScalarFuncSig_DateFormatSig:
 		f = &builtinDateFormatSig{base}
 	// case tipb.ScalarFuncSig_DateLiteral:
@@ -1086,7 +1084,7 @@ func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *ti
 		f = &builtinInternalFromBinarySig{base}
 
 	default:
-		e = ErrFunctionNotExists.GenWithStackByArgs("FUNCTION", sigCode)
+		e = errFunctionNotExists.GenWithStackByArgs("FUNCTION", sigCode)
 		return nil, e
 	}
 	f.setPbCode(sigCode)

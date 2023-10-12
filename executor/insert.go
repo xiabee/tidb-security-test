@@ -62,11 +62,11 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 		return tblName
 	}))
 	// If tidb_batch_insert is ON and not in a transaction, we could use BatchInsert mode.
-	sessVars := e.Ctx().GetSessionVars()
+	sessVars := e.ctx.GetSessionVars()
 	defer sessVars.CleanBuffers()
 	ignoreErr := sessVars.StmtCtx.DupKeyAsWarning
 
-	txn, err := e.Ctx().Txn(true)
+	txn, err := e.ctx.Txn(true)
 	if err != nil {
 		return err
 	}
@@ -186,21 +186,20 @@ func (e *InsertValues) prefetchDataCache(ctx context.Context, txn kv.Transaction
 }
 
 // updateDupRow updates a duplicate row to a new row.
-func (e *InsertExec) updateDupRow(ctx context.Context, idxInBatch int, txn kv.Transaction, row toBeCheckedRow, handle kv.Handle, _ []*expression.Assignment) error {
-	oldRow, err := getOldRow(ctx, e.Ctx(), txn, row.t, handle, e.GenExprs)
+func (e *InsertExec) updateDupRow(ctx context.Context, idxInBatch int, txn kv.Transaction, row toBeCheckedRow, handle kv.Handle, onDuplicate []*expression.Assignment) error {
+	oldRow, err := getOldRow(ctx, e.ctx, txn, row.t, handle, e.GenExprs)
 	if err != nil {
 		return err
 	}
 	// get the extra columns from the SELECT clause.
 	var extraCols []types.Datum
-	if len(e.Ctx().GetSessionVars().CurrInsertBatchExtraCols) > 0 {
-		extraCols = e.Ctx().GetSessionVars().CurrInsertBatchExtraCols[idxInBatch]
+	if len(e.ctx.GetSessionVars().CurrInsertBatchExtraCols) > 0 {
+		extraCols = e.ctx.GetSessionVars().CurrInsertBatchExtraCols[idxInBatch]
 	}
 
 	err = e.doDupRowUpdate(ctx, handle, oldRow, row.row, extraCols, e.OnDuplicate, idxInBatch)
-	if e.Ctx().GetSessionVars().StmtCtx.DupKeyAsWarning && (kv.ErrKeyExists.Equal(err) ||
-		table.ErrCheckConstraintViolated.Equal(err)) {
-		e.Ctx().GetSessionVars().StmtCtx.AppendWarning(err)
+	if e.ctx.GetSessionVars().StmtCtx.DupKeyAsWarning && kv.ErrKeyExists.Equal(err) {
+		e.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
 		return nil
 	}
 	return err
@@ -210,12 +209,12 @@ func (e *InsertExec) updateDupRow(ctx context.Context, idxInBatch int, txn kv.Tr
 func (e *InsertExec) batchUpdateDupRows(ctx context.Context, newRows [][]types.Datum) error {
 	// Get keys need to be checked.
 	start := time.Now()
-	toBeCheckedRows, err := getKeysNeedCheck(e.Ctx(), e.Table, newRows)
+	toBeCheckedRows, err := getKeysNeedCheck(ctx, e.ctx, e.Table, newRows)
 	if err != nil {
 		return err
 	}
 
-	txn, err := e.Ctx().Txn(true)
+	txn, err := e.ctx.Txn(true)
 	if err != nil {
 		return err
 	}
@@ -301,16 +300,16 @@ func (e *InsertExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		ctx = context.WithValue(ctx, autoid.AllocatorRuntimeStatsCtxKey, e.stats.AllocatorRuntimeStats)
 	}
 
-	if !e.EmptyChildren() && e.Children(0) != nil {
+	if len(e.children) > 0 && e.children[0] != nil {
 		return insertRowsFromSelect(ctx, e)
 	}
 	err := insertRows(ctx, e)
 	if err != nil {
 		terr, ok := errors.Cause(err).(*terror.Error)
 		if ok && len(e.OnDuplicate) == 0 &&
-			e.Ctx().GetSessionVars().StmtCtx.ErrAutoincReadFailedAsWarning &&
+			e.ctx.GetSessionVars().StmtCtx.ErrAutoincReadFailedAsWarning &&
 			terr.Code() == errno.ErrAutoincReadFailed {
-			e.Ctx().GetSessionVars().StmtCtx.AppendWarning(err)
+			e.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
 			return nil
 		}
 		return err
@@ -320,8 +319,8 @@ func (e *InsertExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 // Close implements the Executor Close interface.
 func (e *InsertExec) Close() error {
-	if e.RuntimeStats() != nil && e.stats != nil {
-		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
+	if e.runtimeStats != nil && e.stats != nil {
+		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
 	}
 	defer e.memTracker.ReplaceBytesUsed(0)
 	e.setMessage()
@@ -333,8 +332,8 @@ func (e *InsertExec) Close() error {
 
 // Open implements the Executor Open interface.
 func (e *InsertExec) Open(ctx context.Context) error {
-	e.memTracker = memory.NewTracker(e.ID(), -1)
-	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
+	e.memTracker = memory.NewTracker(e.id, -1)
+	e.memTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.MemTracker)
 
 	if e.OnDuplicate != nil {
 		e.initEvalBuffer4Dup()
@@ -366,7 +365,7 @@ func (e *InsertExec) initEvalBuffer4Dup() {
 		evalBufferTypes = append(evalBufferTypes, &(col.FieldType))
 	}
 	if extraLen > 0 {
-		evalBufferTypes = append(evalBufferTypes, e.SelectExec.Base().RetFieldTypes()[e.rowLen:]...)
+		evalBufferTypes = append(evalBufferTypes, e.SelectExec.base().retFieldTypes[e.rowLen:]...)
 	}
 	for _, col := range e.Table.Cols() {
 		evalBufferTypes = append(evalBufferTypes, &(col.FieldType))
@@ -385,7 +384,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 	assignFlag := make([]bool, len(e.Table.WritableCols()))
 	// See http://dev.mysql.com/doc/refman/5.7/en/miscellaneous-functions.html#function_values
 	e.curInsertVals.SetDatums(newRow...)
-	e.Ctx().GetSessionVars().CurrInsertValues = e.curInsertVals.ToRow()
+	e.ctx.GetSessionVars().CurrInsertValues = e.curInsertVals.ToRow()
 	// NOTE: In order to execute the expression inside the column assignment,
 	// we have to put the value of "oldRow" and "extraCols" before "newRow" in
 	// "row4Update" to be consistent with "Schema4OnDuplicate" in the "Insert"
@@ -397,7 +396,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 
 	// Update old row when the key is duplicated.
 	e.evalBuffer4Dup.SetDatums(e.row4Update...)
-	sc := e.Ctx().GetSessionVars().StmtCtx
+	sc := e.ctx.GetSessionVars().StmtCtx
 	warnCnt := int(sc.WarningCount())
 	for _, col := range cols {
 		if col.LazyErr != nil {
@@ -409,7 +408,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 		}
 		c := col.Col.ToInfo()
 		c.Name = col.ColName
-		e.row4Update[col.Col.Index], err1 = table.CastValue(e.Ctx(), val, c, false, false)
+		e.row4Update[col.Col.Index], err1 = table.CastValue(e.ctx, val, c, false, false)
 		if err1 != nil {
 			return err1
 		}
@@ -426,7 +425,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 	}
 
 	newData := e.row4Update[:len(oldRow)]
-	_, err := updateRecord(ctx, e.Ctx(), handle, oldRow, newData, assignFlag, e.Table, true, e.memTracker, e.fkChecks, e.fkCascades)
+	_, err := updateRecord(ctx, e.ctx, handle, oldRow, newData, assignFlag, e.Table, true, e.memTracker, e.fkChecks, e.fkCascades)
 	if err != nil {
 		return err
 	}
@@ -435,7 +434,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 
 // setMessage sets info message(ERR_INSERT_INFO) generated by INSERT statement
 func (e *InsertExec) setMessage() {
-	stmtCtx := e.Ctx().GetSessionVars().StmtCtx
+	stmtCtx := e.ctx.GetSessionVars().StmtCtx
 	numRecords := stmtCtx.RecordRows()
 	if e.SelectExec != nil || numRecords > 1 {
 		numWarnings := stmtCtx.WarningCount()
@@ -444,7 +443,7 @@ func (e *InsertExec) setMessage() {
 			// if ignoreErr
 			numDuplicates = numRecords - stmtCtx.CopiedRows()
 		} else {
-			if e.Ctx().GetSessionVars().ClientCapability&mysql.ClientFoundRows > 0 {
+			if e.ctx.GetSessionVars().ClientCapability&mysql.ClientFoundRows > 0 {
 				numDuplicates = stmtCtx.TouchedRows()
 			} else {
 				numDuplicates = stmtCtx.UpdatedRows()

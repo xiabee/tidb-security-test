@@ -23,13 +23,15 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
-	"github.com/pingcap/tidb/statistics/handle/autoanalyze"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/testdata"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,10 +57,10 @@ func TestChangeVerTo2Behavior(t *testing.T) {
 	statsTblT := h.GetTableStats(tblT.Meta())
 	// Analyze table with version 1 success, all statistics are version 1.
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(1), col.GetStatsVer())
+		require.Equal(t, int64(1), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("set @@session.tidb_analyze_version = 2")
 	tk.MustExec("analyze table t index idx")
@@ -66,23 +68,23 @@ func TestChangeVerTo2Behavior(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t index")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead"))
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t ")
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(2), col.GetStatsVer())
+		require.Equal(t, int64(2), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("set @@session.tidb_analyze_version = 1")
 	tk.MustExec("analyze table t index idx")
@@ -91,7 +93,7 @@ func TestChangeVerTo2Behavior(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t index")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead",
@@ -99,16 +101,16 @@ func TestChangeVerTo2Behavior(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t ")
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(1), col.GetStatsVer())
+		require.Equal(t, int64(1), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 }
 
@@ -134,10 +136,10 @@ func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
 	statsTblT := h.GetTableStats(tblT.Meta())
 	// Analyze table with version 1 success, all statistics are version 1.
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(1), col.GetStatsVer())
+		require.Equal(t, int64(1), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("set @@session.tidb_analyze_version = 2")
 	tk.MustExec("analyze table t index idx")
@@ -145,51 +147,51 @@ func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t index")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead"))
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t ")
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(2), col.GetStatsVer())
+		require.Equal(t, int64(2), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("set @@session.tidb_analyze_version = 1")
 	tk.MustExec("analyze table t index idx")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead",
 		"Warning 1105 The version 2 would collect all statistics not only the selected indexes",
-		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t, reason to use this rate is \"use min(1, 110000/3) as the sample-rate=1\"")) // since fallback to ver2 path, should do samplerate adjustment
+		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t")) // since fallback to ver2 path, should do samplerate adjustment
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t index")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead",
 		"Warning 1105 The version 2 would collect all statistics not only the selected indexes",
-		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t, reason to use this rate is \"use min(1, 110000/3) as the sample-rate=1\""))
+		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t"))
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("analyze table t ")
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(1), col.GetStatsVer())
+		require.Equal(t, int64(1), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 }
 
@@ -213,10 +215,10 @@ func TestFastAnalyzeOnVer2(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT := h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(2), col.GetStatsVer())
+		require.Equal(t, int64(2), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(2), idx.GetStatsVer())
+		require.Equal(t, int64(2), idx.StatsVer)
 	}
 	tk.MustExec("set @@session.tidb_enable_fast_analyze = 1")
 	err = tk.ExecToErr("analyze table t index idx")
@@ -233,10 +235,10 @@ func TestFastAnalyzeOnVer2(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, col := range statsTblT.Columns {
-		require.Equal(t, int64(1), col.GetStatsVer())
+		require.Equal(t, int64(1), col.StatsVer)
 	}
 	for _, idx := range statsTblT.Indices {
-		require.Equal(t, int64(1), idx.GetStatsVer())
+		require.Equal(t, int64(1), idx.StatsVer)
 	}
 }
 
@@ -295,12 +297,12 @@ func TestExpBackoffEstimation(t *testing.T) {
 	}
 
 	// The last case is that no column is loaded and we get no stats at all.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/planner/cardinality/cleanEstResults", `return(true)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/cleanEstResults", `return(true)`))
 	testdata.OnRecord(func() {
 		output[inputLen-1] = testdata.ConvertRowsToStrings(tk.MustQuery(input[inputLen-1]).Rows())
 	})
 	tk.MustQuery(input[inputLen-1]).Check(testkit.Rows(output[inputLen-1]...))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/planner/cardinality/cleanEstResults"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/cleanEstResults"))
 }
 
 func TestGlobalStats(t *testing.T) {
@@ -440,26 +442,16 @@ func TestAnalyzeSnapshot(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("set @@session.tidb_analyze_version = 2;")
-	tk.MustExec("create table t(a int, index(a))")
+	tk.MustExec("create table t(a int)")
 	tk.MustExec("insert into t values(1), (1), (1)")
 	tk.MustExec("analyze table t")
-	rows := tk.MustQuery("select count, snapshot, version from mysql.stats_meta").Rows()
+	rows := tk.MustQuery("select count, snapshot from mysql.stats_meta").Rows()
 	require.Len(t, rows, 1)
 	require.Equal(t, "3", rows[0][0])
 	s1Str := rows[0][1].(string)
 	s1, err := strconv.ParseUint(s1Str, 10, 64)
 	require.NoError(t, err)
 	require.True(t, s1 < math.MaxUint64)
-
-	// TestHistogramsWithSameTxnTS
-	v1 := rows[0][2].(string)
-	rows = tk.MustQuery("select version from mysql.stats_histograms").Rows()
-	require.Len(t, rows, 2)
-	v2 := rows[0][0].(string)
-	require.Equal(t, v1, v2)
-	v3 := rows[1][0].(string)
-	require.Equal(t, v2, v3)
-
 	tk.MustExec("insert into t values(1), (1), (1)")
 	tk.MustExec("analyze table t")
 	rows = tk.MustQuery("select count, snapshot from mysql.stats_meta").Rows()
@@ -472,15 +464,47 @@ func TestAnalyzeSnapshot(t *testing.T) {
 	require.True(t, s2 > s1)
 }
 
+func TestHistogramsWithSameTxnTS(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("set @@session.tidb_analyze_version = 2;")
+	tk.MustExec("create table t(a int, index(a))")
+	tk.MustExec("insert into t values(1), (1), (1)")
+	tk.MustExec("analyze table t")
+	rows := tk.MustQuery("select version from mysql.stats_meta").Rows()
+	require.Len(t, rows, 1)
+	v1 := rows[0][0].(string)
+	rows = tk.MustQuery("select version from mysql.stats_histograms").Rows()
+	require.Len(t, rows, 2)
+	v2 := rows[0][0].(string)
+	require.Equal(t, v1, v2)
+	v3 := rows[1][0].(string)
+	require.Equal(t, v2, v3)
+}
+
+func TestAnalyzeLongString(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("set @@session.tidb_analyze_version = 2;")
+	tk.MustExec("create table t(a longtext);")
+	tk.MustExec("insert into t value(repeat(\"a\",65536));")
+	tk.MustExec("insert into t value(repeat(\"b\",65536));")
+	tk.MustExec("analyze table t with 0 topn")
+}
+
 func TestOutdatedStatsCheck(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
-	autoanalyze.AutoAnalyzeMinCnt = 0
+	handle.AutoAnalyzeMinCnt = 0
 	defer func() {
-		autoanalyze.AutoAnalyzeMinCnt = 1000
+		handle.AutoAnalyzeMinCnt = 1000
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
@@ -544,6 +568,89 @@ func hasPseudoStats(rows [][]interface{}) bool {
 	return false
 }
 
+// TestNotLoadedStatsOnAllNULLCol makes sure that stats on a column that only contains NULLs can be used even when it's
+// not loaded. This is reasonable because it makes no difference whether it's loaded or not.
+func TestNotLoadedStatsOnAllNULLCol(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	h := dom.StatsHandle()
+	oriLease := h.Lease()
+	h.SetLease(1000)
+	defer func() {
+		h.SetLease(oriLease)
+	}()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec("drop table if exists t2")
+	tk.MustExec("create table t1(a int)")
+	tk.MustExec("create table t2(a int)")
+	tk.MustExec("insert into t1 values(null), (null), (null), (null)")
+	tk.MustExec("insert into t2 values(null), (null)")
+	tk.MustExec("analyze table t1;")
+	tk.MustExec("analyze table t2;")
+
+	res := tk.MustQuery("explain format = 'brief' select * from t1 left join t2 on t1.a=t2.a order by t1.a, t2.a")
+	res.Check(testkit.Rows(
+		"Sort 4.00 root  test.t1.a, test.t2.a",
+		"└─HashJoin 4.00 root  left outer join, equal:[eq(test.t1.a, test.t2.a)]",
+		"  ├─TableReader(Build) 0.00 root  data:Selection",
+		// If we are not using stats on this column (which means we use pseudo estimation), the row count for the Selection will become 2.
+		"  │ └─Selection 0.00 cop[tikv]  not(isnull(test.t2.a))",
+		"  │   └─TableFullScan 2.00 cop[tikv] table:t2 keep order:false",
+		"  └─TableReader(Probe) 4.00 root  data:TableFullScan",
+		"    └─TableFullScan 4.00 cop[tikv] table:t1 keep order:false"))
+
+	res = tk.MustQuery("explain format = 'brief' select * from t2 left join t1 on t1.a=t2.a order by t1.a, t2.a")
+	res.Check(testkit.Rows(
+		"Sort 2.00 root  test.t1.a, test.t2.a",
+		"└─HashJoin 2.00 root  left outer join, equal:[eq(test.t2.a, test.t1.a)]",
+		// If we are not using stats on this column, the build side will become t2 because of smaller row count.
+		"  ├─TableReader(Build) 0.00 root  data:Selection",
+		// If we are not using stats on this column, the row count for the Selection will become 4.
+		"  │ └─Selection 0.00 cop[tikv]  not(isnull(test.t1.a))",
+		"  │   └─TableFullScan 4.00 cop[tikv] table:t1 keep order:false",
+		"  └─TableReader(Probe) 2.00 root  data:TableFullScan",
+		"    └─TableFullScan 2.00 cop[tikv] table:t2 keep order:false"))
+
+	res = tk.MustQuery("explain format = 'brief' select * from t1 right join t2 on t1.a=t2.a order by t1.a, t2.a")
+	res.Check(testkit.Rows(
+		"Sort 2.00 root  test.t1.a, test.t2.a",
+		"└─HashJoin 2.00 root  right outer join, equal:[eq(test.t1.a, test.t2.a)]",
+		"  ├─TableReader(Build) 0.00 root  data:Selection",
+		"  │ └─Selection 0.00 cop[tikv]  not(isnull(test.t1.a))",
+		"  │   └─TableFullScan 4.00 cop[tikv] table:t1 keep order:false",
+		"  └─TableReader(Probe) 2.00 root  data:TableFullScan",
+		"    └─TableFullScan 2.00 cop[tikv] table:t2 keep order:false"))
+
+	res = tk.MustQuery("explain format = 'brief' select * from t2 right join t1 on t1.a=t2.a order by t1.a, t2.a")
+	res.Check(testkit.Rows(
+		"Sort 4.00 root  test.t1.a, test.t2.a",
+		"└─HashJoin 4.00 root  right outer join, equal:[eq(test.t2.a, test.t1.a)]",
+		"  ├─TableReader(Build) 0.00 root  data:Selection",
+		"  │ └─Selection 0.00 cop[tikv]  not(isnull(test.t2.a))",
+		"  │   └─TableFullScan 2.00 cop[tikv] table:t2 keep order:false",
+		"  └─TableReader(Probe) 4.00 root  data:TableFullScan",
+		"    └─TableFullScan 4.00 cop[tikv] table:t1 keep order:false"))
+}
+
+func TestCrossValidationSelectivity(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("set @@tidb_analyze_version = 1")
+	tk.MustExec("create table t (a int, b int, c int, primary key (a, b) clustered)")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	tk.MustExec("insert into t values (1,2,3), (1,4,5)")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	tk.MustExec("analyze table t")
+	tk.MustQuery("explain format = 'brief' select * from t where a = 1 and b > 0 and b < 1000 and c > 1000").Check(testkit.Rows(
+		"TableReader 0.00 root  data:Selection",
+		"└─Selection 0.00 cop[tikv]  gt(test.t.c, 1000)",
+		"  └─TableRangeScan 2.00 cop[tikv] table:t range:(1 0,1 1000), keep order:false"))
+}
+
 func TestShowHistogramsLoadStatus(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -560,7 +667,11 @@ func TestShowHistogramsLoadStatus(t *testing.T) {
 	require.NoError(t, h.Update(dom.InfoSchema()))
 	rows := tk.MustQuery("show stats_histograms where db_name = 'test' and table_name = 't'").Rows()
 	for _, row := range rows {
-		require.Equal(t, "allEvicted", row[10].(string))
+		if row[3] == "a" || row[3] == "idx" {
+			require.Equal(t, "allLoaded", row[10].(string))
+		} else {
+			require.Equal(t, "allEvicted", row[10].(string))
+		}
 	}
 }
 
@@ -638,6 +749,149 @@ func TestUpdateNotLoadIndexFMSketch(t *testing.T) {
 	require.Nil(t, h.GetPartitionStats(tblInfo, p1.ID).Indices[idxInfo.ID].FMSketch)
 }
 
+func TestIndexJoinInnerRowCountUpperBound(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+
+	testKit.MustExec("use test")
+	testKit.MustExec("drop table if exists t")
+	testKit.MustExec("create table t(a int, b int, index idx(b))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	is := dom.InfoSchema()
+	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tb.Meta()
+
+	// Mock the stats:
+	// The two columns are the same.
+	// From 0 to 499, each value has 1000 rows. Therefore, NDV is 500 and total row count is 500000.
+	mockStatsTbl := mockStatsTable(tblInfo, 500000)
+	colValues, err := generateIntDatum(1, 500)
+	require.NoError(t, err)
+	for i := 1; i <= 2; i++ {
+		mockStatsTbl.Columns[int64(i)] = &statistics.Column{
+			Histogram:         *mockStatsHistogram(int64(i), colValues, 1000, types.NewFieldType(mysql.TypeLonglong)),
+			Info:              tblInfo.Columns[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	generateMapsForMockStatsTbl(mockStatsTbl)
+	stat := h.GetTableStats(tblInfo)
+	stat.HistColl = mockStatsTbl.HistColl
+
+	query := "explain format = 'brief' " +
+		"select /*+ inl_join(t2) */ * from (select * from t where t.a < 1) as t1 join t t2 where t2.a = 0 and t1.a = t2.b"
+
+	testKit.MustQuery(query).Check(testkit.Rows(
+		"IndexJoin 1000000.00 root  inner join, inner:IndexLookUp, outer key:test.t.a, inner key:test.t.b, equal cond:eq(test.t.a, test.t.b)",
+		"├─TableReader(Build) 1000.00 root  data:Selection",
+		"│ └─Selection 1000.00 cop[tikv]  lt(test.t.a, 1), not(isnull(test.t.a))",
+		"│   └─TableFullScan 500000.00 cop[tikv] table:t keep order:false, stats:pseudo",
+		"└─IndexLookUp(Probe) 1000000.00 root  ",
+		"  ├─Selection(Build) 500000000.00 cop[tikv]  not(isnull(test.t.b))",
+		"  │ └─IndexRangeScan 500000000.00 cop[tikv] table:t2, index:idx(b) range: decided by [eq(test.t.b, test.t.a)], keep order:false, stats:pseudo",
+		"  └─Selection(Probe) 1000000.00 cop[tikv]  eq(test.t.a, 0)",
+		"    └─TableRowIDScan 500000000.00 cop[tikv] table:t2 keep order:false, stats:pseudo",
+	))
+
+	testKit.MustExec("set @@tidb_opt_fix_control = '44855:ON'")
+	testKit.MustQuery(query).Check(testkit.Rows(
+		"IndexJoin 1000000.00 root  inner join, inner:IndexLookUp, outer key:test.t.a, inner key:test.t.b, equal cond:eq(test.t.a, test.t.b)",
+		"├─TableReader(Build) 1000.00 root  data:Selection",
+		"│ └─Selection 1000.00 cop[tikv]  lt(test.t.a, 1), not(isnull(test.t.a))",
+		"│   └─TableFullScan 500000.00 cop[tikv] table:t keep order:false, stats:pseudo",
+		"└─IndexLookUp(Probe) 1000000.00 root  ",
+		"  ├─Selection(Build) 1000000.00 cop[tikv]  not(isnull(test.t.b))",
+		"  │ └─IndexRangeScan 1000000.00 cop[tikv] table:t2, index:idx(b) range: decided by [eq(test.t.b, test.t.a)], keep order:false, stats:pseudo",
+		"  └─Selection(Probe) 1000000.00 cop[tikv]  eq(test.t.a, 0)",
+		"    └─TableRowIDScan 1000000.00 cop[tikv] table:t2 keep order:false, stats:pseudo",
+	))
+}
+
+func TestOrderingIdxSelectivityThreshold(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	sc := &stmtctx.StatementContext{TimeZone: time.UTC}
+
+	testKit.MustExec("use test")
+	testKit.MustExec("drop table if exists t")
+	testKit.MustExec("create table t(a int primary key , b int, c int, index ib(b), index ic(c))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	is := dom.InfoSchema()
+	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tb.Meta()
+
+	// Mock the stats:
+	// total row count 100000
+	// column a: PK, from 0 to 100000, NDV 100000
+	// column b, c: from 0 to 10000, each value has 10 rows, NDV 10000
+	// indexes are created on (b), (c) respectively
+	mockStatsTbl := mockStatsTable(tblInfo, 100000)
+	pkColValues, err := generateIntDatum(1, 100000)
+	require.NoError(t, err)
+	mockStatsTbl.Columns[1] = &statistics.Column{
+		Histogram:         *mockStatsHistogram(1, pkColValues, 1, types.NewFieldType(mysql.TypeLonglong)),
+		Info:              tblInfo.Columns[0],
+		StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+		StatsVer:          2,
+	}
+	colValues, err := generateIntDatum(1, 10000)
+	require.NoError(t, err)
+	idxValues := make([]types.Datum, 0)
+	for _, val := range colValues {
+		b, err := codec.EncodeKey(sc, nil, val)
+		require.NoError(t, err)
+		idxValues = append(idxValues, types.NewBytesDatum(b))
+	}
+
+	for i := 2; i <= 3; i++ {
+		mockStatsTbl.Columns[int64(i)] = &statistics.Column{
+			Histogram:         *mockStatsHistogram(int64(i), colValues, 10, types.NewFieldType(mysql.TypeLonglong)),
+			Info:              tblInfo.Columns[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		mockStatsTbl.Indices[int64(i)] = &statistics.Index{
+			Histogram:         *mockStatsHistogram(int64(i), idxValues, 10, types.NewFieldType(mysql.TypeBlob)),
+			Info:              tblInfo.Indices[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	generateMapsForMockStatsTbl(mockStatsTbl)
+	stat := h.GetTableStats(tblInfo)
+	stat.HistColl = mockStatsTbl.HistColl
+
+	var (
+		input  []string
+		output []struct {
+			Query  string
+			Result []string
+		}
+	)
+	integrationSuiteData := statistics.GetIntegrationSuiteData()
+	integrationSuiteData.LoadTestCases(t, &input, &output)
+	for i := 0; i < len(input); i++ {
+		testdata.OnRecord(func() {
+			output[i].Query = input[i]
+		})
+		if !strings.HasPrefix(input[i], "explain") {
+			testKit.MustExec(input[i])
+			continue
+		}
+		testdata.OnRecord(func() {
+			output[i].Result = testdata.ConvertRowsToStrings(testKit.MustQuery(input[i]).Rows())
+		})
+		testKit.MustQuery(input[i]).Check(testkit.Rows(output[i].Result...))
+	}
+}
+
 func TestIssue44369(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	h := dom.StatsHandle()
@@ -652,83 +906,4 @@ func TestIssue44369(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	tk.MustExec("alter table t rename column b to bb;")
 	tk.MustExec("select * from t where a = 10 and bb > 20;")
-}
-
-func TestGlobalIndexStatistics(t *testing.T) {
-	defer config.RestoreFunc()()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.EnableGlobalIndex = true
-	})
-
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	h := dom.StatsHandle()
-	originLease := h.Lease()
-	defer h.SetLease(originLease)
-	h.SetLease(time.Millisecond)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
-	for i, version := range []string{"1", "2"} {
-		tk.MustExec("set @@session.tidb_analyze_version = " + version)
-
-		// analyze table t
-		tk.MustExec("drop table if exists t")
-		if i != 0 {
-			require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		}
-		tk.MustExec("CREATE TABLE t ( a int, b int, c int default 0, key(a) )" +
-			"PARTITION BY RANGE (a) (" +
-			"PARTITION p0 VALUES LESS THAN (10)," +
-			"PARTITION p1 VALUES LESS THAN (20)," +
-			"PARTITION p2 VALUES LESS THAN (30)," +
-			"PARTITION p3 VALUES LESS THAN (40))")
-		require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		tk.MustExec("insert into t(a,b) values (1,1), (2,2), (3,3), (15,15), (25,25), (35,35)")
-		tk.MustExec("ALTER TABLE t ADD UNIQUE INDEX idx(b)")
-		require.Nil(t, h.DumpStatsDeltaToKV(handle.DumpAll))
-		tk.MustExec("analyze table t")
-		require.Nil(t, h.Update(dom.InfoSchema()))
-		tk.MustQuery("SELECT b FROM t use index(idx) WHERE b < 16 ORDER BY b").
-			Check(testkit.Rows("1", "2", "3", "15"))
-		tk.MustQuery("EXPLAIN SELECT b FROM t use index(idx) WHERE b < 16 ORDER BY b").
-			Check(testkit.Rows("IndexReader_12 4.00 root partition:all index:IndexRangeScan_11",
-				"└─IndexRangeScan_11 4.00 cop[tikv] table:t, index:idx(b) range:[-inf,16), keep order:true"))
-
-		// analyze table t index idx
-		tk.MustExec("drop table if exists t")
-		require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		tk.MustExec("CREATE TABLE t ( a int, b int, c int default 0, primary key(b, a) clustered )" +
-			"PARTITION BY RANGE (a) (" +
-			"PARTITION p0 VALUES LESS THAN (10)," +
-			"PARTITION p1 VALUES LESS THAN (20)," +
-			"PARTITION p2 VALUES LESS THAN (30)," +
-			"PARTITION p3 VALUES LESS THAN (40));")
-		require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		tk.MustExec("insert into t(a,b) values (1,1), (2,2), (3,3), (15,15), (25,25), (35,35)")
-		tk.MustExec("ALTER TABLE t ADD UNIQUE INDEX idx(b);")
-		require.Nil(t, h.DumpStatsDeltaToKV(handle.DumpAll))
-		tk.MustExec("analyze table t index idx")
-		require.Nil(t, h.Update(dom.InfoSchema()))
-		rows := tk.MustQuery("EXPLAIN SELECT b FROM t use index(idx) WHERE b < 16 ORDER BY b;").Rows()
-		require.Equal(t, "4.00", rows[0][1])
-
-		// analyze table t index
-		tk.MustExec("drop table if exists t")
-		require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		tk.MustExec("CREATE TABLE t ( a int, b int, c int default 0, primary key(b, a) clustered )" +
-			"PARTITION BY RANGE (a) (" +
-			"PARTITION p0 VALUES LESS THAN (10)," +
-			"PARTITION p1 VALUES LESS THAN (20)," +
-			"PARTITION p2 VALUES LESS THAN (30)," +
-			"PARTITION p3 VALUES LESS THAN (40));")
-		require.Nil(t, h.HandleDDLEvent(<-h.DDLEventCh()))
-		tk.MustExec("insert into t(a,b) values (1,1), (2,2), (3,3), (15,15), (25,25), (35,35)")
-		tk.MustExec("ALTER TABLE t ADD UNIQUE INDEX idx(b);")
-		require.Nil(t, h.DumpStatsDeltaToKV(handle.DumpAll))
-		tk.MustExec("analyze table t index")
-		require.Nil(t, h.Update(dom.InfoSchema()))
-		tk.MustQuery("EXPLAIN SELECT b FROM t use index(idx) WHERE b < 16 ORDER BY b;").
-			Check(testkit.Rows("IndexReader_12 4.00 root partition:all index:IndexRangeScan_11",
-				"└─IndexRangeScan_11 4.00 cop[tikv] table:t, index:idx(b) range:[-inf,16), keep order:true"))
-	}
 }

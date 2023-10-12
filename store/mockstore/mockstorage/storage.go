@@ -113,13 +113,8 @@ func (s *mockStorage) GetLockWaits() ([]*deadlockpb.WaitForEntry, error) {
 }
 
 func (s *mockStorage) Close() error {
-	select {
-	case <-s.KVStore.Closed():
-		return nil
-	default:
-		s.Store.Close()
-		return s.KVStore.Close()
-	}
+	s.Store.Close()
+	return s.KVStore.Close()
 }
 
 func (s *mockStorage) GetCodec() tikv.Codec {

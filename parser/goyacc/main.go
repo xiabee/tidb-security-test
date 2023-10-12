@@ -132,16 +132,17 @@ import (
 	"go/scanner"
 	"go/token"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 
 	"github.com/cznic/mathutil"
 	"github.com/cznic/sortutil"
 	"github.com/cznic/strutil"
+	"golang.org/x/exp/slices"
 	parser "modernc.org/parser/yacc"
 	"modernc.org/y"
 )
@@ -298,7 +299,7 @@ func main1(in string) (err error) {
 
 	var xerrors []byte
 	if nm := *oXErrors; nm != "" {
-		b, err1 := os.ReadFile(nm)
+		b, err1 := ioutil.ReadFile(nm)
 		if err1 != nil {
 			return err1
 		}

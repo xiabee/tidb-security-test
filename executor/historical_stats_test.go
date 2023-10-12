@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/statistics/handle"
-	"github.com/pingcap/tidb/statistics/handle/globalstats"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -212,7 +211,7 @@ func TestAssertHistoricalStatsAfterAlterTable(t *testing.T) {
 
 	time.Sleep(1 * time.Second)
 	snapshot := oracle.GoTimeToTS(time.Now())
-	jsTable, _, err := h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
+	jsTable, err := h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, jsTable)
 	require.NotEqual(t, jsTable.Version, uint64(0))
@@ -222,7 +221,7 @@ func TestAssertHistoricalStatsAfterAlterTable(t *testing.T) {
 	tk.MustExec("alter table t drop column b")
 	h.GCStats(is, 0)
 	snapshot = oracle.GoTimeToTS(time.Now())
-	jsTable, _, err = h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
+	jsTable, err = h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, jsTable)
 	require.Equal(t, jsTable.Version, originVersion)
@@ -231,7 +230,7 @@ func TestAssertHistoricalStatsAfterAlterTable(t *testing.T) {
 	tk.MustExec("alter table t drop index idx")
 	h.GCStats(is, 0)
 	snapshot = oracle.GoTimeToTS(time.Now())
-	jsTable, _, err = h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
+	jsTable, err = h.DumpHistoricalStatsBySnapshot("test", tableInfo.Meta(), snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, jsTable)
 	require.Equal(t, jsTable.Version, originVersion)
@@ -339,12 +338,12 @@ PARTITION p0 VALUES LESS THAN (6)
 
 	time.Sleep(1 * time.Second)
 	snapshot := oracle.GoTimeToTS(time.Now())
-	jsTable, _, err := h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), snapshot)
+	jsTable, err := h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, jsTable)
 	// only has p0 stats
 	require.NotNil(t, jsTable.Partitions["p0"])
-	require.Nil(t, jsTable.Partitions[globalstats.TiDBGlobalStats])
+	require.Nil(t, jsTable.Partitions["global"])
 
 	// change static to dynamic then assert
 	tk.MustExec("set @@tidb_partition_prune_mode='dynamic'")
@@ -361,12 +360,12 @@ PARTITION p0 VALUES LESS THAN (6)
 	require.NoError(t, err)
 	time.Sleep(1 * time.Second)
 	snapshot = oracle.GoTimeToTS(time.Now())
-	jsTable, _, err = h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), snapshot)
+	jsTable, err = h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), snapshot)
 	require.NoError(t, err)
 	require.NotNil(t, jsTable)
 	// has both global and p0 stats
 	require.NotNil(t, jsTable.Partitions["p0"])
-	require.NotNil(t, jsTable.Partitions[globalstats.TiDBGlobalStats])
+	require.NotNil(t, jsTable.Partitions["global"])
 }
 
 func TestDumpHistoricalStatsFallback(t *testing.T) {
@@ -393,7 +392,7 @@ PARTITION p0 VALUES LESS THAN (6)
 	require.Equal(t, tblID, int64(-1))
 	tk.MustExec("set global tidb_enable_historical_stats = 1")
 	h := dom.StatsHandle()
-	jt, _, err := h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), oracle.GoTimeToTS(time.Now()))
+	jt, err := h.DumpHistoricalStatsBySnapshot("test", tbl.Meta(), oracle.GoTimeToTS(time.Now()))
 	require.NoError(t, err)
 	require.NotNil(t, jt)
 	require.False(t, jt.IsHistoricalStats)

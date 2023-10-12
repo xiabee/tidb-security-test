@@ -21,13 +21,11 @@
 set -euo pipefail
 
 before_checksum=`find . -type f \( -name *.bazel -o -name *.bzl \) -exec md5sum {} \;| sort -k 2`
-make bazel_ci_prepare
+make bazel_prepare
 after_checksum=`find . -type f \( -name *.bazel -o -name *.bzl \) -exec md5sum {} \;| sort -k 2`
 if [ "$before_checksum" != "$after_checksum" ]
 then
-  echo "Please run \`make bazel_prepare\` to update \`.bazel\` files, or just apply the following git diff (run \`git apply -\` and paste following contents):"
-  git diff
-  echo -e "\n\nChecksum diff:"
-  diff <(echo "$before_checksum") <(echo "$after_checksum") || true
+  echo "Please run \`make bazel_prepare\` to update \`.bazel\` files"
+  diff <(echo "$before_checksum") <(echo "$after_checksum")
   exit 1
 fi

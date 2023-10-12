@@ -15,17 +15,17 @@
 package ddl_test
 
 import (
-	"cmp"
 	"context"
-	"slices"
 	"testing"
 
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 )
 
 func TestGetDDLJobs(t *testing.T) {
@@ -50,17 +50,18 @@ func TestGetDDLJobs(t *testing.T) {
 		err := addDDLJobs(sess, txn, jobs[i])
 		require.NoError(t, err)
 
-		currJobs, err := ddl.GetAllDDLJobs(sess)
+		currJobs, err := ddl.GetAllDDLJobs(sess, meta.NewMeta(txn))
 		require.NoError(t, err)
 		require.Len(t, currJobs, i+1)
 
 		currJobs2 = currJobs2[:0]
 		err = ddl.IterAllDDLJobs(sess, txn, func(jobs []*model.Job) (b bool, e error) {
 			for _, job := range jobs {
-				if !job.NotStarted() {
+				if job.NotStarted() {
+					currJobs2 = append(currJobs2, job)
+				} else {
 					return true, nil
 				}
-				currJobs2 = append(currJobs2, job)
 			}
 			return false, nil
 		})
@@ -68,7 +69,7 @@ func TestGetDDLJobs(t *testing.T) {
 		require.Len(t, currJobs2, i+1)
 	}
 
-	currJobs, err := ddl.GetAllDDLJobs(sess)
+	currJobs, err := ddl.GetAllDDLJobs(sess, meta.NewMeta(txn))
 	require.NoError(t, err)
 
 	for i, job := range jobs {
@@ -101,12 +102,12 @@ func TestGetDDLJobsIsSort(t *testing.T) {
 	// insert add index jobs to AddIndexJobListKey queue
 	enQueueDDLJobs(t, sess, txn, model.ActionAddIndex, 5, 10)
 
-	currJobs, err := ddl.GetAllDDLJobs(sess)
+	currJobs, err := ddl.GetAllDDLJobs(sess, meta.NewMeta(txn))
 	require.NoError(t, err)
 	require.Len(t, currJobs, 15)
 
-	isSort := slices.IsSortedFunc(currJobs, func(i, j *model.Job) int {
-		return cmp.Compare(i.ID, j.ID)
+	isSort := slices.IsSortedFunc(currJobs, func(i, j *model.Job) bool {
+		return i.ID <= j.ID
 	})
 	require.True(t, isSort)
 

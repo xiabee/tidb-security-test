@@ -51,8 +51,6 @@ var (
 	ErrCantDropColWithIndex = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "drop column with index"), nil))
 	// ErrCantDropColWithAutoInc means can't drop column with auto_increment
 	ErrCantDropColWithAutoInc = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "can't remove column with auto_increment when @@tidb_allow_remove_auto_inc disabled"), nil))
-	// ErrCantDropColWithCheckConstraint means can't drop column with check constraint
-	ErrCantDropColWithCheckConstraint = ClassDDL.NewStd(mysql.ErrDependentByCheckConstraint)
 	// ErrUnsupportedAddColumn means add columns is unsupported
 	ErrUnsupportedAddColumn = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "add column"), nil))
 	// ErrUnsupportedModifyColumn means modify columns is unsupoorted
@@ -241,8 +239,6 @@ var (
 	ErrRangeNotIncreasing = ClassDDL.NewStd(mysql.ErrRangeNotIncreasing)
 	// ErrPartitionMaxvalue returns maxvalue can only be used in last partition definition.
 	ErrPartitionMaxvalue = ClassDDL.NewStd(mysql.ErrPartitionMaxvalue)
-	// ErrMaxvalueInValuesIn returns maxvalue cannot be used in values in.
-	ErrMaxvalueInValuesIn = ClassDDL.NewStd(mysql.ErrMaxvalueInValuesIn)
 	// ErrDropLastPartition returns cannot remove all partitions, use drop table instead.
 	ErrDropLastPartition = ClassDDL.NewStd(mysql.ErrDropLastPartition)
 	// ErrTooManyPartitions returns too many partitions were defined.
@@ -448,42 +444,6 @@ var (
 
 	// ErrNotSupportedYet returns when tidb does not support this feature.
 	ErrNotSupportedYet = ClassDDL.NewStd(mysql.ErrNotSupportedYet)
-
-	// ErrColumnCheckConstraintReferOther is returned when create column check constraint referring other column.
-	ErrColumnCheckConstraintReferOther = ClassDDL.NewStd(mysql.ErrColumnCheckConstraintReferencesOtherColumn)
-	// ErrTableCheckConstraintReferUnknown is returned when create table check constraint referring non-existing column.
-	ErrTableCheckConstraintReferUnknown = ClassDDL.NewStd(mysql.ErrTableCheckConstraintReferUnknown)
-	// ErrConstraintNotFound is returned for dropping a non-existent constraint.
-	ErrConstraintNotFound = ClassDDL.NewStd(mysql.ErrConstraintNotFound)
-	// ErrCheckConstraintIsViolated is returned for violating an existent check constraint.
-	ErrCheckConstraintIsViolated = ClassDDL.NewStd(mysql.ErrCheckConstraintViolated)
-	// ErrCheckConstraintNamedFuncIsNotAllowed is returned for not allowed function with name.
-	ErrCheckConstraintNamedFuncIsNotAllowed = ClassDDL.NewStd(mysql.ErrCheckConstraintNamedFunctionIsNotAllowed)
-	// ErrCheckConstraintFuncIsNotAllowed is returned for not allowed function.
-	ErrCheckConstraintFuncIsNotAllowed = ClassDDL.NewStd(mysql.ErrCheckConstraintFunctionIsNotAllowed)
-	// ErrCheckConstraintVariables is returned for referring user or system variables.
-	ErrCheckConstraintVariables = ClassDDL.NewStd(mysql.ErrCheckConstraintVariables)
-	// ErrCheckConstraintRefersAutoIncrementColumn is returned for referring auto-increment columns.
-	ErrCheckConstraintRefersAutoIncrementColumn = ClassDDL.NewStd(mysql.ErrCheckConstraintRefersAutoIncrementColumn)
-	// ErrCheckConstraintUsingFKReferActionColumn is returned for referring foreign key columns.
-	ErrCheckConstraintUsingFKReferActionColumn = ClassDDL.NewStd(mysql.ErrCheckConstraintClauseUsingFKReferActionColumn)
-	// ErrNonBooleanExprForCheckConstraint is returned for non bool expression.
-	ErrNonBooleanExprForCheckConstraint = ClassDDL.NewStd(mysql.ErrNonBooleanExprForCheckConstraint)
-	// ErrWarnDeprecatedIntegerDisplayWidth share the same code 1681, and it will be returned when length is specified in integer.
-	ErrWarnDeprecatedIntegerDisplayWidth = ClassDDL.NewStdErr(
-		mysql.ErrWarnDeprecatedSyntaxNoReplacement,
-		parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrWarnDeprecatedSyntaxNoReplacement].Raw,
-			"Integer display width", "",
-		), nil),
-	)
-	// ErrWarnDeprecatedZerofill is for when the deprectated zerofill attribute is used
-	ErrWarnDeprecatedZerofill = ClassDDL.NewStdErr(
-		mysql.ErrWarnDeprecatedSyntaxNoReplacement,
-		parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrWarnDeprecatedSyntaxNoReplacement].Raw,
-			"The ZEROFILL attribute",
-			" Use the LPAD function to zero-pad numbers, or store the formatted numbers in a CHAR column.",
-		), nil),
-	)
 )
 
 // ReorgRetryableErrCodes is the error codes that are retryable for reorganization.

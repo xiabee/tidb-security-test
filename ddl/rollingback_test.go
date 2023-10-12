@@ -17,7 +17,6 @@ package ddl_test
 import (
 	"context"
 	"strconv"
-	"sync/atomic"
 	"testing"
 
 	"github.com/pingcap/failpoint"
@@ -55,7 +54,7 @@ func TestCancelAddIndexJobError(t *testing.T) {
 	hook := &callback.TestDDLCallback{Do: dom}
 	var (
 		checkErr error
-		jobID    atomic.Int64
+		jobID    int64
 		res      sqlexec.RecordSet
 	)
 	onJobUpdatedExportedFunc := func(job *model.Job) {
@@ -66,7 +65,7 @@ func TestCancelAddIndexJobError(t *testing.T) {
 			return
 		}
 		if job.SchemaState == model.StateDeleteOnly {
-			jobID.Store(job.ID)
+			jobID = job.ID
 			res, checkErr = tk1.Exec("admin cancel ddl jobs " + strconv.Itoa(int(job.ID)))
 			// drain the result set here, otherwise the cancel action won't take effect immediately.
 			chk := res.NewChunk(nil)
@@ -88,7 +87,7 @@ func TestCancelAddIndexJobError(t *testing.T) {
 	require.EqualError(t, err, "[ddl:-1]rollback DDL job error count exceed the limit 3, cancelled it now")
 
 	// Verification of the history job state.
-	job, err := ddl.GetHistoryJobByID(tk.Session(), jobID.Load())
+	job, err := ddl.GetHistoryJobByID(tk.Session(), jobID)
 	require.NoError(t, err)
 	require.Equal(t, int64(4), job.ErrorCount)
 	require.EqualError(t, job.Error, "[ddl:-1]rollback DDL job error count exceed the limit 3, cancelled it now")

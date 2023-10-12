@@ -21,38 +21,18 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/auth"
-	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/timeutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"github.com/pingcap/tipb/go-tipb"
 )
-
-func copHandlerCtx(ctx context.Context, req *coprocessor.Request) context.Context {
-	source := req.Context.SourceStmt
-	if source == nil {
-		return ctx
-	}
-
-	traceInfo := &model.TraceInfo{
-		ConnectionID: source.ConnectionId,
-		SessionAlias: source.SessionAlias,
-	}
-
-	ctx = tracing.ContextWithTraceInfo(ctx, traceInfo)
-	ctx = logutil.WithTraceFields(ctx, traceInfo)
-	return ctx
-}
 
 // CoprocessorDAGHandler uses to handle cop dag request.
 type CoprocessorDAGHandler struct {
@@ -69,8 +49,6 @@ func NewCoprocessorDAGHandler(sctx sessionctx.Context) *CoprocessorDAGHandler {
 
 // HandleRequest handles the coprocessor request.
 func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coprocessor.Request) *coprocessor.Response {
-	ctx = copHandlerCtx(ctx, req)
-
 	e, err := h.buildDAGExecutor(req)
 	if err != nil {
 		return h.buildErrorResponse(err)
@@ -81,13 +59,13 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 		return h.buildErrorResponse(err)
 	}
 
-	chk := exec.TryNewCacheChunk(e)
-	tps := e.Base().RetFieldTypes()
+	chk := tryNewCacheChunk(e)
+	tps := e.base().retFieldTypes
 	var totalChunks, partChunks []tipb.Chunk
 	memTracker := h.sctx.GetSessionVars().StmtCtx.MemTracker
 	for {
 		chk.Reset()
-		err = exec.Next(ctx, e, chk)
+		err = Next(ctx, e, chk)
 		if err != nil {
 			return h.buildErrorResponse(err)
 		}
@@ -111,9 +89,6 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 
 // HandleStreamRequest handles the coprocessor stream request.
 func (h *CoprocessorDAGHandler) HandleStreamRequest(ctx context.Context, req *coprocessor.Request, stream tikvpb.Tikv_CoprocessorStreamServer) error {
-	ctx = copHandlerCtx(ctx, req)
-	logutil.Logger(ctx).Debug("handle coprocessor stream request")
-
 	e, err := h.buildDAGExecutor(req)
 	if err != nil {
 		return stream.Send(h.buildErrorResponse(err))
@@ -124,11 +99,11 @@ func (h *CoprocessorDAGHandler) HandleStreamRequest(ctx context.Context, req *co
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
-	chk := exec.TryNewCacheChunk(e)
-	tps := e.Base().RetFieldTypes()
+	chk := tryNewCacheChunk(e)
+	tps := e.base().retFieldTypes
 	for {
 		chk.Reset()
-		if err = exec.Next(ctx, e, chk); err != nil {
+		if err = Next(ctx, e, chk); err != nil {
 			return stream.Send(h.buildErrorResponse(err))
 		}
 		if chk.NumRows() == 0 {
@@ -155,7 +130,7 @@ func (h *CoprocessorDAGHandler) buildResponseAndSendToStream(chk *chunk.Chunk, t
 	return nil
 }
 
-func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (exec.Executor, error) {
+func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (Executor, error) {
 	if req.GetTp() != kv.ReqTypeDAG {
 		return nil, errors.Errorf("unsupported request type %d", req.GetTp())
 	}
@@ -252,7 +227,7 @@ func (h *CoprocessorDAGHandler) buildStreamResponse(chunk *tipb.Chunk) *coproces
 	return resp
 }
 
-func (*CoprocessorDAGHandler) buildErrorResponse(err error) *coprocessor.Response {
+func (h *CoprocessorDAGHandler) buildErrorResponse(err error) *coprocessor.Response {
 	return &coprocessor.Response{
 		OtherError: err.Error(),
 	}
@@ -292,7 +267,7 @@ func (h *CoprocessorDAGHandler) encodeDefault(chk *chunk.Chunk, tps []*types.Fie
 
 const rowsPerChunk = 64
 
-func (*CoprocessorDAGHandler) appendRow(chunks []tipb.Chunk, data []byte, rowCnt int) []tipb.Chunk {
+func (h *CoprocessorDAGHandler) appendRow(chunks []tipb.Chunk, data []byte, rowCnt int) []tipb.Chunk {
 	if rowCnt%rowsPerChunk == 0 {
 		chunks = append(chunks, tipb.Chunk{})
 	}

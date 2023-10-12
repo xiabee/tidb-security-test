@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
-	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // TrackMemWhenExceeds is the threshold when memory usage needs to be tracked.

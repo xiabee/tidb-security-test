@@ -34,8 +34,6 @@ import (
 	"github.com/pingcap/tidb/parser/format"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 )
@@ -66,23 +64,22 @@ func DBFromConfig(ctx context.Context, dsn config.DBStore) (*sql.DB, error) {
 	}
 
 	vars := map[string]string{
-		variable.TiDBBuildStatsConcurrency:      strconv.Itoa(dsn.BuildStatsConcurrency),
-		variable.TiDBDistSQLScanConcurrency:     strconv.Itoa(dsn.DistSQLScanConcurrency),
-		variable.TiDBIndexSerialScanConcurrency: strconv.Itoa(dsn.IndexSerialScanConcurrency),
-		variable.TiDBChecksumTableConcurrency:   strconv.Itoa(dsn.ChecksumTableConcurrency),
+		"tidb_build_stats_concurrency":       strconv.Itoa(dsn.BuildStatsConcurrency),
+		"tidb_distsql_scan_concurrency":      strconv.Itoa(dsn.DistSQLScanConcurrency),
+		"tidb_index_serial_scan_concurrency": strconv.Itoa(dsn.IndexSerialScanConcurrency),
+		"tidb_checksum_table_concurrency":    strconv.Itoa(dsn.ChecksumTableConcurrency),
 
 		// after https://github.com/pingcap/tidb/pull/17102 merge,
 		// we need set session to true for insert auto_random value in TiDB Backend
-		variable.TiDBAllowAutoRandExplicitInsert: "1",
+		"allow_auto_random_explicit_insert": "1",
 		// allow use _tidb_rowid in sql statement
-		variable.TiDBOptWriteRowID: "1",
+		"tidb_opt_write_row_id": "1",
 		// always set auto-commit to ON
-		variable.AutoCommit: "1",
+		"autocommit": "1",
 		// always set transaction mode to optimistic
-		variable.TiDBTxnMode: "optimistic",
+		"tidb_txn_mode": "optimistic",
 		// disable foreign key checks
-		variable.ForeignKeyChecks:              "0",
-		variable.TiDBExplicitRequestSourceType: util.ExplicitTypeLightning,
+		"foreign_key_checks": "0",
 	}
 
 	if dsn.Vars != nil {

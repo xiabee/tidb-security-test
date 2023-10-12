@@ -147,6 +147,15 @@ func TestVerifyCheckpoint(t *testing.T) {
 		"mydumper.data-source-dir": func(cfg *config.Config) {
 			cfg.Mydumper.SourceDir = "/tmp/test"
 		},
+		"tidb.host": func(cfg *config.Config) {
+			cfg.TiDB.Host = "192.168.0.1"
+		},
+		"tidb.port": func(cfg *config.Config) {
+			cfg.TiDB.Port = 5000
+		},
+		"tidb.pd-addr": func(cfg *config.Config) {
+			cfg.TiDB.PdAddr = "127.0.0.1:3379"
+		},
 		"version": func(cfg *config.Config) {
 			build.ReleaseVersion = "some newer version"
 		},
@@ -167,12 +176,6 @@ func TestVerifyCheckpoint(t *testing.T) {
 			require.Regexp(t, fmt.Sprintf("config '%s' value '.*' different from checkpoint value .*", conf), err.Error())
 		}
 	}
-
-	// changing TiDB IP is OK
-	cfg := newCfg()
-	cfg.TiDB.Host = "192.168.0.1"
-	err = verifyCheckpoint(cfg, taskCp)
-	require.NoError(t, err)
 
 	for conf, fn := range adjustFuncs {
 		if conf == "tikv-importer.backend" {
@@ -221,7 +224,7 @@ func TestPreCheckFailed(t *testing.T) {
 		dbMetas:          make([]*mydump.MDDatabaseMeta, 0),
 	}
 	cpdb := panicCheckpointDB{}
-	theCheckBuilder := NewPrecheckItemBuilder(cfg, make([]*mydump.MDDatabaseMeta, 0), preInfoGetter, cpdb, nil)
+	theCheckBuilder := NewPrecheckItemBuilder(cfg, make([]*mydump.MDDatabaseMeta, 0), preInfoGetter, cpdb)
 	ctl := &Controller{
 		cfg:                 cfg,
 		saveCpCh:            make(chan saveCp),

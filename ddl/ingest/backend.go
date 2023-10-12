@@ -44,15 +44,13 @@ type BackendCtx interface {
 
 	CollectRemoteDuplicateRows(indexID int64, tbl table.Table) error
 	FinishImport(indexID int64, unique bool, tbl table.Table) error
-	ResetWorkers(jobID int64)
+	ResetWorkers(jobID, indexID int64)
 	Flush(indexID int64, mode FlushMode) (flushed, imported bool, err error)
 	Done() bool
 	SetDone()
 
 	AttachCheckpointManager(*CheckpointManager)
 	GetCheckpointManager() *CheckpointManager
-
-	GetLocalBackend() *local.Backend
 }
 
 // FlushMode is used to control how to flush.
@@ -90,7 +88,7 @@ type litBackendCtx struct {
 
 // CollectRemoteDuplicateRows collects duplicate rows from remote TiKV.
 func (bc *litBackendCtx) CollectRemoteDuplicateRows(indexID int64, tbl table.Table) error {
-	errorMgr := errormanager.New(nil, bc.cfg, log.Logger{Logger: logutil.Logger(bc.ctx)})
+	errorMgr := errormanager.New(nil, bc.cfg, log.Logger{Logger: logutil.BgLogger()})
 	// backend must be a local backend.
 	// todo: when we can separate local backend completely from tidb backend, will remove this cast.
 	//nolint:forcetypeassert
@@ -101,11 +99,11 @@ func (bc *litBackendCtx) CollectRemoteDuplicateRows(indexID int64, tbl table.Tab
 		IndexID: indexID,
 	})
 	if err != nil {
-		logutil.Logger(bc.ctx).Error(LitInfoRemoteDupCheck, zap.Error(err),
+		logutil.BgLogger().Error(LitInfoRemoteDupCheck, zap.Error(err),
 			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
 		return err
 	} else if hasDupe {
-		logutil.Logger(bc.ctx).Error(LitErrRemoteDupExistErr,
+		logutil.BgLogger().Error(LitErrRemoteDupExistErr,
 			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
 		return tikv.ErrKeyExists
 	}
@@ -131,7 +129,7 @@ func (bc *litBackendCtx) FinishImport(indexID int64, unique bool, tbl table.Tabl
 
 	// Check remote duplicate value for the index.
 	if unique {
-		errorMgr := errormanager.New(nil, bc.cfg, log.Logger{Logger: logutil.Logger(bc.ctx)})
+		errorMgr := errormanager.New(nil, bc.cfg, log.Logger{Logger: logutil.BgLogger()})
 		// backend must be a local backend.
 		// todo: when we can separate local backend completely from tidb backend, will remove this cast.
 		//nolint:forcetypeassert
@@ -142,11 +140,11 @@ func (bc *litBackendCtx) FinishImport(indexID int64, unique bool, tbl table.Tabl
 			IndexID: ei.indexID,
 		})
 		if err != nil {
-			logutil.Logger(bc.ctx).Error(LitInfoRemoteDupCheck, zap.Error(err),
+			logutil.BgLogger().Error(LitInfoRemoteDupCheck, zap.Error(err),
 				zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
 			return err
 		} else if hasDupe {
-			logutil.Logger(bc.ctx).Error(LitErrRemoteDupExistErr,
+			logutil.BgLogger().Error(LitErrRemoteDupExistErr,
 				zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
 			return tikv.ErrKeyExists
 		}
@@ -167,7 +165,7 @@ func acquireLock(ctx context.Context, se *concurrency.Session, key string) (*con
 func (bc *litBackendCtx) Flush(indexID int64, mode FlushMode) (flushed, imported bool, err error) {
 	ei, exist := bc.Load(indexID)
 	if !exist {
-		logutil.Logger(bc.ctx).Error(LitErrGetEngineFail, zap.Int64("index ID", indexID))
+		logutil.BgLogger().Error(LitErrGetEngineFail, zap.Int64("index ID", indexID))
 		return false, false, dbterror.ErrIngestFailed.FastGenByArgs("ingest engine not found")
 	}
 
@@ -200,37 +198,34 @@ func (bc *litBackendCtx) Flush(indexID int64, mode FlushMode) (flushed, imported
 		if err != nil {
 			return true, false, err
 		}
-		logutil.Logger(bc.ctx).Info("acquire distributed flush lock success", zap.Int64("jobID", bc.jobID))
+		logutil.BgLogger().Info("[ddl] acquire distributed flush lock success", zap.Int64("jobID", bc.jobID))
 		defer func() {
 			err = mu.Unlock(bc.ctx)
 			if err != nil {
-				logutil.Logger(bc.ctx).Warn("release distributed flush lock error", zap.Error(err), zap.Int64("jobID", bc.jobID))
+				logutil.BgLogger().Warn("[ddl] release distributed flush lock error", zap.Error(err), zap.Int64("jobID", bc.jobID))
 			} else {
-				logutil.Logger(bc.ctx).Info("release distributed flush lock success", zap.Int64("jobID", bc.jobID))
+				logutil.BgLogger().Info("[ddl] release distributed flush lock success", zap.Int64("jobID", bc.jobID))
 			}
 			err = se.Close()
 			if err != nil {
-				logutil.Logger(bc.ctx).Warn("close session error", zap.Error(err))
+				logutil.BgLogger().Warn("[ddl] close session error", zap.Error(err))
 			}
 		}()
 	}
 
-	logutil.Logger(bc.ctx).Info(LitInfoUnsafeImport, zap.Int64("index ID", indexID),
+	logutil.BgLogger().Info(LitInfoUnsafeImport, zap.Int64("index ID", indexID),
 		zap.String("usage info", bc.diskRoot.UsageInfo()))
 	err = bc.backend.UnsafeImportAndReset(bc.ctx, ei.uuid, int64(lightning.SplitRegionSize)*int64(lightning.MaxSplitRegionSizeRatio), int64(lightning.SplitRegionKeys))
 	if err != nil {
-		logutil.Logger(bc.ctx).Error(LitErrIngestDataErr, zap.Int64("index ID", indexID),
+		logutil.BgLogger().Error(LitErrIngestDataErr, zap.Int64("index ID", indexID),
 			zap.String("usage info", bc.diskRoot.UsageInfo()))
 		return true, false, err
 	}
 	return true, true, nil
 }
 
-// ForceSyncFlagForTest is a flag to force sync only for test.
-var ForceSyncFlagForTest = false
-
 func (bc *litBackendCtx) ShouldSync(mode FlushMode) (shouldFlush bool, shouldImport bool) {
-	if mode == FlushModeForceGlobal || ForceSyncFlagForTest {
+	if mode == FlushModeForceGlobal {
 		return true, true
 	}
 	if mode == FlushModeForceLocal {
@@ -265,9 +260,4 @@ func (bc *litBackendCtx) AttachCheckpointManager(mgr *CheckpointManager) {
 // GetCheckpointManager returns the checkpoint manager attached to the backend context.
 func (bc *litBackendCtx) GetCheckpointManager() *CheckpointManager {
 	return bc.checkpointMgr
-}
-
-// GetLocalBackend returns the local backend.
-func (bc *litBackendCtx) GetLocalBackend() *local.Backend {
-	return bc.backend
 }

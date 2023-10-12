@@ -16,9 +16,7 @@ package statistics
 
 import (
 	"hash"
-	"sync"
 
-	"github.com/dolthub/swiss"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
@@ -27,33 +25,21 @@ import (
 	"github.com/twmb/murmur3"
 )
 
-var murmur3Pool = sync.Pool{
-	New: func() any {
-		return murmur3.New64()
-	},
-}
-
-var fmSketchPool = sync.Pool{
-	New: func() any {
-		return &FMSketch{
-			hashset: swiss.NewMap[uint64, bool](uint32(128)),
-			maxSize: 0,
-		}
-	},
-}
-
 // FMSketch is used to count the number of distinct elements in a set.
 type FMSketch struct {
-	hashset *swiss.Map[uint64, bool]
-	mask    uint64
-	maxSize int
+	hashset  map[uint64]bool
+	mask     uint64
+	maxSize  int
+	hashFunc hash.Hash64
 }
 
 // NewFMSketch returns a new FM sketch.
 func NewFMSketch(maxSize int) *FMSketch {
-	result := fmSketchPool.Get().(*FMSketch)
-	result.maxSize = maxSize
-	return result
+	return &FMSketch{
+		hashset:  make(map[uint64]bool),
+		maxSize:  maxSize,
+		hashFunc: murmur3.New64(),
+	}
 }
 
 // Copy makes a copy for current FMSketch.
@@ -61,14 +47,16 @@ func (s *FMSketch) Copy() *FMSketch {
 	if s == nil {
 		return nil
 	}
-	result := NewFMSketch(s.maxSize)
-	s.hashset.Iter(func(key uint64, value bool) bool {
-		result.hashset.Put(key, value)
-		return false
-	})
-	result.mask = s.mask
-	result.maxSize = s.maxSize
-	return result
+	hashset := make(map[uint64]bool)
+	for key, value := range s.hashset {
+		hashset[key] = value
+	}
+	return &FMSketch{
+		hashset:  hashset,
+		mask:     s.mask,
+		maxSize:  s.maxSize,
+		hashFunc: murmur3.New64(),
+	}
 }
 
 // NDV returns the ndv of the sketch.
@@ -76,22 +64,21 @@ func (s *FMSketch) NDV() int64 {
 	if s == nil {
 		return 0
 	}
-	return int64(s.mask+1) * int64(s.hashset.Count())
+	return int64(s.mask+1) * int64(len(s.hashset))
 }
 
 func (s *FMSketch) insertHashValue(hashVal uint64) {
 	if (hashVal & s.mask) != 0 {
 		return
 	}
-	s.hashset.Put(hashVal, true)
-	if s.hashset.Count() > s.maxSize {
+	s.hashset[hashVal] = true
+	if len(s.hashset) > s.maxSize {
 		s.mask = s.mask*2 + 1
-		s.hashset.Iter(func(k uint64, _ bool) (stop bool) {
-			if (k & s.mask) != 0 {
-				s.hashset.Delete(k)
+		for key := range s.hashset {
+			if (key & s.mask) != 0 {
+				delete(s.hashset, key)
 			}
-			return false
-		})
+		}
 	}
 }
 
@@ -101,35 +88,31 @@ func (s *FMSketch) InsertValue(sc *stmtctx.StatementContext, value types.Datum) 
 	if err != nil {
 		return errors.Trace(err)
 	}
-	hashFunc := murmur3Pool.Get().(hash.Hash64)
-	hashFunc.Reset()
-	defer murmur3Pool.Put(hashFunc)
-	_, err = hashFunc.Write(bytes)
+	s.hashFunc.Reset()
+	_, err = s.hashFunc.Write(bytes)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	s.insertHashValue(hashFunc.Sum64())
+	s.insertHashValue(s.hashFunc.Sum64())
 	return nil
 }
 
 // InsertRowValue inserts multi-column values to the sketch.
 func (s *FMSketch) InsertRowValue(sc *stmtctx.StatementContext, values []types.Datum) error {
 	b := make([]byte, 0, 8)
-	hashFunc := murmur3Pool.Get().(hash.Hash64)
-	hashFunc.Reset()
-	defer murmur3Pool.Put(hashFunc)
+	s.hashFunc.Reset()
 	for _, v := range values {
 		b = b[:0]
 		b, err := codec.EncodeValue(sc, b, v)
 		if err != nil {
 			return err
 		}
-		_, err = hashFunc.Write(b)
+		_, err = s.hashFunc.Write(b)
 		if err != nil {
 			return err
 		}
 	}
-	s.insertHashValue(hashFunc.Sum64())
+	s.insertHashValue(s.hashFunc.Sum64())
 	return nil
 }
 
@@ -140,17 +123,15 @@ func (s *FMSketch) MergeFMSketch(rs *FMSketch) {
 	}
 	if s.mask < rs.mask {
 		s.mask = rs.mask
-		s.hashset.Iter(func(key uint64, _ bool) bool {
+		for key := range s.hashset {
 			if (key & s.mask) != 0 {
-				s.hashset.Delete(key)
+				delete(s.hashset, key)
 			}
-			return false
-		})
+		}
 	}
-	rs.hashset.Iter(func(key uint64, _ bool) bool {
+	for key := range rs.hashset {
 		s.insertHashValue(key)
-		return false
-	})
+	}
 }
 
 // FMSketchToProto converts FMSketch to its protobuf representation.
@@ -158,10 +139,9 @@ func FMSketchToProto(s *FMSketch) *tipb.FMSketch {
 	protoSketch := new(tipb.FMSketch)
 	if s != nil {
 		protoSketch.Mask = s.mask
-		s.hashset.Iter(func(val uint64, _ bool) bool {
+		for val := range s.hashset {
 			protoSketch.Hashset = append(protoSketch.Hashset, val)
-			return false
-		})
+		}
 	}
 	return protoSketch
 }
@@ -171,10 +151,12 @@ func FMSketchFromProto(protoSketch *tipb.FMSketch) *FMSketch {
 	if protoSketch == nil {
 		return nil
 	}
-	sketch := fmSketchPool.Get().(*FMSketch)
-	sketch.mask = protoSketch.Mask
+	sketch := &FMSketch{
+		hashset: make(map[uint64]bool, len(protoSketch.Hashset)),
+		mask:    protoSketch.Mask,
+	}
 	for _, val := range protoSketch.Hashset {
-		sketch.hashset.Put(val, true)
+		sketch.hashset[val] = true
 	}
 	return sketch
 }
@@ -206,32 +188,9 @@ func DecodeFMSketch(data []byte) (*FMSketch, error) {
 
 // MemoryUsage returns the total memory usage of a FMSketch.
 func (s *FMSketch) MemoryUsage() (sum int64) {
+	// In FMSketch, we will ignore the memory usage of `hashFunc`.
 	// As for the variables mask(uint64) and maxSize(int) each will consume 8 bytes. This is the origin of the constant 16.
 	// And for the variables hashset(map[uint64]bool), each element in map will consume 9 bytes(8[uint64] + 1[bool]).
-	sum = int64(16 + 9*s.hashset.Count())
+	sum = int64(16 + 9*len(s.hashset))
 	return
-}
-
-func (s *FMSketch) reset() {
-	// not use hashset.Clear, it will release all memory and Not conducive to memory reuse.
-	// the size of set is not more than 10000.
-	set := make([]uint64, 0, s.hashset.Count())
-	s.hashset.Iter(func(k uint64, v bool) (stop bool) {
-		set = append(set, k)
-		return false
-	})
-	for _, k := range set {
-		s.hashset.Delete(k)
-	}
-	s.mask = 0
-	s.maxSize = 0
-}
-
-// DestroyAndPutToPool resets the FMSketch and puts it to the pool.
-func (s *FMSketch) DestroyAndPutToPool() {
-	if s == nil {
-		return
-	}
-	s.reset()
-	fmSketchPool.Put(s)
 }

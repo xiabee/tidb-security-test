@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "column_filter.go",
         "compat.go",
+        "helper.go",
         "matchers.go",
         "parser.go",
         "table_filter.go",

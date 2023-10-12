@@ -41,9 +41,9 @@ const (
 	Pessimistic
 	// SnapshotTS is defined to set snapshot ts.
 	SnapshotTS
-	// ReplicaRead Set replica read
+	// Set replica read
 	ReplicaRead
-	// TaskID Set task ID
+	// Set task ID
 	TaskID
 	// InfoSchema is schema version used by txn startTS.
 	InfoSchema
@@ -65,7 +65,7 @@ const (
 	TxnScope
 	// ReadReplicaScope
 	ReadReplicaScope
-	// IsStalenessReadOnly indicates whether the transaction is staleness read only transaction
+	// StalenessReadOnly indicates whether the transaction is staleness read only transaction
 	IsStalenessReadOnly
 	// MatchStoreLabels indicates the labels the store should be matched
 	MatchStoreLabels
@@ -77,7 +77,7 @@ const (
 	KVFilter
 	// SnapInterceptor is used for setting the interceptor for snapshot
 	SnapInterceptor
-	// CommitTSUpperBoundCheck is used by cached table
+	// CommitTSUpperBoundChec is used by cached table
 	// The commitTS must be greater than all the write lock lease of the visited cached table.
 	CommitTSUpperBoundCheck
 	// RPCInterceptor is interceptor.RPCInterceptor on Transaction or Snapshot, used to decorate
@@ -92,9 +92,7 @@ const (
 	RequestSourceInternal
 	// RequestSourceType set request source type of the current statement.
 	RequestSourceType
-	// ExplicitRequestSourceType is a complement of RequestSourceType, it may specified by the client or users.
-	ExplicitRequestSourceType
-	// ReplicaReadAdjuster set the adjust function of cop requests.
+	// ReplicaReadAdjuster set the adjust function of cop requsts.
 	ReplicaReadAdjuster
 	// ScanBatchSize set the iter scan batch size.
 	ScanBatchSize
@@ -108,8 +106,6 @@ const (
 	ResourceGroupName
 	// LoadBasedReplicaReadThreshold sets the TiKV wait duration threshold of enabling replica read automatically.
 	LoadBasedReplicaReadThreshold
-	// TiKVClientReadTimeout sets the timeout value for readonly kv request in milliseconds
-	TiKVClientReadTimeout
 )
 
 // ReplicaReadType is the type of replica to read data from
@@ -150,9 +146,6 @@ type RequestSource = util.RequestSource
 
 // WithInternalSourceType create context with internal source.
 var WithInternalSourceType = util.WithInternalSourceType
-
-// WithInternalSourceAndTaskType create context with internal source and task name.
-var WithInternalSourceAndTaskType = util.WithInternalSourceAndTaskType
 
 // GetInternalSourceType get internal source
 func GetInternalSourceType(ctx context.Context) string {
@@ -195,21 +188,15 @@ const (
 	// Do not classify different tools by now.
 	InternalTxnTools = "tools"
 	// InternalTxnBR is the type of BR usage.
-	InternalTxnBR = "br"
-	// InternalTxnLightning is the type of Lightning usage.
-	InternalTxnLightning = "lightning"
+	InternalTxnBR = InternalTxnTools
 	// InternalTxnTrace handles the trace statement.
 	InternalTxnTrace = "Trace"
 	// InternalTxnTTL is the type of TTL usage
 	InternalTxnTTL = "TTL"
 	// InternalLoadData is the type of LOAD DATA usage
 	InternalLoadData = "LoadData"
-	// InternalImportInto is the type of IMPORT INTO usage
-	InternalImportInto = "ImportInto"
 	// InternalDistTask is the type of distributed task.
 	InternalDistTask = "DistTask"
-	// InternalTimer is the type of internal timer
-	InternalTimer = "Timer"
 )
 
 // The bitmap:

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
@@ -50,7 +51,6 @@ import (
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"go.uber.org/mock/gomock"
 )
 
 type chunkRestoreSuite struct {
@@ -425,7 +425,7 @@ func (s *chunkRestoreSuite) TestEncodeLoopDeliverLimit() {
 	require.NoError(s.T(), err)
 	cfg := config.NewConfig()
 
-	reader, err := store.Open(ctx, fileName, nil)
+	reader, err := store.Open(ctx, fileName)
 	require.NoError(s.T(), err)
 	w := worker.NewPool(ctx, 1, "io")
 	p, err := mydump.NewCSVParser(ctx, &cfg.Mydumper.CSV, reader, 111, w, false, nil)
@@ -504,7 +504,7 @@ func (s *chunkRestoreSuite) TestEncodeLoopColumnsMismatch() {
 	errorMgr := errormanager.New(nil, cfg, logger)
 	rc := &Controller{pauser: DeliverPauser, cfg: cfg, errorMgr: errorMgr}
 
-	reader, err := store.Open(ctx, fileName, nil)
+	reader, err := store.Open(ctx, fileName)
 	require.NoError(s.T(), err)
 	w := worker.NewPool(ctx, 5, "io")
 	p, err := mydump.NewCSVParser(ctx, &cfg.Mydumper.CSV, reader, 111, w, false, nil)
@@ -603,7 +603,7 @@ func (s *chunkRestoreSuite) testEncodeLoopIgnoreColumnsCSV(
 	cfg.Mydumper.CSV.Header = header
 	rc := &Controller{pauser: DeliverPauser, cfg: cfg}
 
-	reader, err := store.Open(ctx, fileName, nil)
+	reader, err := store.Open(ctx, fileName)
 	require.NoError(s.T(), err)
 	w := worker.NewPool(ctx, 5, "io")
 	p, err := mydump.NewCSVParser(ctx, &cfg.Mydumper.CSV, reader, 111, w, cfg.Mydumper.CSV.Header, nil)

@@ -156,7 +156,7 @@ func (b *PlanBuilder) getExpressionRewriter(ctx context.Context, p LogicalPlan) 
 	}()
 
 	if len(b.rewriterPool) < b.rewriterCounter {
-		rewriter = &expressionRewriter{p: p, b: b, sctx: b.ctx, ctx: ctx, rollExpand: b.currentBlockExpand}
+		rewriter = &expressionRewriter{p: p, b: b, sctx: b.ctx, ctx: ctx}
 		rewriter.sctx.SetValue(expression.TiDBDecodeKeyFunctionKey, decodeKeyFromString)
 		b.rewriterPool = append(b.rewriterPool, rewriter)
 		return
@@ -174,11 +174,10 @@ func (b *PlanBuilder) getExpressionRewriter(ctx context.Context, p LogicalPlan) 
 	rewriter.ctxNameStk = rewriter.ctxNameStk[:0]
 	rewriter.ctx = ctx
 	rewriter.err = nil
-	rewriter.rollExpand = b.currentBlockExpand
 	return
 }
 
-func (*PlanBuilder) rewriteExprNode(rewriter *expressionRewriter, exprNode ast.ExprNode, asScalar bool) (expression.Expression, LogicalPlan, error) {
+func (b *PlanBuilder) rewriteExprNode(rewriter *expressionRewriter, exprNode ast.ExprNode, asScalar bool) (expression.Expression, LogicalPlan, error) {
 	if rewriter.p != nil {
 		curColLen := rewriter.p.Schema().Len()
 		defer func() {
@@ -245,8 +244,6 @@ type expressionRewriter struct {
 	// NOTE: This value can be changed during expression rewritten.
 	disableFoldCounter int
 	tryFoldCounter     int
-
-	rollExpand *LogicalExpand
 }
 
 func (er *expressionRewriter) ctxStackLen() int {
@@ -327,12 +324,9 @@ func (er *expressionRewriter) buildSubquery(ctx context.Context, subq *ast.Subqu
 		outerSchema := er.schema.Clone()
 		er.b.outerSchemas = append(er.b.outerSchemas, outerSchema)
 		er.b.outerNames = append(er.b.outerNames, er.names)
-		er.b.outerBlockExpand = append(er.b.outerBlockExpand, er.b.currentBlockExpand)
 		defer func() {
 			er.b.outerSchemas = er.b.outerSchemas[0 : len(er.b.outerSchemas)-1]
 			er.b.outerNames = er.b.outerNames[0 : len(er.b.outerNames)-1]
-			er.b.currentBlockExpand = er.b.outerBlockExpand[len(er.b.outerBlockExpand)-1]
-			er.b.outerBlockExpand = er.b.outerBlockExpand[0 : len(er.b.outerBlockExpand)-1]
 		}()
 	}
 	// Store the old value before we enter the subquery and reset they to default value.
@@ -444,7 +438,7 @@ func (er *expressionRewriter) Enter(inNode ast.Node) (ast.Node, bool) {
 			index, ok = er.windowMap[v]
 		}
 		if !ok {
-			er.err = ErrWindowInvalidWindowFuncUse.GenWithStackByArgs(strings.ToLower(v.Name))
+			er.err = ErrWindowInvalidWindowFuncUse.GenWithStackByArgs(strings.ToLower(v.F))
 			return inNode, true
 		}
 		er.ctxStackAppend(er.schema.Columns[index], er.names[index])
@@ -867,39 +861,12 @@ func (er *expressionRewriter) handleExistSubquery(ctx context.Context, v *ast.Ex
 		er.ctxStackAppend(er.p.Schema().Columns[er.p.Schema().Len()-1], er.p.OutputNames()[er.p.Schema().Len()-1])
 	} else {
 		// We don't want nth_plan hint to affect separately executed subqueries here, so disable nth_plan temporarily.
-		nthPlanBackup := er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan
+		NthPlanBackup := er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan
 		er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = -1
 		physicalPlan, _, err := DoOptimize(ctx, er.sctx, er.b.optFlag, np)
-		er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = nthPlanBackup
+		er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = NthPlanBackup
 		if err != nil {
 			er.err = err
-			return v, true
-		}
-		if er.b.ctx.GetSessionVars().StmtCtx.InExplainStmt && !er.b.ctx.GetSessionVars().StmtCtx.InExplainAnalyzeStmt && er.b.ctx.GetSessionVars().ExplainNonEvaledSubQuery {
-			newColID := er.b.ctx.GetSessionVars().AllocPlanColumnID()
-			subqueryCtx := ScalarSubqueryEvalCtx{
-				scalarSubQuery: physicalPlan,
-				ctx:            ctx,
-				is:             er.b.is,
-				outputColIDs:   []int64{newColID},
-			}.Init(er.b.ctx, np.SelectBlockOffset())
-			scalarSubQ := &ScalarSubQueryExpr{
-				scalarSubqueryColID: newColID,
-				evalCtx:             subqueryCtx,
-			}
-			scalarSubQ.RetType = np.Schema().Columns[0].GetType()
-			scalarSubQ.SetCoercibility(np.Schema().Columns[0].Coercibility())
-			er.b.ctx.GetSessionVars().RegisterScalarSubQ(subqueryCtx)
-			if v.Not {
-				notWrapped, err := expression.NewFunction(er.b.ctx, ast.UnaryNot, types.NewFieldType(mysql.TypeTiny), scalarSubQ)
-				if err != nil {
-					er.err = err
-					return v, true
-				}
-				er.ctxStackAppend(notWrapped, types.EmptyName)
-				return v, true
-			}
-			er.ctxStackAppend(scalarSubQ, types.EmptyName)
 			return v, true
 		}
 		row, err := EvalSubqueryFirstRow(ctx, physicalPlan, er.b.is, er.b.ctx)
@@ -1105,46 +1072,12 @@ func (er *expressionRewriter) handleScalarSubquery(ctx context.Context, v *ast.S
 		return v, true
 	}
 	// We don't want nth_plan hint to affect separately executed subqueries here, so disable nth_plan temporarily.
-	nthPlanBackup := er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan
+	NthPlanBackup := er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan
 	er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = -1
 	physicalPlan, _, err := DoOptimize(ctx, er.sctx, er.b.optFlag, np)
-	er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = nthPlanBackup
+	er.sctx.GetSessionVars().StmtCtx.StmtHints.ForceNthPlan = NthPlanBackup
 	if err != nil {
 		er.err = err
-		return v, true
-	}
-	if er.b.ctx.GetSessionVars().StmtCtx.InExplainStmt && !er.b.ctx.GetSessionVars().StmtCtx.InExplainAnalyzeStmt && er.b.ctx.GetSessionVars().ExplainNonEvaledSubQuery {
-		subqueryCtx := ScalarSubqueryEvalCtx{
-			scalarSubQuery: physicalPlan,
-			ctx:            ctx,
-			is:             er.b.is,
-		}.Init(er.b.ctx, np.SelectBlockOffset())
-		newColIDs := make([]int64, 0, np.Schema().Len())
-		newScalarSubQueryExprs := make([]expression.Expression, 0, np.Schema().Len())
-		for _, col := range np.Schema().Columns {
-			newColID := er.b.ctx.GetSessionVars().AllocPlanColumnID()
-			scalarSubQ := &ScalarSubQueryExpr{
-				scalarSubqueryColID: newColID,
-				evalCtx:             subqueryCtx,
-			}
-			scalarSubQ.RetType = col.RetType
-			scalarSubQ.SetCoercibility(col.Coercibility())
-			newColIDs = append(newColIDs, newColID)
-			newScalarSubQueryExprs = append(newScalarSubQueryExprs, scalarSubQ)
-		}
-		subqueryCtx.outputColIDs = newColIDs
-
-		er.b.ctx.GetSessionVars().RegisterScalarSubQ(subqueryCtx)
-		if len(newScalarSubQueryExprs) == 1 {
-			er.ctxStackAppend(newScalarSubQueryExprs[0], types.EmptyName)
-		} else {
-			rowFunc, err := er.newFunction(ast.RowFunc, newScalarSubQueryExprs[0].GetType(), newScalarSubQueryExprs...)
-			if err != nil {
-				er.err = err
-				return v, true
-			}
-			er.ctxStack = append(er.ctxStack, rowFunc)
-		}
 		return v, true
 	}
 	row, err := EvalSubqueryFirstRow(ctx, physicalPlan, er.b.is, er.b.ctx)
@@ -1203,12 +1136,6 @@ func initConstantRepertoire(c *expression.Constant) {
 	}
 }
 
-func (er *expressionRewriter) adjustUTF8MB4Collation(tp *types.FieldType) {
-	if tp.GetFlag()&mysql.UnderScoreCharsetFlag > 0 && charset.CharsetUTF8MB4 == tp.GetCharset() {
-		tp.SetCollate(er.sctx.GetSessionVars().DefaultCollationForUTF8MB4)
-	}
-}
-
 // Leave implements Visitor interface.
 func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok bool) {
 	if er.err != nil {
@@ -1233,10 +1160,6 @@ func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok
 		v.Datum.SetValue(v.Datum.GetValue(), retType)
 		value := &expression.Constant{Value: v.Datum, RetType: retType}
 		initConstantRepertoire(value)
-		er.adjustUTF8MB4Collation(retType)
-		if er.err != nil {
-			return retNode, false
-		}
 		er.ctxStackAppend(value, types.EmptyName)
 	case *driver.ParamMarkerExpr:
 		var value *expression.Constant
@@ -1245,10 +1168,6 @@ func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok
 			return retNode, false
 		}
 		initConstantRepertoire(value)
-		er.adjustUTF8MB4Collation(value.RetType)
-		if er.err != nil {
-			return retNode, false
-		}
 		er.ctxStackAppend(value, types.EmptyName)
 	case *ast.VariableExpr:
 		er.rewriteVariable(v)
@@ -1404,11 +1323,9 @@ func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok
 	return originInNode, true
 }
 
-// newFunctionWithInit chooses which expression.NewFunctionImpl() will be used.
-func (er *expressionRewriter) newFunctionWithInit(funcName string, retType *types.FieldType, init expression.ScalarFunctionCallBack, args ...expression.Expression) (ret expression.Expression, err error) {
-	if init != nil {
-		ret, err = expression.NewFunctionWithInit(er.sctx, funcName, retType, init, args...)
-	} else if er.disableFoldCounter > 0 {
+// newFunction chooses which expression.NewFunctionImpl() will be used.
+func (er *expressionRewriter) newFunction(funcName string, retType *types.FieldType, args ...expression.Expression) (ret expression.Expression, err error) {
+	if er.disableFoldCounter > 0 {
 		ret, err = expression.NewFunctionBase(er.sctx, funcName, retType, args...)
 	} else if er.tryFoldCounter > 0 {
 		ret, err = expression.NewFunctionTryFold(er.sctx, funcName, retType, args...)
@@ -1424,12 +1341,7 @@ func (er *expressionRewriter) newFunctionWithInit(funcName string, retType *type
 	return
 }
 
-// newFunction is being redirected to newFunctionWithInit.
-func (er *expressionRewriter) newFunction(funcName string, retType *types.FieldType, args ...expression.Expression) (ret expression.Expression, err error) {
-	return er.newFunctionWithInit(funcName, retType, nil, args...)
-}
-
-func (*expressionRewriter) checkTimePrecision(ft *types.FieldType) error {
+func (er *expressionRewriter) checkTimePrecision(ft *types.FieldType) error {
 	if ft.EvalType() == types.ETDuration && ft.GetDecimal() > types.MaxFsp {
 		return errTooBigPrecision.GenWithStackByArgs(ft.GetDecimal(), "CAST", types.MaxFsp)
 	}
@@ -1515,19 +1427,10 @@ func (er *expressionRewriter) rewriteVariable(v *ast.VariableExpr) {
 	}
 	nativeVal, nativeType, nativeFlag := sysVar.GetNativeValType(val)
 	e := expression.DatumToConstant(nativeVal, nativeType, nativeFlag)
-	switch nativeType {
-	case mysql.TypeVarString:
-		charset, _ := sessionVars.GetSystemVar(variable.CharacterSetConnection)
-		e.GetType().SetCharset(charset)
-		collate, _ := sessionVars.GetSystemVar(variable.CollationConnection)
-		e.GetType().SetCollate(collate)
-	case mysql.TypeLong, mysql.TypeLonglong:
-		e.GetType().SetCharset(charset.CharsetBin)
-		e.GetType().SetCollate(charset.CollationBin)
-	default:
-		er.err = errors.Errorf("Not supported type(%x) in GetNativeValType() function", nativeType)
-		return
-	}
+	charset, _ := sessionVars.GetSystemVar(variable.CharacterSetConnection)
+	e.GetType().SetCharset(charset)
+	collate, _ := sessionVars.GetSystemVar(variable.CollationConnection)
+	e.GetType().SetCollate(collate)
 	er.ctxStackAppend(e, types.EmptyName)
 }
 
@@ -1761,10 +1664,11 @@ func (er *expressionRewriter) castCollationForIn(colLen int, elemCnt int, stkLen
 			}
 			tp := er.ctxStack[i].GetType().Clone()
 			if er.ctxStack[i].GetType().Hybrid() {
-				if !(expression.GetAccurateCmpType(er.ctxStack[stkLen-elemCnt-1], er.ctxStack[i]) == types.ETString) {
+				if expression.GetAccurateCmpType(er.ctxStack[stkLen-elemCnt-1], er.ctxStack[i]) == types.ETString {
+					tp = types.NewFieldType(mysql.TypeVarString)
+				} else {
 					continue
 				}
-				tp = types.NewFieldType(mysql.TypeVarString)
 			} else if coll.Charset == charset.CharsetBin {
 				// When cast character string to binary string, if we still use fixed length representation,
 				// then 0 padding will be used, which can affect later execution.
@@ -2097,45 +2001,6 @@ func (er *expressionRewriter) funcCallToExpression(v *ast.FuncCallExpr) {
 			c := &expression.Constant{Value: types.NewDatum(nil), RetType: function.GetType().Clone(), DeferredExpr: function}
 			er.ctxStackAppend(c, types.EmptyName)
 		}
-	} else if v.FnName.L == ast.Grouping {
-		// grouping function should fetch the underlying grouping-sets meta and rewrite the args here.
-		// eg: grouping(a) actually is try to find in which grouping-set that the column 'a' is remained,
-		// collecting those gid as a collection and filling it into the grouping function meta. Besides,
-		// the first arg of grouping function should be rewritten as gid column defined/passed by Expand
-		// from the bottom up.
-		if er.rollExpand == nil {
-			er.err = ErrInvalidGroupFuncUse
-			er.ctxStackAppend(nil, types.EmptyName)
-		} else {
-			// whether there is some duplicate grouping sets, gpos is only be used in shuffle keys and group keys
-			// rather than grouping function.
-			// eg: rollup(a,a,b), the decided grouping sets are {a,a,b},{a,a,null},{a,null,null},{null,null,null}
-			// for the second and third grouping set: {a,a,null} and {a,null,null}, a here is the col ref of original
-			// column `a`. So from the static layer, this two grouping set are equivalent, we don't need to copy col
-			// `a double times at the every beginning and resort to gpos to distinguish them.
-			//  {col-a, col-b, gid, gpos}
-			//  {a, b, 0, 1}, {a, null, 1, 2}, {a, null, 1, 3}, {null, null, 2, 4}
-			// grouping function still only need to care about gid is enough, gpos what group and shuffle keys cared.
-			if len(args) > 64 {
-				er.err = ErrInvalidNumberOfArgs.GenWithStackByArgs("GROUPING", 64)
-				er.ctxStackAppend(nil, types.EmptyName)
-				return
-			}
-			// resolve grouping args in group by items or not.
-			resolvedCols, err := er.rollExpand.resolveGroupingFuncArgsInGroupBy(args)
-			if err != nil {
-				er.err = err
-				er.ctxStackAppend(nil, types.EmptyName)
-				return
-			}
-			newArg := er.rollExpand.GID.Clone()
-			init := func(groupingFunc *expression.ScalarFunction) (expression.Expression, error) {
-				err = groupingFunc.Function.(*expression.BuiltinGroupingImplSig).SetMetadata(er.rollExpand.GroupingMode, er.rollExpand.GenerateGroupingMarks(resolvedCols))
-				return groupingFunc, err
-			}
-			function, er.err = er.newFunctionWithInit(v.FnName.L, &v.Type, init, newArg)
-			er.ctxStackAppend(function, types.EmptyName)
-		}
 	} else {
 		function, er.err = er.newFunction(v.FnName.L, &v.Type, args...)
 		er.ctxStackAppend(function, types.EmptyName)
@@ -2171,14 +2036,6 @@ func (er *expressionRewriter) toColumn(v *ast.ColumnName) {
 		er.ctxStackAppend(column, er.names[idx])
 		return
 	}
-	col, name, err := findFieldNameFromNaturalUsingJoin(er.p, v)
-	if err != nil {
-		er.err = err
-		return
-	} else if col != nil {
-		er.ctxStackAppend(col, name)
-		return
-	}
 	for i := len(er.b.outerSchemas) - 1; i >= 0; i-- {
 		outerSchema, outerName := er.b.outerSchemas[i], er.b.outerNames[i]
 		idx, err = expression.FindFieldName(outerName, v)
@@ -2194,6 +2051,14 @@ func (er *expressionRewriter) toColumn(v *ast.ColumnName) {
 	}
 	if _, ok := er.p.(*LogicalUnionAll); ok && v.Table.O != "" {
 		er.err = ErrTablenameNotAllowedHere.GenWithStackByArgs(v.Table.O, "SELECT", clauseMsg[er.b.curClause])
+		return
+	}
+	col, name, err := findFieldNameFromNaturalUsingJoin(er.p, v)
+	if err != nil {
+		er.err = err
+		return
+	} else if col != nil {
+		er.ctxStackAppend(col, name)
 		return
 	}
 	if er.b.curClause == globalOrderByClause {
@@ -2338,7 +2203,10 @@ func decodeKeyFromString(ctx sessionctx.Context, s string) string {
 		sc.AppendWarning(errors.Errorf("infoschema not found when decoding key: %X", key))
 		return s
 	}
-	tbl, _ := infoschema.FindTableByTblOrPartID(is, tableID)
+	tbl, _ := is.TableByID(tableID)
+	if tbl == nil {
+		tbl, _, _ = is.FindTableByPartitionID(tableID)
+	}
 	loc := ctx.GetSessionVars().Location()
 	if tablecodec.IsRecordKey(key) {
 		ret, err := decodeRecordKey(key, tableID, tbl, loc)

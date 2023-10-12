@@ -62,6 +62,8 @@ type TiFlashReplicaManager interface {
 	DeletePlacementRule(ctx context.Context, group string, ruleID string) error
 	// GetGroupRules to get all placement rule in a certain group.
 	GetGroupRules(ctx context.Context, group string) ([]placement.TiFlashRule, error)
+	// PostAccelerateSchedule sends `regions/accelerate-schedule` request.
+	PostAccelerateSchedule(ctx context.Context, tableID int64) error
 	// PostAccelerateScheduleBatch sends `regions/accelerate-schedule/batch` request.
 	PostAccelerateScheduleBatch(ctx context.Context, tableIDs []int64) error
 	// GetRegionCountFromPD is a helper function calling `/stats/region`.
@@ -462,6 +464,31 @@ func (m *TiFlashReplicaManagerCtx) GetGroupRules(ctx context.Context, group stri
 	return rules, nil
 }
 
+// PostAccelerateSchedule sends `regions/accelerate-schedule` request.
+func (m *TiFlashReplicaManagerCtx) PostAccelerateSchedule(ctx context.Context, tableID int64) error {
+	startKey := tablecodec.GenTableRecordPrefix(tableID)
+	endKey := tablecodec.EncodeTablePrefix(tableID + 1)
+	startKey, endKey = m.codec.EncodeRegionRange(startKey, endKey)
+
+	input := map[string]string{
+		"start_key": hex.EncodeToString(startKey),
+		"end_key":   hex.EncodeToString(endKey),
+	}
+	j, err := json.Marshal(input)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	buf := bytes.NewBuffer(j)
+	res, err := doRequest(ctx, "PostAccelerateSchedule", m.etcdCli.Endpoints(), path.Join(pdapi.Regions, "accelerate-schedule"), "POST", buf)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in PostAccelerateSchedule")
+	}
+	return nil
+}
+
 // PostAccelerateScheduleBatch sends `regions/batch-accelerate-schedule` request.
 func (m *TiFlashReplicaManagerCtx) PostAccelerateScheduleBatch(ctx context.Context, tableIDs []int64) error {
 	if len(tableIDs) == 0 {
@@ -614,7 +641,6 @@ type MockTiFlash struct {
 	TiflashDelay                time.Duration
 	StartTime                   time.Time
 	NotAvailable                bool
-	NetworkError                bool
 }
 
 func (tiflash *MockTiFlash) setUpMockTiFlashHTTPServer() {
@@ -630,10 +656,6 @@ func (tiflash *MockTiFlash) setUpMockTiFlashHTTPServer() {
 	router.HandleFunc("/tiflash/sync-status/keyspace/{keyspaceid:\\d+}/table/{tableid:\\d+}", func(w http.ResponseWriter, req *http.Request) {
 		tiflash.Lock()
 		defer tiflash.Unlock()
-		if tiflash.NetworkError {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
 		params := mux.Vars(req)
 		tableID, err := strconv.Atoi(params["tableid"])
 		if err != nil {
@@ -874,32 +896,35 @@ func (tiflash *MockTiFlash) GetRuleGroupIndex() int {
 // Compare supposed rule, and we actually get from TableInfo
 func isRuleMatch(rule placement.TiFlashRule, startKey []byte, endKey []byte, count int, labels []string) bool {
 	// Compute startKey
-	if !(bytes.Equal(rule.StartKey, startKey) && bytes.Equal(rule.EndKey, endKey)) {
-		return false
-	}
-	ok := false
-	for _, c := range rule.Constraints {
-		if c.Key == "engine" && len(c.Values) == 1 && c.Values[0] == "tiflash" && c.Op == placement.In {
-			ok = true
-			break
+	if bytes.Equal(rule.StartKey, startKey) && bytes.Equal(rule.EndKey, endKey) {
+		ok := false
+		for _, c := range rule.Constraints {
+			if c.Key == "engine" && len(c.Values) == 1 && c.Values[0] == "tiflash" && c.Op == placement.In {
+				ok = true
+				break
+			}
 		}
-	}
-	if !ok {
-		return false
-	}
-
-	if len(rule.LocationLabels) != len(labels) {
-		return false
-	}
-	for i, lb := range labels {
-		if lb != rule.LocationLabels[i] {
+		if !ok {
 			return false
 		}
-	}
-	if rule.Count != count {
-		return false
-	}
-	if rule.Role != placement.Learner {
+
+		if len(rule.LocationLabels) == len(labels) {
+			for i, lb := range labels {
+				if lb != rule.LocationLabels[i] {
+					return false
+				}
+			}
+		} else {
+			return false
+		}
+
+		if rule.Count != count {
+			return false
+		}
+		if rule.Role != placement.Learner {
+			return false
+		}
+	} else {
 		return false
 	}
 	return true
@@ -958,13 +983,6 @@ func (tiflash *MockTiFlash) PdSwitch(enabled bool) {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	tiflash.PdEnabled = enabled
-}
-
-// SetNetworkError sets network error state.
-func (tiflash *MockTiFlash) SetNetworkError(e bool) {
-	tiflash.Lock()
-	defer tiflash.Unlock()
-	tiflash.NetworkError = e
 }
 
 // CalculateTiFlashProgress return truncated string to avoid float64 comparison.
@@ -1059,6 +1077,18 @@ func (m *mockTiFlashReplicaManagerCtx) GetGroupRules(ctx context.Context, group 
 		return []placement.TiFlashRule{}, nil
 	}
 	return m.tiflash.HandleGetGroupRules(group)
+}
+
+// PostAccelerateSchedule sends `regions/accelerate-schedule` request.
+func (m *mockTiFlashReplicaManagerCtx) PostAccelerateSchedule(ctx context.Context, tableID int64) error {
+	m.Lock()
+	defer m.Unlock()
+	if m.tiflash == nil {
+		return nil
+	}
+	endKey := tablecodec.EncodeTablePrefix(tableID + 1)
+	endKey = codec.EncodeBytes([]byte{}, endKey)
+	return m.tiflash.HandlePostAccelerateSchedule(hex.EncodeToString(endKey))
 }
 
 // PostAccelerateScheduleBatch sends `regions/batch-accelerate-schedule` request.

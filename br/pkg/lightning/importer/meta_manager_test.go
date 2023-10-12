@@ -63,7 +63,7 @@ func newTableRestore(t *testing.T,
 		},
 	}
 
-	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnLightning)
+	ctx := kv.WithInternalSourceType(context.Background(), "test")
 	err = kv.RunInNewTxn(ctx, kvStore, false, func(ctx context.Context, txn kv.Transaction) error {
 		m := meta.NewMeta(txn)
 		if err := m.CreateDatabase(&model.DBInfo{ID: dbInfo.ID}); err != nil && !errors.ErrorEqual(err, meta.ErrDBExists) {

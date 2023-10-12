@@ -16,7 +16,6 @@ package ddl_test
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,7 +46,7 @@ func TestIndexChange(t *testing.T) {
 	// set up hook
 	prevState := model.StateNone
 	addIndexDone := false
-	var jobID atomic.Int64
+	var jobID int64
 	var (
 		deleteOnlyTable table.Table
 		writeOnlyTable  table.Table
@@ -57,7 +56,7 @@ func TestIndexChange(t *testing.T) {
 		if job.SchemaState == prevState {
 			return
 		}
-		jobID.Store(job.ID)
+		jobID = job.ID
 		ctx1 := testNewContext(store)
 		prevState = job.SchemaState
 		require.NoError(t, dom.Reload())
@@ -93,12 +92,12 @@ func TestIndexChange(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	v := getSchemaVer(t, tk.Session())
-	checkHistoryJobArgs(t, tk.Session(), jobID.Load(), &historyJobArgs{ver: v, tbl: publicTable.Meta()})
+	checkHistoryJobArgs(t, tk.Session(), jobID, &historyJobArgs{ver: v, tbl: publicTable.Meta()})
 
 	prevState = model.StateNone
 	var noneTable table.Table
 	onJobUpdatedExportedFunc2 := func(job *model.Job) {
-		jobID.Store(job.ID)
+		jobID = job.ID
 		if job.SchemaState == prevState {
 			return
 		}
@@ -125,7 +124,7 @@ func TestIndexChange(t *testing.T) {
 	tc.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc2)
 	tk.MustExec("alter table t drop index c2")
 	v = getSchemaVer(t, tk.Session())
-	checkHistoryJobArgs(t, tk.Session(), jobID.Load(), &historyJobArgs{ver: v, tbl: noneTable.Meta()})
+	checkHistoryJobArgs(t, tk.Session(), jobID, &historyJobArgs{ver: v, tbl: noneTable.Meta()})
 }
 
 func checkIndexExists(ctx sessionctx.Context, tbl table.Table, indexValue interface{}, handle int64, exists bool) error {

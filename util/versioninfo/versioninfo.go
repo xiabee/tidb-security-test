@@ -21,9 +21,11 @@ const (
 
 // Version information.
 var (
-	TiDBBuildTS                    = "None"
-	TiDBGitHash                    = "None"
-	TiDBGitBranch                  = "None"
-	TiDBEdition                    = CommunityEdition
+	TiDBBuildTS   = "None"
+	TiDBGitHash   = "None"
+	TiDBGitBranch = "None"
+	TiDBEdition   = CommunityEdition
+	// TiKVMinVersion is the minimum version of TiKV that can be compatible with the current TiDB.
+	TiKVMinVersion                 = "6.2.0-alpha"
 	TiDBEnterpriseExtensionGitHash = ""
 )

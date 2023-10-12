@@ -15,11 +15,9 @@
 package executor
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -36,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/util/set"
 	"github.com/pingcap/tidb/util/size"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"golang.org/x/exp/slices"
 )
 
 type (
@@ -170,22 +169,20 @@ func (e *inspectionResultRetriever) retrieve(ctx context.Context, sctx sessionct
 			continue
 		}
 		// make result stable
-		slices.SortFunc(results, func(i, j inspectionResult) int {
-			if c := cmp.Compare(i.degree, j.degree); c != 0 {
-				return -c
+		slices.SortFunc(results, func(i, j inspectionResult) bool {
+			if i.degree != j.degree {
+				return i.degree > j.degree
 			}
-			// lhs and rhs
-			if c := cmp.Compare(i.item, j.item); c != 0 {
-				return c
+			if lhs, rhs := i.item, j.item; lhs != rhs {
+				return lhs < rhs
 			}
-			if c := cmp.Compare(i.actual, j.actual); c != 0 {
-				return c
+			if i.actual != j.actual {
+				return i.actual < j.actual
 			}
-			// lhs and rhs
-			if c := cmp.Compare(i.tp, j.tp); c != 0 {
-				return c
+			if lhs, rhs := i.tp, j.tp; lhs != rhs {
+				return lhs < rhs
 			}
-			return cmp.Compare(i.instance, j.instance)
+			return i.instance < j.instance
 		})
 		for _, result := range results {
 			if len(result.instance) == 0 {
@@ -477,7 +474,7 @@ func (versionInspection) inspect(ctx context.Context, sctx sessionctx.Context, f
 	return results
 }
 
-func (nodeLoadInspection) inspect(ctx context.Context, sctx sessionctx.Context, filter inspectionFilter) []inspectionResult {
+func (c nodeLoadInspection) inspect(ctx context.Context, sctx sessionctx.Context, filter inspectionFilter) []inspectionResult {
 	var rules = []ruleChecker{
 		inspectCPULoad{item: "load1", tbl: "node_load1"},
 		inspectCPULoad{item: "load5", tbl: "node_load5"},
@@ -496,7 +493,7 @@ func (inspectVirtualMemUsage) genSQL(timeRange plannercore.QueryTimeRange) strin
 	return sql
 }
 
-func (i inspectVirtualMemUsage) genResult(_ string, row chunk.Row) inspectionResult {
+func (i inspectVirtualMemUsage) genResult(sql string, row chunk.Row) inspectionResult {
 	return inspectionResult{
 		tp:       "node",
 		instance: row.GetString(0),
@@ -519,7 +516,7 @@ func (inspectSwapMemoryUsed) genSQL(timeRange plannercore.QueryTimeRange) string
 	return sql
 }
 
-func (i inspectSwapMemoryUsed) genResult(_ string, row chunk.Row) inspectionResult {
+func (i inspectSwapMemoryUsed) genResult(sql string, row chunk.Row) inspectionResult {
 	return inspectionResult{
 		tp:       "node",
 		instance: row.GetString(0),
@@ -541,7 +538,7 @@ func (inspectDiskUsage) genSQL(timeRange plannercore.QueryTimeRange) string {
 	return sql
 }
 
-func (i inspectDiskUsage) genResult(_ string, row chunk.Row) inspectionResult {
+func (i inspectDiskUsage) genResult(sql string, row chunk.Row) inspectionResult {
 	return inspectionResult{
 		tp:       "node",
 		instance: row.GetString(0),
@@ -570,7 +567,7 @@ func (i inspectCPULoad) genSQL(timeRange plannercore.QueryTimeRange) string {
 	return sql
 }
 
-func (i inspectCPULoad) genResult(_ string, row chunk.Row) inspectionResult {
+func (i inspectCPULoad) genResult(sql string, row chunk.Row) inspectionResult {
 	return inspectionResult{
 		tp:       "node",
 		instance: row.GetString(0),
@@ -1098,7 +1095,7 @@ func (c compareStoreStatus) getItem() string {
 
 type checkRegionHealth struct{}
 
-func (checkRegionHealth) genSQL(timeRange plannercore.QueryTimeRange) string {
+func (c checkRegionHealth) genSQL(timeRange plannercore.QueryTimeRange) string {
 	condition := timeRange.Condition()
 	return fmt.Sprintf(`select instance, sum(value) as sum_value from metrics_schema.pd_region_health %s and
 		type in ('extra-peer-region-count','learner-peer-region-count','pending-peer-region-count') having sum_value>100`, condition)
@@ -1120,18 +1117,18 @@ func (c checkRegionHealth) genResult(_ string, row chunk.Row) inspectionResult {
 	}
 }
 
-func (checkRegionHealth) getItem() string {
+func (c checkRegionHealth) getItem() string {
 	return "region-health"
 }
 
 type checkStoreRegionTooMuch struct{}
 
-func (checkStoreRegionTooMuch) genSQL(timeRange plannercore.QueryTimeRange) string {
+func (c checkStoreRegionTooMuch) genSQL(timeRange plannercore.QueryTimeRange) string {
 	condition := timeRange.Condition()
 	return fmt.Sprintf(`select address, max(value) from metrics_schema.pd_scheduler_store_status %s and type='region_count' and value > 20000 group by address`, condition)
 }
 
-func (c checkStoreRegionTooMuch) genResult(_ string, row chunk.Row) inspectionResult {
+func (c checkStoreRegionTooMuch) genResult(sql string, row chunk.Row) inspectionResult {
 	actual := fmt.Sprintf("%.2f", row.GetFloat64(1))
 	degree := math.Abs(row.GetFloat64(1)-20000) / math.Max(row.GetFloat64(1), 20000)
 	return inspectionResult{
@@ -1146,7 +1143,7 @@ func (c checkStoreRegionTooMuch) genResult(_ string, row chunk.Row) inspectionRe
 	}
 }
 
-func (checkStoreRegionTooMuch) getItem() string {
+func (c checkStoreRegionTooMuch) getItem() string {
 	return "region-count"
 }
 
@@ -1193,7 +1190,7 @@ func checkRules(ctx context.Context, sctx sessionctx.Context, filter inspectionF
 	return results
 }
 
-func (thresholdCheckInspection) inspectForLeaderDrop(ctx context.Context, sctx sessionctx.Context, filter inspectionFilter) []inspectionResult {
+func (c thresholdCheckInspection) inspectForLeaderDrop(ctx context.Context, sctx sessionctx.Context, filter inspectionFilter) []inspectionResult {
 	condition := filter.timeRange.Condition()
 	threshold := 50.0
 	sql := new(strings.Builder)

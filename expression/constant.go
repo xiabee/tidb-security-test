@@ -64,25 +64,6 @@ func NewUInt64Const(num int) *Constant {
 	}
 }
 
-// NewUInt64ConstWithFieldType stands for constant of a given number with specified fieldType.
-func NewUInt64ConstWithFieldType(num uint64, fieldType *types.FieldType) *Constant {
-	return &Constant{
-		Value:   types.NewDatum(num),
-		RetType: fieldType,
-	}
-}
-
-// NewInt64Const stands for constant of a given number.
-func NewInt64Const(num int64) *Constant {
-	retT := types.NewFieldType(mysql.TypeLonglong)
-	retT.SetFlen(mysql.MaxIntWidth)
-	retT.SetDecimal(0)
-	return &Constant{
-		Value:   types.NewDatum(num),
-		RetType: retT,
-	}
-}
-
 // NewNull stands for null constant.
 func NewNull() *Constant {
 	retT := types.NewFieldType(mysql.TypeTiny)
@@ -91,14 +72,6 @@ func NewNull() *Constant {
 	return &Constant{
 		Value:   types.NewDatum(nil),
 		RetType: retT,
-	}
-}
-
-// NewNullWithFieldType stands for null constant with specified fieldType.
-func NewNullWithFieldType(fieldType *types.FieldType) *Constant {
-	return &Constant{
-		Value:   types.NewDatum(nil),
-		RetType: fieldType,
 	}
 }
 
@@ -231,11 +204,6 @@ func (c *Constant) getLazyDatum(row chunk.Row) (dt types.Datum, isLazy bool, err
 	return types.Datum{}, false, nil
 }
 
-// Traverse implements the TraverseDown interface.
-func (c *Constant) Traverse(action TraverseAction) Expression {
-	return action.Transform(c)
-}
-
 // Eval implements Expression interface.
 func (c *Constant) Eval(row chunk.Row) (types.Datum, error) {
 	if dt, lazy, err := c.getLazyDatum(row); lazy {
@@ -249,15 +217,16 @@ func (c *Constant) Eval(row chunk.Row) (types.Datum, error) {
 		if c.DeferredExpr != nil {
 			sf, sfOk := c.DeferredExpr.(*ScalarFunction)
 			if sfOk {
-				if dt.Kind() != types.KindMysqlDecimal {
+				if dt.Kind() == types.KindMysqlDecimal {
+					if err := c.adjustDecimal(dt.GetMysqlDecimal()); err != nil {
+						return dt, err
+					}
+				} else {
 					val, err := dt.ConvertTo(sf.GetCtx().GetSessionVars().StmtCtx, c.RetType)
 					if err != nil {
 						return dt, err
 					}
 					return val, nil
-				}
-				if err := c.adjustDecimal(dt.GetMysqlDecimal()); err != nil {
-					return dt, err
 				}
 			}
 		}

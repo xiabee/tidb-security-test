@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +49,7 @@ import (
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/plancodec"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 type signalsKey struct{}
@@ -87,7 +87,7 @@ func (e *slowQueryRetriever) retrieve(ctx context.Context, sctx sessionctx.Conte
 		ctx, e.cancel = context.WithCancel(ctx)
 		e.initializeAsyncParsing(ctx, sctx)
 	}
-	return e.dataForSlowLog(ctx)
+	return e.dataForSlowLog(ctx, sctx)
 }
 
 func (e *slowQueryRetriever) initialize(ctx context.Context, sctx sessionctx.Context) error {
@@ -106,7 +106,7 @@ func (e *slowQueryRetriever) initialize(ctx context.Context, sctx sessionctx.Con
 			}
 			continue
 		}
-		factory, err := getColumnValueFactoryByName(col.Name.O, idx)
+		factory, err := getColumnValueFactoryByName(sctx, col.Name.O, idx)
 		if err != nil {
 			return err
 		}
@@ -213,7 +213,7 @@ func (e *slowQueryRetriever) parseDataForSlowLog(ctx context.Context, sctx sessi
 	e.parseSlowLog(ctx, sctx, reader, ParseSlowLogBatchSize)
 }
 
-func (e *slowQueryRetriever) dataForSlowLog(ctx context.Context) ([][]types.Datum, error) {
+func (e *slowQueryRetriever) dataForSlowLog(ctx context.Context, sctx sessionctx.Context) ([][]types.Datum, error) {
 	var (
 		task slowLogTask
 		ok   bool
@@ -484,7 +484,7 @@ func (e *slowQueryRetriever) parseSlowLog(ctx context.Context, sctx sessionctx.C
 	}
 }
 
-func (*slowQueryRetriever) sendParsedSlowLogCh(t slowLogTask, re parsedSlowLog) {
+func (e *slowQueryRetriever) sendParsedSlowLogCh(t slowLogTask, re parsedSlowLog) {
 	select {
 	case t.resultCh <- re:
 	default:
@@ -681,7 +681,7 @@ func parseUserOrHostValue(value string) string {
 	return strings.TrimSpace(tmp[0])
 }
 
-func getColumnValueFactoryByName(colName string, columnIdx int) (slowQueryColumnValueFactory, error) {
+func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, columnIdx int) (slowQueryColumnValueFactory, error) {
 	switch colName {
 	case variable.SlowLogTimeStr:
 		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (bool, error) {
@@ -760,7 +760,7 @@ func getColumnValueFactoryByName(colName string, columnIdx int) (slowQueryColumn
 		}, nil
 	case variable.SlowLogUserStr, variable.SlowLogHostStr, execdetails.BackoffTypesStr, variable.SlowLogDBStr, variable.SlowLogIndexNamesStr, variable.SlowLogDigestStr,
 		variable.SlowLogStatsInfoStr, variable.SlowLogCopProcAddr, variable.SlowLogCopWaitAddr, variable.SlowLogPlanDigest,
-		variable.SlowLogPrevStmt, variable.SlowLogQuerySQLStr, variable.SlowLogWarnings, variable.SlowLogSessAliasStr:
+		variable.SlowLogPrevStmt, variable.SlowLogQuerySQLStr, variable.SlowLogWarnings:
 		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (valid bool, err error) {
 			row[columnIdx] = types.NewStringDatum(value)
 			return true, nil
@@ -941,13 +941,13 @@ func (e *slowQueryRetriever) getAllFiles(ctx context.Context, sctx sessionctx.Co
 		}
 	}
 	// Sort by start time
-	slices.SortFunc(logFiles, func(i, j logFile) int {
-		return i.start.Compare(j.start)
+	slices.SortFunc(logFiles, func(i, j logFile) bool {
+		return i.start.Before(j.start)
 	})
 	return logFiles, err
 }
 
-func (*slowQueryRetriever) getFileStartTime(ctx context.Context, file *os.File) (time.Time, error) {
+func (e *slowQueryRetriever) getFileStartTime(ctx context.Context, file *os.File) (time.Time, error) {
 	var t time.Time
 	_, err := file.Seek(0, io.SeekStart)
 	if err != nil {
@@ -964,7 +964,7 @@ func (*slowQueryRetriever) getFileStartTime(ctx context.Context, file *os.File) 
 		if strings.HasPrefix(line, variable.SlowLogStartPrefixStr) {
 			return ParseTime(line[len(variable.SlowLogStartPrefixStr):])
 		}
-		maxNum--
+		maxNum -= 1
 		if maxNum <= 0 {
 			break
 		}
@@ -1018,11 +1018,11 @@ func (s *slowQueryRuntimeStats) Clone() execdetails.RuntimeStats {
 }
 
 // Tp implements the RuntimeStats interface.
-func (*slowQueryRuntimeStats) Tp() int {
+func (s *slowQueryRuntimeStats) Tp() int {
 	return execdetails.TpSlowQueryRuntimeStat
 }
 
-func (*slowQueryRetriever) getFileEndTime(ctx context.Context, file *os.File) (time.Time, error) {
+func (e *slowQueryRetriever) getFileEndTime(ctx context.Context, file *os.File) (time.Time, error) {
 	var t time.Time
 	var tried int
 	stat, err := file.Stat()

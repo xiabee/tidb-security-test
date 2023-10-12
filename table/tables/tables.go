@@ -44,7 +44,6 @@ import (
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
-	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/generatedexpr"
@@ -75,8 +74,6 @@ type TableCommon struct {
 	allocs                          autoid.Allocators
 	sequence                        *sequenceCommon
 	dependencyColumnOffsets         []int
-	Constraints                     []*table.Constraint
-	WritableConstraints             []*table.Constraint
 
 	// recordPrefix and indexPrefix are generated using physicalTableID.
 	recordPrefix kv.Key
@@ -91,12 +88,8 @@ func MockTableFromMeta(tblInfo *model.TableInfo) table.Table {
 		columns = append(columns, col)
 	}
 
-	constraints, err := table.LoadCheckConstraint(tblInfo)
-	if err != nil {
-		return nil
-	}
 	var t TableCommon
-	initTableCommon(&t, tblInfo, tblInfo.ID, columns, autoid.NewAllocators(false), constraints)
+	initTableCommon(&t, tblInfo, tblInfo.ID, columns, autoid.NewAllocators(false))
 	if tblInfo.TableCacheStatusType != model.TableCacheStatusDisable {
 		ret, err := newCachedTable(&t)
 		if err != nil {
@@ -159,12 +152,8 @@ func TableFromMeta(allocs autoid.Allocators, tblInfo *model.TableInfo) (table.Ta
 		columns = append(columns, col)
 	}
 
-	constraints, err := table.LoadCheckConstraint(tblInfo)
-	if err != nil {
-		return nil, err
-	}
 	var t TableCommon
-	initTableCommon(&t, tblInfo, tblInfo.ID, columns, allocs, constraints)
+	initTableCommon(&t, tblInfo, tblInfo.ID, columns, allocs)
 	if tblInfo.GetPartitionInfo() == nil {
 		if err := initTableIndices(&t); err != nil {
 			return nil, err
@@ -178,7 +167,7 @@ func TableFromMeta(allocs autoid.Allocators, tblInfo *model.TableInfo) (table.Ta
 }
 
 // initTableCommon initializes a TableCommon struct.
-func initTableCommon(t *TableCommon, tblInfo *model.TableInfo, physicalTableID int64, cols []*table.Column, allocs autoid.Allocators, constraints []*table.Constraint) {
+func initTableCommon(t *TableCommon, tblInfo *model.TableInfo, physicalTableID int64, cols []*table.Column, allocs autoid.Allocators) {
 	t.tableID = tblInfo.ID
 	t.physicalTableID = physicalTableID
 	t.allocs = allocs
@@ -189,8 +178,6 @@ func initTableCommon(t *TableCommon, tblInfo *model.TableInfo, physicalTableID i
 	t.HiddenColumns = t.HiddenCols()
 	t.WritableColumns = t.WritableCols()
 	t.FullHiddenColsAndVisibleColumns = t.FullHiddenColsAndVisibleCols()
-	t.Constraints = constraints
-	t.WritableConstraints = t.WritableConstraint()
 	t.recordPrefix = tablecodec.GenTableRecordPrefix(physicalTableID)
 	t.indexPrefix = tablecodec.GenTableIndexPrefix(physicalTableID)
 	if tblInfo.IsSequence() {
@@ -218,8 +205,8 @@ func initTableIndices(t *TableCommon) error {
 	return nil
 }
 
-func initTableCommonWithIndices(t *TableCommon, tblInfo *model.TableInfo, physicalTableID int64, cols []*table.Column, allocs autoid.Allocators, constraints []*table.Constraint) error {
-	initTableCommon(t, tblInfo, physicalTableID, cols, allocs, constraints)
+func initTableCommonWithIndices(t *TableCommon, tblInfo *model.TableInfo, physicalTableID int64, cols []*table.Column, allocs autoid.Allocators) error {
+	initTableCommon(t, tblInfo, physicalTableID, cols, allocs)
 	return initTableIndices(t)
 }
 
@@ -329,41 +316,6 @@ func (t *TableCommon) DeletableCols() []*table.Column {
 	return t.Columns
 }
 
-// WritableConstraint returns constraints of the table in writable states.
-func (t *TableCommon) WritableConstraint() []*table.Constraint {
-	if len(t.WritableConstraints) > 0 {
-		return t.WritableConstraints
-	}
-	if t.Constraints == nil {
-		return nil
-	}
-	writeableConstraint := make([]*table.Constraint, 0, len(t.Constraints))
-	for _, con := range t.Constraints {
-		if !con.Enforced {
-			continue
-		}
-		if con.State == model.StateDeleteOnly || con.State == model.StateDeleteReorganization {
-			continue
-		}
-		writeableConstraint = append(writeableConstraint, con)
-	}
-	return writeableConstraint
-}
-
-// CheckRowConstraint verify row check constraints.
-func (t *TableCommon) CheckRowConstraint(sctx sessionctx.Context, rowToCheck []types.Datum) error {
-	for _, constraint := range t.WritableConstraint() {
-		ok, isNull, err := constraint.ConstraintExpr.EvalInt(sctx, chunk.MutRowFromDatums(rowToCheck).ToRow())
-		if err != nil {
-			return err
-		}
-		if ok == 0 && !isNull {
-			return table.ErrCheckConstraintViolated.FastGenByArgs(constraint.Name.O)
-		}
-	}
-	return nil
-}
-
 // FullHiddenColsAndVisibleCols implements table FullHiddenColsAndVisibleCols interface.
 func (t *TableCommon) FullHiddenColsAndVisibleCols() []*table.Column {
 	if len(t.FullHiddenColsAndVisibleColumns) > 0 {
@@ -454,7 +406,6 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx sessionctx.Context,
 	}
 	checksumData := t.initChecksumData(sctx, h)
 	needChecksum := len(checksumData) > 0
-	rowToCheck := make([]types.Datum, 0, numColsCap)
 
 	for _, col := range t.Columns {
 		var value types.Datum
@@ -513,17 +464,11 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx sessionctx.Context,
 			colIDs = append(colIDs, col.ID)
 			row = append(row, value)
 		}
-		rowToCheck = append(rowToCheck, value)
 		if shouldWriteBinlog(sctx, t.meta) && !t.canSkipUpdateBinlog(col, value) {
 			binlogColIDs = append(binlogColIDs, col.ID)
 			binlogOldRow = append(binlogOldRow, oldData[col.Offset])
 			binlogNewRow = append(binlogNewRow, value)
 		}
-	}
-	// check data constraint
-	err = t.CheckRowConstraint(sctx, rowToCheck)
-	if err != nil {
-		return err
 	}
 	sessVars := sctx.GetSessionVars()
 	// rebuild index
@@ -562,7 +507,7 @@ func (t *TableCommon) UpdateRecord(ctx context.Context, sctx sessionctx.Context,
 		// Since only the first assertion takes effect, set the injected assertion before setting the correct one to
 		// override it.
 		if sctx.GetSessionVars().ConnectionID != 0 {
-			logutil.BgLogger().Info("force asserting not exist on UpdateRecord", zap.String("category", "failpoint"), zap.Uint64("startTS", txn.StartTS()))
+			logutil.BgLogger().Info("[failpoint] force asserting not exist on UpdateRecord", zap.Uint64("startTS", txn.StartTS()))
 			if err = txn.SetAssertion(key, kv.SetAssertNotExist); err != nil {
 				failpoint.Return(err)
 			}
@@ -975,11 +920,7 @@ func (t *TableCommon) AddRecord(sctx sessionctx.Context, r []types.Datum, opts .
 			row = append(row, value)
 		}
 	}
-	// check data constraint
-	err = t.CheckRowConstraint(sctx, r)
-	if err != nil {
-		return nil, err
-	}
+
 	writeBufs := sessVars.GetWriteStmtBufs()
 	adjustRowValuesBuf(writeBufs, len(row))
 	key := t.RecordKey(recordID)
@@ -1037,7 +978,7 @@ func (t *TableCommon) AddRecord(sctx sessionctx.Context, r []types.Datum, opts .
 		// Since only the first assertion takes effect, set the injected assertion before setting the correct one to
 		// override it.
 		if sctx.GetSessionVars().ConnectionID != 0 {
-			logutil.BgLogger().Info("force asserting exist on AddRecord", zap.String("category", "failpoint"), zap.Uint64("startTS", txn.StartTS()))
+			logutil.BgLogger().Info("[failpoint] force asserting exist on AddRecord", zap.Uint64("startTS", txn.StartTS()))
 			if err = txn.SetAssertion(key, kv.SetAssertExist); err != nil {
 				failpoint.Return(nil, err)
 			}
@@ -1249,7 +1190,7 @@ func DecodeRawRowData(ctx sessionctx.Context, meta *model.TableInfo, h kv.Handle
 			v[i] = ri
 			continue
 		}
-		if col.IsVirtualGenerated() {
+		if col.IsGenerated() && !col.GeneratedStored {
 			continue
 		}
 		if col.ChangeStateInfo != nil {
@@ -1467,7 +1408,7 @@ func (t *TableCommon) removeRowData(ctx sessionctx.Context, h kv.Handle) error {
 		// Since only the first assertion takes effect, set the injected assertion before setting the correct one to
 		// override it.
 		if ctx.GetSessionVars().ConnectionID != 0 {
-			logutil.BgLogger().Info("force asserting not exist on RemoveRecord", zap.String("category", "failpoint"), zap.Uint64("startTS", txn.StartTS()))
+			logutil.BgLogger().Info("[failpoint] force asserting not exist on RemoveRecord", zap.Uint64("startTS", txn.StartTS()))
 			if err = txn.SetAssertion(key, kv.SetAssertNotExist); err != nil {
 				failpoint.Return(err)
 			}
@@ -1948,7 +1889,7 @@ func CanSkip(info *model.TableInfo, col *table.Column, value *types.Datum) bool 
 	if col.GetDefaultValue() == nil && value.IsNull() && col.GetOriginDefaultValue() == nil {
 		return true
 	}
-	if col.IsVirtualGenerated() {
+	if col.IsGenerated() && !col.GeneratedStored {
 		return true
 	}
 	return false
@@ -1956,7 +1897,10 @@ func CanSkip(info *model.TableInfo, col *table.Column, value *types.Datum) bool 
 
 // canSkipUpdateBinlog checks whether the column can be skipped or not.
 func (t *TableCommon) canSkipUpdateBinlog(col *table.Column, value types.Datum) bool {
-	return col.IsVirtualGenerated()
+	if col.IsGenerated() && !col.GeneratedStored {
+		return true
+	}
+	return false
 }
 
 // FindIndexByColName returns a public table index containing only one column named `name`.
@@ -2341,7 +2285,7 @@ type TemporaryTable struct {
 func TempTableFromMeta(tblInfo *model.TableInfo) tableutil.TempTable {
 	return &TemporaryTable{
 		modified:        false,
-		stats:           statistics.PseudoTable(tblInfo, false),
+		stats:           statistics.PseudoTable(tblInfo),
 		autoIDAllocator: autoid.NewAllocatorFromTempTblInfo(tblInfo),
 		meta:            tblInfo,
 	}

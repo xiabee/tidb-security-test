@@ -24,8 +24,6 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/executor/aggfuncs"
-	"github.com/pingcap/tidb/executor/aggregate"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	plannerutil "github.com/pingcap/tidb/planner/util"
@@ -125,8 +123,8 @@ func TestAggPartialResultMapperB(t *testing.T) {
 		},
 		{
 			rowNum:          100,
-			expectedB:       5,
-			expectedGrowing: true,
+			expectedB:       4,
+			expectedGrowing: false,
 		},
 		{
 			rowNum:          10000,
@@ -140,8 +138,8 @@ func TestAggPartialResultMapperB(t *testing.T) {
 		},
 		{
 			rowNum:          851968, // 6.5 * (1 << 17)
-			expectedB:       18,
-			expectedGrowing: true,
+			expectedB:       17,
+			expectedGrowing: false,
 		},
 		{
 			rowNum:          851969, // 6.5 * (1 << 17) + 1
@@ -150,8 +148,8 @@ func TestAggPartialResultMapperB(t *testing.T) {
 		},
 		{
 			rowNum:          425984, // 6.5 * (1 << 16)
-			expectedB:       17,
-			expectedGrowing: true,
+			expectedB:       16,
+			expectedGrowing: false,
 		},
 		{
 			rowNum:          425985, // 6.5 * (1 << 16) + 1
@@ -161,7 +159,7 @@ func TestAggPartialResultMapperB(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		aggMap := make(aggregate.AggPartialResultMapper)
+		aggMap := make(aggPartialResultMapper)
 		tempSlice := make([]aggfuncs.PartialResult, 10)
 		for num := 0; num < tc.rowNum; num++ {
 			aggMap[strconv.Itoa(num)] = tempSlice
@@ -188,13 +186,13 @@ type hmap struct {
 	nevacuate  uintptr        // nolint:unused // progress counter for evacuation (buckets less than this have been evacuated)
 }
 
-func getB(m aggregate.AggPartialResultMapper) int {
+func getB(m aggPartialResultMapper) int {
 	point := (**hmap)(unsafe.Pointer(&m))
 	value := *point
 	return int(value.B)
 }
 
-func getGrowing(m aggregate.AggPartialResultMapper) bool {
+func getGrowing(m aggPartialResultMapper) bool {
 	point := (**hmap)(unsafe.Pointer(&m))
 	value := *point
 	return value.oldbuckets != nil
@@ -233,41 +231,41 @@ func TestSortSpillDisk(t *testing.T) {
 		ndvs:   cas.ndvs,
 	}
 	dataSource := buildMockDataSource(opt)
-	exe := &SortExec{
-		BaseExecutor: exec.NewBaseExecutor(cas.ctx, dataSource.Schema(), 0, dataSource),
+	exec := &SortExec{
+		baseExecutor: newBaseExecutor(cas.ctx, dataSource.schema, 0, dataSource),
 		ByItems:      make([]*plannerutil.ByItems, 0, len(cas.orderByIdx)),
-		schema:       dataSource.Schema(),
+		schema:       dataSource.schema,
 	}
 	for _, idx := range cas.orderByIdx {
-		exe.ByItems = append(exe.ByItems, &plannerutil.ByItems{Expr: cas.columns()[idx]})
+		exec.ByItems = append(exec.ByItems, &plannerutil.ByItems{Expr: cas.columns()[idx]})
 	}
 	tmpCtx := context.Background()
-	chk := exec.NewFirstChunk(exe)
+	chk := newFirstChunk(exec)
 	dataSource.prepareChunks()
-	err := exe.Open(tmpCtx)
+	err := exec.Open(tmpCtx)
 	require.NoError(t, err)
 	for {
-		err = exe.Next(tmpCtx, chk)
+		err = exec.Next(tmpCtx, chk)
 		require.NoError(t, err)
 		if chk.NumRows() == 0 {
 			break
 		}
 	}
 	// Test only 1 partition and all data in memory.
-	require.Len(t, exe.partitionList, 1)
-	require.Equal(t, false, exe.partitionList[0].AlreadySpilledSafeForTest())
-	require.Equal(t, 2048, exe.partitionList[0].NumRow())
-	err = exe.Close()
+	require.Len(t, exec.partitionList, 1)
+	require.Equal(t, false, exec.partitionList[0].AlreadySpilledSafeForTest())
+	require.Equal(t, 2048, exec.partitionList[0].NumRow())
+	err = exec.Close()
 	require.NoError(t, err)
 
 	ctx.GetSessionVars().MemTracker = memory.NewTracker(memory.LabelForSession, 1)
 	ctx.GetSessionVars().StmtCtx.MemTracker = memory.NewTracker(memory.LabelForSQLText, -1)
 	ctx.GetSessionVars().StmtCtx.MemTracker.AttachTo(ctx.GetSessionVars().MemTracker)
 	dataSource.prepareChunks()
-	err = exe.Open(tmpCtx)
+	err = exec.Open(tmpCtx)
 	require.NoError(t, err)
 	for {
-		err = exe.Next(tmpCtx, chk)
+		err = exec.Next(tmpCtx, chk)
 		require.NoError(t, err)
 		if chk.NumRows() == 0 {
 			break
@@ -277,39 +275,39 @@ func TestSortSpillDisk(t *testing.T) {
 	// Now spilling is in parallel.
 	// Maybe the second add() will called before spilling, depends on
 	// Golang goroutine scheduling. So the result has two possibilities.
-	if len(exe.partitionList) == 2 {
-		require.Len(t, exe.partitionList, 2)
-		require.Equal(t, true, exe.partitionList[0].AlreadySpilledSafeForTest())
-		require.Equal(t, true, exe.partitionList[1].AlreadySpilledSafeForTest())
-		require.Equal(t, 1024, exe.partitionList[0].NumRow())
-		require.Equal(t, 1024, exe.partitionList[1].NumRow())
+	if len(exec.partitionList) == 2 {
+		require.Len(t, exec.partitionList, 2)
+		require.Equal(t, true, exec.partitionList[0].AlreadySpilledSafeForTest())
+		require.Equal(t, true, exec.partitionList[1].AlreadySpilledSafeForTest())
+		require.Equal(t, 1024, exec.partitionList[0].NumRow())
+		require.Equal(t, 1024, exec.partitionList[1].NumRow())
 	} else {
-		require.Len(t, exe.partitionList, 1)
-		require.Equal(t, true, exe.partitionList[0].AlreadySpilledSafeForTest())
-		require.Equal(t, 2048, exe.partitionList[0].NumRow())
+		require.Len(t, exec.partitionList, 1)
+		require.Equal(t, true, exec.partitionList[0].AlreadySpilledSafeForTest())
+		require.Equal(t, 2048, exec.partitionList[0].NumRow())
 	}
 
-	err = exe.Close()
+	err = exec.Close()
 	require.NoError(t, err)
 
 	ctx.GetSessionVars().MemTracker = memory.NewTracker(memory.LabelForSession, 28000)
 	ctx.GetSessionVars().StmtCtx.MemTracker = memory.NewTracker(memory.LabelForSQLText, -1)
 	ctx.GetSessionVars().StmtCtx.MemTracker.AttachTo(ctx.GetSessionVars().MemTracker)
 	dataSource.prepareChunks()
-	err = exe.Open(tmpCtx)
+	err = exec.Open(tmpCtx)
 	require.NoError(t, err)
 	for {
-		err = exe.Next(tmpCtx, chk)
+		err = exec.Next(tmpCtx, chk)
 		require.NoError(t, err)
 		if chk.NumRows() == 0 {
 			break
 		}
 	}
 	// Test only 1 partition but spill disk.
-	require.Len(t, exe.partitionList, 1)
-	require.Equal(t, true, exe.partitionList[0].AlreadySpilledSafeForTest())
-	require.Equal(t, 2048, exe.partitionList[0].NumRow())
-	err = exe.Close()
+	require.Len(t, exec.partitionList, 1)
+	require.Equal(t, true, exec.partitionList[0].AlreadySpilledSafeForTest())
+	require.Equal(t, 2048, exec.partitionList[0].NumRow())
+	err = exec.Close()
 	require.NoError(t, err)
 
 	// Test partition nums.
@@ -328,28 +326,28 @@ func TestSortSpillDisk(t *testing.T) {
 		ndvs:   cas.ndvs,
 	}
 	dataSource = buildMockDataSource(opt)
-	exe = &SortExec{
-		BaseExecutor: exec.NewBaseExecutor(cas.ctx, dataSource.Schema(), 0, dataSource),
+	exec = &SortExec{
+		baseExecutor: newBaseExecutor(cas.ctx, dataSource.schema, 0, dataSource),
 		ByItems:      make([]*plannerutil.ByItems, 0, len(cas.orderByIdx)),
-		schema:       dataSource.Schema(),
+		schema:       dataSource.schema,
 	}
 	for _, idx := range cas.orderByIdx {
-		exe.ByItems = append(exe.ByItems, &plannerutil.ByItems{Expr: cas.columns()[idx]})
+		exec.ByItems = append(exec.ByItems, &plannerutil.ByItems{Expr: cas.columns()[idx]})
 	}
 	tmpCtx = context.Background()
-	chk = exec.NewFirstChunk(exe)
+	chk = newFirstChunk(exec)
 	dataSource.prepareChunks()
-	err = exe.Open(tmpCtx)
+	err = exec.Open(tmpCtx)
 	require.NoError(t, err)
 	for {
-		err = exe.Next(tmpCtx, chk)
+		err = exec.Next(tmpCtx, chk)
 		require.NoError(t, err)
 		if chk.NumRows() == 0 {
 			break
 		}
 	}
 	// Don't spill too many partitions.
-	require.True(t, len(exe.partitionList) <= 4)
-	err = exe.Close()
+	require.True(t, len(exec.partitionList) <= 4)
+	err = exec.Close()
 	require.NoError(t, err)
 }

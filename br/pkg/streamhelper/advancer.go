@@ -267,7 +267,7 @@ func (c *CheckpointAdvancer) CalculateGlobalCheckpointLight(ctx context.Context,
 		})
 		minValue = vsf.Min()
 	})
-	log.Info("current last region", zap.String("category", "log backup advancer hint"),
+	log.Info("[log backup advancer hint] current last region",
 		zap.Stringer("min", minValue), zap.Int("for-polling", len(targets)),
 		zap.String("min-ts", oracle.GetTimeFromTS(minValue.Value).Format(time.RFC3339)))
 	if len(targets) == 0 {
@@ -343,16 +343,16 @@ func (c *CheckpointAdvancer) StartTaskListener(ctx context.Context) {
 				return
 			case e, ok := <-ch:
 				if !ok {
-					log.Info("Task watcher exits due to stream ends.", zap.String("category", "log backup advancer"))
+					log.Info("[log backup advancer] Task watcher exits due to stream ends.")
 					return
 				}
-				log.Info("Meet task event", zap.String("category", "log backup advancer"), zap.Stringer("event", &e))
+				log.Info("[log backup advancer] Meet task event", zap.Stringer("event", &e))
 				if err := c.onTaskEvent(ctx, e); err != nil {
 					if errors.Cause(e.Err) != context.Canceled {
 						log.Error("listen task meet error, would reopen.", logutil.ShortError(err))
 						time.AfterFunc(c.cfg.BackoffTime, func() { c.StartTaskListener(ctx) })
 					}
-					log.Info("Task watcher exits due to some error.", zap.String("category", "log backup advancer"),
+					log.Info("[log backup advancer] Task watcher exits due to some error.",
 						logutil.ShortError(err))
 					return
 				}
@@ -474,8 +474,7 @@ func (c *CheckpointAdvancer) subscribeTick(ctx context.Context) error {
 		return nil
 	}
 	if err := c.subscriber.UpdateStoreTopology(ctx); err != nil {
-		log.Warn("Error when updating store topology.",
-			zap.String("category", "log backup advancer"), logutil.ShortError(err))
+		log.Warn("[log backup advancer] Error when updating store topology.", logutil.ShortError(err))
 	}
 	c.subscriber.HandleErrors(ctx)
 	return c.subscriber.PendingErrors()
@@ -530,7 +529,7 @@ func (c *CheckpointAdvancer) optionalTick(cx context.Context) error {
 	}
 	threshold := c.Config().GetDefaultStartPollThreshold()
 	if err := c.subscribeTick(cx); err != nil {
-		log.Warn("Subscriber meet error, would polling the checkpoint.", zap.String("category", "log backup advancer"),
+		log.Warn("[log backup advancer] Subscriber meet error, would polling the checkpoint.",
 			logutil.ShortError(err))
 		threshold = c.Config().GetSubscriberErrorStartPollThreshold()
 	}
@@ -554,13 +553,13 @@ func (c *CheckpointAdvancer) tick(ctx context.Context) error {
 	defer cancel()
 	err := c.optionalTick(cx)
 	if err != nil {
-		log.Warn("option tick failed.", zap.String("category", "log backup advancer"), logutil.ShortError(err))
+		log.Warn("[log backup advancer] option tick failed.", logutil.ShortError(err))
 		errs = multierr.Append(errs, err)
 	}
 
 	err = c.importantTick(ctx)
 	if err != nil {
-		log.Warn("important tick failed.", zap.String("category", "log backup advancer"), logutil.ShortError(err))
+		log.Warn("[log backup advancer] important tick failed.", logutil.ShortError(err))
 		errs = multierr.Append(errs, err)
 	}
 

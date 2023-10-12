@@ -18,7 +18,6 @@ import (
 	"context"
 
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/executor/internal/exec"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/plugin"
 	"github.com/pingcap/tidb/util/chunk"
@@ -26,13 +25,13 @@ import (
 
 // AdminPluginsExec indicates AdminPlugins executor.
 type AdminPluginsExec struct {
-	exec.BaseExecutor
+	baseExecutor
 	Action  core.AdminPluginsAction
 	Plugins []string
 }
 
 // Next implements the Executor Next interface.
-func (e *AdminPluginsExec) Next(context.Context, *chunk.Chunk) error {
+func (e *AdminPluginsExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	switch e.Action {
 	case core.Enable:
 		return e.changeDisableFlagAndFlush(false)
@@ -43,7 +42,7 @@ func (e *AdminPluginsExec) Next(context.Context, *chunk.Chunk) error {
 }
 
 func (e *AdminPluginsExec) changeDisableFlagAndFlush(disabled bool) error {
-	dom := domain.GetDomain(e.Ctx())
+	dom := domain.GetDomain(e.ctx)
 	for _, pluginName := range e.Plugins {
 		err := plugin.ChangeDisableFlagAndFlush(dom, pluginName, disabled)
 		if err != nil {

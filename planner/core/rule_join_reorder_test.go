@@ -72,7 +72,7 @@ func TestJoinOrderHintWithBinding(t *testing.T) {
 }
 
 func TestAdditionOtherConditionsRemained4OuterJoin(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 
 	tk.MustExec("use test")

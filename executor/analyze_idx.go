@@ -31,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/ranger"
@@ -66,14 +67,12 @@ func analyzeIndexPushdown(idxExec *AnalyzeIndexExec) *statistics.AnalyzeResults 
 	if idxExec.analyzePB.IdxReq.Version != nil {
 		statsVer = int(*idxExec.analyzePB.IdxReq.Version)
 	}
-	idxResult := &statistics.AnalyzeResult{
+	result := &statistics.AnalyzeResult{
 		Hist:    []*statistics.Histogram{hist},
+		Cms:     []*statistics.CMSketch{cms},
 		TopNs:   []*statistics.TopN{topN},
 		Fms:     []*statistics.FMSketch{fms},
 		IsIndex: 1,
-	}
-	if statsVer != statistics.Version2 {
-		idxResult.Cms = []*statistics.CMSketch{cms}
 	}
 	cnt := hist.NullCount
 	if hist.Len() > 0 {
@@ -82,18 +81,14 @@ func analyzeIndexPushdown(idxExec *AnalyzeIndexExec) *statistics.AnalyzeResults 
 	if topN.TotalCount() > 0 {
 		cnt += int64(topN.TotalCount())
 	}
-	result := &statistics.AnalyzeResults{
+	return &statistics.AnalyzeResults{
 		TableID:  idxExec.tableID,
-		Ars:      []*statistics.AnalyzeResult{idxResult},
+		Ars:      []*statistics.AnalyzeResult{result},
 		Job:      idxExec.job,
 		StatsVer: statsVer,
 		Count:    cnt,
 		Snapshot: idxExec.snapshot,
 	}
-	if idxExec.idxInfo.MVIndex {
-		result.ForMVIndex = true
-	}
-	return result
 }
 
 func (e *AnalyzeIndexExec) buildStats(ranges []*ranger.Range, considerNull bool) (hist *statistics.Histogram, cms *statistics.CMSketch, fms *statistics.FMSketch, topN *statistics.TopN, err error) {
@@ -145,7 +140,7 @@ func (e *AnalyzeIndexExec) fetchAnalyzeResult(ranges []*ranger.Range, isNullRang
 	var builder distsql.RequestBuilder
 	var kvReqBuilder *distsql.RequestBuilder
 	if e.isCommonHandle && e.idxInfo.Primary {
-		kvReqBuilder = builder.SetHandleRangesForTables(e.ctx.GetSessionVars().StmtCtx, []int64{e.tableID.GetStatisticsID()}, true, ranges)
+		kvReqBuilder = builder.SetHandleRangesForTables(e.ctx.GetSessionVars().StmtCtx, []int64{e.tableID.GetStatisticsID()}, true, ranges, nil)
 	} else {
 		kvReqBuilder = builder.SetIndexRangesForTables(e.ctx.GetSessionVars().StmtCtx, []int64{e.tableID.GetStatisticsID()}, e.idxInfo.ID, ranges)
 	}
@@ -162,7 +157,6 @@ func (e *AnalyzeIndexExec) fetchAnalyzeResult(ranges []*ranger.Range, isNullRang
 		SetKeepOrder(true).
 		SetConcurrency(e.concurrency).
 		SetResourceGroupName(e.ctx.GetSessionVars().ResourceGroupName).
-		SetExplicitRequestSourceType(e.ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 	if err != nil {
 		return err
@@ -201,7 +195,7 @@ func (e *AnalyzeIndexExec) buildStatsFromResult(result distsql.SelectResult, nee
 	for {
 		failpoint.Inject("mockKillRunningAnalyzeIndexJob", func() {
 			dom := domain.GetDomain(e.ctx)
-			dom.SysProcTracker().KillSysProcess(dom.GetAutoAnalyzeProcID())
+			dom.SysProcTracker().KillSysProcess(util.GetAutoAnalyzeProcID(dom.ServerID))
 		})
 		if atomic.LoadUint32(&e.ctx.GetSessionVars().Killed) == 1 {
 			return nil, nil, nil, nil, errors.Trace(exeerrors.ErrQueryInterrupted)
@@ -229,9 +223,6 @@ func (e *AnalyzeIndexExec) buildStatsFromResult(result distsql.SelectResult, nee
 	}
 	if needCMS && topn.TotalCount() > 0 {
 		hist.RemoveVals(topn.TopN)
-	}
-	if statsVer == statistics.Version2 {
-		hist.StandardizeForV2AnalyzeIndex()
 	}
 	if needCMS && cms != nil {
 		cms.CalcDefaultValForAnalyze(uint64(hist.NDV))

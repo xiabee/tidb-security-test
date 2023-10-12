@@ -17,8 +17,6 @@
 package expression
 
 import (
-	"cmp"
-
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 )
@@ -51,7 +49,7 @@ func (b *builtinLTRealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val < 0)
 	}
 	return nil
@@ -201,7 +199,7 @@ func (b *builtinLTDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val < 0)
 	}
 	return nil
@@ -275,7 +273,7 @@ func (b *builtinLERealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val <= 0)
 	}
 	return nil
@@ -425,7 +423,7 @@ func (b *builtinLEDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val <= 0)
 	}
 	return nil
@@ -499,7 +497,7 @@ func (b *builtinGTRealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val > 0)
 	}
 	return nil
@@ -649,7 +647,7 @@ func (b *builtinGTDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val > 0)
 	}
 	return nil
@@ -723,7 +721,7 @@ func (b *builtinGERealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val >= 0)
 	}
 	return nil
@@ -873,7 +871,7 @@ func (b *builtinGEDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val >= 0)
 	}
 	return nil
@@ -947,7 +945,7 @@ func (b *builtinEQRealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val == 0)
 	}
 	return nil
@@ -1097,7 +1095,7 @@ func (b *builtinEQDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val == 0)
 	}
 	return nil
@@ -1171,7 +1169,7 @@ func (b *builtinNERealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Column) 
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareFloat64(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val != 0)
 	}
 	return nil
@@ -1321,7 +1319,7 @@ func (b *builtinNEDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 		if result.IsNull(i) {
 			continue
 		}
-		val := cmp.Compare(arg0[i], arg1[i])
+		val := types.CompareDuration(arg0[i], arg1[i])
 		i64s[i] = boolToInt64(val != 0)
 	}
 	return nil
@@ -1398,7 +1396,7 @@ func (b *builtinNullEQRealSig) vecEvalInt(input *chunk.Chunk, result *chunk.Colu
 			i64s[i] = 1
 		case isNull0 != isNull1:
 			i64s[i] = 0
-		case cmp.Compare(arg0[i], arg1[i]) == 0:
+		case types.CompareFloat64(arg0[i], arg1[i]) == 0:
 			i64s[i] = 1
 		}
 	}
@@ -1564,7 +1562,7 @@ func (b *builtinNullEQDurationSig) vecEvalInt(input *chunk.Chunk, result *chunk.
 			i64s[i] = 1
 		case isNull0 != isNull1:
 			i64s[i] = 0
-		case cmp.Compare(arg0[i], arg1[i]) == 0:
+		case types.CompareDuration(arg0[i], arg1[i]) == 0:
 			i64s[i] = 1
 		}
 	}

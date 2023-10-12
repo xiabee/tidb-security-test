@@ -45,7 +45,6 @@ func (*BaseInterceptor) OnGetInfoSchema(_ sessionctx.Context, is infoschema.Info
 
 // Callback is used for DDL.
 type Callback interface {
-	ReorgCallback
 	// OnChanged is called after a ddl statement is finished.
 	OnChanged(err error) error
 	// OnSchemaStateChanged is called after a schema state is changed.
@@ -74,7 +73,7 @@ func (*BaseCallback) OnChanged(err error) error {
 }
 
 // OnSchemaStateChanged implements Callback interface.
-func (*BaseCallback) OnSchemaStateChanged(_ int64) {
+func (*BaseCallback) OnSchemaStateChanged(schemaVer int64) {
 	// Nothing to do.
 }
 
@@ -89,38 +88,28 @@ func (*BaseCallback) OnJobRunAfter(_ *model.Job) {
 }
 
 // OnJobUpdated implements Callback.OnJobUpdated interface.
-func (*BaseCallback) OnJobUpdated(_ *model.Job) {
+func (*BaseCallback) OnJobUpdated(job *model.Job) {
 	// Nothing to do.
 }
 
 // OnWatched implements Callback.OnWatched interface.
-func (*BaseCallback) OnWatched(_ context.Context) {
+func (*BaseCallback) OnWatched(ctx context.Context) {
 	// Nothing to do.
 }
 
 // OnGetJobBefore implements Callback.OnGetJobBefore interface.
-func (*BaseCallback) OnGetJobBefore(_ string) {
+func (c *BaseCallback) OnGetJobBefore(jobType string) {
 	// Nothing to do.
 }
 
 // OnGetJobAfter implements Callback.OnGetJobAfter interface.
-func (*BaseCallback) OnGetJobAfter(_ string, _ *model.Job) {
+func (c *BaseCallback) OnGetJobAfter(jobType string, job *model.Job) {
 	// Nothing to do.
-}
-
-// OnUpdateReorgInfo implements ReorgCallback interface.
-func (*BaseCallback) OnUpdateReorgInfo(_ *model.Job, _ int64) {
 }
 
 // DomainReloader is used to avoid import loop.
 type DomainReloader interface {
 	Reload() error
-}
-
-// ReorgCallback is the callback for DDL reorganization.
-type ReorgCallback interface {
-	// OnUpdateReorgInfo is called after updating reorg info for partitions.
-	OnUpdateReorgInfo(job *model.Job, pid int64)
 }
 
 // ****************************** Start of Customized DDL Callback Instance ****************************************
@@ -147,7 +136,7 @@ func (c *DefaultCallback) OnChanged(err error) error {
 }
 
 // OnSchemaStateChanged overrides the ddl Callback interface.
-func (c *DefaultCallback) OnSchemaStateChanged(_ int64) {
+func (c *DefaultCallback) OnSchemaStateChanged(schemaVer int64) {
 	err := c.do.Reload()
 	if err != nil {
 		logutil.BgLogger().Error("domain callback failed on schema state changed", zap.Error(err))
@@ -155,7 +144,7 @@ func (c *DefaultCallback) OnSchemaStateChanged(_ int64) {
 }
 
 func newDefaultCallBack(do DomainReloader) Callback {
-	return &DefaultCallback{BaseCallback: &BaseCallback{}, do: do}
+	return &DefaultCallback{do: do}
 }
 
 // ****************************** End of Default DDL Callback Instance *********************************************
@@ -184,7 +173,7 @@ func (c *ctcCallback) OnChanged(err error) error {
 }
 
 // OnSchemaStateChanged overrides the ddl Callback interface.
-func (c *ctcCallback) OnSchemaStateChanged(_ int64) {
+func (c *ctcCallback) OnSchemaStateChanged(retVer int64) {
 	err := c.do.Reload()
 	if err != nil {
 		logutil.BgLogger().Error("domain callback failed on schema state changed", zap.Error(err))

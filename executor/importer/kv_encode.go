@@ -30,13 +30,13 @@ import (
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/chunk"
 )
 
 type kvEncoder interface {
 	Encode(row []types.Datum, rowID int64) (*kv.Pairs, error)
-	// GetColumnSize returns the size of each column in the current encoder.
-	GetColumnSize() map[int64]int64
+	// GetLastInsertID returns the first auto-generated ID in the current encoder.
+	// if there's no auto-generated id column or the column value is not auto-generated, it will be 0.
+	GetLastInsertID() uint64
 	io.Closer
 }
 
@@ -44,7 +44,7 @@ type kvEncoder interface {
 type tableKVEncoder struct {
 	*kv.BaseKVEncoder
 	// see import.go
-	columnAssignments  []expression.Expression
+	columnAssignments  []*ast.Assignment
 	columnsAndUserVars []*ast.ColumnNameOrUserVar
 	fieldMappings      []*FieldMapping
 	insertColumns      []*table.Column
@@ -54,7 +54,10 @@ var _ kvEncoder = &tableKVEncoder{}
 
 func newTableKVEncoder(
 	config *encode.EncodingConfig,
-	ti *TableImporter,
+	columnAssignments []*ast.Assignment,
+	columnsAndUserVars []*ast.ColumnNameOrUserVar,
+	fieldMappings []*FieldMapping,
+	insertColumns []*table.Column,
 ) (*tableKVEncoder, error) {
 	baseKVEncoder, err := kv.NewBaseKVEncoder(config)
 	if err != nil {
@@ -62,17 +65,13 @@ func newTableKVEncoder(
 	}
 	// we need a non-nil TxnCtx to avoid panic when evaluating set clause
 	baseKVEncoder.SessionCtx.Vars.TxnCtx = new(variable.TransactionContext)
-	colAssignExprs, _, err := ti.CreateColAssignExprs(baseKVEncoder.SessionCtx)
-	if err != nil {
-		return nil, err
-	}
 
 	return &tableKVEncoder{
 		BaseKVEncoder:      baseKVEncoder,
-		columnAssignments:  colAssignExprs,
-		columnsAndUserVars: ti.ColumnsAndUserVars,
-		fieldMappings:      ti.FieldMappings,
-		insertColumns:      ti.InsertColumns,
+		columnAssignments:  columnAssignments,
+		columnsAndUserVars: columnsAndUserVars,
+		fieldMappings:      fieldMappings,
+		insertColumns:      insertColumns,
 	}, nil
 }
 
@@ -91,11 +90,9 @@ func (en *tableKVEncoder) Encode(row []types.Datum, rowID int64) (*kv.Pairs, err
 	return en.Record2KV(record, row, rowID)
 }
 
-func (en *tableKVEncoder) GetColumnSize() map[int64]int64 {
-	sessionVars := en.SessionCtx.GetSessionVars()
-	sessionVars.TxnCtxMu.Lock()
-	defer sessionVars.TxnCtxMu.Unlock()
-	return sessionVars.TxnCtx.TableDeltaMap[en.Table.Meta().ID].ColSize
+// GetLastInsertID implements the kvEncoder interface.
+func (en *tableKVEncoder) GetLastInsertID() uint64 {
+	return en.LastInsertID
 }
 
 // todo merge with code in load_data.go
@@ -139,7 +136,7 @@ func (en *tableKVEncoder) parserData2TableData(parserData []types.Datum, rowID i
 	}
 	for i := 0; i < len(en.columnAssignments); i++ {
 		// eval expression of `SET` clause
-		d, err := en.columnAssignments[i].Eval(chunk.Row{})
+		d, err := expression.EvalAstExpr(en.SessionCtx, en.columnAssignments[i].Expr)
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +179,7 @@ func (en *tableKVEncoder) fillRow(row []types.Datum, hasValue []bool, rowID int6
 
 	record := en.GetOrCreateRecord()
 	for i, col := range en.Columns {
-		var theDatum *types.Datum
+		var theDatum *types.Datum = nil
 		if hasValue[i] {
 			theDatum = &row[i]
 		}
@@ -195,6 +192,7 @@ func (en *tableKVEncoder) fillRow(row []types.Datum, hasValue []bool, rowID int6
 	}
 
 	if common.TableHasAutoRowID(en.Table.Meta()) {
+		// todo: we assume there's no such column in input data, will handle it later
 		rowValue := rowID
 		newRowID := en.AutoIDFn(rowID)
 		value = types.NewIntDatum(newRowID)

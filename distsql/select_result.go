@@ -33,7 +33,7 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/planner/util"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/store/copr"
 	"github.com/pingcap/tidb/telemetry"
 	"github.com/pingcap/tidb/types"
@@ -107,13 +107,15 @@ func (h *chunkRowHeap) Pop() interface{} {
 }
 
 // NewSortedSelectResults is only for partition table
-// If schema == nil, sort by first few columns.
-func NewSortedSelectResults(selectResult []SelectResult, schema *expression.Schema, byitems []*util.ByItems, memTracker *memory.Tracker) SelectResult {
+// When pids != nil, the pid will be set in the last column of each chunk.Rows.
+// When schema == nil, sort by first few columns.
+func NewSortedSelectResults(selectResult []SelectResult, pids []int64, schema *expression.Schema, byitems []*util.ByItems, memTracker *memory.Tracker) SelectResult {
 	s := &sortedSelectResults{
 		schema:       schema,
 		selectResult: selectResult,
 		byItems:      byitems,
 		memTracker:   memTracker,
+		pids:         pids,
 	}
 	s.initCompareFuncs()
 	s.buildKeyColumns()
@@ -133,6 +135,7 @@ type sortedSelectResults struct {
 	rowPtrs      []chunk.RowPtr
 	heap         *chunkRowHeap
 
+	pids       []int64
 	memTracker *memory.Tracker
 }
 
@@ -194,6 +197,13 @@ func (ssr *sortedSelectResults) Next(ctx context.Context, c *chunk.Chunk) (err e
 	for i := range ssr.cachedChunks {
 		if ssr.cachedChunks[i] == nil {
 			ssr.cachedChunks[i] = c.CopyConstruct()
+			if len(ssr.pids) != 0 {
+				r := make([]int, c.NumCols()-1)
+				for i := range r {
+					r[i] = i
+				}
+				ssr.cachedChunks[i] = ssr.cachedChunks[i].Prune(r)
+			}
 			ssr.memTracker.Consume(ssr.cachedChunks[i].MemoryUsage())
 		}
 	}
@@ -213,6 +223,10 @@ func (ssr *sortedSelectResults) Next(ctx context.Context, c *chunk.Chunk) (err e
 
 		idx := heap.Pop(ssr.heap).(chunk.RowPtr)
 		c.AppendRow(ssr.cachedChunks[idx.ChkIdx].GetRow(int(idx.RowIdx)))
+		if len(ssr.pids) != 0 {
+			c.AppendInt64(c.NumCols()-1, ssr.pids[idx.ChkIdx])
+		}
+
 		if int(idx.RowIdx) >= ssr.cachedChunks[idx.ChkIdx].NumRows()-1 {
 			if err = ssr.updateCachedChunk(ctx, idx.ChkIdx); err != nil {
 				return err
@@ -299,6 +313,7 @@ type selectResult struct {
 	respChkIdx       int
 	respChunkDecoder *chunk.Decoder
 
+	feedback     *statistics.QueryFeedback
 	partialCount int64 // number of partial results.
 	sqlType      string
 
@@ -396,7 +411,9 @@ func (r *selectResult) fetchResp(ctx context.Context) error {
 		for _, warning := range r.selectResp.Warnings {
 			sc.AppendWarning(dbterror.ClassTiKV.Synthesize(terror.ErrCode(warning.Code), warning.Msg))
 		}
-
+		if r.feedback != nil {
+			r.feedback.Update(resultSubset.GetStartKey(), r.selectResp.OutputCounts, r.selectResp.Ndvs)
+		}
 		r.partialCount++
 
 		hasStats, ok := resultSubset.(CopRuntimeStats)
@@ -447,6 +464,7 @@ func (r *selectResult) NextRaw(ctx context.Context) (data []byte, err error) {
 
 	resultSubset, err := r.resp.Next(ctx)
 	r.partialCount++
+	r.feedback.Invalidate()
 	if resultSubset != nil && err == nil {
 		data = resultSubset.GetData()
 	}
@@ -509,30 +527,6 @@ func (r *selectResult) readFromChunk(ctx context.Context, chk *chunk.Chunk) erro
 	return nil
 }
 
-// FillDummySummariesForTiFlashTasks fills dummy execution summaries for mpp tasks which lack summaries
-func FillDummySummariesForTiFlashTasks(sctx *stmtctx.StatementContext, callee string, storeTypeName string, allPlanIDs []int, recordedPlanIDs map[int]int) {
-	num := uint64(0)
-	dummySummary := &tipb.ExecutorExecutionSummary{TimeProcessedNs: &num, NumProducedRows: &num, NumIterations: &num, ExecutorId: nil}
-	for _, planID := range allPlanIDs {
-		if _, ok := recordedPlanIDs[planID]; !ok {
-			sctx.RuntimeStatsColl.RecordOneCopTask(planID, storeTypeName, callee, dummySummary)
-		}
-	}
-}
-
-// recordExecutionSummariesForTiFlashTasks records mpp task execution summaries
-func recordExecutionSummariesForTiFlashTasks(sctx *stmtctx.StatementContext, executionSummaries []*tipb.ExecutorExecutionSummary, callee string, storeTypeName string, allPlanIDs []int) {
-	var recordedPlanIDs = make(map[int]int)
-	for _, detail := range executionSummaries {
-		if detail != nil && detail.TimeProcessedNs != nil &&
-			detail.NumProducedRows != nil && detail.NumIterations != nil {
-			recordedPlanIDs[sctx.RuntimeStatsColl.
-				RecordOneCopTask(-1, storeTypeName, callee, detail)] = 0
-		}
-	}
-	FillDummySummariesForTiFlashTasks(sctx, callee, storeTypeName, allPlanIDs, recordedPlanIDs)
-}
-
 func (r *selectResult) updateCopRuntimeStats(ctx context.Context, copStats *copr.CopRuntimeStats, respTime time.Duration) {
 	callee := copStats.CalleeAddress
 	if r.rootPlanID <= 0 || r.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl == nil || callee == "" {
@@ -576,7 +570,22 @@ func (r *selectResult) updateCopRuntimeStats(ctx context.Context, copStats *copr
 		}
 	}
 	if hasExecutor {
-		recordExecutionSummariesForTiFlashTasks(r.ctx.GetSessionVars().StmtCtx, r.selectResp.GetExecutionSummaries(), callee, r.storeType.Name(), r.copPlanIDs)
+		var recorededPlanIDs = make(map[int]int)
+		for i, detail := range r.selectResp.GetExecutionSummaries() {
+			if detail != nil && detail.TimeProcessedNs != nil &&
+				detail.NumProducedRows != nil && detail.NumIterations != nil {
+				planID := r.copPlanIDs[i]
+				recorededPlanIDs[r.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.
+					RecordOneCopTask(planID, r.storeType.Name(), callee, detail)] = 0
+			}
+		}
+		num := uint64(0)
+		dummySummary := &tipb.ExecutorExecutionSummary{TimeProcessedNs: &num, NumProducedRows: &num, NumIterations: &num, ExecutorId: nil}
+		for _, planID := range r.copPlanIDs {
+			if _, ok := recorededPlanIDs[planID]; !ok {
+				r.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RecordOneCopTask(planID, r.storeType.Name(), callee, dummySummary)
+			}
+		}
 	} else {
 		// For cop task cases, we still need this protection.
 		if len(r.selectResp.GetExecutionSummaries()) != len(r.copPlanIDs) {
@@ -624,6 +633,9 @@ func (r *selectResult) memConsume(bytes int64) {
 
 // Close closes selectResult.
 func (r *selectResult) Close() error {
+	if r.feedback.Actual() >= 0 {
+		metrics.DistSQLScanKeysHistogram.Observe(float64(r.feedback.Actual()))
+	}
 	metrics.DistSQLPartialCountHistogram.Observe(float64(r.partialCount))
 	respSize := atomic.SwapInt64(&r.selectRespSize, 0)
 	if respSize > 0 {
@@ -740,7 +752,7 @@ func (s *selectResultRuntimeStats) String() string {
 	if s.copRespTime.Size() > 0 {
 		size := s.copRespTime.Size()
 		if size == 1 {
-			fmt.Fprintf(buf, "cop_task: {num: 1, max: %v, proc_keys: %v", execdetails.FormatDuration(time.Duration(s.copRespTime.GetPercentile(0))), s.procKeys.GetPercentile(0))
+			buf.WriteString(fmt.Sprintf("cop_task: {num: 1, max: %v, proc_keys: %v", execdetails.FormatDuration(time.Duration(s.copRespTime.GetPercentile(0))), s.procKeys.GetPercentile(0)))
 		} else {
 			vMax, vMin := s.copRespTime.GetMax(), s.copRespTime.GetMin()
 			vP95 := s.copRespTime.GetPercentile(0.95)
@@ -749,9 +761,9 @@ func (s *selectResultRuntimeStats) String() string {
 
 			keyMax := s.procKeys.GetMax()
 			keyP95 := s.procKeys.GetPercentile(0.95)
-			fmt.Fprintf(buf, "cop_task: {num: %v, max: %v, min: %v, avg: %v, p95: %v", size,
+			buf.WriteString(fmt.Sprintf("cop_task: {num: %v, max: %v, min: %v, avg: %v, p95: %v", size,
 				execdetails.FormatDuration(time.Duration(vMax.GetFloat64())), execdetails.FormatDuration(time.Duration(vMin.GetFloat64())),
-				execdetails.FormatDuration(vAvg), execdetails.FormatDuration(time.Duration(vP95)))
+				execdetails.FormatDuration(vAvg), execdetails.FormatDuration(time.Duration(vP95))))
 			if keyMax > 0 {
 				buf.WriteString(", max_proc_keys: ")
 				buf.WriteString(strconv.FormatInt(int64(keyMax), 10))
@@ -777,8 +789,8 @@ func (s *selectResultRuntimeStats) String() string {
 			buf.WriteString(execdetails.FormatDuration(time.Duration(copRPC.Consume)))
 		}
 		if config.GetGlobalConfig().TiKVClient.CoprCache.CapacityMB > 0 {
-			fmt.Fprintf(buf, ", copr_cache_hit_ratio: %v",
-				strconv.FormatFloat(s.calcCacheHit(), 'f', 2, 64))
+			buf.WriteString(fmt.Sprintf(", copr_cache_hit_ratio: %v",
+				strconv.FormatFloat(s.calcCacheHit(), 'f', 2, 64)))
 		} else {
 			buf.WriteString(", copr_cache: disabled")
 		}
@@ -819,7 +831,7 @@ func (s *selectResultRuntimeStats) String() string {
 				buf.WriteString(", ")
 			}
 			idx++
-			fmt.Fprintf(buf, "%s: %s", k, execdetails.FormatDuration(d))
+			buf.WriteString(fmt.Sprintf("%s: %s", k, execdetails.FormatDuration(d)))
 		}
 		buf.WriteString("}")
 	}

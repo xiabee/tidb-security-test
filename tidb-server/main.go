@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/coreos/go-semver/semver"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -34,8 +35,8 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/executor"
-	"github.com/pingcap/tidb/executor/mppcoordmanager"
 	"github.com/pingcap/tidb/extension"
 	_ "github.com/pingcap/tidb/extension/_import"
 	"github.com/pingcap/tidb/keyspace"
@@ -64,7 +65,6 @@ import (
 	"github.com/pingcap/tidb/util/cpuprofile"
 	"github.com/pingcap/tidb/util/deadlockhistory"
 	"github.com/pingcap/tidb/util/disk"
-	distroleutil "github.com/pingcap/tidb/util/distrole"
 	"github.com/pingcap/tidb/util/domainutil"
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/logutil"
@@ -130,125 +130,66 @@ const (
 	nmInitializeSQLFile           = "initialize-sql-file"
 	nmDisconnectOnExpiredPassword = "disconnect-on-expired-password"
 	nmKeyspaceName                = "keyspace-name"
-	nmTiDBServiceScope            = "tidb-service-scope"
 )
 
 var (
-	version      *bool
-	configPath   *string
-	configCheck  *bool
-	configStrict *bool
+	version      = flagBoolean(nmVersion, false, "print version information and exit")
+	configPath   = flag.String(nmConfig, "", "config file path")
+	configCheck  = flagBoolean(nmConfigCheck, false, "check config file validity and exit")
+	configStrict = flagBoolean(nmConfigStrict, false, "enforce config file validity")
 
 	// Base
-	store            *string
-	storePath        *string
-	host             *string
-	advertiseAddress *string
-	port             *string
-	cors             *string
-	socket           *string
-	enableBinlog     *bool
-	runDDL           *bool
-	ddlLease         *string
-	tokenLimit       *int
-	pluginDir        *string
-	pluginLoad       *string
-	affinityCPU      *string
-	repairMode       *bool
-	repairList       *string
-	tempDir          *string
+	store            = flag.String(nmStore, "unistore", "registered store name, [tikv, mocktikv, unistore]")
+	storePath        = flag.String(nmStorePath, "/tmp/tidb", "tidb storage path")
+	host             = flag.String(nmHost, "0.0.0.0", "tidb server host")
+	advertiseAddress = flag.String(nmAdvertiseAddress, "", "tidb server advertise IP")
+	port             = flag.String(nmPort, "4000", "tidb server port")
+	cors             = flag.String(nmCors, "", "tidb server allow cors origin")
+	socket           = flag.String(nmSocket, "/tmp/tidb-{Port}.sock", "The socket file to use for connection.")
+	enableBinlog     = flagBoolean(nmEnableBinlog, false, "enable generate binlog")
+	runDDL           = flagBoolean(nmRunDDL, true, "run ddl worker on this tidb-server")
+	ddlLease         = flag.String(nmDdlLease, "45s", "schema lease duration, very dangerous to change only if you know what you do")
+	tokenLimit       = flag.Int(nmTokenLimit, 1000, "the limit of concurrent executed sessions")
+	pluginDir        = flag.String(nmPluginDir, "/data/deploy/plugin", "the folder that hold plugin")
+	pluginLoad       = flag.String(nmPluginLoad, "", "wait load plugin name(separated by comma)")
+	affinityCPU      = flag.String(nmAffinityCPU, "", "affinity cpu (cpu-no. separated by comma, e.g. 1,2,3)")
+	repairMode       = flagBoolean(nmRepairMode, false, "enable admin repair mode")
+	repairList       = flag.String(nmRepairList, "", "admin repair table list")
+	tempDir          = flag.String(nmTempDir, config.DefTempDir, "tidb temporary directory")
 
 	// Log
-	logLevel     *string
-	logFile      *string
-	logSlowQuery *string
+	logLevel     = flag.String(nmLogLevel, "info", "log level: info, debug, warn, error, fatal")
+	logFile      = flag.String(nmLogFile, "", "log file path")
+	logSlowQuery = flag.String(nmLogSlowQuery, "", "slow query file path")
 
 	// Status
-	reportStatus    *bool
-	statusHost      *string
-	statusPort      *string
-	metricsAddr     *string
-	metricsInterval *uint
+	reportStatus    = flagBoolean(nmReportStatus, true, "If enable status report HTTP service.")
+	statusHost      = flag.String(nmStatusHost, "0.0.0.0", "tidb server status host")
+	statusPort      = flag.String(nmStatusPort, "10080", "tidb server status port")
+	metricsAddr     = flag.String(nmMetricsAddr, "", "prometheus pushgateway address, leaves it empty will disable prometheus push.")
+	metricsInterval = flag.Uint(nmMetricsInterval, 15, "prometheus client push interval in second, set \"0\" to disable prometheus push.")
 
 	// PROXY Protocol
-	proxyProtocolNetworks      *string
-	proxyProtocolHeaderTimeout *uint
-	proxyProtocolFallbackable  *bool
+	proxyProtocolNetworks      = flag.String(nmProxyProtocolNetworks, "", "proxy protocol networks allowed IP or *, empty mean disable proxy protocol support")
+	proxyProtocolHeaderTimeout = flag.Uint(nmProxyProtocolHeaderTimeout, 5, "proxy protocol header read timeout, unit is second. (Deprecated: as proxy protocol using lazy mode, header read timeout no longer used)")
+	proxyProtocolFallbackable  = flagBoolean(nmProxyProtocolFallbackable, false, "enable proxy protocol fallback mode. If it is enabled, connection will return the client IP address when the client does not send PROXY Protocol Header and it will not return any error. (Note: This feature it does NOT follow the PROXY Protocol SPEC)")
 
 	// Bootstrap and security
-	initializeSecure            *bool
-	initializeInsecure          *bool
-	initializeSQLFile           *string
-	disconnectOnExpiredPassword *bool
-	keyspaceName                *string
-	serviceScope                *string
-	help                        *bool
+	initializeSecure            = flagBoolean(nmInitializeSecure, false, "bootstrap tidb-server in secure mode")
+	initializeInsecure          = flagBoolean(nmInitializeInsecure, true, "bootstrap tidb-server in insecure mode")
+	initializeSQLFile           = flag.String(nmInitializeSQLFile, "", "SQL file to execute on first bootstrap")
+	disconnectOnExpiredPassword = flagBoolean(nmDisconnectOnExpiredPassword, true, "the server disconnects the client when the password is expired")
+	keyspaceName                = flag.String(nmKeyspaceName, "", "keyspace name.")
 )
 
-func initflag() *flag.FlagSet {
-	fset := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	version = flagBoolean(fset, nmVersion, false, "print version information and exit")
-	configPath = fset.String(nmConfig, "", "config file path")
-	configCheck = flagBoolean(fset, nmConfigCheck, false, "check config file validity and exit")
-	configStrict = flagBoolean(fset, nmConfigStrict, false, "enforce config file validity")
-
-	// Base
-	store = fset.String(nmStore, "unistore", "registered store name, [tikv, mocktikv, unistore]")
-	storePath = fset.String(nmStorePath, "/tmp/tidb", "tidb storage path")
-	host = fset.String(nmHost, "0.0.0.0", "tidb server host")
-	advertiseAddress = fset.String(nmAdvertiseAddress, "", "tidb server advertise IP")
-	port = fset.String(nmPort, "4000", "tidb server port")
-	cors = fset.String(nmCors, "", "tidb server allow cors origin")
-	socket = fset.String(nmSocket, "/tmp/tidb-{Port}.sock", "The socket file to use for connection.")
-	enableBinlog = flagBoolean(fset, nmEnableBinlog, false, "enable generate binlog")
-	runDDL = flagBoolean(fset, nmRunDDL, true, "run ddl worker on this tidb-server")
-	ddlLease = fset.String(nmDdlLease, "45s", "schema lease duration, very dangerous to change only if you know what you do")
-	tokenLimit = fset.Int(nmTokenLimit, 1000, "the limit of concurrent executed sessions")
-	pluginDir = fset.String(nmPluginDir, "/data/deploy/plugin", "the folder that hold plugin")
-	pluginLoad = fset.String(nmPluginLoad, "", "wait load plugin name(separated by comma)")
-	affinityCPU = fset.String(nmAffinityCPU, "", "affinity cpu (cpu-no. separated by comma, e.g. 1,2,3)")
-	repairMode = flagBoolean(fset, nmRepairMode, false, "enable admin repair mode")
-	repairList = fset.String(nmRepairList, "", "admin repair table list")
-	tempDir = fset.String(nmTempDir, config.DefTempDir, "tidb temporary directory")
-
-	// Log
-	logLevel = fset.String(nmLogLevel, "info", "log level: info, debug, warn, error, fatal")
-	logFile = fset.String(nmLogFile, "", "log file path")
-	logSlowQuery = fset.String(nmLogSlowQuery, "", "slow query file path")
-
-	// Status
-	reportStatus = flagBoolean(fset, nmReportStatus, true, "If enable status report HTTP service.")
-	statusHost = fset.String(nmStatusHost, "0.0.0.0", "tidb server status host")
-	statusPort = fset.String(nmStatusPort, "10080", "tidb server status port")
-	metricsAddr = fset.String(nmMetricsAddr, "", "prometheus pushgateway address, leaves it empty will disable prometheus push.")
-	metricsInterval = fset.Uint(nmMetricsInterval, 15, "prometheus client push interval in second, set \"0\" to disable prometheus push.")
-
-	// PROXY Protocol
-	proxyProtocolNetworks = fset.String(nmProxyProtocolNetworks, "", "proxy protocol networks allowed IP or *, empty mean disable proxy protocol support")
-	proxyProtocolHeaderTimeout = fset.Uint(nmProxyProtocolHeaderTimeout, 5, "proxy protocol header read timeout, unit is second. (Deprecated: as proxy protocol using lazy mode, header read timeout no longer used)")
-	proxyProtocolFallbackable = flagBoolean(fset, nmProxyProtocolFallbackable, false, "enable proxy protocol fallback mode. If it is enabled, connection will return the client IP address when the client does not send PROXY Protocol Header and it will not return any error. (Note: This feature it does NOT follow the PROXY Protocol SPEC)")
-
-	// Bootstrap and security
-	initializeSecure = flagBoolean(fset, nmInitializeSecure, false, "bootstrap tidb-server in secure mode")
-	initializeInsecure = flagBoolean(fset, nmInitializeInsecure, true, "bootstrap tidb-server in insecure mode")
-	initializeSQLFile = fset.String(nmInitializeSQLFile, "", "SQL file to execute on first bootstrap")
-	disconnectOnExpiredPassword = flagBoolean(fset, nmDisconnectOnExpiredPassword, true, "the server disconnects the client when the password is expired")
-	keyspaceName = fset.String(nmKeyspaceName, "", "keyspace name.")
-	serviceScope = fset.String(nmTiDBServiceScope, "", "tidb service scope")
-	help = fset.Bool("help", false, "show the usage")
-	// Ignore errors; CommandLine is set for ExitOnError.
-	// nolint:errcheck
-	fset.Parse(os.Args[1:])
+func main() {
+	help := flag.Bool("help", false, "show the usage")
+	flag.Parse()
 	if *help {
-		fset.Usage()
+		flag.Usage()
 		os.Exit(0)
 	}
-	return fset
-}
-
-func main() {
-	fset := initflag()
-	config.InitializeConfig(*configPath, *configCheck, *configStrict, overrideConfig, fset)
+	config.InitializeConfig(*configPath, *configCheck, *configStrict, overrideConfig)
 	if *version {
 		setVersions()
 		fmt.Println(printer.GetTiDBInfo())
@@ -295,10 +236,14 @@ func main() {
 	setupMetrics()
 
 	keyspaceName := keyspace.GetKeyspaceNameBySettings()
-	executor.Start()
+
 	resourcemanager.InstanceResourceManager.Start()
 	storage, dom := createStoreAndDomain(keyspaceName)
 	svr := createServer(storage, dom)
+	err = driver.TrySetupGlobalResourceController(context.Background(), dom.ServerID(), storage)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to setup global resource controller", zap.Error(err))
+	}
 
 	// Register error API is not thread-safe, the caller MUST NOT register errors after initialization.
 	// To prevent misuse, set a flag to indicate that register new error will panic immediately.
@@ -306,12 +251,11 @@ func main() {
 	terror.RegisterFinish()
 
 	exited := make(chan struct{})
-	signal.SetupSignalHandler(func() {
+	signal.SetupSignalHandler(func(graceful bool) {
 		svr.Close()
-		cleanup(svr, storage, dom)
+		cleanup(svr, storage, dom, graceful)
 		cpuprofile.StopCPUProfiler()
 		resourcemanager.InstanceResourceManager.Stop()
-		executor.Stop()
 		close(exited)
 	})
 	topsql.SetupTopSQL()
@@ -339,7 +283,9 @@ func syncLog() {
 func checkTempStorageQuota() {
 	// check capacity and the quota when EnableTmpStorageOnOOM is enabled
 	c := config.GetGlobalConfig()
-	if c.TempStorageQuota >= 0 {
+	if c.TempStorageQuota < 0 {
+		// means unlimited, do nothing
+	} else {
 		capacityByte, err := storageSys.GetTargetDirectoryCapacity(c.TempStoragePath)
 		if err != nil {
 			log.Fatal(err.Error())
@@ -395,7 +341,8 @@ func createStoreAndDomain(keyspaceName string) (kv.Storage, *domain.Domain) {
 	storage, err := kvstore.New(fullPath)
 	terror.MustNil(err)
 	copr.GlobalMPPFailedStoreProber.Run()
-	mppcoordmanager.InstanceMPPCoordinatorManager.Run()
+	err = infosync.CheckTiKVVersion(storage, *semver.New(versioninfo.TiKVMinVersion))
+	terror.MustNil(err)
 	// Bootstrap a session to load information schema.
 	dom, err := session.BootstrapSession(storage)
 	terror.MustNil(err)
@@ -488,19 +435,19 @@ func parseDuration(lease string) time.Duration {
 	return dur
 }
 
-func flagBoolean(fset *flag.FlagSet, name string, defaultVal bool, usage string) *bool {
+func flagBoolean(name string, defaultVal bool, usage string) *bool {
 	if !defaultVal {
 		// Fix #4125, golang do not print default false value in usage, so we append it.
 		usage = fmt.Sprintf("%s (default false)", usage)
-		return fset.Bool(name, defaultVal, usage)
+		return flag.Bool(name, defaultVal, usage)
 	}
-	return fset.Bool(name, defaultVal, usage)
+	return flag.Bool(name, defaultVal, usage)
 }
 
 // overrideConfig considers command arguments and overrides some config items in the Config.
-func overrideConfig(cfg *config.Config, fset *flag.FlagSet) {
+func overrideConfig(cfg *config.Config) {
 	actualFlags := make(map[string]bool)
-	fset.Visit(func(f *flag.Flag) {
+	flag.Visit(func(f *flag.Flag) {
 		actualFlags[f.Name] = true
 	})
 
@@ -652,17 +599,6 @@ func overrideConfig(cfg *config.Config, fset *flag.FlagSet) {
 	if actualFlags[nmKeyspaceName] {
 		cfg.KeyspaceName = *keyspaceName
 	}
-
-	if actualFlags[nmTiDBServiceScope] {
-		scope, ok := distroleutil.ToTiDBServiceScope(*serviceScope)
-		if !ok {
-			err := fmt.Errorf("incorrect value: `%s`. %s options: %s",
-				*serviceScope,
-				nmTiDBServiceScope, `"", background`)
-			terror.MustNil(err)
-		}
-		cfg.Instance.TiDBServiceScope = scope
-	}
 }
 
 func setVersions() {
@@ -706,7 +642,8 @@ func setGlobalVars() {
 					cfg.Instance.RecordPlanInSlowLog = cfg.Log.RecordPlanInSlowLog
 				}
 			case "performance":
-				if oldName == "force-priority" {
+				switch oldName {
+				case "force-priority":
 					cfg.Instance.ForcePriority = cfg.Performance.ForcePriority
 				}
 			case "plugin":
@@ -767,7 +704,6 @@ func setGlobalVars() {
 	variable.IsSandBoxModeEnabled.Store(!cfg.Security.DisconnectOnExpiredPassword)
 	atomic.StoreUint32(&variable.DDLSlowOprThreshold, cfg.Instance.DDLSlowOprThreshold)
 	atomic.StoreUint64(&variable.ExpensiveQueryTimeThreshold, cfg.Instance.ExpensiveQueryTimeThreshold)
-	atomic.StoreUint64(&variable.ExpensiveTxnTimeThreshold, cfg.Instance.ExpensiveTxnTimeThreshold)
 
 	if len(cfg.ServerVersion) > 0 {
 		mysql.ServerVersion = cfg.ServerVersion
@@ -776,7 +712,7 @@ func setGlobalVars() {
 
 	if len(cfg.TiDBEdition) > 0 {
 		versioninfo.TiDBEdition = cfg.TiDBEdition
-		variable.SetSysVar(variable.VersionComment, "TiDB Server (Apache License 2.0) "+versioninfo.TiDBEdition+" Edition, MySQL 8.0 compatible")
+		variable.SetSysVar(variable.VersionComment, "TiDB Server (Apache License 2.0) "+versioninfo.TiDBEdition+" Edition, MySQL 5.7 compatible")
 	}
 	if len(cfg.VersionComment) > 0 {
 		variable.SetSysVar(variable.VersionComment, cfg.VersionComment)
@@ -844,10 +780,6 @@ func setGlobalVars() {
 	txninfo.Recorder.ResizeSummaries(cfg.TrxSummary.TransactionSummaryCapacity)
 	txninfo.Recorder.SetMinDuration(time.Duration(cfg.TrxSummary.TransactionIDDigestMinDuration) * time.Millisecond)
 	chunk.InitChunkAllocSize(cfg.TiDBMaxReuseChunk, cfg.TiDBMaxReuseColumn)
-
-	if len(cfg.Instance.TiDBServiceScope) > 0 {
-		variable.ServiceScope.Store(strings.ToLower(cfg.Instance.TiDBServiceScope))
-	}
 }
 
 func setupLog() {
@@ -886,8 +818,8 @@ func createServer(storage kv.Storage, dom *domain.Domain) *server.Server {
 		closeDomainAndStorage(storage, dom)
 		log.Fatal("failed to create the server", zap.Error(err), zap.Stack("stack"))
 	}
-	mppcoordmanager.InstanceMPPCoordinatorManager.InitServerAddr(svr.GetStatusServerAddr())
 	svr.SetDomain(dom)
+	svr.InitGlobalConnID(dom.ServerID)
 	go dom.ExpensiveQueryHandle().SetSessionManager(svr).Run()
 	go dom.MemoryUsageAlarmHandle().SetSessionManager(svr).Run()
 	go dom.ServerMemoryLimitHandle().SetSessionManager(svr).Run()
@@ -922,7 +854,6 @@ func closeDomainAndStorage(storage kv.Storage, dom *domain.Domain) {
 	tikv.StoreShuttingDown(1)
 	dom.Close()
 	copr.GlobalMPPFailedStoreProber.Stop()
-	mppcoordmanager.InstanceMPPCoordinatorManager.Stop()
 	err := storage.Close()
 	terror.Log(errors.Trace(err))
 }
@@ -931,7 +862,7 @@ func closeDomainAndStorage(storage kv.Storage, dom *domain.Domain) {
 // We should better provider a dynamic way to set this value.
 var gracefulCloseConnectionsTimeout = 15 * time.Second
 
-func cleanup(svr *server.Server, storage kv.Storage, dom *domain.Domain) {
+func cleanup(svr *server.Server, storage kv.Storage, dom *domain.Domain, _ bool) {
 	dom.StopAutoAnalyze()
 
 	drainClientWait := gracefulCloseConnectionsTimeout

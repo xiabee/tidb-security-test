@@ -76,10 +76,7 @@ ut build xxx
 ut run --junitfile xxx
 
 // test with race flag
-ut run --race
-
-// test with test.short flag
-ut run --short`
+ut run --race`
 
 	fmt.Println(msg)
 	return true
@@ -405,10 +402,10 @@ func handleFlags(flag string) string {
 	return res
 }
 
-func handleFlag(f string) (found bool) {
+func handleRaceFlag() (found bool) {
 	tmp := os.Args[:0]
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == f {
+		if os.Args[i] == "--race" {
 			found = true
 			continue
 		}
@@ -422,7 +419,6 @@ var junitfile string
 var coverprofile string
 var coverFileTempDir string
 var race bool
-var short bool
 
 var except string
 var only string
@@ -433,8 +429,7 @@ func main() {
 	coverprofile = handleFlags("--coverprofile")
 	except = handleFlags("--except")
 	only = handleFlags("--only")
-	race = handleFlag("--race")
-	short = handleFlag("--short")
+	race = handleRaceFlag()
 
 	if coverprofile != "" {
 		var err error
@@ -831,7 +826,7 @@ func (n *numa) testCommand(pkg string, fn string) *exec.Cmd {
 }
 
 func skipDIR(pkg string) bool {
-	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check", "build"}
+	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check"}
 	for _, ignore := range skipDir {
 		if strings.HasPrefix(pkg, ignore) {
 			return true
@@ -848,9 +843,6 @@ func buildTestBinary(pkg string) error {
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
-	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Dir = path.Join(workDir, pkg)
 	cmd.Stdout = os.Stdout
@@ -877,9 +869,6 @@ func buildTestBinaryMulti(pkgs []string) error {
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
-	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Args = append(cmd.Args, packages...)
 	cmd.Dir = workDir

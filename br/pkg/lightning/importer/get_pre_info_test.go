@@ -757,10 +757,7 @@ func TestGetPreInfoIsTableEmpty(t *testing.T) {
 	require.NoError(t, err)
 	lnConfig := config.NewConfig()
 	lnConfig.TikvImporter.Backend = config.BackendLocal
-	_, err = NewTargetInfoGetterImpl(lnConfig, db, nil)
-	require.ErrorContains(t, err, "pd client is required when using local backend")
-	lnConfig.TikvImporter.Backend = config.BackendTiDB
-	targetGetter, err := NewTargetInfoGetterImpl(lnConfig, db, nil)
+	targetGetter, err := NewTargetInfoGetterImpl(lnConfig, db)
 	require.NoError(t, err)
 	require.Equal(t, lnConfig, targetGetter.cfg)
 

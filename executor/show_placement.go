@@ -15,11 +15,9 @@
 package executor
 
 import (
-	"cmp"
 	"context"
 	gjson "encoding/json"
 	"fmt"
-	"slices"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/domain/infosync"
@@ -34,6 +32,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"golang.org/x/exp/slices"
 )
 
 type showPlacementLabelsResultBuilder struct {
@@ -96,7 +95,7 @@ func (b *showPlacementLabelsResultBuilder) BuildRows() ([][]interface{}, error) 
 	return rows, nil
 }
 
-func (*showPlacementLabelsResultBuilder) sortMapKeys(m map[string]interface{}) []string {
+func (b *showPlacementLabelsResultBuilder) sortMapKeys(m map[string]interface{}) []string {
 	sorted := make([]string, 0, len(m))
 	for key := range m {
 		sorted = append(sorted, key)
@@ -107,7 +106,7 @@ func (*showPlacementLabelsResultBuilder) sortMapKeys(m map[string]interface{}) [
 }
 
 func (e *ShowExec) fetchShowPlacementLabels(ctx context.Context) error {
-	exec := e.Ctx().(sqlexec.RestrictedSQLExecutor)
+	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
 	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, "SELECT DISTINCT LABEL FROM %n.%n", "INFORMATION_SCHEMA", infoschema.TableTiKVStoreStatus)
 	if err != nil {
 		return errors.Trace(err)
@@ -134,9 +133,9 @@ func (e *ShowExec) fetchShowPlacementLabels(ctx context.Context) error {
 }
 
 func (e *ShowExec) fetchShowPlacementForDB(ctx context.Context) (err error) {
-	checker := privilege.GetPrivilegeManager(e.Ctx())
-	if checker != nil && e.Ctx().GetSessionVars().User != nil {
-		if !checker.DBIsVisible(e.Ctx().GetSessionVars().ActiveRoles, e.DBName.String()) {
+	checker := privilege.GetPrivilegeManager(e.ctx)
+	if checker != nil && e.ctx.GetSessionVars().User != nil {
+		if !checker.DBIsVisible(e.ctx.GetSessionVars().ActiveRoles, e.DBName.String()) {
 			return e.dbAccessDenied()
 		}
 	}
@@ -252,7 +251,7 @@ func (e *ShowExec) fetchShowPlacement(ctx context.Context) error {
 
 func (e *ShowExec) fetchAllPlacementPolicies() error {
 	policies := e.is.AllPlacementPolicies()
-	slices.SortFunc(policies, func(i, j *model.PolicyInfo) int { return cmp.Compare(i.Name.O, j.Name.O) })
+	slices.SortFunc(policies, func(i, j *model.PolicyInfo) bool { return i.Name.O < j.Name.O })
 	for _, policy := range policies {
 		name := policy.Name
 		settings := policy.PlacementSettings
@@ -263,14 +262,14 @@ func (e *ShowExec) fetchAllPlacementPolicies() error {
 }
 
 func (e *ShowExec) fetchAllDBPlacements(ctx context.Context, scheduleState map[int64]infosync.PlacementScheduleState) error {
-	checker := privilege.GetPrivilegeManager(e.Ctx())
-	activeRoles := e.Ctx().GetSessionVars().ActiveRoles
+	checker := privilege.GetPrivilegeManager(e.ctx)
+	activeRoles := e.ctx.GetSessionVars().ActiveRoles
 
 	dbs := e.is.AllSchemas()
-	slices.SortFunc(dbs, func(i, j *model.DBInfo) int { return cmp.Compare(i.Name.O, j.Name.O) })
+	slices.SortFunc(dbs, func(i, j *model.DBInfo) bool { return i.Name.O < j.Name.O })
 
 	for _, dbInfo := range dbs {
-		if checker != nil && e.Ctx().GetSessionVars().User != nil && !checker.DBIsVisible(activeRoles, dbInfo.Name.O) {
+		if e.ctx.GetSessionVars().User != nil && checker != nil && !checker.DBIsVisible(activeRoles, dbInfo.Name.O) {
 			continue
 		}
 
@@ -297,11 +296,11 @@ type tableRowSet struct {
 }
 
 func (e *ShowExec) fetchAllTablePlacements(ctx context.Context, scheduleState map[int64]infosync.PlacementScheduleState) error {
-	checker := privilege.GetPrivilegeManager(e.Ctx())
-	activeRoles := e.Ctx().GetSessionVars().ActiveRoles
+	checker := privilege.GetPrivilegeManager(e.ctx)
+	activeRoles := e.ctx.GetSessionVars().ActiveRoles
 
 	dbs := e.is.AllSchemas()
-	slices.SortFunc(dbs, func(i, j *model.DBInfo) int { return cmp.Compare(i.Name.O, j.Name.O) })
+	slices.SortFunc(dbs, func(i, j *model.DBInfo) bool { return i.Name.O < j.Name.O })
 
 	for _, dbInfo := range dbs {
 		tableRowSets := make([]tableRowSet, 0)
@@ -360,7 +359,7 @@ func (e *ShowExec) fetchAllTablePlacements(ctx context.Context, scheduleState ma
 			}
 		}
 
-		slices.SortFunc(tableRowSets, func(i, j tableRowSet) int { return cmp.Compare(i.name, j.name) })
+		slices.SortFunc(tableRowSets, func(i, j tableRowSet) bool { return i.name < j.name })
 		for _, rowSet := range tableRowSets {
 			for _, row := range rowSet.rows {
 				e.appendRow(row)

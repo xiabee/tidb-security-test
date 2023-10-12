@@ -34,9 +34,6 @@ func testGroupToString(t *testing.T, input []string, output []struct {
 }, optimizer *Optimizer) {
 	p := parser.New()
 	ctx := plannercore.MockContext()
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
 	domain.GetDomain(ctx).MockInfoCacheAndLoadInfoSchema(is)
 
@@ -87,9 +84,6 @@ func TestAggPushDownGather(t *testing.T) {
 
 	p := parser.New()
 	ctx := plannercore.MockContext()
-	defer func() {
-		domain.GetDomain(ctx).StatsHandle().Close()
-	}()
 	is := infoschema.MockInfoSchema([]*model.TableInfo{plannercore.MockSignedTable()})
 	domain.GetDomain(ctx).MockInfoCacheAndLoadInfoSchema(is)
 	for i, sql := range input {

@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/mock"
@@ -77,6 +78,11 @@ func (d *ddl) RemoveReorgCtx(id int64) {
 
 // JobNeedGCForTest is only used for test.
 var JobNeedGCForTest = jobNeedGC
+
+// GetMaxRowID is used for test.
+func GetMaxRowID(store kv.Storage, priority int, t table.Table, startHandle, endHandle kv.Key) (kv.Key, error) {
+	return getRangeEndKey(NewJobContext(), store, priority, t.RecordPrefix(), startHandle, endHandle)
+}
 
 func createMockStore(t *testing.T) kv.Storage {
 	store, err := mockstore.NewMockStore()
@@ -154,7 +160,7 @@ func TestModifyColumn(t *testing.T) {
 	for _, tt := range tests {
 		ftA := colDefStrToFieldType(t, tt.origin, ctx)
 		ftB := colDefStrToFieldType(t, tt.to, ctx)
-		err := checkModifyTypes(ftA, ftB, false)
+		err := checkModifyTypes(ctx, ftA, ftB, false)
 		if err == nil {
 			require.NoErrorf(t, tt.err, "origin:%v, to:%v", tt.origin, tt.to)
 		} else {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -465,7 +466,7 @@ func AddNewAnalyzeJob(ctx sessionctx.Context, job *statistics.AnalyzeJob) {
 		logutil.BgLogger().Error("failed to get server info", zap.Error(err))
 		instance = "unknown"
 	} else {
-		instance = fmt.Sprintf("%s:%d", serverInfo.IP, serverInfo.Port)
+		instance = net.JoinHostPort(serverInfo.IP, strconv.Itoa(int(serverInfo.Port)))
 	}
 	statsHandle := domain.GetDomain(ctx).StatsHandle()
 	err = statsHandle.InsertAnalyzeJob(job, instance, ctx.GetSessionVars().ConnectionID)
@@ -592,7 +593,8 @@ func finishJobWithLog(sctx sessionctx.Context, job *statistics.AnalyzeJob, analy
 			zap.String("job info", job.JobInfo),
 			zap.Time("start time", job.StartTime),
 			zap.Time("end time", job.EndTime),
-			zap.String("cost", job.EndTime.Sub(job.StartTime).String()))
+			zap.String("cost", job.EndTime.Sub(job.StartTime).String()),
+			zap.String("sample rate reason", job.SampleRateReason))
 	}
 }
 

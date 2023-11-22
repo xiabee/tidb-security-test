@@ -163,13 +163,13 @@ func testDropSchema(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *mod
 	return job, ver
 }
 
-func isDDLJobDone(test *testing.T, t *meta.Meta, store kv.Storage) bool {
-	tk := testkit.NewTestKit(test, store)
-	rows := tk.MustQuery("select * from mysql.tidb_ddl_job").Rows()
-
-	if len(rows) == 0 {
+func isDDLJobDone(test *testing.T, t *meta.Meta) bool {
+	job, err := t.GetDDLJobByIdx(0)
+	require.NoError(test, err)
+	if job == nil {
 		return true
 	}
+
 	time.Sleep(testLease)
 	return false
 }
@@ -185,7 +185,7 @@ func testCheckSchemaState(test *testing.T, store kv.Storage, dbInfo *model.DBInf
 			require.NoError(test, err)
 
 			if state == model.StateNone {
-				isDropped = isDDLJobDone(test, t, store)
+				isDropped = isDDLJobDone(test, t)
 				if !isDropped {
 					return nil
 				}

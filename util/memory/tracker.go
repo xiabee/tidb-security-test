@@ -462,7 +462,7 @@ func (t *Tracker) Consume(bs int64) {
 			sessionRootTracker.NeedKillReceived.Do(
 				func() {
 					logutil.BgLogger().Warn("global memory controller, NeedKill signal is received successfully",
-						zap.Uint64("conn", sessionRootTracker.SessionID.Load()))
+						zap.Uint64("connID", sessionRootTracker.SessionID.Load()))
 				})
 			tryActionLastOne(&sessionRootTracker.actionMuForHardLimit, sessionRootTracker)
 		}

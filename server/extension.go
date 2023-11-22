@@ -151,7 +151,7 @@ func (e *stmtEventInfo) ExecutePreparedStmt() ast.StmtNode {
 }
 
 func (e *stmtEventInfo) PreparedParams() []types.Datum {
-	return e.sessVars.PlanCacheParams.AllParamValues()
+	return e.sessVars.PreparedParams
 }
 
 func (e *stmtEventInfo) OriginalText() string {
@@ -235,7 +235,7 @@ func (e *stmtEventInfo) ensureStmtContextOriginalSQL() string {
 		e.sc.InitSQLDigest(planCache.NormalizedSQL, planCache.SQLDigest)
 	}
 
-	if e.sc.OriginalSQL == "" && e.executeStmtID == 0 && e.stmtNode != nil {
+	if e.sc.OriginalSQL == "" && e.executeStmtID == 0 {
 		e.sc.OriginalSQL = e.stmtNode.Text()
 	}
 

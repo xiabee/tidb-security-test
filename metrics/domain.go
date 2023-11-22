@@ -21,37 +21,7 @@ import (
 // Metrics for the domain package.
 var (
 	// LoadSchemaCounter records the counter of load schema.
-	LoadSchemaCounter *prometheus.CounterVec
-
-	// LoadSchemaDuration records the duration of load schema.
-	LoadSchemaDuration prometheus.Histogram
-
-	// InfoCacheCounters are the counters of get/hit.
-	InfoCacheCounters *prometheus.CounterVec
-
-	// InfoCacheCounterGet is the total number of getting entry.
-	InfoCacheCounterGet = "get"
-	// InfoCacheCounterHit is the cache hit numbers for get.
-	InfoCacheCounterHit = "hit"
-
-	// LoadPrivilegeCounter records the counter of load privilege.
-	LoadPrivilegeCounter *prometheus.CounterVec
-
-	// LoadSysVarCacheCounter records the counter of loading sysvars
-	LoadSysVarCacheCounter *prometheus.CounterVec
-
-	SchemaValidatorStop       = "stop"
-	SchemaValidatorRestart    = "restart"
-	SchemaValidatorReset      = "reset"
-	SchemaValidatorCacheEmpty = "cache_empty"
-	SchemaValidatorCacheMiss  = "cache_miss"
-	// HandleSchemaValidate records the counter of handling schema validate.
-	HandleSchemaValidate *prometheus.CounterVec
-)
-
-// InitDomainMetrics initializes domain metrics.
-func InitDomainMetrics() {
-	LoadSchemaCounter = NewCounterVec(
+	LoadSchemaCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
@@ -59,7 +29,8 @@ func InitDomainMetrics() {
 			Help:      "Counter of load schema",
 		}, []string{LblType})
 
-	LoadSchemaDuration = NewHistogram(
+	// LoadSchemaDuration records the duration of load schema.
+	LoadSchemaDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
@@ -68,15 +39,21 @@ func InitDomainMetrics() {
 			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 20), // 1ms ~ 524s
 		})
 
-	InfoCacheCounters = NewCounterVec(
+	// InfoCacheCounters are the counters of get/hit.
+	InfoCacheCounters = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
 			Name:      "infocache_counters",
 			Help:      "Counters of infoCache: get/hit.",
 		}, []string{LblAction, LblType})
+	// InfoCacheCounterGet is the total number of getting entry.
+	InfoCacheCounterGet = "get"
+	// InfoCacheCounterHit is the cache hit numbers for get.
+	InfoCacheCounterHit = "hit"
 
-	LoadPrivilegeCounter = NewCounterVec(
+	// LoadPrivilegeCounter records the counter of load privilege.
+	LoadPrivilegeCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
@@ -84,7 +61,8 @@ func InitDomainMetrics() {
 			Help:      "Counter of load privilege",
 		}, []string{LblType})
 
-	LoadSysVarCacheCounter = NewCounterVec(
+	// LoadSysVarCacheCounter records the counter of loading sysvars
+	LoadSysVarCacheCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
@@ -92,11 +70,17 @@ func InitDomainMetrics() {
 			Help:      "Counter of load sysvar cache",
 		}, []string{LblType})
 
-	HandleSchemaValidate = NewCounterVec(
+	SchemaValidatorStop       = "stop"
+	SchemaValidatorRestart    = "restart"
+	SchemaValidatorReset      = "reset"
+	SchemaValidatorCacheEmpty = "cache_empty"
+	SchemaValidatorCacheMiss  = "cache_miss"
+	// HandleSchemaValidate records the counter of handling schema validate.
+	HandleSchemaValidate = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "domain",
 			Name:      "handle_schema_validate",
 			Help:      "Counter of handle schema validate",
 		}, []string{LblType})
-}
+)

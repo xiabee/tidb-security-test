@@ -77,7 +77,6 @@ func TestPessimisticSerializableTxnContextProviderLockError(t *testing.T) {
 	defer tk.MustExec("rollback")
 	se := tk.Session()
 	provider := initializePessimisticSerializableProvider(t, tk)
-	ctx := context.Background()
 
 	stmts, _, err := parser.New().Parse("select * from t for update", "", "")
 	require.NoError(t, err)
@@ -90,7 +89,7 @@ func TestPessimisticSerializableTxnContextProviderLockError(t *testing.T) {
 	} {
 		require.NoError(t, executor.ResetContextOfStmt(se, stmt))
 		require.NoError(t, provider.OnStmtStart(context.TODO(), nil))
-		nextAction, err := provider.OnStmtErrorForNextAction(ctx, sessiontxn.StmtErrAfterPessimisticLock, lockErr)
+		nextAction, err := provider.OnStmtErrorForNextAction(sessiontxn.StmtErrAfterPessimisticLock, lockErr)
 		require.Same(t, lockErr, err)
 		require.Equal(t, sessiontxn.StmtActionError, nextAction)
 	}
@@ -102,7 +101,7 @@ func TestPessimisticSerializableTxnContextProviderLockError(t *testing.T) {
 	} {
 		require.NoError(t, executor.ResetContextOfStmt(se, stmt))
 		require.NoError(t, provider.OnStmtStart(context.TODO(), nil))
-		nextAction, err := provider.OnStmtErrorForNextAction(ctx, sessiontxn.StmtErrAfterPessimisticLock, lockErr)
+		nextAction, err := provider.OnStmtErrorForNextAction(sessiontxn.StmtErrAfterPessimisticLock, lockErr)
 		require.Same(t, lockErr, err)
 		require.Equal(t, sessiontxn.StmtActionError, nextAction)
 	}

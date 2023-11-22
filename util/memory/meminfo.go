@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/sysutil"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/util/cgroup"
 	"github.com/pingcap/tidb/util/logutil"
@@ -151,7 +150,6 @@ func init() {
 	if cgroup.InContainer() {
 		MemTotal = MemTotalCGroup
 		MemUsed = MemUsedCGroup
-		sysutil.RegisterGetMemoryCapacity(MemTotalCGroup)
 	} else {
 		MemTotal = MemTotalNormal
 		MemUsed = MemUsedNormal
@@ -191,7 +189,6 @@ func InitMemoryHook() {
 	if physicalValue > cgroupValue && cgroupValue != 0 {
 		MemTotal = MemTotalCGroup
 		MemUsed = MemUsedCGroup
-		sysutil.RegisterGetMemoryCapacity(MemTotalCGroup)
 		logutil.BgLogger().Info("use cgroup memory hook", zap.Int64("cgroupMemorySize", int64(cgroupValue)), zap.Int64("physicalMemorySize", int64(physicalValue)))
 	} else {
 		logutil.BgLogger().Info("use physical memory hook", zap.Int64("cgroupMemorySize", int64(cgroupValue)), zap.Int64("physicalMemorySize", int64(physicalValue)))

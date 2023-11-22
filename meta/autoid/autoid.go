@@ -23,9 +23,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/kvproto/pkg/autoid"
+	autoid "github.com/pingcap/tidb/autoid_service"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/metrics"
@@ -36,7 +37,6 @@ import (
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	tikvutil "github.com/tikv/client-go/v2/util"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -285,15 +285,11 @@ func SetStep(s int64) {
 
 // Base implements autoid.Allocator Base interface.
 func (alloc *allocator) Base() int64 {
-	alloc.mu.Lock()
-	defer alloc.mu.Unlock()
 	return alloc.base
 }
 
 // End implements autoid.Allocator End interface.
 func (alloc *allocator) End() int64 {
-	alloc.mu.Lock()
-	defer alloc.mu.Unlock()
 	return alloc.end
 }
 
@@ -562,11 +558,6 @@ func NextStep(curStep int64, consumeDur time.Duration) int64 {
 	return res
 }
 
-// MockForTest is exported for testing.
-// The actual implementation is in github.com/pingcap/tidb/autoid_service because of the
-// package circle depending issue.
-var MockForTest func(kv.Storage) autoid.AutoIDAllocClient
-
 func newSinglePointAlloc(store kv.Storage, dbID, tblID int64, isUnsigned bool) *singlePointAlloc {
 	ebd, ok := store.(kv.EtcdBackend)
 	if !ok {
@@ -587,8 +578,8 @@ func newSinglePointAlloc(store kv.Storage, dbID, tblID int64, isUnsigned bool) *
 	if len(addrs) > 0 {
 		etcdCli, err := clientv3.New(clientv3.Config{
 			Endpoints:        addrs,
-			TLS:              ebd.TLSConfig(),
 			AutoSyncInterval: 30 * time.Second,
+			TLS:              ebd.TLSConfig(),
 		})
 		if err != nil {
 			logutil.BgLogger().Error("[autoid client] fail to connect etcd, fallback to default", zap.Error(err))
@@ -597,7 +588,7 @@ func newSinglePointAlloc(store kv.Storage, dbID, tblID int64, isUnsigned bool) *
 		spa.clientDiscover = clientDiscover{etcdCli: etcdCli}
 	} else {
 		spa.clientDiscover = clientDiscover{}
-		spa.mu.AutoIDAllocClient = MockForTest(store)
+		spa.mu.AutoIDAllocClient = autoid.MockForTest(store)
 	}
 
 	// mockAutoIDChange failpoint is not implemented in this allocator, so fallback to use the default one.
@@ -901,7 +892,11 @@ func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, o
 
 		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 		err := kv.RunInNewTxn(ctx, alloc.store, true, func(ctx context.Context, txn kv.Transaction) error {
-			defer tracing.StartRegion(ctx, "alloc.alloc4Signed").End()
+			if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+				span1 := span.Tracer().StartSpan("alloc.alloc4Signed", opentracing.ChildOf(span.Context()))
+				defer span1.Finish()
+				opentracing.ContextWithSpan(ctx, span1)
+			}
 			if allocatorStats != nil {
 				txn.SetOption(kv.CollectRuntimeStats, allocatorStats.SnapshotRuntimeStats)
 			}
@@ -992,7 +987,11 @@ func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment,
 
 		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 		err := kv.RunInNewTxn(ctx, alloc.store, true, func(ctx context.Context, txn kv.Transaction) error {
-			defer tracing.StartRegion(ctx, "alloc.alloc4Unsigned").End()
+			if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+				span1 := span.Tracer().StartSpan("alloc.alloc4Unsigned", opentracing.ChildOf(span.Context()))
+				defer span1.Finish()
+				opentracing.ContextWithSpan(ctx, span1)
+			}
 			if allocatorStats != nil {
 				txn.SetOption(kv.CollectRuntimeStats, allocatorStats.SnapshotRuntimeStats)
 			}

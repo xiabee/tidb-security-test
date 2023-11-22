@@ -290,7 +290,7 @@ func TestTableStorageStats(t *testing.T) {
 		"test 2",
 	))
 	rows := tk.MustQuery("select TABLE_NAME from information_schema.TABLE_STORAGE_STATS where TABLE_SCHEMA = 'mysql';").Rows()
-	result := 48
+	result := 42
 	require.Len(t, rows, result)
 
 	// More tests about the privileges.
@@ -307,7 +307,7 @@ func TestTableStorageStats(t *testing.T) {
 	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{
 		Username: "testuser",
 		Hostname: "localhost",
-	}, nil, nil, nil))
+	}, nil, nil))
 
 	// User has no access to this schema, so the result set is empty.
 	tk.MustQuery("select count(1) from information_schema.TABLE_STORAGE_STATS where TABLE_SCHEMA = 'mysql'").Check(testkit.Rows("0"))
@@ -315,14 +315,14 @@ func TestTableStorageStats(t *testing.T) {
 	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{
 		Username: "testuser2",
 		Hostname: "localhost",
-	}, nil, nil, nil))
+	}, nil, nil))
 
 	tk.MustQuery("select count(1) from information_schema.TABLE_STORAGE_STATS where TABLE_SCHEMA = 'mysql'").Check(testkit.Rows(strconv.Itoa(result)))
 
 	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{
 		Username: "testuser3",
 		Hostname: "localhost",
-	}, nil, nil, nil))
+	}, nil, nil))
 
 	tk.MustQuery("select count(1) from information_schema.TABLE_STORAGE_STATS where TABLE_SCHEMA = 'mysql'").Check(testkit.Rows(strconv.Itoa(result)))
 }
@@ -354,7 +354,7 @@ func TestIssue42619(t *testing.T) {
 			"PARTITION `p3` VALUES LESS THAN (MAXVALUE))")
 	tk.MustQuery("SELECT TABLE_SCHEMA, TABLE_NAME, PEER_COUNT, REGION_COUNT, EMPTY_REGION_COUNT, TABLE_SIZE, TABLE_KEYS " +
 		"FROM information_schema.TABLE_STORAGE_STATS " +
-		"WHERE TABLE_SCHEMA = 'test'").Sort().Check(
+		"WHERE TABLE_SCHEMA = 'test'").Check(
 		testkit.Rows(
 			"test t 1 1 1 1 1",
 			"test tp 1 1 1 1 1",

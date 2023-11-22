@@ -15,8 +15,6 @@
 package isolation
 
 import (
-	"context"
-
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/sessionctx"
@@ -33,7 +31,7 @@ type PessimisticSerializableTxnContextProvider struct {
 func NewPessimisticSerializableTxnContextProvider(sctx sessionctx.Context,
 	causalConsistencyOnly bool) *PessimisticSerializableTxnContextProvider {
 	provider := &PessimisticSerializableTxnContextProvider{
-		baseTxnContextProvider: baseTxnContextProvider{
+		baseTxnContextProvider{
 			sctx:                  sctx,
 			causalConsistencyOnly: causalConsistencyOnly,
 			onInitializeTxnCtx: func(txnCtx *variable.TransactionContext) {
@@ -52,7 +50,8 @@ func NewPessimisticSerializableTxnContextProvider(sctx sessionctx.Context,
 }
 
 // OnStmtErrorForNextAction is the hook that should be called when a new statement get an error
-func (p *PessimisticSerializableTxnContextProvider) OnStmtErrorForNextAction(ctx context.Context, point sessiontxn.StmtErrorHandlePoint, err error) (sessiontxn.StmtErrorAction, error) {
+func (p *PessimisticSerializableTxnContextProvider) OnStmtErrorForNextAction(
+	point sessiontxn.StmtErrorHandlePoint, err error) (sessiontxn.StmtErrorAction, error) {
 	switch point {
 	case sessiontxn.StmtErrAfterPessimisticLock:
 		// In oracle-like serializable isolation, we do not retry encountering pessimistic lock error.

@@ -1718,9 +1718,6 @@ func (c *unhexFunctionClass) getFunction(ctx sessionctx.Context, args []Expressi
 	default:
 		return nil, errors.Errorf("Unhex invalid args, need int or string but get %s", argType)
 	}
-	if argType.GetFlen() == types.UnspecifiedLength {
-		retFlen = types.UnspecifiedLength
-	}
 
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, types.ETString)
 	if err != nil {
@@ -3534,12 +3531,7 @@ func (c *toBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
-
-	if bf.args[0].GetType().GetFlen() == types.UnspecifiedLength {
-		bf.tp.SetFlen(types.UnspecifiedLength)
-	} else {
-		bf.tp.SetFlen(base64NeededEncodedLength(bf.args[0].GetType().GetFlen()))
-	}
+	bf.tp.SetFlen(base64NeededEncodedLength(bf.args[0].GetType().GetFlen()))
 
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)

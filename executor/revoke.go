@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
@@ -137,7 +136,7 @@ func (e *RevokeExec) checkDynamicPrivilegeUsage() error {
 		}
 	}
 	if len(dynamicPrivs) > 0 && e.Level.Level != ast.GrantLevelGlobal {
-		return exeerrors.ErrIllegalPrivilegeLevel.GenWithStackByArgs(strings.Join(dynamicPrivs, ","))
+		return ErrIllegalPrivilegeLevel.GenWithStackByArgs(strings.Join(dynamicPrivs, ","))
 	}
 	return nil
 }
@@ -201,7 +200,7 @@ func (e *RevokeExec) revokePriv(internalSession sessionctx.Context, priv *ast.Pr
 func (e *RevokeExec) revokeDynamicPriv(internalSession sessionctx.Context, privName string, user, host string) error {
 	privName = strings.ToUpper(privName)
 	if !privilege.GetPrivilegeManager(e.ctx).IsDynamicPrivilege(privName) { // for MySQL compatibility
-		e.ctx.GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrDynamicPrivilegeNotRegistered.GenWithStackByArgs(privName))
+		e.ctx.GetSessionVars().StmtCtx.AppendWarning(ErrDynamicPrivilegeNotRegistered.GenWithStackByArgs(privName))
 	}
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
 	_, err := internalSession.(sqlexec.SQLExecutor).ExecuteInternal(ctx, "DELETE FROM mysql.global_grants WHERE user = %? AND host = %? AND priv = %?", user, host, privName)

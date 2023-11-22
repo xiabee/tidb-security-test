@@ -138,8 +138,9 @@ func newDataSource(ctx sessionctx.Context, name string, count int) LogicalPlan {
 	tan := model.NewCIStr(name)
 	ds.TableAsName = &tan
 	ds.schema = expression.NewSchema()
+	ctx.GetSessionVars().PlanColumnID++
 	ds.schema.Append(&expression.Column{
-		UniqueID: ctx.GetSessionVars().PlanColumnID.Add(1),
+		UniqueID: ctx.GetSessionVars().PlanColumnID,
 		RetType:  types.NewFieldType(mysql.TypeLonglong),
 	})
 	ds.stats = &property.StatsInfo{
@@ -162,7 +163,7 @@ func TestDPReorderTPCHQ5(t *testing.T) {
 	statsMap := makeStatsMapForTPCHQ5()
 
 	ctx := MockContext()
-	ctx.GetSessionVars().PlanID.Store(-1)
+	ctx.GetSessionVars().PlanID = -1
 	joinGroups := make([]LogicalPlan, 0, 6)
 	joinGroups = append(joinGroups, newDataSource(ctx, "lineitem", 59986052))
 	joinGroups = append(joinGroups, newDataSource(ctx, "orders", 15000000))
@@ -185,12 +186,9 @@ func TestDPReorderTPCHQ5(t *testing.T) {
 		require.True(t, isSF)
 		eqEdges = append(eqEdges, sf)
 	}
-	basicJoinGroupInfo := &basicJoinGroupInfo{
-		eqEdges: eqEdges,
-	}
 	baseGroupSolver := &baseSingleGroupJoinOrderSolver{
-		ctx:                ctx,
-		basicJoinGroupInfo: basicJoinGroupInfo,
+		ctx:     ctx,
+		eqEdges: eqEdges,
 	}
 	solver := &joinReorderDPSolver{
 		baseSingleGroupJoinOrderSolver: baseGroupSolver,
@@ -207,7 +205,7 @@ func TestDPReorderAllCartesian(t *testing.T) {
 	statsMap := makeStatsMapForTPCHQ5()
 
 	ctx := MockContext()
-	ctx.GetSessionVars().PlanID.Store(-1)
+	ctx.GetSessionVars().PlanID = -1
 
 	joinGroup := make([]LogicalPlan, 0, 4)
 	joinGroup = append(joinGroup, newDataSource(ctx, "a", 100))
@@ -216,8 +214,7 @@ func TestDPReorderAllCartesian(t *testing.T) {
 	joinGroup = append(joinGroup, newDataSource(ctx, "d", 100))
 	solver := &joinReorderDPSolver{
 		baseSingleGroupJoinOrderSolver: &baseSingleGroupJoinOrderSolver{
-			ctx:                ctx,
-			basicJoinGroupInfo: &basicJoinGroupInfo{},
+			ctx: ctx,
 		},
 		newJoin: newMockJoin(ctx, statsMap),
 	}

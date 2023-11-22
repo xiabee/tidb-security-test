@@ -62,7 +62,6 @@ go_test(
     ],
     embed = [":cophandler"],
     flaky = True,
-    shard_count = 4,
     deps = [
         "//expression",
         "//kv",

@@ -673,7 +673,7 @@ func TestDeriveCollation(t *testing.T) {
 		},
 		{
 			[]string{
-				ast.Database, ast.User, ast.CurrentUser, ast.Version, ast.CurrentRole, ast.TiDBVersion, ast.CurrentResourceGroup,
+				ast.Database, ast.User, ast.CurrentUser, ast.Version, ast.CurrentRole, ast.TiDBVersion,
 			},
 			[]Expression{},
 			[]types.EvalType{},

@@ -912,7 +912,10 @@ func (s *FDSet) AddFrom(fds *FDSet) {
 			s.AddLaxFunctionalDependency(fd.from, fd.to)
 		}
 	}
-	s.ncEdges = append(s.ncEdges, fds.ncEdges...)
+	for i := range fds.ncEdges {
+		fd := fds.ncEdges[i]
+		s.ncEdges = append(s.ncEdges, fd)
+	}
 	s.NotNullCols.UnionWith(fds.NotNullCols)
 	if s.HashCodeToUniqueID == nil {
 		s.HashCodeToUniqueID = fds.HashCodeToUniqueID

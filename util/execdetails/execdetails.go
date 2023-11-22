@@ -511,24 +511,20 @@ func (p *Percentile[valueType]) Sum() float64 {
 // String implements the RuntimeStats interface.
 func (e *basicCopRuntimeStats) String() string {
 	if e.storeType == "tiflash" {
-		return fmt.Sprintf("time:%v, loops:%d, threads:%d, ", FormatDuration(time.Duration(e.consume.Load())), e.loop.Load(), e.threads) + e.BasicRuntimeStats.tiflashScanContext.String()
+		return fmt.Sprintf("time:%v, loops:%d, threads:%d, ", FormatDuration(time.Duration(e.consume)), e.loop, e.threads) + e.BasicRuntimeStats.tiflashScanContext.String()
 	}
-	return fmt.Sprintf("time:%v, loops:%d", FormatDuration(time.Duration(e.consume.Load())), e.loop.Load())
+	return fmt.Sprintf("time:%v, loops:%d", FormatDuration(time.Duration(e.consume)), e.loop)
 }
 
 // Clone implements the RuntimeStats interface.
 func (e *basicCopRuntimeStats) Clone() RuntimeStats {
-	stats := &basicCopRuntimeStats{
-		BasicRuntimeStats: BasicRuntimeStats{tiflashScanContext: e.tiflashScanContext.Clone()},
+	return &basicCopRuntimeStats{
+		BasicRuntimeStats: BasicRuntimeStats{loop: e.loop, consume: e.consume, rows: e.rows, tiflashScanContext: e.tiflashScanContext.Clone()},
 		threads:           e.threads,
 		storeType:         e.storeType,
 		totalTasks:        e.totalTasks,
 		procTimes:         e.procTimes,
 	}
-	stats.loop.Store(e.loop.Load())
-	stats.consume.Store(e.consume.Load())
-	stats.rows.Store(e.rows.Load())
-	return stats
 }
 
 // Merge implements the RuntimeStats interface.
@@ -537,13 +533,13 @@ func (e *basicCopRuntimeStats) Merge(rs RuntimeStats) {
 	if !ok {
 		return
 	}
-	e.loop.Add(tmp.loop.Load())
-	e.consume.Add(tmp.consume.Load())
-	e.rows.Add(tmp.rows.Load())
+	e.loop += tmp.loop
+	e.consume += tmp.consume
+	e.rows += tmp.rows
 	e.threads += tmp.threads
 	e.totalTasks += tmp.totalTasks
 	if tmp.procTimes.Size() == 0 {
-		e.procTimes.Add(Duration(tmp.consume.Load()))
+		e.procTimes.Add(Duration(tmp.consume))
 	} else {
 		e.procTimes.MergePercentile(&tmp.procTimes)
 	}
@@ -579,9 +575,11 @@ func (crs *CopRuntimeStats) RecordOneCopTask(address string, summary *tipb.Execu
 			storeType: crs.storeType,
 		}
 	}
-	data := &basicCopRuntimeStats{
+	crs.stats[address].Merge(&basicCopRuntimeStats{
 		storeType: crs.storeType,
-		BasicRuntimeStats: BasicRuntimeStats{
+		BasicRuntimeStats: BasicRuntimeStats{loop: int32(*summary.NumIterations),
+			consume: int64(*summary.TimeProcessedNs),
+			rows:    int64(*summary.NumProducedRows),
 			tiflashScanContext: TiFlashScanContext{
 				totalDmfileScannedPacks:            summary.GetTiflashScanContext().GetTotalDmfileScannedPacks(),
 				totalDmfileSkippedPacks:            summary.GetTiflashScanContext().GetTotalDmfileSkippedPacks(),
@@ -589,21 +587,15 @@ func (crs *CopRuntimeStats) RecordOneCopTask(address string, summary *tipb.Execu
 				totalDmfileSkippedRows:             summary.GetTiflashScanContext().GetTotalDmfileSkippedRows(),
 				totalDmfileRoughSetIndexLoadTimeMs: summary.GetTiflashScanContext().GetTotalDmfileRoughSetIndexLoadTimeMs(),
 				totalDmfileReadTimeMs:              summary.GetTiflashScanContext().GetTotalDmfileReadTimeMs(),
-				totalCreateSnapshotTimeMs:          summary.GetTiflashScanContext().GetTotalCreateSnapshotTimeMs(),
-				totalLocalRegionNum:                summary.GetTiflashScanContext().GetTotalLocalRegionNum(),
-				totalRemoteRegionNum:               summary.GetTiflashScanContext().GetTotalRemoteRegionNum()}}, threads: int32(summary.GetConcurrency()),
+				totalCreateSnapshotTimeMs:          summary.GetTiflashScanContext().GetTotalCreateSnapshotTimeMs()}}, threads: int32(summary.GetConcurrency()),
 		totalTasks: 1,
-	}
-	data.BasicRuntimeStats.loop.Store(int32(*summary.NumIterations))
-	data.BasicRuntimeStats.consume.Store(int64(*summary.TimeProcessedNs))
-	data.BasicRuntimeStats.rows.Store(int64(*summary.NumProducedRows))
-	crs.stats[address].Merge(data)
+	})
 }
 
 // GetActRows return total rows of CopRuntimeStats.
 func (crs *CopRuntimeStats) GetActRows() (totalRows int64) {
 	for _, instanceStats := range crs.stats {
-		totalRows += instanceStats.rows.Load()
+		totalRows += instanceStats.rows
 	}
 	return totalRows
 }
@@ -613,8 +605,8 @@ func (crs *CopRuntimeStats) MergeBasicStats() (procTimes Percentile[Duration], t
 	totalTiFlashScanContext = TiFlashScanContext{}
 	for _, instanceStats := range crs.stats {
 		procTimes.MergePercentile(&instanceStats.procTimes)
-		totalTime += time.Duration(instanceStats.consume.Load())
-		totalLoops += instanceStats.loop.Load()
+		totalTime += time.Duration(instanceStats.consume)
+		totalLoops += instanceStats.loop
 		totalThreads += instanceStats.threads
 		totalTiFlashScanContext.Merge(instanceStats.tiflashScanContext)
 		totalTasks += instanceStats.totalTasks
@@ -702,8 +694,6 @@ const (
 	TpFKCheckRuntimeStats
 	// TpFKCascadeRuntimeStats is the tp for FKCascadeRuntimeStats
 	TpFKCascadeRuntimeStats
-	// TpRURuntimeStats is the tp for RURuntimeStats
-	TpRURuntimeStats
 )
 
 // RuntimeStats is used to express the executor runtime information.
@@ -723,8 +713,6 @@ type TiFlashScanContext struct {
 	totalDmfileRoughSetIndexLoadTimeMs uint64
 	totalDmfileReadTimeMs              uint64
 	totalCreateSnapshotTimeMs          uint64
-	totalLocalRegionNum                uint64
-	totalRemoteRegionNum               uint64
 }
 
 // Clone implements the deep copy of * TiFlashshScanContext
@@ -737,12 +725,10 @@ func (context *TiFlashScanContext) Clone() TiFlashScanContext {
 		totalDmfileRoughSetIndexLoadTimeMs: context.totalDmfileRoughSetIndexLoadTimeMs,
 		totalDmfileReadTimeMs:              context.totalDmfileReadTimeMs,
 		totalCreateSnapshotTimeMs:          context.totalCreateSnapshotTimeMs,
-		totalLocalRegionNum:                context.totalLocalRegionNum,
-		totalRemoteRegionNum:               context.totalRemoteRegionNum,
 	}
 }
 func (context *TiFlashScanContext) String() string {
-	return fmt.Sprintf("tiflash_scan:{dtfile:{total_scanned_packs:%d, total_skipped_packs:%d, total_scanned_rows:%d, total_skipped_rows:%d, total_rs_index_load_time: %dms, total_read_time: %dms}, total_create_snapshot_time: %dms, total_local_region_num: %d, total_remote_region_num: %d}", context.totalDmfileScannedPacks, context.totalDmfileSkippedPacks, context.totalDmfileScannedRows, context.totalDmfileSkippedRows, context.totalDmfileRoughSetIndexLoadTimeMs, context.totalDmfileReadTimeMs, context.totalCreateSnapshotTimeMs, context.totalLocalRegionNum, context.totalRemoteRegionNum)
+	return fmt.Sprintf("tiflash_scan:{dtfile:{total_scanned_packs:%d, total_skipped_packs:%d, total_scanned_rows:%d, total_skipped_rows:%d, total_rs_index_load_time: %dms, total_read_time: %dms}, total_create_snapshot_time: %dms}", context.totalDmfileScannedPacks, context.totalDmfileSkippedPacks, context.totalDmfileScannedRows, context.totalDmfileSkippedRows, context.totalDmfileRoughSetIndexLoadTimeMs, context.totalDmfileReadTimeMs, context.totalCreateSnapshotTimeMs)
 }
 
 // Merge make sum to merge the information in TiFlashScanContext
@@ -754,8 +740,6 @@ func (context *TiFlashScanContext) Merge(other TiFlashScanContext) {
 	context.totalDmfileRoughSetIndexLoadTimeMs += other.totalDmfileRoughSetIndexLoadTimeMs
 	context.totalDmfileReadTimeMs += other.totalDmfileReadTimeMs
 	context.totalCreateSnapshotTimeMs += other.totalCreateSnapshotTimeMs
-	context.totalLocalRegionNum += other.totalLocalRegionNum
-	context.totalRemoteRegionNum += other.totalRemoteRegionNum
 }
 
 // Empty check whether TiFlashScanContext is Empty, if scan no pack and skip no pack, we regard it as empty
@@ -767,29 +751,28 @@ func (context *TiFlashScanContext) Empty() bool {
 // BasicRuntimeStats is the basic runtime stats.
 type BasicRuntimeStats struct {
 	// executor's Next() called times.
-	loop atomic.Int32
+	loop int32
 	// executor consume time.
-	consume atomic.Int64
+	consume int64
 	// executor return row count.
-	rows atomic.Int64
+	rows int64
 	// executor extra infos
 	tiflashScanContext TiFlashScanContext
 }
 
 // GetActRows return total rows of BasicRuntimeStats.
 func (e *BasicRuntimeStats) GetActRows() int64 {
-	return e.rows.Load()
+	return e.rows
 }
 
 // Clone implements the RuntimeStats interface.
 func (e *BasicRuntimeStats) Clone() RuntimeStats {
-	result := &BasicRuntimeStats{
+	return &BasicRuntimeStats{
+		loop:               e.loop,
+		consume:            e.consume,
+		rows:               e.rows,
 		tiflashScanContext: e.tiflashScanContext.Clone(),
 	}
-	result.loop.Store(e.loop.Load())
-	result.consume.Store(e.consume.Load())
-	result.rows.Store(e.rows.Load())
-	return result
 }
 
 // Merge implements the RuntimeStats interface.
@@ -798,9 +781,9 @@ func (e *BasicRuntimeStats) Merge(rs RuntimeStats) {
 	if !ok {
 		return
 	}
-	e.loop.Add(tmp.loop.Load())
-	e.consume.Add(tmp.consume.Load())
-	e.rows.Add(tmp.rows.Load())
+	e.loop += tmp.loop
+	e.consume += tmp.consume
+	e.rows += tmp.rows
 	e.tiflashScanContext.Merge(tmp.tiflashScanContext)
 }
 
@@ -825,7 +808,7 @@ func (e *RootRuntimeStats) GetActRows() int64 {
 	if e.basic == nil {
 		return 0
 	}
-	return e.basic.rows.Load()
+	return e.basic.rows
 }
 
 // MergeStats merges stats in the RootRuntimeStats and return the stats suitable for display directly.
@@ -851,14 +834,14 @@ func (e *RootRuntimeStats) String() string {
 
 // Record records executor's execution.
 func (e *BasicRuntimeStats) Record(d time.Duration, rowNum int) {
-	e.loop.Add(1)
-	e.consume.Add(int64(d))
-	e.rows.Add(int64(rowNum))
+	atomic.AddInt32(&e.loop, 1)
+	atomic.AddInt64(&e.consume, int64(d))
+	atomic.AddInt64(&e.rows, int64(rowNum))
 }
 
 // SetRowNum sets the row num.
 func (e *BasicRuntimeStats) SetRowNum(rowNum int64) {
-	e.rows.Store(rowNum)
+	atomic.StoreInt64(&e.rows, rowNum)
 }
 
 // String implements the RuntimeStats interface.
@@ -868,15 +851,15 @@ func (e *BasicRuntimeStats) String() string {
 	}
 	var str strings.Builder
 	str.WriteString("time:")
-	str.WriteString(FormatDuration(time.Duration(e.consume.Load())))
+	str.WriteString(FormatDuration(time.Duration(e.consume)))
 	str.WriteString(", loops:")
-	str.WriteString(strconv.FormatInt(int64(e.loop.Load()), 10))
+	str.WriteString(strconv.FormatInt(int64(e.loop), 10))
 	return str.String()
 }
 
 // GetTime get the int64 total time
 func (e *BasicRuntimeStats) GetTime() int64 {
-	return e.consume.Load()
+	return e.consume
 }
 
 // RuntimeStatsColl collects executors's execution info.

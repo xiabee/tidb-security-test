@@ -20,21 +20,7 @@ import (
 
 var (
 	// ExecutorCounter records the number of expensive executors.
-	ExecutorCounter *prometheus.CounterVec
-
-	// StmtNodeCounter records the number of statement with the same type.
-	StmtNodeCounter *prometheus.CounterVec
-
-	// DbStmtNodeCounter records the number of statement with the same type and db.
-	DbStmtNodeCounter *prometheus.CounterVec
-
-	// ExecPhaseDuration records the duration of each execution phase.
-	ExecPhaseDuration *prometheus.SummaryVec
-)
-
-// InitExecutorMetrics initializes excutor metrics.
-func InitExecutorMetrics() {
-	ExecutorCounter = NewCounterVec(
+	ExecutorCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "executor",
@@ -43,15 +29,17 @@ func InitExecutorMetrics() {
 		}, []string{LblType},
 	)
 
-	StmtNodeCounter = NewCounterVec(
+	// StmtNodeCounter records the number of statement with the same type.
+	StmtNodeCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "executor",
 			Name:      "statement_total",
 			Help:      "Counter of StmtNode.",
-		}, []string{LblType, LblDb})
+		}, []string{LblType})
 
-	DbStmtNodeCounter = NewCounterVec(
+	// DbStmtNodeCounter records the number of statement with the same type and db.
+	DbStmtNodeCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
 			Subsystem: "executor",
@@ -59,11 +47,12 @@ func InitExecutorMetrics() {
 			Help:      "Counter of StmtNode by Database.",
 		}, []string{LblDb, LblType})
 
-	ExecPhaseDuration = NewSummaryVec(
+	// ExecPhaseDuration records the duration of each execution phase.
+	ExecPhaseDuration = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
 			Namespace: "tidb",
 			Subsystem: "executor",
 			Name:      "phase_duration_seconds",
 			Help:      "Summary of each execution phase duration.",
 		}, []string{LblPhase, LblInternal})
-}
+)

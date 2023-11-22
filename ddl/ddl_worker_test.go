@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
@@ -98,7 +97,7 @@ func TestParallelDDL(t *testing.T) {
 
 	// set hook to execute jobs after all jobs are in queue.
 	jobCnt := 11
-	tc := &callback.TestDDLCallback{Do: dom}
+	tc := &ddl.TestDDLCallback{Do: dom}
 	once := sync.Once{}
 	var checkErr error
 	tc.OnJobRunBeforeExported = func(job *model.Job) {
@@ -308,28 +307,4 @@ func TestJobNeedGC(t *testing.T) {
 			{Type: model.ActionRebaseAutoID, State: model.JobStateCancelled},
 		}}}
 	require.True(t, ddl.JobNeedGCForTest(job))
-}
-
-func TestUsingReorgCtx(t *testing.T) {
-	_, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
-	d := domain.DDL()
-
-	wg := util.WaitGroupWrapper{}
-	wg.Run(func() {
-		jobID := int64(1)
-		for i := 0; i < 500; i++ {
-			d.(ddl.DDLForTest).NewReorgCtx(jobID, 0)
-			d.(ddl.DDLForTest).GetReorgCtx(jobID).IsReorgCanceled()
-			d.(ddl.DDLForTest).RemoveReorgCtx(jobID)
-		}
-	})
-	wg.Run(func() {
-		jobID := int64(1)
-		for i := 0; i < 500; i++ {
-			d.(ddl.DDLForTest).NewReorgCtx(jobID, 0)
-			d.(ddl.DDLForTest).GetReorgCtx(jobID).IsReorgCanceled()
-			d.(ddl.DDLForTest).RemoveReorgCtx(jobID)
-		}
-	})
-	wg.Wait()
 }

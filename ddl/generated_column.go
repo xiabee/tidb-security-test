@@ -122,19 +122,13 @@ func findPositionRelativeColumn(cols []*table.Column, pos *ast.ColumnPosition) (
 
 // findDependedColumnNames returns a set of string, which indicates
 // the names of the columns that are depended by colDef.
-func findDependedColumnNames(schemaName model.CIStr, tableName model.CIStr, colDef *ast.ColumnDef) (generated bool, colsMap map[string]struct{}, err error) {
+func findDependedColumnNames(colDef *ast.ColumnDef) (generated bool, colsMap map[string]struct{}) {
 	colsMap = make(map[string]struct{})
 	for _, option := range colDef.Options {
 		if option.Tp == ast.ColumnOptionGenerated {
 			generated = true
 			colNames := FindColumnNamesInExpr(option.Expr)
 			for _, depCol := range colNames {
-				if depCol.Schema.L != "" && schemaName.L != "" && depCol.Schema.L != schemaName.L {
-					return false, nil, dbterror.ErrWrongDBName.GenWithStackByArgs(depCol.Schema.O)
-				}
-				if depCol.Table.L != "" && tableName.L != "" && depCol.Table.L != tableName.L {
-					return false, nil, dbterror.ErrWrongTableName.GenWithStackByArgs(depCol.Table.O)
-				}
 				colsMap[depCol.Name.L] = struct{}{}
 			}
 			break
@@ -198,7 +192,7 @@ func (c *generatedColumnChecker) Leave(inNode ast.Node) (node ast.Node, ok bool)
 //  3. check if the modified expr contains non-deterministic functions
 //  4. check whether new column refers to any auto-increment columns.
 //  5. check if the new column is indexed or stored
-func checkModifyGeneratedColumn(sctx sessionctx.Context, schemaName model.CIStr, tbl table.Table, oldCol, newCol *table.Column, newColDef *ast.ColumnDef, pos *ast.ColumnPosition) error {
+func checkModifyGeneratedColumn(sctx sessionctx.Context, tbl table.Table, oldCol, newCol *table.Column, newColDef *ast.ColumnDef, pos *ast.ColumnPosition) error {
 	// rule 1.
 	oldColIsStored := !oldCol.IsGenerated() || oldCol.GeneratedStored
 	newColIsStored := !newCol.IsGenerated() || newCol.GeneratedStored
@@ -258,10 +252,7 @@ func checkModifyGeneratedColumn(sctx sessionctx.Context, schemaName model.CIStr,
 		}
 
 		// rule 4.
-		_, dependColNames, err := findDependedColumnNames(schemaName, tbl.Meta().Name, newColDef)
-		if err != nil {
-			return errors.Trace(err)
-		}
+		_, dependColNames := findDependedColumnNames(newColDef)
 		if !sctx.GetSessionVars().EnableAutoIncrementInGenerated {
 			if err := checkAutoIncrementRef(newColDef.Name.Name.L, dependColNames, tbl.Meta()); err != nil {
 				return errors.Trace(err)
@@ -277,14 +268,12 @@ func checkModifyGeneratedColumn(sctx sessionctx.Context, schemaName model.CIStr,
 }
 
 type illegalFunctionChecker struct {
-	hasIllegalFunc        bool
-	hasAggFunc            bool
-	hasRowVal             bool // hasRowVal checks whether the functional index refers to a row value
-	hasWindowFunc         bool
-	hasNotGAFunc4ExprIdx  bool
-	hasCastArrayFunc      bool
-	disallowCastArrayFunc bool
-	otherErr              error
+	hasIllegalFunc       bool
+	hasAggFunc           bool
+	hasRowVal            bool // hasRowVal checks whether the functional index refers to a row value
+	hasWindowFunc        bool
+	hasNotGAFunc4ExprIdx bool
+	otherErr             error
 }
 
 func (c *illegalFunctionChecker) Enter(inNode ast.Node) (outNode ast.Node, skipChildren bool) {
@@ -319,16 +308,7 @@ func (c *illegalFunctionChecker) Enter(inNode ast.Node) (outNode ast.Node, skipC
 	case *ast.WindowFuncExpr:
 		c.hasWindowFunc = true
 		return inNode, true
-	case *ast.FuncCastExpr:
-		c.hasCastArrayFunc = c.hasCastArrayFunc || node.Tp.IsArray()
-		if c.disallowCastArrayFunc && node.Tp.IsArray() {
-			c.otherErr = expression.ErrNotSupportedYet.GenWithStackByArgs("Use of CAST( .. AS .. ARRAY) outside of functional index in CREATE(non-SELECT)/ALTER TABLE or in general expressions")
-			return inNode, true
-		}
-	case *ast.ParenthesesExpr:
-		return inNode, false
 	}
-	c.disallowCastArrayFunc = true
 	return inNode, false
 }
 
@@ -374,9 +354,6 @@ func checkIllegalFn4Generated(name string, genType int, expr ast.ExprNode) error
 	}
 	if genType == typeIndex && c.hasNotGAFunc4ExprIdx && !config.GetGlobalConfig().Experimental.AllowsExpressionIndex {
 		return dbterror.ErrUnsupportedExpressionIndex
-	}
-	if genType == typeColumn && c.hasCastArrayFunc {
-		return expression.ErrNotSupportedYet.GenWithStackByArgs("Use of CAST( .. AS .. ARRAY) outside of functional index in CREATE(non-SELECT)/ALTER TABLE or in general expressions")
 	}
 	return nil
 }

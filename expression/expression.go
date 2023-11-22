@@ -59,7 +59,7 @@ var EvalAstExpr func(sctx sessionctx.Context, expr ast.ExprNode) (types.Datum, e
 // RewriteAstExpr rewrites ast expression directly.
 // Note: initialized in planner/core
 // import expression and planner/core together to use EvalAstExpr
-var RewriteAstExpr func(sctx sessionctx.Context, expr ast.ExprNode, schema *Schema, names types.NameSlice, allowCastArray bool) (Expression, error)
+var RewriteAstExpr func(sctx sessionctx.Context, expr ast.ExprNode, schema *Schema, names types.NameSlice) (Expression, error)
 
 // VecExpr contains all vectorized evaluation methods.
 type VecExpr interface {
@@ -816,7 +816,7 @@ func SplitDNFItems(onExpr Expression) []Expression {
 // If the Expression is a non-constant value, it means the result is unknown.
 func EvaluateExprWithNull(ctx sessionctx.Context, schema *Schema, expr Expression) Expression {
 	if MaybeOverOptimized4PlanCache(ctx, []Expression{expr}) {
-		ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("%v affects null check"))
+		ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("skip plan-cache: %v affects null check"))
 	}
 	if ctx.GetSessionVars().StmtCtx.InNullRejectCheck {
 		expr, _ = evaluateExprWithNullInNullRejectCheck(ctx, schema, expr)
@@ -983,11 +983,11 @@ func ColumnInfos2ColumnsAndNames(ctx sessionctx.Context, dbName, tblName model.C
 	// Resolve virtual generated column.
 	mockSchema := NewSchema(columns...)
 	// Ignore redundant warning here.
-	save := ctx.GetSessionVars().StmtCtx.IgnoreTruncate.Load()
+	save := ctx.GetSessionVars().StmtCtx.IgnoreTruncate
 	defer func() {
-		ctx.GetSessionVars().StmtCtx.IgnoreTruncate.Store(save)
+		ctx.GetSessionVars().StmtCtx.IgnoreTruncate = save
 	}()
-	ctx.GetSessionVars().StmtCtx.IgnoreTruncate.Store(true)
+	ctx.GetSessionVars().StmtCtx.IgnoreTruncate = true
 	for i, col := range colInfos {
 		if col.IsGenerated() && !col.GeneratedStored {
 			expr, err := generatedexpr.ParseExpression(col.GeneratedExprString)
@@ -998,7 +998,7 @@ func ColumnInfos2ColumnsAndNames(ctx sessionctx.Context, dbName, tblName model.C
 			if err != nil {
 				return nil, nil, errors.Trace(err)
 			}
-			e, err := RewriteAstExpr(ctx, expr, mockSchema, names, true)
+			e, err := RewriteAstExpr(ctx, expr, mockSchema, names)
 			if err != nil {
 				return nil, nil, errors.Trace(err)
 			}
@@ -1139,7 +1139,7 @@ func scalarExprSupportedByFlash(function *ScalarFunction) bool {
 		}
 	case
 		ast.LogicOr, ast.LogicAnd, ast.UnaryNot, ast.BitNeg, ast.Xor, ast.And, ast.Or, ast.RightShift, ast.LeftShift,
-		ast.GE, ast.LE, ast.EQ, ast.NE, ast.LT, ast.GT, ast.In, ast.IsNull, ast.Like, ast.Ilike, ast.Strcmp,
+		ast.GE, ast.LE, ast.EQ, ast.NE, ast.LT, ast.GT, ast.In, ast.IsNull, ast.Like, ast.Strcmp,
 		ast.Plus, ast.Minus, ast.Div, ast.Mul, ast.Abs, ast.Mod,
 		ast.If, ast.Ifnull, ast.Case,
 		ast.Concat, ast.ConcatWS,
@@ -1171,7 +1171,7 @@ func scalarExprSupportedByFlash(function *ScalarFunction) bool {
 			return false
 		}
 		return true
-	case ast.Regexp, ast.RegexpLike, ast.RegexpInStr, ast.RegexpSubstr, ast.RegexpReplace:
+	case ast.Regexp, ast.RegexpLike, ast.RegexpInStr, ast.RegexpSubstr:
 		funcCharset, funcCollation := function.Function.CharsetAndCollation()
 		if funcCharset == charset.CharsetBin && funcCollation == charset.CollationBin {
 			return false
@@ -1262,16 +1262,14 @@ func scalarExprSupportedByFlash(function *ScalarFunction) bool {
 	case ast.Least, ast.Greatest:
 		switch function.Function.PbCode() {
 		case tipb.ScalarFuncSig_GreatestInt, tipb.ScalarFuncSig_GreatestReal,
-			tipb.ScalarFuncSig_LeastInt, tipb.ScalarFuncSig_LeastReal, tipb.ScalarFuncSig_LeastString, tipb.ScalarFuncSig_GreatestString:
+			tipb.ScalarFuncSig_LeastInt, tipb.ScalarFuncSig_LeastReal:
 			return true
 		}
 	case ast.IsTruthWithNull, ast.IsTruthWithoutNull, ast.IsFalsity:
 		return true
-	case ast.Hex, ast.Unhex, ast.Bin:
+	case ast.Hex, ast.Bin:
 		return true
 	case ast.GetFormat:
-		return true
-	case ast.IsIPv4, ast.IsIPv6:
 		return true
 	}
 	return false
@@ -1346,14 +1344,9 @@ func IsPushDownEnabled(name string, storeType kv.StoreType) bool {
 // DefaultExprPushDownBlacklist indicates the expressions which can not be pushed down to TiKV.
 var DefaultExprPushDownBlacklist *atomic.Value
 
-// ExprPushDownBlackListReloadTimeStamp is used to record the last time when the push-down black list is reloaded.
-// This is for plan cache, when the push-down black list is updated, we invalid all cached plans to avoid error.
-var ExprPushDownBlackListReloadTimeStamp *atomic.Int64
-
 func init() {
 	DefaultExprPushDownBlacklist = new(atomic.Value)
 	DefaultExprPushDownBlacklist.Store(make(map[string]uint32))
-	ExprPushDownBlackListReloadTimeStamp = new(atomic.Int64)
 }
 
 func canScalarFuncPushDown(scalarFunc *ScalarFunction, pc PbConverter, storeType kv.StoreType) bool {
@@ -1365,15 +1358,12 @@ func canScalarFuncPushDown(scalarFunc *ScalarFunction, pc PbConverter, storeType
 				panic(errors.Errorf("unspecified PbCode: %T", scalarFunc.Function))
 			})
 		}
-		storageName := storeType.Name()
-		if storeType == kv.UnSpecified {
-			storageName = "storage layer"
-		}
-		warnErr := errors.New("Scalar function '" + scalarFunc.FuncName.L + "'(signature: " + scalarFunc.Function.PbCode().String() + ", return type: " + scalarFunc.RetType.CompactStr() + ") is not supported to push down to " + storageName + " now.")
 		if pc.sc.InExplainStmt {
-			pc.sc.AppendWarning(warnErr)
-		} else {
-			pc.sc.AppendExtraWarning(warnErr)
+			storageName := storeType.Name()
+			if storeType == kv.UnSpecified {
+				storageName = "storage layer"
+			}
+			pc.sc.AppendWarning(errors.New("Scalar function '" + scalarFunc.FuncName.L + "'(signature: " + scalarFunc.Function.PbCode().String() + ", return type: " + scalarFunc.RetType.CompactStr() + ") is not supported to push down to " + storageName + " now."))
 		}
 		return false
 	}
@@ -1403,20 +1393,14 @@ func canExprPushDown(expr Expression, pc PbConverter, storeType kv.StoreType, ca
 			if expr.GetType().GetType() == mysql.TypeEnum && canEnumPush {
 				break
 			}
-			warnErr := errors.New("Expression about '" + expr.String() + "' can not be pushed to TiFlash because it contains unsupported calculation of type '" + types.TypeStr(expr.GetType().GetType()) + "'.")
 			if pc.sc.InExplainStmt {
-				pc.sc.AppendWarning(warnErr)
-			} else {
-				pc.sc.AppendExtraWarning(warnErr)
+				pc.sc.AppendWarning(errors.New("Expression about '" + expr.String() + "' can not be pushed to TiFlash because it contains unsupported calculation of type '" + types.TypeStr(expr.GetType().GetType()) + "'."))
 			}
 			return false
 		case mysql.TypeNewDecimal:
 			if !expr.GetType().IsDecimalValid() {
-				warnErr := errors.New("Expression about '" + expr.String() + "' can not be pushed to TiFlash because it contains invalid decimal('" + strconv.Itoa(expr.GetType().GetFlen()) + "','" + strconv.Itoa(expr.GetType().GetDecimal()) + "').")
 				if pc.sc.InExplainStmt {
-					pc.sc.AppendWarning(warnErr)
-				} else {
-					pc.sc.AppendExtraWarning(warnErr)
+					pc.sc.AppendWarning(errors.New("Expression about '" + expr.String() + "' can not be pushed to TiFlash because it contains invalid decimal('" + strconv.Itoa(expr.GetType().GetFlen()) + "','" + strconv.Itoa(expr.GetType().GetDecimal()) + "')."))
 				}
 				return false
 			}

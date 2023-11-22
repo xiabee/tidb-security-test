@@ -207,11 +207,6 @@ func (vt *perfSchemaTable) Indices() []table.Index {
 	return vt.indices
 }
 
-// GetPartitionedTable implements table.Table GetPartitionedTable interface.
-func (vt *perfSchemaTable) GetPartitionedTable() table.PartitionedTable {
-	return nil
-}
-
 // initTableIndices initializes the indices of the perfSchemaTable.
 func initTableIndices(t *perfSchemaTable) error {
 	tblInfo := t.meta

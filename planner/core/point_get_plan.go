@@ -323,7 +323,6 @@ type BatchPointGetPlan struct {
 	IdxColLens       []int
 	PartitionColPos  int
 	PartitionExpr    *tables.PartitionExpr
-	PartitionIDs     []int64 // pre-calculated partition IDs for Handles or IndexValues
 	KeepOrder        bool
 	Desc             bool
 	Lock             bool
@@ -332,7 +331,7 @@ type BatchPointGetPlan struct {
 	cost             float64
 
 	// SinglePart indicates whether this BatchPointGetPlan is just for a single partition, instead of the whole partition table.
-	// If the BatchPointGetPlan is built in fast path, this value is false; if the plan is generated in physical optimization for a partition,
+	// If the BatchPointGetPlan is built in fast path, this value if false; if the plan is generated in physical optimization for a partition,
 	// this value would be true. This value would decide the behavior of BatchPointGetExec, i.e, whether to compute the table ID of the partition
 	// on the fly.
 	SinglePart bool
@@ -538,8 +537,8 @@ func TryFastPlan(ctx sessionctx.Context, node ast.Node) (p Plan) {
 		return nil
 	}
 
-	ctx.GetSessionVars().PlanID.Store(0)
-	ctx.GetSessionVars().PlanColumnID.Store(0)
+	ctx.GetSessionVars().PlanID = 0
+	ctx.GetSessionVars().PlanColumnID = 0
 	switch x := node.(type) {
 	case *ast.SelectStmt:
 		defer func() {
@@ -712,16 +711,15 @@ func newBatchPointGetPlan(
 		if len(partitionInfos) == 0 {
 			partitionInfos = nil
 		}
-		p := &BatchPointGetPlan{
+
+		return BatchPointGetPlan{
 			TblInfo:        tbl,
 			Handles:        handles,
 			HandleParams:   handleParams,
 			HandleType:     &handleCol.FieldType,
 			PartitionExpr:  partitionExpr,
 			PartitionInfos: partitionInfos,
-		}
-
-		return p.Init(ctx, statsInfo, schema, names, 0)
+		}.Init(ctx, statsInfo, schema, names, 0)
 	}
 
 	// The columns in where clause should be covered by unique index
@@ -736,7 +734,7 @@ func newBatchPointGetPlan(
 		}
 	}
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible ||
 			!indexIsAvailableByHints(idxInfo, indexHints) {
 			continue
 		}
@@ -900,7 +898,8 @@ func newBatchPointGetPlan(
 	if len(partitionInfos) == 0 {
 		partitionInfos = nil
 	}
-	p := &BatchPointGetPlan{
+
+	return BatchPointGetPlan{
 		TblInfo:          tbl,
 		IndexInfo:        matchIdxInfo,
 		IndexValues:      indexValues,
@@ -909,9 +908,7 @@ func newBatchPointGetPlan(
 		PartitionColPos:  pos,
 		PartitionExpr:    partitionExpr,
 		PartitionInfos:   partitionInfos,
-	}
-
-	return p.Init(ctx, statsInfo, schema, names, 0)
+	}.Init(ctx, statsInfo, schema, names, 0)
 }
 
 func tryWhereIn2BatchPointGet(ctx sessionctx.Context, selStmt *ast.SelectStmt) *BatchPointGetPlan {
@@ -1105,7 +1102,7 @@ func tryPointGetPlan(ctx sessionctx.Context, selStmt *ast.SelectStmt, check bool
 	var err error
 
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible ||
 			!indexIsAvailableByHints(idxInfo, tblName.IndexHints) {
 			continue
 		}
@@ -1267,11 +1264,6 @@ func buildSchemaFromFields(
 				}
 				continue
 			}
-			if name, column, ok := tryExtractRowChecksumColumn(field, len(columns)); ok {
-				names = append(names, name)
-				columns = append(columns, column)
-				continue
-			}
 			colNameExpr, ok := field.Expr.(*ast.ColumnNameExpr)
 			if !ok {
 				return nil, nil
@@ -1311,38 +1303,6 @@ func buildSchemaFromFields(
 	}
 	schema := expression.NewSchema(columns...)
 	return schema, names
-}
-
-func tryExtractRowChecksumColumn(field *ast.SelectField, idx int) (*types.FieldName, *expression.Column, bool) {
-	f, ok := field.Expr.(*ast.FuncCallExpr)
-	if !ok || f.FnName.L != ast.TiDBRowChecksum || len(f.Args) != 0 {
-		return nil, nil, false
-	}
-	origName := f.FnName
-	origName.L += "()"
-	origName.O += "()"
-	asName := origName
-	if field.AsName.L != "" {
-		asName = field.AsName
-	}
-	cs, cl := types.DefaultCharsetForType(mysql.TypeString)
-	ftype := ptypes.NewFieldType(mysql.TypeString)
-	ftype.SetCharset(cs)
-	ftype.SetCollate(cl)
-	ftype.SetFlen(mysql.MaxBlobWidth)
-	ftype.SetDecimal(0)
-	name := &types.FieldName{
-		OrigColName: origName,
-		ColName:     asName,
-	}
-	column := &expression.Column{
-		RetType:  ftype,
-		ID:       model.ExtraRowChecksumID,
-		UniqueID: model.ExtraRowChecksumID,
-		Index:    idx,
-		OrigName: origName.L,
-	}
-	return name, column, true
 }
 
 // getSingleTableNameAndAlias return the ast node of queried table name and the alias string.
@@ -1775,12 +1735,10 @@ func buildPointDeletePlan(ctx sessionctx.Context, pointPlan PhysicalPlan, dbName
 	var err error
 	is := sessiontxn.GetTxnManager(ctx).GetTxnInfoSchema()
 	t, _ := is.TableByID(tbl.ID)
-	if t != nil {
-		tblID2Table := map[int64]table.Table{tbl.ID: t}
-		err = delPlan.buildOnDeleteFKTriggers(ctx, is, tblID2Table)
-		if err != nil {
-			return nil
-		}
+	tblID2Table := map[int64]table.Table{tbl.ID: t}
+	err = delPlan.buildOnDeleteFKTriggers(ctx, is, tblID2Table)
+	if err != nil {
+		return nil
 	}
 	return delPlan
 }
@@ -1860,19 +1818,6 @@ func getPartitionInfo(ctx sessionctx.Context, tbl *model.TableInfo, pairs []name
 				return &pi.Definitions[pos], i, int(pos), false
 			}
 		}
-	case model.PartitionTypeKey:
-		// The key partition table supports FastPlan when it contains only one partition column
-		if len(pi.Columns) == 1 {
-			for i, pair := range pairs {
-				if pi.Columns[0].L == pair.colName {
-					pos, err := partitionExpr.LocateKeyPartitionWithSPC(pi, []types.Datum{pair.value})
-					if err != nil {
-						return nil, 0, 0, false
-					}
-					return &pi.Definitions[pos], i, pos, false
-				}
-			}
-		}
 	case model.PartitionTypeRange:
 		// left range columns partition for future development
 		if len(pi.Columns) == 0 {
@@ -1938,18 +1883,11 @@ func getPartitionColumnPos(idx *model.IndexInfo, partitionExpr *tables.Partition
 		return 0, nil
 	}
 
-	var partitionColName model.CIStr
+	var partitionName model.CIStr
 	switch pi.Type {
 	case model.PartitionTypeHash:
 		if col, ok := partitionExpr.OrigExpr.(*ast.ColumnNameExpr); ok {
-			partitionColName = col.Name.Name
-		} else {
-			return 0, errors.Errorf("unsupported partition type in BatchGet")
-		}
-	case model.PartitionTypeKey:
-		if len(partitionExpr.KeyPartCols) == 1 {
-			colInfo := findColNameByColID(tbl.Columns, partitionExpr.KeyPartCols[0])
-			partitionColName = colInfo.Name
+			partitionName = col.Name.Name
 		} else {
 			return 0, errors.Errorf("unsupported partition type in BatchGet")
 		}
@@ -1957,7 +1895,7 @@ func getPartitionColumnPos(idx *model.IndexInfo, partitionExpr *tables.Partition
 		// left range columns partition for future development
 		if col, ok := partitionExpr.Expr.(*expression.Column); ok && len(pi.Columns) == 0 {
 			colInfo := findColNameByColID(tbl.Columns, col)
-			partitionColName = colInfo.Name
+			partitionName = colInfo.Name
 		} else {
 			return 0, errors.Errorf("unsupported partition type in BatchGet")
 		}
@@ -1965,23 +1903,27 @@ func getPartitionColumnPos(idx *model.IndexInfo, partitionExpr *tables.Partition
 		// left list columns partition for future development
 		if locateExpr, ok := partitionExpr.ForListPruning.LocateExpr.(*expression.Column); ok && partitionExpr.ForListPruning.ColPrunes == nil {
 			colInfo := findColNameByColID(tbl.Columns, locateExpr)
-			partitionColName = colInfo.Name
+			partitionName = colInfo.Name
 		} else {
 			return 0, errors.Errorf("unsupported partition type in BatchGet")
 		}
 	}
 
-	return getColumnPosInIndex(idx, &partitionColName), nil
+	for i, idxCol := range idx.Columns {
+		if partitionName.L == idxCol.Name.L {
+			return i, nil
+		}
+	}
+	panic("unique index must include all partition columns")
 }
 
-// getColumnPosInIndex gets the column's position in the index.
-// It is only used to get partition columns postition in unique index so far.
-func getColumnPosInIndex(idx *model.IndexInfo, colName *model.CIStr) int {
-	if colName == nil {
+// getHashPartitionColumnPos gets the hash partition column's position in the unique index.
+func getHashPartitionColumnPos(idx *model.IndexInfo, partitionColName *ast.ColumnName) int {
+	if partitionColName == nil {
 		return 0
 	}
 	for i, idxCol := range idx.Columns {
-		if colName.L == idxCol.Name.L {
+		if partitionColName.Name.L == idxCol.Name.L {
 			return i
 		}
 	}
@@ -2001,15 +1943,20 @@ func getPartitionExpr(ctx sessionctx.Context, tbl *model.TableInfo) *tables.Part
 	}
 
 	// PartitionExpr don't need columns and names for hash partition.
-	return partTable.PartitionExpr()
+	partitionExpr, err := partTable.PartitionExpr()
+	if err != nil {
+		return nil
+	}
+
+	return partitionExpr
 }
 
-func getHashOrKeyPartitionColumnName(ctx sessionctx.Context, tbl *model.TableInfo) *model.CIStr {
+func getHashPartitionColumnName(ctx sessionctx.Context, tbl *model.TableInfo) *ast.ColumnName {
 	pi := tbl.GetPartitionInfo()
 	if pi == nil {
 		return nil
 	}
-	if pi.Type != model.PartitionTypeHash && pi.Type != model.PartitionTypeKey {
+	if pi.Type != model.PartitionTypeHash {
 		return nil
 	}
 	is := ctx.GetInfoSchema().(infoschema.InfoSchema)
@@ -2018,20 +1965,16 @@ func getHashOrKeyPartitionColumnName(ctx sessionctx.Context, tbl *model.TableInf
 		return nil
 	}
 	// PartitionExpr don't need columns and names for hash partition.
-	partitionExpr := table.(partitionTable).PartitionExpr()
-	if pi.Type == model.PartitionTypeKey {
-		// used to judge whether the key partition contains only one field
-		if len(pi.Columns) != 1 {
-			return nil
-		}
-		return &pi.Columns[0]
+	partitionExpr, err := table.(partitionTable).PartitionExpr()
+	if err != nil {
+		return nil
 	}
 	expr := partitionExpr.OrigExpr
 	col, ok := expr.(*ast.ColumnNameExpr)
 	if !ok {
 		return nil
 	}
-	return &col.Name.Name
+	return col.Name
 }
 
 func findColNameByColID(cols []*model.ColumnInfo, col *expression.Column) *model.ColumnInfo {

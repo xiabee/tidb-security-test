@@ -205,7 +205,6 @@ func (s *Server) startHTTPServer() {
 	router.Handle("/stats/dump/{db}/{table}/{snapshot}", s.newStatsHistoryHandler()).Name("StatsHistoryDump")
 
 	router.Handle("/plan_replayer/dump/{filename}", s.newPlanReplayerHandler()).Name("PlanReplayerDump")
-	router.Handle("/extract_task/dump", s.newExtractServeHandler()).Name("ExtractTaskDump")
 
 	router.Handle("/optimize_trace/dump/{filename}", s.newOptimizeTraceHandler()).Name("OptimizeTraceDump")
 
@@ -238,9 +237,6 @@ func (s *Server) startHTTPServer() {
 	router.Handle("/db-table/{tableID}", dbTableHandler{tikvHandlerTool})
 	// HTTP path for get table tiflash replica info.
 	router.Handle("/tiflash/replica-deprecated", flashReplicaHandler{tikvHandlerTool})
-
-	// HTTP path for upgrade operations.
-	router.Handle("/upgrade/{op}", NewClusterUpgradeHandler(tikvHandlerTool.Store.(kv.Storage))).Name("upgrade operations")
 
 	if s.cfg.Store == "tikv" {
 		// HTTP path for tikv.
@@ -421,9 +417,6 @@ func (s *Server) startHTTPServer() {
 	// ddlHook is enabled only for tests so we can substitute the callback in the DDL.
 	router.Handle("/test/ddl/hook", &ddlHookHandler{tikvHandlerTool.Store.(kv.Storage)})
 
-	// ttlJobTriggerHandler is enabled only for tests, so we can accelerate the schedule of TTL job
-	router.Handle("/test/ttl/trigger/{db}/{table}", &ttlJobTriggerHandler{tikvHandlerTool.Store.(kv.Storage)})
-
 	var (
 		httpRouterPage bytes.Buffer
 		pathTemplate   string
@@ -468,14 +461,8 @@ func (s *Server) startStatusServerAndRPCServer(serverMux *http.ServeMux) {
 	grpcServer := NewRPCServer(s.cfg, s.dom, s)
 	service.RegisterChannelzServiceToServer(grpcServer)
 	if s.cfg.Store == "tikv" {
-		keyspaceName := config.GetGlobalKeyspaceName()
 		for {
-			var fullPath string
-			if keyspaceName == "" {
-				fullPath = fmt.Sprintf("%s://%s", s.cfg.Store, s.cfg.Path)
-			} else {
-				fullPath = fmt.Sprintf("%s://%s?keyspaceName=%s", s.cfg.Store, s.cfg.Path, keyspaceName)
-			}
+			fullPath := fmt.Sprintf("tikv://%s", s.cfg.Path)
 			store, err := store.New(fullPath)
 			if err != nil {
 				logutil.BgLogger().Error("new tikv store fail", zap.Error(err))
@@ -552,7 +539,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, req *http.Request) {
 	// If the server is in the process of shutting down, return a non-200 status.
 	// It is important not to return status{} as acquiring the s.ConnectionCount()
 	// acquires a lock that may already be held by the shutdown process.
-	if !s.health.Load() {
+	if s.inShutdownMode {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

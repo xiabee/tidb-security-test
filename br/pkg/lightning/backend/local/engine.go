@@ -32,18 +32,16 @@ import (
 	"github.com/google/btree"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
+	"github.com/pingcap/tidb/br/pkg/lightning/errormanager"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/membuf"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util/hack"
-	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
@@ -93,7 +91,6 @@ func (r *syncedRanges) reset() {
 	r.Unlock()
 }
 
-// Engine is a local engine.
 type Engine struct {
 	engineMeta
 	closed       atomic.Bool
@@ -107,13 +104,14 @@ type Engine struct {
 	// flush and ingest sst hold the rlock, other operation hold the wlock.
 	mutex sync.RWMutex
 
-	ctx          context.Context
-	cancel       context.CancelFunc
-	sstDir       string
-	sstMetasChan chan metaOrFlush
-	ingestErr    common.OnceError
-	wg           sync.WaitGroup
-	sstIngester  sstIngester
+	ctx            context.Context
+	cancel         context.CancelFunc
+	sstDir         string
+	sstMetasChan   chan metaOrFlush
+	ingestErr      common.OnceError
+	wg             sync.WaitGroup
+	sstIngester    sstIngester
+	finishedRanges syncedRanges
 
 	// sst seq lock
 	seqLock sync.Mutex
@@ -125,7 +123,7 @@ type Engine struct {
 	config    backend.LocalEngineConfig
 	tableInfo *checkpoints.TidbTableInfo
 
-	dupDetectOpt DupDetectOpt
+	dupDetectOpt dupDetectOpt
 
 	// total size of SST files waiting to be ingested
 	pendingFileSize atomic.Int64
@@ -137,6 +135,7 @@ type Engine struct {
 	keyAdapter         KeyAdapter
 	duplicateDetection bool
 	duplicateDB        *pebble.DB
+	errorMgr           *errormanager.ErrorManager
 
 	logger log.Logger
 }
@@ -244,9 +243,8 @@ func (e *Engine) unlock() {
 	e.mutex.Unlock()
 }
 
-// TotalMemorySize returns the total memory size of the engine.
 func (e *Engine) TotalMemorySize() int64 {
-	var memSize int64
+	var memSize int64 = 0
 	e.localWriters.Range(func(k, v interface{}) bool {
 		w := k.(*Writer)
 		if w.kvBuffer != nil {
@@ -269,7 +267,6 @@ type rangeProperty struct {
 	rangeOffsets
 }
 
-// Less implements btree.Item interface.
 func (r *rangeProperty) Less(than btree.Item) bool {
 	ta := than.(*rangeProperty)
 	return bytes.Compare(r.Key, ta.Key) < 0
@@ -279,7 +276,6 @@ var _ btree.Item = &rangeProperty{}
 
 type rangeProperties []rangeProperty
 
-// Encode encodes the range properties into a byte slice.
 func (r rangeProperties) Encode() []byte {
 	b := make([]byte, 0, 1024)
 	idx := 0
@@ -301,7 +297,6 @@ func (r rangeProperties) Encode() []byte {
 	return b
 }
 
-// RangePropertiesCollector collects range properties for each range.
 type RangePropertiesCollector struct {
 	props               rangeProperties
 	lastOffsets         rangeOffsets
@@ -348,7 +343,6 @@ func (c *RangePropertiesCollector) Add(key pebble.InternalKey, value []byte) err
 	return nil
 }
 
-// Finish implements `pebble.TablePropertyCollector`.
 func (c *RangePropertiesCollector) Finish(userProps map[string]string) error {
 	if c.sizeInLastRange() > 0 || c.keysInLastRange() > 0 {
 		c.insertNewPoint(c.lastKey)
@@ -358,8 +352,7 @@ func (c *RangePropertiesCollector) Finish(userProps map[string]string) error {
 	return nil
 }
 
-// Name implements `pebble.TablePropertyCollector`.
-func (*RangePropertiesCollector) Name() string {
+func (c *RangePropertiesCollector) Name() string {
 	return propRangeIndex
 }
 
@@ -429,9 +422,6 @@ func decodeRangeProperties(data []byte, keyAdapter KeyAdapter) (rangeProperties,
 
 	return r, nil
 }
-
-// getSizePropertiesFn is used to let unit test replace the real function.
-var getSizePropertiesFn = getSizeProperties
 
 func getSizeProperties(logger log.Logger, db *pebble.DB, keyAdapter KeyAdapter) (*sizeProperties, error) {
 	sstables, err := db.SSTables(pebble.WithProperties())
@@ -510,27 +500,22 @@ type metaSeqHeap struct {
 	arr []metaSeq
 }
 
-// Len returns the number of items in the priority queue.
 func (h *metaSeqHeap) Len() int {
 	return len(h.arr)
 }
 
-// Less reports whether the item in the priority queue with
 func (h *metaSeqHeap) Less(i, j int) bool {
 	return h.arr[i].flushSeq < h.arr[j].flushSeq
 }
 
-// Swap swaps the items at the passed indices.
 func (h *metaSeqHeap) Swap(i, j int) {
 	h.arr[i], h.arr[j] = h.arr[j], h.arr[i]
 }
 
-// Push pushes the item onto the priority queue.
 func (h *metaSeqHeap) Push(x interface{}) {
 	h.arr = append(h.arr, x.(metaSeq))
 }
 
-// Pop removes the minimum item (according to Less) from the priority queue
 func (h *metaSeqHeap) Pop() interface{} {
 	item := h.arr[len(h.arr)-1]
 	h.arr = h.arr[:len(h.arr)-1]
@@ -771,7 +756,6 @@ func (e *Engine) batchIngestSSTs(metas []*sstMeta) error {
 		return bytes.Compare(i.minKey, j.minKey) < 0
 	})
 
-	// non overlapping sst is grouped, and ingested in that order
 	metaLevels := make([][]*sstMeta, 0)
 	for _, meta := range metas {
 		inserted := false
@@ -924,6 +908,72 @@ func (e *Engine) loadEngineMeta() error {
 	return nil
 }
 
+// sortAndMergeRanges sort the ranges and merge range that overlaps with each other into a single range.
+func sortAndMergeRanges(ranges []Range) []Range {
+	if len(ranges) == 0 {
+		return ranges
+	}
+
+	slices.SortFunc(ranges, func(i, j Range) bool {
+		return bytes.Compare(i.start, j.start) < 0
+	})
+
+	curEnd := ranges[0].end
+	i := 0
+	for j := 1; j < len(ranges); j++ {
+		if bytes.Compare(curEnd, ranges[j].start) >= 0 {
+			if bytes.Compare(curEnd, ranges[j].end) < 0 {
+				curEnd = ranges[j].end
+			}
+		} else {
+			ranges[i].end = curEnd
+			i++
+			ranges[i].start = ranges[j].start
+			curEnd = ranges[j].end
+		}
+	}
+	ranges[i].end = curEnd
+	return ranges[:i+1]
+}
+
+func filterOverlapRange(ranges []Range, finishedRanges []Range) []Range {
+	if len(ranges) == 0 || len(finishedRanges) == 0 {
+		return ranges
+	}
+
+	result := make([]Range, 0)
+	for _, r := range ranges {
+		start := r.start
+		end := r.end
+		for len(finishedRanges) > 0 && bytes.Compare(finishedRanges[0].start, end) < 0 {
+			fr := finishedRanges[0]
+			if bytes.Compare(fr.start, start) > 0 {
+				result = append(result, Range{start: start, end: fr.start})
+			}
+			if bytes.Compare(fr.end, start) > 0 {
+				start = fr.end
+			}
+			if bytes.Compare(fr.end, end) > 0 {
+				break
+			}
+			finishedRanges = finishedRanges[1:]
+		}
+		if bytes.Compare(start, end) < 0 {
+			result = append(result, Range{start: start, end: end})
+		}
+	}
+	return result
+}
+
+func (e *Engine) unfinishedRanges(ranges []Range) []Range {
+	e.finishedRanges.Lock()
+	defer e.finishedRanges.Unlock()
+
+	e.finishedRanges.ranges = sortAndMergeRanges(e.finishedRanges.ranges)
+
+	return filterOverlapRange(ranges, e.finishedRanges.ranges)
+}
+
 func (e *Engine) newKVIter(ctx context.Context, opts *pebble.IterOptions) Iter {
 	if bytes.Compare(opts.LowerBound, normalIterStartKey) < 0 {
 		newOpts := *opts
@@ -937,43 +987,7 @@ func (e *Engine) newKVIter(ctx context.Context, opts *pebble.IterOptions) Iter {
 		zap.String("table", common.UniqueTable(e.tableInfo.DB, e.tableInfo.Name)),
 		zap.Int64("tableID", e.tableInfo.ID),
 		zap.Stringer("engineUUID", e.UUID))
-	return newDupDetectIter(e.getDB(), e.keyAdapter, opts, e.duplicateDB, logger, e.dupDetectOpt)
-}
-
-// getFirstAndLastKey reads the first and last key in range [lowerBound, upperBound)
-// in the engine. Empty upperBound means unbounded.
-func (e *Engine) getFirstAndLastKey(lowerBound, upperBound []byte) ([]byte, []byte, error) {
-	if len(upperBound) == 0 {
-		// we use empty slice for unbounded upper bound, but it means max value in pebble
-		// so reset to nil
-		upperBound = nil
-	}
-	opt := &pebble.IterOptions{
-		LowerBound: lowerBound,
-		UpperBound: upperBound,
-	}
-	failpoint.Inject("mockGetFirstAndLastKey", func() {
-		failpoint.Return(lowerBound, upperBound, nil)
-	})
-
-	iter := e.newKVIter(context.Background(), opt)
-	//nolint: errcheck
-	defer iter.Close()
-	// Needs seek to first because NewIter returns an iterator that is unpositioned
-	hasKey := iter.First()
-	if iter.Error() != nil {
-		return nil, nil, errors.Annotate(iter.Error(), "failed to read the first key")
-	}
-	if !hasKey {
-		return nil, nil, nil
-	}
-	firstKey := append([]byte{}, iter.Key()...)
-	iter.Last()
-	if iter.Error() != nil {
-		return nil, nil, errors.Annotate(iter.Error(), "failed to seek to the last key")
-	}
-	lastKey := append([]byte{}, iter.Key()...)
-	return firstKey, lastKey, nil
+	return newDupDetectIter(ctx, e.getDB(), e.keyAdapter, opts, e.duplicateDB, logger, e.dupDetectOpt)
 }
 
 type sstMeta struct {
@@ -987,7 +1001,6 @@ type sstMeta struct {
 	seq      int32
 }
 
-// Writer is used to write data into a SST file.
 type Writer struct {
 	sync.Mutex
 	engine            *Engine
@@ -1010,8 +1023,6 @@ type Writer struct {
 	batchSize  int64
 
 	lastMetaSeq int32
-
-	tikvCodec tikv.Codec
 }
 
 func (w *Writer) appendRowsSorted(kvs []common.KvPair) error {
@@ -1026,7 +1037,7 @@ func (w *Writer) appendRowsSorted(kvs []common.KvPair) error {
 	keyAdapter := w.engine.keyAdapter
 	totalKeySize := 0
 	for i := 0; i < len(kvs); i++ {
-		keySize := keyAdapter.EncodedLen(kvs[i].Key, kvs[i].RowID)
+		keySize := keyAdapter.EncodedLen(kvs[i].Key)
 		w.batchSize += int64(keySize + len(kvs[i].Val))
 		totalKeySize += keySize
 	}
@@ -1063,7 +1074,7 @@ func (w *Writer) appendRowsUnsorted(ctx context.Context, kvs []common.KvPair) er
 		}
 		lastKey = pair.Key
 		w.batchSize += int64(len(pair.Key) + len(pair.Val))
-		buf := w.kvBuffer.AllocBytes(keyAdapter.EncodedLen(pair.Key, pair.RowID))
+		buf := w.kvBuffer.AllocBytes(keyAdapter.EncodedLen(pair.Key))
 		key := keyAdapter.Encode(buf[:0], pair.Key, pair.RowID)
 		val := w.kvBuffer.AddBytes(pair.Val)
 		if cnt < l {
@@ -1084,19 +1095,14 @@ func (w *Writer) appendRowsUnsorted(ctx context.Context, kvs []common.KvPair) er
 	return nil
 }
 
-// AppendRows appends rows to the SST file.
-func (w *Writer) AppendRows(ctx context.Context, columnNames []string, rows encode.Rows) error {
-	kvs := kv.Rows2KvPairs(rows)
+func (w *Writer) AppendRows(ctx context.Context, tableName string, columnNames []string, rows kv.Rows) error {
+	kvs := kv.KvPairsFromRows(rows)
 	if len(kvs) == 0 {
 		return nil
 	}
 
 	if w.engine.closed.Load() {
 		return errorEngineClosed
-	}
-
-	for i := range kvs {
-		kvs[i].Key = w.tikvCodec.EncodeKey(kvs[i].Key)
 	}
 
 	w.Lock()
@@ -1150,12 +1156,10 @@ type flushStatus struct {
 	seq   int32
 }
 
-// Flushed implements backend.ChunkFlushStatus.
 func (f flushStatus) Flushed() bool {
 	return f.seq <= f.local.finishedMetaSeq.Load()
 }
 
-// Close implements backend.ChunkFlushStatus.
 func (w *Writer) Close(ctx context.Context) (backend.ChunkFlushStatus, error) {
 	defer w.kvBuffer.Destroy()
 	defer w.engine.localWriters.Delete(w)
@@ -1167,7 +1171,6 @@ func (w *Writer) Close(ctx context.Context) (backend.ChunkFlushStatus, error) {
 	return flushStatus{local: w.engine, seq: w.lastMetaSeq}, err
 }
 
-// IsSynced implements backend.ChunkFlushStatus.
 func (w *Writer) IsSynced() bool {
 	return w.batchCount == 0 && w.lastMetaSeq <= w.engine.finishedMetaSeq.Load()
 }
@@ -1192,15 +1195,6 @@ func (w *Writer) flushKVs(ctx context.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-
-	failpoint.Inject("orphanWriterGoRoutine", func() {
-		_ = common.KillMySelf()
-		// mimic we meet context cancel error when `addSST`
-		<-ctx.Done()
-		time.Sleep(5 * time.Second)
-		failpoint.Return(errors.Trace(ctx.Err()))
-	})
-
 	err = w.addSST(ctx, meta)
 	if err != nil {
 		return errors.Trace(err)
@@ -1306,7 +1300,6 @@ type sstIter struct {
 	valid  bool
 }
 
-// Close implements common.Iterator.
 func (i *sstIter) Close() error {
 	if err := i.iter.Close(); err != nil {
 		return errors.Trace(err)
@@ -1319,34 +1312,28 @@ type sstIterHeap struct {
 	iters []*sstIter
 }
 
-// Len implements heap.Interface.
 func (h *sstIterHeap) Len() int {
 	return len(h.iters)
 }
 
-// Less implements heap.Interface.
 func (h *sstIterHeap) Less(i, j int) bool {
 	return bytes.Compare(h.iters[i].key, h.iters[j].key) < 0
 }
 
-// Swap implements heap.Interface.
 func (h *sstIterHeap) Swap(i, j int) {
 	h.iters[i], h.iters[j] = h.iters[j], h.iters[i]
 }
 
-// Push implements heap.Interface.
 func (h *sstIterHeap) Push(x interface{}) {
 	h.iters = append(h.iters, x.(*sstIter))
 }
 
-// Pop implements heap.Interface.
 func (h *sstIterHeap) Pop() interface{} {
 	item := h.iters[len(h.iters)-1]
 	h.iters = h.iters[:len(h.iters)-1]
 	return item
 }
 
-// Next implements common.Iterator.
 func (h *sstIterHeap) Next() ([]byte, []byte, error) {
 	for {
 		if len(h.iters) == 0 {

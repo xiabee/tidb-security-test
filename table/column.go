@@ -300,6 +300,10 @@ func CastValue(ctx sessionctx.Context, val types.Datum, col *model.ColumnInfo, r
 	if returnErr && err != nil {
 		return casted, err
 	}
+	if err != nil {
+		logutil.BgLogger().Debug("[debug] ConvertTo FieldType failed", zap.Stringer("FieldType", &col.FieldType),
+			zap.Stringer("Datum", val), zap.Error(err))
+	}
 	if err != nil && types.ErrTruncated.Equal(err) && col.GetType() != mysql.TypeSet && col.GetType() != mysql.TypeEnum {
 		str, err1 := val.ToString()
 		if err1 != nil {
@@ -323,7 +327,6 @@ func CastValue(ctx sessionctx.Context, val types.Datum, col *model.ColumnInfo, r
 	}
 
 	err = sc.HandleTruncate(err)
-	err = sc.HandleOverflow(err, err)
 
 	if forceIgnoreTruncate {
 		err = nil
@@ -445,26 +448,17 @@ func CheckOnce(cols []*Column) error {
 }
 
 // CheckNotNull checks if nil value set to a column with NotNull flag is set.
-// When caller is LOAD DATA, `rowCntInLoadData` should be greater than 0 and it
-// will return a ErrWarnNullToNotnull when error.
-// Otherwise, it will return a ErrColumnCantNull when error.
-func (c *Column) CheckNotNull(data *types.Datum, rowCntInLoadData uint64) error {
+func (c *Column) CheckNotNull(data *types.Datum) error {
 	if (mysql.HasNotNullFlag(c.GetFlag()) || mysql.HasPreventNullInsertFlag(c.GetFlag())) && data.IsNull() {
-		if rowCntInLoadData > 0 {
-			return ErrWarnNullToNotnull.GenWithStackByArgs(c.Name, rowCntInLoadData)
-		}
 		return ErrColumnCantNull.GenWithStackByArgs(c.Name)
 	}
 	return nil
 }
 
 // HandleBadNull handles the bad null error.
-// When caller is LOAD DATA, `rowCntInLoadData` should be greater than 0 the
-// error is ErrWarnNullToNotnull.
-// Otherwise, the error is ErrColumnCantNull.
 // If BadNullAsWarning is true, it will append the error as a warning, else return the error.
-func (c *Column) HandleBadNull(d *types.Datum, sc *stmtctx.StatementContext, rowCntInLoadData uint64) error {
-	if err := c.CheckNotNull(d, rowCntInLoadData); err != nil {
+func (c *Column) HandleBadNull(d *types.Datum, sc *stmtctx.StatementContext) error {
+	if err := c.CheckNotNull(d); err != nil {
 		if sc.BadNullAsWarning {
 			sc.AppendWarning(err)
 			*d = GetZeroValue(c.ToInfo())
@@ -485,27 +479,26 @@ func (c *Column) IsCommonHandleColumn(tbInfo *model.TableInfo) bool {
 	return mysql.HasPriKeyFlag(c.GetFlag()) && tbInfo.IsCommonHandle
 }
 
-type getColOriginDefaultValue struct {
-	StrictSQLMode bool
+// CheckNotNull checks if row has nil value set to a column with NotNull flag set.
+func CheckNotNull(cols []*Column, row []types.Datum) error {
+	for _, c := range cols {
+		if err := c.CheckNotNull(&row[c.Offset]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // GetColOriginDefaultValue gets default value of the column from original default value.
 func GetColOriginDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo) (types.Datum, error) {
-	return getColDefaultValue(ctx, col, col.GetOriginDefaultValue(), nil)
-}
-
-// GetColOriginDefaultValueWithoutStrictSQLMode gets default value of the column from original default value with Strict SQL mode.
-func GetColOriginDefaultValueWithoutStrictSQLMode(ctx sessionctx.Context, col *model.ColumnInfo) (types.Datum, error) {
-	return getColDefaultValue(ctx, col, col.GetOriginDefaultValue(), &getColOriginDefaultValue{
-		StrictSQLMode: false,
-	})
+	return getColDefaultValue(ctx, col, col.GetOriginDefaultValue())
 }
 
 // GetColDefaultValue gets default value of the column.
 func GetColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo) (types.Datum, error) {
 	defaultValue := col.GetDefaultValue()
 	if !col.DefaultIsExpr {
-		return getColDefaultValue(ctx, col, defaultValue, nil)
+		return getColDefaultValue(ctx, col, defaultValue)
 	}
 	return getColDefaultExprValue(ctx, col, defaultValue.(string))
 }
@@ -543,14 +536,12 @@ func getColDefaultExprValue(ctx sessionctx.Context, col *model.ColumnInfo, defau
 	return value, nil
 }
 
-func getColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo, defaultVal interface{}, args *getColOriginDefaultValue) (types.Datum, error) {
+func getColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo, defaultVal interface{}) (types.Datum, error) {
 	if defaultVal == nil {
-		return getColDefaultValueFromNil(ctx, col, args)
+		return getColDefaultValueFromNil(ctx, col)
 	}
 
-	switch col.GetType() {
-	case mysql.TypeTimestamp, mysql.TypeDate, mysql.TypeDatetime:
-	default:
+	if col.GetType() != mysql.TypeTimestamp && col.GetType() != mysql.TypeDatetime {
 		value, err := CastValue(ctx, types.NewDatum(defaultVal), col, false, false)
 		if err != nil {
 			return types.Datum{}, err
@@ -588,7 +579,7 @@ func getColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo, defaultVa
 	return value, nil
 }
 
-func getColDefaultValueFromNil(ctx sessionctx.Context, col *model.ColumnInfo, args *getColOriginDefaultValue) (types.Datum, error) {
+func getColDefaultValueFromNil(ctx sessionctx.Context, col *model.ColumnInfo) (types.Datum, error) {
 	if !mysql.HasNotNullFlag(col.GetFlag()) && !mysql.HasNoDefaultValueFlag(col.GetFlag()) {
 		return types.Datum{}, nil
 	}
@@ -610,13 +601,7 @@ func getColDefaultValueFromNil(ctx sessionctx.Context, col *model.ColumnInfo, ar
 	}
 	vars := ctx.GetSessionVars()
 	sc := vars.StmtCtx
-	var strictSQLMode bool
-	if args != nil {
-		strictSQLMode = args.StrictSQLMode
-	} else {
-		strictSQLMode = vars.StrictSQLMode
-	}
-	if !strictSQLMode {
+	if !vars.StrictSQLMode {
 		sc.AppendWarning(ErrNoDefaultValue.FastGenByArgs(col.Name))
 		if mysql.HasNotNullFlag(col.GetFlag()) {
 			return GetZeroValue(col), nil
@@ -711,25 +696,6 @@ func FillVirtualColumnValue(virtualRetTypes []*types.FieldType, virtualColumnInd
 			if err != nil {
 				return err
 			}
-
-			// Clip to zero if get negative value after cast to unsigned.
-			if mysql.HasUnsignedFlag(colInfos[idx].FieldType.GetFlag()) && !castDatum.IsNull() && !sctx.GetSessionVars().StmtCtx.ShouldClipToZero() {
-				switch datum.Kind() {
-				case types.KindInt64:
-					if datum.GetInt64() < 0 {
-						castDatum = GetZeroValue(colInfos[idx])
-					}
-				case types.KindFloat32, types.KindFloat64:
-					if types.RoundFloat(datum.GetFloat64()) < 0 {
-						castDatum = GetZeroValue(colInfos[idx])
-					}
-				case types.KindMysqlDecimal:
-					if datum.GetMysqlDecimal().IsNegative() {
-						castDatum = GetZeroValue(colInfos[idx])
-					}
-				}
-			}
-
 			// Handle the bad null error.
 			if (mysql.HasNotNullFlag(colInfos[idx].GetFlag()) || mysql.HasPreventNullInsertFlag(colInfos[idx].GetFlag())) && castDatum.IsNull() {
 				castDatum = GetZeroValue(colInfos[idx])

@@ -217,15 +217,6 @@ func TestConstantFolding(t *testing.T) {
 			condition: newFunction(ast.LT, newColumn(0), newFunction(ast.Plus, newColumn(1), newFunction(ast.Plus, newLonglong(2), newLonglong(1)))),
 			result:    "lt(Column#0, plus(Column#1, 3))",
 		},
-		{
-			condition: func() Expression {
-				expr := newFunction(ast.ConcatWS, newColumn(0), NewNull())
-				function := expr.(*ScalarFunction)
-				function.GetCtx().GetSessionVars().StmtCtx.InNullRejectCheck = true
-				return function
-			}(),
-			result: "concat_ws(cast(Column#0, var_string(20)), <nil>)",
-		},
 	}
 	for _, tt := range tests {
 		newConds := FoldConstant(tt.condition)
@@ -292,7 +283,7 @@ func TestConstantFoldingCharsetConvert(t *testing.T) {
 func TestDeferredParamNotNull(t *testing.T) {
 	ctx := mock.NewContext()
 	testTime := time.Now()
-	ctx.GetSessionVars().PlanCacheParams.Append(
+	ctx.GetSessionVars().PreparedParams = []types.Datum{
 		types.NewIntDatum(1),
 		types.NewDecimalDatum(types.NewDecFromStringForTest("20170118123950.123")),
 		types.NewTimeDatum(types.NewTime(types.FromGoTime(testTime), mysql.TypeTimestamp, 6)),
@@ -305,7 +296,7 @@ func TestDeferredParamNotNull(t *testing.T) {
 		types.NewUintDatum(100),
 		types.NewMysqlBitDatum([]byte{1}),
 		types.NewMysqlEnumDatum(types.Enum{Name: "n", Value: 2}),
-	)
+	}
 	cstInt := &Constant{ParamMarker: &ParamMarker{ctx: ctx, order: 0}, RetType: newIntFieldType()}
 	cstDec := &Constant{ParamMarker: &ParamMarker{ctx: ctx, order: 1}, RetType: newDecimalFieldType()}
 	cstTime := &Constant{ParamMarker: &ParamMarker{ctx: ctx, order: 2}, RetType: newDateFieldType()}
@@ -346,8 +337,7 @@ func TestDeferredParamNotNull(t *testing.T) {
 	require.Equal(t, "b", s)
 	evalTime, _, err := cstTime.EvalTime(ctx, chunk.Row{})
 	require.NoError(t, err)
-	v := ctx.GetSessionVars().PlanCacheParams.GetParamValue(2)
-	require.Equal(t, 0, evalTime.Compare(v.GetMysqlTime()))
+	require.Equal(t, 0, evalTime.Compare(ctx.GetSessionVars().PreparedParams[2].GetMysqlTime()))
 	dur, _, err := cstDuration.EvalDuration(ctx, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.ZeroDuration.Duration, dur.Duration)
@@ -488,7 +478,9 @@ func TestVectorizedConstant(t *testing.T) {
 
 func TestGetTypeThreadSafe(t *testing.T) {
 	ctx := mock.NewContext()
-	ctx.GetSessionVars().PlanCacheParams.Append(types.NewIntDatum(1))
+	ctx.GetSessionVars().PreparedParams = []types.Datum{
+		types.NewIntDatum(1),
+	}
 	con := &Constant{ParamMarker: &ParamMarker{ctx: ctx, order: 0}, RetType: newStringFieldType()}
 	ft1 := con.GetType()
 	ft2 := con.GetType()

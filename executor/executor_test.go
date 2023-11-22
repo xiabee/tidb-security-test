@@ -66,7 +66,6 @@ import (
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/replayer"
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tidb/util/timeutil"
@@ -79,19 +78,15 @@ import (
 func checkFileName(s string) bool {
 	files := []string{
 		"config.toml",
-		"debug_trace/debug_trace0.json",
 		"meta.txt",
 		"stats/test.t_dump_single.json",
 		"schema/test.t_dump_single.schema.txt",
-		"schema/schema_meta.txt",
 		"table_tiflash_replica.txt",
 		"variables.toml",
 		"session_bindings.sql",
 		"global_bindings.sql",
 		"sql/sql0.sql",
-		"explain.txt",
-		"statsMem/test.t_dump_single.txt",
-		"sql_meta.toml",
+		"explain/sql0.txt",
 	}
 	for _, f := range files {
 		if strings.Compare(f, s) == 0 {
@@ -179,71 +174,13 @@ func TestPlanReplayer(t *testing.T) {
 	require.Len(t, rows, 1)
 }
 
-func TestPlanReplayerCaptureSEM(t *testing.T) {
-	originSEM := config.GetGlobalConfig().Security.EnableSEM
-	defer func() {
-		config.GetGlobalConfig().Security.EnableSEM = originSEM
-	}()
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("plan replayer capture '123' '123';")
-	tk.MustExec("create table t(id int)")
-	tk.MustQuery("plan replayer dump explain select * from t")
-	tk.MustQuery("select count(*) from mysql.plan_replayer_status").Check(testkit.Rows("1"))
-}
-
 func TestPlanReplayerCapture(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("plan replayer capture '123' '123';")
 	tk.MustQuery("select sql_digest, plan_digest from mysql.plan_replayer_task;").Check(testkit.Rows("123 123"))
 	tk.MustGetErrMsg("plan replayer capture '123' '123';", "plan replayer capture task already exists")
-	tk.MustExec("plan replayer capture remove '123' '123'")
-	tk.MustQuery("select count(*) from mysql.plan_replayer_task;").Check(testkit.Rows("0"))
-	tk.MustExec("create table t(id int)")
-	tk.MustExec("prepare stmt from 'update t set id = ?  where id = ? + 1';")
-	tk.MustExec("SET @number = 5;")
-	tk.MustExec("execute stmt using @number,@number")
-	_, sqlDigest := tk.Session().GetSessionVars().StmtCtx.SQLDigest()
-	_, planDigest := tk.Session().GetSessionVars().StmtCtx.GetPlanDigest()
-	tk.MustExec("SET @@tidb_enable_plan_replayer_capture = ON;")
-	tk.MustExec("SET @@global.tidb_enable_historical_stats_for_capture='ON'")
-	tk.MustExec(fmt.Sprintf("plan replayer capture '%v' '%v'", sqlDigest.String(), planDigest.String()))
-	err := dom.GetPlanReplayerHandle().CollectPlanReplayerTask()
-	require.NoError(t, err)
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/domain/shouldDumpStats", "return(true)"))
-	defer require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/domain/shouldDumpStats"))
-	tk.MustExec("execute stmt using @number,@number")
-	task := dom.GetPlanReplayerHandle().DrainTask()
-	require.NotNil(t, task)
-}
-
-func TestPlanReplayerContinuesCapture(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("set @@global.tidb_enable_historical_stats='OFF'")
-	_, err := tk.Exec("set @@global.tidb_enable_plan_replayer_continuous_capture='ON'")
-	require.Error(t, err)
-	require.Equal(t, err.Error(), "tidb_enable_historical_stats should be enabled before enabling tidb_enable_plan_replayer_continuous_capture")
-
-	tk.MustExec("set @@global.tidb_enable_historical_stats='ON'")
-	tk.MustExec("set @@global.tidb_enable_plan_replayer_continuous_capture='ON'")
-
-	prHandle := dom.GetPlanReplayerHandle()
-	tk.MustExec("delete from mysql.plan_replayer_status;")
-	tk.MustExec("use test")
-	tk.MustExec("create table t(id int);")
-	tk.MustExec("set @@tidb_enable_plan_replayer_continuous_capture = 'ON'")
-	tk.MustQuery("select * from t;")
-	task := prHandle.DrainTask()
-	require.NotNil(t, task)
-	worker := prHandle.GetWorker()
-	success := worker.HandleTask(task)
-	require.True(t, success)
-	tk.MustQuery("select count(*) from mysql.plan_replayer_status").Check(testkit.Rows("1"))
 }
 
 func TestShow(t *testing.T) {
@@ -308,7 +245,6 @@ func TestShow(t *testing.T) {
 		"RESTRICTED_USER_ADMIN Server Admin ",
 		"RESTRICTED_CONNECTION_ADMIN Server Admin ",
 		"RESTRICTED_REPLICA_WRITER_ADMIN Server Admin ",
-		"RESOURCE_GROUP_ADMIN Server Admin ",
 	))
 	require.Len(t, tk.MustQuery("show table status").Rows(), 1)
 }
@@ -1651,7 +1587,7 @@ func TestPlanReplayerDumpSingle(t *testing.T) {
 	res := tk.MustQuery("plan replayer dump explain select * from t_dump_single")
 	path := testdata.ConvertRowsToStrings(res.Rows())
 
-	reader, err := zip.OpenReader(filepath.Join(replayer.GetPlanReplayerDirName(), path[0]))
+	reader, err := zip.OpenReader(filepath.Join(domain.GetPlanReplayerDirName(), path[0]))
 	require.NoError(t, err)
 	defer func() { require.NoError(t, reader.Close()) }()
 	for _, file := range reader.File {
@@ -2133,8 +2069,6 @@ func TestIncorrectLimitArg(t *testing.T) {
 
 	tk.MustGetErrMsg(`execute stmt1 using @a;`, `[planner:1210]Incorrect arguments to LIMIT`)
 	tk.MustGetErrMsg(`execute stmt2 using @b, @a;`, `[planner:1210]Incorrect arguments to LIMIT`)
-	tk.MustGetErrMsg(`execute stmt2 using @a, @b;`, `[planner:1210]Incorrect arguments to LIMIT`)
-	tk.MustGetErrMsg(`execute stmt2 using @a, @a;`, `[planner:1210]Incorrect arguments to LIMIT`)
 }
 
 func TestExecutorLimit(t *testing.T) {
@@ -3679,10 +3613,10 @@ func TestPointGetPreparedPlan(t *testing.T) {
 
 	pspk1Id, _, _, err := tk.Session().PrepareStmt("select * from t where a = ?")
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[pspk1Id].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[pspk1Id].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 	pspk2Id, _, _, err := tk.Session().PrepareStmt("select * from t where ? = a ")
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[pspk2Id].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[pspk2Id].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 
 	ctx := context.Background()
 	// first time plan generated
@@ -3722,7 +3656,7 @@ func TestPointGetPreparedPlan(t *testing.T) {
 	// unique index
 	psuk1Id, _, _, err := tk.Session().PrepareStmt("select * from t where b = ? ")
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[psuk1Id].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[psuk1Id].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 
 	rs, err = tk.Session().ExecutePreparedStmt(ctx, psuk1Id, expression.Args2Expressions4Test(1))
 	require.NoError(t, err)
@@ -3840,7 +3774,7 @@ func TestPointGetPreparedPlanWithCommitMode(t *testing.T) {
 
 	pspk1Id, _, _, err := tk1.Session().PrepareStmt("select * from t where a = ?")
 	require.NoError(t, err)
-	tk1.Session().GetSessionVars().PreparedStmts[pspk1Id].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk1.Session().GetSessionVars().PreparedStmts[pspk1Id].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 
 	ctx := context.Background()
 	// first time plan generated
@@ -3906,11 +3840,11 @@ func TestPointUpdatePreparedPlan(t *testing.T) {
 
 	updateID1, pc, _, err := tk.Session().PrepareStmt(`update t set c = c + 1 where a = ?`)
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[updateID1].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[updateID1].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 	require.Equal(t, 1, pc)
 	updateID2, pc, _, err := tk.Session().PrepareStmt(`update t set c = c + 2 where ? = a`)
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[updateID2].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[updateID2].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 	require.Equal(t, 1, pc)
 
 	ctx := context.Background()
@@ -3945,7 +3879,7 @@ func TestPointUpdatePreparedPlan(t *testing.T) {
 	// unique index
 	updUkID1, _, _, err := tk.Session().PrepareStmt(`update t set c = c + 10 where b = ?`)
 	require.NoError(t, err)
-	tk.Session().GetSessionVars().PreparedStmts[updUkID1].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk.Session().GetSessionVars().PreparedStmts[updUkID1].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 	rs, err = tk.Session().ExecutePreparedStmt(ctx, updUkID1, expression.Args2Expressions4Test(3))
 	require.Nil(t, rs)
 	require.NoError(t, err)
@@ -4014,7 +3948,7 @@ func TestPointUpdatePreparedPlanWithCommitMode(t *testing.T) {
 
 	ctx := context.Background()
 	updateID1, _, _, err := tk1.Session().PrepareStmt(`update t set c = c + 1 where a = ?`)
-	tk1.Session().GetSessionVars().PreparedStmts[updateID1].(*plannercore.PlanCacheStmt).StmtCacheable = false
+	tk1.Session().GetSessionVars().PreparedStmts[updateID1].(*plannercore.PlanCacheStmt).PreparedAst.UseCache = false
 	require.NoError(t, err)
 
 	// first time plan generated
@@ -4421,7 +4355,7 @@ func TestAdminShowDDLJobs(t *testing.T) {
 	require.NoError(t, err)
 	err = meta.NewMeta(txn).AddHistoryDDLJob(job, true)
 	require.NoError(t, err)
-	tk.Session().StmtCommit(context.Background())
+	tk.Session().StmtCommit()
 
 	re = tk.MustQuery("admin show ddl jobs 1")
 	row = re.Rows()[0]
@@ -4695,10 +4629,13 @@ func TestUnion2(t *testing.T) {
 	terr = errors.Cause(err).(*terror.Error)
 	require.Equal(t, errors.ErrCode(mysql.ErrWrongUsage), terr.Code())
 
-	tk.MustGetDBError("(select a from t order by a) union all select a from t limit 1 union all select a from t limit 1", plannercore.ErrWrongUsage)
+	_, err = tk.Exec("(select a from t order by a) union all select a from t limit 1 union all select a from t limit 1")
+	require.Truef(t, terror.ErrorEqual(err, plannercore.ErrWrongUsage), "err %v", err)
 
-	tk.MustExec("(select a from t limit 1) union all select a from t limit 1")
-	tk.MustExec("(select a from t order by a) union all select a from t order by a")
+	_, err = tk.Exec("(select a from t limit 1) union all select a from t limit 1")
+	require.NoError(t, err)
+	_, err = tk.Exec("(select a from t order by a) union all select a from t order by a")
+	require.NoError(t, err)
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int)")
@@ -4769,8 +4706,8 @@ func TestUnion2(t *testing.T) {
 	tk.MustExec("insert into t2 values(3,'c'),(4,'d'),(5,'f'),(6,'e')")
 	tk.MustExec("analyze table t1")
 	tk.MustExec("analyze table t2")
-	tk.MustGetErrMsg("(select a,b from t1 limit 2) union all (select a,b from t2 order by a limit 1) order by t1.b",
-		"[planner:1250]Table 't1' from one of the SELECTs cannot be used in global ORDER clause")
+	_, err = tk.Exec("(select a,b from t1 limit 2) union all (select a,b from t2 order by a limit 1) order by t1.b")
+	require.Equal(t, "[planner:1250]Table 't1' from one of the SELECTs cannot be used in global ORDER clause", err.Error())
 
 	// #issue 9900
 	tk.MustExec("drop table if exists t")
@@ -4924,11 +4861,15 @@ func TestSQLMode(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (a tinyint not null)")
 	tk.MustExec("set sql_mode = 'STRICT_TRANS_TABLES'")
-	tk.ExecToErr("insert t values ()")
-	tk.ExecToErr("insert t values ('1000')")
+	_, err := tk.Exec("insert t values ()")
+	require.Error(t, err)
+
+	_, err = tk.Exec("insert t values ('1000')")
+	require.Error(t, err)
 
 	tk.MustExec("create table if not exists tdouble (a double(3,2))")
-	tk.ExecToErr("insert tdouble values (10.23)")
+	_, err = tk.Exec("insert tdouble values (10.23)")
+	require.Error(t, err)
 
 	tk.MustExec("set sql_mode = ''")
 	tk.MustExec("insert t values ()")
@@ -4956,7 +4897,8 @@ func TestSQLMode(t *testing.T) {
 	tk2.MustQuery("select * from t2").Check(testkit.Rows("abc"))
 
 	// session1 is still in strict mode.
-	tk.ExecToErr("insert t2 values ('abcd')")
+	_, err = tk.Exec("insert t2 values ('abcd')")
+	require.Error(t, err)
 	// Restore original global strict mode.
 	tk.MustExec("set @@global.sql_mode = 'STRICT_TRANS_TABLES'")
 }
@@ -5552,10 +5494,6 @@ func TestStrToDateBuiltinWithWarnings(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustQuery(`SELECT STR_TO_DATE('0000-1-01', '%Y-%m-%d');`).Check(testkit.Rows("<nil>"))
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1411 Incorrect datetime value: '0000-1-01' for function str_to_date"))
-	tk.MustQuery("SELECT CAST('4#,8?Q' AS DATE);").Check(testkit.Rows("<nil>"))
-	tk.MustQuery(`show warnings;`).Check(testkit.Rows(
-		`Warning 8034 Incorrect datetime value: '4#,8?Q'`,
-	))
 }
 
 func TestReadPartitionedTable(t *testing.T) {
@@ -5599,8 +5537,6 @@ func TestAdmin(t *testing.T) {
 	}))
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk2 := testkit.NewTestKit(t, store)
-	tk2.MustExec("use test")
 	tk.MustExec("drop table if exists admin_test")
 	tk.MustExec("create table admin_test (c1 int, c2 int, c3 int default 1, index (c1))")
 	tk.MustExec("insert admin_test (c1) values (1),(2),(NULL)")
@@ -5709,68 +5645,6 @@ func TestAdmin(t *testing.T) {
 	result = tk.MustQuery(`admin show ddl job queries limit 3 offset 2`)
 	result.Check(testkit.Rows(fmt.Sprintf("%d %s", historyJobs[2].ID, historyJobs[2].Query), fmt.Sprintf("%d %s", historyJobs[3].ID, historyJobs[3].Query), fmt.Sprintf("%d %s", historyJobs[4].ID, historyJobs[4].Query)))
 	require.NoError(t, err)
-
-	// check situations when `admin show ddl job 20` happens at the same time with new DDLs being executed
-	var wg sync.WaitGroup
-	wg.Add(2)
-	flag := true
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 10; i++ {
-			tk.MustExec("drop table if exists admin_test9")
-			tk.MustExec("create table admin_test9 (c1 int, c2 int, c3 int default 1, index (c1))")
-		}
-	}()
-	go func() {
-		// check that the result set has no duplication
-		defer wg.Done()
-		for i := 0; i < 10; i++ {
-			result := tk2.MustQuery(`admin show ddl job queries 20`)
-			rows := result.Rows()
-			rowIDs := make(map[string]struct{})
-			for _, row := range rows {
-				rowID := fmt.Sprintf("%v", row[0])
-				if _, ok := rowIDs[rowID]; ok {
-					flag = false
-					return
-				}
-				rowIDs[rowID] = struct{}{}
-			}
-		}
-	}()
-	wg.Wait()
-	require.True(t, flag)
-
-	// check situations when `admin show ddl job queries limit 3 offset 2` happens at the same time with new DDLs being executed
-	var wg2 sync.WaitGroup
-	wg2.Add(2)
-	flag = true
-	go func() {
-		defer wg2.Done()
-		for i := 0; i < 10; i++ {
-			tk.MustExec("drop table if exists admin_test9")
-			tk.MustExec("create table admin_test9 (c1 int, c2 int, c3 int default 1, index (c1))")
-		}
-	}()
-	go func() {
-		// check that the result set has no duplication
-		defer wg2.Done()
-		for i := 0; i < 10; i++ {
-			result := tk2.MustQuery(`admin show ddl job queries limit 3 offset 2`)
-			rows := result.Rows()
-			rowIDs := make(map[string]struct{})
-			for _, row := range rows {
-				rowID := fmt.Sprintf("%v", row[0])
-				if _, ok := rowIDs[rowID]; ok {
-					flag = false
-					return
-				}
-				rowIDs[rowID] = struct{}{}
-			}
-		}
-	}()
-	wg2.Wait()
-	require.True(t, flag)
 
 	// check table test
 	tk.MustExec("create table admin_test1 (c1 int, c2 int default 1, index (c1))")
@@ -6111,7 +5985,7 @@ func TestSummaryFailedUpdate(t *testing.T) {
 	tk.MustQuery("select variable_value from mysql.GLOBAL_VARIABLES where variable_name = 'tidb_mem_oom_action'").Check(testkit.Rows("LOG"))
 
 	tk.MustExec("SET GLOBAL tidb_mem_oom_action='CANCEL'")
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec("set @@tidb_mem_quota_query=1")
 	tk.MustMatchErrMsg("update t set t.a = t.a - 1 where t.a in (select a from t where a < 4)", memory.PanicMemoryExceedWarnMsg)
 	tk.MustExec("set @@tidb_mem_quota_query=1000000000")
@@ -6216,7 +6090,7 @@ func TestTableLockPrivilege(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int)")
 	tk.MustExec("create user 'testuser'@'localhost'")
-	require.NoError(t, tk2.Session().Auth(&auth.UserIdentity{Username: "testuser", Hostname: "localhost"}, nil, nil, nil))
+	require.NoError(t, tk2.Session().Auth(&auth.UserIdentity{Username: "testuser", Hostname: "localhost"}, nil, nil))
 	tk2.MustGetErrMsg("LOCK TABLE test.t WRITE", "[planner:1044]Access denied for user 'testuser'@'localhost' to database 'test'")
 	tk.MustExec("GRANT LOCK TABLES ON test.* to 'testuser'@'localhost'")
 	tk2.MustGetErrMsg("LOCK TABLE test.t WRITE", "[planner:1142]SELECT command denied to user 'testuser'@'localhost' for table 't'")
@@ -6234,6 +6108,72 @@ func TestTableLockPrivilege(t *testing.T) {
 	tk.MustExec("GRANT SELECT ON test2.* to 'testuser'@'localhost'")
 	tk2.MustExec("LOCK TABLE test.t WRITE, test2.t2 WRITE")
 	tk.MustExec("LOCK TABLE test.t WRITE, test2.t2 WRITE")
+}
+
+func TestGlobalMemoryControl(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk0 := testkit.NewTestKit(t, store)
+	tk0.MustExec("set global tidb_mem_oom_action = 'cancel'")
+	tk0.MustExec("set global tidb_server_memory_limit = 512 << 20")
+	tk0.MustExec("set global tidb_server_memory_limit_sess_min_size = 128")
+
+	tk1 := testkit.NewTestKit(t, store)
+	tracker1 := tk1.Session().GetSessionVars().MemTracker
+	tracker1.FallbackOldAndSetNewAction(&memory.PanicOnExceed{})
+
+	tk2 := testkit.NewTestKit(t, store)
+	tracker2 := tk2.Session().GetSessionVars().MemTracker
+	tracker2.FallbackOldAndSetNewAction(&memory.PanicOnExceed{})
+
+	tk3 := testkit.NewTestKit(t, store)
+	tracker3 := tk3.Session().GetSessionVars().MemTracker
+	tracker3.FallbackOldAndSetNewAction(&memory.PanicOnExceed{})
+
+	sm := &testkit.MockSessionManager{
+		PS: []*util.ProcessInfo{tk1.Session().ShowProcess(), tk2.Session().ShowProcess(), tk3.Session().ShowProcess()},
+	}
+	dom.ServerMemoryLimitHandle().SetSessionManager(sm)
+	go dom.ServerMemoryLimitHandle().Run()
+
+	tracker1.Consume(100 << 20) // 100 MB
+	tracker2.Consume(200 << 20) // 200 MB
+	tracker3.Consume(300 << 20) // 300 MB
+
+	test := make([]int, 128<<20)       // Keep 1GB HeapInUse
+	time.Sleep(500 * time.Millisecond) // The check goroutine checks the memory usage every 100ms. The Sleep() make sure that Top1Tracker can be Canceled.
+
+	// Kill Top1
+	require.False(t, tracker1.NeedKill.Load())
+	require.False(t, tracker2.NeedKill.Load())
+	require.True(t, tracker3.NeedKill.Load())
+	require.Equal(t, memory.MemUsageTop1Tracker.Load(), tracker3)
+	util.WithRecovery( // Next Consume() will panic and cancel the SQL
+		func() {
+			tracker3.Consume(1)
+		}, func(r interface{}) {
+			require.True(t, strings.Contains(r.(string), memory.PanicMemoryExceedWarnMsg))
+		})
+	tracker2.Consume(300 << 20) // Sum 500MB, Not Panic, Waiting t3 cancel finish.
+	time.Sleep(500 * time.Millisecond)
+	require.False(t, tracker2.NeedKill.Load())
+	// Kill Finished
+	tracker3.Consume(-(300 << 20))
+	// Simulated SQL is Canceled and the time is updated
+	sm.PSMu.Lock()
+	ps := *sm.PS[2]
+	ps.Time = time.Now()
+	sm.PS[2] = &ps
+	sm.PSMu.Unlock()
+	time.Sleep(500 * time.Millisecond)
+	// Kill the Next SQL
+	util.WithRecovery( // Next Consume() will panic and cancel the SQL
+		func() {
+			tracker2.Consume(1)
+		}, func(r interface{}) {
+			require.True(t, strings.Contains(r.(string), memory.PanicMemoryExceedWarnMsg))
+		})
+	require.Equal(t, test[0], 0) // Keep 1GB HeapInUse
 }
 
 func TestGlobalMemoryControl2(t *testing.T) {
@@ -6362,137 +6302,6 @@ func TestIssue39211(t *testing.T) {
 	tk.MustExec("set @@tidb_max_chunk_size=32;")
 	tk.MustExec("set @@tidb_enable_null_aware_anti_join=true;")
 	tk.MustQuery("select * from t where (a,b) not in (select a, b from s);").Check(testkit.Rows())
-}
-
-func TestPlanReplayerDumpTPCDS(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec(`create table catalog_sales
-(
-    cs_sold_date_sk           int                       ,
-    cs_sold_time_sk           int                       ,
-    cs_ship_date_sk           int                       ,
-    cs_bill_customer_sk       int                       ,
-    cs_bill_cdemo_sk          int                       ,
-    cs_bill_hdemo_sk          int                       ,
-    cs_bill_addr_sk           int                       ,
-    cs_ship_customer_sk       int                       ,
-    cs_ship_cdemo_sk          int                       ,
-    cs_ship_hdemo_sk          int                       ,
-    cs_ship_addr_sk           int                       ,
-    cs_call_center_sk         int                       ,
-    cs_catalog_page_sk        int                       ,
-    cs_ship_mode_sk           int                       ,
-    cs_warehouse_sk           int                       ,
-    cs_item_sk                int               not null,
-    cs_promo_sk               int                       ,
-    cs_order_number           int               not null,
-    cs_quantity               int                       ,
-    cs_wholesale_cost         decimal(7,2)                  ,
-    cs_list_price             decimal(7,2)                  ,
-    cs_sales_price            decimal(7,2)                  ,
-    cs_ext_discount_amt       decimal(7,2)                  ,
-    cs_ext_sales_price        decimal(7,2)                  ,
-    cs_ext_wholesale_cost     decimal(7,2)                  ,
-    cs_ext_list_price         decimal(7,2)                  ,
-    cs_ext_tax                decimal(7,2)                  ,
-    cs_coupon_amt             decimal(7,2)                  ,
-    cs_ext_ship_cost          decimal(7,2)                  ,
-    cs_net_paid               decimal(7,2)                  ,
-    cs_net_paid_inc_tax       decimal(7,2)                  ,
-    cs_net_paid_inc_ship      decimal(7,2)                  ,
-    cs_net_paid_inc_ship_tax  decimal(7,2)                  ,
-    cs_net_profit             decimal(7,2)                  ,
-    primary key (cs_item_sk, cs_order_number)
-);`)
-	tk.MustExec(`create table store_sales
-(
-    ss_sold_date_sk           int                       ,
-    ss_sold_time_sk           int                       ,
-    ss_item_sk                int               not null,
-    ss_customer_sk            int                       ,
-    ss_cdemo_sk               int                       ,
-    ss_hdemo_sk               int                       ,
-    ss_addr_sk                int                       ,
-    ss_store_sk               int                       ,
-    ss_promo_sk               int                       ,
-    ss_ticket_number          int               not null,
-    ss_quantity               int                       ,
-    ss_wholesale_cost         decimal(7,2)                  ,
-    ss_list_price             decimal(7,2)                  ,
-    ss_sales_price            decimal(7,2)                  ,
-    ss_ext_discount_amt       decimal(7,2)                  ,
-    ss_ext_sales_price        decimal(7,2)                  ,
-    ss_ext_wholesale_cost     decimal(7,2)                  ,
-    ss_ext_list_price         decimal(7,2)                  ,
-    ss_ext_tax                decimal(7,2)                  ,
-    ss_coupon_amt             decimal(7,2)                  ,
-    ss_net_paid               decimal(7,2)                  ,
-    ss_net_paid_inc_tax       decimal(7,2)                  ,
-    ss_net_profit             decimal(7,2)                  ,
-    primary key (ss_item_sk, ss_ticket_number)
-);`)
-	tk.MustExec(`create table date_dim
-(
-    d_date_sk                 int               not null,
-    d_date_id                 char(16)              not null,
-    d_date                    date                          ,
-    d_month_seq               int                       ,
-    d_week_seq                int                       ,
-    d_quarter_seq             int                       ,
-    d_year                    int                       ,
-    d_dow                     int                       ,
-    d_moy                     int                       ,
-    d_dom                     int                       ,
-    d_qoy                     int                       ,
-    d_fy_year                 int                       ,
-    d_fy_quarter_seq          int                       ,
-    d_fy_week_seq             int                       ,
-    d_day_name                char(9)                       ,
-    d_quarter_name            char(6)                       ,
-    d_holiday                 char(1)                       ,
-    d_weekend                 char(1)                       ,
-    d_following_holiday       char(1)                       ,
-    d_first_dom               int                       ,
-    d_last_dom                int                       ,
-    d_same_day_ly             int                       ,
-    d_same_day_lq             int                       ,
-    d_current_day             char(1)                       ,
-    d_current_week            char(1)                       ,
-    d_current_month           char(1)                       ,
-    d_current_quarter         char(1)                       ,
-    d_current_year            char(1)                       ,
-    primary key (d_date_sk)
-);`)
-	tk.MustQuery(`plan replayer dump explain with ssci as (
-select ss_customer_sk customer_sk
-      ,ss_item_sk item_sk
-from store_sales,date_dim
-where ss_sold_date_sk = d_date_sk
-  and d_month_seq between 1212 and 1212 + 11
-group by ss_customer_sk
-        ,ss_item_sk),
-csci as(
- select cs_bill_customer_sk customer_sk
-      ,cs_item_sk item_sk
-from catalog_sales,date_dim
-where cs_sold_date_sk = d_date_sk
-  and d_month_seq between 1212 and 1212 + 11
-group by cs_bill_customer_sk
-        ,cs_item_sk)
- select  sum(case when ssci.customer_sk is not null and csci.customer_sk is null then 1 else 0 end) store_only
-      ,sum(case when ssci.customer_sk is null and csci.customer_sk is not null then 1 else 0 end) catalog_only
-      ,sum(case when ssci.customer_sk is not null and csci.customer_sk is not null then 1 else 0 end) store_and_catalog
-from ssci left join csci on (ssci.customer_sk=csci.customer_sk
-                               and ssci.item_sk = csci.item_sk)
-UNION
- select  sum(case when ssci.customer_sk is not null and csci.customer_sk is null then 1 else 0 end) store_only
-      ,sum(case when ssci.customer_sk is null and csci.customer_sk is not null then 1 else 0 end) catalog_only
-      ,sum(case when ssci.customer_sk is not null and csci.customer_sk is not null then 1 else 0 end) store_and_catalog
-from ssci right join csci on (ssci.customer_sk=csci.customer_sk
-                               and ssci.item_sk = csci.item_sk)
-limit 100;`)
 }
 
 func TestProcessInfoOfSubQuery(t *testing.T) {

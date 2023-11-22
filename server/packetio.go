@@ -41,13 +41,18 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
-	server_metrics "github.com/pingcap/tidb/server/metrics"
 	"github.com/pingcap/tidb/sessionctx/variable"
 )
 
 const defaultWriterSize = 16 * 1024
+
+var (
+	readPacketBytes  = metrics.PacketIOCounter.WithLabelValues("read")
+	writePacketBytes = metrics.PacketIOCounter.WithLabelValues("write")
+)
 
 // packetIO is a helper to read and write data in packet format.
 // MySQL Packets: https://dev.mysql.com/doc/internals/en/mysql-packet.html
@@ -133,7 +138,7 @@ func (p *packetIO) readPacket() ([]byte, error) {
 	}
 
 	if len(data) < mysql.MaxPayloadLen {
-		server_metrics.ReadPacketBytes.Add(float64(len(data)))
+		readPacketBytes.Add(float64(len(data)))
 		return data, nil
 	}
 
@@ -151,14 +156,14 @@ func (p *packetIO) readPacket() ([]byte, error) {
 		}
 	}
 
-	server_metrics.ReadPacketBytes.Add(float64(len(data)))
+	readPacketBytes.Add(float64(len(data)))
 	return data, nil
 }
 
 // writePacket writes data that already have header
 func (p *packetIO) writePacket(data []byte) error {
 	length := len(data) - 4
-	server_metrics.WritePacketBytes.Add(float64(len(data)))
+	writePacketBytes.Add(float64(len(data)))
 
 	for length >= mysql.MaxPayloadLen {
 		data[3] = p.sequence

@@ -270,9 +270,7 @@ func formatDatum(d types.Datum, isLeftSide bool) string {
 		}
 	case types.KindBytes:
 		return fmt.Sprintf("0x%X", d.GetValue())
-	case types.KindString:
-		return fmt.Sprintf("%q", d.GetValue())
-	case types.KindMysqlEnum, types.KindMysqlSet,
+	case types.KindString, types.KindMysqlEnum, types.KindMysqlSet,
 		types.KindMysqlJSON, types.KindBinaryLiteral, types.KindMysqlBit:
 		return fmt.Sprintf("\"%v\"", d.GetValue())
 	}

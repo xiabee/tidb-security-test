@@ -277,12 +277,6 @@ type LogicalPlan interface {
 	// pushDownTopN will push down the topN or limit operator during logical optimization.
 	pushDownTopN(topN *LogicalTopN, opt *logicalOptimizeOp) LogicalPlan
 
-	// deriveTopN derives an implicit TopN from a filter on row_number window function..
-	deriveTopN(opt *logicalOptimizeOp) LogicalPlan
-
-	// predicateSimplification consolidates different predcicates on a column and its equivalence classes.
-	predicateSimplification(opt *logicalOptimizeOp) LogicalPlan
-
 	// recursiveDeriveStats derives statistic info between plans.
 	recursiveDeriveStats(colGroups [][]*expression.Column) (*property.StatsInfo, error)
 
@@ -373,9 +367,6 @@ type PhysicalPlan interface {
 
 	// Stats returns the StatsInfo of the plan.
 	Stats() *property.StatsInfo
-
-	// SetStats sets basePlan.stats inside the basePhysicalPlan.
-	SetStats(s *property.StatsInfo)
 
 	// ExplainNormalizedInfo returns operator normalized information for generating digest.
 	ExplainNormalizedInfo() string
@@ -728,10 +719,11 @@ func (p *logicalSchemaProducer) BuildKeyInfo(selfSchema *expression.Schema, chil
 }
 
 func newBasePlan(ctx sessionctx.Context, tp string, offset int) basePlan {
-	id := ctx.GetSessionVars().PlanID.Add(1)
+	ctx.GetSessionVars().PlanID++
+	id := ctx.GetSessionVars().PlanID
 	return basePlan{
 		tp:          tp,
-		id:          int(id),
+		id:          id,
 		ctx:         ctx,
 		blockOffset: offset,
 	}
@@ -821,11 +813,6 @@ func (p *basePlan) SelectBlockOffset() int {
 // Stats implements Plan Stats interface.
 func (p *basePlan) Stats() *property.StatsInfo {
 	return p.stats
-}
-
-// SetStats sets basePlan.stats
-func (p *basePlan) SetStats(s *property.StatsInfo) {
-	p.stats = s
 }
 
 // basePlanSize is the size of basePlan.

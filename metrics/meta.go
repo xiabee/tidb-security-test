@@ -23,18 +23,7 @@ var (
 	GlobalAutoID      = "global"
 	TableAutoIDAlloc  = "alloc"
 	TableAutoIDRebase = "rebase"
-	AutoIDHistogram   *prometheus.HistogramVec
-
-	GetSchemaDiff    = "get_schema_diff"
-	SetSchemaDiff    = "set_schema_diff"
-	GetHistoryDDLJob = "get_history_ddl_job"
-
-	MetaHistogram *prometheus.HistogramVec
-)
-
-// InitMetaMetrics initializes meta metrics.
-func InitMetaMetrics() {
-	AutoIDHistogram = NewHistogramVec(
+	AutoIDHistogram   = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "tidb",
 			Subsystem: "autoid",
@@ -43,7 +32,13 @@ func InitMetaMetrics() {
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 29), // 0.5ms ~ 1.5days
 		}, []string{LblType, LblResult})
 
-	MetaHistogram = NewHistogramVec(
+	GetSchemaDiff    = "get_schema_diff"
+	SetSchemaDiff    = "set_schema_diff"
+	GetDDLJobByIdx   = "get_ddl_job"
+	UpdateDDLJob     = "update_ddl_job"
+	GetHistoryDDLJob = "get_history_ddl_job"
+
+	MetaHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "tidb",
 			Subsystem: "meta",
@@ -51,4 +46,4 @@ func InitMetaMetrics() {
 			Help:      "Bucketed histogram of processing time (s) of tidb meta data operations.",
 			Buckets:   prometheus.ExponentialBuckets(0.0005, 2, 29), // 0.5ms ~ 1.5days
 		}, []string{LblType, LblResult})
-}
+)

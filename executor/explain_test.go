@@ -30,7 +30,6 @@ import (
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,7 +37,7 @@ func TestExplainPrivileges(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
-	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
+	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk := testkit.NewTestKit(t, store)
 	tk.SetSession(se)
 
@@ -51,7 +50,7 @@ func TestExplainPrivileges(t *testing.T) {
 	tk1 := testkit.NewTestKit(t, store)
 	se, err = session.CreateSession4Test(store)
 	require.NoError(t, err)
-	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "explain", Hostname: "%"}, nil, nil, nil))
+	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "explain", Hostname: "%"}, nil, nil))
 	tk1.SetSession(se)
 
 	tk.MustExec(`grant select on explaindatabase.v to 'explain'@'%'`)
@@ -248,7 +247,6 @@ func TestExplainAnalyzeExecutionInfo(t *testing.T) {
 	checkExecutionInfo(t, tk, "explain analyze select * from t use index(k)")
 	checkExecutionInfo(t, tk, "explain analyze with recursive cte(a) as (select 1 union select a + 1 from cte where a < 1000) select * from cte;")
 
-	tk.MustExec("set @@foreign_key_checks=0")
 	tk.MustExec("CREATE TABLE IF NOT EXISTS nation  ( N_NATIONKEY  BIGINT NOT NULL,N_NAME       CHAR(25) NOT NULL,N_REGIONKEY  BIGINT NOT NULL,N_COMMENT    VARCHAR(152),PRIMARY KEY (N_NATIONKEY));")
 	tk.MustExec("CREATE TABLE IF NOT EXISTS part  ( P_PARTKEY     BIGINT NOT NULL,P_NAME        VARCHAR(55) NOT NULL,P_MFGR        CHAR(25) NOT NULL,P_BRAND       CHAR(10) NOT NULL,P_TYPE        VARCHAR(25) NOT NULL,P_SIZE        BIGINT NOT NULL,P_CONTAINER   CHAR(10) NOT NULL,P_RETAILPRICE DECIMAL(15,2) NOT NULL,P_COMMENT     VARCHAR(23) NOT NULL,PRIMARY KEY (P_PARTKEY));")
 	tk.MustExec("CREATE TABLE IF NOT EXISTS supplier  ( S_SUPPKEY     BIGINT NOT NULL,S_NAME        CHAR(25) NOT NULL,S_ADDRESS     VARCHAR(40) NOT NULL,S_NATIONKEY   BIGINT NOT NULL,S_PHONE       CHAR(15) NOT NULL,S_ACCTBAL     DECIMAL(15,2) NOT NULL,S_COMMENT     VARCHAR(101) NOT NULL,PRIMARY KEY (S_SUPPKEY),CONSTRAINT FOREIGN KEY SUPPLIER_FK1 (S_NATIONKEY) references nation(N_NATIONKEY));")
@@ -450,12 +448,12 @@ func TestFix29401(t *testing.T) {
 	tk.MustExec(" explain select /*+ inl_hash_join(t1) */ * from tt123 t1 join tt123 t2 on t1.b=t2.e;")
 }
 
-func TestIssue35296AndIssue43024(t *testing.T) {
+func TestIssue35296(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b int , c int, d int, e int, primary key(a), index ib(b), index ic(c), index idd(d), index ie(e));")
+	tk.MustExec("create table t(a int, b int , c int, d int, e int,index ia(a), index ib(b), index ic(c), index idd(d), index ie(e));")
 
 	rows := tk.MustQuery("explain analyze select * from t where a = 10 or b = 30 or c = 10 or d = 1 or e = 90;").Rows()
 
@@ -609,96 +607,5 @@ func TestExplainJSON(t *testing.T) {
 			require.NotEqual(t, flatJSONRows[i].MemoryInfo, "")
 			require.NotEqual(t, flatJSONRows[i].DiskInfo, "")
 		}
-	}
-}
-
-func TestExplainFormatInCtx(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int)")
-	tk.MustExec("set @@session.tidb_enable_non_prepared_plan_cache = 1")
-
-	explainFormats := []string{
-		types.ExplainFormatBrief,
-		types.ExplainFormatDOT,
-		types.ExplainFormatHint,
-		types.ExplainFormatROW,
-		types.ExplainFormatVerbose,
-		types.ExplainFormatTraditional,
-		types.ExplainFormatBinary,
-		types.ExplainFormatTiDBJSON,
-		types.ExplainFormatCostTrace,
-		types.ExplainFormatPlanCache,
-	}
-
-	tk.MustExec("select * from t")
-	tk.MustExec("explain analyze select * from t")
-	require.Equal(t, tk.Session().GetSessionVars().StmtCtx.InExplainStmt, true)
-	require.Equal(t, tk.Session().GetSessionVars().StmtCtx.ExplainFormat, types.ExplainFormatROW)
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
-	for _, format := range explainFormats {
-		tk.MustExec(fmt.Sprintf("explain analyze format = '%v' select * from t", format))
-		require.Equal(t, tk.Session().GetSessionVars().StmtCtx.InExplainStmt, true)
-		require.Equal(t, tk.Session().GetSessionVars().StmtCtx.ExplainFormat, format)
-		if format != types.ExplainFormatPlanCache {
-			tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
-		} else {
-			tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
-		}
-	}
-}
-
-func TestExplainFormatPlanCache(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int)")
-	tk.MustExec("set @@session.tidb_enable_non_prepared_plan_cache = 1")
-	tk.MustExec("select * from t limit 1")
-	tk.MustExec("select * from t limit 1")
-
-	// miss
-	tk.MustExec("explain format = 'plan_cache' select * from (select * from t) t1 limit 1")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 skip non-prepared plan-cache: queries that have sub-queries are not supported"))
-	tk.MustExec("explain format = 'plan_cache' select * from (select * from t) t1 limit 1")
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
-
-	tk.MustExec("explain analyze format = 'plan_cache' select * from (select * from t) t1 limit 1")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 skip non-prepared plan-cache: queries that have sub-queries are not supported"))
-	tk.MustExec("explain analyze format = 'plan_cache' select * from (select * from t) t1 limit 1")
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
-
-	// hit
-	tk.MustExec("explain format = 'plan_cache' select * from t")
-	tk.MustQuery("show warnings").Check(testkit.Rows())
-	tk.MustExec("explain format = 'plan_cache' select * from t")
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
-
-	tk.MustExec("explain analyze format = 'plan_cache' select * from t")
-	tk.MustQuery("show warnings").Check(testkit.Rows())
-	tk.MustExec("explain analyze format = 'plan_cache' select * from t")
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
-
-	// will not use plan cache
-	explainFormats := []string{
-		types.ExplainFormatBrief,
-		types.ExplainFormatDOT,
-		types.ExplainFormatHint,
-		types.ExplainFormatROW,
-		types.ExplainFormatVerbose,
-		types.ExplainFormatTraditional,
-		types.ExplainFormatBinary,
-		types.ExplainFormatTiDBJSON,
-		types.ExplainFormatCostTrace,
-	}
-
-	tk.MustExec("explain select * from t")
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
-	for _, format := range explainFormats {
-		tk.MustExec(fmt.Sprintf("explain format = '%v' select * from t", format))
-		tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
 	}
 }

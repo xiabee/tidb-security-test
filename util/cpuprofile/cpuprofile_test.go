@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"runtime/pprof"
@@ -236,7 +237,7 @@ func TestProfileHTTPHandler(t *testing.T) {
 	resp, err = http.Get("http://" + address + "/debug/pprof/profile?seconds=100000")
 	require.NoError(t, err)
 	require.Equal(t, 400, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "profile duration exceeds server's WriteTimeout\n", string(body))
 	require.NoError(t, resp.Body.Close())

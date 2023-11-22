@@ -24,15 +24,17 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/external"
 	"github.com/pingcap/tidb/types"
@@ -62,7 +64,7 @@ func TestDDLStatsInfo(t *testing.T) {
 	require.NoError(t, err)
 	_, err = m.AddRecord(ctx, types.MakeDatums(3, 3))
 	require.NoError(t, err)
-	ctx.StmtCommit(context.Background())
+	ctx.StmtCommit()
 	require.NoError(t, ctx.CommitTxn(context.Background()))
 
 	job := buildCreateIdxJob(dbInfo, tblInfo, true, "idx", "c1")
@@ -91,8 +93,11 @@ func TestDDLStatsInfo(t *testing.T) {
 			varMap, err := d.Stats(nil)
 			wg.Done()
 			require.NoError(t, err)
-			_, err = hex.DecodeString(varMap[ddlJobReorgHandle].(string))
+			key, err := hex.DecodeString(varMap[ddlJobReorgHandle].(string))
 			require.NoError(t, err)
+			_, h, err := tablecodec.DecodeRecordKey(key)
+			require.NoError(t, err)
+			require.Equal(t, h.IntValue(), int64(1))
 		}
 	}
 }
@@ -148,13 +153,20 @@ func TestGetDDLInfo(t *testing.T) {
 }
 
 func addDDLJobs(sess session.Session, txn kv.Transaction, job *model.Job) error {
-	b, err := job.Encode(true)
-	if err != nil {
+	if variable.EnableConcurrentDDL.Load() {
+		b, err := job.Encode(true)
+		if err != nil {
+			return err
+		}
+		_, err = sess.Execute(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), fmt.Sprintf("insert into mysql.tidb_ddl_job(job_id, reorg, schema_ids, table_ids, job_meta, type, processing) values (%d, %t, %s, %s, %s, %d, %t)",
+			job.ID, job.MayNeedReorg(), strconv.Quote(strconv.FormatInt(job.SchemaID, 10)), strconv.Quote(strconv.FormatInt(job.TableID, 10)), wrapKey2String(b), job.Type, false))
 		return err
 	}
-	_, err = sess.Execute(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), fmt.Sprintf("insert into mysql.tidb_ddl_job(job_id, reorg, schema_ids, table_ids, job_meta, type, processing) values (%d, %t, %s, %s, %s, %d, %t)",
-		job.ID, job.MayNeedReorg(), strconv.Quote(strconv.FormatInt(job.SchemaID, 10)), strconv.Quote(strconv.FormatInt(job.TableID, 10)), wrapKey2String(b), job.Type, false))
-	return err
+	m := meta.NewMeta(txn)
+	if job.MayNeedReorg() {
+		return m.EnQueueDDLJob(job, meta.AddIndexJobListKey)
+	}
+	return m.EnQueueDDLJob(job)
 }
 
 func wrapKey2String(key []byte) string {
@@ -197,7 +209,7 @@ func TestIssue42268(t *testing.T) {
 	tk1 := testkit.NewTestKit(t, store)
 	tk1.MustExec("use test")
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{}
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if tbl.Meta().ID != job.TableID {
 			return

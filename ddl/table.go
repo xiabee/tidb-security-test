@@ -24,7 +24,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	sess "github.com/pingcap/tidb/ddl/internal/session"
 	"github.com/pingcap/tidb/ddl/label"
 	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/ddl/util"
@@ -206,7 +205,7 @@ func createTableWithForeignKeys(d *ddlCtx, t *meta.Meta, job *model.Job, tbInfo 
 func onCreateTables(d *ddlCtx, t *meta.Meta, job *model.Job) (int64, error) {
 	var ver int64
 
-	var args []*model.TableInfo
+	args := []*model.TableInfo{}
 	fkCheck := false
 	err := job.DecodeArgs(&args, &fkCheck)
 	if err != nil {
@@ -409,11 +408,6 @@ func (w *worker) onRecoverTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver in
 
 	schemaID := recoverInfo.SchemaID
 	tblInfo := recoverInfo.TableInfo
-	if tblInfo.TTLInfo != nil {
-		// force disable TTL job schedule for recovered table
-		tblInfo.TTLInfo.Enable = false
-	}
-
 	// check GC and safe point
 	gcEnable, err := checkGCEnable(w)
 	if err != nil {
@@ -538,9 +532,6 @@ func (w *worker) recoverTable(t *meta.Meta, job *model.Job, recoverInfo *Recover
 	failpoint.Inject("mockRecoverTableCommitErr", func(val failpoint.Value) {
 		if val.(bool) && atomic.CompareAndSwapUint32(&mockRecoverTableCommitErrOnce, 0, 1) {
 			err = failpoint.Enable(`tikvclient/mockCommitErrorOpt`, "return(true)")
-			if err != nil {
-				return
-			}
 		}
 	})
 
@@ -582,41 +573,41 @@ func clearTablePlacementAndBundles(tblInfo *model.TableInfo) error {
 var mockRecoverTableCommitErrOnce uint32
 
 func enableGC(w *worker) error {
-	ctx, err := w.sessPool.Get()
+	ctx, err := w.sessPool.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.Put(ctx)
+	defer w.sessPool.put(ctx)
 
 	return gcutil.EnableGC(ctx)
 }
 
 func disableGC(w *worker) error {
-	ctx, err := w.sessPool.Get()
+	ctx, err := w.sessPool.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.Put(ctx)
+	defer w.sessPool.put(ctx)
 
 	return gcutil.DisableGC(ctx)
 }
 
 func checkGCEnable(w *worker) (enable bool, err error) {
-	ctx, err := w.sessPool.Get()
+	ctx, err := w.sessPool.get()
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	defer w.sessPool.Put(ctx)
+	defer w.sessPool.put(ctx)
 
 	return gcutil.CheckGCEnable(ctx)
 }
 
 func checkSafePoint(w *worker, snapshotTS uint64) error {
-	ctx, err := w.sessPool.Get()
+	ctx, err := w.sessPool.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.Put(ctx)
+	defer w.sessPool.put(ctx)
 
 	return gcutil.ValidateSnapshot(ctx, snapshotTS)
 }
@@ -681,7 +672,7 @@ func getTableInfo(t *meta.Meta, tableID, schemaID int64) (*model.TableInfo, erro
 }
 
 // onTruncateTable delete old table meta, and creates a new table identical to old table except for table ID.
-// As all the old data is encoded with old table ID, it can not be accessed anymore.
+// As all the old data is encoded with old table ID, it can not be accessed any more.
 // A background job will be created to delete old data.
 func onTruncateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	schemaID := job.SchemaID
@@ -961,15 +952,15 @@ func (w *worker) onShardRowID(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int6
 	return ver, nil
 }
 
-func verifyNoOverflowShardBits(s *sess.Pool, tbl table.Table, shardRowIDBits uint64) error {
+func verifyNoOverflowShardBits(s *sessionPool, tbl table.Table, shardRowIDBits uint64) error {
 	if shardRowIDBits == 0 {
 		return nil
 	}
-	ctx, err := s.Get()
+	ctx, err := s.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer s.Put(ctx)
+	defer s.put(ctx)
 	// Check next global max auto ID first.
 	autoIncID, err := tbl.Allocators(ctx).Get(autoid.RowIDAllocType).NextGlobalAutoID()
 	if err != nil {
@@ -1383,11 +1374,11 @@ func (w *worker) onSetTableFlashReplica(d *ddlCtx, t *meta.Meta, job *model.Job)
 }
 
 func (w *worker) checkTiFlashReplicaCount(replicaCount uint64) error {
-	ctx, err := w.sessPool.Get()
+	ctx, err := w.sessPool.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.Put(ctx)
+	defer w.sessPool.put(ctx)
 
 	return checkTiFlashReplicaCount(ctx, replicaCount)
 }
@@ -1494,7 +1485,7 @@ func checkTableNotExistsFromInfoSchema(is infoschema.InfoSchema, schemaID int64,
 
 func checkTableNotExistsFromStore(t *meta.Meta, schemaID int64, tableName string) error {
 	// Check this table's database.
-	tbls, err := t.ListTables(schemaID)
+	tables, err := t.ListTables(schemaID)
 	if err != nil {
 		if meta.ErrDBNotExists.Equal(err) {
 			return infoschema.ErrDatabaseNotExists.GenWithStackByArgs("")
@@ -1503,7 +1494,7 @@ func checkTableNotExistsFromStore(t *meta.Meta, schemaID int64, tableName string
 	}
 
 	// Check the table.
-	for _, tbl := range tbls {
+	for _, tbl := range tables {
 		if tbl.Name.L == tableName {
 			return infoschema.ErrTableExists.GenWithStackByArgs(tbl.Name)
 		}

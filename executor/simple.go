@@ -32,10 +32,10 @@ import (
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/errno"
-	executor_metrics "github.com/pingcap/tidb/executor/metrics"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/model"
@@ -51,7 +51,6 @@ import (
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/collate"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
@@ -65,6 +64,11 @@ import (
 )
 
 const notSpecified = -1
+
+var (
+	transactionDurationPessimisticRollback = metrics.TransactionDuration.WithLabelValues(metrics.LblPessimistic, metrics.LblRollback)
+	transactionDurationOptimisticRollback  = metrics.TransactionDuration.WithLabelValues(metrics.LblOptimistic, metrics.LblRollback)
+)
 
 // SimpleExec represents simple statement executor.
 // For statements do simple execution.
@@ -210,8 +214,6 @@ func (e *SimpleExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 		err = e.executeShutdown(x)
 	case *ast.AdminStmt:
 		err = e.executeAdmin(x)
-	case *ast.SetResourceGroupStmt:
-		err = e.executeSetResourceGroupName(x)
 	}
 	e.done = true
 	return err
@@ -256,7 +258,7 @@ func (e *SimpleExec) setDefaultRoleRegular(ctx context.Context, s *ast.SetDefaul
 			return err
 		}
 		if !exists {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", user.String())
+			return ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", user.String())
 		}
 	}
 	for _, role := range s.RoleList {
@@ -265,7 +267,7 @@ func (e *SimpleExec) setDefaultRoleRegular(ctx context.Context, s *ast.SetDefaul
 			return err
 		}
 		if !exists {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", role.String())
+			return ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", role.String())
 		}
 	}
 
@@ -310,7 +312,7 @@ func (e *SimpleExec) setDefaultRoleRegular(ctx context.Context, s *ast.SetDefaul
 				if _, rollbackErr := sqlExecutor.ExecuteInternal(internalCtx, "rollback"); rollbackErr != nil {
 					return rollbackErr
 				}
-				return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(role.String(), user.String())
+				return ErrRoleNotGranted.GenWithStackByArgs(role.String(), user.String())
 			}
 		}
 	}
@@ -327,7 +329,7 @@ func (e *SimpleExec) setDefaultRoleAll(ctx context.Context, s *ast.SetDefaultRol
 			return err
 		}
 		if !exists {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", user.String())
+			return ErrCannotUser.GenWithStackByArgs("SET DEFAULT ROLE", user.String())
 		}
 	}
 	internalCtx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
@@ -412,7 +414,7 @@ func (e *SimpleExec) setDefaultRoleForCurrentUser(s *ast.SetDefaultRoleStmt) (er
 			}
 			ok := checker.FindEdge(e.ctx, role, user)
 			if !ok {
-				return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(role.String(), user.String())
+				return ErrRoleNotGranted.GenWithStackByArgs(role.String(), user.String())
 			}
 			sqlexec.MustFormatSQL(sql, "(%?, %?, %?, %?)", user.Hostname, user.Username, role.Hostname, role.Username)
 		}
@@ -487,7 +489,7 @@ func (e *SimpleExec) setRoleRegular(s *ast.SetRoleStmt) error {
 	ok, roleName := checker.ActiveRoles(e.ctx, roleList)
 	if !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return nil
 }
@@ -500,7 +502,7 @@ func (e *SimpleExec) setRoleAll(s *ast.SetRoleStmt) error {
 	ok, roleName := checker.ActiveRoles(e.ctx, roles)
 	if !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return nil
 }
@@ -539,7 +541,7 @@ func (e *SimpleExec) setRoleAllExcept(s *ast.SetRoleStmt) error {
 	ok, roleName := checker.ActiveRoles(e.ctx, afterExcept)
 	if !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return nil
 }
@@ -552,7 +554,7 @@ func (e *SimpleExec) setRoleDefault(s *ast.SetRoleStmt) error {
 	ok, roleName := checker.ActiveRoles(e.ctx, roles)
 	if !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return nil
 }
@@ -564,7 +566,7 @@ func (e *SimpleExec) setRoleNone(s *ast.SetRoleStmt) error {
 	ok, roleName := checker.ActiveRoles(e.ctx, roles)
 	if !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return nil
 }
@@ -593,7 +595,7 @@ func (e *SimpleExec) dbAccessDenied(dbname string) error {
 		u = user.AuthUsername
 		h = user.AuthHostname
 	}
-	return exeerrors.ErrDBaccessDenied.GenWithStackByArgs(u, h, dbname)
+	return ErrDBaccessDenied.GenWithStackByArgs(u, h, dbname)
 }
 
 func (e *SimpleExec) executeUse(s *ast.UseStmt) error {
@@ -679,7 +681,7 @@ func (e *SimpleExec) executeSavepoint(s *ast.SavepointStmt) error {
 func (e *SimpleExec) executeReleaseSavepoint(s *ast.ReleaseSavepointStmt) error {
 	deleted := e.ctx.GetSessionVars().TxnCtx.ReleaseSavepoint(s.Name)
 	if !deleted {
-		return exeerrors.ErrSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.Name)
+		return errSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.Name)
 	}
 	return nil
 }
@@ -706,7 +708,7 @@ func (e *SimpleExec) executeRevokeRole(ctx context.Context, s *ast.RevokeRoleStm
 			return errors.Trace(err)
 		}
 		if !exists {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
+			return ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
 		}
 	}
 
@@ -737,7 +739,7 @@ func (e *SimpleExec) executeRevokeRole(ctx context.Context, s *ast.RevokeRoleStm
 			if _, err := sqlExecutor.ExecuteInternal(internalCtx, "rollback"); err != nil {
 				return errors.Trace(err)
 			}
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", user.String())
+			return ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", user.String())
 		}
 		for _, role := range s.Roles {
 			if role.Hostname == "" {
@@ -749,7 +751,7 @@ func (e *SimpleExec) executeRevokeRole(ctx context.Context, s *ast.RevokeRoleStm
 				if _, err := sqlExecutor.ExecuteInternal(internalCtx, "rollback"); err != nil {
 					return errors.Trace(err)
 				}
-				return exeerrors.ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
+				return ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
 			}
 
 			sql.Reset()
@@ -758,7 +760,7 @@ func (e *SimpleExec) executeRevokeRole(ctx context.Context, s *ast.RevokeRoleStm
 				if _, err := sqlExecutor.ExecuteInternal(internalCtx, "rollback"); err != nil {
 					return errors.Trace(err)
 				}
-				return exeerrors.ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
+				return ErrCannotUser.GenWithStackByArgs("REVOKE ROLE", role.String())
 			}
 
 			// delete from activeRoles
@@ -781,7 +783,7 @@ func (e *SimpleExec) executeRevokeRole(ctx context.Context, s *ast.RevokeRoleStm
 	}
 	if ok, roleName := checker.ActiveRoles(e.ctx, activeRoles); !ok {
 		u := e.ctx.GetSessionVars().User
-		return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+		return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 	}
 	return domain.GetDomain(e.ctx).NotifyUpdatePrivilege()
 }
@@ -799,11 +801,11 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 	}
 	if s.SavepointName != "" {
 		if !txn.Valid() {
-			return exeerrors.ErrSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.SavepointName)
+			return errSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.SavepointName)
 		}
 		savepointRecord := sessVars.TxnCtx.RollbackToSavepoint(s.SavepointName)
 		if savepointRecord == nil {
-			return exeerrors.ErrSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.SavepointName)
+			return errSavepointNotExists.GenWithStackByArgs("SAVEPOINT", s.SavepointName)
 		}
 		txn.RollbackMemDBToCheckpoint(savepointRecord.MemDBCheckpoint)
 		return nil
@@ -812,18 +814,10 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 	sessVars.SetInTxn(false)
 	if txn.Valid() {
 		duration := time.Since(sessVars.TxnCtx.CreateTime).Seconds()
-		isInternal := false
-		if internal := txn.GetOption(kv.RequestSourceInternal); internal != nil && internal.(bool) {
-			isInternal = true
-		}
-		if isInternal && sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationPessimisticRollbackInternal.Observe(duration)
-		} else if isInternal && !sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationOptimisticRollbackInternal.Observe(duration)
-		} else if !isInternal && sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationPessimisticRollbackGeneral.Observe(duration)
-		} else if !isInternal && !sessVars.TxnCtx.IsPessimistic {
-			executor_metrics.TransactionDurationOptimisticRollbackGeneral.Observe(duration)
+		if sessVars.TxnCtx.IsPessimistic {
+			transactionDurationPessimisticRollback.Observe(duration)
+		} else {
+			transactionDurationOptimisticRollback.Observe(duration)
 		}
 		sessVars.TxnCtx.ClearDelta()
 		return txn.Rollback()
@@ -1089,29 +1083,15 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 			userAttributes = append(userAttributes, fmt.Sprintf("\"metadata\": %s", s.CommentOrAttributeOption.Value))
 		}
 	}
-
-	if s.ResourceGroupNameOption != nil {
-		if !variable.EnableResourceControl.Load() {
-			return infoschema.ErrResourceGroupSupportDisabled
-		}
-
-		resourceGroupName := strings.ToLower(s.ResourceGroupNameOption.Value)
-
-		// check if specified resource group exists
-		if resourceGroupName != "default" && resourceGroupName != "" {
-			_, exists := e.is.ResourceGroupByName(model.NewCIStr(resourceGroupName))
-			if !exists {
-				return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(resourceGroupName)
-			}
-		}
-		userAttributes = append(userAttributes, fmt.Sprintf("\"resource_group\": \"%s\"", resourceGroupName))
-	}
 	// If FAILED_LOGIN_ATTEMPTS and PASSWORD_LOCK_TIME are both specified to 0, a string of 0 length is generated.
 	// When inserting the attempts into json, an error occurs. This requires special handling.
 	if PasswordLocking != "" {
 		userAttributes = append(userAttributes, PasswordLocking)
 	}
-	userAttributesStr := fmt.Sprintf("{%s}", strings.Join(userAttributes, ","))
+	var userAttributesStr any = nil
+	if len(userAttributes) > 0 {
+		userAttributesStr = fmt.Sprintf("{%s}", strings.Join(userAttributes, ","))
+	}
 
 	tokenIssuer := ""
 	for _, authTokenOption := range s.AuthTokenOrTLSOptions {
@@ -1126,7 +1106,7 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 	passwordInit := true
 	// Get changed user password reuse info.
 	savePasswdHistory := whetherSavePasswordHistory(plOptions)
-	sqlTemplate := "INSERT INTO %n.%n (Host, User, authentication_string, plugin, user_attributes, Account_locked, Token_issuer, Password_expired, Password_lifetime,  Password_reuse_time, Password_reuse_history) VALUES "
+	sqlTemplate := "INSERT INTO %n.%n (Host, User, authentication_string, plugin, user_attributes, Account_locked, Token_issuer, Password_expired, Password_lifetime, Password_reuse_time, Password_reuse_history) VALUES "
 	valueTemplate := "(%?, %?, %?, %?, %?, %?, %?, %?, %?"
 
 	sqlexec.MustFormatSQL(sql, sqlTemplate, mysql.SystemDB, mysql.UserTable)
@@ -1137,13 +1117,13 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 	users := make([]*auth.UserIdentity, 0, len(s.Specs))
 	for _, spec := range s.Specs {
 		if len(spec.User.Username) > auth.UserNameMaxLength {
-			return exeerrors.ErrWrongStringLength.GenWithStackByArgs(spec.User.Username, "user name", auth.UserNameMaxLength)
+			return ErrWrongStringLength.GenWithStackByArgs(spec.User.Username, "user name", auth.UserNameMaxLength)
 		}
 		if len(spec.User.Username) == 0 && plOptions.passwordExpired == "Y" {
-			return exeerrors.ErrPasswordExpireAnonymousUser.GenWithStackByArgs()
+			return ErrPasswordExpireAnonymousUser.GenWithStackByArgs()
 		}
 		if len(spec.User.Hostname) > auth.HostNameMaxLength {
-			return exeerrors.ErrWrongStringLength.GenWithStackByArgs(spec.User.Hostname, "host name", auth.HostNameMaxLength)
+			return ErrWrongStringLength.GenWithStackByArgs(spec.User.Hostname, "host name", auth.HostNameMaxLength)
 		}
 		if len(users) > 0 {
 			sqlexec.MustFormatSQL(sql, ",")
@@ -1156,9 +1136,9 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 			user := fmt.Sprintf(`'%s'@'%s'`, spec.User.Username, spec.User.Hostname)
 			if !s.IfNotExists {
 				if s.IsCreateRole {
-					return exeerrors.ErrCannotUser.GenWithStackByArgs("CREATE ROLE", user)
+					return ErrCannotUser.GenWithStackByArgs("CREATE ROLE", user)
 				}
-				return exeerrors.ErrCannotUser.GenWithStackByArgs("CREATE USER", user)
+				return ErrCannotUser.GenWithStackByArgs("CREATE USER", user)
 			}
 			err := infoschema.ErrUserAlreadyExists.GenWithStackByArgs(user)
 			e.ctx.GetSessionVars().StmtCtx.AppendNote(err)
@@ -1181,13 +1161,13 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 		pwd, ok := spec.EncodedPassword()
 
 		if !ok {
-			return errors.Trace(exeerrors.ErrPasswordFormat)
+			return errors.Trace(ErrPasswordFormat)
 		}
 
 		switch authPlugin {
-		case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, mysql.AuthTiDBAuthToken, mysql.AuthLDAPSimple, mysql.AuthLDAPSASL:
+		case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, mysql.AuthTiDBAuthToken:
 		default:
-			return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+			return ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
 		}
 
 		recordTokenIssuer := tokenIssuer
@@ -1476,7 +1456,7 @@ func fullRecordCheck(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, userD
 		}
 		return checkPasswordsMatch(rows, userDetail.authString, authPlugin)
 	default:
-		return false, exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
+		return false, ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
 	}
 }
 
@@ -1526,7 +1506,7 @@ func checkPasswordHistoryRule(ctx context.Context, sqlExecutor sqlexec.SQLExecut
 		}
 		return checkPasswordsMatch(rows, userDetail.authString, authPlugin)
 	default:
-		return false, exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
+		return false, ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
 	}
 }
 
@@ -1572,7 +1552,7 @@ func checkPasswordTimeRule(ctx context.Context, sqlExecutor sqlexec.SQLExecutor,
 		}
 		return checkPasswordsMatch(rows, userDetail.authString, authPlugin)
 	default:
-		return false, exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
+		return false, ErrPluginIsNotLoaded.GenWithStackByArgs(authPlugin)
 	}
 	return false, nil
 }
@@ -1616,7 +1596,7 @@ func passwordVerification(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, 
 }
 
 func checkPasswordReusePolicy(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, userDetail *userInfo, sctx sessionctx.Context, authPlugin string) error {
-	if strings.EqualFold(authPlugin, mysql.AuthTiDBAuthToken) || strings.EqualFold(authPlugin, mysql.AuthLDAPSASL) || strings.EqualFold(authPlugin, mysql.AuthLDAPSimple) {
+	if strings.EqualFold(authPlugin, mysql.AuthTiDBAuthToken) {
 		// AuthTiDBAuthToken is the token login method on the cloud,
 		// and the Password Reuse Policy does not take effect.
 		return nil
@@ -1632,7 +1612,7 @@ func checkPasswordReusePolicy(ctx context.Context, sqlExecutor sqlexec.SQLExecut
 		return err
 	}
 	if !res {
-		return exeerrors.ErrExistsInHistoryPassword.GenWithStackByArgs(userDetail.user, userDetail.host)
+		return ErrExistsInHistoryPassword.GenWithStackByArgs(userDetail.user, userDetail.host)
 	}
 	err = deleteHistoricalData(ctx, sqlExecutor, userDetail, maxDelNum, passwdReuseInfo, sctx)
 	if err != nil {
@@ -1802,14 +1782,14 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 				spec.AuthOpt.AuthPlugin = currentAuthPlugin
 			}
 			switch spec.AuthOpt.AuthPlugin {
-			case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, mysql.AuthLDAPSimple, mysql.AuthLDAPSASL, "":
+			case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, "":
 				authTokenOptionHandler = NoNeedAuthTokenOptions
 			case mysql.AuthTiDBAuthToken:
 				if authTokenOptionHandler != OptionalAuthTokenOptions {
 					authTokenOptionHandler = RequireAuthTokenOptions
 				}
 			default:
-				return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+				return ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
 			}
 			// changing the auth method prunes history.
 			if spec.AuthOpt.AuthPlugin != currentAuthPlugin {
@@ -1829,7 +1809,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			}
 			pwd, ok := spec.EncodedPassword()
 			if !ok {
-				return errors.Trace(exeerrors.ErrPasswordFormat)
+				return errors.Trace(ErrPasswordFormat)
 			}
 			// for Support Password Reuse Policy.
 			// The empty password does not count in the password history and is subject to reuse at any time.
@@ -1886,7 +1866,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 
 		if len(plOptions.passwordExpired) != 0 {
 			if len(spec.User.Username) == 0 && plOptions.passwordExpired == "Y" {
-				return exeerrors.ErrPasswordExpireAnonymousUser.GenWithStackByArgs()
+				return ErrPasswordExpireAnonymousUser.GenWithStackByArgs()
 			}
 			fields = append(fields, alterField{"password_expired=%?", plOptions.passwordExpired})
 		}
@@ -1901,22 +1881,6 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			} else {
 				newAttributes = append(newAttributes, fmt.Sprintf(`"metadata": %s`, s.CommentOrAttributeOption.Value))
 			}
-		}
-		if s.ResourceGroupNameOption != nil {
-			if !variable.EnableResourceControl.Load() {
-				return infoschema.ErrResourceGroupSupportDisabled
-			}
-
-			// check if specified resource group exists
-			resourceGroupName := strings.ToLower(s.ResourceGroupNameOption.Value)
-			if resourceGroupName != "default" && s.ResourceGroupNameOption.Value != "" {
-				_, exists := e.is.ResourceGroupByName(model.NewCIStr(resourceGroupName))
-				if !exists {
-					return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(resourceGroupName)
-				}
-			}
-
-			newAttributes = append(newAttributes, fmt.Sprintf(`"resource_group": "%s"`, resourceGroupName))
 		}
 		if passwordLockingStr != "" {
 			newAttributes = append(newAttributes, passwordLockingStr)
@@ -1991,7 +1955,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 	if len(failedUsers) > 0 {
 		// Compatible with MySQL 8.0, `ALTER USER` realizes atomic operation.
 		if !s.IfExists || needRollback {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("ALTER USER", strings.Join(failedUsers, ","))
+			return ErrCannotUser.GenWithStackByArgs("ALTER USER", strings.Join(failedUsers, ","))
 		}
 		for _, user := range failedUsers {
 			err := infoschema.ErrUserDropExists.GenWithStackByArgs(user)
@@ -2021,7 +1985,7 @@ func (e *SimpleExec) checkSandboxMode(specs []*ast.UserSpec) error {
 			}
 		}
 	}
-	return exeerrors.ErrMustChangePassword.GenWithStackByArgs()
+	return errMustChangePassword.GenWithStackByArgs()
 }
 
 func (e *SimpleExec) executeGrantRole(ctx context.Context, s *ast.GrantRoleStmt) error {
@@ -2035,7 +1999,7 @@ func (e *SimpleExec) executeGrantRole(ctx context.Context, s *ast.GrantRoleStmt)
 			return err
 		}
 		if !exists {
-			return exeerrors.ErrGrantRole.GenWithStackByArgs(role.String())
+			return ErrGrantRole.GenWithStackByArgs(role.String())
 		}
 	}
 	for _, user := range s.Users {
@@ -2044,7 +2008,7 @@ func (e *SimpleExec) executeGrantRole(ctx context.Context, s *ast.GrantRoleStmt)
 			return err
 		}
 		if !exists {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("GRANT ROLE", user.String())
+			return ErrCannotUser.GenWithStackByArgs("GRANT ROLE", user.String())
 		}
 	}
 
@@ -2070,7 +2034,7 @@ func (e *SimpleExec) executeGrantRole(ctx context.Context, s *ast.GrantRoleStmt)
 				if _, err := sqlExecutor.ExecuteInternal(internalCtx, "rollback"); err != nil {
 					return err
 				}
-				return exeerrors.ErrCannotUser.GenWithStackByArgs("GRANT ROLE", user.String())
+				return ErrCannotUser.GenWithStackByArgs("GRANT ROLE", user.String())
 			}
 		}
 	}
@@ -2097,10 +2061,10 @@ func (e *SimpleExec) executeRenameUser(s *ast.RenameUserStmt) error {
 	for _, userToUser := range s.UserToUsers {
 		oldUser, newUser := userToUser.OldUser, userToUser.NewUser
 		if len(newUser.Username) > auth.UserNameMaxLength {
-			return exeerrors.ErrWrongStringLength.GenWithStackByArgs(newUser.Username, "user name", auth.UserNameMaxLength)
+			return ErrWrongStringLength.GenWithStackByArgs(newUser.Username, "user name", auth.UserNameMaxLength)
 		}
 		if len(newUser.Hostname) > auth.HostNameMaxLength {
-			return exeerrors.ErrWrongStringLength.GenWithStackByArgs(newUser.Hostname, "host name", auth.HostNameMaxLength)
+			return ErrWrongStringLength.GenWithStackByArgs(newUser.Hostname, "host name", auth.HostNameMaxLength)
 		}
 		exists, err := userExistsInternal(ctx, sqlExecutor, oldUser.Username, oldUser.Hostname)
 		if err != nil {
@@ -2191,7 +2155,7 @@ func (e *SimpleExec) executeRenameUser(s *ast.RenameUserStmt) error {
 		if _, err := sqlExecutor.ExecuteInternal(ctx, "rollback"); err != nil {
 			return err
 		}
-		return exeerrors.ErrCannotUser.GenWithStackByArgs("RENAME USER", failedUser)
+		return ErrCannotUser.GenWithStackByArgs("RENAME USER", failedUser)
 	}
 	return domain.GetDomain(e.ctx).NotifyUpdatePrivilege()
 }
@@ -2376,7 +2340,7 @@ func (e *SimpleExec) executeDropUser(ctx context.Context, s *ast.DropUserStmt) e
 			// apply new activeRoles
 			if ok, roleName := checker.ActiveRoles(e.ctx, activeRoles); !ok {
 				u := e.ctx.GetSessionVars().User
-				return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
+				return ErrRoleNotGranted.GenWithStackByArgs(roleName, u.String())
 			}
 		}
 	} else {
@@ -2384,9 +2348,9 @@ func (e *SimpleExec) executeDropUser(ctx context.Context, s *ast.DropUserStmt) e
 			return err
 		}
 		if s.IsDropRole {
-			return exeerrors.ErrCannotUser.GenWithStackByArgs("DROP ROLE", strings.Join(failedUsers, ","))
+			return ErrCannotUser.GenWithStackByArgs("DROP ROLE", strings.Join(failedUsers, ","))
 		}
-		return exeerrors.ErrCannotUser.GenWithStackByArgs("DROP USER", strings.Join(failedUsers, ","))
+		return ErrCannotUser.GenWithStackByArgs("DROP USER", strings.Join(failedUsers, ","))
 	}
 	return domain.GetDomain(e.ctx).NotifyUpdatePrivilege()
 }
@@ -2411,7 +2375,7 @@ func userExistsInternal(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, na
 	}
 	req := recordSet.NewChunk(nil)
 	err = recordSet.Next(ctx, req)
-	var rows = 0
+	var rows int = 0
 	if err == nil {
 		rows = req.NumRows()
 	}
@@ -2455,7 +2419,7 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 		checker := privilege.GetPrivilegeManager(e.ctx)
 		activeRoles := e.ctx.GetSessionVars().ActiveRoles
 		if checker != nil && !checker.RequestVerification(activeRoles, "", "", "", mysql.SuperPriv) {
-			return exeerrors.ErrDBaccessDenied.GenWithStackByArgs(u, h, "mysql")
+			return ErrDBaccessDenied.GenWithStackByArgs(u, h, "mysql")
 		}
 		u = s.User.Username
 		h = s.User.Hostname
@@ -2465,14 +2429,14 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 		return err
 	}
 	if !exists {
-		return errors.Trace(exeerrors.ErrPasswordNoMatch)
+		return errors.Trace(ErrPasswordNoMatch)
 	}
 	if e.ctx.InSandBoxMode() {
 		if s.User == nil || s.User.CurrentUser ||
 			e.ctx.GetSessionVars().User.AuthUsername == u && e.ctx.GetSessionVars().User.AuthHostname == strings.ToLower(h) {
 			disableSandboxMode = true
 		} else {
-			return exeerrors.ErrMustChangePassword.GenWithStackByArgs()
+			return errMustChangePassword.GenWithStackByArgs()
 		}
 	}
 
@@ -2490,7 +2454,7 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 	case mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password:
 		pwd = auth.NewHashPassword(s.Password, authplugin)
 	case mysql.AuthSocket:
-		e.ctx.GetSessionVars().StmtCtx.AppendNote(exeerrors.ErrSetPasswordAuthPlugin.GenWithStackByArgs(u, h))
+		e.ctx.GetSessionVars().StmtCtx.AppendNote(ErrSetPasswordAuthPlugin.GenWithStackByArgs(u, h))
 		pwd = ""
 	default:
 		pwd = auth.EncodePassword(s.Password)
@@ -2568,7 +2532,7 @@ func (e *SimpleExec) executeKillStmt(ctx context.Context, s *ast.KillStmt) error
 		return nil
 	}
 	if e.IsFromRemote {
-		logutil.BgLogger().Info("Killing connection in current instance redirected from remote TiDB", zap.Uint64("conn", s.ConnectionID), zap.Bool("query", s.Query),
+		logutil.BgLogger().Info("Killing connection in current instance redirected from remote TiDB", zap.Uint64("connID", s.ConnectionID), zap.Bool("query", s.Query),
 			zap.String("sourceAddr", e.ctx.GetSessionVars().SourceAddr.IP.String()))
 		sm.Kill(s.ConnectionID, s.Query)
 		return nil
@@ -2582,7 +2546,7 @@ func (e *SimpleExec) executeKillStmt(ctx context.Context, s *ast.KillStmt) error
 	}
 	if isTruncated {
 		message := "Kill failed: Received a 32bits truncated ConnectionID, expect 64bits. Please execute 'KILL [CONNECTION | QUERY] ConnectionID' to send a Kill without truncating ConnectionID."
-		logutil.BgLogger().Warn(message, zap.Uint64("conn", s.ConnectionID))
+		logutil.BgLogger().Warn(message, zap.Uint64("connID", s.ConnectionID))
 		// Notice that this warning cannot be seen if KILL is triggered by "CTRL-C" of mysql client,
 		//   as the KILL is sent by a new connection.
 		err := errors.New(message)
@@ -2649,7 +2613,7 @@ func killRemoteConn(ctx context.Context, sctx sessionctx.Context, connID *util.G
 	}
 
 	logutil.BgLogger().Info("Killed remote connection", zap.Uint64("serverID", connID.ServerID),
-		zap.Uint64("conn", connID.ID()), zap.Bool("query", query))
+		zap.Uint64("connID", connID.ID()), zap.Bool("query", query))
 	return err
 }
 
@@ -2830,22 +2794,11 @@ func (e *SimpleExec) executeAdminFlushPlanCache(s *ast.AdminStmt) error {
 	}
 	now := types.NewTime(types.FromGoTime(time.Now().In(e.ctx.GetSessionVars().StmtCtx.TimeZone)), mysql.TypeTimestamp, 3)
 	e.ctx.GetSessionVars().LastUpdateTime4PC = now
-	e.ctx.GetSessionPlanCache().DeleteAll()
+	e.ctx.GetPlanCache(false).DeleteAll()
 	if s.StatementScope == ast.StatementScopeInstance {
 		// Record the timestamp. When other sessions want to use the plan cache,
 		// it will check the timestamp first to decide whether the plan cache should be flushed.
 		domain.GetDomain(e.ctx).SetExpiredTimeStamp4PC(now)
 	}
-	return nil
-}
-
-func (e *SimpleExec) executeSetResourceGroupName(s *ast.SetResourceGroupStmt) error {
-	if s.Name.L != "" {
-		if _, ok := e.is.ResourceGroupByName(s.Name); !ok {
-			return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(s.Name.O)
-		}
-	}
-
-	e.ctx.GetSessionVars().ResourceGroupName = s.Name.L
 	return nil
 }

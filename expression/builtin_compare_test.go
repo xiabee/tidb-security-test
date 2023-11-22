@@ -233,10 +233,10 @@ func TestIntervalFunc(t *testing.T) {
 	ctx := createContext(t)
 
 	sc := ctx.GetSessionVars().StmtCtx
-	origin := sc.IgnoreTruncate.Load()
-	sc.IgnoreTruncate.Store(true)
+	origin := sc.IgnoreTruncate
+	sc.IgnoreTruncate = true
 	defer func() {
-		sc.IgnoreTruncate.Store(origin)
+		sc.IgnoreTruncate = origin
 	}()
 
 	for _, test := range []struct {
@@ -289,12 +289,12 @@ func TestIntervalFunc(t *testing.T) {
 func TestGreatestLeastFunc(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	originIgnoreTruncate := sc.IgnoreTruncate.Load()
-	sc.IgnoreTruncate.Store(true)
+	originIgnoreTruncate := sc.IgnoreTruncate
+	sc.IgnoreTruncate = true
 	decG := &types.MyDecimal{}
 	decL := &types.MyDecimal{}
 	defer func() {
-		sc.IgnoreTruncate.Store(originIgnoreTruncate)
+		sc.IgnoreTruncate = originIgnoreTruncate
 	}()
 
 	for _, test := range []struct {
@@ -405,18 +405,4 @@ func TestGreatestLeastFunc(t *testing.T) {
 	require.NoError(t, err)
 	_, err = funcs[ast.Least].getFunction(ctx, []Expression{NewZero(), NewOne()})
 	require.NoError(t, err)
-}
-
-func TestRefineArgsWithCastEnum(t *testing.T) {
-	ctx := createContext(t)
-	zeroUintConst := primitiveValsToConstants(ctx, []interface{}{uint64(0)})[0]
-	enumType := types.NewFieldTypeBuilder().SetType(mysql.TypeEnum).SetElems([]string{"1", "2", "3"}).AddFlag(mysql.EnumSetAsIntFlag).Build()
-	enumCol := &Column{RetType: &enumType}
-
-	f := funcs[ast.EQ].(*compareFunctionClass)
-	require.NotNil(t, f)
-
-	args := f.refineArgsByUnsignedFlag(ctx, []Expression{zeroUintConst, enumCol})
-	require.Equal(t, zeroUintConst, args[0])
-	require.Equal(t, enumCol, args[1])
 }

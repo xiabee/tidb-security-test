@@ -94,7 +94,7 @@ func (e *ProjectionExec) Open(ctx context.Context) error {
 	return e.open(ctx)
 }
 
-func (e *ProjectionExec) open(_ context.Context) error {
+func (e *ProjectionExec) open(ctx context.Context) error {
 	e.prepared = false
 	e.parentReqRows = int64(e.maxChunkSize)
 
@@ -368,14 +368,14 @@ func (f *projectionInputFetcher) run(ctx context.Context) {
 	}()
 
 	for {
-		input, isNil := readProjection[*projectionInput](f.inputCh, f.globalFinishCh)
-		if isNil {
+		input := readProjectionInput(f.inputCh, f.globalFinishCh)
+		if input == nil {
 			return
 		}
 		targetWorker := input.targetWorker
 
-		output, isNil = readProjection[*projectionOutput](f.outputCh, f.globalFinishCh)
-		if isNil {
+		output = readProjectionOutput(f.outputCh, f.globalFinishCh)
+		if output == nil {
 			f.proj.memTracker.Consume(-input.chk.MemoryUsage())
 			return
 		}
@@ -435,13 +435,13 @@ func (w *projectionWorker) run(ctx context.Context) {
 		w.proj.wg.Done()
 	}()
 	for {
-		input, isNil := readProjection[*projectionInput](w.inputCh, w.globalFinishCh)
-		if isNil {
+		input := readProjectionInput(w.inputCh, w.globalFinishCh)
+		if input == nil {
 			return
 		}
 
-		output, isNil = readProjection[*projectionOutput](w.outputCh, w.globalFinishCh)
-		if isNil {
+		output = readProjectionOutput(w.outputCh, w.globalFinishCh)
+		if output == nil {
 			return
 		}
 
@@ -466,14 +466,26 @@ func recoveryProjection(output *projectionOutput, r interface{}) {
 	logutil.BgLogger().Error("projection executor panicked", zap.String("error", fmt.Sprintf("%v", r)), zap.Stack("stack"))
 }
 
-func readProjection[T any](ch <-chan T, finishCh <-chan struct{}) (t T, isNil bool) {
+func readProjectionInput(inputCh <-chan *projectionInput, finishCh <-chan struct{}) *projectionInput {
 	select {
 	case <-finishCh:
-		return t, true
-	case t, ok := <-ch:
+		return nil
+	case input, ok := <-inputCh:
 		if !ok {
-			return t, true
+			return nil
 		}
-		return t, false
+		return input
+	}
+}
+
+func readProjectionOutput(outputCh <-chan *projectionOutput, finishCh <-chan struct{}) *projectionOutput {
+	select {
+	case <-finishCh:
+		return nil
+	case output, ok := <-outputCh:
+		if !ok {
+			return nil
+		}
+		return output
 	}
 }

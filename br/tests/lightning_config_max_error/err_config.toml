@@ -1,8 +1,0 @@
-[lightning.max-error]
-conflict = 4
-
-[mydumper.csv]
-header = true
-
-[tikv-importer]
-duplicate-resolution = 'remove'

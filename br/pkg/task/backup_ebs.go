@@ -130,7 +130,7 @@ func RunBackupEBS(c context.Context, g glue.Glue, cfg *BackupConfig) error {
 		return errors.Trace(err)
 	}
 
-	backupStartTs, err = client.GetCurrentTS(c)
+	backupStartTs, err = client.GetCurerntTS(c)
 	if err != nil {
 		return errors.Trace(err)
 	}

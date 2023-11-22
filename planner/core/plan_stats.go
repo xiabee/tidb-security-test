@@ -135,13 +135,9 @@ func collectSyncIndices(ctx sessionctx.Context, histNeededColumns []model.TableI
 		if column.IsIndex {
 			continue
 		}
-		is := ctx.GetDomainInfoSchema().(infoschema.InfoSchema)
-		tbl, ok := is.TableByID(column.TableID)
+		tbl, ok := ctx.GetDomainInfoSchema().(infoschema.InfoSchema).TableByID(column.TableID)
 		if !ok {
-			tbl, _, _ = is.FindTableByPartitionID(column.TableID)
-			if tbl == nil {
-				continue
-			}
+			continue
 		}
 		colName := tbl.Meta().FindColumnNameByID(column.ID)
 		if colName == "" {
@@ -182,11 +178,11 @@ func recordTableRuntimeStats(sctx sessionctx.Context, tbls map[int64]struct{}) {
 		tblStats = map[int64]interface{}{}
 	}
 	for tblID := range tbls {
-		tblJSONStats, skip, err := recordSingleTableRuntimeStats(sctx, tblID)
+		tblJSONStats, err := recordSingleTableRuntimeStats(sctx, tblID)
 		if err != nil {
 			logutil.BgLogger().Warn("record table json stats failed", zap.Int64("tblID", tblID), zap.Error(err))
 		}
-		if tblJSONStats == nil && !skip {
+		if tblJSONStats == nil {
 			logutil.BgLogger().Warn("record table json stats failed due to empty", zap.Int64("tblID", tblID))
 		}
 		tblStats[tblID] = tblJSONStats
@@ -194,17 +190,15 @@ func recordTableRuntimeStats(sctx sessionctx.Context, tbls map[int64]struct{}) {
 	sctx.GetSessionVars().StmtCtx.TableStats = tblStats
 }
 
-func recordSingleTableRuntimeStats(sctx sessionctx.Context, tblID int64) (stats *statistics.Table, skip bool, err error) {
+func recordSingleTableRuntimeStats(sctx sessionctx.Context, tblID int64) (*statistics.Table, error) {
 	dom := domain.GetDomain(sctx)
+	is := dom.InfoSchema()
 	statsHandle := dom.StatsHandle()
-	is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
 	tbl, ok := is.TableByID(tblID)
 	if !ok {
-		return nil, false, nil
+		return nil, nil
 	}
 	tableInfo := tbl.Meta()
-	stats = statsHandle.GetTableStats(tableInfo)
-	// Skip the warning if the table is a temporary table because the temporary table doesn't have stats.
-	skip = tableInfo.TempTableType != model.TempTableNone
-	return stats, skip, nil
+	stats := statsHandle.GetTableStats(tableInfo)
+	return stats, nil
 }

@@ -57,8 +57,6 @@ const (
 	TypeExchangeSender = "ExchangeSender"
 	// TypeExchangeReceiver is the type of mpp exchanger receiver.
 	TypeExchangeReceiver = "ExchangeReceiver"
-	// TypeExpand is the type of mpp expand source operator.
-	TypeExpand = "Expand"
 	// TypeMergeJoin is the type of merge join.
 	TypeMergeJoin = "MergeJoin"
 	// TypeIndexJoin is the type of index look up join.
@@ -195,7 +193,6 @@ const (
 	typeShuffleReceiverID     int = 55
 	typeForeignKeyCheck       int = 56
 	typeForeignKeyCascade     int = 57
-	typeExpandID              int = 58
 )
 
 // TypeStringToPhysicalID converts the plan type string to plan id.
@@ -315,8 +312,6 @@ func TypeStringToPhysicalID(tp string) int {
 		return typeForeignKeyCheck
 	case TypeForeignKeyCascade:
 		return typeForeignKeyCascade
-	case TypeExpand:
-		return typeExpandID
 	}
 	// Should never reach here.
 	return 0
@@ -439,8 +434,6 @@ func PhysicalIDToTypeString(id int) string {
 		return TypeForeignKeyCheck
 	case typeForeignKeyCascade:
 		return TypeForeignKeyCascade
-	case typeExpandID:
-		return TypeExpand
 	}
 
 	// Should never reach here.

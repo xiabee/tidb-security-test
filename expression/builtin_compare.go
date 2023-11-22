@@ -1585,7 +1585,7 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		exprType := args[1-conIdx].GetType()
 		exprEvalType := exprType.EvalType()
 		if exprType.GetType() == mysql.TypeYear {
-			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
+			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
 			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
@@ -1595,7 +1595,7 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		conEvalType := args[conIdx].GetType().EvalType()
 		if exprEvalType == types.ETInt &&
 			(conEvalType == types.ETString || conEvalType == types.ETReal || conEvalType == types.ETDecimal) {
-			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
+			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
 			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}

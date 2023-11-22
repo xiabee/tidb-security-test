@@ -85,19 +85,7 @@ func DigestNormalized(normalized string) (digest *Digest) {
 // for example: Normalize('select 1 from b where a = 1') => 'select ? from b where a = ?'
 func Normalize(sql string) (result string) {
 	d := digesterPool.Get().(*sqlDigester)
-	result = d.doNormalize(sql, false)
-	digesterPool.Put(d)
-	return
-}
-
-// NormalizeKeepHint generates the normalized statements, but keep the hints.
-// it will get normalized form of statement text with hints.
-// which removes general property of a statement but keeps specific property.
-//
-// for example: Normalize('select /*+ use_index(t, primary) */ 1 from b where a = 1') => 'select /*+ use_index(t, primary) */ ? from b where a = ?'
-func NormalizeKeepHint(sql string) (result string) {
-	d := digesterPool.Get().(*sqlDigester)
-	result = d.doNormalize(sql, true)
+	result = d.doNormalize(sql)
 	digesterPool.Put(d)
 	return
 }
@@ -141,7 +129,7 @@ func (d *sqlDigester) doDigestNormalized(normalized string) (digest *Digest) {
 }
 
 func (d *sqlDigester) doDigest(sql string) (digest *Digest) {
-	d.normalize(sql, false)
+	d.normalize(sql)
 	d.hasher.Write(d.buffer.Bytes())
 	d.buffer.Reset()
 	digest = NewDigest(d.hasher.Sum(nil))
@@ -149,15 +137,15 @@ func (d *sqlDigester) doDigest(sql string) (digest *Digest) {
 	return
 }
 
-func (d *sqlDigester) doNormalize(sql string, keepHint bool) (result string) {
-	d.normalize(sql, keepHint)
+func (d *sqlDigester) doNormalize(sql string) (result string) {
+	d.normalize(sql)
 	result = d.buffer.String()
 	d.buffer.Reset()
 	return
 }
 
 func (d *sqlDigester) doNormalizeDigest(sql string) (normalized string, digest *Digest) {
-	d.normalize(sql, false)
+	d.normalize(sql)
 	normalized = d.buffer.String()
 	d.hasher.Write(d.buffer.Bytes())
 	d.buffer.Reset()
@@ -175,9 +163,8 @@ const (
 	genericSymbolList = -2
 )
 
-func (d *sqlDigester) normalize(sql string, keepHint bool) {
+func (d *sqlDigester) normalize(sql string) {
 	d.lexer.reset(sql)
-	d.lexer.setKeepHint(keepHint)
 	for {
 		tok, pos, lit := d.lexer.scan()
 		if tok == invalid {
@@ -188,7 +175,7 @@ func (d *sqlDigester) normalize(sql string, keepHint bool) {
 		}
 		currTok := token{tok, strings.ToLower(lit)}
 
-		if !keepHint && d.reduceOptimizerHint(&currTok) {
+		if d.reduceOptimizerHint(&currTok) {
 			continue
 		}
 

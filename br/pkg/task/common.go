@@ -80,6 +80,7 @@ const (
 	flagDryRun            = "dry-run"
 	// TODO used for local test, should be removed later
 	flagSkipAWS                       = "skip-aws"
+	flagUseFSR                        = "use-fsr"
 	flagCloudAPIConcurrency           = "cloud-api-concurrency"
 	flagWithSysTable                  = "with-sys-table"
 	flagOperatorPausedGCAndSchedulers = "operator-paused-gc-and-scheduler"
@@ -253,9 +254,6 @@ type Config struct {
 	// whether there's explicit filter
 	ExplicitFilter bool `json:"-" toml:"-"`
 
-	// KeyspaceName is the name of the keyspace of the task
-	KeyspaceName string `json:"keyspace-name" toml:"keyspace-name"`
-
 	// Metadata download batch size, such as metadata for log restore
 	MetadataDownloadBatchSize uint `json:"metadata-download-batch-size" toml:"metadata-download-batch-size"`
 }
@@ -275,6 +273,12 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 	flags.Bool(flagChecksum, true, "Run checksum at end of task")
 	flags.Bool(flagRemoveTiFlash, true,
 		"Remove TiFlash replicas before backup or restore, for unsupported versions of TiFlash")
+
+	// Default concurrency is different for backup and restore.
+	// Leave it 0 and let them adjust the value.
+	flags.Uint32(flagConcurrency, 0, "The size of thread pool on each node that executes the task")
+	// It may confuse users , so just hide it.
+	_ = flags.MarkHidden(flagConcurrency)
 
 	flags.Uint64(flagRateLimitUnit, units.MiB, "The unit of rate limit")
 	_ = flags.MarkHidden(flagRateLimitUnit)
@@ -493,7 +497,9 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	if cfg.NoCreds, err = flags.GetBool(flagNoCreds); err != nil {
 		return errors.Trace(err)
 	}
-
+	if cfg.Concurrency, err = flags.GetUint32(flagConcurrency); err != nil {
+		return errors.Trace(err)
+	}
 	if cfg.Checksum, err = flags.GetBool(flagChecksum); err != nil {
 		return errors.Trace(err)
 	}

@@ -36,7 +36,6 @@ go_library(
         "//session",
         "//util",
         "//util/logutil",
-        "//util/metricsutil",
         "@com_github_gogo_protobuf//proto",
         "@com_github_pingcap_errors//:errors",
         "@com_github_pingcap_kvproto//pkg/brpb",

@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//go:build !race
 
 package server
 
@@ -82,16 +83,6 @@ type tidbTestSuite struct {
 }
 
 func createTidbTestSuite(t *testing.T) *tidbTestSuite {
-	cfg := newTestConfig()
-	cfg.Port = 0
-	cfg.Status.ReportStatus = true
-	cfg.Status.StatusPort = 0
-	cfg.Status.RecordDBLabel = true
-	cfg.Performance.TCPKeepAlive = true
-	return createTidbTestSuiteWithCfg(t, cfg)
-}
-
-func createTidbTestSuiteWithCfg(t *testing.T, cfg *config.Config) *tidbTestSuite {
 	ts := &tidbTestSuite{testServerClient: newTestServerClient()}
 
 	// setup tidbTestSuite
@@ -102,6 +93,11 @@ func createTidbTestSuiteWithCfg(t *testing.T, cfg *config.Config) *tidbTestSuite
 	ts.domain, err = session.BootstrapSession(ts.store)
 	require.NoError(t, err)
 	ts.tidbdrv = NewTiDBDriver(ts.store)
+	cfg := newTestConfig()
+	cfg.Port = ts.port
+	cfg.Status.ReportStatus = true
+	cfg.Status.StatusPort = ts.statusPort
+	cfg.Performance.TCPKeepAlive = true
 
 	server, err := NewServer(cfg, ts.tidbdrv)
 	require.NoError(t, err)
@@ -129,6 +125,7 @@ func createTidbTestSuiteWithCfg(t *testing.T, cfg *config.Config) *tidbTestSuite
 		}
 		view.Stop()
 	})
+
 	return ts
 }
 
@@ -903,6 +900,7 @@ func TestInternalSessionTxnStartTS(t *testing.T) {
 	}
 	// Test an issue that sysSessionPool doesn't call session's Close, cause
 	// asyncGetTSWorker goroutine leak.
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/mockDelayInnerSessionExecute", "return"))
 	var wg util.WaitGroupWrapper
 	for i := 0; i < count; i++ {
 		s := stmts[i]
@@ -911,6 +909,11 @@ func TestInternalSessionTxnStartTS(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/mockDelayInnerSessionExecute"))
+
+	lst := ts.domain.InfoSyncer().GetSessionManager().GetInternalSessionStartTSList()
+	require.Equal(t, len(lst), 10)
 
 	wg.Wait()
 }
@@ -1620,7 +1623,7 @@ func TestTopSQLCPUProfile(t *testing.T) {
 		dbt.MustExec("SET tidb_multi_statement_mode='ON'")
 		_, err = db.Exec(multiStatement7)
 		require.NotNil(t, err)
-		require.Equal(t, "Error 1146 (42S02): Table 'topsql.t_not_exist' doesn't exist", err.Error())
+		require.Equal(t, "Error 1146: Table 'topsql.t_not_exist' doesn't exist", err.Error())
 	}
 	check = func() {
 		checkFn(cases7[0], "") // the first statement execute success, should have topsql data.
@@ -1671,7 +1674,7 @@ func TestTopSQLCPUProfile(t *testing.T) {
 		dbt.MustExec("alter table t drop index if exists idx_b")
 		_, err := db.Exec(addIndexStr)
 		require.NotNil(t, err)
-		require.Equal(t, "Error 1062 (23000): Duplicate entry '1' for key 't.idx_b'", err.Error())
+		require.Equal(t, "Error 1062: Duplicate entry '1' for key 't.idx_b'", err.Error())
 	}
 	check = func() {
 		checkFn(addIndexStr, "")
@@ -1685,7 +1688,7 @@ func TestTopSQLCPUProfile(t *testing.T) {
 	execFn = func(db *sql.DB) {
 		_, err = db.Query(execFailedQuery)
 		require.NotNil(t, err)
-		require.Equal(t, "Error 1105 (HY000): mock handleTaskOnce error", err.Error())
+		require.Equal(t, "Error 1105: mock handleTaskOnce error", err.Error())
 	}
 	check = func() {
 		checkFn(execFailedQuery, "")
@@ -2067,7 +2070,7 @@ func setupForTestTopSQLStatementStats(t *testing.T) (*tidbTestSuite, stmtstats.S
 	tagChecker := &resourceTagChecker{
 		sqlDigest2Reqs: make(map[stmtstats.BinaryDigest]map[tikvrpc.CmdType]struct{}),
 	}
-	unistoreRPCClientSendHook := func(req *tikvrpc.Request) {
+	unistore.UnistoreRPCClientSendHook = func(req *tikvrpc.Request) {
 		tag := req.GetResourceGroupTag()
 		if len(tag) == 0 || ddlutil.IsInternalResourceGroupTaggerForTopSQL(tag) {
 			// Ignore for internal background request.
@@ -2085,7 +2088,6 @@ func setupForTestTopSQLStatementStats(t *testing.T) (*tidbTestSuite, stmtstats.S
 		reqMap[req.Type] = struct{}{}
 		tagChecker.sqlDigest2Reqs[stmtstats.BinaryDigest(sqlDigest)] = reqMap
 	}
-	unistore.UnistoreRPCClientSendHook.Store(&unistoreRPCClientSendHook)
 
 	t.Cleanup(func() {
 		stmtstats.UnregisterCollector(mockCollector)
@@ -2180,11 +2182,11 @@ func TestTopSQLStatementStats2(t *testing.T) {
 
 		_, err := db.Exec(multiStatement6)
 		require.NotNil(t, err)
-		require.Equal(t, "Error 1146 (42S02): Table 'stmtstats.t6_not_exist' doesn't exist", err.Error())
+		require.Equal(t, "Error 1146: Table 'stmtstats.t6_not_exist' doesn't exist", err.Error())
 
 		_, err = db.Exec(multiStatement7)
 		require.NotNil(t, err)
-		require.Equal(t, "Error 1146 (42S02): Table 'stmtstats.t7_not_exist' doesn't exist", err.Error())
+		require.Equal(t, "Error 1146: Table 'stmtstats.t7_not_exist' doesn't exist", err.Error())
 
 		for _, ca := range cases8 {
 			dbt.MustExec(ca)
@@ -2970,15 +2972,15 @@ func TestChunkReuseCorruptSysVarString(t *testing.T) {
 	}()
 
 	rs, err := conn.QueryContext(context.Background(), "show tables in test")
-	ts.Rows(t, rs)
 	require.NoError(t, err)
+	ts.Rows(t, rs)
 
 	_, err = conn.ExecContext(context.Background(), "set @@time_zone=(select 'Asia/Shanghai')")
 	require.NoError(t, err)
 
 	rs, err = conn.QueryContext(context.Background(), "select TIDB_TABLE_ID from information_schema.tables where TABLE_SCHEMA='aaaa'")
-	ts.Rows(t, rs)
 	require.NoError(t, err)
+	ts.Rows(t, rs)
 
 	rs, err = conn.QueryContext(context.Background(), "select @@time_zone")
 	require.NoError(t, err)
@@ -2997,7 +2999,7 @@ type mockProxyProtocolProxy struct {
 	clientAddr    string
 	backendIsSock bool
 	ln            net.Listener
-	run           atomic.Bool
+	run           bool
 }
 
 func newMockProxyProtocolProxy(frontend, backend, clientAddr string, backendIsSock bool) *mockProxyProtocolProxy {
@@ -3007,6 +3009,7 @@ func newMockProxyProtocolProxy(frontend, backend, clientAddr string, backendIsSo
 		clientAddr:    clientAddr,
 		backendIsSock: backendIsSock,
 		ln:            nil,
+		run:           false,
 	}
 }
 
@@ -3015,12 +3018,12 @@ func (p *mockProxyProtocolProxy) ListenAddr() net.Addr {
 }
 
 func (p *mockProxyProtocolProxy) Run() (err error) {
-	p.run.Store(true)
+	p.run = true
 	p.ln, err = net.Listen("tcp", p.frontend)
 	if err != nil {
 		return err
 	}
-	for p.run.Load() {
+	for p.run {
 		conn, err := p.ln.Accept()
 		if err != nil {
 			break
@@ -3031,7 +3034,7 @@ func (p *mockProxyProtocolProxy) Run() (err error) {
 }
 
 func (p *mockProxyProtocolProxy) Close() error {
-	p.run.Store(false)
+	p.run = false
 	if p.ln != nil {
 		return p.ln.Close()
 	}
@@ -3208,4 +3211,10 @@ func TestProxyProtocolWithIpNoFallbackable(t *testing.T) {
 	err = db.Ping()
 	require.NotNil(t, err)
 	db.Close()
+}
+
+func TestLoadData(t *testing.T) {
+	ts := createTidbTestSuite(t)
+	ts.runTestLoadDataReplace(t)
+	ts.runTestLoadDataReplaceNonclusteredPK(t)
 }

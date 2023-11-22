@@ -18,7 +18,6 @@ go_library(
 
 go_test(
     name = "daemon_test",
-    timeout = "short",
     srcs = ["owner_daemon_test.go"],
     flaky = True,
     deps = [

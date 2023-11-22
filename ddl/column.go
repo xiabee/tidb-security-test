@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/bits"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,7 +27,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/config"
-	sess "github.com/pingcap/tidb/ddl/internal/session"
 	ddlutil "github.com/pingcap/tidb/ddl/util"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
@@ -50,8 +48,8 @@ import (
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/logutil"
 	decoder "github.com/pingcap/tidb/util/rowDecoder"
-	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -700,11 +698,11 @@ func (w *worker) doModifyColumnTypeWithData(
 		failpoint.Inject("mockInsertValueAfterCheckNull", func(val failpoint.Value) {
 			if valStr, ok := val.(string); ok {
 				var sctx sessionctx.Context
-				sctx, err := w.sessPool.Get()
+				sctx, err := w.sessPool.get()
 				if err != nil {
 					failpoint.Return(ver, err)
 				}
-				defer w.sessPool.Put(sctx)
+				defer w.sessPool.put(sctx)
 
 				ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
 				//nolint:forcetypeassert
@@ -813,19 +811,32 @@ func doReorgWorkForModifyColumnMultiSchema(w *worker, d *ddlCtx, t *meta.Meta, j
 func doReorgWorkForModifyColumn(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job, tbl table.Table,
 	oldCol, changingCol *model.ColumnInfo, changingIdxs []*model.IndexInfo) (done bool, ver int64, err error) {
 	job.ReorgMeta.ReorgTp = model.ReorgTypeTxn
-	sctx, err1 := w.sessPool.Get()
-	if err1 != nil {
-		err = errors.Trace(err1)
-		return
+	var rh *reorgHandler
+	if w.concurrentDDL {
+		sctx, err1 := w.sessPool.get()
+		if err1 != nil {
+			err = errors.Trace(err1)
+			return
+		}
+		defer w.sessPool.put(sctx)
+		sess := newSession(sctx)
+		err = sess.begin()
+		if err != nil {
+			return
+		}
+		defer sess.rollback()
+		txn, err1 := sess.txn()
+		if err1 != nil {
+			err = errors.Trace(err1)
+			return
+		}
+		newMeta := meta.NewMeta(txn)
+		rh = newReorgHandler(newMeta, newSession(sctx), w.concurrentDDL)
+	} else {
+		rh = newReorgHandler(t, w.sess, w.concurrentDDL)
 	}
-	defer w.sessPool.Put(sctx)
-	rh := newReorgHandler(sess.NewSession(sctx))
-	dbInfo, err := t.GetDatabase(job.SchemaID)
-	if err != nil {
-		return false, ver, errors.Trace(err)
-	}
-	reorgInfo, err := getReorgInfo(d.jobContext(job.ID), d, rh, job, dbInfo, tbl, BuildElements(changingCol, changingIdxs), false)
-	if err != nil || reorgInfo == nil || reorgInfo.first {
+	reorgInfo, err := getReorgInfo(d.jobContext(job), d, rh, job, tbl, BuildElements(changingCol, changingIdxs), false)
+	if err != nil || reorgInfo.first {
 		// If we run reorg firstly, we should update the job snapshot version
 		// and then run the reorg next time.
 		return false, ver, errors.Trace(err)
@@ -847,15 +858,11 @@ func doReorgWorkForModifyColumn(w *worker, d *ddlCtx, t *meta.Meta, job *model.J
 		return w.updateCurrentElement(tbl, reorgInfo)
 	})
 	if err != nil {
-		if dbterror.ErrPausedDDLJob.Equal(err) {
-			return false, ver, nil
-		}
-
 		if dbterror.ErrWaitReorgTimeout.Equal(err) {
 			// If timeout, we should return, check for the owner and re-wait job done.
 			return false, ver, nil
 		}
-		if kv.IsTxnRetryableError(err) || dbterror.ErrNotOwner.Equal(err) {
+		if kv.IsTxnRetryableError(err) {
 			return false, ver, errors.Trace(err)
 		}
 		if err1 := rh.RemoveDDLReorgHandle(job, reorgInfo.elements); err1 != nil {
@@ -1059,37 +1066,9 @@ func BuildElements(changingCol *model.ColumnInfo, changingIdxs []*model.IndexInf
 	return elements
 }
 
-func (w *worker) updatePhysicalTableRow(t table.Table, reorgInfo *reorgInfo) error {
+func (w *worker) updatePhysicalTableRow(t table.PhysicalTable, reorgInfo *reorgInfo) error {
 	logutil.BgLogger().Info("[ddl] start to update table row", zap.String("job", reorgInfo.Job.String()), zap.String("reorgInfo", reorgInfo.String()))
-	if tbl, ok := t.(table.PartitionedTable); ok {
-		done := false
-		for !done {
-			p := tbl.GetPartition(reorgInfo.PhysicalTableID)
-			if p == nil {
-				return dbterror.ErrCancelledDDLJob.GenWithStack("Can not find partition id %d for table %d", reorgInfo.PhysicalTableID, t.Meta().ID)
-			}
-			workType := typeReorgPartitionWorker
-			if reorgInfo.Job.Type != model.ActionReorganizePartition {
-				// workType = typeUpdateColumnWorker
-				// TODO: Support Modify Column on partitioned table
-				// https://github.com/pingcap/tidb/issues/38297
-				return dbterror.ErrCancelledDDLJob.GenWithStack("Modify Column on partitioned table / typeUpdateColumnWorker not yet supported.")
-			}
-			err := w.writePhysicalTableRecord(w.sessPool, p, workType, reorgInfo)
-			if err != nil {
-				return err
-			}
-			done, err = updateReorgInfo(w.sessPool, tbl, reorgInfo)
-			if err != nil {
-				return errors.Trace(err)
-			}
-		}
-		return nil
-	}
-	if tbl, ok := t.(table.PhysicalTable); ok {
-		return w.writePhysicalTableRecord(w.sessPool, tbl, typeUpdateColumnWorker, reorgInfo)
-	}
-	return dbterror.ErrCancelledDDLJob.GenWithStack("internal error for phys tbl id: %d tbl id: %d", reorgInfo.PhysicalTableID, t.Meta().ID)
+	return w.writePhysicalTableRecord(w.sessPool, t, typeUpdateColumnWorker, reorgInfo)
 }
 
 // TestReorgGoroutineRunning is only used in test to indicate the reorg goroutine has been started.
@@ -1104,7 +1083,7 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 			TestReorgGoroutineRunning <- a
 			for {
 				time.Sleep(30 * time.Millisecond)
-				if w.isReorgCancelled(reorgInfo.Job.ID) {
+				if w.getReorgCtx(reorgInfo.Job).isReorgCanceled() {
 					// Job is cancelled. So it can't be done.
 					failpoint.Return(dbterror.ErrCancelledDDLJob)
 				}
@@ -1120,18 +1099,13 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 		}
 	}
 
-	if _, ok := t.(table.PartitionedTable); ok {
-		// TODO: remove when modify column of partitioned table is supported
-		// https://github.com/pingcap/tidb/issues/38297
-		return dbterror.ErrCancelledDDLJob.GenWithStack("Modify Column on partitioned table / typeUpdateColumnWorker not yet supported.")
-	}
 	// Get the original start handle and end handle.
 	currentVer, err := getValidCurrentVersion(reorgInfo.d.store)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	//nolint:forcetypeassert
-	originalStartHandle, originalEndHandle, err := getTableRange(reorgInfo.d.jobContext(reorgInfo.Job.ID), reorgInfo.d, t.(table.PhysicalTable), currentVer.Ver, reorgInfo.Job.Priority)
+	originalStartHandle, originalEndHandle, err := getTableRange(reorgInfo.d.jobContext(reorgInfo.Job), reorgInfo.d, t.(table.PhysicalTable), currentVer.Ver, reorgInfo.Job.Priority)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1156,13 +1130,17 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 			reorgInfo.StartKey, reorgInfo.EndKey = originalStartHandle, originalEndHandle
 		}
 
+		// Update the element in the reorgCtx to keep the atomic access for daemon-worker.
+		w.getReorgCtx(reorgInfo.Job).setCurrentElement(reorgInfo.elements[i+1])
+
 		// Update the element in the reorgInfo for updating the reorg meta below.
 		reorgInfo.currElement = reorgInfo.elements[i+1]
 		// Write the reorg info to store so the whole reorganize process can recover from panic.
 		err := reorgInfo.UpdateReorgMeta(reorgInfo.StartKey, w.sessPool)
 		logutil.BgLogger().Info("[ddl] update column and indexes",
 			zap.Int64("job ID", reorgInfo.Job.ID),
-			zap.Stringer("element", reorgInfo.currElement),
+			zap.ByteString("element type", reorgInfo.currElement.TypeKey),
+			zap.Int64("element ID", reorgInfo.currElement.ID),
 			zap.String("start key", hex.EncodeToString(reorgInfo.StartKey)),
 			zap.String("end key", hex.EncodeToString(reorgInfo.EndKey)))
 		if err != nil {
@@ -1177,9 +1155,10 @@ func (w *worker) updateCurrentElement(t table.Table, reorgInfo *reorgInfo) error
 }
 
 type updateColumnWorker struct {
-	*backfillCtx
-	oldColInfo *model.ColumnInfo
-	newColInfo *model.ColumnInfo
+	*backfillWorker
+	oldColInfo    *model.ColumnInfo
+	newColInfo    *model.ColumnInfo
+	metricCounter prometheus.Counter
 
 	// The following attributes are used to reduce memory allocation.
 	rowRecords []*rowRecord
@@ -1187,8 +1166,9 @@ type updateColumnWorker struct {
 
 	rowMap map[int64]types.Datum
 
-	checksumBuffer rowcodec.RowData
-	checksumNeeded bool
+	// For SQL Mode and warnings.
+	sqlMode    mysql.SQLMode
+	jobContext *JobContext
 }
 
 func newUpdateColumnWorker(sessCtx sessionctx.Context, id int, t table.PhysicalTable, decodeColMap map[int64]decoder.Column, reorgInfo *reorgInfo, jc *JobContext) *updateColumnWorker {
@@ -1206,46 +1186,20 @@ func newUpdateColumnWorker(sessCtx sessionctx.Context, id int, t table.PhysicalT
 		}
 	}
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
-	checksumNeeded := false
-	failpoint.Inject("forceRowLevelChecksumOnUpdateColumnBackfill", func() {
-		orig := variable.EnableRowLevelChecksum.Load()
-		defer variable.EnableRowLevelChecksum.Store(orig)
-		variable.EnableRowLevelChecksum.Store(true)
-	})
-	// We use global `EnableRowLevelChecksum` to detect whether checksum is enabled in ddl backfill worker because
-	// `SessionVars.IsRowLevelChecksumEnabled` will filter out internal sessions.
-	if variable.EnableRowLevelChecksum.Load() {
-		if numNonPubCols := len(t.DeletableCols()) - len(t.Cols()); numNonPubCols > 1 {
-			cols := make([]*model.ColumnInfo, len(t.DeletableCols()))
-			for i, col := range t.DeletableCols() {
-				cols[i] = col.ToInfo()
-			}
-			logutil.BgLogger().Warn("skip checksum in update-column backfill since the number of non-public columns is greater than 1",
-				zap.String("jobQuery", reorgInfo.Query), zap.String("reorgInfo", reorgInfo.String()), zap.Any("cols", cols))
-		} else {
-			checksumNeeded = true
-		}
-	}
 	return &updateColumnWorker{
-		backfillCtx:    newBackfillCtx(reorgInfo.d, id, sessCtx, reorgInfo.SchemaName, t, jc, "update_col_rate", false),
+		backfillWorker: newBackfillWorker(jc.ddlJobCtx, sessCtx, id, t, reorgInfo, typeUpdateColumnWorker),
 		oldColInfo:     oldCol,
 		newColInfo:     newCol,
+		metricCounter:  metrics.BackfillTotalCounter.WithLabelValues(metrics.GenerateReorgLabel("update_col_rate", reorgInfo.SchemaName, t.Meta().Name.String())),
 		rowDecoder:     rowDecoder,
 		rowMap:         make(map[int64]types.Datum, len(decodeColMap)),
-		checksumNeeded: checksumNeeded,
+		sqlMode:        reorgInfo.ReorgMeta.SQLMode,
+		jobContext:     jc,
 	}
 }
 
 func (w *updateColumnWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
-}
-
-func (*updateColumnWorker) String() string {
-	return typeUpdateColumnWorker.String()
-}
-
-func (w *updateColumnWorker) GetCtx() *backfillCtx {
-	return w.backfillCtx
 }
 
 type rowRecord struct {
@@ -1254,8 +1208,8 @@ type rowRecord struct {
 	warning *terror.Error // It's used to record the cast warning of a record.
 }
 
-// getNextHandleKey gets next handle of entry that we are going to process.
-func getNextHandleKey(taskRange reorgBackfillTask,
+// getNextKey gets next handle of entry that we are going to process.
+func (*updateColumnWorker) getNextKey(taskRange reorgBackfillTask,
 	taskDone bool, lastAccessedHandle kv.Key) (nextHandle kv.Key) {
 	if !taskDone {
 		// The task is not done. So we need to pick the last processed entry's handle and add one.
@@ -1273,8 +1227,8 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 	taskDone := false
 	var lastAccessedHandle kv.Key
 	oprStartTime := startTime
-	err := iterateSnapshotKeys(w.jobContext, w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(),
-		txn.StartTS(), taskRange.startKey, taskRange.endKey, func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
+	err := iterateSnapshotKeys(w.reorgInfo.d.jobContext(w.reorgInfo.Job), w.sessCtx.GetStore(), w.priority, w.table.RecordPrefix(), txn.StartTS(), taskRange.startKey, taskRange.endKey,
+		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in updateColumnWorker fetchRowColVals", 0)
 			oprStartTime = oprEndTime
@@ -1305,7 +1259,7 @@ func (w *updateColumnWorker) fetchRowColVals(txn kv.Transaction, taskRange reorg
 	}
 
 	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Uint64("txnStartTS", txn.StartTS()), zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
-	return w.rowRecords, getNextHandleKey(taskRange, taskDone, lastAccessedHandle), taskDone, errors.Trace(err)
+	return w.rowRecords, w.getNextKey(taskRange, taskDone, lastAccessedHandle), taskDone, errors.Trace(err)
 }
 
 func (w *updateColumnWorker) getRowRecord(handle kv.Handle, recordKey []byte, rawRow []byte) error {
@@ -1362,15 +1316,15 @@ func (w *updateColumnWorker) getRowRecord(handle kv.Handle, recordKey []byte, ra
 	if err != nil {
 		return errors.Trace(err)
 	}
+
 	newColumnIDs := make([]int64, 0, len(w.rowMap))
 	newRow := make([]types.Datum, 0, len(w.rowMap))
 	for colID, val := range w.rowMap {
 		newColumnIDs = append(newColumnIDs, colID)
 		newRow = append(newRow, val)
 	}
-	checksums := w.calcChecksums()
 	sctx, rd := w.sessCtx.GetSessionVars().StmtCtx, &w.sessCtx.GetSessionVars().RowEncoder
-	newRowVal, err := tablecodec.EncodeRow(sctx, newRow, newColumnIDs, nil, nil, rd, checksums...)
+	newRowVal, err := tablecodec.EncodeRow(sctx, newRow, newColumnIDs, nil, nil, rd)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1378,38 +1332,6 @@ func (w *updateColumnWorker) getRowRecord(handle kv.Handle, recordKey []byte, ra
 	w.rowRecords = append(w.rowRecords, &rowRecord{key: recordKey, vals: newRowVal, warning: recordWarning})
 	w.cleanRowMap()
 	return nil
-}
-
-func (w *updateColumnWorker) calcChecksums() []uint32 {
-	if !w.checksumNeeded {
-		return nil
-	}
-	// when w.checksumNeeded is true, it indicates that there is only one write-reorg column (the new column) and other
-	// columns are public, thus we have to calculate two checksums that one of which only contains the old column and
-	// the other only contains the new column.
-	var checksums [2]uint32
-	for i, id := range []int64{w.newColInfo.ID, w.oldColInfo.ID} {
-		if len(w.checksumBuffer.Cols) > 0 {
-			w.checksumBuffer.Cols = w.checksumBuffer.Cols[:0]
-		}
-		for _, col := range w.table.DeletableCols() {
-			if col.ID == id || (col.IsGenerated() && !col.GeneratedStored) {
-				continue
-			}
-			d := w.rowMap[col.ID]
-			w.checksumBuffer.Cols = append(w.checksumBuffer.Cols, rowcodec.ColData{ColumnInfo: col.ToInfo(), Datum: &d})
-		}
-		if !sort.IsSorted(w.checksumBuffer) {
-			sort.Sort(w.checksumBuffer)
-		}
-		checksum, err := w.checksumBuffer.Checksum()
-		if err != nil {
-			logutil.BgLogger().Warn("skip checksum in update-column backfill due to encode error", zap.Error(err))
-			return nil
-		}
-		checksums[i] = checksum
-	}
-	return checksums[:]
 }
 
 // reformatErrors casted error because `convertTo` function couldn't package column name and datum value for some errors.
@@ -1440,8 +1362,8 @@ func (w *updateColumnWorker) cleanRowMap() {
 	}
 }
 
-// BackfillData will backfill the table record in a transaction. A lock corresponds to a rowKey if the value of rowKey is changed.
-func (w *updateColumnWorker) BackfillData(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
+// BackfillDataInTxn will backfill the table record in a transaction. A lock corresponds to a rowKey if the value of rowKey is changed.
+func (w *updateColumnWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	oprStartTime := time.Now()
 	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
 	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
@@ -1461,8 +1383,8 @@ func (w *updateColumnWorker) BackfillData(handleRange reorgBackfillTask) (taskCt
 		}
 		txn.SetOption(kv.TxnSource, txnSource)
 
-		txn.SetOption(kv.Priority, handleRange.priority)
-		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(handleRange.getJobID()); tagger != nil {
+		txn.SetOption(kv.Priority, w.priority)
+		if tagger := w.reorgInfo.d.getResourceGroupTaggerForTopSQL(w.reorgInfo.Job); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1499,7 +1421,7 @@ func (w *updateColumnWorker) BackfillData(handleRange reorgBackfillTask) (taskCt
 
 		return nil
 	})
-	logSlowOperations(time.Since(oprStartTime), "BackfillData", 3000)
+	logSlowOperations(time.Since(oprStartTime), "BackfillDataInTxn", 3000)
 
 	return
 }
@@ -1770,15 +1692,6 @@ func updateColumnDefaultValue(d *ddlCtx, t *meta.Meta, job *model.Job, newCol *m
 		job.State = model.JobStateCancelled
 		return ver, infoschema.ErrColumnNotExists.GenWithStackByArgs(newCol.Name, tblInfo.Name)
 	}
-
-	if hasDefaultValue, _, err := checkColumnDefaultValue(newContext(d.store), table.ToColumn(oldCol.Clone()), newCol.DefaultValue); err != nil {
-		job.State = model.JobStateCancelled
-		return ver, errors.Trace(err)
-	} else if !hasDefaultValue {
-		job.State = model.JobStateCancelled
-		return ver, dbterror.ErrInvalidDefaultValue.GenWithStackByArgs(newCol.Name)
-	}
-
 	// The newCol's offset may be the value of the old schema version, so we can't use newCol directly.
 	oldCol.DefaultValue = newCol.DefaultValue
 	oldCol.DefaultValueBit = newCol.DefaultValueBit
@@ -1888,11 +1801,11 @@ func rollbackModifyColumnJob(d *ddlCtx, t *meta.Meta, tblInfo *model.TableInfo, 
 func modifyColsFromNull2NotNull(w *worker, dbInfo *model.DBInfo, tblInfo *model.TableInfo, cols []*model.ColumnInfo, newCol *model.ColumnInfo, isDataTruncated bool) error {
 	// Get sessionctx from context resource pool.
 	var sctx sessionctx.Context
-	sctx, err := w.sessPool.Get()
+	sctx, err := w.sessPool.get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.Put(sctx)
+	defer w.sessPool.put(sctx)
 
 	skipCheck := false
 	failpoint.Inject("skipMockContextDoExec", func(val failpoint.Value) {

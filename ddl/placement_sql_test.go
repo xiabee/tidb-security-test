@@ -588,8 +588,7 @@ func checkTiflashReplicaSet(t *testing.T, do *domain.Domain, db, tb string, cnt 
 		return
 	}
 
-	r := infosync.MakeNewRule(tbl.Meta().ID, 1, nil)
-	infosync.GetMockTiFlash().CheckPlacementRule(r)
+	CheckPlacementRule(infosync.GetMockTiFlash(), *infosync.MakeNewRule(tbl.Meta().ID, 1, nil))
 	require.NotNil(t, tiflashReplica)
 	require.Equal(t, cnt, tiflashReplica.Count)
 }

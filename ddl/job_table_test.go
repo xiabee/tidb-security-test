@@ -15,18 +15,14 @@
 package ddl_test
 
 import (
-	"context"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/syncer"
-	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util"
 	"github.com/stretchr/testify/require"
@@ -35,8 +31,11 @@ import (
 
 // TestDDLScheduling tests the DDL scheduling. See Concurrent DDL RFC for the rules of DDL scheduling.
 // This test checks the chosen job records to see if there are wrong scheduling, if job A and job B cannot run concurrently,
-// then all the records of job A must before or after job B, no cross record between these 2 jobs.
+// then the all the record of job A must before or after job B, no cross record between these 2 jobs should be in between.
 func TestDDLScheduling(t *testing.T) {
+	if !variable.EnableConcurrentDDL.Load() {
+		t.Skipf("test requires concurrent ddl")
+	}
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
@@ -60,7 +59,7 @@ func TestDDLScheduling(t *testing.T) {
 		"ALTER TABLE e EXCHANGE PARTITION p1 WITH TABLE e3;",
 	}
 
-	hook := &callback.TestDDLCallback{}
+	hook := &ddl.TestDDLCallback{}
 	var wg util.WaitGroupWrapper
 	wg.Add(1)
 	var once sync.Once
@@ -179,66 +178,67 @@ func check(t *testing.T, record []int64, ids ...int64) {
 	}
 }
 
-func TestUpgradingRelatedJobState(t *testing.T) {
+func TestAlwaysChoiceProcessingJob(t *testing.T) {
+	if !variable.EnableConcurrentDDL.Load() {
+		t.Skipf("test requires concurrent ddl")
+	}
 	store, dom := testkit.CreateMockStoreAndDomain(t)
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("CREATE TABLE e2 (id INT NOT NULL);")
 
 	d := dom.DDL()
 
-	testCases := []struct {
-		sql      string
-		jobState model.JobState
-		err      error
-	}{
-		{"alter table e2 add index idx(id)", model.JobStateDone, nil},
-		{"alter table e2 add index idx1(id)", model.JobStateCancelling, errors.New("[ddl:8214]Cancelled DDL job")},
-		{"alter table e2 add index idx2(id)", model.JobStateRollingback, errors.New("[ddl:8214]Cancelled DDL job")},
-		{"alter table e2 add index idx3(id)", model.JobStateRollbackDone, errors.New("[ddl:8214]Cancelled DDL job")},
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int, b int)")
+
+	ddlJobs := []string{
+		"alter table t add index idx(a)",
+		"alter table t add index idx(b)",
 	}
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/mockUpgradingState", `return(true)`))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/mockUpgradingState"))
-	}()
-
-	num := 0
-	hook := &callback.TestDDLCallback{}
+	hook := &ddl.TestDDLCallback{}
+	var wg util.WaitGroupWrapper
+	wg.Add(1)
+	var once sync.Once
+	var idxa, idxb int64
 	hook.OnGetJobBeforeExported = func(jobType string) {
-		for i := 0; i < 100; i++ {
-			time.Sleep(time.Millisecond * 100)
-			jobs, err := ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session(), nil)
-			require.NoError(t, err)
-			if len(jobs) < 1 || jobs[0].Query != testCases[num].sql {
-				continue
+		once.Do(func() {
+			var jobs []*model.Job
+			for i, job := range ddlJobs {
+				wg.Run(func() {
+					tk := testkit.NewTestKit(t, store)
+					tk.MustExec("use test")
+					recordSet, _ := tk.Exec(job)
+					if recordSet != nil {
+						require.NoError(t, recordSet.Close())
+					}
+				})
+				for {
+					time.Sleep(time.Millisecond * 100)
+					var err error
+					jobs, err = ddl.GetAllDDLJobs(testkit.NewTestKit(t, store).Session(), nil)
+					require.NoError(t, err)
+					if len(jobs) == i+1 {
+						break
+					}
+				}
 			}
+			idxa = jobs[0].ID
+			idxb = jobs[1].ID
+			require.Greater(t, idxb, idxa)
+			tk := testkit.NewTestKit(t, store)
+			tk.MustExec("update mysql.tidb_ddl_job set processing = 1 where job_id = ?", idxb)
+			wg.Done()
+		})
+	}
 
-			if testCases[num].err != nil && jobs[0].SchemaState == model.StateWriteOnly {
-				tk.MustExec("use test")
-				tk.MustExec(fmt.Sprintf("admin cancel ddl jobs %d", jobs[0].ID))
-			}
-			if jobs[0].State == testCases[num].jobState {
-				dom.DDL().StateSyncer().UpdateGlobalState(context.Background(), &syncer.StateInfo{State: syncer.StateUpgrading})
-			}
-			break
-		}
+	record := make([]int64, 0, 16)
+	hook.OnGetJobAfterExported = func(jobType string, job *model.Job) {
+		// record the job schedule order
+		record = append(record, job.ID)
 	}
-	hook.OnGetJobAfterExported = func(jobType string, getJob *model.Job) {
-		if getJob.Query == testCases[num].sql && getJob.State == testCases[num].jobState {
-			dom.DDL().StateSyncer().UpdateGlobalState(context.Background(), &syncer.StateInfo{State: syncer.StateNormalRunning})
-		}
-	}
+
 	d.SetHook(hook)
+	wg.Wait()
 
-	for i, tc := range testCases {
-		num = i
-		if tc.err == nil {
-			tk.MustExec(tc.sql)
-		} else {
-			_, err := tk.Exec(tc.sql)
-			require.Equal(t, tc.err.Error(), err.Error())
-		}
-	}
+	check(t, record, idxb, idxa)
 }

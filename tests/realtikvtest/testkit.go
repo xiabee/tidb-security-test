@@ -19,7 +19,6 @@ package realtikvtest
 import (
 	"flag"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,13 +43,8 @@ import (
 var (
 	// WithRealTiKV is a flag identify whether tests run with real TiKV
 	WithRealTiKV = flag.Bool("with-real-tikv", false, "whether tests run with real TiKV")
-
 	// TiKVPath is the path of the TiKV Storage.
 	TiKVPath = flag.String("tikv-path", "tikv://127.0.0.1:2379?disableGC=true", "TiKV addr")
-
-	// KeyspaceName is an option to specify the name of keyspace that the tests run on,
-	// this option is only valid while the flag WithRealTiKV is set.
-	KeyspaceName = flag.String("keyspace-name", "", "the name of keyspace that the tests run on")
 )
 
 // RunTestMain run common setups for all real tikv tests.
@@ -107,9 +101,8 @@ func CreateMockStoreAndDomainAndSetup(t *testing.T, opts ...mockstore.MockTiKVSt
 		var d driver.TiKVDriver
 		config.UpdateGlobal(func(conf *config.Config) {
 			conf.TxnLocalLatches.Enabled = false
-			conf.KeyspaceName = *KeyspaceName
 		})
-		store, err = d.Open(*TiKVPath)
+		store, err = d.Open("tikv://127.0.0.1:2379?disableGC=true")
 		require.NoError(t, err)
 
 		dom, err = session.BootstrapSession(store)
@@ -121,12 +114,8 @@ func CreateMockStoreAndDomainAndSetup(t *testing.T, opts ...mockstore.MockTiKVSt
 		tk.MustExec(fmt.Sprintf("set global innodb_lock_wait_timeout = %d", variable.DefInnodbLockWaitTimeout))
 		tk.MustExec("use test")
 		rs := tk.MustQuery("show tables")
-		tables := []string{}
 		for _, row := range rs.Rows() {
-			tables = append(tables, fmt.Sprintf("`%v`", row[0]))
-		}
-		if len(tables) > 0 {
-			tk.MustExec(fmt.Sprintf("drop table %s", strings.Join(tables, ",")))
+			tk.MustExec(fmt.Sprintf("drop table %s", row[0]))
 		}
 	} else {
 		store, err = mockstore.NewMockStore(opts...)

@@ -73,7 +73,7 @@ func MockSignedTable() *model.TableInfo {
 			Unique: true,
 		},
 		{
-			Name: model.NewCIStr("x"),
+			Name: model.NewCIStr("e"),
 			Columns: []*model.IndexColumn{
 				{
 					Name:   model.NewCIStr("e"),

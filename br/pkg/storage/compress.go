@@ -46,7 +46,7 @@ func (w *withCompression) Open(ctx context.Context, path string) (ExternalFileRe
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	uncompressReader, err := InterceptDecompressReader(fileReader, w.compressType)
+	uncompressReader, err := newInterceptReader(fileReader, w.compressType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -87,11 +87,8 @@ type compressReader struct {
 	io.Closer
 }
 
-// InterceptDecompressReader intercepts the reader and wraps it with a decompress
-// reader on the given io.ReadSeekCloser. Note that the returned
-// io.ReadSeekCloser does not have the property that Seek(0, io.SeekCurrent)
-// equals total bytes Read() if the decompress reader is used.
-func InterceptDecompressReader(fileReader io.ReadSeekCloser, compressType CompressType) (io.ReadSeekCloser, error) {
+// nolint:interfacer
+func newInterceptReader(fileReader ExternalFileReader, compressType CompressType) (ExternalFileReader, error) {
 	if compressType == NoCompression {
 		return fileReader, nil
 	}
@@ -104,20 +101,6 @@ func InterceptDecompressReader(fileReader io.ReadSeekCloser, compressType Compre
 		Closer: fileReader,
 		Seeker: fileReader,
 	}, nil
-}
-
-func NewLimitedInterceptReader(fileReader ExternalFileReader, compressType CompressType, n int64) (ExternalFileReader, error) {
-	newFileReader := fileReader
-	if n < 0 {
-		return nil, errors.Annotatef(berrors.ErrStorageInvalidConfig, "compressReader doesn't support negative limit, n: %d", n)
-	} else if n > 0 {
-		newFileReader = &compressReader{
-			Reader: io.LimitReader(fileReader, n),
-			Seeker: fileReader,
-			Closer: fileReader,
-		}
-	}
-	return InterceptDecompressReader(newFileReader, compressType)
 }
 
 func (c *compressReader) Seek(offset int64, whence int) (int64, error) {

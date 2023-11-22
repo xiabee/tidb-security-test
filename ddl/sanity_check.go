@@ -16,17 +16,16 @@ package ddl
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"strings"
 
 	"github.com/pingcap/errors"
-	sess "github.com/pingcap/tidb/ddl/internal/session"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/util/intest"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/sqlexec"
@@ -52,11 +51,11 @@ func (d *ddl) checkDeleteRangeCnt(job *model.Job) {
 	}
 }
 
-func queryDeleteRangeCnt(sessPool *sess.Pool, jobID int64) (int, error) {
-	sctx, _ := sessPool.Get()
+func queryDeleteRangeCnt(sessPool *sessionPool, jobID int64) (int, error) {
+	sctx, _ := sessPool.get()
 	s, _ := sctx.(sqlexec.SQLExecutor)
 	defer func() {
-		sessPool.Put(sctx)
+		sessPool.put(sctx)
 	}()
 
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
@@ -98,9 +97,8 @@ func expectedDeleteRangeCnt(ctx delRangeCntCtx, job *model.Job) (int, error) {
 		if err := job.DecodeArgs(&startKey, &physicalTableIDs, &ruleIDs); err != nil {
 			return 0, errors.Trace(err)
 		}
-		return len(physicalTableIDs) + 1, nil
-	case model.ActionDropTablePartition, model.ActionTruncateTablePartition,
-		model.ActionReorganizePartition:
+		return mathutil.Max(len(physicalTableIDs), 1), nil
+	case model.ActionDropTablePartition, model.ActionTruncateTablePartition:
 		var physicalTableIDs []int64
 		if err := job.DecodeArgs(&physicalTableIDs); err != nil {
 			return 0, errors.Trace(err)
@@ -184,7 +182,7 @@ func (ctx *delRangeCntCtx) deduplicateIdxCnt(indexIDs []int64) int {
 // It's only check during the test environment, so it would panic directly.
 // These checks may be controlled by configuration in the future.
 func (d *ddl) checkHistoryJobInTest(ctx sessionctx.Context, historyJob *model.Job) {
-	if !intest.InTest {
+	if !(flag.Lookup("test.v") != nil || flag.Lookup("check.v") != nil) {
 		return
 	}
 

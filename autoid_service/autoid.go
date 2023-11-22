@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
-	autoid1 "github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/owner"
 	"github.com/pingcap/tidb/parser/model"
@@ -188,7 +187,6 @@ func (alloc *autoIDValue) rebase4Unsigned(ctx context.Context,
 	}
 
 	var newBase, newEnd uint64
-	var oldValue int64
 	startTime := time.Now()
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 	err := kv.RunInNewTxn(ctx, store, true, func(ctx context.Context, txn kv.Transaction) error {
@@ -197,7 +195,6 @@ func (alloc *autoIDValue) rebase4Unsigned(ctx context.Context,
 		if err1 != nil {
 			return err1
 		}
-		oldValue = currentEnd
 		uCurrentEnd := uint64(currentEnd)
 		newBase = mathutil.Max(uCurrentEnd, requiredBase)
 		newEnd = mathutil.Min(math.MaxUint64-uint64(batch), newBase) + uint64(batch)
@@ -208,13 +205,6 @@ func (alloc *autoIDValue) rebase4Unsigned(ctx context.Context,
 	if err != nil {
 		return err
 	}
-
-	logutil.BgLogger().Info("rebase4Unsigned from",
-		zap.String("category", "autoid service"),
-		zap.Int64("dbID", dbID),
-		zap.Int64("tblID", tblID),
-		zap.Int64("from", oldValue),
-		zap.Uint64("to", newEnd))
 	alloc.base, alloc.end = int64(newBase), int64(newEnd)
 	return nil
 }
@@ -230,8 +220,7 @@ func (alloc *autoIDValue) rebase4Signed(ctx context.Context, store kv.Storage, d
 		return nil
 	}
 
-	var oldValue, newBase, newEnd int64
-	startTime := time.Now()
+	var newBase, newEnd int64
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 	err := kv.RunInNewTxn(ctx, store, true, func(ctx context.Context, txn kv.Transaction) error {
 		idAcc := meta.NewMeta(txn).GetAutoIDAccessors(dbID, tblID).IncrementID(model.TableInfoVersion5)
@@ -239,23 +228,14 @@ func (alloc *autoIDValue) rebase4Signed(ctx context.Context, store kv.Storage, d
 		if err1 != nil {
 			return err1
 		}
-		oldValue = currentEnd
 		newBase = mathutil.Max(currentEnd, requiredBase)
 		newEnd = mathutil.Min(math.MaxInt64-batch, newBase) + batch
 		_, err1 = idAcc.Inc(newEnd - currentEnd)
 		return err1
 	})
-	metrics.AutoIDHistogram.WithLabelValues(metrics.TableAutoIDRebase, metrics.RetLabel(err)).Observe(time.Since(startTime).Seconds())
 	if err != nil {
 		return err
 	}
-
-	logutil.BgLogger().Info("rebase4Signed from",
-		zap.Int64("dbID", dbID),
-		zap.Int64("tblID", tblID),
-		zap.Int64("from", oldValue),
-		zap.Int64("to", newEnd),
-		zap.String("category", "autoid service"))
 	alloc.base, alloc.end = newBase, newEnd
 	return nil
 }
@@ -273,7 +253,6 @@ type Service struct {
 func New(selfAddr string, etcdAddr []string, store kv.Storage, tlsConfig *tls.Config) *Service {
 	cfg := config.GetGlobalConfig()
 	etcdLogCfg := zap.NewProductionConfig()
-
 	cli, err := clientv3.New(clientv3.Config{
 		LogConfig:        &etcdLogCfg,
 		Endpoints:        etcdAddr,
@@ -291,18 +270,9 @@ func New(selfAddr string, etcdAddr []string, store kv.Storage, tlsConfig *tls.Co
 	if err != nil {
 		panic(err)
 	}
-	return newWithCli(selfAddr, cli, store)
-}
 
-func newWithCli(selfAddr string, cli *clientv3.Client, store kv.Storage) *Service {
 	l := owner.NewOwnerManager(context.Background(), cli, "autoid", selfAddr, autoIDLeaderPath)
-	l.SetBeOwnerHook(func() {
-		logutil.BgLogger().Info("leader change of autoid service, this node become owner",
-			zap.String("addr", selfAddr),
-			zap.String("category", "autoid service"))
-	})
-	// 10 means that autoid service's etcd lease is 10s.
-	err := l.CampaignOwner(10)
+	err = l.CampaignOwner()
 	if err != nil {
 		panic(err)
 	}
@@ -329,7 +299,7 @@ func (m *mockClient) Rebase(ctx context.Context, in *autoid.RebaseRequest, opts 
 var global = make(map[string]*mockClient)
 
 // MockForTest is used for testing, the UT test and unistore use this.
-func MockForTest(store kv.Storage) autoid.AutoIDAllocClient {
+func MockForTest(store kv.Storage) *mockClient {
 	uuid := store.UUID()
 	ret, ok := global[uuid]
 	if !ok {
@@ -347,7 +317,7 @@ func MockForTest(store kv.Storage) autoid.AutoIDAllocClient {
 
 // Close closes the Service and clean up resource.
 func (s *Service) Close() {
-	if s.leaderShip != nil && s.leaderShip.IsOwner() {
+	if s.leaderShip != nil {
 		for k, v := range s.autoIDMap {
 			if v.base > 0 {
 				err := v.forceRebase(context.Background(), s.store, k.dbID, k.tblID, v.base, v.isUnsigned)
@@ -495,14 +465,12 @@ func (s *Service) allocAutoID(ctx context.Context, req *autoid.AutoIDRequest) (*
 
 func (alloc *autoIDValue) forceRebase(ctx context.Context, store kv.Storage, dbID, tblID, requiredBase int64, isUnsigned bool) error {
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
-	var oldValue int64
 	err := kv.RunInNewTxn(ctx, store, true, func(ctx context.Context, txn kv.Transaction) error {
 		idAcc := meta.NewMeta(txn).GetAutoIDAccessors(dbID, tblID).IncrementID(model.TableInfoVersion5)
 		currentEnd, err1 := idAcc.Get()
 		if err1 != nil {
 			return err1
 		}
-		oldValue = currentEnd
 		var step int64
 		if !isUnsigned {
 			step = requiredBase - currentEnd
@@ -516,13 +484,6 @@ func (alloc *autoIDValue) forceRebase(ctx context.Context, store kv.Storage, dbI
 	if err != nil {
 		return err
 	}
-	logutil.BgLogger().Info("forceRebase from",
-		zap.Int64("dbID", dbID),
-		zap.Int64("tblID", tblID),
-		zap.Int64("from", oldValue),
-		zap.Int64("to", requiredBase),
-		zap.Bool("isUnsigned", isUnsigned),
-		zap.String("category", "autoid service"))
 	alloc.base, alloc.end = requiredBase, requiredBase
 	return nil
 }
@@ -553,8 +514,4 @@ func (s *Service) Rebase(ctx context.Context, req *autoid.RebaseRequest) (*autoi
 		return &autoid.RebaseResponse{Errmsg: []byte(err.Error())}, nil
 	}
 	return &autoid.RebaseResponse{}, nil
-}
-
-func init() {
-	autoid1.MockForTest = MockForTest
 }

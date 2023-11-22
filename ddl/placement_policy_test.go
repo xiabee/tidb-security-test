@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/ddl/util"
-	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/domain/infosync"
 	mysql "github.com/pingcap/tidb/errno"
@@ -175,7 +174,7 @@ func TestPlacementPolicy(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("drop placement policy if exists x")
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var policyID int64
 	onJobUpdatedExportedFunc := func(job *model.Job) {
 		if policyID != 0 {

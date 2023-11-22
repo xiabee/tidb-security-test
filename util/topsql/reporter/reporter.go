@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/topsql/collector"
-	reporter_metrics "github.com/pingcap/tidb/util/topsql/reporter/metrics"
 	topsqlstate "github.com/pingcap/tidb/util/topsql/state"
 	"github.com/pingcap/tidb/util/topsql/stmtstats"
 	"go.uber.org/zap"
@@ -124,7 +123,7 @@ func (tsr *RemoteTopSQLReporter) Collect(data []collector.SQLCPUTimeRecord) {
 	case tsr.collectCPUTimeChan <- data:
 	default:
 		// ignore if chan blocked
-		reporter_metrics.IgnoreCollectChannelFullCounter.Inc()
+		ignoreCollectChannelFullCounter.Inc()
 	}
 }
 
@@ -140,7 +139,7 @@ func (tsr *RemoteTopSQLReporter) CollectStmtStatsMap(data stmtstats.StatementSta
 	case tsr.collectStmtStatsChan <- data:
 	default:
 		// ignore if chan blocked
-		reporter_metrics.IgnoreCollectStmtChannelFullCounter.Inc()
+		ignoreCollectStmtChannelFullCounter.Inc()
 	}
 }
 
@@ -250,7 +249,7 @@ func (tsr *RemoteTopSQLReporter) takeDataAndSendToReportChan() {
 	}:
 	default:
 		// ignore if chan blocked
-		reporter_metrics.IgnoreReportChannelFullCounter.Inc()
+		ignoreReportChannelFullCounter.Inc()
 	}
 }
 

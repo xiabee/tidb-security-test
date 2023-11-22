@@ -189,8 +189,7 @@ func (s *mockTiKVStore) refreshCache() {
 	require.NoError(s.t, err)
 }
 
-func (s *mockTiKVStore) batchAddIntHandleRegions(tblID int64, regionCnt, regionSize int,
-	offset int64) (end kv.IntHandle) {
+func (s *mockTiKVStore) batchAddIntHandleRegions(tblID int64, regionCnt int, regionSize int, offset int64) (end kv.IntHandle) {
 	for i := 0; i < regionCnt; i++ {
 		start := kv.IntHandle(offset + int64(i*regionSize))
 		end = kv.IntHandle(start.IntValue() + int64(regionSize))
@@ -228,20 +227,14 @@ func bytesHandle(t *testing.T, data []byte) kv.Handle {
 
 func createTTLTable(t *testing.T, tk *testkit.TestKit, name string, option string) *cache.PhysicalTable {
 	if option == "" {
-		return createTTLTableWithSQL(t, tk, name,
-			fmt.Sprintf("create table test.%s(t timestamp) TTL = `t` + interval 1 day", name))
+		return createTTLTableWithSQL(t, tk, name, fmt.Sprintf("create table test.%s(t timestamp) TTL = `t` + interval 1 day", name))
 	}
 
-	return createTTLTableWithSQL(t, tk, name,
-		fmt.Sprintf("create table test.%s(id %s primary key, t timestamp) TTL = `t` + interval 1 day",
-			name, option))
+	return createTTLTableWithSQL(t, tk, name, fmt.Sprintf("create table test.%s(id %s primary key, t timestamp) TTL = `t` + interval 1 day", name, option))
 }
 
 func create2PKTTLTable(t *testing.T, tk *testkit.TestKit, name string, option string) *cache.PhysicalTable {
-	return createTTLTableWithSQL(t, tk, name,
-		fmt.Sprintf(
-			"create table test.%s(id %s, id2 int, t timestamp, primary key(id, id2)) TTL = `t` + interval 1 day",
-			name, option))
+	return createTTLTableWithSQL(t, tk, name, fmt.Sprintf("create table test.%s(id %s, id2 int, t timestamp, primary key(id, id2)) TTL = `t` + interval 1 day", name, option))
 }
 
 func createTTLTableWithSQL(t *testing.T, tk *testkit.TestKit, name string, sql string) *cache.PhysicalTable {
@@ -377,18 +370,12 @@ func TestSplitTTLScanRangesWithUnsignedInt(t *testing.T) {
 		ranges, err = tbl.SplitScanRanges(context.TODO(), tikvStore, 6)
 		require.NoError(t, err)
 		require.Equal(t, 6, len(ranges))
-		checkRange(t, ranges[0],
-			types.NewUintDatum(uint64(math.MaxInt64)+1), types.NewUintDatum(uint64(math.MaxUint64)-199))
-		checkRange(t, ranges[1],
-			types.NewUintDatum(uint64(math.MaxUint64)-199), types.NewUintDatum(uint64(math.MaxUint64)-99))
-		checkRange(t, ranges[2],
-			types.NewUintDatum(uint64(math.MaxUint64)-99), types.Datum{})
-		checkRange(t, ranges[3],
-			types.Datum{}, types.NewUintDatum(100))
-		checkRange(t, ranges[4],
-			types.NewUintDatum(100), types.NewUintDatum(200))
-		checkRange(t, ranges[5],
-			types.NewUintDatum(200), types.NewUintDatum(uint64(math.MaxInt64)+1))
+		checkRange(t, ranges[0], types.NewUintDatum(uint64(math.MaxInt64)+1), types.NewUintDatum(uint64(math.MaxUint64)-199))
+		checkRange(t, ranges[1], types.NewUintDatum(uint64(math.MaxUint64)-199), types.NewUintDatum(uint64(math.MaxUint64)-99))
+		checkRange(t, ranges[2], types.NewUintDatum(uint64(math.MaxUint64)-99), types.Datum{})
+		checkRange(t, ranges[3], types.Datum{}, types.NewUintDatum(100))
+		checkRange(t, ranges[4], types.NewUintDatum(100), types.NewUintDatum(200))
+		checkRange(t, ranges[5], types.NewUintDatum(200), types.NewUintDatum(uint64(math.MaxInt64)+1))
 
 		// test one table has multiple regions: [MinInt64, a) [a, b) [b, c) [c, d) [d, MaxInt64], b < 0 < c
 		tikvStore.clearRegions()
@@ -398,18 +385,12 @@ func TestSplitTTLScanRangesWithUnsignedInt(t *testing.T) {
 		ranges, err = tbl.SplitScanRanges(context.TODO(), tikvStore, 5)
 		require.NoError(t, err)
 		require.Equal(t, 6, len(ranges))
-		checkRange(t, ranges[0],
-			types.NewUintDatum(uint64(math.MaxInt64)+1), types.NewUintDatum(uint64(math.MaxUint64)-149))
-		checkRange(t, ranges[1],
-			types.NewUintDatum(uint64(math.MaxUint64)-149), types.NewUintDatum(uint64(math.MaxUint64)-49))
-		checkRange(t, ranges[2],
-			types.NewUintDatum(uint64(math.MaxUint64)-49), types.Datum{})
-		checkRange(t, ranges[3],
-			types.Datum{}, types.NewUintDatum(50))
-		checkRange(t, ranges[4],
-			types.NewUintDatum(50), types.NewUintDatum(150))
-		checkRange(t, ranges[5],
-			types.NewUintDatum(150), types.NewUintDatum(uint64(math.MaxInt64)+1))
+		checkRange(t, ranges[0], types.NewUintDatum(uint64(math.MaxInt64)+1), types.NewUintDatum(uint64(math.MaxUint64)-149))
+		checkRange(t, ranges[1], types.NewUintDatum(uint64(math.MaxUint64)-149), types.NewUintDatum(uint64(math.MaxUint64)-49))
+		checkRange(t, ranges[2], types.NewUintDatum(uint64(math.MaxUint64)-49), types.Datum{})
+		checkRange(t, ranges[3], types.Datum{}, types.NewUintDatum(50))
+		checkRange(t, ranges[4], types.NewUintDatum(50), types.NewUintDatum(150))
+		checkRange(t, ranges[5], types.NewUintDatum(150), types.NewUintDatum(uint64(math.MaxInt64)+1))
 	}
 }
 
@@ -448,14 +429,10 @@ func TestSplitTTLScanRangesWithBytes(t *testing.T) {
 		// test one table has multiple regions
 		tikvStore.clearRegions()
 		tikvStore.addRegionBeginWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 3}))
-		tikvStore.addRegionWithTablePrefix(
-			tbl.ID, bytesHandle(t, []byte{1, 2, 3}), bytesHandle(t, []byte{1, 2, 3, 4}))
-		tikvStore.addRegionWithTablePrefix(
-			tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4}), bytesHandle(t, []byte{1, 2, 3, 4, 5}))
-		tikvStore.addRegionWithTablePrefix(
-			tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4, 5}), bytesHandle(t, []byte{1, 2, 4}))
-		tikvStore.addRegionWithTablePrefix(
-			tbl.ID, bytesHandle(t, []byte{1, 2, 4}), bytesHandle(t, []byte{1, 2, 5}))
+		tikvStore.addRegionWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 3}), bytesHandle(t, []byte{1, 2, 3, 4}))
+		tikvStore.addRegionWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4}), bytesHandle(t, []byte{1, 2, 3, 4, 5}))
+		tikvStore.addRegionWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4, 5}), bytesHandle(t, []byte{1, 2, 4}))
+		tikvStore.addRegionWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 4}), bytesHandle(t, []byte{1, 2, 5}))
 		tikvStore.addRegionEndWithTablePrefix(bytesHandle(t, []byte{1, 2, 5}), tbl.ID)
 		ranges, err = tbl.SplitScanRanges(context.TODO(), tikvStore, 4)
 		require.NoError(t, err)
@@ -474,6 +451,7 @@ func TestNoTTLSplitSupportTables(t *testing.T) {
 	tbls := []*cache.PhysicalTable{
 		createTTLTable(t, tk, "t1", "char(32)  CHARACTER SET UTF8MB4"),
 		createTTLTable(t, tk, "t2", "varchar(32) CHARACTER SET UTF8MB4"),
+		createTTLTable(t, tk, "t3", "double"),
 		createTTLTable(t, tk, "t4", "decimal(32, 2)"),
 		create2PKTTLTable(t, tk, "t5", "char(32)  CHARACTER SET UTF8MB4"),
 	}

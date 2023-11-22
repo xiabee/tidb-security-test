@@ -63,7 +63,6 @@ func TestMetricsRegister(t *testing.T) {
 	assert.True(t, r.Unregister(m.ProcessedEngineCounter))
 	assert.True(t, r.Unregister(m.ChunkCounter))
 	assert.True(t, r.Unregister(m.BytesCounter))
-	assert.True(t, r.Unregister(m.RowsCounter))
 	assert.True(t, r.Unregister(m.ImportSecondsHistogram))
 	assert.True(t, r.Unregister(m.ChunkParserReadBlockSecondsHistogram))
 	assert.True(t, r.Unregister(m.ApplyWorkerSecondsHistogram))
@@ -75,7 +74,6 @@ func TestMetricsRegister(t *testing.T) {
 	assert.True(t, r.Unregister(m.BlockDeliverBytesHistogram))
 	assert.True(t, r.Unregister(m.BlockDeliverKVPairsHistogram))
 	assert.True(t, r.Unregister(m.ChecksumSecondsHistogram))
-	assert.True(t, r.Unregister(m.SSTSecondsHistogram))
 	assert.True(t, r.Unregister(m.LocalStorageUsageBytesGauge))
 	assert.True(t, r.Unregister(m.ProgressGauge))
 }
@@ -92,7 +90,6 @@ func TestMetricsUnregister(t *testing.T) {
 	assert.False(t, r.Unregister(m.ProcessedEngineCounter))
 	assert.False(t, r.Unregister(m.ChunkCounter))
 	assert.False(t, r.Unregister(m.BytesCounter))
-	assert.False(t, r.Unregister(m.RowsCounter))
 	assert.False(t, r.Unregister(m.ImportSecondsHistogram))
 	assert.False(t, r.Unregister(m.ChunkParserReadBlockSecondsHistogram))
 	assert.False(t, r.Unregister(m.ApplyWorkerSecondsHistogram))
@@ -104,7 +101,6 @@ func TestMetricsUnregister(t *testing.T) {
 	assert.False(t, r.Unregister(m.BlockDeliverBytesHistogram))
 	assert.False(t, r.Unregister(m.BlockDeliverKVPairsHistogram))
 	assert.False(t, r.Unregister(m.ChecksumSecondsHistogram))
-	assert.False(t, r.Unregister(m.SSTSecondsHistogram))
 	assert.False(t, r.Unregister(m.LocalStorageUsageBytesGauge))
 	assert.False(t, r.Unregister(m.ProgressGauge))
 }

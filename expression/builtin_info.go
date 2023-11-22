@@ -44,7 +44,6 @@ var (
 	_ functionClass = &foundRowsFunctionClass{}
 	_ functionClass = &currentUserFunctionClass{}
 	_ functionClass = &currentRoleFunctionClass{}
-	_ functionClass = &currentResourceGroupFunctionClass{}
 	_ functionClass = &userFunctionClass{}
 	_ functionClass = &connectionIDFunctionClass{}
 	_ functionClass = &lastInsertIDFunctionClass{}
@@ -70,7 +69,6 @@ var (
 	_ builtinFunc = &builtinDatabaseSig{}
 	_ builtinFunc = &builtinFoundRowsSig{}
 	_ builtinFunc = &builtinCurrentUserSig{}
-	_ builtinFunc = &builtinCurrentResourceGroupSig{}
 	_ builtinFunc = &builtinUserSig{}
 	_ builtinFunc = &builtinConnectionIDSig{}
 	_ builtinFunc = &builtinLastInsertIDSig{}
@@ -245,41 +243,6 @@ func (b *builtinCurrentRoleSig) evalString(row chunk.Row) (res string, isNull bo
 		}
 	}
 	return res, false, nil
-}
-
-type currentResourceGroupFunctionClass struct {
-	baseFunctionClass
-}
-
-func (c *currentResourceGroupFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString)
-	if err != nil {
-		return nil, err
-	}
-	bf.tp.SetFlen(64)
-	sig := &builtinCurrentResourceGroupSig{bf}
-	return sig, nil
-}
-
-type builtinCurrentResourceGroupSig struct {
-	baseBuiltinFunc
-}
-
-func (b *builtinCurrentResourceGroupSig) Clone() builtinFunc {
-	newSig := &builtinCurrentResourceGroupSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-func (b *builtinCurrentResourceGroupSig) evalString(row chunk.Row) (res string, isNull bool, err error) {
-	data := b.ctx.GetSessionVars()
-	if data == nil {
-		return "", true, errors.Errorf("Missing session variable when eval builtin")
-	}
-	return data.ResourceGroupName, false, nil
 }
 
 type userFunctionClass struct {

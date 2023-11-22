@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tidb/parser/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -96,7 +95,7 @@ func IsTypeCompatible(src types.FieldType, target types.FieldType) bool {
 }
 
 func GRPCConn(ctx context.Context, storeAddr string, tlsConf *tls.Config, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	secureOpt := grpc.WithTransportCredentials(insecure.NewCredentials())
+	secureOpt := grpc.WithInsecure()
 	if tlsConf != nil {
 		secureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConf))
 	}

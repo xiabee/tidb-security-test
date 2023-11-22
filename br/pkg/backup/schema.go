@@ -5,6 +5,7 @@ package backup
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -40,22 +41,18 @@ type schemaInfo struct {
 	stats      *handle.JSONTable
 }
 
-type iterFuncTp func(kv.Storage, func(*model.DBInfo, *model.TableInfo)) error
-
 // Schemas is task for backuping schemas.
 type Schemas struct {
-	iterFunc iterFuncTp
-
-	size int
+	// name -> schema
+	schemas map[string]*schemaInfo
 
 	// checkpoint: table id -> checksum
 	checkpointChecksum map[int64]*checkpoint.ChecksumItem
 }
 
-func NewBackupSchemas(iterFunc iterFuncTp, size int) *Schemas {
+func NewBackupSchemas() *Schemas {
 	return &Schemas{
-		iterFunc:           iterFunc,
-		size:               size,
+		schemas:            make(map[string]*schemaInfo),
 		checkpointChecksum: nil,
 	}
 }
@@ -64,11 +61,28 @@ func (ss *Schemas) SetCheckpointChecksum(checkpointChecksum map[int64]*checkpoin
 	ss.checkpointChecksum = checkpointChecksum
 }
 
+func (ss *Schemas) AddSchema(
+	dbInfo *model.DBInfo, tableInfo *model.TableInfo,
+) {
+	if tableInfo == nil {
+		ss.schemas[utils.EncloseName(dbInfo.Name.L)] = &schemaInfo{
+			dbInfo: dbInfo,
+		}
+		return
+	}
+	name := fmt.Sprintf("%s.%s",
+		utils.EncloseName(dbInfo.Name.L), utils.EncloseName(tableInfo.Name.L))
+	ss.schemas[name] = &schemaInfo{
+		tableInfo: tableInfo,
+		dbInfo:    dbInfo,
+	}
+}
+
 // BackupSchemas backups table info, including checksum and stats.
 func (ss *Schemas) BackupSchemas(
 	ctx context.Context,
 	metaWriter *metautil.MetaWriter,
-	checkpointRunner *checkpoint.CheckpointRunner[checkpoint.BackupKeyType, checkpoint.BackupValueType],
+	checkpointRunner *checkpoint.CheckpointRunner,
 	store kv.Storage,
 	statsHandle *handle.Handle,
 	backupTS uint64,
@@ -88,15 +102,10 @@ func (ss *Schemas) BackupSchemas(
 	startAll := time.Now()
 	op := metautil.AppendSchema
 	metaWriter.StartWriteMetasAsync(ctx, op)
-	err := ss.iterFunc(store, func(dbInfo *model.DBInfo, tableInfo *model.TableInfo) {
-		// because the field of `dbInfo` would be modified, which affects the later iteration.
-		// so copy the `dbInfo` for each to `newDBInfo`
-		newDBInfo := *dbInfo
-		schema := &schemaInfo{
-			tableInfo: tableInfo,
-			dbInfo:    &newDBInfo,
-		}
-
+	for _, s := range ss.schemas {
+		schema := s
+		// Because schema.dbInfo is a pointer that many tables point to.
+		// Remove "add Temporary-prefix into dbName" from closure to prevent concurrent operations.
 		if utils.IsSysDB(schema.dbInfo.Name.L) {
 			schema.dbInfo.Name = utils.TemporaryDBName(schema.dbInfo.Name.O)
 		}
@@ -108,7 +117,7 @@ func (ss *Schemas) BackupSchemas(
 		}
 		workerPool.ApplyOnErrorGroup(errg, func() error {
 			if schema.tableInfo != nil {
-				logger := log.L().With(
+				logger := log.With(
 					zap.String("db", schema.dbInfo.Name.O),
 					zap.String("table", schema.tableInfo.Name.O),
 				)
@@ -130,18 +139,22 @@ func (ss *Schemas) BackupSchemas(
 							return errors.Trace(err)
 						}
 						calculateCost := time.Since(start)
+						var flushCost time.Duration
 						if checkpointRunner != nil {
 							// if checkpoint runner is running and the checksum is not from checkpoint
 							// then flush the checksum by the checkpoint runner
-							if err = checkpointRunner.FlushChecksum(ctx, schema.tableInfo.ID, schema.crc64xor, schema.totalKvs, schema.totalBytes); err != nil {
+							startFlush := time.Now()
+							if err = checkpointRunner.FlushChecksum(ctx, schema.tableInfo.ID, schema.crc64xor, schema.totalKvs, schema.totalBytes, calculateCost.Seconds()); err != nil {
 								return errors.Trace(err)
 							}
+							flushCost = time.Since(startFlush)
 						}
 						logger.Info("Calculate table checksum completed",
 							zap.Uint64("Crc64Xor", schema.crc64xor),
 							zap.Uint64("TotalKvs", schema.totalKvs),
 							zap.Uint64("TotalBytes", schema.totalBytes),
-							zap.Duration("calculate-take", calculateCost))
+							zap.Duration("calculate-take", calculateCost),
+							zap.Duration("flush-take", flushCost))
 					}
 				}
 				if statsHandle != nil {
@@ -163,9 +176,6 @@ func (ss *Schemas) BackupSchemas(
 			}
 			return nil
 		})
-	})
-	if err != nil {
-		return errors.Trace(err)
 	}
 	if err := errg.Wait(); err != nil {
 		return errors.Trace(err)
@@ -177,7 +187,7 @@ func (ss *Schemas) BackupSchemas(
 
 // Len returns the number of schemas.
 func (ss *Schemas) Len() int {
-	return ss.size
+	return len(ss.schemas)
 }
 
 func (s *schemaInfo) calculateChecksum(

@@ -19,6 +19,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/domain"
@@ -28,7 +29,6 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	plannercore "github.com/pingcap/tidb/planner/core"
-	"github.com/pingcap/tidb/planner/util"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/statistics"
@@ -39,7 +39,6 @@ import (
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tidb/util/stringutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"github.com/pingcap/tipb/go-tipb"
 	"golang.org/x/exp/slices"
 )
@@ -106,8 +105,6 @@ type TableReaderExecutor struct {
 
 	keepOrder bool
 	desc      bool
-	// byItems only for partition table with orderBy + pushedLimit
-	byItems   []*util.ByItems
 	paging    bool
 	storeType kv.StoreType
 	// corColInFilter tells whether there's correlated column in filter.
@@ -138,8 +135,11 @@ func (e *TableReaderExecutor) setDummy() {
 
 // Open initializes necessary variables for using this executor.
 func (e *TableReaderExecutor) Open(ctx context.Context) error {
-	r, ctx := tracing.StartRegionEx(ctx, "TableReaderExecutor.Open")
-	defer r.End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("TableReaderExecutor.Open", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
 	failpoint.Inject("mockSleepInTableReaderNext", func(v failpoint.Value) {
 		ms := v.(int)
 		time.Sleep(time.Millisecond * time.Duration(ms))
@@ -188,7 +188,6 @@ func (e *TableReaderExecutor) Open(ctx context.Context) error {
 			e.feedback.Invalidate()
 		}
 	}
-
 	firstPartRanges, secondPartRanges := distsql.SplitRangesAcrossInt64Boundary(e.ranges, e.keepOrder, e.desc, e.table.Meta() != nil && e.table.Meta().IsCommonHandle)
 
 	// Treat temporary table as dummy table, avoid sending distsql request to TiKV.
@@ -315,26 +314,6 @@ func (e *TableReaderExecutor) buildResp(ctx context.Context, ranges []*ranger.Ra
 		return result, nil
 	}
 
-	// use sortedSelectResults here when pushDown limit for partition table.
-	if e.kvRangeBuilder != nil && e.byItems != nil {
-		kvReqs, err := e.buildKVReqSeparately(ctx, ranges)
-		if err != nil {
-			return nil, err
-		}
-		var results []distsql.SelectResult
-		for _, kvReq := range kvReqs {
-			result, err := e.SelectResult(ctx, e.ctx, kvReq, retTypes(e), e.feedback, getPhysicalPlanIDs(e.plans), e.id)
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, result)
-		}
-		if len(results) == 1 {
-			return results[0], nil
-		}
-		return distsql.NewSortedSelectResults(results, nil, e.Schema(), e.byItems, e.memTracker), nil
-	}
-
 	kvReq, err := e.buildKVReq(ctx, ranges)
 	if err != nil {
 		return nil, err
@@ -378,7 +357,6 @@ func (e *TableReaderExecutor) buildKVReqSeparately(ctx context.Context, ranges [
 			SetPaging(e.paging).
 			SetAllowBatchCop(e.batchCop).
 			SetClosestReplicaReadAdjuster(newClosestReadAdjuster(e.ctx, &reqBuilder.Request, e.netDataSize)).
-			SetConnID(e.ctx.GetSessionVars().ConnectionID).
 			Build()
 		if err != nil {
 			return nil, err
@@ -420,7 +398,6 @@ func (e *TableReaderExecutor) buildKVReqForPartitionTableScan(ctx context.Contex
 		SetPaging(e.paging).
 		SetAllowBatchCop(e.batchCop).
 		SetClosestReplicaReadAdjuster(newClosestReadAdjuster(e.ctx, &reqBuilder.Request, e.netDataSize)).
-		SetConnID(e.ctx.GetSessionVars().ConnectionID).
 		Build()
 	if err != nil {
 		return nil, err
@@ -469,8 +446,7 @@ func (e *TableReaderExecutor) buildKVReq(ctx context.Context, ranges []*ranger.R
 		SetStoreType(e.storeType).
 		SetAllowBatchCop(e.batchCop).
 		SetClosestReplicaReadAdjuster(newClosestReadAdjuster(e.ctx, &reqBuilder.Request, e.netDataSize)).
-		SetPaging(e.paging).
-		SetConnID(e.ctx.GetSessionVars().ConnectionID)
+		SetPaging(e.paging)
 	return reqBuilder.Build()
 }
 
@@ -490,19 +466,13 @@ func buildVirtualColumnIndex(schema *expression.Schema, columns []*model.ColumnI
 
 // buildVirtualColumnInfo saves virtual column indices and sort them in definition order
 func (e *TableReaderExecutor) buildVirtualColumnInfo() {
-	e.virtualColumnIndex, e.virtualColumnRetFieldTypes = buildVirtualColumnInfo(e.Schema(), e.columns)
-}
-
-// buildVirtualColumnInfo saves virtual column indices and sort them in definition order
-func buildVirtualColumnInfo(schema *expression.Schema, columns []*model.ColumnInfo) (colIndexs []int, retTypes []*types.FieldType) {
-	colIndexs = buildVirtualColumnIndex(schema, columns)
-	if len(colIndexs) > 0 {
-		retTypes = make([]*types.FieldType, len(colIndexs))
-		for i, idx := range colIndexs {
-			retTypes[i] = schema.Columns[idx].RetType
+	e.virtualColumnIndex = buildVirtualColumnIndex(e.Schema(), e.columns)
+	if len(e.virtualColumnIndex) > 0 {
+		e.virtualColumnRetFieldTypes = make([]*types.FieldType, len(e.virtualColumnIndex))
+		for i, idx := range e.virtualColumnIndex {
+			e.virtualColumnRetFieldTypes[i] = e.schema.Columns[idx].RetType
 		}
 	}
-	return colIndexs, retTypes
 }
 
 type tableResultHandler struct {

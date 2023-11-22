@@ -28,7 +28,6 @@ go_test(
     ],
     embed = [":funcdep"],
     flaky = True,
-    shard_count = 16,
     deps = [
         "//domain",
         "//infoschema",

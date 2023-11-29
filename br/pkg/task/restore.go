@@ -203,6 +203,7 @@ type RestoreConfig struct {
 	VolumeType          pconfig.EBSVolumeType `json:"volume-type" toml:"volume-type"`
 	VolumeIOPS          int64                 `json:"volume-iops" toml:"volume-iops"`
 	VolumeThroughput    int64                 `json:"volume-throughput" toml:"volume-throughput"`
+	VolumeEncrypted     bool                  `json:"volume-encrypted" toml:"volume-encrypted"`
 	ProgressFile        string                `json:"progress-file" toml:"progress-file"`
 	TargetAZ            string                `json:"target-az" toml:"target-az"`
 	UseFSR              bool                  `json:"use-fsr" toml:"use-fsr"`
@@ -353,6 +354,9 @@ func (cfg *RestoreConfig) ParseFromFlags(flags *pflag.FlagSet) error {
 		if cfg.VolumeThroughput, err = flags.GetInt64(flagVolumeThroughput); err != nil {
 			return errors.Trace(err)
 		}
+		if cfg.VolumeEncrypted, err = flags.GetBool(flagVolumeEncrypted); err != nil {
+			return errors.Trace(err)
+		}
 
 		cfg.ProgressFile, err = flags.GetString(flagProgressFile)
 		if err != nil {
@@ -495,6 +499,23 @@ func isFullRestore(cmdName string) bool {
 // IsStreamRestore checks the command is `restore point`
 func IsStreamRestore(cmdName string) bool {
 	return cmdName == PointRestoreCmd
+}
+
+func DefaultRestoreConfig() RestoreConfig {
+	fs := pflag.NewFlagSet("dummy", pflag.ContinueOnError)
+	DefineCommonFlags(fs)
+	DefineRestoreFlags(fs)
+	cfg := RestoreConfig{}
+	err := multierr.Combine(
+		cfg.ParseFromFlags(fs),
+		cfg.RestoreCommonConfig.ParseFromFlags(fs),
+		cfg.Config.ParseFromFlags(fs),
+	)
+	if err != nil {
+		log.Panic("infallible failed.", zap.Error(err))
+	}
+
+	return cfg
 }
 
 // RunRestore starts a restore task inside the current goroutine.

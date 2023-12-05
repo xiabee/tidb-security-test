@@ -4,11 +4,10 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//     http://wwm.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,8 +18,7 @@ import (
 
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta/autoid"
-	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/clientv3"
 )
 
 // Option represents an option to initialize the DDL module
@@ -28,12 +26,11 @@ type Option func(*Options)
 
 // Options represents all the options of the DDL module needs
 type Options struct {
-	EtcdCli      *clientv3.Client
-	Store        kv.Storage
-	AutoIDClient *autoid.ClientDiscover
-	InfoCache    *infoschema.InfoCache
-	Hook         Callback
-	Lease        time.Duration
+	EtcdCli   *clientv3.Client
+	Store     kv.Storage
+	InfoCache *infoschema.InfoCache
+	Hook      Callback
+	Lease     time.Duration
 }
 
 // WithEtcdClient specifies the `clientv3.Client` of DDL used to request the etcd service
@@ -54,13 +51,6 @@ func WithStore(store kv.Storage) Option {
 func WithInfoCache(ic *infoschema.InfoCache) Option {
 	return func(options *Options) {
 		options.InfoCache = ic
-	}
-}
-
-// WithAutoIDClient specifies the autoid client used by the autoid service for those AUTO_ID_CACHE=1 tables.
-func WithAutoIDClient(cli *autoid.ClientDiscover) Option {
-	return func(options *Options) {
-		options.AutoIDClient = cli
 	}
 }
 

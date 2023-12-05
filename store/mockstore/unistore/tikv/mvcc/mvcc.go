@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,11 +15,10 @@ package mvcc
 
 import (
 	"encoding/binary"
-	"encoding/hex"
-	"fmt"
 	"unsafe"
 
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+
 	"github.com/pingcap/tidb/util/codec"
 )
 
@@ -113,18 +111,6 @@ func (l *Lock) ToLockInfo(key []byte) *kvrpcpb.LockInfo {
 		MinCommitTs:     l.MinCommitTS,
 		Secondaries:     l.Secondaries,
 	}
-}
-
-// String implements fmt.Stringer for Lock.
-func (l *Lock) String() string {
-	return fmt.Sprintf(
-		"Lock { Type: %v, StartTS: %v,  ForUpdateTS: %v, Primary: %v, UseAsyncCommit: %v }",
-		kvrpcpb.Op(l.Op).String(),
-		l.StartTS,
-		l.ForUpdateTS,
-		hex.EncodeToString(l.Primary),
-		l.UseAsyncCommit,
-	)
 }
 
 // UserMeta value for lock.

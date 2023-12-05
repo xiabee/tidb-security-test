@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,14 +19,17 @@ import (
 	"runtime/trace"
 	"time"
 
+	"github.com/pingcap/errors"
+	"github.com/pingcap/parser/charset"
+	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta/autoid"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
+	"go.uber.org/zap"
 )
 
 // ReplaceExec represents a replace executor.
@@ -39,9 +41,6 @@ type ReplaceExec struct {
 // Close implements the Executor Close interface.
 func (e *ReplaceExec) Close() error {
 	e.setMessage()
-	if e.runtimeStats != nil && e.stats != nil {
-		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
-	}
 	if e.SelectExec != nil {
 		return e.SelectExec.Close()
 	}
@@ -60,6 +59,59 @@ func (e *ReplaceExec) Open(ctx context.Context) error {
 	return nil
 }
 
+// removeRow removes the duplicate row and cleanup its keys in the key-value map,
+// but if the to-be-removed row equals to the to-be-added row, no remove or add things to do.
+func (e *ReplaceExec) removeRow(ctx context.Context, txn kv.Transaction, handle kv.Handle, r toBeCheckedRow) (bool, error) {
+	newRow := r.row
+	oldRow, err := getOldRow(ctx, e.ctx, txn, r.t, handle, e.GenExprs)
+	if err != nil {
+		logutil.BgLogger().Error("get old row failed when replace",
+			zap.String("handle", handle.String()),
+			zap.String("toBeInsertedRow", types.DatumsToStrNoErr(r.row)))
+		if kv.IsErrNotFound(err) {
+			err = errors.NotFoundf("can not be duplicated row, due to old row not found. handle %s", handle)
+		}
+		return false, err
+	}
+
+	rowUnchanged, err := e.EqualDatumsAsBinary(e.ctx.GetSessionVars().StmtCtx, oldRow, newRow)
+	if err != nil {
+		return false, err
+	}
+	if rowUnchanged {
+		e.ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
+		return true, nil
+	}
+
+	err = r.t.RemoveRecord(e.ctx, handle, oldRow)
+	if err != nil {
+		return false, err
+	}
+	e.ctx.GetSessionVars().StmtCtx.AddAffectedRows(1)
+	return false, nil
+}
+
+// EqualDatumsAsBinary compare if a and b contains the same datum values in binary collation.
+func (e *ReplaceExec) EqualDatumsAsBinary(sc *stmtctx.StatementContext, a []types.Datum, b []types.Datum) (bool, error) {
+	if len(a) != len(b) {
+		return false, nil
+	}
+	for i, ai := range a {
+		collation := ai.Collation()
+		// We should use binary collation to compare datum, otherwise the result will be incorrect
+		ai.SetCollation(charset.CollationBin)
+		v, err := ai.CompareDatum(sc, &b[i])
+		ai.SetCollation(collation)
+		if err != nil {
+			return false, errors.Trace(err)
+		}
+		if v != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // replaceRow removes all duplicate rows for one row, then inserts it.
 func (e *ReplaceExec) replaceRow(ctx context.Context, r toBeCheckedRow) error {
 	txn, err := e.ctx.Txn(true)
@@ -74,7 +126,7 @@ func (e *ReplaceExec) replaceRow(ctx context.Context, r toBeCheckedRow) error {
 		}
 
 		if _, err := txn.Get(ctx, r.handleKey.newKey); err == nil {
-			rowUnchanged, err := e.removeRow(ctx, txn, handle, r, true)
+			rowUnchanged, err := e.removeRow(ctx, txn, handle, r)
 			if err != nil {
 				return err
 			}
@@ -113,20 +165,24 @@ func (e *ReplaceExec) replaceRow(ctx context.Context, r toBeCheckedRow) error {
 
 // removeIndexRow removes the row which has a duplicated key.
 // the return values:
-//  1. bool: true when the row is unchanged. This means no need to remove, and then add the row.
-//  2. bool: true when found the duplicated key. This only means that duplicated key was found,
-//     and the row was removed.
-//  3. error: the error.
+//     1. bool: true when the row is unchanged. This means no need to remove, and then add the row.
+//     2. bool: true when found the duplicated key. This only means that duplicated key was found,
+//              and the row was removed.
+//     3. error: the error.
 func (e *ReplaceExec) removeIndexRow(ctx context.Context, txn kv.Transaction, r toBeCheckedRow) (bool, bool, error) {
 	for _, uk := range r.uniqueKeys {
-		_, handle, err := tables.FetchDuplicatedHandle(ctx, uk.newKey, true, txn, e.Table.Meta().ID, uk.commonHandle)
+		val, err := txn.Get(ctx, uk.newKey)
 		if err != nil {
+			if kv.IsErrNotFound(err) {
+				continue
+			}
 			return false, false, err
 		}
-		if handle == nil {
-			continue
+		handle, err := tablecodec.DecodeHandleInUniqueIndexValue(val, uk.commonHandle)
+		if err != nil {
+			return false, true, err
 		}
-		rowUnchanged, err := e.removeRow(ctx, txn, handle, r, true)
+		rowUnchanged, err := e.removeRow(ctx, txn, handle, r)
 		if err != nil {
 			return false, true, err
 		}
@@ -168,14 +224,13 @@ func (e *ReplaceExec) exec(ctx context.Context, newRows [][]types.Datum) error {
 			defer snapshot.SetOption(kv.CollectRuntimeStats, nil)
 		}
 	}
-	setOptionForTopSQL(e.ctx.GetSessionVars().StmtCtx, txn)
+	setResourceGroupTagForTxn(e.ctx.GetSessionVars().StmtCtx, txn)
 	prefetchStart := time.Now()
 	// Use BatchGet to fill cache.
 	// It's an optimization and could be removed without affecting correctness.
-	if err = e.prefetchDataCache(ctx, txn, toBeCheckedRows); err != nil {
+	if err = prefetchDataCache(ctx, txn, toBeCheckedRows); err != nil {
 		return err
 	}
-
 	if e.stats != nil {
 		e.stats.Prefetch = time.Since(prefetchStart)
 	}
@@ -193,10 +248,6 @@ func (e *ReplaceExec) exec(ctx context.Context, newRows [][]types.Datum) error {
 // Next implements the Executor Next interface.
 func (e *ReplaceExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.Reset()
-	if e.collectRuntimeStatsEnabled() {
-		ctx = context.WithValue(ctx, autoid.AllocatorRuntimeStatsCtxKey, e.stats.AllocatorRuntimeStats)
-	}
-
 	if len(e.children) > 0 && e.children[0] != nil {
 		return insertRowsFromSelect(ctx, e)
 	}

@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -17,8 +16,8 @@ package kv
 import (
 	"strings"
 
+	pmysql "github.com/pingcap/parser/mysql"
 	mysql "github.com/pingcap/tidb/errno"
-	pmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/dbterror"
 )
 
@@ -32,13 +31,8 @@ var (
 	// ErrTxnRetryable is used when KV store occurs retryable error which SQL layer can safely retry the transaction.
 	// When using TiKV as the storage node, the error is returned ONLY when lock not found (txnLockNotFound) in Commit,
 	// subject to change it in the future.
-	ErrTxnRetryable = dbterror.ClassKV.NewStdErr(
-		mysql.ErrTxnRetryable,
-		pmysql.Message(
-			mysql.MySQLErrName[mysql.ErrTxnRetryable].Raw+TxnRetryableMark,
-			mysql.MySQLErrName[mysql.ErrTxnRetryable].RedactArgPos,
-		),
-	)
+	ErrTxnRetryable = dbterror.ClassKV.NewStdErr(mysql.ErrTxnRetryable,
+		pmysql.Message(mysql.MySQLErrName[mysql.ErrTxnRetryable].Raw+TxnRetryableMark, []int{0}))
 	// ErrCannotSetNilValue is the error when sets an empty value.
 	ErrCannotSetNilValue = dbterror.ClassKV.NewStd(mysql.ErrCannotSetNilValue)
 	// ErrInvalidTxn is the error when commits or rollbacks in an invalid transaction.
@@ -52,25 +46,13 @@ var (
 	// ErrNotImplemented returns when a function is not implemented yet.
 	ErrNotImplemented = dbterror.ClassKV.NewStd(mysql.ErrNotImplemented)
 	// ErrWriteConflict is the error when the commit meets an write conflict error.
-	ErrWriteConflict = dbterror.ClassKV.NewStdErr(
-		mysql.ErrWriteConflict,
-		pmysql.Message(
-			mysql.MySQLErrName[mysql.ErrWriteConflict].Raw+" "+TxnRetryableMark,
-			mysql.MySQLErrName[mysql.ErrWriteConflict].RedactArgPos,
-		),
-	)
+	ErrWriteConflict = dbterror.ClassKV.NewStdErr(mysql.ErrWriteConflict,
+		pmysql.Message(mysql.MySQLErrName[mysql.ErrWriteConflict].Raw+" "+TxnRetryableMark, []int{3}))
 	// ErrWriteConflictInTiDB is the error when the commit meets an write conflict error when local latch is enabled.
-	ErrWriteConflictInTiDB = dbterror.ClassKV.NewStdErr(
-		mysql.ErrWriteConflictInTiDB,
-		pmysql.Message(
-			mysql.MySQLErrName[mysql.ErrWriteConflictInTiDB].Raw+" "+TxnRetryableMark,
-			mysql.MySQLErrName[mysql.ErrWriteConflictInTiDB].RedactArgPos,
-		),
-	)
+	ErrWriteConflictInTiDB = dbterror.ClassKV.NewStdErr(mysql.ErrWriteConflictInTiDB,
+		pmysql.Message(mysql.MySQLErrName[mysql.ErrWriteConflictInTiDB].Raw+" "+TxnRetryableMark, nil))
 	// ErrLockExpire is the error when the lock is expired.
 	ErrLockExpire = dbterror.ClassTiKV.NewStd(mysql.ErrLockExpire)
-	// ErrAssertionFailed is the error when an assertion fails.
-	ErrAssertionFailed = dbterror.ClassTiKV.NewStd(mysql.ErrAssertionFailed)
 )
 
 // IsTxnRetryableError checks if the error could safely retry the transaction.

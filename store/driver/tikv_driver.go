@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -32,11 +31,11 @@ import (
 	derr "github.com/pingcap/tidb/store/driver/error"
 	txn_driver "github.com/pingcap/tidb/store/driver/txn"
 	"github.com/pingcap/tidb/store/gcworker"
+	"github.com/pingcap/tidb/store/tikv"
+	"github.com/pingcap/tidb/store/tikv/config"
+	"github.com/pingcap/tidb/store/tikv/tikvrpc"
+	"github.com/pingcap/tidb/store/tikv/util"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/tikv/client-go/v2/config"
-	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikvrpc"
-	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -113,7 +112,7 @@ func (d *TiKVDriver) setDefaultAndOptions(options ...Option) {
 
 // OpenWithOptions is used by other program that use tidb as a library, to avoid modifying GlobalConfig
 // unspecified options will be set to global config
-func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv.Storage, err error) {
+func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (kv.Storage, error) {
 	mc.Lock()
 	defer mc.Unlock()
 	d.setDefaultAndOptions(options...)
@@ -122,28 +121,7 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		return nil, errors.Trace(err)
 	}
 
-	var (
-		pdCli pd.Client
-		spkv  *tikv.EtcdSafePointKV
-		s     *tikv.KVStore
-	)
-	defer func() {
-		if err != nil {
-			if s != nil {
-				// if store is created, it will close spkv and pdCli inside
-				_ = s.Close()
-				return
-			}
-			if spkv != nil {
-				_ = spkv.Close()
-			}
-			if pdCli != nil {
-				pdCli.Close()
-			}
-		}
-	}()
-
-	pdCli, err = pd.NewClient(etcdAddrs, pd.SecurityOption{
+	pdCli, err := pd.NewClient(etcdAddrs, pd.SecurityOption{
 		CAPath:   d.security.ClusterSSLCA,
 		CertPath: d.security.ClusterSSLCert,
 		KeyPath:  d.security.ClusterSSLKey,
@@ -156,16 +134,15 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		),
 		pd.WithCustomTimeoutOption(time.Duration(d.pdConfig.PDServerTimeout)*time.Second),
 		pd.WithForwardingOption(config.GetGlobalConfig().EnableForwarding))
+	pdCli = util.InterceptedPDClient{Client: pdCli}
 
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	pdCli = util.InterceptedPDClient{Client: pdCli}
 
 	// FIXME: uuid will be a very long and ugly string, simplify it.
 	uuid := fmt.Sprintf("tikv-%v", pdCli.GetClusterID(context.TODO()))
 	if store, ok := mc.cache[uuid]; ok {
-		pdCli.Close()
 		return store, nil
 	}
 
@@ -174,13 +151,13 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		return nil, errors.Trace(err)
 	}
 
-	spkv, err = tikv.NewEtcdSafePointKV(etcdAddrs, tlsConfig)
+	spkv, err := tikv.NewEtcdSafePointKV(etcdAddrs, tlsConfig)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	pdClient := tikv.CodecPDClient{Client: pdCli}
-	s, err = tikv.NewKVStore(uuid, &pdClient, spkv, tikv.NewRPCClient(tikv.WithSecurity(d.security)), tikv.WithPDHTTPClient(tlsConfig, etcdAddrs))
+	s, err := tikv.NewKVStore(uuid, &pdClient, spkv, tikv.NewRPCClient(d.security))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -198,6 +175,7 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		etcdAddrs: etcdAddrs,
 		tlsConfig: tlsConfig,
 		memCache:  kv.NewCacheDB(),
+		pdClient:  &pdClient,
 		enableGC:  !disableGC,
 		coprStore: coprStore,
 	}
@@ -211,6 +189,7 @@ type tikvStore struct {
 	etcdAddrs []string
 	tlsConfig *tls.Config
 	memCache  kv.MemManager // this is used to query from memory
+	pdClient  pd.Client
 	enableGC  bool
 	gcWorker  *gcworker.GCWorker
 	coprStore *copr.Store
@@ -226,7 +205,9 @@ func (s *tikvStore) Describe() string {
 	return "TiKV is a distributed transactional key-value database"
 }
 
-var ldflagGetEtcdAddrsFromConfig = "0" // 1:Yes, otherwise:No
+var (
+	ldflagGetEtcdAddrsFromConfig = "0" // 1:Yes, otherwise:No
+)
 
 const getAllMembersBackoff = 5000
 
@@ -284,7 +265,7 @@ func (s *tikvStore) StartGCWorker() error {
 		return nil
 	}
 
-	gcWorker, err := gcworker.NewGCWorker(s, s.GetPDClient())
+	gcWorker, err := gcworker.NewGCWorker(s, s.pdClient)
 	if err != nil {
 		return derr.ToTiDBErr(err)
 	}
@@ -320,8 +301,17 @@ func (s *tikvStore) GetMemCache() kv.MemManager {
 }
 
 // Begin a global transaction.
-func (s *tikvStore) Begin(opts ...tikv.TxnOption) (kv.Transaction, error) {
-	txn, err := s.KVStore.Begin(opts...)
+func (s *tikvStore) Begin() (kv.Transaction, error) {
+	txn, err := s.KVStore.Begin()
+	if err != nil {
+		return nil, derr.ToTiDBErr(err)
+	}
+	return txn_driver.NewTiKVTxn(txn), err
+}
+
+// BeginWithOption begins a transaction with given option
+func (s *tikvStore) BeginWithOption(option tikv.StartTSOption) (kv.Transaction, error) {
+	txn, err := s.KVStore.BeginWithOption(option)
 	if err != nil {
 		return nil, derr.ToTiDBErr(err)
 	}
@@ -348,7 +338,6 @@ func (s *tikvStore) ShowStatus(ctx context.Context, key string) (interface{}, er
 // GetLockWaits get return lock waits info
 func (s *tikvStore) GetLockWaits() ([]*deadlockpb.WaitForEntry, error) {
 	stores := s.GetRegionCache().GetStoresByType(tikvrpc.TiKV)
-	//nolint: prealloc
 	var result []*deadlockpb.WaitForEntry
 	for _, store := range stores {
 		resp, err := s.GetTiKVClient().SendRequest(context.TODO(), store.GetAddr(), tikvrpc.NewRequest(tikvrpc.CmdLockWaitInfo, &kvrpcpb.GetLockWaitInfoRequest{}), time.Second*30)

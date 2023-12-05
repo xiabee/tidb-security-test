@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,15 +19,13 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/cznic/mathutil"
 	"github.com/pingcap/badger"
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/store/mockstore/unistore/lockstore"
 	"github.com/pingcap/tidb/store/mockstore/unistore/tikv/dbreader"
 	"github.com/pingcap/tidb/store/mockstore/unistore/tikv/mvcc"
-	"github.com/pingcap/tidb/util/mathutil"
-	"go.uber.org/zap"
 )
 
 const (
@@ -251,10 +248,7 @@ func (wb *writeBatch) Prewrite(key []byte, lock *mvcc.Lock) {
 func (wb *writeBatch) Commit(key []byte, lock *mvcc.Lock) {
 	userMeta := mvcc.NewDBUserMeta(wb.startTS, wb.commitTS)
 	k := y.KeyWithTs(key, wb.commitTS)
-	if lock.Op == uint8(kvrpcpb.Op_PessimisticLock) {
-		log.Info("removing a pessimistic lock when committing", zap.Binary("key", key), zap.Uint64("startTS", wb.startTS), zap.Uint64("commitTS", wb.commitTS))
-		// Write nothing as if PessimisticRollback is called.
-	} else if lock.Op != uint8(kvrpcpb.Op_Lock) {
+	if lock.Op != uint8(kvrpcpb.Op_Lock) {
 		wb.dbBatch.set(k, lock.Value, userMeta)
 	} else if bytes.Equal(key, lock.Primary) {
 		opLockKey := y.KeyWithTs(mvcc.EncodeExtraTxnStatusKey(key, wb.startTS), wb.startTS)

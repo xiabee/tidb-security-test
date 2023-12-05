@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,8 +17,6 @@ import (
 	"context"
 	"crypto/tls"
 
-	"github.com/pingcap/tidb/expression"
-	"github.com/pingcap/tidb/extension"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 )
@@ -27,7 +24,7 @@ import (
 // IDriver opens IContext.
 type IDriver interface {
 	// OpenCtx opens an IContext with connection id, client capability, collation, dbname and optionally the tls state.
-	OpenCtx(connID uint64, capability uint32, collation uint8, dbname string, tlsState *tls.ConnectionState, extensions *extension.SessionExtensions) (*TiDBContext, error)
+	OpenCtx(connID uint64, capability uint32, collation uint8, dbname string, tlsState *tls.ConnectionState) (*TiDBContext, error)
 }
 
 // PreparedStatement is the interface to use a prepared statement.
@@ -36,7 +33,7 @@ type PreparedStatement interface {
 	ID() int
 
 	// Execute executes the statement.
-	Execute(context.Context, []expression.Expression) (ResultSet, error)
+	Execute(context.Context, []types.Datum) (ResultSet, error)
 
 	// AppendParam appends parameter to the statement.
 	AppendParam(paramID int, data []byte) error
@@ -54,48 +51,26 @@ type PreparedStatement interface {
 	GetParamsType() []byte
 
 	// StoreResultSet stores ResultSet for subsequent stmt fetching
-	StoreResultSet(rs cursorResultSet)
+	StoreResultSet(rs ResultSet)
 
 	// GetResultSet gets ResultSet associated this statement
-	GetResultSet() cursorResultSet
+	GetResultSet() ResultSet
 
-	// Reset removes all bound parameters and opened resultSet/rowContainer.
-	Reset() error
+	// Reset removes all bound parameters.
+	Reset()
 
 	// Close closes the statement.
 	Close() error
-
-	// GetCursorActive returns whether the statement has active cursor
-	GetCursorActive() bool
-
-	// SetCursorActive sets whether the statement has active cursor
-	SetCursorActive(active bool)
-
-	// StoreRowContainer stores a row container into the prepared statement. The `rowContainer` is used to be closed at
-	// appropriate time. It's actually not used to read, because an iterator of it has been stored in the result set.
-	StoreRowContainer(container *chunk.RowContainer)
-
-	// GetRowContainer returns the row container of the statement
-	GetRowContainer() *chunk.RowContainer
 }
 
 // ResultSet is the result set of an query.
 type ResultSet interface {
 	Columns() []*ColumnInfo
-	NewChunk(chunk.Allocator) *chunk.Chunk
+	NewChunk() *chunk.Chunk
 	Next(context.Context, *chunk.Chunk) error
+	StoreFetchedRows(rows []chunk.Row)
+	GetFetchedRows() []chunk.Row
 	Close() error
-	// IsClosed checks whether the result set is closed.
-	IsClosed() bool
-	FieldTypes() []*types.FieldType
-}
-
-// cursorResultSet extends the `ResultSet` to provide the ability to store an iterator
-type cursorResultSet interface {
-	ResultSet
-
-	StoreRowContainerReader(reader chunk.RowContainerReader)
-	GetRowContainerReader() chunk.RowContainerReader
 }
 
 // fetchNotifier represents notifier will be called in COM_FETCH.
@@ -103,10 +78,4 @@ type fetchNotifier interface {
 	// OnFetchReturned be called when COM_FETCH returns.
 	// it will be used in server-side cursor.
 	OnFetchReturned()
-}
-
-func wrapWithCursor(rs ResultSet) cursorResultSet {
-	return &tidbCursorResultSet{
-		rs, nil,
-	}
 }

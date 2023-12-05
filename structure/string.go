@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -27,13 +26,13 @@ func (t *TxStructure) Set(key []byte, value []byte) error {
 	if t.readWriter == nil {
 		return ErrWriteOnSnapshot
 	}
-	ek := t.EncodeStringDataKey(key)
+	ek := t.encodeStringDataKey(key)
 	return t.readWriter.Set(ek, value)
 }
 
 // Get gets the string value of a key.
 func (t *TxStructure) Get(key []byte) ([]byte, error) {
-	ek := t.EncodeStringDataKey(key)
+	ek := t.encodeStringDataKey(key)
 	value, err := t.reader.Get(context.TODO(), ek)
 	if kv.ErrNotExist.Equal(err) {
 		err = nil
@@ -58,7 +57,7 @@ func (t *TxStructure) Inc(key []byte, step int64) (int64, error) {
 	if t.readWriter == nil {
 		return 0, ErrWriteOnSnapshot
 	}
-	ek := t.EncodeStringDataKey(key)
+	ek := t.encodeStringDataKey(key)
 	// txn Inc will lock this key, so we don't lock it here.
 	n, err := kv.IncInt64(t.readWriter, ek, step)
 	if kv.ErrNotExist.Equal(err) {
@@ -72,7 +71,7 @@ func (t *TxStructure) Clear(key []byte) error {
 	if t.readWriter == nil {
 		return ErrWriteOnSnapshot
 	}
-	ek := t.EncodeStringDataKey(key)
+	ek := t.encodeStringDataKey(key)
 	err := t.readWriter.Delete(ek)
 	if kv.ErrNotExist.Equal(err) {
 		err = nil

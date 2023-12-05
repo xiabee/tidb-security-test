@@ -8,7 +8,6 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -25,9 +24,20 @@ const (
 	// executed in the coprocessor layer.
 	CopSingleReadTaskType
 
-	// CopMultiReadTaskType stands for the a IndexLookup tasks executed in the
+	// CopDoubleReadTaskType stands for the a IndexLookup tasks executed in the
 	// coprocessor layer.
-	CopMultiReadTaskType
+	CopDoubleReadTaskType
+
+	// CopTiFlashLocalReadTaskType stands for flash coprocessor that read data locally,
+	// and only a part of the data is read in one cop task, if the current task type is
+	// CopTiFlashLocalReadTaskType, all its children prop's task type is CopTiFlashLocalReadTaskType
+	CopTiFlashLocalReadTaskType
+
+	// CopTiFlashGlobalReadTaskType stands for flash coprocessor that read data globally
+	// and all the data of given table will be read in one cop task, if the current task
+	// type is CopTiFlashGlobalReadTaskType, all its children prop's task type is
+	// CopTiFlashGlobalReadTaskType
+	CopTiFlashGlobalReadTaskType
 
 	// MppTaskType stands for task that would run on Mpp nodes, currently meaning the tiflash node.
 	MppTaskType
@@ -40,8 +50,12 @@ func (t TaskType) String() string {
 		return "rootTask"
 	case CopSingleReadTaskType:
 		return "copSingleReadTask"
-	case CopMultiReadTaskType:
-		return "copMultiReadTask"
+	case CopDoubleReadTaskType:
+		return "copDoubleReadTask"
+	case CopTiFlashLocalReadTaskType:
+		return "copTiFlashLocalReadTask"
+	case CopTiFlashGlobalReadTaskType:
+		return "copTiFlashGlobalReadTask"
 	case MppTaskType:
 		return "mppTask"
 	}

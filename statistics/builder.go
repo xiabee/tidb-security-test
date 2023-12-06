@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/collate"
 )
 
 // SortedBuilder is used to build histograms for PK and index.
@@ -66,7 +68,7 @@ func (b *SortedBuilder) Iterate(data types.Datum) error {
 		b.hist.NDV = 1
 		return nil
 	}
-	cmp, err := b.hist.GetUpper(int(b.bucketIdx)).CompareDatum(b.sc, &data)
+	cmp, err := b.hist.GetUpper(int(b.bucketIdx)).Compare(b.sc, &data, collate.GetBinaryCollator())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -157,7 +159,7 @@ func buildHist(sc *stmtctx.StatementContext, hg *Histogram, samples []*SampleIte
 	hg.AppendBucket(&samples[0].Value, &samples[0].Value, int64(sampleFactor), int64(ndvFactor))
 	for i := int64(1); i < sampleNum; i++ {
 		corrXYSum += float64(i) * float64(samples[i].Ordinal)
-		cmp, err := hg.GetUpper(bucketIdx).CompareDatum(sc, &samples[i].Value)
+		cmp, err := hg.GetUpper(bucketIdx).Compare(sc, &samples[i].Value, collate.GetBinaryCollator())
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -371,10 +373,11 @@ func BuildHistAndTopN(
 }
 
 // pruneTopNItem tries to prune the least common values in the top-n list if it is not significantly more common than the values not in the list.
-//   We assume that the ones not in the top-n list's selectivity is 1/remained_ndv which is the internal implementation of EqualRowCount
+//
+//	We assume that the ones not in the top-n list's selectivity is 1/remained_ndv which is the internal implementation of EqualRowCount
 func pruneTopNItem(topns []TopNMeta, ndv, nullCount, sampleRows, totalRows int64) []TopNMeta {
-	// If the sampleRows holds all rows. We just return the top-n directly.
-	if sampleRows == totalRows || totalRows <= 1 {
+	// If the sampleRows holds all rows, or NDV of samples equals to actual NDV, we just return the TopN directly.
+	if sampleRows == totalRows || totalRows <= 1 || int64(len(topns)) >= ndv {
 		return topns
 	}
 	// Sum the occurrence except the least common one from the top-n list. To check whether the lest common one is worth
@@ -394,7 +397,7 @@ func pruneTopNItem(topns []TopNMeta, ndv, nullCount, sampleRows, totalRows int64
 		if selectivity > 1 {
 			selectivity = 1
 		}
-		otherNDV := float64(ndv) - float64(topNNum)
+		otherNDV := float64(ndv) - (float64(topNNum) - 1)
 		if otherNDV > 1 {
 			selectivity /= otherNDV
 		}
@@ -405,11 +408,13 @@ func pruneTopNItem(topns []TopNMeta, ndv, nullCount, sampleRows, totalRows int64
 		// Thus the variance is the following formula.
 		variance := n * K * (N - K) * (N - n) / (N * N * (N - 1))
 		stddev := math.Sqrt(variance)
-		// We choose the bound that plus two stddev of the sample frequency， plus an additional 0.5 for the continuity correction.
+		// We choose the bound that plus two stddev of the sample frequency, plus an additional 0.5 for the continuity correction.
 		//   Note:
 		//  	The mean + 2 * stddev is known as Wald confidence interval, plus 0.5 would be continuity-corrected Wald interval
 		if float64(topns[topNNum-1].Count) > selectivity*n+2*stddev+0.5 {
-			// If the current one is worth storing, the latter ones too. So we just break here.
+			// Estimated selectivity of this item in the TopN is significantly higher than values not in TopN.
+			// So this value, and all other values in the TopN (selectivity of which is higher than this value) are
+			// worth being remained in the TopN list, and we stop pruning now.
 			break
 		}
 		// Current one is not worth storing, remove it and subtract it from sumCount, go to next one.

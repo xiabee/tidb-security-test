@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -64,16 +65,16 @@ func (opt *Optimizer) GetImplementationRules(node plannercore.LogicalPlan) []Imp
 // FindBestPlan is the optimization entrance of the cascades planner. The
 // optimization is composed of 3 phases: preprocessing, exploration and implementation.
 //
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Phase 1: Preprocessing
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 //
 // The target of this phase is to preprocess the plan tree by some heuristic
 // rules which should always be beneficial, for example Column Pruning.
 //
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Phase 2: Exploration
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 //
 // The target of this phase is to explore all the logically equivalent
 // expressions by exploring all the equivalent group expressions of each group.
@@ -85,9 +86,9 @@ func (opt *Optimizer) GetImplementationRules(node plannercore.LogicalPlan) []Imp
 // graph, where nodes are expressions and directed edges are the transformation
 // rules.
 //
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 // Phase 3: Implementation
-//------------------------------------------------------------------------------
+// ------------------------------------------------------------------------------
 //
 // The target of this phase is to search the best physical plan for a Group
 // which satisfies a certain required physical property.
@@ -115,7 +116,7 @@ func (opt *Optimizer) FindBestPlan(sctx sessionctx.Context, logical plannercore.
 }
 
 func (opt *Optimizer) onPhasePreprocessing(sctx sessionctx.Context, plan plannercore.LogicalPlan) (plannercore.LogicalPlan, error) {
-	err := plan.PruneColumns(plan.Schema().Columns)
+	err := plan.PruneColumns(plan.Schema().Columns, nil)
 	if err != nil {
 		return nil, err
 	}

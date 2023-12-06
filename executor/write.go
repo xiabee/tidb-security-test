@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,18 +20,18 @@ import (
 
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser/ast"
-	"github.com/pingcap/parser/charset"
-	"github.com/pingcap/parser/mysql"
-	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/memory"
 )
 
@@ -46,8 +47,8 @@ var (
 // `modified` means which columns are really modified. It's used for secondary indices.
 // Length of `oldData` and `newData` equals to length of `t.WritableCols()`.
 // The return values:
-//     1. changed (bool) : does the update really change the row values. e.g. update set i = 1 where i = 1;
-//     2. err (error) : error in the update.
+//  1. changed (bool) : does the update really change the row values. e.g. update set i = 1 where i = 1;
+//  2. err (error) : error in the update.
 func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, oldData, newData []types.Datum, modified []bool, t table.Table,
 	onDup bool, memTracker *memory.Tracker) (bool, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
@@ -71,19 +72,7 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 	// because all of them are sorted by their `Offset`, which
 	// causes all writable columns are after public columns.
 
-	// 1. Cast modified values.
-	for i, col := range t.Cols() {
-		if modified[i] {
-			// Cast changed fields with respective columns.
-			v, err := table.CastValue(sctx, newData[i], col.ToInfo(), false, false)
-			if err != nil {
-				return false, err
-			}
-			newData[i] = v
-		}
-	}
-
-	// 2. Handle the bad null error.
+	// Handle the bad null error.
 	for i, col := range t.Cols() {
 		var err error
 		if err = col.HandleBadNull(&newData[i], sc); err != nil {
@@ -91,13 +80,10 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 		}
 	}
 
-	// 3. Compare datum, then handle some flags.
+	// Compare datum, then handle some flags.
 	for i, col := range t.Cols() {
-		collation := newData[i].Collation()
 		// We should use binary collation to compare datum, otherwise the result will be incorrect.
-		newData[i].SetCollation(charset.CollationBin)
-		cmp, err := newData[i].CompareDatum(sc, &oldData[i])
-		newData[i].SetCollation(collation)
+		cmp, err := newData[i].Compare(sc, &oldData[i], collate.GetBinaryCollator())
 		if err != nil {
 			return false, err
 		}
@@ -105,19 +91,19 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 			changed = true
 			modified[i] = true
 			// Rebase auto increment id if the field is changed.
-			if mysql.HasAutoIncrementFlag(col.Flag) {
+			if mysql.HasAutoIncrementFlag(col.GetFlag()) {
 				recordID, err := getAutoRecordID(newData[i], &col.FieldType, false)
 				if err != nil {
 					return false, err
 				}
-				if err = t.RebaseAutoID(sctx, recordID, true, autoid.RowIDAllocType); err != nil {
+				if err = t.Allocators(sctx).Get(autoid.RowIDAllocType).Rebase(ctx, recordID, true); err != nil {
 					return false, err
 				}
 			}
 			if col.IsPKHandleColumn(t.Meta()) {
 				handleChanged = true
 				// Rebase auto random id if the field is changed.
-				if err := rebaseAutoRandomValue(sctx, t, &newData[i], col); err != nil {
+				if err := rebaseAutoRandomValue(ctx, sctx, t, &newData[i], col); err != nil {
 					return false, err
 				}
 			}
@@ -125,7 +111,7 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 				handleChanged = true
 			}
 		} else {
-			if mysql.HasOnUpdateNowFlag(col.Flag) && modified[i] {
+			if mysql.HasOnUpdateNowFlag(col.GetFlag()) && modified[i] {
 				// It's for "UPDATE t SET ts = ts" and ts is a timestamp.
 				onUpdateSpecified[i] = true
 			}
@@ -140,37 +126,31 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 		if sctx.GetSessionVars().ClientCapability&mysql.ClientFoundRows > 0 {
 			sc.AddAffectedRows(1)
 		}
-
-		physicalID := t.Meta().ID
-		if pt, ok := t.(table.PartitionedTable); ok {
-			p, err := pt.GetPartitionByRow(sctx, oldData)
-			if err != nil {
-				return false, err
-			}
-			physicalID = p.GetPhysicalID()
-		}
-
-		unchangedRowKey := tablecodec.EncodeRowKeyWithHandle(physicalID, h)
-		txnCtx := sctx.GetSessionVars().TxnCtx
-		if txnCtx.IsPessimistic {
-			txnCtx.AddUnchangedRowKey(unchangedRowKey)
-		}
-		return false, nil
+		_, err := appendUnchangedRowForLock(sctx, t, h, oldData)
+		return false, err
 	}
 
-	// 4. Fill values into on-update-now fields, only if they are really changed.
+	// Fill values into on-update-now fields, only if they are really changed.
 	for i, col := range t.Cols() {
-		if mysql.HasOnUpdateNowFlag(col.Flag) && !modified[i] && !onUpdateSpecified[i] {
-			if v, err := expression.GetTimeValue(sctx, strings.ToUpper(ast.CurrentTimestamp), col.Tp, int8(col.Decimal)); err == nil {
+		if mysql.HasOnUpdateNowFlag(col.GetFlag()) && !modified[i] && !onUpdateSpecified[i] {
+			if v, err := expression.GetTimeValue(sctx, strings.ToUpper(ast.CurrentTimestamp), col.GetType(), col.GetDecimal(), nil); err == nil {
 				newData[i] = v
 				modified[i] = true
+				// Only TIMESTAMP and DATETIME columns can be automatically updated, so it cannot be PKIsHandle.
+				// Ref: https://dev.mysql.com/doc/refman/8.0/en/timestamp-initialization.html
+				if col.IsPKHandleColumn(t.Meta()) {
+					return false, errors.Errorf("on-update-now column should never be pk-is-handle")
+				}
+				if col.IsCommonHandleColumn(t.Meta()) {
+					handleChanged = true
+				}
 			} else {
 				return false, err
 			}
 		}
 	}
 
-	// 5. If handle changed, remove the old then add the new record, otherwise update the record.
+	// If handle changed, remove the old then add the new record, otherwise update the record.
 	if handleChanged {
 		// For `UPDATE IGNORE`/`INSERT IGNORE ON DUPLICATE KEY UPDATE`
 		// we use the staging buffer so that we don't need to precheck the existence of handle or unique keys by sending
@@ -221,7 +201,25 @@ func updateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, old
 	return true, nil
 }
 
-func rebaseAutoRandomValue(sctx sessionctx.Context, t table.Table, newData *types.Datum, col *table.Column) error {
+func appendUnchangedRowForLock(sctx sessionctx.Context, t table.Table, h kv.Handle, row []types.Datum) (bool, error) {
+	txnCtx := sctx.GetSessionVars().TxnCtx
+	if !txnCtx.IsPessimistic {
+		return false, nil
+	}
+	physicalID := t.Meta().ID
+	if pt, ok := t.(table.PartitionedTable); ok {
+		p, err := pt.GetPartitionByRow(sctx, row)
+		if err != nil {
+			return false, err
+		}
+		physicalID = p.GetPhysicalID()
+	}
+	unchangedRowKey := tablecodec.EncodeRowKeyWithHandle(physicalID, h)
+	txnCtx.AddUnchangedRowKey(unchangedRowKey)
+	return true, nil
+}
+
+func rebaseAutoRandomValue(ctx context.Context, sctx sessionctx.Context, t table.Table, newData *types.Datum, col *table.Column) error {
 	tableInfo := t.Meta()
 	if !tableInfo.ContainsAutoRandomBits() {
 		return nil
@@ -236,7 +234,7 @@ func rebaseAutoRandomValue(sctx sessionctx.Context, t table.Table, newData *type
 	layout := autoid.NewShardIDLayout(&col.FieldType, tableInfo.AutoRandomBits)
 	// Set bits except incremental_bits to zero.
 	recordID = recordID & (1<<layout.IncrementalBits - 1)
-	return t.Allocators(sctx).Get(autoid.AutoRandomType).Rebase(tableInfo.ID, recordID, true)
+	return t.Allocators(sctx).Get(autoid.AutoRandomType).Rebase(ctx, recordID, true)
 }
 
 // resetErrDataTooLong reset ErrDataTooLong error msg.

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,7 +19,7 @@ import (
 	"math"
 	"unsafe"
 
-	"github.com/pingcap/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/hack"
@@ -81,13 +82,13 @@ func MutRowFromTypes(types []*types.FieldType) MutRow {
 }
 
 func zeroValForType(tp *types.FieldType) interface{} {
-	switch tp.Tp {
+	switch tp.GetType() {
 	case mysql.TypeFloat:
 		return float32(0)
 	case mysql.TypeDouble:
 		return float64(0)
 	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong, mysql.TypeYear:
-		if mysql.HasUnsignedFlag(tp.Flag) {
+		if mysql.HasUnsignedFlag(tp.GetFlag()) {
 			return uint64(0)
 		}
 		return int64(0)

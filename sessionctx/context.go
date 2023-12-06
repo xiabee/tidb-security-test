@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -19,16 +20,16 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser/model"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
-	"github.com/pingcap/tidb/owner"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/sli"
+	"github.com/pingcap/tidb/util/topsql/stmtstats"
 	"github.com/pingcap/tipb/go-binlog"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
 // InfoschemaMetaVersion is a workaround. Due to circular dependency,
@@ -57,7 +58,7 @@ type Context interface {
 	// GetClient gets a kv.Client.
 	GetClient() kv.Client
 
-	// GetClient gets a kv.Client.
+	// GetMPPClient gets a kv.MPPClient.
 	GetMPPClient() kv.MPPClient
 
 	// SetValue saves a value associated with this context for key.
@@ -69,6 +70,9 @@ type Context interface {
 	// ClearValue clears the value associated with this context for key.
 	ClearValue(key fmt.Stringer)
 
+	// Deprecated: the semantics of session.GetInfoSchema() is ambiguous
+	// If you want to get the infoschema of the current transaction in SQL layer, use sessiontxn.GetTxnManager(ctx).GetTxnInfoSchema()
+	// If you want to get the latest infoschema use domain.GetDomain(ctx).GetInfoSchema()
 	GetInfoSchema() InfoschemaMetaVersion
 
 	GetSessionVars() *variable.SessionVars
@@ -88,6 +92,9 @@ type Context interface {
 	// It should be called right before we builds an executor.
 	InitTxnWithStartTS(startTS uint64) error
 
+	// GetSnapshotWithTS returns a snapshot with start ts
+	GetSnapshotWithTS(ts uint64) kv.Snapshot
+
 	// GetStore returns the store of session.
 	GetStore() kv.Storage
 
@@ -96,6 +103,10 @@ type Context interface {
 
 	// StoreQueryFeedback stores the query feedback.
 	StoreQueryFeedback(feedback interface{})
+
+	// UpdateColStatsUsage updates the column stats usage.
+	// TODO: maybe we can use a method called GetSessionStatsCollector to replace both StoreQueryFeedback and UpdateColStatsUsage but we need to deal with import circle if we do so.
+	UpdateColStatsUsage(predicateColumns []model.TableColumnID)
 
 	// HasDirtyContent checks whether there's dirty update on the given table.
 	HasDirtyContent(tid int64) bool
@@ -106,13 +117,13 @@ type Context interface {
 	StmtRollback()
 	// StmtGetMutation gets the binlog mutation for current statement.
 	StmtGetMutation(int64) *binlog.TableMutation
-	// DDLOwnerChecker returns owner.DDLOwnerChecker.
-	DDLOwnerChecker() owner.DDLOwnerChecker
+	// IsDDLOwner checks whether this session is DDL owner.
+	IsDDLOwner() bool
 	// AddTableLock adds table lock to the session lock map.
 	AddTableLock([]model.TableLockTpInfo)
 	// ReleaseTableLocks releases table locks in the session lock map.
 	ReleaseTableLocks(locks []model.TableLockTpInfo)
-	// ReleaseTableLockByTableID releases table locks in the session lock map by table ID.
+	// ReleaseTableLockByTableIDs releases table locks in the session lock map by table IDs.
 	ReleaseTableLockByTableIDs(tableIDs []int64)
 	// CheckTableLocked checks the table lock.
 	CheckTableLocked(tblID int64) (bool, model.TableLockType)
@@ -128,6 +139,22 @@ type Context interface {
 	StoreIndexUsage(tblID int64, idxID int64, rowsSelected int64)
 	// GetTxnWriteThroughputSLI returns the TxnWriteThroughputSLI.
 	GetTxnWriteThroughputSLI() *sli.TxnWriteThroughputSLI
+	// GetBuiltinFunctionUsage returns the BuiltinFunctionUsage of current Context, which is not thread safe.
+	// Use primitive map type to prevent circular import. Should convert it to telemetry.BuiltinFunctionUsage before using.
+	GetBuiltinFunctionUsage() map[string]uint32
+	// BuiltinFunctionUsageInc increase the counting of each builtin function usage
+	// Notice that this is a thread safe function
+	BuiltinFunctionUsageInc(scalarFuncSigName string)
+	// GetStmtStats returns stmtstats.StatementStats owned by implementation.
+	GetStmtStats() *stmtstats.StatementStats
+	// ShowProcess returns ProcessInfo running in current Context
+	ShowProcess() *util.ProcessInfo
+	// GetAdvisoryLock acquires an advisory lock (aka GET_LOCK()).
+	GetAdvisoryLock(string, int64) error
+	// ReleaseAdvisoryLock releases an advisory lock (aka RELEASE_LOCK()).
+	ReleaseAdvisoryLock(string) bool
+	// ReleaseAllAdvisoryLocks releases all advisory locks that this session holds.
+	ReleaseAllAdvisoryLocks() int
 }
 
 type basicCtxType int
@@ -190,4 +217,12 @@ func ValidateStaleReadTS(ctx context.Context, sctx Context, readTS uint64) error
 		return errors.Errorf("cannot set read timestamp to a future time")
 	}
 	return nil
+}
+
+// SysProcTracker is used to track background sys processes
+type SysProcTracker interface {
+	Track(id uint64, proc Context) error
+	UnTrack(id uint64)
+	GetSysProcessList() map[uint64]*util.ProcessInfo
+	KillSysProcess(id uint64)
 }

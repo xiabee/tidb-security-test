@@ -1,7 +1,3 @@
-// Copyright 2014 The ql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSES/QL-LICENSE file.
-
 // Copyright 2015 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +8,13 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Copyright 2014 The ql Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSES/QL-LICENSE file.
 
 package types
 
@@ -23,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser/mysql"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/hack"
@@ -246,7 +247,7 @@ func convertDecimalStrToUint(sc *stmtctx.StatementContext, str string, upperBoun
 	if intStr == "" {
 		intStr = "0"
 	}
-	if sc.ShouldClipToZero() && intStr[0] == '-' {
+	if intStr[0] == '-' {
 		return 0, overflow(str, tp)
 	}
 
@@ -255,8 +256,7 @@ func convertDecimalStrToUint(sc *stmtctx.StatementContext, str string, upperBoun
 		round++
 	}
 
-	upperBound -= round
-	upperStr := strconv.FormatUint(upperBound, 10)
+	upperStr := strconv.FormatUint(upperBound-round, 10)
 	if len(intStr) > len(upperStr) ||
 		(len(intStr) == len(upperStr) && intStr > upperStr) {
 		return upperBound, overflow(str, tp)
@@ -285,7 +285,7 @@ func StrToInt(sc *stmtctx.StatementContext, str string, isFuncCast bool) (int64,
 	return iVal, errors.Trace(err)
 }
 
-// StrToUint converts a string to an unsigned integer at the best-effortt.
+// StrToUint converts a string to an unsigned integer at the best-effort.
 func StrToUint(sc *stmtctx.StatementContext, str string, isFuncCast bool) (uint64, error) {
 	str = strings.TrimSpace(str)
 	validPrefix, err := getValidIntPrefix(sc, str, isFuncCast)
@@ -300,19 +300,22 @@ func StrToUint(sc *stmtctx.StatementContext, str string, isFuncCast bool) (uint6
 }
 
 // StrToDateTime converts str to MySQL DateTime.
-func StrToDateTime(sc *stmtctx.StatementContext, str string, fsp int8) (Time, error) {
-	return ParseTime(sc, str, mysql.TypeDatetime, fsp)
+func StrToDateTime(sc *stmtctx.StatementContext, str string, fsp int) (Time, error) {
+	return ParseTime(sc, str, mysql.TypeDatetime, fsp, nil)
 }
 
 // StrToDuration converts str to Duration. It returns Duration in normal case,
 // and returns Time when str is in datetime format.
 // when isDuration is true, the d is returned, when it is false, the t is returned.
 // See https://dev.mysql.com/doc/refman/5.5/en/date-and-time-literals.html.
-func StrToDuration(sc *stmtctx.StatementContext, str string, fsp int8) (d Duration, t Time, isDuration bool, err error) {
+func StrToDuration(sc *stmtctx.StatementContext, str string, fsp int) (d Duration, t Time, isDuration bool, err error) {
 	str = strings.TrimSpace(str)
 	length := len(str)
 	if length > 0 && str[0] == '-' {
 		length--
+	}
+	if n := strings.IndexByte(str, '.'); n >= 0 {
+		length = length - len(str[n:])
 	}
 	// Timestamp format is 'YYYYMMDDHHMMSS' or 'YYMMDDHHMMSS', which length is 12.
 	// See #3923, it explains what we do here.
@@ -331,7 +334,7 @@ func StrToDuration(sc *stmtctx.StatementContext, str string, fsp int8) (d Durati
 }
 
 // NumberToDuration converts number to Duration.
-func NumberToDuration(number int64, fsp int8) (Duration, error) {
+func NumberToDuration(number int64, fsp int) (Duration, error) {
 	if number > TimeMaxValue {
 		// Try to parse DATETIME.
 		if number >= 10000000000 { // '2001-00-00 00-00-00'
@@ -555,8 +558,10 @@ func ConvertJSONToInt(sc *stmtctx.StatementContext, j json.BinaryJSON, unsigned 
 		return 0, sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("INTEGER", j.String()))
 	case json.TypeCodeLiteral:
 		switch j.Value[0] {
-		case json.LiteralNil, json.LiteralFalse:
+		case json.LiteralFalse:
 			return 0, nil
+		case json.LiteralNil:
+			return 0, sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("INTEGER", j.String()))
 		default:
 			return 1, nil
 		}
@@ -613,8 +618,10 @@ func ConvertJSONToFloat(sc *stmtctx.StatementContext, j json.BinaryJSON) (float6
 		return 0, sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("FLOAT", j.String()))
 	case json.TypeCodeLiteral:
 		switch j.Value[0] {
-		case json.LiteralNil, json.LiteralFalse:
+		case json.LiteralFalse:
 			return 0, nil
+		case json.LiteralNil:
+			return 0, sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("FLOAT", j.String()))
 		default:
 			return 1, nil
 		}
@@ -640,8 +647,10 @@ func ConvertJSONToDecimal(sc *stmtctx.StatementContext, j json.BinaryJSON) (*MyD
 		err = ErrTruncatedWrongVal.GenWithStackByArgs("DECIMAL", j.String())
 	case json.TypeCodeLiteral:
 		switch j.Value[0] {
-		case json.LiteralNil, json.LiteralFalse:
+		case json.LiteralFalse:
 			res = res.FromInt(0)
+		case json.LiteralNil:
+			err = ErrTruncatedWrongVal.GenWithStackByArgs("DECIMAL", j.String())
 		default:
 			res = res.FromInt(1)
 		}
@@ -710,7 +719,7 @@ func getValidFloatPrefix(sc *stmtctx.StatementContext, s string, isFuncCast bool
 		valid = "0"
 	}
 	if validLen == 0 || validLen != len(s) {
-		err = errors.Trace(sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("FLOAT", s)))
+		err = errors.Trace(sc.HandleTruncate(ErrTruncatedWrongVal.GenWithStackByArgs("DOUBLE", s)))
 	}
 	return valid, err
 }

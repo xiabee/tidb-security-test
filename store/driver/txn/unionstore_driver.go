@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -18,20 +19,24 @@ import (
 
 	"github.com/pingcap/tidb/kv"
 	derr "github.com/pingcap/tidb/store/driver/error"
-	tikvstore "github.com/pingcap/tidb/store/tikv/kv"
-	"github.com/pingcap/tidb/store/tikv/unionstore"
+	tikvstore "github.com/tikv/client-go/v2/kv"
+	"github.com/tikv/client-go/v2/tikv"
 )
 
-// memBuffer wraps unionstore.MemDB as kv.MemBuffer.
+// memBuffer wraps tikv.MemDB as kv.MemBuffer.
 type memBuffer struct {
-	*unionstore.MemDB
+	*tikv.MemDB
 }
 
-func newMemBuffer(m *unionstore.MemDB) kv.MemBuffer {
+func newMemBuffer(m *tikv.MemDB) kv.MemBuffer {
 	if m == nil {
 		return nil
 	}
 	return &memBuffer{MemDB: m}
+}
+
+func (m *memBuffer) Size() int {
+	return m.MemDB.Size()
 }
 
 func (m *memBuffer) Delete(k kv.Key) error {
@@ -112,10 +117,10 @@ func (m *memBuffer) SnapshotGetter() kv.Getter {
 }
 
 type tikvGetter struct {
-	unionstore.Getter
+	tikv.Getter
 }
 
-func newKVGetter(getter unionstore.Getter) kv.Getter {
+func newKVGetter(getter tikv.Getter) kv.Getter {
 	return &tikvGetter{Getter: getter}
 }
 
@@ -124,16 +129,9 @@ func (g *tikvGetter) Get(_ context.Context, k kv.Key) ([]byte, error) {
 	return data, derr.ToTiDBErr(err)
 }
 
-// tikvIterator wraps unionstore.Iterator as kv.Iterator
+// tikvIterator wraps tikv.Iterator as kv.Iterator
 type tikvIterator struct {
-	unionstore.Iterator
-}
-
-func newKVIterator(it unionstore.Iterator) kv.Iterator {
-	if it == nil {
-		return nil
-	}
-	return &tikvIterator{Iterator: it}
+	tikv.Iterator
 }
 
 func (it *tikvIterator) Key() kv.Key {
@@ -148,6 +146,14 @@ func getTiDBKeyFlags(flag tikvstore.KeyFlags) kv.KeyFlags {
 	if flag.HasNeedLocked() {
 		v = kv.ApplyFlagsOps(v, kv.SetNeedLocked)
 	}
+
+	if flag.HasAssertExist() {
+		v = kv.ApplyFlagsOps(v, kv.SetAssertExist)
+	} else if flag.HasAssertNotExist() {
+		v = kv.ApplyFlagsOps(v, kv.SetAssertNotExist)
+	} else if flag.HasAssertUnknown() {
+		v = kv.ApplyFlagsOps(v, kv.SetAssertUnknown)
+	}
 	return v
 }
 
@@ -157,6 +163,14 @@ func getTiKVFlagsOp(op kv.FlagsOp) tikvstore.FlagsOp {
 		return tikvstore.SetPresumeKeyNotExists
 	case kv.SetNeedLocked:
 		return tikvstore.SetNeedLocked
+	case kv.SetAssertExist:
+		return tikvstore.SetAssertExist
+	case kv.SetAssertNotExist:
+		return tikvstore.SetAssertNotExist
+	case kv.SetAssertUnknown:
+		return tikvstore.SetAssertUnknown
+	case kv.SetAssertNone:
+		return tikvstore.SetAssertNone
 	}
 	return 0
 }

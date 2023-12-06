@@ -8,74 +8,31 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package executor_test
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"sort"
-
-	"github.com/pingcap/check"
-
-	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/session"
-	"github.com/pingcap/tidb/sessionctx"
+	"testing"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/store/mockstore"
-	"github.com/pingcap/tidb/util/mock"
-	"github.com/pingcap/tidb/util/testkit"
+	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
+	"github.com/stretchr/testify/require"
 )
 
-var _ = check.Suite(&CTETestSuite{&baseCTETestSuite{}})
-var _ = check.SerialSuites(&CTESerialTestSuite{&baseCTETestSuite{}})
+func TestBasicCTE(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
 
-type baseCTETestSuite struct {
-	store      kv.Storage
-	dom        *domain.Domain
-	sessionCtx sessionctx.Context
-	session    session.Session
-	ctx        context.Context
-}
-
-type CTETestSuite struct {
-	*baseCTETestSuite
-}
-
-type CTESerialTestSuite struct {
-	*baseCTETestSuite
-}
-
-func (test *baseCTETestSuite) SetUpSuite(c *check.C) {
-	var err error
-	test.store, err = mockstore.NewMockStore()
-	c.Assert(err, check.IsNil)
-
-	test.dom, err = session.BootstrapSession(test.store)
-	c.Assert(err, check.IsNil)
-
-	test.sessionCtx = mock.NewContext()
-
-	test.session, err = session.CreateSession4Test(test.store)
-	c.Assert(err, check.IsNil)
-	test.session.SetConnectionID(0)
-
-	test.ctx = context.Background()
-}
-
-func (test *baseCTETestSuite) TearDownSuite(c *check.C) {
-	test.dom.Close()
-	test.store.Close()
-}
-
-func (test *CTETestSuite) TestBasicCTE(c *check.C) {
-	tk := testkit.NewTestKit(c, test.store)
+	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 
 	rows := tk.MustQuery("with recursive cte1 as (" +
@@ -120,63 +77,11 @@ func (test *CTETestSuite) TestBasicCTE(c *check.C) {
 	rows.Check(testkit.Rows("1 1", "2 1", "3 1", "4 1", "5 1"))
 }
 
-func (test *CTESerialTestSuite) TestSpillToDisk(c *check.C) {
-	defer config.RestoreFunc()()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.OOMUseTmpStorage = true
-	})
+func TestUnionDistinct(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
 
-	tk := testkit.NewTestKit(c, test.store)
-	tk.MustExec("use test;")
-
-	c.Assert(failpoint.Enable("github.com/pingcap/tidb/executor/testCTEStorageSpill", "return(true)"), check.IsNil)
-	defer func() {
-		c.Assert(failpoint.Disable("github.com/pingcap/tidb/executor/testCTEStorageSpill"), check.IsNil)
-		tk.MustExec("set tidb_mem_quota_query = 1073741824;")
-	}()
-	c.Assert(failpoint.Enable("github.com/pingcap/tidb/executor/testSortedRowContainerSpill", "return(true)"), check.IsNil)
-	defer func() {
-		c.Assert(failpoint.Disable("github.com/pingcap/tidb/executor/testSortedRowContainerSpill"), check.IsNil)
-	}()
-
-	// Use duplicated rows to test UNION DISTINCT.
-	tk.MustExec("set tidb_mem_quota_query = 1073741824;")
-	insertStr := "insert into t1 values(0)"
-	rowNum := 1000
-	vals := make([]int, rowNum)
-	vals[0] = 0
-	for i := 1; i < rowNum; i++ {
-		v := rand.Intn(100)
-		vals[i] = v
-		insertStr += fmt.Sprintf(", (%d)", v)
-	}
-	tk.MustExec("drop table if exists t1;")
-	tk.MustExec("create table t1(c1 int);")
-	tk.MustExec(insertStr)
-	tk.MustExec("set tidb_mem_quota_query = 40000;")
-	tk.MustExec("set cte_max_recursion_depth = 500000;")
-	sql := fmt.Sprintf("with recursive cte1 as ( "+
-		"select c1 from t1 "+
-		"union "+
-		"select c1 + 1 c1 from cte1 where c1 < %d) "+
-		"select c1 from cte1 order by c1;", rowNum)
-	rows := tk.MustQuery(sql)
-
-	memTracker := tk.Se.GetSessionVars().StmtCtx.MemTracker
-	diskTracker := tk.Se.GetSessionVars().StmtCtx.DiskTracker
-	c.Assert(memTracker.MaxConsumed(), check.Greater, int64(0))
-	c.Assert(diskTracker.MaxConsumed(), check.Greater, int64(0))
-
-	sort.Ints(vals)
-	resRows := make([]string, 0, rowNum)
-	for i := vals[0]; i <= rowNum; i++ {
-		resRows = append(resRows, fmt.Sprintf("%d", i))
-	}
-	rows.Check(testkit.Rows(resRows...))
-}
-
-func (test *CTETestSuite) TestUnionDistinct(c *check.C) {
-	tk := testkit.NewTestKit(c, test.store)
+	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
 	// Basic test. UNION/UNION ALL intersects.
@@ -199,14 +104,16 @@ func (test *CTETestSuite) TestUnionDistinct(c *check.C) {
 	rows.Check(testkit.Rows("1", "2", "3", "4"))
 }
 
-func (test *CTETestSuite) TestCTEMaxRecursionDepth(c *check.C) {
-	tk := testkit.NewTestKit(c, test.store)
+func TestCTEMaxRecursionDepth(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+
+	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
 	tk.MustExec("set @@cte_max_recursion_depth = -1;")
 	err := tk.QueryToErr("with recursive cte1(c1) as (select 1 union select c1 + 1 c1 from cte1 where c1 < 100) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 	// If there is no recursive part, query runs ok.
 	rows := tk.MustQuery("with recursive cte1(c1) as (select 1 union select 2) select * from cte1 order by c1;")
 	rows.Check(testkit.Rows("1", "2"))
@@ -215,11 +122,9 @@ func (test *CTETestSuite) TestCTEMaxRecursionDepth(c *check.C) {
 
 	tk.MustExec("set @@cte_max_recursion_depth = 0;")
 	err = tk.QueryToErr("with recursive cte1(c1) as (select 1 union select c1 + 1 c1 from cte1 where c1 < 0) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 	err = tk.QueryToErr("with recursive cte1(c1) as (select 1 union select c1 + 1 c1 from cte1 where c1 < 1) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 	// If there is no recursive part, query runs ok.
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 1 union select 2) select * from cte1 order by c1;")
 	rows.Check(testkit.Rows("1", "2"))
@@ -232,8 +137,7 @@ func (test *CTETestSuite) TestCTEMaxRecursionDepth(c *check.C) {
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 1 union select c1 + 1 c1 from cte1 where c1 < 1) select * from cte1;")
 	rows.Check(testkit.Rows("1"))
 	err = tk.QueryToErr("with recursive cte1(c1) as (select 1 union select c1 + 1 c1 from cte1 where c1 < 2) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 2 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 2 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 	// If there is no recursive part, query runs ok.
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 1 union select 2) select * from cte1 order by c1;")
 	rows.Check(testkit.Rows("1", "2"))
@@ -241,8 +145,11 @@ func (test *CTETestSuite) TestCTEMaxRecursionDepth(c *check.C) {
 	rows.Check(testkit.Rows("1", "2"))
 }
 
-func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
-	tk := testkit.NewTestKit(c, test.store)
+func TestCTEWithLimit(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+
+	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
 	// Basic recursive tests.
@@ -267,16 +174,14 @@ func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
 	rows.Check(testkit.Rows("2"))
 
 	err := tk.QueryToErr("with recursive cte1(c1) as (select 0 union select c1 + 1 from cte1 limit 1 offset 3) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 3 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 3 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 
 	tk.MustExec("set cte_max_recursion_depth=1000;")
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 0 union select c1 + 1 from cte1 limit 5 offset 996) select * from cte1;")
 	rows.Check(testkit.Rows("996", "997", "998", "999", "1000"))
 
 	err = tk.QueryToErr("with recursive cte1(c1) as (select 0 union select c1 + 1 from cte1 limit 5 offset 997) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 1001 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 1001 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 1 union select c1 + 1 from cte1 limit 0 offset 1) select * from cte1")
 	rows.Check(testkit.Rows())
@@ -311,7 +216,7 @@ func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
 	// Error: ERROR 1221 (HY000): Incorrect usage of UNION and LIMIT.
 	// Limit can only be at the end of SQL stmt.
 	err = tk.ExecToErr("with recursive cte1(c1) as (select c1 from t1 limit 1 offset 1 union select c1 + 1 from cte1 limit 0 offset 1) select * from cte1")
-	c.Assert(err.Error(), check.Equals, "[planner:1221]Incorrect usage of UNION and LIMIT")
+	require.EqualError(t, err, "[planner:1221]Incorrect usage of UNION and LIMIT")
 
 	// Basic non-recusive tests.
 	rows = tk.MustQuery("with recursive cte1(c1) as (select 1 union select 2 order by 1 limit 1 offset 1) select * from cte1")
@@ -326,7 +231,7 @@ func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
 	// Test with table.
 	tk.MustExec("drop table if exists t1;")
 	insertStr := "insert into t1 values(0)"
-	for i := 1; i < 5000; i++ {
+	for i := 1; i < 300; i++ {
 		insertStr += fmt.Sprintf(", (%d)", i)
 	}
 
@@ -374,8 +279,7 @@ func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
 	rows.Check(testkit.Rows())
 	// MySQL err: ERROR 1365 (22012): Division by 0. Because it gives error when computing 1/c1.
 	err = tk.QueryToErr("with recursive cte1 as (select 1/c1 c1 from t1 union select c1 + 1 c1 from cte1 where c1 < 2 limit 1) select * from cte1;")
-	c.Assert(err, check.NotNil)
-	c.Assert(err.Error(), check.Equals, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
+	require.EqualError(t, err, "[executor:3636]Recursive query aborted after 1 iterations. Try increasing @@cte_max_recursion_depth to a larger value")
 
 	tk.MustExec("set cte_max_recursion_depth = 1000;")
 	tk.MustExec("drop table if exists t1;")
@@ -447,4 +351,188 @@ func (test *CTETestSuite) TestCTEWithLimit(c *check.C) {
 	rows.Check(testkit.Rows("3", "4", "3"))
 	rows = tk.MustQuery("with recursive cte1(c1) as (select c1 from t1 union all select c1 + 1 from cte1 limit 4 offset 4) select * from cte1;")
 	rows.Check(testkit.Rows("3", "4", "3", "4"))
+}
+
+func TestSpillToDisk(t *testing.T) {
+	defer config.RestoreFunc()()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.OOMUseTmpStorage = true
+	})
+
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testCTEStorageSpill", "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testCTEStorageSpill"))
+		tk.MustExec("set tidb_mem_quota_query = 1073741824;")
+	}()
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testSortedRowContainerSpill", "return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testSortedRowContainerSpill"))
+	}()
+
+	// Use duplicated rows to test UNION DISTINCT.
+	tk.MustExec("set tidb_mem_quota_query = 1073741824;")
+	insertStr := "insert into t1 values(0)"
+	rowNum := 1000
+	vals := make([]int, rowNum)
+	vals[0] = 0
+	for i := 1; i < rowNum; i++ {
+		v := rand.Intn(100)
+		vals[i] = v
+		insertStr += fmt.Sprintf(", (%d)", v)
+	}
+	tk.MustExec("drop table if exists t1;")
+	tk.MustExec("create table t1(c1 int);")
+	tk.MustExec(insertStr)
+	tk.MustExec("set tidb_mem_quota_query = 40000;")
+	tk.MustExec("set cte_max_recursion_depth = 500000;")
+	sql := fmt.Sprintf("with recursive cte1 as ( "+
+		"select c1 from t1 "+
+		"union "+
+		"select c1 + 1 c1 from cte1 where c1 < %d) "+
+		"select c1 from cte1 order by c1;", rowNum)
+	rows := tk.MustQuery(sql)
+
+	memTracker := tk.Session().GetSessionVars().StmtCtx.MemTracker
+	diskTracker := tk.Session().GetSessionVars().StmtCtx.DiskTracker
+	require.Greater(t, memTracker.MaxConsumed(), int64(0))
+	require.Greater(t, diskTracker.MaxConsumed(), int64(0))
+
+	sort.Ints(vals)
+	resRows := make([]string, 0, rowNum)
+	for i := vals[0]; i <= rowNum; i++ {
+		resRows = append(resRows, fmt.Sprintf("%d", i))
+	}
+	rows.Check(testkit.Rows(resRows...))
+}
+
+func TestCTEExecError(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists src;")
+	tk.MustExec("create table src(first int, second int);")
+
+	insertStr := fmt.Sprintf("insert into src values (%d, %d)", rand.Intn(1000), rand.Intn(1000))
+	for i := 0; i < 1000; i++ {
+		insertStr += fmt.Sprintf(",(%d, %d)", rand.Intn(1000), rand.Intn(1000))
+	}
+	insertStr += ";"
+	tk.MustExec(insertStr)
+
+	// Increase projection concurrency and decrease chunk size
+	// to increase the probability of reproducing the problem.
+	tk.MustExec("set tidb_max_chunk_size = 32")
+	tk.MustExec("set tidb_projection_concurrency = 20")
+	for i := 0; i < 10; i++ {
+		err := tk.QueryToErr("with recursive cte(iter, first, second, result) as " +
+			"(select 1, first, second, first+second from src " +
+			" union all " +
+			"select iter+1, second, result, second+result from cte where iter < 80 )" +
+			"select * from cte")
+		require.True(t, terror.ErrorEqual(err, types.ErrOverflow))
+	}
+}
+
+// https://github.com/pingcap/tidb/issues/33965.
+func TestCTEsInView(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+
+	tk.MustExec("create database if not exists test1;")
+	tk.MustExec("create table test.t (a int);")
+	tk.MustExec("create table test1.t (a int);")
+	tk.MustExec("insert into test.t values (1);")
+	tk.MustExec("insert into test1.t values (2);")
+
+	tk.MustExec("use test;")
+	tk.MustExec("create definer='root'@'localhost' view test.v as with tt as (select * from t) select * from tt;")
+	tk.MustQuery("select * from test.v;").Check(testkit.Rows("1"))
+	tk.MustExec("use test1;")
+	tk.MustQuery("select * from test.v;").Check(testkit.Rows("1"))
+}
+
+func TestCTEPanic(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("create table t1(c1 int)")
+	tk.MustExec("insert into t1 values(1), (2), (3)")
+
+	fpPathPrefix := "github.com/pingcap/tidb/executor/"
+	fp := "testCTESeedPanic"
+	require.NoError(t, failpoint.Enable(fpPathPrefix+fp, fmt.Sprintf(`panic("%s")`, fp)))
+	err := tk.QueryToErr("with recursive cte1 as (select c1 from t1 union all select c1 + 1 from cte1 where c1 < 5) select t_alias_1.c1 from cte1 as t_alias_1 inner join cte1 as t_alias_2 on t_alias_1.c1 = t_alias_2.c1 order by c1")
+	require.Contains(t, err.Error(), fp)
+	require.NoError(t, failpoint.Disable(fpPathPrefix+fp))
+
+	fp = "testCTERecursivePanic"
+	require.NoError(t, failpoint.Enable(fpPathPrefix+fp, fmt.Sprintf(`panic("%s")`, fp)))
+	err = tk.QueryToErr("with recursive cte1 as (select c1 from t1 union all select c1 + 1 from cte1 where c1 < 5) select t_alias_1.c1 from cte1 as t_alias_1 inner join cte1 as t_alias_2 on t_alias_1.c1 = t_alias_2.c1 order by c1")
+	require.Contains(t, err.Error(), fp)
+	require.NoError(t, failpoint.Disable(fpPathPrefix+fp))
+}
+
+func TestCTEDelSpillFile(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1, t2;")
+	tk.MustExec("create table t1(c1 int, c2 int);")
+	tk.MustExec("create table t2(c1 int);")
+	tk.MustExec("set @@cte_max_recursion_depth = 1000000;")
+	tk.MustExec("set global tidb_mem_oom_action = 'log';")
+	tk.MustExec("set @@tidb_mem_quota_query = 100;")
+	tk.MustExec("insert into t2 values(1);")
+	tk.MustExec("insert into t1 (c1, c2) with recursive cte1 as (select c1 from t2 union select cte1.c1 + 1 from cte1 where cte1.c1 < 100000) select cte1.c1, cte1.c1+1 from cte1;")
+	require.Nil(t, tk.Session().GetSessionVars().StmtCtx.CTEStorageMap)
+}
+
+func TestCTEShareCorColumn(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1, t2;")
+	tk.MustExec("create table t1(c1 int, c2 varchar(100));")
+	tk.MustExec("insert into t1 values(1, '2020-10-10');")
+	tk.MustExec("create table t2(c1 int, c2 date);")
+	tk.MustExec("insert into t2 values(1, '2020-10-10');")
+	for i := 0; i < 100; i++ {
+		tk.MustQuery("with cte1 as (select t1.c1, (select t2.c2 from t2 where t2.c2 = str_to_date(t1.c2, '%Y-%m-%d')) from t1 inner join t2 on t1.c1 = t2.c1) select /*+ hash_join_build(alias1) */ * from cte1 alias1 inner join cte1 alias2 on alias1.c1 =   alias2.c1;").Check(testkit.Rows("1 2020-10-10 1 2020-10-10"))
+		tk.MustQuery("with cte1 as (select t1.c1, (select t2.c2 from t2 where t2.c2 = str_to_date(t1.c2, '%Y-%m-%d')) from t1 inner join t2 on t1.c1 = t2.c1) select /*+ hash_join_build(alias2) */ * from cte1 alias1 inner join cte1 alias2 on alias1.c1 =   alias2.c1;").Check(testkit.Rows("1 2020-10-10 1 2020-10-10"))
+	}
+
+	tk.MustExec("drop table if exists t1;")
+	tk.MustExec("create table t1(a int);")
+	tk.MustExec("insert into t1 values(1), (2);")
+	tk.MustQuery("SELECT * FROM t1 dt WHERE EXISTS( WITH RECURSIVE qn AS (SELECT a AS b UNION ALL SELECT b+1 FROM qn WHERE b=0 or b = 1) SELECT * FROM qn dtqn1 where exists (select /*+ NO_DECORRELATE() */ b from qn where dtqn1.b+1));").Check(testkit.Rows("1", "2"))
+}
+
+func TestCTESmallChunkSize(t *testing.T) {
+	store, clean := testkit.CreateMockStore(t)
+	defer clean()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec("create table t1(c1 int);")
+	insertStr := "insert into t1 values (0)"
+	for i := 1; i < 300; i++ {
+		insertStr += fmt.Sprintf(", (%d)", i)
+	}
+	tk.MustExec(insertStr)
+	tk.MustExec("set @@tidb_max_chunk_size = 32;")
+	tk.MustQuery("with recursive cte1(c1) as (select c1 from t1 union select c1 + 1 c1 from cte1 limit 1 offset 100) select * from cte1;").Check(testkit.Rows("100"))
+	tk.MustExec("set @@tidb_max_chunk_size = default;")
 }

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -29,12 +30,12 @@ var _ Storage = &StorageRC{}
 //
 // Common usage as follows:
 //
-//  storage.Lock()
-//  if !storage.Done() {
-//      fill all data into storage
-//  }
-//  storage.UnLock()
-//  read data from storage
+//	storage.Lock()
+//	if !storage.Done() {
+//	    fill all data into storage
+//	}
+//	storage.UnLock()
+//	read data from storage
 type Storage interface {
 	// If is first called, will open underlying storage. Otherwise will add ref count by one.
 	OpenAndRef() error
@@ -76,15 +77,14 @@ type Storage interface {
 	Done() bool
 	SetDone()
 
+	// Store error message, so we can return directly.
+	Error() error
+	SetError(err error)
+
 	// Readers use iter information to determine
 	// whether they need to read data from the beginning.
 	SetIter(iter int)
 	GetIter() int
-
-	// We use this channel to notify reader that Storage is ready to read.
-	// It exists only to solve the special implementation of IndexLookUpJoin.
-	// We will find a better way and remove this later.
-	GetBegCh() chan struct{}
 
 	GetMemTracker() *memory.Tracker
 	GetDiskTracker() *disk.Tracker
@@ -98,9 +98,9 @@ type StorageRC struct {
 	tp      []*types.FieldType
 	chkSize int
 
-	begCh chan struct{}
-	done  bool
-	iter  int
+	done bool
+	iter int
+	err  error
 
 	rc *chunk.RowContainer
 }
@@ -115,7 +115,6 @@ func (s *StorageRC) OpenAndRef() (err error) {
 	if !s.valid() {
 		s.rc = chunk.NewRowContainer(s.tp, s.chkSize)
 		s.refCnt = 1
-		s.begCh = make(chan struct{})
 		s.iter = 0
 	} else {
 		s.refCnt += 1
@@ -132,13 +131,14 @@ func (s *StorageRC) DerefAndClose() (err error) {
 	if s.refCnt < 0 {
 		return errors.New("Storage ref count is less than zero")
 	} else if s.refCnt == 0 {
-		// TODO: unreg memtracker
+		s.refCnt = -1
+		s.done = false
+		s.err = nil
+		s.iter = 0
 		if err = s.rc.Close(); err != nil {
 			return err
 		}
-		if err = s.resetAll(); err != nil {
-			return err
-		}
+		s.rc = nil
 	}
 	return nil
 }
@@ -158,12 +158,12 @@ func (s *StorageRC) SwapData(other Storage) (err error) {
 
 // Reopen impls Storage Reopen interface.
 func (s *StorageRC) Reopen() (err error) {
-	if err = s.rc.Reset(); err != nil {
+	if err = s.rc.Close(); err != nil {
 		return err
 	}
 	s.iter = 0
-	s.begCh = make(chan struct{})
 	s.done = false
+	s.err = nil
 	// Create a new RowContainer.
 	// Because some meta infos in old RowContainer are not resetted.
 	// Such as memTracker/actionSpill etc. So we just use a new one.
@@ -228,6 +228,16 @@ func (s *StorageRC) SetDone() {
 	s.done = true
 }
 
+// Error impls Storage Error interface.
+func (s *StorageRC) Error() error {
+	return s.err
+}
+
+// SetError impls Storage SetError interface.
+func (s *StorageRC) SetError(err error) {
+	s.err = err
+}
+
 // SetIter impls Storage SetIter interface.
 func (s *StorageRC) SetIter(iter int) {
 	s.iter = iter
@@ -236,11 +246,6 @@ func (s *StorageRC) SetIter(iter int) {
 // GetIter impls Storage GetIter interface.
 func (s *StorageRC) GetIter() int {
 	return s.iter
-}
-
-// GetBegCh impls Storage GetBegCh interface.
-func (s *StorageRC) GetBegCh() chan struct{} {
-	return s.begCh
 }
 
 // GetMemTracker impls Storage GetMemTracker interface.
@@ -261,18 +266,6 @@ func (s *StorageRC) ActionSpill() *chunk.SpillDiskAction {
 // ActionSpillForTest is for test.
 func (s *StorageRC) ActionSpillForTest() *chunk.SpillDiskAction {
 	return s.rc.ActionSpillForTest()
-}
-
-func (s *StorageRC) resetAll() error {
-	s.refCnt = -1
-	s.begCh = nil
-	s.done = false
-	s.iter = 0
-	if err := s.rc.Reset(); err != nil {
-		return err
-	}
-	s.rc = nil
-	return nil
 }
 
 func (s *StorageRC) valid() bool {

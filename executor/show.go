@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -23,18 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cznic/mathutil"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser"
-	"github.com/pingcap/parser/ast"
-	"github.com/pingcap/parser/auth"
-	"github.com/pingcap/parser/charset"
-	"github.com/pingcap/parser/model"
-	"github.com/pingcap/parser/mysql"
-	"github.com/pingcap/parser/terror"
-	"github.com/pingcap/tidb-tools/pkg/etcd"
-	"github.com/pingcap/tidb-tools/pkg/utils"
-	"github.com/pingcap/tidb-tools/tidb-binlog/node"
 	"github.com/pingcap/tidb/bindinfo"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
@@ -43,24 +33,36 @@ import (
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/auth"
+	"github.com/pingcap/tidb/parser/charset"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/plugin"
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/privilege/privileges"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/store/helper"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/tidb-binlog/node"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/collate"
+	"github.com/pingcap/tidb/util/etcd"
 	"github.com/pingcap/tidb/util/format"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/hint"
+	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/sem"
 	"github.com/pingcap/tidb/util/set"
 	"github.com/pingcap/tidb/util/sqlexec"
@@ -76,11 +78,13 @@ type ShowExec struct {
 	Tp        ast.ShowStmtType // Databases/Tables/Columns/....
 	DBName    model.CIStr
 	Table     *ast.TableName       // Used for showing columns.
+	Partition model.CIStr          // Used for showing partition
 	Column    *ast.ColumnName      // Used for `desc table column`.
 	IndexName model.CIStr          // Used for show table regions.
 	Flag      int                  // Some flag parsed from sql, such as FULL.
 	Roles     []*auth.RoleIdentity // Used for show grants.
 	User      *auth.UserIdentity   // Used by show grants, show create user.
+	Extractor plannercore.ShowPredicateExtractor
 
 	is infoschema.InfoSchema
 
@@ -105,12 +109,12 @@ func (e *ShowExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		iter := chunk.NewIterator4Chunk(e.result)
 		for colIdx := 0; colIdx < e.Schema().Len(); colIdx++ {
 			retType := e.Schema().Columns[colIdx].RetType
-			if !types.IsTypeVarchar(retType.Tp) {
+			if !types.IsTypeVarchar(retType.GetType()) {
 				continue
 			}
 			for row := iter.Begin(); row != iter.End(); row = iter.Next() {
-				if valLen := len(row.GetString(colIdx)); retType.Flen < valLen {
-					retType.Flen = valLen
+				if valLen := len(row.GetString(colIdx)); retType.GetFlen() < valLen {
+					retType.SetFlen(valLen)
 				}
 			}
 		}
@@ -139,17 +143,19 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 	case ast.ShowCreateSequence:
 		return e.fetchShowCreateSequence()
 	case ast.ShowCreateUser:
-		return e.fetchShowCreateUser()
+		return e.fetchShowCreateUser(ctx)
 	case ast.ShowCreateView:
 		return e.fetchShowCreateView()
 	case ast.ShowCreateDatabase:
 		return e.fetchShowCreateDatabase()
+	case ast.ShowCreatePlacementPolicy:
+		return e.fetchShowCreatePlacementPolicy()
 	case ast.ShowDatabases:
 		return e.fetchShowDatabases()
 	case ast.ShowDrainerStatus:
 		return e.fetchShowPumpOrDrainerStatus(node.DrainerNode)
 	case ast.ShowEngines:
-		return e.fetchShowEngines()
+		return e.fetchShowEngines(ctx)
 	case ast.ShowGrants:
 		return e.fetchShowGrants()
 	case ast.ShowIndex:
@@ -165,7 +171,7 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 	case ast.ShowOpenTables:
 		return e.fetchShowOpenTables()
 	case ast.ShowTableStatus:
-		return e.fetchShowTableStatus()
+		return e.fetchShowTableStatus(ctx)
 	case ast.ShowTriggers:
 		return e.fetchShowTriggers()
 	case ast.ShowVariables:
@@ -191,6 +197,11 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 	case ast.ShowStatsHealthy:
 		e.fetchShowStatsHealthy()
 		return nil
+	case ast.ShowHistogramsInFlight:
+		e.fetchShowHistogramsInFlight()
+		return nil
+	case ast.ShowColumnStatsUsage:
+		return e.fetchShowColumnStatsUsage()
 	case ast.ShowPlugins:
 		return e.fetchShowPlugins()
 	case ast.ShowProfiles:
@@ -201,9 +212,10 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 		return e.fetchShowPrivileges()
 	case ast.ShowBindings:
 		return e.fetchShowBind()
+	case ast.ShowBindingCacheStatus:
+		return e.fetchShowBindingCacheStatus(ctx)
 	case ast.ShowAnalyzeStatus:
-		e.fetchShowAnalyzeStatus()
-		return nil
+		return e.fetchShowAnalyzeStatus()
 	case ast.ShowRegions:
 		return e.fetchShowTableRegions()
 	case ast.ShowBuiltins:
@@ -212,6 +224,16 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 		return e.fetchShowBRIE(ast.BRIEKindBackup)
 	case ast.ShowRestores:
 		return e.fetchShowBRIE(ast.BRIEKindRestore)
+	case ast.ShowPlacementLabels:
+		return e.fetchShowPlacementLabels(ctx)
+	case ast.ShowPlacement:
+		return e.fetchShowPlacement(ctx)
+	case ast.ShowPlacementForDatabase:
+		return e.fetchShowPlacementForDB(ctx)
+	case ast.ShowPlacementForTable:
+		return e.fetchShowPlacementForTable(ctx)
+	case ast.ShowPlacementForPartition:
+		return e.fetchShowPlacementForPartition(ctx)
 	}
 	return nil
 }
@@ -256,7 +278,36 @@ func (e *ShowExec) fetchShowBind() error {
 	} else {
 		bindRecords = domain.GetDomain(e.ctx).BindHandle().GetAllBindRecord()
 	}
+	// Remove the invalid bindRecord.
+	ind := 0
+	for _, bindData := range bindRecords {
+		if len(bindData.Bindings) > 0 {
+			bindRecords[ind] = bindData
+			ind++
+		}
+	}
+	bindRecords = bindRecords[:ind]
 	parser := parser.New()
+	for _, bindData := range bindRecords {
+		// For the same origin_sql, sort the bindings according to their update time.
+		sort.Slice(bindData.Bindings, func(i int, j int) bool {
+			cmpResult := bindData.Bindings[i].UpdateTime.Compare(bindData.Bindings[j].UpdateTime)
+			if cmpResult == 0 {
+				// Because the create time must be different, the result of sorting is stable.
+				cmpResult = bindData.Bindings[i].CreateTime.Compare(bindData.Bindings[j].CreateTime)
+			}
+			return cmpResult > 0
+		})
+	}
+	// For the different origin_sql, sort the bindRecords according to their max update time.
+	sort.Slice(bindRecords, func(i int, j int) bool {
+		cmpResult := bindRecords[i].Bindings[0].UpdateTime.Compare(bindRecords[j].Bindings[0].UpdateTime)
+		if cmpResult == 0 {
+			// Because the create time must be different, the result of sorting is stable.
+			cmpResult = bindRecords[i].Bindings[0].CreateTime.Compare(bindRecords[j].Bindings[0].CreateTime)
+		}
+		return cmpResult > 0
+	})
 	for _, bindData := range bindRecords {
 		for _, hint := range bindData.Bindings {
 			stmt, err := parser.ParseOneStmt(hint.BindSQL, hint.Charset, hint.Collation)
@@ -290,14 +341,41 @@ func (e *ShowExec) fetchShowBind() error {
 	return nil
 }
 
-func (e *ShowExec) fetchShowEngines() error {
+func (e *ShowExec) fetchShowBindingCacheStatus(ctx context.Context) error {
 	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
 
-	stmt, err := exec.ParseWithParams(context.TODO(), `SELECT * FROM information_schema.engines`)
+	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, fmt.Sprintf("SELECT count(*) FROM mysql.bind_info where status = '%s' or status = '%s';", bindinfo.Enabled, bindinfo.Using))
 	if err != nil {
 		return errors.Trace(err)
 	}
-	rows, _, err := exec.ExecRestrictedStmt(context.TODO(), stmt)
+
+	handle := domain.GetDomain(e.ctx).BindHandle()
+
+	bindRecords := handle.GetAllBindRecord()
+	numBindings := 0
+	for _, bindRecord := range bindRecords {
+		for _, binding := range bindRecord.Bindings {
+			if binding.IsBindingEnabled() {
+				numBindings++
+			}
+		}
+	}
+
+	memUsage := handle.GetMemUsage()
+	memCapacity := handle.GetMemCapacity()
+	e.appendRow([]interface{}{
+		numBindings,
+		rows[0].GetInt64(0),
+		memory.FormatBytes(memUsage),
+		memory.FormatBytes(memCapacity),
+	})
+	return nil
+}
+
+func (e *ShowExec) fetchShowEngines(ctx context.Context) error {
+	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
+
+	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, `SELECT * FROM information_schema.engines`)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -323,10 +401,29 @@ func (e *ShowExec) fetchShowDatabases() error {
 	dbs := e.is.AllSchemaNames()
 	checker := privilege.GetPrivilegeManager(e.ctx)
 	sort.Strings(dbs)
+	var (
+		fieldPatternsLike collate.WildcardPattern
+		FieldFilterEnable bool
+		fieldFilter       string
+	)
+
+	if e.Extractor != nil {
+		extractor := (e.Extractor).(*plannercore.ShowDatabaseExtractor)
+		if extractor.FieldPatterns != "" {
+			fieldPatternsLike = collate.GetCollatorByID(collate.CollationName2ID(mysql.UTF8MB4DefaultCollation)).Pattern()
+			fieldPatternsLike.Compile(extractor.FieldPatterns, byte('\\'))
+		}
+		FieldFilterEnable = extractor.Field != ""
+		fieldFilter = extractor.Field
+	}
 	// let information_schema be the first database
 	moveInfoSchemaToFront(dbs)
 	for _, d := range dbs {
 		if checker != nil && !checker.DBIsVisible(e.ctx.GetSessionVars().ActiveRoles, d) {
+			continue
+		} else if FieldFilterEnable && strings.ToLower(d) != fieldFilter {
+			continue
+		} else if fieldPatternsLike != nil && !fieldPatternsLike.DoMatch(strings.ToLower(d)) {
 			continue
 		}
 		e.appendRow([]interface{}{
@@ -380,13 +477,32 @@ func (e *ShowExec) fetchShowTables() error {
 		return ErrBadDB.GenWithStackByArgs(e.DBName)
 	}
 	// sort for tables
-	tableNames := make([]string, 0, len(e.is.SchemaTables(e.DBName)))
+	schemaTables := e.is.SchemaTables(e.DBName)
+	tableNames := make([]string, 0, len(schemaTables))
 	activeRoles := e.ctx.GetSessionVars().ActiveRoles
-	var tableTypes = make(map[string]string)
-	for _, v := range e.is.SchemaTables(e.DBName) {
+	var (
+		tableTypes        = make(map[string]string)
+		fieldPatternsLike collate.WildcardPattern
+		FieldFilterEnable bool
+		fieldFilter       string
+	)
+	if e.Extractor != nil {
+		extractor := (e.Extractor).(*plannercore.ShowTablesTableExtractor)
+		if extractor.FieldPatterns != "" {
+			fieldPatternsLike = collate.GetCollatorByID(collate.CollationName2ID(mysql.UTF8MB4DefaultCollation)).Pattern()
+			fieldPatternsLike.Compile(extractor.FieldPatterns, byte('\\'))
+		}
+		FieldFilterEnable = extractor.Field != ""
+		fieldFilter = extractor.Field
+	}
+	for _, v := range schemaTables {
 		// Test with mysql.AllPrivMask means any privilege would be OK.
 		// TODO: Should consider column privileges, which also make a table visible.
 		if checker != nil && !checker.RequestVerification(activeRoles, e.DBName.O, v.Meta().Name.O, "", mysql.AllPrivMask) {
+			continue
+		} else if FieldFilterEnable && v.Meta().Name.L != fieldFilter {
+			continue
+		} else if fieldPatternsLike != nil && !fieldPatternsLike.DoMatch(v.Meta().Name.L) {
 			continue
 		}
 		tableNames = append(tableNames, v.Meta().Name.O)
@@ -411,7 +527,7 @@ func (e *ShowExec) fetchShowTables() error {
 	return nil
 }
 
-func (e *ShowExec) fetchShowTableStatus() error {
+func (e *ShowExec) fetchShowTableStatus(ctx context.Context) error {
 	checker := privilege.GetPrivilegeManager(e.ctx)
 	if checker != nil && e.ctx.GetSessionVars().User != nil {
 		if !checker.DBIsVisible(e.ctx.GetSessionVars().ActiveRoles, e.DBName.O) {
@@ -423,17 +539,6 @@ func (e *ShowExec) fetchShowTableStatus() error {
 	}
 
 	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
-
-	stmt, err := exec.ParseWithParams(context.TODO(), `SELECT
-		table_name, engine, version, row_format, table_rows,
-		avg_row_length, data_length, max_data_length, index_length,
-		data_free, auto_increment, create_time, update_time, check_time,
-		table_collation, IFNULL(checksum,''), create_options, table_comment
-		FROM information_schema.tables
-		WHERE lower(table_schema)=%? ORDER BY table_name`, e.DBName.L)
-	if err != nil {
-		return errors.Trace(err)
-	}
 
 	var snapshot uint64
 	txn, err := e.ctx.Txn(false)
@@ -447,7 +552,13 @@ func (e *ShowExec) fetchShowTableStatus() error {
 		snapshot = e.ctx.GetSessionVars().SnapshotTS
 	}
 
-	rows, _, err := exec.ExecRestrictedStmt(context.TODO(), stmt, sqlexec.ExecOptionWithSnapshot(snapshot))
+	rows, _, err := exec.ExecRestrictedSQL(ctx, []sqlexec.OptionFuncAlias{sqlexec.ExecOptionWithSnapshot(snapshot), sqlexec.ExecOptionUseCurSession},
+		`SELECT table_name, engine, version, row_format, table_rows,
+		avg_row_length, data_length, max_data_length, index_length,
+		data_free, auto_increment, create_time, update_time, check_time,
+		table_collation, IFNULL(checksum,''), create_options, table_comment
+		FROM information_schema.tables
+		WHERE lower(table_schema)=%? ORDER BY table_name`, e.DBName.L)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -465,13 +576,27 @@ func (e *ShowExec) fetchShowTableStatus() error {
 
 func (e *ShowExec) fetchShowColumns(ctx context.Context) error {
 	tb, err := e.getTable()
-
 	if err != nil {
 		return errors.Trace(err)
 	}
+	var (
+		fieldPatternsLike collate.WildcardPattern
+		FieldFilterEnable bool
+		fieldFilter       string
+	)
+	if e.Extractor != nil {
+		extractor := (e.Extractor).(*plannercore.ShowColumnsTableExtractor)
+		if extractor.FieldPatterns != "" {
+			fieldPatternsLike = collate.GetCollatorByID(collate.CollationName2ID(mysql.UTF8MB4DefaultCollation)).Pattern()
+			fieldPatternsLike.Compile(extractor.FieldPatterns, byte('\\'))
+		}
+		FieldFilterEnable = extractor.Field != ""
+		fieldFilter = extractor.Field
+	}
+
 	checker := privilege.GetPrivilegeManager(e.ctx)
 	activeRoles := e.ctx.GetSessionVars().ActiveRoles
-	if checker != nil && e.ctx.GetSessionVars().User != nil && !checker.RequestVerification(activeRoles, e.DBName.O, tb.Meta().Name.O, "", mysql.AllPrivMask) {
+	if checker != nil && e.ctx.GetSessionVars().User != nil && !checker.RequestVerification(activeRoles, e.DBName.O, tb.Meta().Name.O, "", mysql.InsertPriv|mysql.SelectPriv|mysql.UpdatePriv|mysql.ReferencesPriv) {
 		return e.tableAccessDenied("SELECT", tb.Meta().Name.O)
 	}
 
@@ -487,24 +612,25 @@ func (e *ShowExec) fetchShowColumns(ctx context.Context) error {
 		return err
 	}
 	for _, col := range cols {
-		if e.Column != nil && e.Column.Name.L != col.Name.L {
+		if FieldFilterEnable && col.Name.L != fieldFilter {
+			continue
+		} else if fieldPatternsLike != nil && !fieldPatternsLike.DoMatch(col.Name.L) {
 			continue
 		}
-
 		desc := table.NewColDesc(col)
 		var columnDefault interface{}
 		if desc.DefaultValue != nil {
 			// SHOW COLUMNS result expects string value
 			defaultValStr := fmt.Sprintf("%v", desc.DefaultValue)
 			// If column is timestamp, and default value is not current_timestamp, should convert the default value to the current session time zone.
-			if col.Tp == mysql.TypeTimestamp && defaultValStr != types.ZeroDatetimeStr && !strings.HasPrefix(strings.ToUpper(defaultValStr), strings.ToUpper(ast.CurrentTimestamp)) {
+			if col.GetType() == mysql.TypeTimestamp && defaultValStr != types.ZeroDatetimeStr && !strings.HasPrefix(strings.ToUpper(defaultValStr), strings.ToUpper(ast.CurrentTimestamp)) {
 				timeValue, err := table.GetColDefaultValue(e.ctx, col.ToInfo())
 				if err != nil {
 					return errors.Trace(err)
 				}
 				defaultValStr = timeValue.GetMysqlTime().String()
 			}
-			if col.Tp == mysql.TypeBit {
+			if col.GetType() == mysql.TypeBit {
 				defaultValBinaryLiteral := types.BinaryLiteral(defaultValStr)
 				columnDefault = defaultValBinaryLiteral.ToBitLiteralString(true)
 			} else {
@@ -555,7 +681,7 @@ func (e *ShowExec) fetchShowIndex() error {
 	if tb.Meta().PKIsHandle {
 		var pkCol *table.Column
 		for _, col := range tb.Cols() {
-			if mysql.HasPriKeyFlag(col.Flag) {
+			if mysql.HasPriKeyFlag(col.GetFlag()) {
 				pkCol = col
 				break
 			}
@@ -575,7 +701,7 @@ func (e *ShowExec) fetchShowIndex() error {
 			"",               // Comment
 			"",               // Index_comment
 			"YES",            // Index_visible
-			"NULL",           // Expression
+			nil,              // Expression
 			"YES",            // Clustered
 		})
 	}
@@ -601,7 +727,7 @@ func (e *ShowExec) fetchShowIndex() error {
 
 			tblCol := tb.Meta().Columns[col.Offset]
 			nullVal := "YES"
-			if mysql.HasNotNullFlag(tblCol.Flag) {
+			if mysql.HasNotNullFlag(tblCol.GetFlag()) {
 				nullVal = ""
 			}
 
@@ -611,10 +737,10 @@ func (e *ShowExec) fetchShowIndex() error {
 			}
 
 			colName := col.Name.O
-			expression := "NULL"
+			var expression interface{}
 			if tblCol.Hidden {
 				colName = "NULL"
-				expression = fmt.Sprintf("(%s)", tblCol.GeneratedExprString)
+				expression = tblCol.GeneratedExprString
 			}
 
 			e.appendRow([]interface{}{
@@ -677,6 +803,20 @@ func (e *ShowExec) fetchShowVariables() (err error) {
 		value       string
 		sessionVars = e.ctx.GetSessionVars()
 	)
+	var (
+		fieldPatternsLike collate.WildcardPattern
+		FieldFilterEnable bool
+		fieldFilter       string
+	)
+	if e.Extractor != nil {
+		extractor := (e.Extractor).(*plannercore.ShowVariablesExtractor)
+		if extractor.FieldPatterns != "" {
+			fieldPatternsLike = collate.GetCollatorByID(collate.CollationName2ID(mysql.UTF8MB4DefaultCollation)).Pattern()
+			fieldPatternsLike.Compile(extractor.FieldPatterns, byte('\\'))
+		}
+		FieldFilterEnable = extractor.Field != ""
+		fieldFilter = extractor.Field
+	}
 	if e.GlobalScope {
 		// Collect global scope variables,
 		// 1. Exclude the variables of ScopeSession in variable.SysVars;
@@ -684,6 +824,11 @@ func (e *ShowExec) fetchShowVariables() (err error) {
 		// 		otherwise, fetch the value from table `mysql.Global_Variables`.
 		for _, v := range variable.GetSysVars() {
 			if v.Scope != variable.ScopeSession {
+				if FieldFilterEnable && v.Name != fieldFilter {
+					continue
+				} else if fieldPatternsLike != nil && !fieldPatternsLike.DoMatch(v.Name) {
+					continue
+				}
 				if v.Hidden || e.sysVarHiddenForSem(v.Name) {
 					continue
 				}
@@ -701,6 +846,11 @@ func (e *ShowExec) fetchShowVariables() (err error) {
 	// If it is a session only variable, use the default value defined in code,
 	//   otherwise, fetch the value from table `mysql.Global_Variables`.
 	for _, v := range variable.GetSysVars() {
+		if FieldFilterEnable && v.Name != fieldFilter {
+			continue
+		} else if fieldPatternsLike != nil && !fieldPatternsLike.DoMatch(v.Name) {
+			continue
+		}
 		if v.Hidden || e.sysVarHiddenForSem(v.Name) {
 			continue
 		}
@@ -744,13 +894,12 @@ func (e *ShowExec) fetchShowStatus() error {
 }
 
 func getDefaultCollate(charsetName string) string {
-	for _, c := range charset.GetSupportedCharsets() {
-		if strings.EqualFold(c.Name, charsetName) {
-			return c.DefaultCollation
-		}
+	ch, err := charset.GetCharsetInfo(charsetName)
+	if err != nil {
+		// The charset is invalid, return server default.
+		return mysql.DefaultCollationName
 	}
-	// The charset is invalid, return server default.
-	return mysql.DefaultCollationName
+	return ch.DefaultCollation
 }
 
 // ConstructResultOfShowCreateTable constructs the result for show create table.
@@ -779,6 +928,8 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 	switch tableInfo.TempTableType {
 	case model.TempTableGlobal:
 		fmt.Fprintf(buf, "CREATE GLOBAL TEMPORARY TABLE %s (\n", tableName)
+	case model.TempTableLocal:
+		fmt.Fprintf(buf, "CREATE TEMPORARY TABLE %s (\n", tableName)
 	default:
 		fmt.Fprintf(buf, "CREATE TABLE %s (\n", tableName)
 	}
@@ -793,16 +944,16 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 			buf.WriteString(",\n")
 		}
 		fmt.Fprintf(buf, "  %s %s", stringutil.Escape(col.Name.O, sqlMode), col.GetTypeDesc())
-		if col.Charset != "binary" {
-			if col.Charset != tblCharset {
-				fmt.Fprintf(buf, " CHARACTER SET %s", col.Charset)
+		if col.GetCharset() != "binary" {
+			if col.GetCharset() != tblCharset {
+				fmt.Fprintf(buf, " CHARACTER SET %s", col.GetCharset())
 			}
-			if col.Collate != tblCollate {
-				fmt.Fprintf(buf, " COLLATE %s", col.Collate)
+			if col.GetCollate() != tblCollate {
+				fmt.Fprintf(buf, " COLLATE %s", col.GetCollate())
 			} else {
-				defcol, err := charset.GetDefaultCollation(col.Charset)
-				if err == nil && defcol != col.Collate {
-					fmt.Fprintf(buf, " COLLATE %s", col.Collate)
+				defcol, err := charset.GetDefaultCollation(col.GetCharset())
+				if err == nil && defcol != col.GetCollate() {
+					fmt.Fprintf(buf, " COLLATE %s", col.GetCollate())
 				}
 			}
 		}
@@ -815,33 +966,33 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 				buf.WriteString(" VIRTUAL")
 			}
 		}
-		if mysql.HasAutoIncrementFlag(col.Flag) {
+		if mysql.HasAutoIncrementFlag(col.GetFlag()) {
 			hasAutoIncID = true
 			buf.WriteString(" NOT NULL AUTO_INCREMENT")
 		} else {
-			if mysql.HasNotNullFlag(col.Flag) {
+			if mysql.HasNotNullFlag(col.GetFlag()) {
 				buf.WriteString(" NOT NULL")
 			}
 			// default values are not shown for generated columns in MySQL
-			if !mysql.HasNoDefaultValueFlag(col.Flag) && !col.IsGenerated() {
+			if !mysql.HasNoDefaultValueFlag(col.GetFlag()) && !col.IsGenerated() {
 				defaultValue := col.GetDefaultValue()
 				switch defaultValue {
 				case nil:
-					if !mysql.HasNotNullFlag(col.Flag) {
-						if col.Tp == mysql.TypeTimestamp {
+					if !mysql.HasNotNullFlag(col.GetFlag()) {
+						if col.GetType() == mysql.TypeTimestamp {
 							buf.WriteString(" NULL")
 						}
 						buf.WriteString(" DEFAULT NULL")
 					}
 				case "CURRENT_TIMESTAMP":
 					buf.WriteString(" DEFAULT CURRENT_TIMESTAMP")
-					if col.Decimal > 0 {
-						buf.WriteString(fmt.Sprintf("(%d)", col.Decimal))
+					if col.GetDecimal() > 0 {
+						buf.WriteString(fmt.Sprintf("(%d)", col.GetDecimal()))
 					}
 				default:
 					defaultValStr := fmt.Sprintf("%v", defaultValue)
 					// If column is timestamp, and default value is not current_timestamp, should convert the default value to the current session time zone.
-					if col.Tp == mysql.TypeTimestamp && defaultValStr != types.ZeroDatetimeStr {
+					if col.GetType() == mysql.TypeTimestamp && defaultValStr != types.ZeroDatetimeStr {
 						timeValue, err := table.GetColDefaultValue(ctx, col)
 						if err != nil {
 							return errors.Trace(err)
@@ -849,7 +1000,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 						defaultValStr = timeValue.GetMysqlTime().String()
 					}
 
-					if col.Tp == mysql.TypeBit {
+					if col.GetType() == mysql.TypeBit {
 						defaultValBinaryLiteral := types.BinaryLiteral(defaultValStr)
 						fmt.Fprintf(buf, " DEFAULT %s", defaultValBinaryLiteral.ToBitLiteralString(true))
 					} else if col.DefaultIsExpr {
@@ -859,7 +1010,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 					}
 				}
 			}
-			if mysql.HasOnUpdateNowFlag(col.Flag) {
+			if mysql.HasOnUpdateNowFlag(col.GetFlag()) {
 				buf.WriteString(" ON UPDATE CURRENT_TIMESTAMP")
 				buf.WriteString(table.OptionalFsp(&col.FieldType))
 			}
@@ -873,7 +1024,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 		if i != len(tableInfo.Cols())-1 {
 			needAddComma = true
 		}
-		if tableInfo.PKIsHandle && mysql.HasPriKeyFlag(col.Flag) {
+		if tableInfo.PKIsHandle && mysql.HasPriKeyFlag(col.GetFlag()) {
 			pkCol = col
 		}
 	}
@@ -921,8 +1072,11 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 		if idxInfo.Invisible {
 			fmt.Fprintf(buf, ` /*!80000 INVISIBLE */`)
 		}
+		if idxInfo.Comment != "" {
+			fmt.Fprintf(buf, ` COMMENT '%s'`, format.OutputFormat(idxInfo.Comment))
+		}
 		if idxInfo.Primary {
-			if tableInfo.PKIsHandle || tableInfo.IsCommonHandle {
+			if tableInfo.HasClusteredIndex() {
 				buf.WriteString(" /*T![clustered_index] CLUSTERED */")
 			} else {
 				buf.WriteString(" /*T![clustered_index] NONCLUSTERED */")
@@ -958,14 +1112,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 
 	buf.WriteString("\n")
 
-	switch tableInfo.TempTableType {
-	case model.TempTableNone:
-		buf.WriteString(") ENGINE=InnoDB")
-	default:
-		// For now the only supported engine for temporary table is memory.
-		buf.WriteString(") ENGINE=memory")
-	}
-
+	buf.WriteString(") ENGINE=InnoDB")
 	// We need to explicitly set the default charset and collation
 	// to make it work on MySQL server which has default collate utf8_general_ci.
 	if len(tblCollate) == 0 || tblCollate == "binary" {
@@ -984,7 +1131,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 
 	incrementAllocator := allocators.Get(autoid.RowIDAllocType)
 	if hasAutoIncID && incrementAllocator != nil {
-		autoIncID, err := incrementAllocator.NextGlobalAutoID(tableInfo.ID)
+		autoIncID, err := incrementAllocator.NextGlobalAutoID()
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1001,7 +1148,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 
 	randomAllocator := allocators.Get(autoid.AutoRandomType)
 	if randomAllocator != nil {
-		autoRandID, err := randomAllocator.NextGlobalAutoID(tableInfo.ID)
+		autoRandID, err := randomAllocator.NextGlobalAutoID()
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1012,7 +1159,7 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 	}
 
 	if tableInfo.ShardRowIDBits > 0 {
-		fmt.Fprintf(buf, "/*!90000 SHARD_ROW_ID_BITS=%d ", tableInfo.ShardRowIDBits)
+		fmt.Fprintf(buf, " /*T! SHARD_ROW_ID_BITS=%d ", tableInfo.ShardRowIDBits)
 		if tableInfo.PreSplitRegions > 0 {
 			fmt.Fprintf(buf, "PRE_SPLIT_REGIONS=%d ", tableInfo.PreSplitRegions)
 		}
@@ -1027,8 +1174,18 @@ func ConstructResultOfShowCreateTable(ctx sessionctx.Context, tableInfo *model.T
 		fmt.Fprintf(buf, " ON COMMIT DELETE ROWS")
 	}
 
+	if tableInfo.PlacementPolicyRef != nil {
+		fmt.Fprintf(buf, " /*T![placement] PLACEMENT POLICY=%s */", stringutil.Escape(tableInfo.PlacementPolicyRef.Name.String(), sqlMode))
+	}
+
+	if tableInfo.TableCacheStatusType == model.TableCacheStatusEnable {
+		// This is not meant to be understand by other components, so it's not written as /*T![cached] */
+		// For all external components, cached table is just a normal table.
+		fmt.Fprintf(buf, " /* CACHED ON */")
+	}
+
 	// add partition info here.
-	appendPartitionInfo(tableInfo.Partition, buf)
+	appendPartitionInfo(tableInfo.Partition, buf, sqlMode)
 	return nil
 }
 
@@ -1144,9 +1301,12 @@ func (e *ShowExec) fetchShowCreateView() error {
 
 func fetchShowCreateTable4View(ctx sessionctx.Context, tb *model.TableInfo, buf *bytes.Buffer) {
 	sqlMode := ctx.GetSessionVars().SQLMode
-
 	fmt.Fprintf(buf, "CREATE ALGORITHM=%s ", tb.View.Algorithm.String())
-	fmt.Fprintf(buf, "DEFINER=%s@%s ", stringutil.Escape(tb.View.Definer.Username, sqlMode), stringutil.Escape(tb.View.Definer.Hostname, sqlMode))
+	if tb.View.Definer.AuthUsername == "" || tb.View.Definer.AuthHostname == "" {
+		fmt.Fprintf(buf, "DEFINER=%s@%s ", stringutil.Escape(tb.View.Definer.Username, sqlMode), stringutil.Escape(tb.View.Definer.Hostname, sqlMode))
+	} else {
+		fmt.Fprintf(buf, "DEFINER=%s@%s ", stringutil.Escape(tb.View.Definer.AuthUsername, sqlMode), stringutil.Escape(tb.View.Definer.AuthHostname, sqlMode))
+	}
 	fmt.Fprintf(buf, "SQL SECURITY %s ", tb.View.Security.String())
 	fmt.Fprintf(buf, "VIEW %s (", stringutil.Escape(tb.Name.O, sqlMode))
 	for i, col := range tb.Columns {
@@ -1158,54 +1318,58 @@ func fetchShowCreateTable4View(ctx sessionctx.Context, tb *model.TableInfo, buf 
 	fmt.Fprintf(buf, ") AS %s", tb.View.SelectStmt)
 }
 
-func appendPartitionInfo(partitionInfo *model.PartitionInfo, buf *bytes.Buffer) {
+func appendPartitionInfo(partitionInfo *model.PartitionInfo, buf *bytes.Buffer, sqlMode mysql.SQLMode) {
 	if partitionInfo == nil {
 		return
 	}
+	// Since MySQL 5.1/5.5 is very old and TiDB aims for 5.7/8.0 compatibility, we will not
+	// include the /*!50100 or /*!50500 comments for TiDB.
+	// This also solves the issue with comments within comments that would happen for
+	// PLACEMENT POLICY options.
 	if partitionInfo.Type == model.PartitionTypeHash {
-		fmt.Fprintf(buf, "\nPARTITION BY HASH( %s )", partitionInfo.Expr)
-		fmt.Fprintf(buf, "\nPARTITIONS %d", partitionInfo.Num)
-		return
+		defaultPartitionDefinitions := true
+		for i, def := range partitionInfo.Definitions {
+			if def.Name.O != fmt.Sprintf("p%d", i) {
+				defaultPartitionDefinitions = false
+				break
+			}
+			if len(def.Comment) > 0 || def.PlacementPolicyRef != nil {
+				defaultPartitionDefinitions = false
+				break
+			}
+		}
+
+		if defaultPartitionDefinitions {
+			fmt.Fprintf(buf, "\nPARTITION BY HASH (%s) PARTITIONS %d", partitionInfo.Expr, partitionInfo.Num)
+			return
+		}
 	}
-	// this if statement takes care of range columns case
-	if partitionInfo.Columns != nil && partitionInfo.Type == model.PartitionTypeRange {
-		buf.WriteString("\nPARTITION BY RANGE COLUMNS(")
+	// this if statement takes care of lists/range columns case
+	if partitionInfo.Columns != nil {
+		// partitionInfo.Type == model.PartitionTypeRange || partitionInfo.Type == model.PartitionTypeList
+		// Notice that MySQL uses two spaces between LIST and COLUMNS...
+		fmt.Fprintf(buf, "\nPARTITION BY %s COLUMNS(", partitionInfo.Type.String())
 		for i, col := range partitionInfo.Columns {
-			buf.WriteString(col.L)
+			buf.WriteString(stringutil.Escape(col.O, sqlMode))
 			if i < len(partitionInfo.Columns)-1 {
 				buf.WriteString(",")
 			}
 		}
-		buf.WriteString(") (\n")
-	} else if partitionInfo.Type == model.PartitionTypeList {
-		if len(partitionInfo.Columns) == 0 {
-			fmt.Fprintf(buf, "\nPARTITION BY %s (%s) (\n", partitionInfo.Type.String(), partitionInfo.Expr)
-		} else {
-			colsName := ""
-			for _, col := range partitionInfo.Columns {
-				if len(colsName) > 0 {
-					colsName += ","
-				}
-				colsName += col.L
-			}
-			fmt.Fprintf(buf, "\nPARTITION BY LIST COLUMNS(%s) (\n", colsName)
-		}
+		buf.WriteString(")\n(")
 	} else {
-		fmt.Fprintf(buf, "\nPARTITION BY %s ( %s ) (\n", partitionInfo.Type.String(), partitionInfo.Expr)
+		fmt.Fprintf(buf, "\nPARTITION BY %s (%s)\n(", partitionInfo.Type.String(), partitionInfo.Expr)
 	}
-	if partitionInfo.Type == model.PartitionTypeRange {
-		for i, def := range partitionInfo.Definitions {
-			lessThans := strings.Join(def.LessThan, ",")
-			fmt.Fprintf(buf, "  PARTITION `%s` VALUES LESS THAN (%s)", def.Name, lessThans)
-			if i < len(partitionInfo.Definitions)-1 {
-				buf.WriteString(",\n")
-			} else {
-				buf.WriteString("\n")
-			}
+
+	for i, def := range partitionInfo.Definitions {
+		if i > 0 {
+			fmt.Fprintf(buf, ",\n ")
 		}
-		buf.WriteString(")")
-	} else if partitionInfo.Type == model.PartitionTypeList {
-		for i, def := range partitionInfo.Definitions {
+		fmt.Fprintf(buf, "PARTITION %s", stringutil.Escape(def.Name.O, sqlMode))
+		// PartitionTypeHash does not have any VALUES definition
+		if partitionInfo.Type == model.PartitionTypeRange {
+			lessThans := strings.Join(def.LessThan, ",")
+			fmt.Fprintf(buf, " VALUES LESS THAN (%s)", lessThans)
+		} else if partitionInfo.Type == model.PartitionTypeList {
 			values := bytes.NewBuffer(nil)
 			for j, inValues := range def.InValues {
 				if j > 0 {
@@ -1219,15 +1383,17 @@ func appendPartitionInfo(partitionInfo *model.PartitionInfo, buf *bytes.Buffer) 
 					values.WriteString(strings.Join(inValues, ","))
 				}
 			}
-			fmt.Fprintf(buf, "  PARTITION `%s` VALUES IN (%s)", def.Name, values.String())
-			if i < len(partitionInfo.Definitions)-1 {
-				buf.WriteString(",\n")
-			} else {
-				buf.WriteString("\n")
-			}
+			fmt.Fprintf(buf, " VALUES IN (%s)", values.String())
 		}
-		buf.WriteString(")")
+		if len(def.Comment) > 0 {
+			buf.WriteString(fmt.Sprintf(" COMMENT '%s'", format.OutputFormat(def.Comment)))
+		}
+		if def.PlacementPolicyRef != nil {
+			// add placement ref info here
+			fmt.Fprintf(buf, " /*T![placement] PLACEMENT POLICY=%s */", stringutil.Escape(def.PlacementPolicyRef.Name.O, sqlMode))
+		}
 	}
+	buf.WriteString(")")
 }
 
 // ConstructResultOfShowCreateDatabase constructs the result for show create database.
@@ -1248,9 +1414,7 @@ func ConstructResultOfShowCreateDatabase(ctx sessionctx.Context, dbInfo *model.D
 			fmt.Fprintf(buf, "COLLATE %s ", dbInfo.Collate)
 		}
 		fmt.Fprint(buf, "*/")
-		return nil
-	}
-	if dbInfo.Collate != "" {
+	} else if dbInfo.Collate != "" {
 		collInfo, err := collate.GetCollationByName(dbInfo.Collate)
 		if err != nil {
 			return errors.Trace(err)
@@ -1260,11 +1424,19 @@ func ConstructResultOfShowCreateDatabase(ctx sessionctx.Context, dbInfo *model.D
 			fmt.Fprintf(buf, "COLLATE %s ", dbInfo.Collate)
 		}
 		fmt.Fprint(buf, "*/")
-		return nil
 	}
 	// MySQL 5.7 always show the charset info but TiDB may ignore it, which makes a slight difference. We keep this
 	// behavior unchanged because it is trivial enough.
+	if dbInfo.PlacementPolicyRef != nil {
+		// add placement ref info here
+		fmt.Fprintf(buf, " /*T![placement] PLACEMENT POLICY=%s */", stringutil.Escape(dbInfo.PlacementPolicyRef.Name.O, sqlMode))
+	}
 	return nil
+}
+
+// ConstructResultOfShowCreatePlacementPolicy constructs the result for show create placement policy.
+func ConstructResultOfShowCreatePlacementPolicy(policyInfo *model.PolicyInfo) string {
+	return fmt.Sprintf("CREATE PLACEMENT POLICY `%s` %s", policyInfo.Name.O, policyInfo.PlacementSettings.String())
 }
 
 // fetchShowCreateDatabase composes show create database result.
@@ -1289,6 +1461,17 @@ func (e *ShowExec) fetchShowCreateDatabase() error {
 	return nil
 }
 
+// fetchShowCreatePlacementPolicy composes show create policy result.
+func (e *ShowExec) fetchShowCreatePlacementPolicy() error {
+	policy, found := e.is.PolicyByName(e.DBName)
+	if !found {
+		return infoschema.ErrPlacementPolicyNotExists.GenWithStackByArgs(e.DBName.O)
+	}
+	showCreate := ConstructResultOfShowCreatePlacementPolicy(policy)
+	e.appendRow([]interface{}{e.DBName.O, showCreate})
+	return nil
+}
+
 func (e *ShowExec) fetchShowCollation() error {
 	collations := collate.GetSupportedCollations()
 	for _, v := range collations {
@@ -1309,7 +1492,7 @@ func (e *ShowExec) fetchShowCollation() error {
 }
 
 // fetchShowCreateUser composes show create create user result.
-func (e *ShowExec) fetchShowCreateUser() error {
+func (e *ShowExec) fetchShowCreateUser(ctx context.Context) error {
 	checker := privilege.GetPrivilegeManager(e.ctx)
 	if checker == nil {
 		return errors.New("miss privilege checker")
@@ -1331,11 +1514,7 @@ func (e *ShowExec) fetchShowCreateUser() error {
 
 	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
 
-	stmt, err := exec.ParseWithParams(context.TODO(), `SELECT plugin FROM %n.%n WHERE User=%? AND Host=%?`, mysql.SystemDB, mysql.UserTable, userName, hostName)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	rows, _, err := exec.ExecRestrictedStmt(context.TODO(), stmt)
+	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, `SELECT plugin FROM %n.%n WHERE User=%? AND Host=%?`, mysql.SystemDB, mysql.UserTable, userName, strings.ToLower(hostName))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1351,11 +1530,7 @@ func (e *ShowExec) fetchShowCreateUser() error {
 		authplugin = rows[0].GetString(0)
 	}
 
-	stmt, err = exec.ParseWithParams(context.TODO(), `SELECT Priv FROM %n.%n WHERE User=%? AND Host=%?`, mysql.SystemDB, mysql.GlobalPrivTable, userName, hostName)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	rows, _, err = exec.ExecRestrictedStmt(context.TODO(), stmt)
+	rows, _, err = exec.ExecRestrictedSQL(ctx, nil, `SELECT Priv FROM %n.%n WHERE User=%? AND Host=%?`, mysql.SystemDB, mysql.GlobalPrivTable, userName, hostName)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1370,32 +1545,45 @@ func (e *ShowExec) fetchShowCreateUser() error {
 		}
 		require = privValue.RequireStr()
 	}
+
+	authData := checker.GetEncodedPassword(e.User.Username, e.User.Hostname)
+	authStr := ""
+	if !(authplugin == mysql.AuthSocket && authData == "") {
+		authStr = fmt.Sprintf(" AS '%s'", authData)
+	}
+
 	// FIXME: the returned string is not escaped safely
-	showStr := fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED WITH '%s' AS '%s' REQUIRE %s PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK",
-		e.User.Username, e.User.Hostname, authplugin, checker.GetEncodedPassword(e.User.Username, e.User.Hostname), require)
+	showStr := fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED WITH '%s'%s REQUIRE %s PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK",
+		e.User.Username, e.User.Hostname, authplugin, authStr, require)
 	e.appendRow([]interface{}{showStr})
 	return nil
 }
 
 func (e *ShowExec) fetchShowGrants() error {
-	// Get checker
+	vars := e.ctx.GetSessionVars()
 	checker := privilege.GetPrivilegeManager(e.ctx)
 	if checker == nil {
 		return errors.New("miss privilege checker")
 	}
-	sessVars := e.ctx.GetSessionVars()
-	if !e.User.CurrentUser {
-		userName := sessVars.User.AuthUsername
-		hostName := sessVars.User.AuthHostname
+	if e.User == nil || e.User.CurrentUser {
+		// The input is a "SHOW GRANTS" statement with no users *or* SHOW GRANTS FOR CURRENT_USER()
+		// In these cases we include the active roles for showing privileges.
+		e.User = &auth.UserIdentity{Username: vars.User.AuthUsername, Hostname: vars.User.AuthHostname}
+		if len(e.Roles) == 0 {
+			e.Roles = vars.ActiveRoles
+		}
+	} else {
+		userName := vars.User.AuthUsername
+		hostName := vars.User.AuthHostname
 		// Show grant user requires the SELECT privilege on mysql schema.
 		// Ref https://dev.mysql.com/doc/refman/8.0/en/show-grants.html
 		if userName != e.User.Username || hostName != e.User.Hostname {
-			activeRoles := sessVars.ActiveRoles
-			if !checker.RequestVerification(activeRoles, mysql.SystemDB, "", "", mysql.SelectPriv) {
+			if !checker.RequestVerification(vars.ActiveRoles, mysql.SystemDB, "", "", mysql.SelectPriv) {
 				return ErrDBaccessDenied.GenWithStackByArgs(userName, hostName, mysql.SystemDB)
 			}
 		}
 	}
+	// This is for the syntax SHOW GRANTS FOR x USING role
 	for _, r := range e.Roles {
 		if r.Hostname == "" {
 			r.Hostname = "%"
@@ -1417,13 +1605,16 @@ func (e *ShowExec) fetchShowGrants() error {
 func (e *ShowExec) fetchShowPrivileges() error {
 	e.appendRow([]interface{}{"Alter", "Tables", "To alter the table"})
 	e.appendRow([]interface{}{"Alter routine", "Functions,Procedures", "To alter or drop stored functions/procedures"})
+	e.appendRow([]interface{}{"Config", "Server Admin", "To use SHOW CONFIG and SET CONFIG statements"})
 	e.appendRow([]interface{}{"Create", "Databases,Tables,Indexes", "To create new databases and tables"})
 	e.appendRow([]interface{}{"Create routine", "Databases", "To use CREATE FUNCTION/PROCEDURE"})
+	e.appendRow([]interface{}{"Create role", "Server Admin", "To create new roles"})
 	e.appendRow([]interface{}{"Create temporary tables", "Databases", "To use CREATE TEMPORARY TABLE"})
 	e.appendRow([]interface{}{"Create view", "Tables", "To create new views"})
 	e.appendRow([]interface{}{"Create user", "Server Admin", "To create new users"})
 	e.appendRow([]interface{}{"Delete", "Tables", "To delete existing rows"})
 	e.appendRow([]interface{}{"Drop", "Databases,Tables", "To drop databases, tables, and views"})
+	e.appendRow([]interface{}{"Drop role", "Server Admin", "To drop roles"})
 	e.appendRow([]interface{}{"Event", "Server Admin", "To create, alter, drop and execute events"})
 	e.appendRow([]interface{}{"Execute", "Functions,Procedures", "To execute stored routines"})
 	e.appendRow([]interface{}{"File", "File access on server", "To read and write files on the server"})
@@ -1491,16 +1682,18 @@ func (e *ShowExec) fetchShowWarnings(errOnly bool) error {
 
 // fetchShowPumpOrDrainerStatus gets status of all pumps or drainers and fill them into e.rows.
 func (e *ShowExec) fetchShowPumpOrDrainerStatus(kind string) error {
-	registry, err := createRegistry(config.GetGlobalConfig().Path)
+	registry, needToClose, err := getOrCreateBinlogRegistry(config.GetGlobalConfig().Path)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	nodes, _, err := registry.Nodes(context.Background(), node.NodePrefix[kind])
-	if err != nil {
-		return errors.Trace(err)
+	if needToClose {
+		defer func() {
+			_ = registry.Close()
+		}()
 	}
-	err = registry.Close()
+
+	nodes, _, err := registry.Nodes(context.Background(), node.NodePrefix[kind])
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1509,24 +1702,27 @@ func (e *ShowExec) fetchShowPumpOrDrainerStatus(kind string) error {
 		if n.State == node.Offline {
 			continue
 		}
-		e.appendRow([]interface{}{n.NodeID, n.Addr, n.State, n.MaxCommitTS, utils.TSOToRoughTime(n.UpdateTS).Format(types.TimeFormat)})
+		e.appendRow([]interface{}{n.NodeID, n.Addr, n.State, n.MaxCommitTS, util.TSOToRoughTime(n.UpdateTS).Format(types.TimeFormat)})
 	}
 
 	return nil
 }
 
-// createRegistry returns an ectd registry
-func createRegistry(urls string) (*node.EtcdRegistry, error) {
-	ectdEndpoints, err := utils.ParseHostPortAddr(urls)
+// getOrCreateBinlogRegistry returns an etcd registry for binlog, need to close, and error
+func getOrCreateBinlogRegistry(urls string) (*node.EtcdRegistry, bool, error) {
+	if pumpClient := binloginfo.GetPumpsClient(); pumpClient != nil && pumpClient.EtcdRegistry != nil {
+		return pumpClient.EtcdRegistry, false, nil
+	}
+	ectdEndpoints, err := util.ParseHostPortAddr(urls)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, false, errors.Trace(err)
 	}
 	cli, err := etcd.NewClientFromCfg(ectdEndpoints, etcdDialTimeout, node.DefaultRootPath, nil)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, false, errors.Trace(err)
 	}
 
-	return node.NewEtcdRegistry(cli, etcdDialTimeout), nil
+	return node.NewEtcdRegistry(cli, etcdDialTimeout), true, nil
 }
 
 func (e *ShowExec) getTable() (table.Table, error) {
@@ -1709,8 +1905,8 @@ func (e *ShowExec) fillRegionsToChunk(regions []regionMeta) {
 			e.result.AppendInt64(6, 0)
 		}
 
-		e.result.AppendInt64(7, regions[i].writtenBytes)
-		e.result.AppendInt64(8, regions[i].readBytes)
+		e.result.AppendUint64(7, regions[i].writtenBytes)
+		e.result.AppendUint64(8, regions[i].readBytes)
 		e.result.AppendInt64(9, regions[i].approximateSize)
 		e.result.AppendInt64(10, regions[i].approximateKeys)
 	}
@@ -1727,10 +1923,16 @@ func (e *ShowExec) fetchShowBuiltins() error {
 // Because view's underlying table's column could change or recreate, so view's column type may change over time.
 // To avoid this situation we need to generate a logical plan and extract current column types from Schema.
 func tryFillViewColumnType(ctx context.Context, sctx sessionctx.Context, is infoschema.InfoSchema, dbName model.CIStr, tbl *model.TableInfo) error {
-	if tbl.IsView() {
+	if !tbl.IsView() {
+		return nil
+	}
+	// We need to run the build plan process in another session because there may be
+	// multiple goroutines running at the same time while session is not goroutine-safe.
+	// Take joining system table as an example, `fetchBuildSideRows` and `fetchProbeSideChunks` can be run concurrently.
+	return runWithSystemSession(sctx, func(s sessionctx.Context) error {
 		// Retrieve view columns info.
 		planBuilder, _ := plannercore.NewPlanBuilder(
-			plannercore.PlanBuilderOptNoExecution{}).Init(sctx, is, &hint.BlockHintProcessor{})
+			plannercore.PlanBuilderOptNoExecution{}).Init(s, is, &hint.BlockHintProcessor{})
 		if viewLogicalPlan, err := planBuilder.BuildDataSourceFromView(ctx, dbName, tbl); err == nil {
 			viewSchema := viewLogicalPlan.Schema()
 			viewOutputNames := viewLogicalPlan.OutputNames()
@@ -1739,13 +1941,23 @@ func tryFillViewColumnType(ctx context.Context, sctx sessionctx.Context, is info
 				if idx >= 0 {
 					col.FieldType = *viewSchema.Columns[idx].GetType()
 				}
-				if col.Tp == mysql.TypeVarString {
-					col.Tp = mysql.TypeVarchar
+				if col.GetType() == mysql.TypeVarString {
+					col.SetType(mysql.TypeVarchar)
 				}
 			}
 		} else {
 			return err
 		}
+		return nil
+	})
+}
+
+func runWithSystemSession(sctx sessionctx.Context, fn func(sessionctx.Context) error) error {
+	b := &baseExecutor{ctx: sctx}
+	sysCtx, err := b.getSysSession()
+	if err != nil {
+		return err
 	}
-	return nil
+	defer b.releaseSysSession(sysCtx)
+	return fn(sysCtx)
 }

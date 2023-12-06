@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -173,11 +174,11 @@ func (e *sum4Decimal) AppendFinalResult2Chunk(sctx sessionctx.Context, pr Partia
 	if e.retTp == nil {
 		return errors.New("e.retTp of sum should not be nil")
 	}
-	frac := e.retTp.Decimal
+	frac := e.retTp.GetDecimal()
 	if frac == -1 {
 		frac = mysql.MaxDecimalScale
 	}
-	err := p.val.Round(&p.val, frac, types.ModeHalfEven)
+	err := p.val.Round(&p.val, frac, types.ModeHalfUp)
 	if err != nil {
 		return err
 	}

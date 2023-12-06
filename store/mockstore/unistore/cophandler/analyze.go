@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,6 +16,7 @@ package cophandler
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"math/rand"
 	"sort"
@@ -24,11 +26,11 @@ import (
 	"github.com/pingcap/badger/y"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
-	"github.com/pingcap/parser/ast"
-	"github.com/pingcap/parser/charset"
-	"github.com/pingcap/parser/model"
-	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/charset"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/store/mockstore/unistore/tikv/dbreader"
@@ -39,7 +41,6 @@ import (
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/twmb/murmur3"
-	"golang.org/x/net/context"
 )
 
 // handleCopAnalyzeRequest handles coprocessor analyze request.
@@ -299,7 +300,12 @@ func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange
 	for i := range e.fields {
 		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
-		rf.Column.FieldType = types.FieldType{Tp: mysql.TypeBlob, Flen: mysql.MaxBlobWidth, Charset: charset.CharsetUTF8, Collate: charset.CollationUTF8}
+		ft := types.FieldType{}
+		ft.SetType(mysql.TypeBlob)
+		ft.SetFlen(mysql.MaxBlobWidth)
+		ft.SetCharset(charset.CharsetUTF8)
+		ft.SetCollate(charset.CollationUTF8)
+		rf.Column.FieldType = ft
 		e.fields[i] = rf
 	}
 
@@ -316,7 +322,7 @@ func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange
 		ft := fieldTypeFromPBColumn(col)
 		fts[i] = ft
 		if ft.EvalType() == types.ETString {
-			collators[i] = collate.GetCollator(ft.Collate)
+			collators[i] = collate.GetCollator(ft.GetCollate())
 		}
 	}
 	colReq := analyzeReq.ColReq
@@ -400,7 +406,12 @@ func handleAnalyzeFullSamplingReq(
 	for i := range e.fields {
 		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
-		rf.Column.FieldType = types.FieldType{Tp: mysql.TypeBlob, Flen: mysql.MaxBlobWidth, Charset: charset.CharsetUTF8, Collate: charset.CollationUTF8}
+		ft := types.FieldType{}
+		ft.SetType(mysql.TypeBlob)
+		ft.SetFlen(mysql.MaxBlobWidth)
+		ft.SetCharset(charset.CharsetUTF8)
+		ft.SetCollate(charset.CollationUTF8)
+		rf.Column.FieldType = ft
 		e.fields[i] = rf
 	}
 
@@ -411,7 +422,7 @@ func handleAnalyzeFullSamplingReq(
 		ft := fieldTypeFromPBColumn(col)
 		fts[i] = ft
 		if ft.EvalType() == types.ETString {
-			collators[i] = collate.GetCollator(ft.Collate)
+			collators[i] = collate.GetCollator(ft.GetCollate())
 		}
 	}
 	colGroups := make([][]int64, 0, len(analyzeReq.ColReq.ColumnGroups))
@@ -421,6 +432,7 @@ func handleAnalyzeFullSamplingReq(
 		colGroups = append(colGroups, colOffsets)
 	}
 	colReq := analyzeReq.ColReq
+	/* #nosec G404 */
 	builder := &statistics.RowSampleBuilder{
 		Sc:              sc,
 		RecordSet:       e,
@@ -429,6 +441,7 @@ func handleAnalyzeFullSamplingReq(
 		ColGroups:       colGroups,
 		MaxSampleSize:   int(colReq.SampleSize),
 		MaxFMSketchSize: int(colReq.SketchSize),
+		SampleRate:      colReq.GetSampleRate(),
 		Rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	collector, err := builder.Collect()
@@ -436,7 +449,7 @@ func handleAnalyzeFullSamplingReq(
 		return nil, err
 	}
 	colResp := &tipb.AnalyzeColumnsResp{}
-	colResp.RowCollector = collector.ToProto()
+	colResp.RowCollector = collector.Base().ToProto()
 	data, err := colResp.Marshal()
 	if err != nil {
 		return nil, err
@@ -499,7 +512,7 @@ func (e *analyzeColumnsExec) Process(key, value []byte) error {
 	return nil
 }
 
-func (e *analyzeColumnsExec) NewChunk() *chunk.Chunk {
+func (e *analyzeColumnsExec) NewChunk(_ chunk.Allocator) *chunk.Chunk {
 	fields := make([]*types.FieldType, 0, len(e.fields))
 	for _, field := range e.fields {
 		fields = append(fields, &field.Column.FieldType)

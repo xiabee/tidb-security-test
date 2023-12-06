@@ -1,7 +1,3 @@
-// Copyright 2013 The ql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSES/QL-LICENSE file.
-
 // Copyright 2015 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +8,13 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// Copyright 2013 The ql Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSES/QL-LICENSE file.
 
 package session
 
@@ -24,15 +25,16 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser"
-	"github.com/pingcap/parser/ast"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbterror"
@@ -42,22 +44,24 @@ import (
 )
 
 type domainMap struct {
-	domains map[string]*domain.Domain
 	mu      sync.Mutex
+	domains map[string]*domain.Domain
 }
 
 func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
-	// If this is the only domain instance, and the caller doesn't provide store.
-	if len(dm.domains) == 1 && store == nil {
-		for _, r := range dm.domains {
-			return r, nil
+	if store == nil {
+		for _, d := range dm.domains {
+			// return available domain if any
+			return d, nil
 		}
+		return nil, errors.New("can not find available domain for a nil store")
 	}
 
 	key := store.UUID()
+
 	d = dm.domains[key]
 	if d != nil {
 		return
@@ -66,6 +70,7 @@ func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 	ddlLease := time.Duration(atomic.LoadInt64(&schemaLease))
 	statisticLease := time.Duration(atomic.LoadInt64(&statsLease))
 	idxUsageSyncLease := GetIndexUsageSyncLease()
+	planReplayerGCLease := GetPlanReplayerGCLease()
 	err = util.RunWithRetry(util.DefaultMaxRetries, util.RetryInterval, func() (retry bool, err1 error) {
 		logutil.BgLogger().Info("new domain",
 			zap.String("store", store.UUID()),
@@ -74,7 +79,7 @@ func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 			zap.Stringer("index usage sync lease", idxUsageSyncLease))
 		factory := createSessionFunc(store)
 		sysFactory := createSessionWithDomainFunc(store)
-		d = domain.NewDomain(store, ddlLease, statisticLease, idxUsageSyncLease, factory)
+		d = domain.NewDomain(store, ddlLease, statisticLease, idxUsageSyncLease, planReplayerGCLease, factory)
 		err1 = d.Init(ddlLease, sysFactory)
 		if err1 != nil {
 			// If we don't clean it, there are some dirty data when retrying the function of Init.
@@ -88,6 +93,9 @@ func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 		return nil, err
 	}
 	dm.domains[key] = d
+	d.SetOnClose(func() {
+		dm.Delete(store)
+	})
 
 	return
 }
@@ -121,6 +129,9 @@ var (
 	// Because we have not completed GC and other functions, we set it to 0.
 	// TODO: Set indexUsageSyncLease to 60s.
 	indexUsageSyncLease = int64(0 * time.Second)
+
+	// planReplayerGCLease is the time for plan replayer gc.
+	planReplayerGCLease = int64(10 * time.Minute)
 )
 
 // ResetStoreForWithTiKVTest is only used in the test code.
@@ -166,6 +177,16 @@ func GetIndexUsageSyncLease() time.Duration {
 	return time.Duration(atomic.LoadInt64(&indexUsageSyncLease))
 }
 
+// SetPlanReplayerGCLease changes the default plan repalyer gc lease time.
+func SetPlanReplayerGCLease(lease time.Duration) {
+	atomic.StoreInt64(&planReplayerGCLease, int64(lease))
+}
+
+// GetPlanReplayerGCLease returns the plan replayer gc lease time.
+func GetPlanReplayerGCLease() time.Duration {
+	return time.Duration(atomic.LoadInt64(&planReplayerGCLease))
+}
+
 // DisableStats4Test disables the stats for tests.
 func DisableStats4Test() {
 	SetStatsLease(-1)
@@ -174,13 +195,13 @@ func DisableStats4Test() {
 // Parse parses a query string to raw ast.StmtNode.
 func Parse(ctx sessionctx.Context, src string) ([]ast.StmtNode, error) {
 	logutil.BgLogger().Debug("compiling", zap.String("source", src))
-	charset, collation := ctx.GetSessionVars().GetCharsetInfo()
+	sessVars := ctx.GetSessionVars()
 	p := parser.New()
-	p.SetParserConfig(ctx.GetSessionVars().BuildParserConfig())
-	p.SetSQLMode(ctx.GetSessionVars().SQLMode)
-	stmts, warns, err := p.Parse(src, charset, collation)
+	p.SetParserConfig(sessVars.BuildParserConfig())
+	p.SetSQLMode(sessVars.SQLMode)
+	stmts, warns, err := p.ParseSQL(src, sessVars.GetParseParams()...)
 	for _, warn := range warns {
-		ctx.GetSessionVars().StmtCtx.AppendWarning(warn)
+		sessVars.StmtCtx.AppendWarning(warn)
 	}
 	if err != nil {
 		logutil.BgLogger().Warn("compiling",
@@ -232,7 +253,7 @@ func finishStmt(ctx context.Context, se *session, meetsErr error, sql sqlexec.St
 	if err != nil {
 		return err
 	}
-	return checkStmtLimit(ctx, se)
+	return checkStmtLimit(ctx, se, true)
 }
 
 func autoCommitAfterStmt(ctx context.Context, se *session, meetsErr error, sql sqlexec.Statement) error {
@@ -262,19 +283,30 @@ func autoCommitAfterStmt(ctx context.Context, se *session, meetsErr error, sql s
 	return nil
 }
 
-func checkStmtLimit(ctx context.Context, se *session) error {
+func checkStmtLimit(ctx context.Context, se *session, isFinish bool) error {
 	// If the user insert, insert, insert ... but never commit, TiDB would OOM.
 	// So we limit the statement count in a transaction here.
 	var err error
 	sessVars := se.GetSessionVars()
 	history := GetHistory(se)
-	if history.Count() > int(config.GetGlobalConfig().Performance.StmtCountLimit) {
+	stmtCount := history.Count()
+	if !isFinish {
+		// history stmt count + current stmt, since current stmt is not finish, it has not add to history.
+		stmtCount++
+	}
+	if stmtCount > int(config.GetGlobalConfig().Performance.StmtCountLimit) {
 		if !sessVars.BatchCommit {
 			se.RollbackTxn(ctx)
-			return errors.Errorf("statement count %d exceeds the transaction limitation, autocommit = %t",
-				history.Count(), sessVars.IsAutocommit())
+			return errors.Errorf("statement count %d exceeds the transaction limitation, transaction has been rollback, autocommit = %t",
+				stmtCount, sessVars.IsAutocommit())
 		}
-		err = se.NewTxn(ctx)
+		if !isFinish {
+			// if the stmt is not finish execute, then just return, since some work need to be done such as StmtCommit.
+			return nil
+		}
+		// If the stmt is finish execute, and exceed the StmtCountLimit, and BatchCommit is true,
+		// then commit the current transaction and create a new transaction.
+		err = sessiontxn.NewTxn(ctx, se)
 		// The transaction does not committed yet, we need to keep it in transaction.
 		// The last history could not be "commit"/"rollback" statement.
 		// It means it is impossible to start a new transaction at the end of the transaction.
@@ -285,6 +317,7 @@ func checkStmtLimit(ctx context.Context, se *session) error {
 }
 
 // GetHistory get all stmtHistory in current txn. Exported only for test.
+// If stmtHistory is nil, will create a new one for current txn.
 func GetHistory(ctx sessionctx.Context) *StmtHistory {
 	hist, ok := ctx.GetSessionVars().TxnCtx.History.(*StmtHistory)
 	if ok {
@@ -301,7 +334,7 @@ func GetRows4Test(ctx context.Context, sctx sessionctx.Context, rs sqlexec.Recor
 		return nil, nil
 	}
 	var rows []chunk.Row
-	req := rs.NewChunk()
+	req := rs.NewChunk(nil)
 	// Must reuse `req` for imitating server.(*clientConn).writeChunks
 	for {
 		err := rs.Next(ctx, req)

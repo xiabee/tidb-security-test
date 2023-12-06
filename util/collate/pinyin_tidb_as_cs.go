@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,6 +25,11 @@ func (py *zhPinyinTiDBASCSCollator) Compare(a, b string) int {
 
 // Collator interface, no implements now.
 func (py *zhPinyinTiDBASCSCollator) Key(str string) []byte {
+	panic("implement me")
+}
+
+// Collator interface, no implements now.
+func (py *zhPinyinTiDBASCSCollator) KeyWithoutTrimRightSpace(str string) []byte {
 	panic("implement me")
 }
 

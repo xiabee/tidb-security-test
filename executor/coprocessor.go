@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,18 +21,18 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/tikvpb"
-	"github.com/pingcap/parser/auth"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/privilege"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/tikv/client-go/v2/oracle"
 )
 
 // CoprocessorDAGHandler uses to handle cop dag request.
@@ -62,6 +63,7 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 	chk := newFirstChunk(e)
 	tps := e.base().retFieldTypes
 	var totalChunks, partChunks []tipb.Chunk
+	memTracker := h.sctx.GetSessionVars().StmtCtx.MemTracker
 	for {
 		chk.Reset()
 		err = Next(ctx, e, chk)
@@ -74,6 +76,9 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 		partChunks, err = h.buildChunk(chk, tps)
 		if err != nil {
 			return h.buildErrorResponse(err)
+		}
+		for _, ch := range partChunks {
+			memTracker.Consume(int64(ch.Size()))
 		}
 		totalChunks = append(totalChunks, partChunks...)
 	}
@@ -117,8 +122,8 @@ func (h *CoprocessorDAGHandler) buildResponseAndSendToStream(chk *chunk.Chunk, t
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
-	for _, c := range chunks {
-		resp := h.buildStreamResponse(&c)
+	for i := range chunks {
+		resp := h.buildStreamResponse(&chunks[i])
 		if err = stream.Send(resp); err != nil {
 			return err
 		}
@@ -143,8 +148,8 @@ func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (Exec
 				Username: dagReq.User.UserName,
 				Hostname: dagReq.User.UserHost,
 			}
-			authName, authHost, success := pm.GetAuthWithoutVerification(dagReq.User.UserName, dagReq.User.UserHost)
-			if success {
+			authName, authHost, success := pm.MatchIdentity(dagReq.User.UserName, dagReq.User.UserHost, false)
+			if success && pm.GetAuthWithoutVerification(authName, authHost) {
 				h.sctx.GetSessionVars().User.AuthUsername = authName
 				h.sctx.GetSessionVars().User.AuthHostname = authHost
 				h.sctx.GetSessionVars().ActiveRoles = pm.GetDefaultRoles(authName, authHost)
@@ -169,7 +174,7 @@ func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (Exec
 	}
 	plan = core.InjectExtraProjection(plan)
 	// Build executor.
-	b := newExecutorBuilder(h.sctx, is, nil, 0, false, oracle.GlobalTxnScope)
+	b := newExecutorBuilder(h.sctx, is, nil, oracle.GlobalTxnScope)
 	return b.build(plan), nil
 }
 

@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -15,6 +16,7 @@ package chunk
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -27,23 +29,60 @@ import (
 	"go.uber.org/zap"
 )
 
+type rowContainerRecord struct {
+	inMemory *List
+	inDisk   *ListInDisk
+	// spillError stores the error when spilling.
+	spillError error
+}
+
+type mutexForRowContainer struct {
+	// RWMutex guarantees spill and get operator for rowContainer is mutually exclusive.
+	// `rLock` and `wLocks` is introduced to reduce the contention when multiple
+	// goroutine touch the same rowContainer concurrently. If there are multiple
+	// goroutines touch the same rowContainer concurrently, it's recommended to
+	// use RowContainer.ShallowCopyWithNewMutex to build a new RowContainer for
+	// each goroutine. Thus each goroutine holds its own rLock but share the same
+	// underlying data, which can reduce the contention on m.rLock remarkably and
+	// get better performance.
+	rLock   *sync.RWMutex
+	wLocks  []*sync.RWMutex
+	records *rowContainerRecord
+}
+
+// Lock locks rw for writing.
+func (m *mutexForRowContainer) Lock() {
+	for _, l := range m.wLocks {
+		l.Lock()
+	}
+}
+
+// Unlock unlocks rw for writing.
+func (m *mutexForRowContainer) Unlock() {
+	for _, l := range m.wLocks {
+		l.Unlock()
+	}
+}
+
+// RLock locks rw for reading.
+func (m *mutexForRowContainer) RLock() {
+	m.rLock.RLock()
+}
+
+// RUnlock undoes a single RLock call.
+func (m *mutexForRowContainer) RUnlock() {
+	m.rLock.RUnlock()
+}
+
+type spillHelper interface {
+	SpillToDisk()
+	hasEnoughDataToSpill(t *memory.Tracker) bool
+}
+
 // RowContainer provides a place for many rows, so many that we might want to spill them into disk.
 // nolint:structcheck
 type RowContainer struct {
-	m struct {
-		// RWMutex guarantees spill and get operator for rowContainer is mutually exclusive.
-		sync.RWMutex
-		// records stores the chunks in memory.
-		records *List
-		// recordsInDisk stores the chunks in disk.
-		recordsInDisk *ListInDisk
-		// spillError stores the error when spilling.
-		spillError error
-	}
-
-	fieldType []*types.FieldType
-	chunkSize int
-	numRow    int
+	m *mutexForRowContainer
 
 	memTracker  *memory.Tracker
 	diskTracker *disk.Tracker
@@ -53,15 +92,41 @@ type RowContainer struct {
 // NewRowContainer creates a new RowContainer in memory.
 func NewRowContainer(fieldType []*types.FieldType, chunkSize int) *RowContainer {
 	li := NewList(fieldType, chunkSize, chunkSize)
-	rc := &RowContainer{fieldType: fieldType, chunkSize: chunkSize}
-	rc.m.records = li
-	rc.memTracker = li.memTracker
-	rc.diskTracker = disk.NewTracker(memory.LabelForRowContainer, -1)
+	rLock := new(sync.RWMutex)
+	rc := &RowContainer{
+		m: &mutexForRowContainer{
+			records: &rowContainerRecord{inMemory: li},
+			rLock:   rLock,
+			wLocks:  []*sync.RWMutex{rLock},
+		},
+		memTracker:  memory.NewTracker(memory.LabelForRowContainer, -1),
+		diskTracker: disk.NewTracker(memory.LabelForRowContainer, -1),
+	}
+	li.GetMemTracker().AttachTo(rc.GetMemTracker())
 	return rc
+}
+
+// ShallowCopyWithNewMutex shallow clones a RowContainer.
+// The new RowContainer shares the same underlying data with the old one but
+// holds an individual rLock.
+func (c *RowContainer) ShallowCopyWithNewMutex() *RowContainer {
+	newRC := *c
+	rLock := new(sync.RWMutex)
+	c.m.wLocks = append(c.m.wLocks, rLock)
+	newRC.m.rLock = rLock
+	return &newRC
 }
 
 // SpillToDisk spills data to disk. This function may be called in parallel.
 func (c *RowContainer) SpillToDisk() {
+	c.spillToDisk(nil)
+}
+
+func (*RowContainer) hasEnoughDataToSpill(_ *memory.Tracker) bool {
+	return true
+}
+
+func (c *RowContainer) spillToDisk(preSpillError error) {
 	c.m.Lock()
 	defer c.m.Unlock()
 	if c.alreadySpilled() {
@@ -78,18 +143,34 @@ func (c *RowContainer) SpillToDisk() {
 		defer c.actionSpill.setStatus(spilledYet)
 	}
 	var err error
-	N := c.m.records.NumChunks()
-	c.m.recordsInDisk = NewListInDisk(c.m.records.FieldTypes())
-	c.m.recordsInDisk.diskTracker.AttachTo(c.diskTracker)
+	N := c.m.records.inMemory.NumChunks()
+	c.m.records.inDisk = NewListInDisk(c.m.records.inMemory.FieldTypes())
+	c.m.records.inDisk.diskTracker.AttachTo(c.diskTracker)
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("%v", r)
+			c.m.records.spillError = err
+			logutil.BgLogger().Error("spill to disk failed", zap.Stack("stack"), zap.Error(err))
+		}
+	}()
+	failpoint.Inject("spillToDiskOutOfDiskQuota", func(val failpoint.Value) {
+		if val.(bool) {
+			panic("out of disk quota when spilling")
+		}
+	})
+	if preSpillError != nil {
+		c.m.records.spillError = preSpillError
+		return
+	}
 	for i := 0; i < N; i++ {
-		chk := c.m.records.GetChunk(i)
-		err = c.m.recordsInDisk.Add(chk)
+		chk := c.m.records.inMemory.GetChunk(i)
+		err = c.m.records.inDisk.Add(chk)
 		if err != nil {
-			c.m.spillError = err
+			c.m.records.spillError = err
 			return
 		}
 	}
-	c.m.records.Clear()
+	c.m.records.inMemory.Clear()
 }
 
 // Reset resets RowContainer.
@@ -97,21 +178,21 @@ func (c *RowContainer) Reset() error {
 	c.m.Lock()
 	defer c.m.Unlock()
 	if c.alreadySpilled() {
-		err := c.m.recordsInDisk.Close()
-		c.m.recordsInDisk = nil
+		err := c.m.records.inDisk.Close()
+		c.m.records.inDisk = nil
 		if err != nil {
 			return err
 		}
 		c.actionSpill.Reset()
 	} else {
-		c.m.records.Reset()
+		c.m.records.inMemory.Reset()
 	}
 	return nil
 }
 
 // alreadySpilled indicates that records have spilled out into disk.
 func (c *RowContainer) alreadySpilled() bool {
-	return c.m.recordsInDisk != nil
+	return c.m.records.inDisk != nil
 }
 
 // AlreadySpilledSafeForTest indicates that records have spilled out into disk. It's thread-safe.
@@ -119,7 +200,7 @@ func (c *RowContainer) alreadySpilled() bool {
 func (c *RowContainer) AlreadySpilledSafeForTest() bool {
 	c.m.RLock()
 	defer c.m.RUnlock()
-	return c.m.recordsInDisk != nil
+	return c.m.records.inDisk != nil
 }
 
 // NumRow returns the number of rows in the container
@@ -127,9 +208,9 @@ func (c *RowContainer) NumRow() int {
 	c.m.RLock()
 	defer c.m.RUnlock()
 	if c.alreadySpilled() {
-		return c.m.recordsInDisk.Len()
+		return c.m.records.inDisk.Len()
 	}
-	return c.m.records.Len()
+	return c.m.records.inMemory.Len()
 }
 
 // NumRowsOfChunk returns the number of rows of a chunk in the ListInDisk.
@@ -137,9 +218,9 @@ func (c *RowContainer) NumRowsOfChunk(chkID int) int {
 	c.m.RLock()
 	defer c.m.RUnlock()
 	if c.alreadySpilled() {
-		return c.m.recordsInDisk.NumRowsOfChunk(chkID)
+		return c.m.records.inDisk.NumRowsOfChunk(chkID)
 	}
-	return c.m.records.NumRowsOfChunk(chkID)
+	return c.m.records.inMemory.NumRowsOfChunk(chkID)
 }
 
 // NumChunks returns the number of chunks in the container.
@@ -147,9 +228,9 @@ func (c *RowContainer) NumChunks() int {
 	c.m.RLock()
 	defer c.m.RUnlock()
 	if c.alreadySpilled() {
-		return c.m.recordsInDisk.NumChunks()
+		return c.m.records.inDisk.NumChunks()
 	}
-	return c.m.records.NumChunks()
+	return c.m.records.inMemory.NumChunks()
 }
 
 // Add appends a chunk into the RowContainer.
@@ -162,19 +243,19 @@ func (c *RowContainer) Add(chk *Chunk) (err error) {
 		}
 	})
 	if c.alreadySpilled() {
-		if c.m.spillError != nil {
-			return c.m.spillError
+		if err := c.m.records.spillError; err != nil {
+			return err
 		}
-		err = c.m.recordsInDisk.Add(chk)
+		err = c.m.records.inDisk.Add(chk)
 	} else {
-		c.m.records.Add(chk)
+		c.m.records.inMemory.Add(chk)
 	}
 	return
 }
 
 // AllocChunk allocates a new chunk from RowContainer.
 func (c *RowContainer) AllocChunk() (chk *Chunk) {
-	return c.m.records.allocChunk()
+	return c.m.records.inMemory.allocChunk()
 }
 
 // GetChunk returns chkIdx th chunk of in memory records.
@@ -182,12 +263,12 @@ func (c *RowContainer) GetChunk(chkIdx int) (*Chunk, error) {
 	c.m.RLock()
 	defer c.m.RUnlock()
 	if !c.alreadySpilled() {
-		return c.m.records.GetChunk(chkIdx), nil
+		return c.m.records.inMemory.GetChunk(chkIdx), nil
 	}
-	if c.m.spillError != nil {
-		return nil, c.m.spillError
+	if err := c.m.records.spillError; err != nil {
+		return nil, err
 	}
-	return c.m.recordsInDisk.GetChunk(chkIdx)
+	return c.m.records.inDisk.GetChunk(chkIdx)
 }
 
 // GetRow returns the row the ptr pointed to.
@@ -195,12 +276,12 @@ func (c *RowContainer) GetRow(ptr RowPtr) (Row, error) {
 	c.m.RLock()
 	defer c.m.RUnlock()
 	if c.alreadySpilled() {
-		if c.m.spillError != nil {
-			return Row{}, c.m.spillError
+		if err := c.m.records.spillError; err != nil {
+			return Row{}, err
 		}
-		return c.m.recordsInDisk.GetRow(ptr)
+		return c.m.records.inDisk.GetRow(ptr)
 	}
-	return c.m.records.GetRow(ptr), nil
+	return c.m.records.inMemory.GetRow(ptr), nil
 }
 
 // GetMemTracker returns the memory tracker in records, panics if the RowContainer has already spilled.
@@ -221,12 +302,13 @@ func (c *RowContainer) Close() (err error) {
 		// Set status to spilledYet to avoid spilling.
 		c.actionSpill.setStatus(spilledYet)
 		c.actionSpill.cond.Broadcast()
+		c.actionSpill.SetFinished()
 	}
 	if c.alreadySpilled() {
-		err = c.m.recordsInDisk.Close()
-		c.m.recordsInDisk = nil
+		err = c.m.records.inDisk.Close()
+		c.m.records.inDisk = nil
 	}
-	c.m.records.Clear()
+	c.m.records.inMemory.Clear()
 	return
 }
 
@@ -234,8 +316,9 @@ func (c *RowContainer) Close() (err error) {
 func (c *RowContainer) ActionSpill() *SpillDiskAction {
 	if c.actionSpill == nil {
 		c.actionSpill = &SpillDiskAction{
-			c:    c,
-			cond: spillStatusCond{sync.NewCond(new(sync.Mutex)), notSpilled}}
+			c:                   c,
+			baseSpillDiskAction: &baseSpillDiskAction{cond: spillStatusCond{sync.NewCond(new(sync.Mutex)), notSpilled}},
+		}
 	}
 	return c.actionSpill
 }
@@ -244,23 +327,21 @@ func (c *RowContainer) ActionSpill() *SpillDiskAction {
 func (c *RowContainer) ActionSpillForTest() *SpillDiskAction {
 	c.actionSpill = &SpillDiskAction{
 		c: c,
-		testSyncInputFunc: func() {
-			c.actionSpill.testWg.Add(1)
+		baseSpillDiskAction: &baseSpillDiskAction{
+			testSyncInputFunc: func() {
+				c.actionSpill.testWg.Add(1)
+			},
+			testSyncOutputFunc: func() {
+				c.actionSpill.testWg.Done()
+			},
+			cond: spillStatusCond{sync.NewCond(new(sync.Mutex)), notSpilled},
 		},
-		testSyncOutputFunc: func() {
-			c.actionSpill.testWg.Done()
-		},
-		cond: spillStatusCond{sync.NewCond(new(sync.Mutex)), notSpilled},
 	}
 	return c.actionSpill
 }
 
-// SpillDiskAction implements memory.ActionOnExceed for chunk.List. If
-// the memory quota of a query is exceeded, SpillDiskAction.Action is
-// triggered.
-type SpillDiskAction struct {
+type baseSpillDiskAction struct {
 	memory.BaseOOMAction
-	c    *RowContainer
 	m    sync.Mutex
 	once sync.Once
 	cond spillStatusCond
@@ -269,6 +350,20 @@ type SpillDiskAction struct {
 	testSyncInputFunc  func()
 	testSyncOutputFunc func()
 	testWg             sync.WaitGroup
+}
+
+// SpillDiskAction implements memory.ActionOnExceed for chunk.List. If
+// the memory quota of a query is exceeded, SpillDiskAction.Action is
+// triggered.
+type SpillDiskAction struct {
+	c *RowContainer
+	*baseSpillDiskAction
+}
+
+// Action sends a signal to trigger spillToDisk method of RowContainer
+// and if it is already triggered before, call its fallbackAction.
+func (a *SpillDiskAction) Action(t *memory.Tracker) {
+	a.action(t, a.c)
 }
 
 type spillStatusCond struct {
@@ -288,38 +383,35 @@ const (
 	spilledYet
 )
 
-func (a *SpillDiskAction) setStatus(status spillStatus) {
+func (a *baseSpillDiskAction) setStatus(status spillStatus) {
 	a.cond.L.Lock()
 	defer a.cond.L.Unlock()
 	a.cond.status = status
 }
 
-func (a *SpillDiskAction) getStatus() spillStatus {
+func (a *baseSpillDiskAction) getStatus() spillStatus {
 	a.cond.L.Lock()
 	defer a.cond.L.Unlock()
 	return a.cond.status
 }
 
-// Action sends a signal to trigger spillToDisk method of RowContainer
-// and if it is already triggered before, call its fallbackAction.
-func (a *SpillDiskAction) Action(t *memory.Tracker) {
+func (a *baseSpillDiskAction) action(t *memory.Tracker, spillHelper spillHelper) {
 	a.m.Lock()
 	defer a.m.Unlock()
 
-	if a.getStatus() == notSpilled {
+	if a.getStatus() == notSpilled && spillHelper.hasEnoughDataToSpill(t) {
 		a.once.Do(func() {
 			logutil.BgLogger().Info("memory exceeds quota, spill to disk now.",
 				zap.Int64("consumed", t.BytesConsumed()), zap.Int64("quota", t.GetBytesLimit()))
 			if a.testSyncInputFunc != nil {
 				a.testSyncInputFunc()
-				c := a.c
 				go func() {
-					c.SpillToDisk()
+					spillHelper.SpillToDisk()
 					a.testSyncOutputFunc()
 				}()
 				return
 			}
-			go a.c.SpillToDisk()
+			go spillHelper.SpillToDisk()
 		})
 		return
 	}
@@ -339,7 +431,7 @@ func (a *SpillDiskAction) Action(t *memory.Tracker) {
 }
 
 // Reset resets the status for SpillDiskAction.
-func (a *SpillDiskAction) Reset() {
+func (a *baseSpillDiskAction) Reset() {
 	a.m.Lock()
 	defer a.m.Unlock()
 	a.setStatus(notSpilled)
@@ -350,12 +442,12 @@ func (a *SpillDiskAction) Reset() {
 func (a *SpillDiskAction) SetLogHook(hook func(uint64)) {}
 
 // GetPriority get the priority of the Action.
-func (a *SpillDiskAction) GetPriority() int64 {
+func (a *baseSpillDiskAction) GetPriority() int64 {
 	return memory.DefSpillPriority
 }
 
 // WaitForTest waits all goroutine have gone.
-func (a *SpillDiskAction) WaitForTest() {
+func (a *baseSpillDiskAction) WaitForTest() {
 	a.testWg.Wait()
 }
 
@@ -380,20 +472,24 @@ type SortedRowContainer struct {
 	keyCmpFuncs []CompareFunc
 
 	actionSpill *SortAndSpillDiskAction
+	memTracker  *memory.Tracker
 }
 
 // NewSortedRowContainer creates a new SortedRowContainer in memory.
 func NewSortedRowContainer(fieldType []*types.FieldType, chunkSize int, ByItemsDesc []bool,
 	keyColumns []int, keyCmpFuncs []CompareFunc) *SortedRowContainer {
-	return &SortedRowContainer{RowContainer: NewRowContainer(fieldType, chunkSize),
+	src := SortedRowContainer{RowContainer: NewRowContainer(fieldType, chunkSize),
 		ByItemsDesc: ByItemsDesc, keyColumns: keyColumns, keyCmpFuncs: keyCmpFuncs}
+	src.memTracker = memory.NewTracker(memory.LabelForRowContainer, -1)
+	src.RowContainer.GetMemTracker().AttachTo(src.GetMemTracker())
+	return &src
 }
 
 // Close close the SortedRowContainer
 func (c *SortedRowContainer) Close() error {
 	c.ptrM.Lock()
 	defer c.ptrM.Unlock()
-	c.GetMemTracker().Consume(int64(-8 * cap(c.ptrM.rowPtrs)))
+	c.GetMemTracker().Consume(int64(-8 * c.NumRow()))
 	c.ptrM.rowPtrs = nil
 	return c.RowContainer.Close()
 }
@@ -416,19 +512,25 @@ func (c *SortedRowContainer) lessRow(rowI, rowJ Row) bool {
 
 // keyColumnsLess is the less function for key columns.
 func (c *SortedRowContainer) keyColumnsLess(i, j int) bool {
-	rowI := c.m.records.GetRow(c.ptrM.rowPtrs[i])
-	rowJ := c.m.records.GetRow(c.ptrM.rowPtrs[j])
+	rowI := c.m.records.inMemory.GetRow(c.ptrM.rowPtrs[i])
+	rowJ := c.m.records.inMemory.GetRow(c.ptrM.rowPtrs[j])
 	return c.lessRow(rowI, rowJ)
 }
 
 // Sort inits pointers and sorts the records.
-func (c *SortedRowContainer) Sort() {
+func (c *SortedRowContainer) Sort() (ret error) {
 	c.ptrM.Lock()
 	defer c.ptrM.Unlock()
+	ret = nil
+	defer func() {
+		if r := recover(); r != nil {
+			ret = fmt.Errorf("%v", r)
+		}
+	}()
 	if c.ptrM.rowPtrs != nil {
 		return
 	}
-	c.ptrM.rowPtrs = make([]RowPtr, 0, c.NumRow())
+	c.ptrM.rowPtrs = make([]RowPtr, 0, c.NumRow()) // The memory usage has been tracked in SortedRowContainer.Add() function
 	for chkIdx := 0; chkIdx < c.NumChunks(); chkIdx++ {
 		rowChk, err := c.GetChunk(chkIdx)
 		// err must be nil, because the chunk is in memory.
@@ -439,13 +541,24 @@ func (c *SortedRowContainer) Sort() {
 			c.ptrM.rowPtrs = append(c.ptrM.rowPtrs, RowPtr{ChkIdx: uint32(chkIdx), RowIdx: uint32(rowIdx)})
 		}
 	}
+	failpoint.Inject("errorDuringSortRowContainer", func(val failpoint.Value) {
+		if val.(bool) {
+			panic("sort meet error")
+		}
+	})
 	sort.Slice(c.ptrM.rowPtrs, c.keyColumnsLess)
-	c.GetMemTracker().Consume(int64(8 * c.numRow))
+	return
 }
 
-func (c *SortedRowContainer) sortAndSpillToDisk() {
-	c.Sort()
-	c.RowContainer.SpillToDisk()
+// SpillToDisk spills data to disk. This function may be called in parallel.
+func (c *SortedRowContainer) SpillToDisk() {
+	err := c.Sort()
+	c.RowContainer.spillToDisk(err)
+}
+
+func (c *SortedRowContainer) hasEnoughDataToSpill(t *memory.Tracker) bool {
+	// Guarantee that each partition size is at least 10% of the threshold, to avoid opening too many files.
+	return c.GetMemTracker().BytesConsumed() > t.GetBytesLimit()/10
 }
 
 // Add appends a chunk into the SortedRowContainer.
@@ -455,6 +568,8 @@ func (c *SortedRowContainer) Add(chk *Chunk) (err error) {
 	if c.ptrM.rowPtrs != nil {
 		return ErrCannotAddBecauseSorted
 	}
+	// Consume the memory usage of rowPtrs in advance
+	c.GetMemTracker().Consume(int64(chk.NumRows() * 8))
 	return c.RowContainer.Add(chk)
 }
 
@@ -470,8 +585,8 @@ func (c *SortedRowContainer) GetSortedRow(idx int) (Row, error) {
 func (c *SortedRowContainer) ActionSpill() *SortAndSpillDiskAction {
 	if c.actionSpill == nil {
 		c.actionSpill = &SortAndSpillDiskAction{
-			c:               c,
-			SpillDiskAction: c.RowContainer.ActionSpill(),
+			c:                   c,
+			baseSpillDiskAction: c.RowContainer.ActionSpill().baseSpillDiskAction,
 		}
 	}
 	return c.actionSpill
@@ -480,10 +595,15 @@ func (c *SortedRowContainer) ActionSpill() *SortAndSpillDiskAction {
 // ActionSpillForTest returns a SortAndSpillDiskAction for sorting and spilling over to disk for test.
 func (c *SortedRowContainer) ActionSpillForTest() *SortAndSpillDiskAction {
 	c.actionSpill = &SortAndSpillDiskAction{
-		c:               c,
-		SpillDiskAction: c.RowContainer.ActionSpillForTest(),
+		c:                   c,
+		baseSpillDiskAction: c.RowContainer.ActionSpillForTest().baseSpillDiskAction,
 	}
 	return c.actionSpill
+}
+
+// GetMemTracker return the memory tracker for the sortedRowContainer
+func (c *SortedRowContainer) GetMemTracker() *memory.Tracker {
+	return c.memTracker
 }
 
 // SortAndSpillDiskAction implements memory.ActionOnExceed for chunk.List. If
@@ -491,45 +611,13 @@ func (c *SortedRowContainer) ActionSpillForTest() *SortAndSpillDiskAction {
 // triggered.
 type SortAndSpillDiskAction struct {
 	c *SortedRowContainer
-	*SpillDiskAction
+	*baseSpillDiskAction
 }
 
 // Action sends a signal to trigger sortAndSpillToDisk method of RowContainer
 // and if it is already triggered before, call its fallbackAction.
 func (a *SortAndSpillDiskAction) Action(t *memory.Tracker) {
-	a.m.Lock()
-	defer a.m.Unlock()
-	// Guarantee that each partition size is at least 10% of the threshold, to avoid opening too many files.
-	if a.getStatus() == notSpilled && a.c.GetMemTracker().BytesConsumed() > t.GetBytesLimit()/10 {
-		a.once.Do(func() {
-			logutil.BgLogger().Info("memory exceeds quota, spill to disk now.",
-				zap.Int64("consumed", t.BytesConsumed()), zap.Int64("quota", t.GetBytesLimit()))
-			if a.testSyncInputFunc != nil {
-				a.testSyncInputFunc()
-				c := a.c
-				go func() {
-					c.sortAndSpillToDisk()
-					a.testSyncOutputFunc()
-				}()
-				return
-			}
-			go a.c.sortAndSpillToDisk()
-		})
-		return
-	}
-
-	a.cond.L.Lock()
-	for a.cond.status == spilling {
-		a.cond.Wait()
-	}
-	a.cond.L.Unlock()
-
-	if !t.CheckExceed() {
-		return
-	}
-	if fallback := a.GetFallback(); fallback != nil {
-		fallback.Action(t)
-	}
+	a.action(t, a.c)
 }
 
 // SetLogHook sets the hook, it does nothing just to form the memory.ActionOnExceed interface.

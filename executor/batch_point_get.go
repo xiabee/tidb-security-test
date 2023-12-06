@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,52 +23,53 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/parser/model"
-	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	driver "github.com/pingcap/tidb/store/driver/txn"
-	"github.com/pingcap/tidb/store/tikv"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/hack"
-	"github.com/pingcap/tidb/util/math"
+	"github.com/pingcap/tidb/util/logutil/consistency"
+	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/rowcodec"
+	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 )
 
 // BatchPointGetExec executes a bunch of point select queries.
 type BatchPointGetExec struct {
 	baseExecutor
 
-	tblInfo     *model.TableInfo
-	idxInfo     *model.IndexInfo
-	handles     []kv.Handle
-	physIDs     []int64
-	partExpr    *tables.PartitionExpr
-	partPos     int
-	singlePart  bool
-	partTblID   int64
-	idxVals     [][]types.Datum
-	startTS     uint64
-	txnScope    string
-	isStaleness bool
-	snapshotTS  uint64
-	txn         kv.Transaction
-	lock        bool
-	waitTime    int64
-	inited      uint32
-	values      [][]byte
-	index       int
-	rowDecoder  *rowcodec.ChunkDecoder
-	keepOrder   bool
-	desc        bool
-	batchGetter kv.BatchGetter
+	tblInfo          *model.TableInfo
+	idxInfo          *model.IndexInfo
+	handles          []kv.Handle
+	physIDs          []int64
+	partExpr         *tables.PartitionExpr
+	partPos          int
+	singlePart       bool
+	partTblID        int64
+	idxVals          [][]types.Datum
+	startTS          uint64
+	readReplicaScope string
+	isStaleness      bool
+	snapshotTS       uint64
+	txn              kv.Transaction
+	lock             bool
+	waitTime         int64
+	inited           uint32
+	values           [][]byte
+	index            int
+	rowDecoder       *rowcodec.ChunkDecoder
+	keepOrder        bool
+	desc             bool
+	batchGetter      kv.BatchGetter
 
 	columns []*model.ColumnInfo
 	// virtualColumnIndex records all the indices of virtual columns and sort them in definition
@@ -77,8 +79,9 @@ type BatchPointGetExec struct {
 	// virtualColumnRetFieldTypes records the RetFieldTypes of virtual columns.
 	virtualColumnRetFieldTypes []*types.FieldType
 
-	snapshot kv.Snapshot
-	stats    *runtimeStatsWithSnapshot
+	snapshot   kv.Snapshot
+	stats      *runtimeStatsWithSnapshot
+	cacheTable kv.MemBuffer
 }
 
 // buildVirtualColumnInfo saves virtual column indices and sort them in definition order
@@ -112,44 +115,45 @@ func (e *BatchPointGetExec) Open(context.Context) error {
 		// The snapshot may contains cache that can reduce RPC call.
 		snapshot = txn.GetSnapshot()
 	} else {
-		snapshot = e.ctx.GetStore().GetSnapshot(kv.Version{Ver: e.snapshotTS})
+		snapshot = e.ctx.GetSnapshotWithTS(e.snapshotTS)
+	}
+	if e.ctx.GetSessionVars().StmtCtx.RCCheckTS {
+		snapshot.SetOption(kv.IsolationLevel, kv.RCCheckTS)
+	}
+	if e.cacheTable != nil {
+		snapshot = cacheTableSnapshot{snapshot, e.cacheTable}
 	}
 	if e.runtimeStats != nil {
-		snapshotStats := &tikv.SnapshotRuntimeStats{}
+		snapshotStats := &txnsnapshot.SnapshotRuntimeStats{}
 		e.stats = &runtimeStatsWithSnapshot{
 			SnapshotRuntimeStats: snapshotStats,
 		}
 		snapshot.SetOption(kv.CollectRuntimeStats, snapshotStats)
 		stmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
 	}
-	if e.ctx.GetSessionVars().GetReplicaRead().IsFollowerRead() {
-		snapshot.SetOption(kv.ReplicaRead, kv.ReplicaReadFollower)
+	replicaReadType := e.ctx.GetSessionVars().GetReplicaRead()
+	if replicaReadType.IsFollowerRead() && !e.ctx.GetSessionVars().StmtCtx.RCCheckTS {
+		snapshot.SetOption(kv.ReplicaRead, replicaReadType)
 	}
 	snapshot.SetOption(kv.TaskID, stmtCtx.TaskID)
-	snapshot.SetOption(kv.TxnScope, e.txnScope)
+	snapshot.SetOption(kv.ReadReplicaScope, e.readReplicaScope)
 	snapshot.SetOption(kv.IsStalenessReadOnly, e.isStaleness)
-	failpoint.Inject("assertBatchPointStalenessOption", func(val failpoint.Value) {
+	failpoint.Inject("assertBatchPointReplicaOption", func(val failpoint.Value) {
 		assertScope := val.(string)
-		if len(assertScope) > 0 {
-			if e.isStaleness && assertScope != e.txnScope {
-				panic("batch point get staleness option fail")
-			}
+		if replicaReadType.IsClosestRead() && assertScope != e.readReplicaScope {
+			panic("batch point get replica option fail")
 		}
 	})
 
-	if e.isStaleness && e.txnScope != kv.GlobalTxnScope {
+	if replicaReadType.IsClosestRead() && e.readReplicaScope != kv.GlobalTxnScope {
 		snapshot.SetOption(kv.MatchStoreLabels, []*metapb.StoreLabel{
 			{
 				Key:   placement.DCLabelKey,
-				Value: e.txnScope,
+				Value: e.readReplicaScope,
 			},
 		})
 	}
-	setResourceGroupTagForTxn(stmtCtx, snapshot)
-	// Avoid network requests for the temporary table.
-	if e.tblInfo.TempTableType == model.TempTableGlobal {
-		snapshot = globalTemporaryTableSnapshot{snapshot}
-	}
+	setOptionForTopSQL(stmtCtx, snapshot)
 	var batchGetter kv.BatchGetter = snapshot
 	if txn.Valid() {
 		lock := e.tblInfo.Lock
@@ -166,14 +170,46 @@ func (e *BatchPointGetExec) Open(context.Context) error {
 	return nil
 }
 
-// Global temporary table would always be empty, so get the snapshot data of it is meanless.
-// globalTemporaryTableSnapshot inherits kv.Snapshot and override the BatchGet methods to return empty.
-type globalTemporaryTableSnapshot struct {
+// CacheTable always use memBuffer in session as snapshot.
+// cacheTableSnapshot inherits kv.Snapshot and override the BatchGet methods and Get methods.
+type cacheTableSnapshot struct {
 	kv.Snapshot
+	memBuffer kv.MemBuffer
 }
 
-func (s globalTemporaryTableSnapshot) BatchGet(ctx context.Context, keys []kv.Key) (map[string][]byte, error) {
-	return make(map[string][]byte), nil
+func (s cacheTableSnapshot) BatchGet(ctx context.Context, keys []kv.Key) (map[string][]byte, error) {
+	values := make(map[string][]byte)
+	if s.memBuffer == nil {
+		return values, nil
+	}
+
+	for _, key := range keys {
+		val, err := s.memBuffer.Get(ctx, key)
+		if kv.ErrNotExist.Equal(err) {
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if len(val) == 0 {
+			continue
+		}
+
+		values[string(key)] = val
+	}
+
+	return values, nil
+}
+
+func (s cacheTableSnapshot) Get(ctx context.Context, key kv.Key) ([]byte, error) {
+	return s.memBuffer.Get(ctx, key)
+}
+
+// MockNewCacheTableSnapShot only serves for test.
+func MockNewCacheTableSnapShot(snapshot kv.Snapshot, memBuffer kv.MemBuffer) *cacheTableSnapshot {
+	return &cacheTableSnapshot{snapshot, memBuffer}
 }
 
 // Close implements the Executor interface.
@@ -341,7 +377,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			return e.handles[i].Compare(e.handles[j]) < 0
 
 		}
-		if e.tblInfo.PKIsHandle && mysql.HasUnsignedFlag(e.tblInfo.GetPkColInfo().Flag) {
+		if e.tblInfo.PKIsHandle && mysql.HasUnsignedFlag(e.tblInfo.GetPkColInfo().GetFlag()) {
 			uintComparator := func(i, h kv.Handle) int {
 				if !i.IsInt() || !h.IsInt() {
 					panic(fmt.Sprintf("both handles need be IntHandle, but got %T and %T ", i, h))
@@ -414,15 +450,16 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			if !e.txn.Valid() {
 				return kv.ErrInvalidTxn
 			}
-			membuf := e.txn.GetMemBuffer()
-			for _, idxKey := range indexKeys {
-				handleVal := handleVals[string(idxKey)]
-				if len(handleVal) == 0 {
-					continue
-				}
-				err = membuf.Set(idxKey, handleVal)
-				if err != nil {
-					return err
+			txn, ok := e.txn.(interface {
+				ChangeLockIntoPut(context.Context, kv.Key, []byte) bool
+			})
+			if ok {
+				for _, idxKey := range indexKeys {
+					handleVal := handleVals[string(idxKey)]
+					if len(handleVal) == 0 {
+						continue
+					}
+					txn.ChangeLockIntoPut(ctx, idxKey, handleVal)
 				}
 			}
 		}
@@ -442,9 +479,24 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 	for i, key := range keys {
 		val := values[string(key)]
 		if len(val) == 0 {
-			if e.idxInfo != nil && (!e.tblInfo.IsCommonHandle || !e.idxInfo.Primary) {
-				return kv.ErrNotExist.GenWithStack("inconsistent extra index %s, handle %d not found in table",
-					e.idxInfo.Name.O, e.handles[i])
+			if e.idxInfo != nil && (!e.tblInfo.IsCommonHandle || !e.idxInfo.Primary) &&
+				!e.ctx.GetSessionVars().StmtCtx.WeakConsistency {
+				return (&consistency.Reporter{
+					HandleEncode: func(_ kv.Handle) kv.Key {
+						return key
+					},
+					IndexEncode: func(_ *consistency.RecordData) kv.Key {
+						return indexKeys[i]
+					},
+					Tbl:  e.tblInfo,
+					Idx:  e.idxInfo,
+					Sctx: e.ctx,
+				}).ReportLookupInconsistent(ctx,
+					1, 0,
+					e.handles[i:i+1],
+					e.handles,
+					[]consistency.RecordData{{}},
+				)
 			}
 			continue
 		}
@@ -491,7 +543,7 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 // LockKeys locks the keys for pessimistic transaction.
 func LockKeys(ctx context.Context, seCtx sessionctx.Context, lockWaitTime int64, keys ...kv.Key) error {
 	txnCtx := seCtx.GetSessionVars().TxnCtx
-	lctx := newLockCtx(seCtx.GetSessionVars(), lockWaitTime)
+	lctx := newLockCtx(seCtx.GetSessionVars(), lockWaitTime, len(keys))
 	if txnCtx.IsPessimistic {
 		lctx.InitReturnValues(len(keys))
 	}
@@ -538,7 +590,7 @@ func getPhysID(tblInfo *model.TableInfo, partitionExpr *tables.PartitionExpr, in
 
 	switch pi.Type {
 	case model.PartitionTypeHash:
-		partIdx := math.Abs(intVal % int64(pi.Num))
+		partIdx := mathutil.Abs(intVal % int64(pi.Num))
 		return pi.Definitions[partIdx].ID, nil
 	case model.PartitionTypeRange:
 		// we've check the type assertions in func TryFastPlan
@@ -546,7 +598,7 @@ func getPhysID(tblInfo *model.TableInfo, partitionExpr *tables.PartitionExpr, in
 		if !ok {
 			return 0, errors.Errorf("unsupported partition type in BatchGet")
 		}
-		unsigned := mysql.HasUnsignedFlag(col.GetType().Flag)
+		unsigned := mysql.HasUnsignedFlag(col.GetType().GetFlag())
 		ranges := partitionExpr.ForRangePruning
 		length := len(ranges.LessThan)
 		partIdx := sort.Search(length, func(i int) bool {

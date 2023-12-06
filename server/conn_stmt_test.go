@@ -8,20 +8,27 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package server
 
 import (
-	. "github.com/pingcap/check"
-	"github.com/pingcap/parser/mysql"
-	"github.com/pingcap/parser/terror"
+	"bytes"
+	"context"
+	"encoding/binary"
+	"testing"
+
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
+	"github.com/stretchr/testify/require"
 )
 
-func (ts *ConnTestSuite) TestParseExecArgs(c *C) {
+func TestParseExecArgs(t *testing.T) {
 	type args struct {
 		args        []types.Datum
 		boundParams [][]byte
@@ -194,13 +201,36 @@ func (ts *ConnTestSuite) TestParseExecArgs(c *C) {
 		},
 	}
 	for _, tt := range tests {
-		err := parseExecArgs(&stmtctx.StatementContext{}, tt.args.args, tt.args.boundParams, tt.args.nullBitmap, tt.args.paramTypes, tt.args.paramValues)
-		c.Assert(terror.ErrorEqual(err, tt.err), IsTrue, Commentf("err %v", err))
-		c.Assert(tt.args.args[0].GetValue(), Equals, tt.expect)
+		err := parseExecArgs(&stmtctx.StatementContext{}, tt.args.args, tt.args.boundParams, tt.args.nullBitmap, tt.args.paramTypes, tt.args.paramValues, nil)
+		require.Truef(t, terror.ErrorEqual(err, tt.err), "err %v", err)
+		require.Equal(t, tt.expect, tt.args.args[0].GetValue())
 	}
 }
 
-func (ts *ConnTestSuite) TestParseStmtFetchCmd(c *C) {
+func TestParseExecArgsAndEncode(t *testing.T) {
+	dt := make([]types.Datum, 1)
+	err := parseExecArgs(&stmtctx.StatementContext{},
+		dt,
+		[][]byte{nil},
+		[]byte{0x0},
+		[]byte{mysql.TypeVarchar, 0},
+		[]byte{4, 178, 226, 202, 212},
+		newInputDecoder("gbk"))
+	require.NoError(t, err)
+	require.Equal(t, "测试", dt[0].GetValue())
+
+	err = parseExecArgs(&stmtctx.StatementContext{},
+		dt,
+		[][]byte{{178, 226, 202, 212}},
+		[]byte{0x0},
+		[]byte{mysql.TypeString, 0},
+		[]byte{},
+		newInputDecoder("gbk"))
+	require.NoError(t, err)
+	require.Equal(t, "测试", dt[0].GetString())
+}
+
+func TestParseStmtFetchCmd(t *testing.T) {
 	tests := []struct {
 		arg       []byte
 		stmtID    uint32
@@ -215,10 +245,129 @@ func (ts *ConnTestSuite) TestParseStmtFetchCmd(c *C) {
 		{[]byte{}, 0, 0, mysql.ErrMalformPacket},
 	}
 
-	for _, t := range tests {
-		stmtID, fetchSize, err := parseStmtFetchCmd(t.arg)
-		c.Assert(stmtID, Equals, t.stmtID)
-		c.Assert(fetchSize, Equals, t.fetchSize)
-		c.Assert(err, Equals, t.err)
+	for _, tc := range tests {
+		stmtID, fetchSize, err := parseStmtFetchCmd(tc.arg)
+		require.Equal(t, tc.stmtID, stmtID)
+		require.Equal(t, tc.fetchSize, fetchSize)
+		require.Equal(t, tc.err, err)
 	}
+}
+
+func TestCursorExistsFlag(t *testing.T) {
+	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
+	defer clean()
+	srv := CreateMockServer(t, store)
+	srv.SetDomain(dom)
+	defer srv.Close()
+
+	appendUint32 := binary.LittleEndian.AppendUint32
+	ctx := context.Background()
+	c := CreateMockConn(t, store, srv).(*mockConn)
+	out := new(bytes.Buffer)
+	c.pkt.bufWriter.Reset(out)
+	c.capability |= mysql.ClientProtocol41
+	tk := testkit.NewTestKitWithSession(t, store, c.Context().Session)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int primary key)")
+	tk.MustExec("insert into t values (1), (2), (3), (4), (5), (6), (7), (8)")
+	tk.MustQuery("select count(*) from t").Check(testkit.Rows("8"))
+
+	getLastStatus := func() uint16 {
+		raw := out.Bytes()
+		return binary.LittleEndian.Uint16(raw[len(raw)-2:])
+	}
+
+	stmt, _, _, err := c.Context().Prepare("select * from t")
+	require.NoError(t, err)
+
+	require.NoError(t, c.Dispatch(ctx, append(
+		appendUint32([]byte{mysql.ComStmtExecute}, uint32(stmt.ID())),
+		mysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
+	)))
+	require.True(t, mysql.HasCursorExistsFlag(getLastStatus()))
+
+	// fetch first 5
+	require.NoError(t, c.Dispatch(ctx, appendUint32(appendUint32([]byte{mysql.ComStmtFetch}, uint32(stmt.ID())), 5)))
+	require.True(t, mysql.HasCursorExistsFlag(getLastStatus()))
+
+	// COM_QUERY during fetch
+	require.NoError(t, c.Dispatch(ctx, append([]byte{mysql.ComQuery}, "select * from t"...)))
+	require.False(t, mysql.HasCursorExistsFlag(getLastStatus()))
+
+	// fetch last 3
+	require.NoError(t, c.Dispatch(ctx, appendUint32(appendUint32([]byte{mysql.ComStmtFetch}, uint32(stmt.ID())), 5)))
+	require.True(t, mysql.HasCursorExistsFlag(getLastStatus()))
+
+	// final fetch with no row retured
+	// (tidb doesn't unset cursor-exists flag in the previous response like mysql, one more fetch is needed)
+	require.NoError(t, c.Dispatch(ctx, appendUint32(appendUint32([]byte{mysql.ComStmtFetch}, uint32(stmt.ID())), 5)))
+	require.False(t, mysql.HasCursorExistsFlag(getLastStatus()))
+	require.True(t, getLastStatus()&mysql.ServerStatusLastRowSend > 0)
+
+	// COM_QUERY after fetch
+	require.NoError(t, c.Dispatch(ctx, append([]byte{mysql.ComQuery}, "select * from t"...)))
+	require.False(t, mysql.HasCursorExistsFlag(getLastStatus()))
+}
+
+func TestCursorWithParams(t *testing.T) {
+	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
+	defer clean()
+	srv := CreateMockServer(t, store)
+	srv.SetDomain(dom)
+	defer srv.Close()
+
+	appendUint32 := binary.LittleEndian.AppendUint32
+	ctx := context.Background()
+	c := CreateMockConn(t, store, srv).(*mockConn)
+
+	tk := testkit.NewTestKitWithSession(t, store, c.Context().Session)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(id_1 int, id_2 int)")
+	tk.MustExec("insert into t values (1, 1), (1, 2)")
+
+	stmt1, _, _, err := c.Context().Prepare("select * from t where id_1 = ? and id_2 = ?")
+	require.NoError(t, err)
+	stmt2, _, _, err := c.Context().Prepare("select * from t where id_1 = ?")
+	require.NoError(t, err)
+
+	// `execute stmt1 using 1,2` with cursor
+	require.NoError(t, c.Dispatch(ctx, append(
+		appendUint32([]byte{mysql.ComStmtExecute}, uint32(stmt1.ID())),
+		mysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
+		0x0, 0x1, 0x3, 0x0, 0x3, 0x0,
+		0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0,
+	)))
+	rows := c.Context().stmts[stmt1.ID()].GetResultSet().GetFetchedRows()
+	require.Len(t, rows, 1)
+	require.Equal(t, int64(1), rows[0].GetInt64(0))
+	require.Equal(t, int64(2), rows[0].GetInt64(1))
+
+	// `execute stmt2 using 1` with cursor
+	require.NoError(t, c.Dispatch(ctx, append(
+		appendUint32([]byte{mysql.ComStmtExecute}, uint32(stmt2.ID())),
+		mysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
+		0x0, 0x1, 0x3, 0x0,
+		0x1, 0x0, 0x0, 0x0,
+	)))
+	rows = c.Context().stmts[stmt2.ID()].GetResultSet().GetFetchedRows()
+	require.Len(t, rows, 2)
+	require.Equal(t, int64(1), rows[0].GetInt64(0))
+	require.Equal(t, int64(1), rows[0].GetInt64(1))
+	require.Equal(t, int64(1), rows[1].GetInt64(0))
+	require.Equal(t, int64(2), rows[1].GetInt64(1))
+
+	// fetch stmt2 with fetch size 256
+	require.NoError(t, c.Dispatch(ctx, append(
+		appendUint32([]byte{mysql.ComStmtFetch}, uint32(stmt2.ID())),
+		0x0, 0x1, 0x0, 0x0,
+	)))
+
+	// fetch stmt1 with fetch size 256, as it has more params, if we fetch the result at the first execute command, it
+	// will panic because the params have been overwritten and is not long enough.
+	require.NoError(t, c.Dispatch(ctx, append(
+		appendUint32([]byte{mysql.ComStmtFetch}, uint32(stmt1.ID())),
+		0x0, 0x1, 0x0, 0x0,
+	)))
 }

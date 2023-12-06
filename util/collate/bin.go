@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -32,6 +33,11 @@ func (bc *binCollator) Key(str string) []byte {
 	return []byte(str)
 }
 
+// KeyWithoutTrimRightSpace implement Collator interface.
+func (bc *binCollator) KeyWithoutTrimRightSpace(str string) []byte {
+	return []byte(str)
+}
+
 // Pattern implements Collator interface.
 func (bc *binCollator) Pattern() WildcardPattern {
 	return &binPattern{}
@@ -46,6 +52,11 @@ func (bpc *binPaddingCollator) Compare(a, b string) int {
 
 func (bpc *binPaddingCollator) Key(str string) []byte {
 	return []byte(truncateTailingSpace(str))
+}
+
+// KeyWithoutTrimRightSpace implement Collator interface.
+func (bpc *binPaddingCollator) KeyWithoutTrimRightSpace(str string) []byte {
+	return []byte(str)
 }
 
 // Pattern implements Collator interface.
@@ -64,7 +75,7 @@ func (p *binPattern) Compile(patternStr string, escape byte) {
 	p.patChars, p.patTypes = stringutil.CompilePattern(patternStr, escape)
 }
 
-// Compile implements WildcardPattern interface.
+// DoMatch implements WildcardPattern interface.
 func (p *binPattern) DoMatch(str string) bool {
 	return stringutil.DoMatch(str, p.patChars, p.patTypes)
 }

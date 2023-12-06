@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -282,7 +283,6 @@ const tableTransCurrent = "CREATE TABLE if not exists performance_schema." + tab
 	"NESTING_EVENT_TYPE		ENUM('TRANSACTION','STATEMENT','STAGE'));"
 
 // tableTransHistory contains the column name definitions for table events_transactions_history, same as MySQL.
-//
 const tableTransHistory = "CREATE TABLE if not exists performance_schema." + tableNameEventsTransactionsHistory + " (" +
 	"THREAD_ID		BIGINT(20) UNSIGNED NOT NULL," +
 	"EVENT_ID		BIGINT(20) UNSIGNED NOT NULL," +

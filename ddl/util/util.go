@@ -8,23 +8,28 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
 package util
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"strings"
+	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/tikv/client-go/v2/tikvrpc"
+	atomicutil "go.uber.org/atomic"
 )
 
 const (
@@ -33,7 +38,7 @@ const (
 	loadDeleteRangeSQL           = `SELECT HIGH_PRIORITY job_id, element_id, start_key, end_key FROM mysql.%n WHERE ts < %?`
 	recordDoneDeletedRangeSQL    = `INSERT IGNORE INTO mysql.gc_delete_range_done SELECT * FROM mysql.gc_delete_range WHERE job_id = %? AND element_id = %?`
 	completeDeleteRangeSQL       = `DELETE FROM mysql.gc_delete_range WHERE job_id = %? AND element_id = %?`
-	completeDeleteMultiRangesSQL = `DELETE FROM mysql.gc_delete_range WHERE job_id = %? AND element_id in (` // + idList + ")"
+	completeDeleteMultiRangesSQL = `DELETE FROM mysql.gc_delete_range WHERE job_id = %?`
 	updateDeleteRangeSQL         = `UPDATE mysql.gc_delete_range SET start_key = %? WHERE job_id = %? AND element_id = %? AND start_key = %?`
 	deleteDoneRecordSQL          = `DELETE FROM mysql.gc_delete_range_done WHERE job_id = %? AND element_id = %?`
 	loadGlobalVars               = `SELECT HIGH_PRIORITY variable_name, variable_value from mysql.global_variables where variable_name in (` // + nameList + ")"
@@ -69,7 +74,7 @@ func loadDeleteRangesFromTable(ctx sessionctx.Context, table string, safePoint u
 		return nil, errors.Trace(err)
 	}
 
-	req := rs.NewChunk()
+	req := rs.NewChunk(nil)
 	it := chunk.NewIterator4Chunk(req)
 	for {
 		err = rs.Next(context.TODO(), req)
@@ -101,14 +106,23 @@ func loadDeleteRangesFromTable(ctx sessionctx.Context, table string, safePoint u
 }
 
 // CompleteDeleteRange moves a record from gc_delete_range table to gc_delete_range_done table.
-// NOTE: This function WILL NOT start and run in a new transaction internally.
 func CompleteDeleteRange(ctx sessionctx.Context, dr DelRangeTask) error {
-	_, err := ctx.(sqlexec.SQLExecutor).ExecuteInternal(context.TODO(), recordDoneDeletedRangeSQL, dr.JobID, dr.ElementID)
+	_, err := ctx.(sqlexec.SQLExecutor).ExecuteInternal(context.TODO(), "BEGIN")
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	return RemoveFromGCDeleteRange(ctx, dr.JobID, dr.ElementID)
+	_, err = ctx.(sqlexec.SQLExecutor).ExecuteInternal(context.TODO(), recordDoneDeletedRangeSQL, dr.JobID, dr.ElementID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	err = RemoveFromGCDeleteRange(ctx, dr.JobID, dr.ElementID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	_, err = ctx.(sqlexec.SQLExecutor).ExecuteInternal(context.TODO(), "COMMIT")
+	return errors.Trace(err)
 }
 
 // RemoveFromGCDeleteRange is exported for ddl pkg to use.
@@ -118,20 +132,8 @@ func RemoveFromGCDeleteRange(ctx sessionctx.Context, jobID, elementID int64) err
 }
 
 // RemoveMultiFromGCDeleteRange is exported for ddl pkg to use.
-func RemoveMultiFromGCDeleteRange(ctx sessionctx.Context, jobID int64, elementIDs []int64) error {
-	var buf strings.Builder
-	buf.WriteString(completeDeleteMultiRangesSQL)
-	paramIDs := make([]interface{}, 0, 1+len(elementIDs))
-	paramIDs = append(paramIDs, jobID)
-	for i, elementID := range elementIDs {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		buf.WriteString("%?")
-		paramIDs = append(paramIDs, elementID)
-	}
-	buf.WriteString(")")
-	_, err := ctx.(sqlexec.SQLExecutor).ExecuteInternal(context.TODO(), buf.String(), paramIDs...)
+func RemoveMultiFromGCDeleteRange(ctx context.Context, sctx sessionctx.Context, jobID int64) error {
+	_, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, completeDeleteMultiRangesSQL, jobID)
 	return errors.Trace(err)
 }
 
@@ -150,20 +152,20 @@ func UpdateDeleteRange(ctx sessionctx.Context, dr DelRangeTask, newStartKey, old
 }
 
 // LoadDDLReorgVars loads ddl reorg variable from mysql.global_variables.
-func LoadDDLReorgVars(ctx sessionctx.Context) error {
+func LoadDDLReorgVars(ctx context.Context, sctx sessionctx.Context) error {
 	// close issue #21391
 	// variable.TiDBRowFormatVersion is used to encode the new row for column type change.
-	return LoadGlobalVars(ctx, []string{variable.TiDBDDLReorgWorkerCount, variable.TiDBDDLReorgBatchSize, variable.TiDBRowFormatVersion})
+	return LoadGlobalVars(ctx, sctx, []string{variable.TiDBDDLReorgWorkerCount, variable.TiDBDDLReorgBatchSize, variable.TiDBRowFormatVersion})
 }
 
 // LoadDDLVars loads ddl variable from mysql.global_variables.
 func LoadDDLVars(ctx sessionctx.Context) error {
-	return LoadGlobalVars(ctx, []string{variable.TiDBDDLErrorCountLimit})
+	return LoadGlobalVars(context.Background(), ctx, []string{variable.TiDBDDLErrorCountLimit})
 }
 
 // LoadGlobalVars loads global variable from mysql.global_variables.
-func LoadGlobalVars(ctx sessionctx.Context, varNames []string) error {
-	if sctx, ok := ctx.(sqlexec.RestrictedSQLExecutor); ok {
+func LoadGlobalVars(ctx context.Context, sctx sessionctx.Context, varNames []string) error {
+	if e, ok := sctx.(sqlexec.RestrictedSQLExecutor); ok {
 		var buf strings.Builder
 		buf.WriteString(loadGlobalVars)
 		paramNames := make([]interface{}, 0, len(varNames))
@@ -175,21 +177,65 @@ func LoadGlobalVars(ctx sessionctx.Context, varNames []string) error {
 			paramNames = append(paramNames, name)
 		}
 		buf.WriteString(")")
-		stmt, err := sctx.ParseWithParams(context.Background(), buf.String(), paramNames...)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		rows, _, err := sctx.ExecRestrictedStmt(context.Background(), stmt)
+		rows, _, err := e.ExecRestrictedSQL(ctx, nil, buf.String(), paramNames...)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		for _, row := range rows {
 			varName := row.GetString(0)
 			varValue := row.GetString(1)
-			if err = ctx.GetSessionVars().SetSystemVar(varName, varValue); err != nil {
+			if err = sctx.GetSessionVars().SetSystemVar(varName, varValue); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// GetTimeZone gets the session location's zone name and offset.
+func GetTimeZone(sctx sessionctx.Context) (string, int) {
+	loc := sctx.GetSessionVars().Location()
+	name := loc.String()
+	if name != "" {
+		_, err := time.LoadLocation(name)
+		if err == nil {
+			return name, 0
+		}
+	}
+	_, offset := time.Now().In(loc).Zone()
+	return "UTC", offset
+}
+
+// enableEmulatorGC means whether to enable emulator GC. The default is enable.
+// In some unit tests, we want to stop emulator GC, then wen can set enableEmulatorGC to 0.
+var emulatorGCEnable = atomicutil.NewInt32(1)
+
+// EmulatorGCEnable enables emulator gc. It exports for testing.
+func EmulatorGCEnable() {
+	emulatorGCEnable.Store(1)
+}
+
+// EmulatorGCDisable disables emulator gc. It exports for testing.
+func EmulatorGCDisable() {
+	emulatorGCEnable.Store(0)
+}
+
+// IsEmulatorGCEnable indicates whether emulator GC enabled. It exports for testing.
+func IsEmulatorGCEnable() bool {
+	return emulatorGCEnable.Load() == 1
+}
+
+var internalResourceGroupTag = []byte{0}
+
+// GetInternalResourceGroupTaggerForTopSQL only use for testing.
+func GetInternalResourceGroupTaggerForTopSQL() tikvrpc.ResourceGroupTagger {
+	tagger := func(req *tikvrpc.Request) {
+		req.ResourceGroupTag = internalResourceGroupTag
+	}
+	return tagger
+}
+
+// IsInternalResourceGroupTaggerForTopSQL use for testing.
+func IsInternalResourceGroupTaggerForTopSQL(tag []byte) bool {
+	return bytes.Equal(tag, internalResourceGroupTag)
 }

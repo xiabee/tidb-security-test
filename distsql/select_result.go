@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,16 +25,14 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/parser/terror"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/store/copr"
-	"github.com/pingcap/tidb/store/tikv"
-	"github.com/pingcap/tidb/store/tikv/tikvrpc"
 	"github.com/pingcap/tidb/telemetry"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -42,9 +41,12 @@ import (
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
-	"github.com/pingcap/tidb/util/sli"
 	"github.com/pingcap/tipb/go-tipb"
+	tikvmetrics "github.com/tikv/client-go/v2/metrics"
+	"github.com/tikv/client-go/v2/tikv"
+	"github.com/tikv/client-go/v2/tikvrpc"
 	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
 )
 
 var (
@@ -151,7 +153,8 @@ type selectResult struct {
 	durationReported bool
 	memTracker       *memory.Tracker
 
-	stats *selectResultRuntimeStats
+	stats  *selectResultRuntimeStats
+	paging bool
 }
 
 func (r *selectResult) fetchResp(ctx context.Context) error {
@@ -205,7 +208,11 @@ func (r *selectResult) fetchResp(ctx context.Context) error {
 				// final round of fetch
 				// TODO: Add a label to distinguish between success or failure.
 				// https://github.com/pingcap/tidb/issues/11397
-				metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType).Observe(r.fetchDuration.Seconds())
+				if r.paging {
+					metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType, "paging").Observe(r.fetchDuration.Seconds())
+				} else {
+					metrics.DistSQLQueryHistogram.WithLabelValues(r.label, r.sqlType, "common").Observe(r.fetchDuration.Seconds())
+				}
 				r.durationReported = true
 			}
 			return nil
@@ -353,7 +360,8 @@ func (r *selectResult) updateCopRuntimeStats(ctx context.Context, copStats *copr
 	if copStats.ScanDetail != nil {
 		readKeys := copStats.ScanDetail.ProcessedKeys
 		readTime := copStats.TimeDetail.KvReadWallTimeMs.Seconds()
-		sli.ObserveReadSLI(uint64(readKeys), readTime)
+		readSize := float64(copStats.ScanDetail.ProcessedKeysSize)
+		tikvmetrics.ObserveReadSLI(uint64(readKeys), readTime, readSize)
 	}
 
 	if r.stats == nil {
@@ -479,10 +487,7 @@ func (s *selectResultRuntimeStats) mergeCopRuntimeStats(copStats *copr.CopRuntim
 	} else {
 		s.procKeys = append(s.procKeys, 0)
 	}
-
-	for k, v := range copStats.BackoffSleep {
-		s.backoffSleep[k] += v
-	}
+	maps.Copy(s.backoffSleep, copStats.BackoffSleep)
 	s.totalProcessTime += copStats.TimeDetail.ProcessTime
 	s.totalWaitTime += copStats.TimeDetail.WaitTime
 	s.rpcStat.Merge(copStats.RegionRequestRuntimeStats)
@@ -505,9 +510,7 @@ func (s *selectResultRuntimeStats) Clone() execdetails.RuntimeStats {
 	}
 	newRs.totalProcessTime += s.totalProcessTime
 	newRs.totalWaitTime += s.totalWaitTime
-	for k, v := range s.rpcStat.Stats {
-		newRs.rpcStat.Stats[k] = v
-	}
+	maps.Copy(newRs.rpcStat.Stats, s.rpcStat.Stats)
 	return &newRs
 }
 

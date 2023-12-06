@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -84,7 +85,11 @@ func (uc *unicodeCICollator) Compare(a, b string) int {
 
 // Key implements Collator interface.
 func (uc *unicodeCICollator) Key(str string) []byte {
-	str = truncateTailingSpace(str)
+	return uc.KeyWithoutTrimRightSpace(truncateTailingSpace(str))
+}
+
+// KeyWithoutTrimRightSpace implements Collator interface.
+func (uc *unicodeCICollator) KeyWithoutTrimRightSpace(str string) []byte {
 	buf := make([]byte, 0, len(str)*2)
 	r := rune(0)
 	si := 0                        // decode index of s

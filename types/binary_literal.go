@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -108,7 +109,7 @@ func (b BinaryLiteral) ToInt(sc *stmtctx.StatementContext) (uint64, error) {
 		return 0, nil
 	}
 	if length > 8 {
-		var err = ErrTruncatedWrongVal.GenWithStackByArgs("BINARY", b)
+		var err = ErrTruncatedWrongVal.FastGenByArgs("BINARY", b)
 		if sc != nil {
 			err = sc.HandleTruncate(err)
 		}

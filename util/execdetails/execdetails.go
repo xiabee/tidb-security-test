@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -24,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pingcap/tidb/store/tikv/util"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
 
@@ -414,16 +415,18 @@ const (
 	TpSelectResultRuntimeStats
 	// TpInsertRuntimeStat is the tp for InsertRuntimeStat
 	TpInsertRuntimeStat
-	// TpIndexLookUpRunTimeStats is the tp for TpIndexLookUpRunTimeStats
+	// TpIndexLookUpRunTimeStats is the tp for IndexLookUpRunTimeStats
 	TpIndexLookUpRunTimeStats
-	// TpSlowQueryRuntimeStat is the tp for TpSlowQueryRuntimeStat
+	// TpSlowQueryRuntimeStat is the tp for SlowQueryRuntimeStat
 	TpSlowQueryRuntimeStat
 	// TpHashAggRuntimeStat is the tp for HashAggRuntimeStat
 	TpHashAggRuntimeStat
-	// TpIndexMergeRunTimeStats is the tp for TpIndexMergeRunTimeStats
+	// TpIndexMergeRunTimeStats is the tp for IndexMergeRunTimeStats
 	TpIndexMergeRunTimeStats
-	// TpBasicCopRunTimeStats is the tp for TpBasicCopRunTimeStats
+	// TpBasicCopRunTimeStats is the tp for BasicCopRunTimeStats
 	TpBasicCopRunTimeStats
+	// TpUpdateRuntimeStats is the tp for UpdateRuntimeStats
+	TpUpdateRuntimeStats
 )
 
 // RuntimeStats is used to express the executor runtime information.
@@ -539,7 +542,12 @@ func (e *BasicRuntimeStats) SetRowNum(rowNum int64) {
 
 // String implements the RuntimeStats interface.
 func (e *BasicRuntimeStats) String() string {
-	return fmt.Sprintf("time:%v, loops:%d", FormatDuration(time.Duration(e.consume)), e.loop)
+	var str strings.Builder
+	str.WriteString("time:")
+	str.WriteString(FormatDuration(time.Duration(e.consume)))
+	str.WriteString(", loops:")
+	str.WriteString(strconv.FormatInt(int64(e.loop), 10))
+	return str.String()
 }
 
 // GetTime get the int64 total time
@@ -555,9 +563,25 @@ type RuntimeStatsColl struct {
 }
 
 // NewRuntimeStatsColl creates new executor collector.
-func NewRuntimeStatsColl() *RuntimeStatsColl {
-	return &RuntimeStatsColl{rootStats: make(map[int]*RootRuntimeStats),
-		copStats: make(map[int]*CopRuntimeStats)}
+// Reuse the object to reduce allocation when *RuntimeStatsColl is not nil.
+func NewRuntimeStatsColl(reuse *RuntimeStatsColl) *RuntimeStatsColl {
+	if reuse != nil {
+		// Reuse map is cheaper than create a new map object.
+		// Go compiler optimize this cleanup code pattern to a clearmap() function.
+		reuse.mu.Lock()
+		defer reuse.mu.Unlock()
+		for k := range reuse.rootStats {
+			delete(reuse.rootStats, k)
+		}
+		for k := range reuse.copStats {
+			delete(reuse.copStats, k)
+		}
+		return reuse
+	}
+	return &RuntimeStatsColl{
+		rootStats: make(map[int]*RootRuntimeStats),
+		copStats:  make(map[int]*CopRuntimeStats),
+	}
 }
 
 // RegisterStats register execStat for a executor.
@@ -741,6 +765,7 @@ func (e *RuntimeStatsWithConcurrencyInfo) Merge(_ RuntimeStats) {
 // RuntimeStatsWithCommit is the RuntimeStats with commit detail.
 type RuntimeStatsWithCommit struct {
 	Commit   *util.CommitDetails
+	TxnCnt   int
 	LockKeys *util.LockKeysDetails
 }
 
@@ -749,12 +774,27 @@ func (e *RuntimeStatsWithCommit) Tp() int {
 	return TpRuntimeStatsWithCommit
 }
 
+// MergeCommitDetails merges the commit details.
+func (e *RuntimeStatsWithCommit) MergeCommitDetails(detail *util.CommitDetails) {
+	if detail == nil {
+		return
+	}
+	if e.Commit == nil {
+		e.Commit = detail
+		e.TxnCnt = 1
+		return
+	}
+	e.Commit.Merge(detail)
+	e.TxnCnt++
+}
+
 // Merge implements the RuntimeStats interface.
 func (e *RuntimeStatsWithCommit) Merge(rs RuntimeStats) {
 	tmp, ok := rs.(*RuntimeStatsWithCommit)
 	if !ok {
 		return
 	}
+	e.TxnCnt += tmp.TxnCnt
 	if tmp.Commit != nil {
 		if e.Commit == nil {
 			e.Commit = &util.CommitDetails{}
@@ -772,7 +812,9 @@ func (e *RuntimeStatsWithCommit) Merge(rs RuntimeStats) {
 
 // Clone implements the RuntimeStats interface.
 func (e *RuntimeStatsWithCommit) Clone() RuntimeStats {
-	newRs := RuntimeStatsWithCommit{}
+	newRs := RuntimeStatsWithCommit{
+		TxnCnt: e.TxnCnt,
+	}
 	if e.Commit != nil {
 		newRs.Commit = e.Commit.Clone()
 	}
@@ -787,6 +829,12 @@ func (e *RuntimeStatsWithCommit) String() string {
 	buf := bytes.NewBuffer(make([]byte, 0, 32))
 	if e.Commit != nil {
 		buf.WriteString("commit_txn: {")
+		// Only print out when there are more than 1 transaction.
+		if e.TxnCnt > 1 {
+			buf.WriteString("count: ")
+			buf.WriteString(strconv.Itoa(e.TxnCnt))
+			buf.WriteString(", ")
+		}
 		if e.Commit.PrewriteTime > 0 {
 			buf.WriteString("prewrite:")
 			buf.WriteString(FormatDuration(e.Commit.PrewriteTime))
@@ -908,12 +956,12 @@ func (e *RuntimeStatsWithCommit) formatBackoff(backoffTypes []string) string {
 
 // FormatDuration uses to format duration, this function will prune precision before format duration.
 // Pruning precision is for human readability. The prune rule is:
-// 1. if the duration was less than 1us, return the original string.
-// 2. readable value >=10, keep 1 decimal, otherwise, keep 2 decimal. such as:
-//    9.412345ms  -> 9.41ms
-//    10.412345ms -> 10.4ms
-//    5.999s      -> 6s
-//    100.45µs    -> 100.5µs
+//  1. if the duration was less than 1us, return the original string.
+//  2. readable value >=10, keep 1 decimal, otherwise, keep 2 decimal. such as:
+//     9.412345ms  -> 9.41ms
+//     10.412345ms -> 10.4ms
+//     5.999s      -> 6s
+//     100.45µs    -> 100.5µs
 func FormatDuration(d time.Duration) string {
 	if d <= time.Microsecond {
 		return d.String()
@@ -922,7 +970,7 @@ func FormatDuration(d time.Duration) string {
 	if unit == time.Nanosecond {
 		return d.String()
 	}
-	integer := (d / unit) * unit
+	integer := (d / unit) * unit //nolint:durationcheck
 	decimal := float64(d%unit) / float64(unit)
 	if d < 10*unit {
 		decimal = math.Round(decimal*100) / 100

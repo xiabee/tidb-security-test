@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -20,8 +21,8 @@ import (
 	"sync"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/parser"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/util/plancodec"
 )
 
@@ -67,6 +68,9 @@ func (pn *planEncoder) encodePlanTree(p Plan) string {
 }
 
 func (pn *planEncoder) encodeCTEPlan() {
+	if len(pn.ctes) <= 0 {
+		return
+	}
 	explainedCTEPlan := make(map[int]struct{})
 	for i := 0; i < len(pn.ctes); i++ {
 		x := (*CTEDefinition)(pn.ctes[i])
@@ -112,7 +116,7 @@ func (pn *planEncoder) encodePlan(p Plan, isRoot bool, store kv.StoreType, depth
 		if pn.encodedPlans[child.ID()] {
 			continue
 		}
-		pn.encodePlan(child.(PhysicalPlan), isRoot, store, depth)
+		pn.encodePlan(child, isRoot, store, depth)
 	}
 	switch copPlan := selectPlan.(type) {
 	case *PhysicalTableReader:
@@ -129,6 +133,8 @@ func (pn *planEncoder) encodePlan(p Plan, isRoot bool, store kv.StoreType, depth
 		if copPlan.tablePlan != nil {
 			pn.encodePlan(copPlan.tablePlan, false, store, depth)
 		}
+	case *PhysicalShuffleReceiverStub:
+		pn.encodePlan(copPlan.DataSource, isRoot, store, depth)
 	case *PhysicalCTE:
 		pn.ctes = append(pn.ctes, copPlan)
 	}
@@ -184,7 +190,7 @@ func (d *planDigester) normalizePlan(p PhysicalPlan, isRoot bool, store kv.Store
 		if d.encodedPlans[child.ID()] {
 			continue
 		}
-		d.normalizePlan(child.(PhysicalPlan), isRoot, store, depth)
+		d.normalizePlan(child, isRoot, store, depth)
 	}
 	switch x := p.(type) {
 	case *PhysicalTableReader:

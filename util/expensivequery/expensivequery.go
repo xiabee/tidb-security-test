@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -21,7 +22,7 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/parser"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
@@ -69,9 +70,18 @@ func (eqh *Handle) Run() {
 					logExpensiveQuery(costTime, info)
 					info.ExceedExpensiveTimeThresh = true
 				}
-
 				if info.MaxExecutionTime > 0 && costTime > time.Duration(info.MaxExecutionTime)*time.Millisecond {
+					logutil.BgLogger().Warn("execution timeout, kill it", zap.Duration("costTime", costTime),
+						zap.Duration("maxExecutionTime", time.Duration(info.MaxExecutionTime)*time.Millisecond), zap.String("processInfo", info.String()))
 					sm.Kill(info.ID, true)
+				}
+				if info.ID == util.GetAutoAnalyzeProcID(sm.ServerID) {
+					maxAutoAnalyzeTime := variable.MaxAutoAnalyzeTime.Load()
+					if maxAutoAnalyzeTime > 0 && costTime > time.Duration(maxAutoAnalyzeTime)*time.Second {
+						logutil.BgLogger().Warn("auto analyze timeout, kill it", zap.Duration("costTime", costTime),
+							zap.Duration("maxAutoAnalyzeTime", time.Duration(maxAutoAnalyzeTime)*time.Second), zap.String("processInfo", info.String()))
+						sm.Kill(info.ID, true)
+					}
 				}
 			}
 			threshold = atomic.LoadUint64(&variable.ExpensiveQueryTimeThreshold)
@@ -109,6 +119,10 @@ func (eqh *Handle) LogOnQueryExceedMemQuota(connID uint64) {
 }
 
 func genLogFields(costTime time.Duration, info *util.ProcessInfo) []zap.Field {
+	if info.RefCountOfStmtCtx != nil && !info.RefCountOfStmtCtx.TryIncrease() {
+		return nil
+	}
+	defer info.RefCountOfStmtCtx.Decrease()
 	logFields := make([]zap.Field, 0, 20)
 	logFields = append(logFields, zap.String("cost_time", strconv.FormatFloat(costTime.Seconds(), 'f', -1, 64)+"s"))
 	execDetail := info.StmtCtx.GetExecDetails()
@@ -175,5 +189,9 @@ func genLogFields(costTime time.Duration, info *util.ProcessInfo) []zap.Field {
 
 // logExpensiveQuery logs the queries which exceed the time threshold or memory threshold.
 func logExpensiveQuery(costTime time.Duration, info *util.ProcessInfo) {
-	logutil.BgLogger().Warn("expensive_query", genLogFields(costTime, info)...)
+	fields := genLogFields(costTime, info)
+	if fields == nil {
+		return
+	}
+	logutil.BgLogger().Warn("expensive_query", fields...)
 }

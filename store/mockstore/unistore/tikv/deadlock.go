@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -25,6 +26,7 @@ import (
 	deadlockPb "github.com/pingcap/kvproto/pkg/deadlock"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/store/mockstore/unistore/pd"
+	"github.com/pingcap/tidb/store/mockstore/unistore/tikv/kverrors"
 	"github.com/pingcap/tidb/store/mockstore/unistore/util/lockwaiter"
 )
 
@@ -213,7 +215,7 @@ func (dt *DetectorClient) Detect(txnTs uint64, waitForTxnTs uint64, keyHash uint
 }
 
 // convertErrToResp converts `ErrDeadlock` to `DeadlockResponse` proto type
-func convertErrToResp(errDeadlock *ErrDeadlock, txnTs, waitForTxnTs, keyHash uint64) *deadlockPb.DeadlockResponse {
+func convertErrToResp(errDeadlock *kverrors.ErrDeadlock, txnTs, waitForTxnTs, keyHash uint64) *deadlockPb.DeadlockResponse {
 	entry := deadlockPb.WaitForEntry{}
 	entry.Txn = txnTs
 	entry.WaitForTxn = waitForTxnTs

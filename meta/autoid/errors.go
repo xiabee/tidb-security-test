@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -30,8 +31,10 @@ var (
 )
 
 const (
-	// AutoRandomPKisNotHandleErrMsg indicates the auto_random column attribute is defined on a non-primary key column, or the primary key is nonclustered.
-	AutoRandomPKisNotHandleErrMsg = "column %s is not the integer primary key, or the primary key is nonclustered"
+	// AutoRandomMustFirstColumnInPK is reported when auto_random is not the first column in primary key.
+	AutoRandomMustFirstColumnInPK = "column '%s' must be the first column in primary key"
+	// AutoRandomNoClusteredPKErrMsg indicates the primary key is not clustered.
+	AutoRandomNoClusteredPKErrMsg = "auto_random is only supported on the tables with clustered primary key"
 	// AutoRandomIncompatibleWithAutoIncErrMsg is reported when auto_random and auto_increment are specified on the same column.
 	AutoRandomIncompatibleWithAutoIncErrMsg = "auto_random is incompatible with auto_increment"
 	// AutoRandomIncompatibleWithDefaultValueErrMsg is reported when auto_random and default are specified on the same column.

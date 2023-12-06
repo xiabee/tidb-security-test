@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -16,20 +17,19 @@ package executor
 import (
 	"context"
 	"sort"
-	"time"
 
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/parser/model"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/store/tikv"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	decoder "github.com/pingcap/tidb/util/rowDecoder"
+	"github.com/tikv/client-go/v2/tikv"
 )
 
 var _ Executor = &TableSampleExecutor{}
@@ -153,14 +153,14 @@ func (s *tableRegionSampler) pickRanges(count int) ([]kv.KeyRange, error) {
 }
 
 func (s *tableRegionSampler) writeChunkFromRanges(ranges []kv.KeyRange, req *chunk.Chunk) error {
-	decLoc, sysLoc := s.ctx.GetSessionVars().TimeZone, time.UTC
+	decLoc := s.ctx.GetSessionVars().Location()
 	cols, decColMap, err := s.buildSampleColAndDecodeColMap()
 	if err != nil {
 		return err
 	}
 	rowDecoder := decoder.NewRowDecoder(s.table, cols, decColMap)
 	err = s.scanFirstKVForEachRange(ranges, func(handle kv.Handle, value []byte) error {
-		_, err := rowDecoder.DecodeAndEvalRowWithMap(s.ctx, handle, value, decLoc, sysLoc, s.rowMap)
+		_, err := rowDecoder.DecodeAndEvalRowWithMap(s.ctx, handle, value, decLoc, s.rowMap)
 		if err != nil {
 			return err
 		}
@@ -284,6 +284,7 @@ func (s *tableRegionSampler) scanFirstKVForEachRange(ranges []kv.KeyRange,
 	fn func(handle kv.Handle, value []byte) error) error {
 	ver := kv.Version{Ver: s.startTS}
 	snap := s.ctx.GetStore().GetSnapshot(ver)
+	setOptionForTopSQL(s.ctx.GetSessionVars().StmtCtx, snap)
 	concurrency := sampleMethodRegionConcurrency
 	if len(ranges) < concurrency {
 		concurrency = len(ranges)

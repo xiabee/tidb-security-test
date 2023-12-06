@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -22,20 +23,21 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/parser/mysql"
 	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/statistics"
-	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/tikv/client-go/v2/tikvrpc"
 )
 
 // RequestBuilder is used to build a "kv.Request".
@@ -48,23 +50,21 @@ type RequestBuilder struct {
 
 // Build builds a "kv.Request".
 func (builder *RequestBuilder) Build() (*kv.Request, error) {
-	if builder.TxnScope == "" {
-		builder.TxnScope = oracle.GlobalTxnScope
+	if builder.ReadReplicaScope == "" {
+		builder.ReadReplicaScope = kv.GlobalReplicaScope
 	}
-	if builder.IsStaleness && builder.TxnScope != kv.GlobalTxnScope {
+	if builder.ReplicaRead.IsClosestRead() && builder.ReadReplicaScope != kv.GlobalReplicaScope {
 		builder.MatchStoreLabels = []*metapb.StoreLabel{
 			{
 				Key:   placement.DCLabelKey,
-				Value: builder.TxnScope,
+				Value: builder.ReadReplicaScope,
 			},
 		}
 	}
-	failpoint.Inject("assertRequestBuilderStalenessOption", func(val failpoint.Value) {
+	failpoint.Inject("assertRequestBuilderReplicaOption", func(val failpoint.Value) {
 		assertScope := val.(string)
-		if len(assertScope) > 0 {
-			if builder.IsStaleness && assertScope != builder.TxnScope {
-				panic("request builder get staleness option fail")
-			}
+		if builder.ReplicaRead.IsClosestRead() && assertScope != builder.ReadReplicaScope {
+			panic("request builder get staleness option fail")
 		}
 	})
 	err := builder.verifyTxnScope()
@@ -217,6 +217,12 @@ func (builder *RequestBuilder) SetAllowBatchCop(batchCop bool) *RequestBuilder {
 	return builder
 }
 
+// SetPartitionIDAndRanges sets `PartitionIDAndRanges` property.
+func (builder *RequestBuilder) SetPartitionIDAndRanges(PartitionIDAndRanges []kv.PartitionIDAndRanges) *RequestBuilder {
+	builder.PartitionIDAndRanges = PartitionIDAndRanges
+	return builder
+}
+
 func (builder *RequestBuilder) getIsolationLevel() kv.IsoLevel {
 	switch builder.Tp {
 	case kv.ReqTypeAnalyze:
@@ -238,24 +244,38 @@ func (builder *RequestBuilder) getKVPriority(sv *variable.SessionVars) int {
 }
 
 // SetFromSessionVars sets the following fields for "kv.Request" from session variables:
-// "Concurrency", "IsolationLevel", "NotFillCache", "ReplicaRead", "SchemaVar".
+// "Concurrency", "IsolationLevel", "NotFillCache", "TaskID", "Priority", "ReplicaRead", "ResourceGroupTagger".
 func (builder *RequestBuilder) SetFromSessionVars(sv *variable.SessionVars) *RequestBuilder {
 	if builder.Request.Concurrency == 0 {
 		// Concurrency may be set to 1 by SetDAGRequest
 		builder.Request.Concurrency = sv.DistSQLScanConcurrency()
 	}
-	builder.Request.IsolationLevel = builder.getIsolationLevel()
+	replicaReadType := sv.GetReplicaRead()
+	if sv.StmtCtx.WeakConsistency {
+		builder.Request.IsolationLevel = kv.RC
+	} else if sv.StmtCtx.RCCheckTS {
+		builder.Request.IsolationLevel = kv.RCCheckTS
+		replicaReadType = kv.ReplicaReadLeader
+	} else {
+		builder.Request.IsolationLevel = builder.getIsolationLevel()
+	}
 	builder.Request.NotFillCache = sv.StmtCtx.NotFillCache
 	builder.Request.TaskID = sv.StmtCtx.TaskID
 	builder.Request.Priority = builder.getKVPriority(sv)
-	builder.Request.ReplicaRead = sv.GetReplicaRead()
-	builder.SetResourceGroupTag(sv.StmtCtx)
+	builder.Request.ReplicaRead = replicaReadType
+	builder.SetResourceGroupTagger(sv.StmtCtx.GetResourceGroupTagger())
 	return builder
 }
 
 // SetStreaming sets "Streaming" flag for "kv.Request".
 func (builder *RequestBuilder) SetStreaming(streaming bool) *RequestBuilder {
 	builder.Request.Streaming = streaming
+	return builder
+}
+
+// SetPaging sets "Paging" flag for "kv.Request".
+func (builder *RequestBuilder) SetPaging(paging bool) *RequestBuilder {
+	builder.Request.Paging = paging
 	return builder
 }
 
@@ -266,8 +286,9 @@ func (builder *RequestBuilder) SetConcurrency(concurrency int) *RequestBuilder {
 }
 
 // SetTiDBServerID sets "TiDBServerID" for "kv.Request"
-//   ServerID is a unique id of TiDB instance among the cluster.
-//   See https://github.com/pingcap/tidb/blob/master/docs/design/2020-06-01-global-kill.md
+//
+//	ServerID is a unique id of TiDB instance among the cluster.
+//	See https://github.com/pingcap/tidb/blob/master/docs/design/2020-06-01-global-kill.md
 func (builder *RequestBuilder) SetTiDBServerID(serverID uint64) *RequestBuilder {
 	builder.Request.TiDBServerID = serverID
 	return builder
@@ -285,19 +306,22 @@ func (builder *RequestBuilder) SetFromInfoSchema(pis interface{}) *RequestBuilde
 	return builder
 }
 
-// SetResourceGroupTag sets the request resource group tag.
-func (builder *RequestBuilder) SetResourceGroupTag(sc *stmtctx.StatementContext) *RequestBuilder {
-	if variable.TopSQLEnabled() {
-		builder.Request.ResourceGroupTag = sc.GetResourceGroupTag()
-	}
+// SetResourceGroupTagger sets the request resource group tagger.
+func (builder *RequestBuilder) SetResourceGroupTagger(tagger tikvrpc.ResourceGroupTagger) *RequestBuilder {
+	builder.Request.ResourceGroupTagger = tagger
 	return builder
 }
 
 func (builder *RequestBuilder) verifyTxnScope() error {
-	if builder.TxnScope == "" {
-		builder.TxnScope = kv.GlobalTxnScope
+	// Stale Read uses the calculated TSO for the read,
+	// so there is no need to check the TxnScope here.
+	if builder.IsStaleness {
+		return nil
 	}
-	if builder.TxnScope == kv.GlobalTxnScope || builder.is == nil {
+	if builder.ReadReplicaScope == "" {
+		builder.ReadReplicaScope = kv.GlobalReplicaScope
+	}
+	if builder.ReadReplicaScope == kv.GlobalReplicaScope || builder.is == nil {
 		return nil
 	}
 	visitPhysicalTableID := make(map[int64]struct{})
@@ -311,7 +335,7 @@ func (builder *RequestBuilder) verifyTxnScope() error {
 	}
 
 	for phyTableID := range visitPhysicalTableID {
-		valid := VerifyTxnScope(builder.TxnScope, phyTableID, builder.is)
+		valid := VerifyTxnScope(builder.ReadReplicaScope, phyTableID, builder.is)
 		if !valid {
 			var tblName string
 			var partName string
@@ -323,10 +347,10 @@ func (builder *RequestBuilder) verifyTxnScope() error {
 				tblInfo, _ = builder.is.TableByID(phyTableID)
 				tblName = tblInfo.Meta().Name.String()
 			}
-			err := fmt.Errorf("table %v can not be read by %v txn_scope", tblName, builder.TxnScope)
+			err := fmt.Errorf("table %v can not be read by %v txn_scope", tblName, builder.ReadReplicaScope)
 			if len(partName) > 0 {
 				err = fmt.Errorf("table %v's partition %v can not be read by %v txn_scope",
-					tblName, partName, builder.TxnScope)
+					tblName, partName, builder.ReadReplicaScope)
 			}
 			return err
 		}
@@ -334,9 +358,9 @@ func (builder *RequestBuilder) verifyTxnScope() error {
 	return nil
 }
 
-// SetTxnScope sets request TxnScope
-func (builder *RequestBuilder) SetTxnScope(scope string) *RequestBuilder {
-	builder.TxnScope = scope
+// SetReadReplicaScope sets request readReplicaScope
+func (builder *RequestBuilder) SetReadReplicaScope(scope string) *RequestBuilder {
+	builder.ReadReplicaScope = scope
 	return builder
 }
 
@@ -378,7 +402,7 @@ func tablesRangesToKVRanges(tids []int64, ranges []*ranger.Range, fb *statistics
 		// since we need to guarantee each range falls inside the exactly one bucket, `PrefixNext` will make the
 		// high value greater than upper bound, so we store the range here.
 		r := &ranger.Range{LowVal: []types.Datum{types.NewBytesDatum(low)},
-			HighVal: []types.Datum{types.NewBytesDatum(high)}}
+			HighVal: []types.Datum{types.NewBytesDatum(high)}, Collators: collate.GetBinaryCollatorSlice(1)}
 		feedbackRanges = append(feedbackRanges, r)
 
 		if !ran.HighExclude {
@@ -427,9 +451,9 @@ func encodeHandleKey(ran *ranger.Range) ([]byte, []byte) {
 // interpreted as an int64 variable.
 //
 // This function does the following:
-// 1. split ranges into two groups as described above.
-// 2. if there's a range that straddles the int64 boundary, split it into two ranges, which results in one smaller and
-//    one greater than MaxInt64.
+//  1. split ranges into two groups as described above.
+//  2. if there's a range that straddles the int64 boundary, split it into two ranges, which results in one smaller and
+//     one greater than MaxInt64.
 //
 // if `KeepOrder` is false, we merge the two groups of ranges into one group, to save an rpc call later
 // if `desc` is false, return signed ranges first, vice versa.
@@ -461,6 +485,7 @@ func SplitRangesAcrossInt64Boundary(ranges []*ranger.Range, keepOrder bool, desc
 			LowVal:     ranges[idx].LowVal,
 			LowExclude: ranges[idx].LowExclude,
 			HighVal:    []types.Datum{types.NewUintDatum(math.MaxInt64)},
+			Collators:  ranges[idx].Collators,
 		})
 	}
 	if !(ranges[idx].HighVal[0].GetUint64() == math.MaxInt64+1 && ranges[idx].HighExclude) {
@@ -468,6 +493,7 @@ func SplitRangesAcrossInt64Boundary(ranges []*ranger.Range, keepOrder bool, desc
 			LowVal:      []types.Datum{types.NewUintDatum(math.MaxInt64 + 1)},
 			HighVal:     ranges[idx].HighVal,
 			HighExclude: ranges[idx].HighExclude,
+			Collators:   ranges[idx].Collators,
 		})
 	}
 	if idx < len(ranges) {
@@ -576,12 +602,12 @@ func indexRangesToKVRangesForTablesWithInterruptSignal(sc *stmtctx.StatementCont
 	}
 	feedbackRanges := make([]*ranger.Range, 0, len(ranges))
 	for _, ran := range ranges {
-		low, high, err := encodeIndexKey(sc, ran)
+		low, high, err := EncodeIndexKey(sc, ran)
 		if err != nil {
 			return nil, err
 		}
 		feedbackRanges = append(feedbackRanges, &ranger.Range{LowVal: []types.Datum{types.NewBytesDatum(low)},
-			HighVal: []types.Datum{types.NewBytesDatum(high)}, LowExclude: false, HighExclude: true})
+			HighVal: []types.Datum{types.NewBytesDatum(high)}, LowExclude: false, HighExclude: true, Collators: collate.GetBinaryCollatorSlice(1)})
 	}
 	feedbackRanges, ok := fb.Hist.SplitRange(sc, feedbackRanges, true)
 	if !ok {
@@ -615,12 +641,12 @@ func indexRangesToKVRangesForTablesWithInterruptSignal(sc *stmtctx.StatementCont
 func CommonHandleRangesToKVRanges(sc *stmtctx.StatementContext, tids []int64, ranges []*ranger.Range) ([]kv.KeyRange, error) {
 	rans := make([]*ranger.Range, 0, len(ranges))
 	for _, ran := range ranges {
-		low, high, err := encodeIndexKey(sc, ran)
+		low, high, err := EncodeIndexKey(sc, ran)
 		if err != nil {
 			return nil, err
 		}
 		rans = append(rans, &ranger.Range{LowVal: []types.Datum{types.NewBytesDatum(low)},
-			HighVal: []types.Datum{types.NewBytesDatum(high)}, LowExclude: false, HighExclude: true})
+			HighVal: []types.Datum{types.NewBytesDatum(high)}, LowExclude: false, HighExclude: true, Collators: collate.GetBinaryCollatorSlice(1)})
 	}
 	krs := make([]kv.KeyRange, 0, len(rans))
 	for _, ran := range rans {
@@ -643,11 +669,11 @@ func VerifyTxnScope(txnScope string, physicalTableID int64, is infoschema.InfoSc
 	if txnScope == "" || txnScope == kv.GlobalTxnScope {
 		return true
 	}
-	bundle, ok := is.BundleByName(placement.GroupID(physicalTableID))
+	bundle, ok := is.PlacementBundleByPhysicalTableID(physicalTableID)
 	if !ok {
 		return true
 	}
-	leaderDC, ok := placement.GetLeaderDCByBundle(bundle, placement.DCLabelKey)
+	leaderDC, ok := bundle.GetLeaderDC(placement.DCLabelKey)
 	if !ok {
 		return true
 	}
@@ -664,7 +690,7 @@ func indexRangesToKVWithoutSplit(sc *stmtctx.StatementContext, tids []int64, idx
 	// encodeIndexKey and EncodeIndexSeekKey is time-consuming, thus we need to
 	// check the interrupt signal periodically.
 	for i, ran := range ranges {
-		low, high, err := encodeIndexKey(sc, ran)
+		low, high, err := EncodeIndexKey(sc, ran)
 		if err != nil {
 			return nil, err
 		}
@@ -692,7 +718,8 @@ func indexRangesToKVWithoutSplit(sc *stmtctx.StatementContext, tids []int64, idx
 	return krs, nil
 }
 
-func encodeIndexKey(sc *stmtctx.StatementContext, ran *ranger.Range) ([]byte, []byte, error) {
+// EncodeIndexKey gets encoded keys containing low and high
+func EncodeIndexKey(sc *stmtctx.StatementContext, ran *ranger.Range) ([]byte, []byte, error) {
 	low, err := codec.EncodeKey(sc, nil, ran.LowVal...)
 	if err != nil {
 		return nil, nil, err
@@ -707,19 +734,6 @@ func encodeIndexKey(sc *stmtctx.StatementContext, ran *ranger.Range) ([]byte, []
 
 	if !ran.HighExclude {
 		high = kv.Key(high).PrefixNext()
-	}
-
-	var hasNull bool
-	for _, highVal := range ran.HighVal {
-		if highVal.IsNull() {
-			hasNull = true
-			break
-		}
-	}
-
-	if hasNull {
-		// Append 0 to make unique-key range [null, null] to be a scan rather than point-get.
-		high = kv.Key(high).Next()
 	}
 	return low, high, nil
 }

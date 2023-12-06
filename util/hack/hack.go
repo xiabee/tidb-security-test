@@ -8,6 +8,7 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
@@ -54,4 +55,13 @@ const (
 	LoadFactorNum = 13
 	// LoadFactorDen is the denominator of load factor
 	LoadFactorDen = 2
+)
+
+const (
+	// DefBucketMemoryUsageForMapStrToSlice = bucketSize*(1+unsafe.Sizeof(string) + unsafe.Sizeof(slice))+2*ptrSize
+	// ref https://github.com/golang/go/blob/go1.15.6/src/reflect/type.go#L2162.
+	// The bucket size may be changed by golang implement in the future.
+	DefBucketMemoryUsageForMapStrToSlice = 8*(1+16+24) + 16
+	// DefBucketMemoryUsageForMapIntToPtr = bucketSize*(1+unsafe.Sizeof(uint64) + unsafe.Sizeof(pointer))+2*ptrSize
+	DefBucketMemoryUsageForMapIntToPtr = 8*(1+8+8) + 16
 )

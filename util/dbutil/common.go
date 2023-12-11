@@ -63,17 +63,12 @@ var (
 
 // DBConfig is database configuration.
 type DBConfig struct {
-	Host string `toml:"host" json:"host"`
-
-	Port int `toml:"port" json:"port"`
-
-	User string `toml:"user" json:"user"`
-
-	Password string `toml:"password" json:"-"` // omit it for privacy
-
-	Schema string `toml:"schema" json:"schema"`
-
+	Host     string `toml:"host" json:"host"`
+	User     string `toml:"user" json:"user"`
+	Password string `toml:"password" json:"-"`
+	Schema   string `toml:"schema" json:"schema"`
 	Snapshot string `toml:"snapshot" json:"snapshot"`
+	Port     int    `toml:"port" json:"port"`
 }
 
 // String returns native format of database configuration
@@ -255,7 +250,7 @@ func GetRandomValues(ctx context.Context, db QueryExecutor, schemaName, table, c
 }
 
 // GetMinMaxValue return min and max value of given column by specified limitRange condition.
-func GetMinMaxValue(ctx context.Context, db QueryExecutor, schema, table, column string, limitRange string, limitArgs []interface{}, collation string) (string, string, error) {
+func GetMinMaxValue(ctx context.Context, db QueryExecutor, schema, table, column string, limitRange string, limitArgs []interface{}, collation string) (minStr string, maxStr string, err error) {
 	/*
 		example:
 		mysql> SELECT MIN(`id`) as MIN, MAX(`id`) as MAX FROM `test`.`testa` WHERE id > 0 AND id < 10;
@@ -324,7 +319,7 @@ func GetTimeZoneOffset(ctx context.Context, db QueryExecutor) (time.Duration, er
 	}
 
 	hour, minute, second := t.Clock()
-	// nolint:durationcheck
+	//nolint:durationcheck
 	return time.Duration(hour*3600+minute*60+second) * time.Second * factor, nil
 }
 
@@ -339,7 +334,6 @@ func FormatTimeZoneOffset(offset time.Duration) string {
 	minutes := (offset % time.Hour) / time.Minute
 
 	return fmt.Sprintf("%s%02d:%02d", prefix, hours, minutes)
-
 }
 
 func queryTables(ctx context.Context, db QueryExecutor, q string) (tables []string, err error) {
@@ -463,9 +457,9 @@ func GetCRC32Checksum(ctx context.Context, db QueryExecutor, schemaName, tableNa
 
 // Bucket saves the bucket information from TiDB.
 type Bucket struct {
-	Count      int64
 	LowerBound string
 	UpperBound string
+	Count      int64
 }
 
 // GetBucketsInfo SHOW STATS_BUCKETS in TiDB.
@@ -691,13 +685,12 @@ func GetSessionVariable(ctx context.Context, db QueryExecutor, variable string) 
 	*/
 
 	for rows.Next() {
-		err = rows.Scan(&variable, &value)
-		if err != nil {
+		if err = rows.Scan(&variable, &value); err != nil {
 			return "", errors.Trace(err)
 		}
 	}
 
-	if rows.Err() != nil {
+	if err := rows.Err(); err != nil {
 		return "", errors.Trace(err)
 	}
 

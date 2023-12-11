@@ -19,11 +19,13 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/planner"
@@ -60,8 +62,7 @@ func getLogicalMemTable(t *testing.T, dom *domain.Domain, se session.Session, pa
 }
 
 func TestClusterConfigTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -231,12 +232,11 @@ func TestClusterConfigTableExtractor(t *testing.T) {
 func timestamp(t *testing.T, s string) int64 {
 	tt, err := time.ParseInLocation("2006-01-02 15:04:05.999", s, time.Local)
 	require.NoError(t, err)
-	return tt.UnixNano() / int64(time.Millisecond)
+	return tt.UnixMilli()
 }
 
 func TestClusterLogTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -537,8 +537,7 @@ func TestClusterLogTableExtractor(t *testing.T) {
 }
 
 func TestMetricTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -663,8 +662,7 @@ func TestMetricTableExtractor(t *testing.T) {
 }
 
 func TestMetricsSummaryTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -764,8 +762,7 @@ func TestMetricsSummaryTableExtractor(t *testing.T) {
 }
 
 func TestInspectionResultTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -906,8 +903,7 @@ func TestInspectionResultTableExtractor(t *testing.T) {
 }
 
 func TestInspectionSummaryTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -1008,8 +1004,7 @@ func TestInspectionSummaryTableExtractor(t *testing.T) {
 }
 
 func TestInspectionRuleTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -1049,8 +1044,7 @@ func TestInspectionRuleTableExtractor(t *testing.T) {
 }
 
 func TestTiDBHotRegionsHistoryTableExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -1425,8 +1419,7 @@ func TestTiDBHotRegionsHistoryTableExtractor(t *testing.T) {
 }
 
 func TestTikvRegionPeersExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -1560,8 +1553,7 @@ func TestTikvRegionPeersExtractor(t *testing.T) {
 }
 
 func TestColumns(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
@@ -1659,8 +1651,7 @@ func TestColumns(t *testing.T) {
 }
 
 func TestPredicateQuery(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1712,11 +1703,24 @@ func TestPredicateQuery(t *testing.T) {
 }
 
 func TestTikvRegionStatusExtractor(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec(`CREATE TABLE p (id int(11), unique index(id))
+PARTITION BY RANGE COLUMNS ( id ) (
+		PARTITION p0 VALUES LESS THAN (6),
+		PARTITION p1 VALUES LESS THAN (11),
+		PARTITION p3 VALUES LESS THAN (21)
+)`)
+	res := tk.MustQuery("select * from information_schema.tables where table_name = 'p'")
+	idStr := res.Rows()[0][21]
+	id, err := strconv.Atoi(idStr.(string))
+	require.NoError(t, err)
+	sSQL := fmt.Sprintf("select * from information_schema.TIKV_REGION_STATUS where table_id = %v", id)
 
 	var cases = []struct {
 		sql      string
@@ -1734,6 +1738,10 @@ func TestTikvRegionStatusExtractor(t *testing.T) {
 			sql:      "select * from information_schema.TIKV_REGION_STATUS where table_id in (1,2,3)",
 			tableIDs: []int64{1, 2, 3},
 		},
+		{
+			sql:      sSQL,
+			tableIDs: []int64{int64(id)},
+		},
 	}
 	parser := parser.New()
 	for _, ca := range cases {
@@ -1741,16 +1749,13 @@ func TestTikvRegionStatusExtractor(t *testing.T) {
 		require.NotNil(t, logicalMemTable.Extractor)
 		rse := logicalMemTable.Extractor.(*plannercore.TiKVRegionStatusExtractor)
 		tableids := rse.GetTablesID()
-		sort.Slice(tableids, func(i, j int) bool {
-			return tableids[i] < tableids[j]
-		})
+		slices.Sort(tableids)
 		require.Equal(t, ca.tableIDs, tableids)
 	}
 }
 
 func TestExtractorInPreparedStmt(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 
 	var cases = []struct {
@@ -1805,7 +1810,6 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 			prepared: "select * from information_schema.tidb_hot_regions_history where update_time>=?",
 			userVars: []interface{}{"cast('2019-10-10 10:10:10' as datetime)"},
 			params: []interface{}{func() types.Time {
-				tk.Session().GetSessionVars().StmtCtx.TimeZone = time.Local
 				tt, err := types.ParseTimestamp(tk.Session().GetSessionVars().StmtCtx, "2019-10-10 10:10:10")
 				require.NoError(t, err)
 				return tt
@@ -1835,9 +1839,9 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 		tk.MustExec(setStmt)
 		stmt, err := parser.ParseOneStmt(exec, "", "")
 		require.NoError(t, err)
-		plan, err := planner.OptimizeExecStmt(context.Background(), tk.Session(), stmt.(*ast.ExecuteStmt), dom.InfoSchema())
+		plan, _, err := planner.OptimizeExecStmt(context.Background(), tk.Session(), stmt.(*ast.ExecuteStmt), dom.InfoSchema())
 		require.NoError(t, err)
-		extractor := plan.(*plannercore.PhysicalMemTable).Extractor
+		extractor := plan.(*plannercore.Execute).Plan.(*plannercore.PhysicalMemTable).Extractor
 		ca.checker(extractor)
 	}
 
@@ -1845,13 +1849,16 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 	for _, ca := range cases {
 		id, _, _, err := tk.Session().PrepareStmt(ca.prepared)
 		require.NoError(t, err)
-		execStmt := &ast.ExecuteStmt{
-			BinaryArgs: types.MakeDatums(ca.params...),
-			ExecID:     id,
-		}
-		plan, err := planner.OptimizeExecStmt(context.Background(), tk.Session(), execStmt, dom.InfoSchema())
+		prepStmt, err := tk.Session().GetSessionVars().GetPreparedStmtByID(id)
 		require.NoError(t, err)
-		extractor := plan.(*plannercore.PhysicalMemTable).Extractor
+		params := expression.Args2Expressions4Test(ca.params...)
+		execStmt := &ast.ExecuteStmt{
+			BinaryArgs: params,
+			PrepStmt:   prepStmt,
+		}
+		plan, _, err := planner.OptimizeExecStmt(context.Background(), tk.Session(), execStmt, dom.InfoSchema())
+		require.NoError(t, err)
+		extractor := plan.(*plannercore.Execute).Plan.(*plannercore.PhysicalMemTable).Extractor
 		ca.checker(extractor)
 	}
 }

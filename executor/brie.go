@@ -17,6 +17,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/task"
+	"github.com/pingcap/tidb/br/pkg/task/show"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
@@ -42,9 +44,11 @@ import (
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/printer"
 	"github.com/pingcap/tidb/util/sem"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/pingcap/tidb/util/syncutil"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
@@ -64,7 +68,7 @@ type brieTaskProgress struct {
 	current int64
 
 	// lock is the mutex protected the two fields below.
-	lock sync.Mutex
+	lock syncutil.Mutex
 	// cmd is the name of the step the BRIE task is currently performing.
 	cmd string
 	// total is the total progress of the task.
@@ -75,6 +79,16 @@ type brieTaskProgress struct {
 // Inc implements glue.Progress
 func (p *brieTaskProgress) Inc() {
 	atomic.AddInt64(&p.current, 1)
+}
+
+// IncBy implements glue.Progress
+func (p *brieTaskProgress) IncBy(cnt int64) {
+	atomic.AddInt64(&p.current, cnt)
+}
+
+// GetCurrent implements glue.Progress
+func (p *brieTaskProgress) GetCurrent() int64 {
+	return atomic.LoadInt64(&p.current)
 }
 
 // Close implements glue.Progress
@@ -92,6 +106,7 @@ type brieTaskInfo struct {
 	storage     string
 	connID      uint64
 	backupTS    uint64
+	restoreTS   uint64
 	archiveSize uint64
 	message     string
 }
@@ -207,22 +222,21 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 		},
 	}
 
-	tidbCfg := config.GetGlobalConfig()
-	cfg := task.Config{
-		TLS: task.TLSConfig{
-			CA:   tidbCfg.Security.ClusterSSLCA,
-			Cert: tidbCfg.Security.ClusterSSLCert,
-			Key:  tidbCfg.Security.ClusterSSLKey,
-		},
-		PD:          strings.Split(tidbCfg.Path, ","),
-		Concurrency: 4,
-		Checksum:    true,
-		SendCreds:   true,
-		LogProgress: true,
-		CipherInfo: backuppb.CipherInfo{
-			CipherType: encryptionpb.EncryptionMethod_PLAINTEXT,
-		},
+	if s.Kind == ast.BRIEKindShowBackupMeta {
+		e.fillByShowMetadata(s)
+		return e
 	}
+
+	tidbCfg := config.GetGlobalConfig()
+	tlsCfg := task.TLSConfig{
+		CA:   tidbCfg.Security.ClusterSSLCA,
+		Cert: tidbCfg.Security.ClusterSSLCert,
+		Key:  tidbCfg.Security.ClusterSSLKey,
+	}
+	pds := strings.Split(tidbCfg.Path, ",")
+	cfg := task.DefaultConfig()
+	cfg.PD = pds
+	cfg.TLS = tlsCfg
 
 	storageURL, err := storage.ParseRawURL(s.Storage)
 	if err != nil {
@@ -238,17 +252,16 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 	case "hdfs":
 		if sem.IsEnabled() {
 			// Storage is not permitted to be hdfs when SEM is enabled.
-			b.err = ErrNotSupportedWithSem.GenWithStackByArgs("hdfs storage")
+			b.err = exeerrors.ErrNotSupportedWithSem.GenWithStackByArgs("hdfs storage")
 			return nil
 		}
 	case "local", "file", "":
 		if sem.IsEnabled() {
 			// Storage is not permitted to be local when SEM is enabled.
-			b.err = ErrNotSupportedWithSem.GenWithStackByArgs("local storage")
+			b.err = exeerrors.ErrNotSupportedWithSem.GenWithStackByArgs("local storage")
 			return nil
 		}
 	default:
-		break
 	}
 
 	if tidbCfg.Store != "tikv" {
@@ -291,7 +304,9 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 
 	switch s.Kind {
 	case ast.BRIEKindBackup:
-		e.backupCfg = &task.BackupConfig{Config: cfg}
+		bcfg := task.DefaultBackupConfig()
+		bcfg.Config = cfg
+		e.backupCfg = &bcfg
 
 		for _, opt := range s.Options {
 			switch opt.Tp {
@@ -319,7 +334,9 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 		}
 
 	case ast.BRIEKindRestore:
-		e.restoreCfg = &task.RestoreConfig{Config: cfg}
+		rcfg := task.DefaultRestoreConfig()
+		rcfg.Config = cfg
+		e.restoreCfg = &rcfg
 		for _, opt := range s.Options {
 			switch opt.Tp {
 			case ast.BRIEOptionOnline:
@@ -341,7 +358,52 @@ type BRIEExec struct {
 
 	backupCfg  *task.BackupConfig
 	restoreCfg *task.RestoreConfig
+	showConfig *show.Config
 	info       *brieTaskInfo
+}
+
+func (e *BRIEExec) fillByShowMetadata(s *ast.BRIEStmt) {
+	if s.Kind != ast.BRIEKindShowBackupMeta {
+		panic(fmt.Sprintf("precondition failed: `fillByShowMetadata` should always called by a ast.BRIEKindShowBackupMeta, but it is %s.", s.Kind))
+	}
+
+	store := s.Storage
+	e.showConfig = &show.Config{
+		Storage: store,
+		Cipher: backuppb.CipherInfo{
+			CipherType: encryptionpb.EncryptionMethod_PLAINTEXT,
+		},
+	}
+	e.info.kind = ast.BRIEKindShowBackupMeta
+}
+
+func (e *BRIEExec) runShowMetadata(ctx context.Context, req *chunk.Chunk) error {
+	exe, err := show.CreateExec(ctx, *e.showConfig)
+	if err != nil {
+		return errors.Annotate(err, "failed to create show exec")
+	}
+	res, err := exe.Read(ctx)
+	if err != nil {
+		return errors.Annotate(err, "failed to read metadata from backupmeta")
+	}
+
+	startTime := oracle.GetTimeFromTS(uint64(res.StartVersion))
+	endTime := oracle.GetTimeFromTS(uint64(res.EndVersion))
+
+	for _, table := range res.Tables {
+		req.AppendString(0, table.DBName)
+		req.AppendString(1, table.TableName)
+		req.AppendInt64(2, int64(table.KVCount))
+		req.AppendInt64(3, int64(table.KVSize))
+		if res.StartVersion > 0 {
+			req.AppendTime(4, types.NewTime(types.FromGoTime(startTime), mysql.TypeDatetime, 0))
+		} else {
+			req.AppendNull(4)
+		}
+		req.AppendTime(5, types.NewTime(types.FromGoTime(endTime), mysql.TypeDatetime, 0))
+	}
+	e.info = nil
+	return nil
 }
 
 // Next implements the Executor Next interface.
@@ -349,6 +411,13 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.Reset()
 	if e.info == nil {
 		return nil
+	}
+
+	if e.info.kind == ast.BRIEKindShowBackupMeta {
+		// This should be able to execute without the queue.
+		// NOTE: maybe extract the procedure of executing task in queue
+		// into a function, make it more tidy.
+		return e.runShowMetadata(ctx, req)
 	}
 
 	bq := globalBRIEQueue
@@ -387,9 +456,9 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 	switch e.info.kind {
 	case ast.BRIEKindBackup:
-		err = handleBRIEError(task.RunBackup(taskCtx, glue, "Backup", e.backupCfg), ErrBRIEBackupFailed)
+		err = handleBRIEError(task.RunBackup(taskCtx, glue, "Backup", e.backupCfg), exeerrors.ErrBRIEBackupFailed)
 	case ast.BRIEKindRestore:
-		err = handleBRIEError(task.RunRestore(taskCtx, glue, "Restore", e.restoreCfg), ErrBRIERestoreFailed)
+		err = handleBRIEError(task.RunRestore(taskCtx, glue, "Restore", e.restoreCfg), exeerrors.ErrBRIERestoreFailed)
 	default:
 		err = errors.Errorf("unsupported BRIE statement kind: %s", e.info.kind)
 	}
@@ -402,9 +471,17 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 	req.AppendString(0, e.info.storage)
 	req.AppendUint64(1, e.info.archiveSize)
-	req.AppendUint64(2, e.info.backupTS)
-	req.AppendTime(3, e.info.queueTime)
-	req.AppendTime(4, e.info.execTime)
+	switch e.info.kind {
+	case ast.BRIEKindBackup:
+		req.AppendUint64(2, e.info.backupTS)
+		req.AppendTime(3, e.info.queueTime)
+		req.AppendTime(4, e.info.execTime)
+	case ast.BRIEKindRestore:
+		req.AppendUint64(2, e.info.backupTS)
+		req.AppendUint64(3, e.info.restoreTS)
+		req.AppendTime(4, e.info.queueTime)
+		req.AppendTime(5, e.info.execTime)
+	}
 	e.info = nil
 	return nil
 }
@@ -448,7 +525,12 @@ type tidbGlueSession struct {
 	info     *brieTaskInfo
 }
 
-// BootstrapSession implements glue.Glue
+// GetSessionCtx implements glue.Glue
+func (gs *tidbGlueSession) GetSessionCtx() sessionctx.Context {
+	return gs.se
+}
+
+// GetDomain implements glue.Glue
 func (gs *tidbGlueSession) GetDomain(store kv.Storage) (*domain.Domain, error) {
 	return domain.GetDomain(gs.se), nil
 }
@@ -463,11 +545,13 @@ func (gs *tidbGlueSession) CreateSession(store kv.Storage) (glue.Session, error)
 // such as BACKUP and RESTORE have already been privilege checked.
 // NOTE: Maybe drain the restult too? See `gluetidb.tidbSession.ExecuteInternal` for more details.
 func (gs *tidbGlueSession) Execute(ctx context.Context, sql string) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	_, _, err := gs.se.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(ctx, nil, sql)
 	return err
 }
 
 func (gs *tidbGlueSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	exec := gs.se.(sqlexec.SQLExecutor)
 	_, err := exec.ExecuteInternal(ctx, sql, args...)
 	return err
@@ -490,7 +574,7 @@ func (gs *tidbGlueSession) CreateDatabase(ctx context.Context, schema *model.DBI
 }
 
 // CreateTable implements glue.Session
-func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo) error {
+func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	d := domain.GetDomain(gs.se).DDL()
 
 	// 512 is defaultCapOfCreateTable.
@@ -499,6 +583,8 @@ func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, 
 		return err
 	}
 	gs.se.SetValue(sessionctx.QueryString, result.String())
+	// Disable foreign key check when batch create tables.
+	gs.se.GetSessionVars().ForeignKeyChecks = false
 
 	// Clone() does not clone partitions yet :(
 	table = table.Clone()
@@ -508,7 +594,7 @@ func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, 
 		table.Partition = &newPartition
 	}
 
-	return d.CreateTableWithInfo(gs.se, dbName, table, ddl.OnExistIgnore)
+	return d.CreateTableWithInfo(gs.se, dbName, table, append(cs, ddl.OnExistIgnore)...)
 }
 
 // CreatePlacementPolicy implements glue.Session
@@ -553,6 +639,8 @@ func (gs *tidbGlueSession) Record(name string, value uint64) {
 	switch name {
 	case "BackupTS":
 		gs.info.backupTS = value
+	case "RestoreTS":
+		gs.info.restoreTS = value
 	case "Size":
 		gs.info.archiveSize = value
 	}

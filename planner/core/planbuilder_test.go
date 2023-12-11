@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
-	_ "unsafe" // required by go:linkname
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/expression"
@@ -89,6 +88,11 @@ func TestGetPathByIndexName(t *testing.T) {
 	}
 
 	path := getPathByIndexName(accessPath, model.NewCIStr("idx"), tblInfo)
+	require.NotNil(t, path)
+	require.Equal(t, accessPath[1], path)
+
+	// "id" is a prefix of "idx"
+	path = getPathByIndexName(accessPath, model.NewCIStr("id"), tblInfo)
 	require.NotNil(t, path)
 	require.Equal(t, accessPath[1], path)
 

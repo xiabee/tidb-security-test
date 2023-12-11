@@ -22,13 +22,17 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 )
 
+//revive:disable:exported
 var (
 	ErrWarnOptimizerHintUnsupportedHint = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintUnsupportedHint)
 	ErrWarnOptimizerHintInvalidToken    = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidToken)
 	ErrWarnMemoryQuotaOverflow          = terror.ClassParser.NewStd(mysql.ErrWarnMemoryQuotaOverflow)
 	ErrWarnOptimizerHintParseError      = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintParseError)
 	ErrWarnOptimizerHintInvalidInteger  = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintInvalidInteger)
+	ErrWarnOptimizerHintWrongPos        = terror.ClassParser.NewStd(mysql.ErrWarnOptimizerHintWrongPos)
 )
+
+//revive:enable:exported
 
 // hintScanner implements the yyhintLexer interface
 type hintScanner struct {

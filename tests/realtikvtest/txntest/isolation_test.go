@@ -17,19 +17,34 @@ package txntest
 import (
 	"testing"
 
+	"github.com/pingcap/tidb/store/driver"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
 	"github.com/pingcap/tidb/util"
 	"github.com/stretchr/testify/require"
+	"go.opencensus.io/stats/view"
 )
+
+func TestGetCachedStore(t *testing.T) {
+	defer view.Stop()
+	var d driver.TiKVDriver
+	// when get the cached store, there should not have routine leak.
+	store1, err := d.Open(*realtikvtest.TiKVPath)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store1.Close())
+	}()
+	store2, err := d.Open(*realtikvtest.TiKVPath)
+	require.NoError(t, err)
+	require.Equal(t, store1, store2)
+}
 
 /*
 These test cases come from the paper <A Critique of ANSI SQL Isolation Levels>.
 The sign 'P0', 'P1'.... can be found in the paper. These cases will run under snapshot isolation.
 */
 func TestP0DirtyWrite(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -87,8 +102,7 @@ func TestP0DirtyWrite(t *testing.T) {
 }
 
 func TestP1DirtyRead(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -137,8 +151,7 @@ func TestP1DirtyRead(t *testing.T) {
 }
 
 func TestP2NonRepeatableRead(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -208,8 +221,7 @@ func TestP2NonRepeatableRead(t *testing.T) {
 }
 
 func TestP3Phantom(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -276,8 +288,7 @@ func TestP3Phantom(t *testing.T) {
 }
 
 func TestP4LostUpdate(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -337,8 +348,7 @@ func TestP4LostUpdate(t *testing.T) {
 func TestP4CLostUpdate(t *testing.T) {}
 
 func TestA3Phantom(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -390,8 +400,7 @@ func TestA3Phantom(t *testing.T) {
 }
 
 func TestA5AReadSkew(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -455,8 +464,7 @@ func TestA5AReadSkew(t *testing.T) {
 }
 
 func TestA5BWriteSkew(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -552,8 +560,7 @@ These test cases come from the paper <Highly Available Transactions: Virtues and
 for tidb, we support read-after-write on cluster level.
 */
 func TestReadAfterWrite(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")
@@ -605,8 +612,7 @@ func TestReadAfterWrite(t *testing.T) {
 This case will do harm in Innodb, even if in snapshot isolation, but harmless in tidb.
 */
 func TestPhantomReadInInnodb(t *testing.T) {
-	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
-	defer clean()
+	store := realtikvtest.CreateMockStoreAndSetup(t)
 	session1 := testkit.NewTestKit(t, store)
 	session2 := testkit.NewTestKit(t, store)
 	session1.MustExec("use test;")

@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +49,10 @@ import (
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/plancodec"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
+
+type signalsKey struct{}
 
 // ParseSlowLogBatchSize is the batch size of slow-log lines for a worker to parse, exported for testing.
 var ParseSlowLogBatchSize = 64
@@ -273,33 +275,7 @@ func (sc *slowLogChecker) isTimeValid(t types.Time) bool {
 }
 
 func getOneLine(reader *bufio.Reader) ([]byte, error) {
-	var resByte []byte
-	lineByte, isPrefix, err := reader.ReadLine()
-	if isPrefix {
-		// Need to read more data.
-		resByte = make([]byte, len(lineByte), len(lineByte)*2)
-	} else {
-		resByte = make([]byte, len(lineByte))
-	}
-	// Use copy here to avoid shallow copy problem.
-	copy(resByte, lineByte)
-	if err != nil {
-		return resByte, err
-	}
-
-	var tempLine []byte
-	for isPrefix {
-		tempLine, isPrefix, err = reader.ReadLine()
-		resByte = append(resByte, tempLine...) // nozero
-		// Use the max value of max_allowed_packet to check the single line length.
-		if len(resByte) > int(variable.MaxOfMaxAllowedPacket) {
-			return resByte, errors.Errorf("single line length exceeds limit: %v", variable.MaxOfMaxAllowedPacket)
-		}
-		if err != nil {
-			return resByte, err
-		}
-	}
-	return resByte, err
+	return util.ReadLine(reader, int(variable.MaxOfMaxAllowedPacket))
 }
 
 type offset struct {
@@ -474,7 +450,7 @@ func (e *slowQueryRetriever) parseSlowLog(ctx context.Context, sctx sessionctx.C
 		}
 		failpoint.Inject("mockReadSlowLogSlow", func(val failpoint.Value) {
 			if val.(bool) {
-				signals := ctx.Value("signals").([]chan int)
+				signals := ctx.Value(signalsKey{}).([]chan int)
 				signals[0] <- 1
 				<-signals[1]
 			}
@@ -622,6 +598,9 @@ func (e *slowQueryRetriever) parseLog(ctx context.Context, sctx sessionctx.Conte
 					valid = e.setColumnValue(sctx, row, tz, variable.SlowLogHostStr, host, e.checker, fileLine)
 				} else if strings.HasPrefix(line, variable.SlowLogCopBackoffPrefix) {
 					valid = e.setColumnValue(sctx, row, tz, variable.SlowLogBackoffDetail, line, e.checker, fileLine)
+				} else if strings.HasPrefix(line, variable.SlowLogWarnings) {
+					line = line[len(variable.SlowLogWarnings+variable.SlowLogSpaceMarkStr):]
+					valid = e.setColumnValue(sctx, row, tz, variable.SlowLogWarnings, line, e.checker, fileLine)
 				} else {
 					fields, values := splitByColon(line)
 					for i := 0; i < len(fields); i++ {
@@ -740,6 +719,14 @@ func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, column
 			row[columnIdx] = types.NewStringDatum(plan)
 			return true, nil
 		}, nil
+	case variable.SlowLogBinaryPlan:
+		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (bool, error) {
+			if strings.HasPrefix(value, variable.SlowLogBinaryPlanPrefix) {
+				value = value[len(variable.SlowLogBinaryPlanPrefix) : len(value)-len(variable.SlowLogPlanSuffix)]
+			}
+			row[columnIdx] = types.NewStringDatum(value)
+			return true, nil
+		}, nil
 	case variable.SlowLogConnIDStr, variable.SlowLogExecRetryCount, variable.SlowLogPreprocSubQueriesStr,
 		execdetails.WriteKeysStr, execdetails.WriteSizeStr, execdetails.PrewriteRegionStr, execdetails.TxnRetryStr,
 		execdetails.RequestCountStr, execdetails.TotalKeysStr, execdetails.ProcessKeysStr,
@@ -773,7 +760,7 @@ func getColumnValueFactoryByName(sctx sessionctx.Context, colName string, column
 		}, nil
 	case variable.SlowLogUserStr, variable.SlowLogHostStr, execdetails.BackoffTypesStr, variable.SlowLogDBStr, variable.SlowLogIndexNamesStr, variable.SlowLogDigestStr,
 		variable.SlowLogStatsInfoStr, variable.SlowLogCopProcAddr, variable.SlowLogCopWaitAddr, variable.SlowLogPlanDigest,
-		variable.SlowLogPrevStmt, variable.SlowLogQuerySQLStr:
+		variable.SlowLogPrevStmt, variable.SlowLogQuerySQLStr, variable.SlowLogWarnings:
 		return func(row []types.Datum, value string, tz *time.Location, checker *slowLogChecker) (valid bool, err error) {
 			row[columnIdx] = types.NewStringDatum(value)
 			return true, nil
@@ -855,6 +842,7 @@ func (e *slowQueryRetriever) getAllFiles(ctx context.Context, sctx sessionctx.Co
 	}
 	if e.extractor == nil || !e.extractor.Enable {
 		totalFileNum = 1
+		//nolint: gosec
 		file, err := os.Open(logFilePath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -953,8 +941,8 @@ func (e *slowQueryRetriever) getAllFiles(ctx context.Context, sctx sessionctx.Co
 		}
 	}
 	// Sort by start time
-	sort.Slice(logFiles, func(i, j int) bool {
-		return logFiles[i].start.Before(logFiles[j].start)
+	slices.SortFunc(logFiles, func(i, j logFile) bool {
+		return i.start.Before(j.start)
 	})
 	return logFiles, err
 }

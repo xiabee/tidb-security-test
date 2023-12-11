@@ -27,11 +27,13 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/executor"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/store/copr"
+	"github.com/pingcap/tidb/store/helper"
 	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/deadlockhistory"
 	"github.com/stretchr/testify/require"
 )
@@ -42,8 +44,7 @@ func TestTiDBLastTxnInfoCommitMode(t *testing.T) {
 		conf.TiKVClient.AsyncCommit.SafeWindow = time.Second
 	})
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -109,8 +110,7 @@ func TestTiDBLastTxnInfoCommitMode(t *testing.T) {
 }
 
 func TestPointGetRepeatableRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk1.MustExec("use test")
@@ -148,8 +148,7 @@ func TestPointGetRepeatableRead(t *testing.T) {
 }
 
 func TestBatchPointGetRepeatableRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk1.MustExec("use test")
@@ -185,8 +184,12 @@ func TestBatchPointGetRepeatableRead(t *testing.T) {
 }
 
 func TestSplitRegionTimeout(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
+
+	require.NoError(t, failpoint.Enable("tikvclient/injectLiveness", `return("reachable")`))
+	defer func() {
+		require.NoError(t, failpoint.Disable("tikvclient/injectLiveness"))
+	}()
 
 	require.NoError(t, failpoint.Enable("tikvclient/mockSplitRegionTimeout", `return(true)`))
 	tk := testkit.NewTestKit(t, store)
@@ -216,8 +219,7 @@ func TestSplitRegionTimeout(t *testing.T) {
 }
 
 func TestTSOFail(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`use test`)
@@ -238,8 +240,7 @@ func TestKillTableReader(t *testing.T) {
 	defer func() {
 		require.NoError(t, failpoint.Disable(retry))
 	}()
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
@@ -256,15 +257,14 @@ func TestKillTableReader(t *testing.T) {
 		time.Sleep(1 * time.Second)
 		err := tk.QueryToErr("select * from t")
 		require.Error(t, err)
-		require.Equal(t, int(executor.ErrQueryInterrupted.Code()), int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code))
+		require.Equal(t, int(exeerrors.ErrQueryInterrupted.Code()), int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code))
 	}()
 	atomic.StoreUint32(&tk.Session().GetSessionVars().Killed, 1)
 	wg.Wait()
 }
 
 func TestCollectCopRuntimeStats(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
@@ -280,8 +280,7 @@ func TestCollectCopRuntimeStats(t *testing.T) {
 }
 
 func TestCoprocessorOOMTiCase(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec(`set @@tidb_wait_split_region_finish=1`)
@@ -362,8 +361,7 @@ func TestIssue21441(t *testing.T) {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/issue21441"))
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -397,9 +395,10 @@ select a from t`
 }
 
 func TestTxnWriteThroughputSLI(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
+	setTxnTk := testkit.NewTestKit(t, store)
+	setTxnTk.MustExec("set global tidb_txn_mode=''")
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -546,8 +545,7 @@ func TestDeadlocksTable(t *testing.T) {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/expression/sqlDigestRetrieverSkipRetrieveGlobal"))
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustQuery("select * from information_schema.deadlocks").Check(
@@ -558,4 +556,32 @@ func TestDeadlocksTable(t *testing.T) {
 			id2+"/2022-06-11 02:03:04.987654/1/202/<nil>/<nil>/<nil>/<nil>/203",
 			id2+"/2022-06-11 02:03:04.987654/1/203/<nil>/<nil>/<nil>/<nil>/201",
 		))
+}
+
+func TestGetMvccByEncodedKeyRegionError(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	h := helper.NewHelper(store.(helper.Storage))
+	txn, err := store.Begin()
+	require.NoError(t, err)
+	m := meta.NewMeta(txn)
+	schemaVersion := tk.Session().GetDomainInfoSchema().SchemaMetaVersion()
+	key := m.EncodeSchemaDiffKey(schemaVersion)
+
+	resp, err := h.GetMvccByEncodedKey(key)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Info)
+	require.Equal(t, 1, len(resp.Info.Writes))
+	require.Less(t, uint64(0), resp.Info.Writes[0].CommitTs)
+	commitTs := resp.Info.Writes[0].CommitTs
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/store/mockstore/unistore/epochNotMatch", "2*return(true)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/store/mockstore/unistore/epochNotMatch"))
+	}()
+	resp, err = h.GetMvccByEncodedKey(key)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Info)
+	require.Equal(t, 1, len(resp.Info.Writes))
+	require.Equal(t, commitTs, resp.Info.Writes[0].CommitTs)
 }

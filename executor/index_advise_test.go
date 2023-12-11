@@ -25,17 +25,13 @@ import (
 )
 
 func TestIndexAdvise(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 
-	_, err := tk.Exec("index advise infile '/tmp/nonexistence.sql'")
-	require.EqualError(t, err, "Index Advise: don't support load file without local field")
-	_, err = tk.Exec("index advise local infile ''")
-	require.EqualError(t, err, "Index Advise: infile path is empty")
-	_, err = tk.Exec("index advise local infile '/tmp/nonexistence.sql' lines terminated by ''")
-	require.EqualError(t, err, "Index Advise: don't support advise index for SQL terminated by nil")
+	tk.MustGetErrMsg("index advise infile '/tmp/nonexistence.sql'", "Index Advise: don't support load file without local field")
+	tk.MustGetErrMsg("index advise local infile ''", "Index Advise: infile path is empty")
+	tk.MustGetErrMsg("index advise local infile '/tmp/nonexistence.sql' lines terminated by ''", "Index Advise: don't support advise index for SQL terminated by nil")
 
 	path := "/tmp/index_advise.sql"
 	fp, err := os.Create(path)
@@ -71,10 +67,10 @@ func TestIndexAdvise(t *testing.T) {
 }
 
 func TestIndexJoinProjPattern(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set @@session.tidb_opt_advanced_join_hint=0;")
 	tk.MustExec(`create table t1(
 pnbrn_cnaps varchar(5) not null,
 new_accno varchar(18) not null,
@@ -104,10 +100,10 @@ and b.pnbrn_cnaps = a.pnbrn_cnaps
 and b.txn_accno = a.new_accno;`
 	rows := [][]interface{}{
 		{"Update_8"},
-		{"└─IndexJoin_13"},
-		{"  ├─TableReader_23(Build)"},
-		{"  │ └─Selection_22"},
-		{"  │   └─TableFullScan_21"},
+		{"└─IndexJoin_14"},
+		{"  ├─TableReader_25(Build)"},
+		{"  │ └─Selection_24"},
+		{"  │   └─TableFullScan_23"},
 		{"  └─IndexReader_12(Probe)"},
 		{"    └─Selection_11"},
 		{"      └─IndexRangeScan_10"},
@@ -132,10 +128,10 @@ and b.txn_accno = a.new_accno;`
 }
 
 func TestIndexJoinSelPattern(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec(`set @@tidb_opt_advanced_join_hint=0`)
 	tk.MustExec(` create table tbl_miss(
 id bigint(20) unsigned not null
 ,txn_dt date default null
@@ -186,18 +182,18 @@ txn_dt date default null
 	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='OFF'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
 	rows = [][]interface{}{
-		{"IndexJoin_12"},
-		{"├─TableReader_23(Build)"},
-		{"│ └─Selection_22"},
-		{"│   └─TableRangeScan_21"},
-		{"└─IndexLookUp_11(Probe)"},
-		{"  ├─IndexRangeScan_8(Build)"},
-		{"  └─Selection_10(Probe)"},
-		{"    └─TableRowIDScan_9"},
+		{"IndexJoin_13"},
+		{"├─TableReader_25(Build)"},
+		{"│ └─Selection_24"},
+		{"│   └─TableRangeScan_23"},
+		{"└─Selection_12(Probe)"},
+		{"  └─IndexLookUp_11"},
+		{"    ├─IndexRangeScan_8(Build)"},
+		{"    └─Selection_10(Probe)"},
+		{"      └─TableRowIDScan_9"},
 	}
 	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='ON'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
-	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='ON'")
 	tk.MustQuery(sql).Check(testkit.Rows("1 2022-12-01 123 1 2022-12-01 123 1 <nil>"))
 	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='OFF'")
 	tk.MustQuery(sql).Check(testkit.Rows("1 2022-12-01 123 1 2022-12-01 123 1 <nil>"))

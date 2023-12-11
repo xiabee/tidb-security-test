@@ -23,6 +23,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/tidb"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
@@ -41,10 +42,12 @@ import (
 )
 
 type mysqlSuite struct {
-	dbHandle *sql.DB
-	mockDB   sqlmock.Sqlmock
-	backend  backend.Backend
-	tbl      table.Table
+	dbHandle   *sql.DB
+	mockDB     sqlmock.Sqlmock
+	mgr        backend.EngineManager
+	backend    backend.Backend
+	encBuilder encode.EncodingBuilder
+	tbl        table.Table
 }
 
 func createMysqlSuite(t *testing.T) *mysqlSuite {
@@ -63,8 +66,15 @@ func createMysqlSuite(t *testing.T) *mysqlSuite {
 	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
 	tbl, err := tables.TableFromMeta(kv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
-	backend := tidb.NewTiDBBackend(db, config.ReplaceOnDup, errormanager.New(nil, config.NewConfig()))
-	return &mysqlSuite{dbHandle: db, mockDB: mock, backend: backend, tbl: tbl}
+	backendObj := tidb.NewTiDBBackend(context.Background(), db, config.ReplaceOnDup, errormanager.New(nil, config.NewConfig(), log.L()))
+	return &mysqlSuite{
+		dbHandle:   db,
+		mockDB:     mock,
+		mgr:        backend.MakeEngineManager(backendObj),
+		backend:    backendObj,
+		encBuilder: tidb.NewEncodingBuilder(),
+		tbl:        tbl,
+	}
 }
 
 func (s *mysqlSuite) TearDownTest(t *testing.T) {
@@ -82,12 +92,12 @@ func TestWriteRowsReplaceOnDup(t *testing.T) {
 	ctx := context.Background()
 	logger := log.L()
 
-	engine, err := s.backend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	engine, err := s.mgr.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
 
-	dataRows := s.backend.MakeEmptyRows()
+	dataRows := s.encBuilder.MakeEmptyRows()
 	dataChecksum := verification.MakeKVChecksum(0, 0, 0)
-	indexRows := s.backend.MakeEmptyRows()
+	indexRows := s.encBuilder.MakeEmptyRows()
 	indexChecksum := verification.MakeKVChecksum(0, 0, 0)
 
 	cols := s.tbl.Cols()
@@ -99,9 +109,13 @@ func TestWriteRowsReplaceOnDup(t *testing.T) {
 	// skip column a,c due to ignore-columns
 	perms[0] = -1
 	perms[2] = -1
-	encoder, err := s.backend.NewEncoder(s.tbl, &kv.SessionOptions{SQLMode: 0, Timestamp: 1234567890})
+	encoder, err := s.encBuilder.NewEncoder(context.Background(), &encode.EncodingConfig{
+		SessionOptions: encode.SessionOptions{SQLMode: 0, Timestamp: 1234567890},
+		Table:          s.tbl,
+		Logger:         logger,
+	})
 	require.NoError(t, err)
-	row, err := encoder.Encode(logger, []types.Datum{
+	row, err := encoder.Encode([]types.Datum{
 		types.NewUintDatum(18446744073709551615),
 		types.NewIntDatum(-9223372036854775808),
 		types.NewUintDatum(0),
@@ -117,13 +131,13 @@ func TestWriteRowsReplaceOnDup(t *testing.T) {
 		types.NewMysqlBitDatum(types.NewBinaryLiteralFromUint(0x98765432, 4)),
 		types.NewDecimalDatum(types.NewDecFromFloatForTest(12.5)),
 		types.NewMysqlEnumDatum(types.Enum{Name: "ENUM_NAME", Value: 51}),
-	}, 1, perms, "0.csv", 0)
+	}, 1, perms, 0)
 	require.NoError(t, err)
 	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
 
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"b", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"b", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"}, dataRows)
 	require.NoError(t, err)
 	st, err := writer.Close(ctx)
 	require.NoError(t, err)
@@ -140,37 +154,38 @@ func TestWriteRowsIgnoreOnDup(t *testing.T) {
 	ctx := context.Background()
 	logger := log.L()
 
-	ignoreBackend := tidb.NewTiDBBackend(s.dbHandle, config.IgnoreOnDup, errormanager.New(nil, config.NewConfig()))
-	engine, err := ignoreBackend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	encBuilder := tidb.NewEncodingBuilder()
+	ignoreBackend := tidb.NewTiDBBackend(ctx, s.dbHandle, config.IgnoreOnDup, errormanager.New(nil, config.NewConfig(), logger))
+	engine, err := backend.MakeEngineManager(ignoreBackend).OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
 
-	dataRows := ignoreBackend.MakeEmptyRows()
+	dataRows := encBuilder.MakeEmptyRows()
 	dataChecksum := verification.MakeKVChecksum(0, 0, 0)
-	indexRows := ignoreBackend.MakeEmptyRows()
+	indexRows := encBuilder.MakeEmptyRows()
 	indexChecksum := verification.MakeKVChecksum(0, 0, 0)
 
-	encoder, err := ignoreBackend.NewEncoder(s.tbl, &kv.SessionOptions{})
+	encoder, err := encBuilder.NewEncoder(ctx, &encode.EncodingConfig{Table: s.tbl, Logger: logger})
 	require.NoError(t, err)
-	row, err := encoder.Encode(logger, []types.Datum{
+	row, err := encoder.Encode([]types.Datum{
 		types.NewIntDatum(1),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "1.csv", 0)
+	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, 0)
 	require.NoError(t, err)
 	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
 
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"a"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"a"}, dataRows)
 	require.NoError(t, err)
 	_, err = writer.Close(ctx)
 	require.NoError(t, err)
 
 	// test encode rows with _tidb_rowid
-	encoder, err = ignoreBackend.NewEncoder(s.tbl, &kv.SessionOptions{})
+	encoder, err = encBuilder.NewEncoder(ctx, &encode.EncodingConfig{Table: s.tbl, Logger: logger})
 	require.NoError(t, err)
-	rowWithID, err := encoder.Encode(logger, []types.Datum{
+	rowWithID, err := encoder.Encode([]types.Datum{
 		types.NewIntDatum(1),
 		types.NewIntDatum(1), // _tidb_rowid field
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1}, "2.csv", 0)
+	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1}, 0)
 	require.NoError(t, err)
 	// tidbRow is stringer.
 	require.Equal(t, "(1,1)", fmt.Sprint(rowWithID))
@@ -186,27 +201,28 @@ func TestWriteRowsErrorOnDup(t *testing.T) {
 	ctx := context.Background()
 	logger := log.L()
 
-	ignoreBackend := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	engine, err := ignoreBackend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	encBuilder := tidb.NewEncodingBuilder()
+	ignoreBackend := tidb.NewTiDBBackend(ctx, s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig(), logger))
+	engine, err := backend.MakeEngineManager(ignoreBackend).OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
 
-	dataRows := ignoreBackend.MakeEmptyRows()
+	dataRows := encBuilder.MakeEmptyRows()
 	dataChecksum := verification.MakeKVChecksum(0, 0, 0)
-	indexRows := ignoreBackend.MakeEmptyRows()
+	indexRows := encBuilder.MakeEmptyRows()
 	indexChecksum := verification.MakeKVChecksum(0, 0, 0)
 
-	encoder, err := ignoreBackend.NewEncoder(s.tbl, &kv.SessionOptions{})
+	encoder, err := encBuilder.NewEncoder(ctx, &encode.EncodingConfig{Table: s.tbl, Logger: logger})
 	require.NoError(t, err)
-	row, err := encoder.Encode(logger, []types.Datum{
+	row, err := encoder.Encode([]types.Datum{
 		types.NewIntDatum(1),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "3.csv", 0)
+	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, 0)
 	require.NoError(t, err)
 
 	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
 
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"a"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"a"}, dataRows)
 	require.NoError(t, err)
 	st, err := writer.Close(ctx)
 	require.NoError(t, err)
@@ -229,29 +245,39 @@ func testStrictMode(t *testing.T) {
 	tbl, err := tables.TableFromMeta(kv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	encoder, err := bk.NewEncoder(tbl, &kv.SessionOptions{SQLMode: mysql.ModeStrictAllTables})
-	require.NoError(t, err)
+	ctx := context.Background()
 
+	encBuilder := tidb.NewEncodingBuilder()
 	logger := log.L()
-	_, err = encoder.Encode(logger, []types.Datum{
-		types.NewStringDatum("test"),
-	}, 1, []int{0, -1, -1}, "4.csv", 0)
+	encoder, err := encBuilder.NewEncoder(ctx, &encode.EncodingConfig{
+		SessionOptions: encode.SessionOptions{SQLMode: mysql.ModeStrictAllTables},
+		Table:          tbl,
+		Logger:         log.L(),
+	})
 	require.NoError(t, err)
 
-	_, err = encoder.Encode(logger, []types.Datum{
+	_, err = encoder.Encode([]types.Datum{
+		types.NewStringDatum("test"),
+	}, 1, []int{0, -1, -1}, 0)
+	require.NoError(t, err)
+
+	_, err = encoder.Encode([]types.Datum{
 		types.NewStringDatum("\xff\xff\xff\xff"),
-	}, 1, []int{0, -1, -1}, "5.csv", 0)
+	}, 1, []int{0, -1, -1}, 0)
 	require.Error(t, err)
 	require.Regexp(t, `incorrect utf8 value .* for column s0$`, err.Error())
 
 	// oepn a new encode because column count changed.
-	encoder, err = bk.NewEncoder(tbl, &kv.SessionOptions{SQLMode: mysql.ModeStrictAllTables})
+	encoder, err = encBuilder.NewEncoder(ctx, &encode.EncodingConfig{
+		SessionOptions: encode.SessionOptions{SQLMode: mysql.ModeStrictAllTables},
+		Table:          tbl,
+		Logger:         logger,
+	})
 	require.NoError(t, err)
-	_, err = encoder.Encode(logger, []types.Datum{
+	_, err = encoder.Encode([]types.Datum{
 		types.NewStringDatum(""),
 		types.NewStringDatum("非 ASCII 字符串"),
-	}, 1, []int{0, 1, -1}, "6.csv", 0)
+	}, 1, []int{0, 1, -1}, 0)
 	require.Error(t, err)
 	require.Regexp(t, "incorrect ascii value .* for column s1$", err.Error())
 }
@@ -268,8 +294,8 @@ func TestFetchRemoteTableModels_3_x(t *testing.T) {
 			AddRow("t", "id", "int(10)", "", "auto_increment"))
 	s.mockDB.ExpectCommit()
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	tableInfos, err := bk.FetchRemoteTableModels(context.Background(), "test")
+	targetInfoGetter := tidb.NewTargetInfoGetter(s.dbHandle)
+	tableInfos, err := targetInfoGetter.FetchRemoteTableModels(context.Background(), "test")
 	require.NoError(t, err)
 	ft := types.FieldType{}
 	ft.SetFlag(mysql.AutoIncrementFlag)
@@ -302,11 +328,11 @@ func TestFetchRemoteTableModels_4_0(t *testing.T) {
 			AddRow("t", "id", "bigint(20) unsigned", "", "auto_increment"))
 	s.mockDB.ExpectQuery("SHOW TABLE `test`.`t` NEXT_ROW_ID").
 		WillReturnRows(sqlmock.NewRows([]string{"DB_NAME", "TABLE_NAME", "COLUMN_NAME", "NEXT_GLOBAL_ROW_ID"}).
-			AddRow("test", "t", "id", int64(1)))
+			AddRow("test", "t", "id", "10942694589135710585"))
 	s.mockDB.ExpectCommit()
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	tableInfos, err := bk.FetchRemoteTableModels(context.Background(), "test")
+	targetInfoGetter := tidb.NewTargetInfoGetter(s.dbHandle)
+	tableInfos, err := targetInfoGetter.FetchRemoteTableModels(context.Background(), "test")
 	require.NoError(t, err)
 	ft := types.FieldType{}
 	ft.SetFlag(mysql.AutoIncrementFlag | mysql.UnsignedFlag)
@@ -342,8 +368,8 @@ func TestFetchRemoteTableModels_4_x_auto_increment(t *testing.T) {
 			AddRow("test", "t", "id", int64(1), "AUTO_INCREMENT"))
 	s.mockDB.ExpectCommit()
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	tableInfos, err := bk.FetchRemoteTableModels(context.Background(), "test")
+	targetInfoGetter := tidb.NewTargetInfoGetter(s.dbHandle)
+	tableInfos, err := targetInfoGetter.FetchRemoteTableModels(context.Background(), "test")
 	require.NoError(t, err)
 	ft := types.FieldType{}
 	ft.SetFlag(mysql.AutoIncrementFlag)
@@ -379,8 +405,8 @@ func TestFetchRemoteTableModels_4_x_auto_random(t *testing.T) {
 			AddRow("test", "t", "id", int64(1), "AUTO_RANDOM"))
 	s.mockDB.ExpectCommit()
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	tableInfos, err := bk.FetchRemoteTableModels(context.Background(), "test")
+	targetInfoGetter := tidb.NewTargetInfoGetter(s.dbHandle)
+	tableInfos, err := targetInfoGetter.FetchRemoteTableModels(context.Background(), "test")
 	require.NoError(t, err)
 	ft := types.FieldType{}
 	ft.SetFlag(mysql.PriKeyFlag)
@@ -424,8 +450,8 @@ func TestFetchRemoteTableModelsDropTableHalfway(t *testing.T) {
 		WillReturnError(mysql.NewErr(mysql.ErrNoSuchTable, "test", "tbl02"))
 	s.mockDB.ExpectCommit()
 
-	bk := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup, errormanager.New(nil, config.NewConfig()))
-	tableInfos, err := bk.FetchRemoteTableModels(context.Background(), "test")
+	infoGetter := tidb.NewTargetInfoGetter(s.dbHandle)
+	tableInfos, err := infoGetter.FetchRemoteTableModels(context.Background(), "test")
 	require.NoError(t, err)
 	ft := types.FieldType{}
 	ft.SetFlag(mysql.AutoIncrementFlag)
@@ -462,16 +488,17 @@ func TestWriteRowsErrorNoRetry(t *testing.T) {
 		WillReturnError(nonRetryableError)
 
 	// disable error record, should not expect retry statements one by one.
-	ignoreBackend := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup,
-		errormanager.New(s.dbHandle, &config.Config{}),
+	ignoreBackend := tidb.NewTiDBBackend(context.Background(), s.dbHandle, config.ErrorOnDup,
+		errormanager.New(s.dbHandle, &config.Config{}, log.L()),
 	)
-	dataRows := encodeRowsTiDB(t, ignoreBackend, s.tbl)
+	encBuilder := tidb.NewEncodingBuilder()
+	dataRows := encodeRowsTiDB(t, encBuilder, s.tbl)
 	ctx := context.Background()
-	engine, err := ignoreBackend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	engine, err := backend.MakeEngineManager(ignoreBackend).OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"a"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"a"}, dataRows)
 	require.Error(t, err)
 	require.False(t, common.IsRetryableError(err), "err: %v", err)
 }
@@ -522,7 +549,7 @@ func TestWriteRowsErrorDowngradingAll(t *testing.T) {
 		WillReturnResult(driver.ResultNoRows)
 
 	// disable error record, should not expect retry statements one by one.
-	ignoreBackend := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup,
+	ignoreBackend := tidb.NewTiDBBackend(context.Background(), s.dbHandle, config.ErrorOnDup,
 		errormanager.New(s.dbHandle, &config.Config{
 			App: config.Lightning{
 				TaskInfoSchemaName: "tidb_lightning_errors",
@@ -530,15 +557,16 @@ func TestWriteRowsErrorDowngradingAll(t *testing.T) {
 					Type: *atomic.NewInt64(10),
 				},
 			},
-		}),
+		}, log.L()),
 	)
-	dataRows := encodeRowsTiDB(t, ignoreBackend, s.tbl)
+	encBuilder := tidb.NewEncodingBuilder()
+	dataRows := encodeRowsTiDB(t, encBuilder, s.tbl)
 	ctx := context.Background()
-	engine, err := ignoreBackend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	engine, err := backend.MakeEngineManager(ignoreBackend).OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"a"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"a"}, dataRows)
 	require.NoError(t, err)
 }
 
@@ -577,7 +605,7 @@ func TestWriteRowsErrorDowngradingExceedThreshold(t *testing.T) {
 		ExpectExec("\\QINSERT INTO `foo`.`bar`(`a`) VALUES(4)\\E").
 		WillReturnError(nonRetryableError)
 
-	ignoreBackend := tidb.NewTiDBBackend(s.dbHandle, config.ErrorOnDup,
+	ignoreBackend := tidb.NewTiDBBackend(context.Background(), s.dbHandle, config.ErrorOnDup,
 		errormanager.New(s.dbHandle, &config.Config{
 			App: config.Lightning{
 				TaskInfoSchemaName: "tidb_lightning_errors",
@@ -585,70 +613,90 @@ func TestWriteRowsErrorDowngradingExceedThreshold(t *testing.T) {
 					Type: *atomic.NewInt64(3),
 				},
 			},
-		}),
+		}, log.L()),
 	)
-	dataRows := encodeRowsTiDB(t, ignoreBackend, s.tbl)
+	encBuilder := tidb.NewEncodingBuilder()
+	dataRows := encodeRowsTiDB(t, encBuilder, s.tbl)
 	ctx := context.Background()
-	engine, err := ignoreBackend.OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
+	engine, err := backend.MakeEngineManager(ignoreBackend).OpenEngine(ctx, &backend.EngineConfig{}, "`foo`.`bar`", 1)
 	require.NoError(t, err)
-	writer, err := engine.LocalWriter(ctx, nil)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`foo`.`bar`"})
 	require.NoError(t, err)
-	err = writer.WriteRows(ctx, []string{"a"}, dataRows)
+	err = writer.AppendRows(ctx, []string{"a"}, dataRows)
 	require.Error(t, err)
 	st, err := writer.Close(ctx)
 	require.NoError(t, err)
 	require.Nil(t, st)
 }
 
-func encodeRowsTiDB(t *testing.T, b backend.Backend, tbl table.Table) kv.Rows {
-	dataRows := b.MakeEmptyRows()
+func encodeRowsTiDB(t *testing.T, encBuilder encode.EncodingBuilder, tbl table.Table) encode.Rows {
+	dataRows := encBuilder.MakeEmptyRows()
 	dataChecksum := verification.MakeKVChecksum(0, 0, 0)
-	indexRows := b.MakeEmptyRows()
+	indexRows := encBuilder.MakeEmptyRows()
 	indexChecksum := verification.MakeKVChecksum(0, 0, 0)
-	logger := log.L()
 
-	encoder, err := b.NewEncoder(tbl, &kv.SessionOptions{})
-	require.NoError(t, err)
-	row, err := encoder.Encode(logger, []types.Datum{
-		types.NewIntDatum(1),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "7.csv", 0)
-	require.NoError(t, err)
-
-	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
-
-	row, err = encoder.Encode(logger, []types.Datum{
-		types.NewIntDatum(2),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "8.csv", 0)
-	require.NoError(t, err)
-
-	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
-
-	row, err = encoder.Encode(logger, []types.Datum{
-		types.NewIntDatum(3),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "9.csv", 0)
-	require.NoError(t, err)
-
-	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
-
-	row, err = encoder.Encode(logger, []types.Datum{
-		types.NewIntDatum(4),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "10.csv", 0)
-	require.NoError(t, err)
-
-	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
-
-	row, err = encoder.Encode(logger, []types.Datum{
-		types.NewIntDatum(5),
-	}, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "11.csv", 0)
-	require.NoError(t, err)
-
-	row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
+	rowCases := []struct {
+		row        []types.Datum
+		rowID      int64
+		colMapping []int
+		path       string
+		offset     int64
+	}{
+		{
+			row:        []types.Datum{types.NewIntDatum(1)},
+			rowID:      1,
+			colMapping: []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+			path:       "7.csv",
+			offset:     0,
+		},
+		{
+			row:        []types.Datum{types.NewIntDatum(2)},
+			rowID:      1,
+			colMapping: []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+			path:       "8.csv",
+		},
+		{
+			row:        []types.Datum{types.NewIntDatum(3)},
+			rowID:      1,
+			colMapping: []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+			path:       "9.csv",
+		},
+		{
+			row:        []types.Datum{types.NewIntDatum(4)},
+			rowID:      1,
+			colMapping: []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+			path:       "10.csv",
+		},
+		{
+			row:        []types.Datum{types.NewIntDatum(5)},
+			rowID:      1,
+			colMapping: []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+			path:       "11.csv",
+		},
+	}
+	for _, rc := range rowCases {
+		encoder, err := encBuilder.NewEncoder(context.Background(), &encode.EncodingConfig{
+			Path:   rc.path,
+			Table:  tbl,
+			Logger: log.L(),
+		})
+		require.NoError(t, err)
+		row, err := encoder.Encode(rc.row, rc.rowID, rc.colMapping, rc.offset)
+		require.NoError(t, err)
+		row.ClassifyAndAppend(&dataRows, &dataChecksum, &indexRows, &indexChecksum)
+	}
 
 	rawRow := make([]types.Datum, 0)
 	for i := 0; i < 15; i++ {
 		rawRow = append(rawRow, types.NewIntDatum(0))
 	}
-	row, err = encoder.Encode(logger, rawRow, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, "12.csv", 0)
+	encoder, err := encBuilder.NewEncoder(context.Background(), &encode.EncodingConfig{
+		Path:   "12.csv",
+		Table:  tbl,
+		Logger: log.L(),
+	})
+	require.NoError(t, err)
+	_, err = encoder.Encode(rawRow, 1, []int{0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}, 0)
 	require.NotNil(t, err)
 	require.Contains(t, err.Error(), "column count mismatch, at most")
 	return dataRows
@@ -658,7 +706,7 @@ func TestEncodeRowForRecord(t *testing.T) {
 	s := createMysqlSuite(t)
 
 	// for a correct row, the will encode a correct result
-	row := tidb.EncodeRowForRecord(s.tbl, mysql.ModeStrictTransTables, []types.Datum{
+	row := tidb.EncodeRowForRecord(context.Background(), s.tbl, mysql.ModeStrictTransTables, []types.Datum{
 		types.NewIntDatum(5),
 		types.NewStringDatum("test test"),
 		types.NewBinaryLiteralDatum(types.NewBinaryLiteralFromUint(0xabcdef, 6)),
@@ -667,7 +715,7 @@ func TestEncodeRowForRecord(t *testing.T) {
 
 	// the following row will result in column count mismatch error, there for encode
 	// result will fallback to a "," separated string list.
-	row = tidb.EncodeRowForRecord(s.tbl, mysql.ModeStrictTransTables, []types.Datum{
+	row = tidb.EncodeRowForRecord(context.Background(), s.tbl, mysql.ModeStrictTransTables, []types.Datum{
 		types.NewIntDatum(5),
 		types.NewStringDatum("test test"),
 		types.NewBinaryLiteralDatum(types.NewBinaryLiteralFromUint(0xabcdef, 6)),

@@ -3,6 +3,9 @@
 package errors
 
 import (
+	"context"
+	stderrors "errors"
+
 	"github.com/pingcap/errors"
 )
 
@@ -15,6 +18,17 @@ func Is(err error, is *errors.Error) bool {
 	return errorFound != nil
 }
 
+// IsContextCanceled checks whether the is caused by context.Canceled.
+// errors.Cause does not work for the error wrapped by %w in fmt.Errorf.
+// So we need to call stderrors.Is to unwrap the error.
+func IsContextCanceled(err error) bool {
+	err = errors.Cause(err)
+	if err == context.Canceled || err == context.DeadlineExceeded {
+		return true
+	}
+	return stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded)
+}
+
 // BR errors.
 var (
 	ErrUnknown                   = errors.Normalize("internal error", errors.RFCCodeText("BR:Common:ErrUnknown"))
@@ -22,7 +36,7 @@ var (
 	ErrUndefinedRestoreDbOrTable = errors.Normalize("undefined restore databases or tables", errors.RFCCodeText("BR:Common:ErrUndefinedDbOrTable"))
 	ErrVersionMismatch           = errors.Normalize("version mismatch", errors.RFCCodeText("BR:Common:ErrVersionMismatch"))
 	ErrFailedToConnect           = errors.Normalize("failed to make gRPC channels", errors.RFCCodeText("BR:Common:ErrFailedToConnect"))
-	ErrInvalidMetaFile           = errors.Normalize("invalid metafile", errors.RFCCodeText("BR:Common:ErrInvalidMetaFile"))
+	ErrInvalidMetaFile           = errors.Normalize("invalid metafile: %s", errors.RFCCodeText("BR:Common:ErrInvalidMetaFile"))
 	ErrEnvNotSpecified           = errors.Normalize("environment variable not found", errors.RFCCodeText("BR:Common:ErrEnvNotSpecified"))
 	ErrUnsupportedOperation      = errors.Normalize("the operation is not supported", errors.RFCCodeText("BR:Common:ErrUnsupportedOperation"))
 
@@ -48,7 +62,10 @@ var (
 	ErrRestoreInvalidRange     = errors.Normalize("invalid restore range", errors.RFCCodeText("BR:Restore:ErrRestoreInvalidRange"))
 	ErrRestoreWriteAndIngest   = errors.Normalize("failed to write and ingest", errors.RFCCodeText("BR:Restore:ErrRestoreWriteAndIngest"))
 	ErrRestoreSchemaNotExists  = errors.Normalize("schema not exists", errors.RFCCodeText("BR:Restore:ErrRestoreSchemaNotExists"))
+	ErrRestoreNotFreshCluster  = errors.Normalize("cluster is not fresh", errors.RFCCodeText("BR:Restore:ErrRestoreNotFreshCluster"))
+	ErrRestoreIncompatibleSys  = errors.Normalize("incompatible system table", errors.RFCCodeText("BR:Restore:ErrRestoreIncompatibleSys"))
 	ErrUnsupportedSystemTable  = errors.Normalize("the system table isn't supported for restoring yet", errors.RFCCodeText("BR:Restore:ErrUnsupportedSysTable"))
+	ErrDatabasesAlreadyExisted = errors.Normalize("databases already existed in restored cluster", errors.RFCCodeText("BR:Restore:ErrDatabasesAlreadyExisted"))
 
 	// ErrStreamLogTaskExist is the error when stream log task already exists, because of supporting single task currently.
 	ErrStreamLogTaskExist = errors.Normalize("stream task already exists", errors.RFCCodeText("BR:Stream:ErrStreamLogTaskExist"))
@@ -64,6 +81,11 @@ var (
 	ErrStorageUnknown           = errors.Normalize("unknown external storage error", errors.RFCCodeText("BR:ExternalStorage:ErrStorageUnknown"))
 	ErrStorageInvalidConfig     = errors.Normalize("invalid external storage config", errors.RFCCodeText("BR:ExternalStorage:ErrStorageInvalidConfig"))
 	ErrStorageInvalidPermission = errors.Normalize("external storage permission", errors.RFCCodeText("BR:ExternalStorage:ErrStorageInvalidPermission"))
+
+	// Snapshot restore
+	ErrRestoreTotalKVMismatch   = errors.Normalize("restore total tikvs mismatch", errors.RFCCodeText("BR:EBS:ErrRestoreTotalKVMismatch"))
+	ErrRestoreInvalidPeer       = errors.Normalize("restore met a invalid peer", errors.RFCCodeText("BR:EBS:ErrRestoreInvalidPeer"))
+	ErrRestoreRegionWithoutPeer = errors.Normalize("restore met a region without any peer", errors.RFCCodeText("BR:EBS:ErrRestoreRegionWithoutPeer"))
 
 	// Errors reported from TiKV.
 	ErrKVStorage           = errors.Normalize("tikv storage occur I/O error", errors.RFCCodeText("BR:KV:ErrKVStorage"))
@@ -89,4 +111,6 @@ var (
 	ErrKVDownloadFailed = errors.Normalize("download sst failed", errors.RFCCodeText("BR:KV:ErrKVDownloadFailed"))
 	// ErrKVIngestFailed indicates a generic, retryable ingest error.
 	ErrKVIngestFailed = errors.Normalize("ingest sst failed", errors.RFCCodeText("BR:KV:ErrKVIngestFailed"))
+
+	ErrPossibleInconsistency = errors.Normalize("the cluster state might be inconsistent", errors.RFCCodeText("BR:KV:ErrPossibleInconsistency"))
 )

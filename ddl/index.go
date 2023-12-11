@@ -15,30 +15,45 @@
 package ddl
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/ddl/ingest"
+	sess "github.com/pingcap/tidb/ddl/internal/session"
+	"github.com/pingcap/tidb/disttask/framework/proto"
+	"github.com/pingcap/tidb/disttask/framework/storage"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
-	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/logutil"
 	decoder "github.com/pingcap/tidb/util/rowDecoder"
@@ -46,6 +61,7 @@ import (
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -53,48 +69,72 @@ const (
 	MaxCommentLength = 1024
 )
 
-func buildIndexColumns(columns []*model.ColumnInfo, indexPartSpecifications []*ast.IndexPartSpecification) ([]*model.IndexColumn, error) {
+var (
+	telemetryAddIndexIngestUsage = metrics.TelemetryAddIndexIngestCnt
+)
+
+func buildIndexColumns(ctx sessionctx.Context, columns []*model.ColumnInfo, indexPartSpecifications []*ast.IndexPartSpecification) ([]*model.IndexColumn, bool, error) {
 	// Build offsets.
 	idxParts := make([]*model.IndexColumn, 0, len(indexPartSpecifications))
 	var col *model.ColumnInfo
-
+	var mvIndex bool
+	maxIndexLength := config.GetGlobalConfig().MaxIndexLength
 	// The sum of length of all index columns.
 	sumLength := 0
 	for _, ip := range indexPartSpecifications {
 		col = model.FindColumnInfo(columns, ip.Column.Name.L)
 		if col == nil {
-			return nil, dbterror.ErrKeyColumnDoesNotExits.GenWithStack("column does not exist: %s", ip.Column.Name)
+			return nil, false, dbterror.ErrKeyColumnDoesNotExits.GenWithStack("column does not exist: %s", ip.Column.Name)
 		}
 
-		if err := checkIndexColumn(col, ip.Length); err != nil {
-			return nil, err
+		if err := checkIndexColumn(ctx, col, ip.Length); err != nil {
+			return nil, false, err
 		}
-
+		if col.FieldType.IsArray() {
+			if mvIndex {
+				return nil, false, dbterror.ErrNotSupportedYet.GenWithStackByArgs("more than one multi-valued key part per index")
+			}
+			mvIndex = true
+		}
+		indexColLen := ip.Length
 		indexColumnLength, err := getIndexColumnLength(col, ip.Length)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		sumLength += indexColumnLength
 
 		// The sum of all lengths must be shorter than the max length for prefix.
-		if sumLength > config.GetGlobalConfig().MaxIndexLength {
-			return nil, dbterror.ErrTooLongKey.GenWithStackByArgs(config.GetGlobalConfig().MaxIndexLength)
+		if sumLength > maxIndexLength {
+			// The multiple column index and the unique index in which the length sum exceeds the maximum size
+			// will return an error instead produce a warning.
+			if ctx == nil || ctx.GetSessionVars().StrictSQLMode || mysql.HasUniKeyFlag(col.GetFlag()) || len(indexPartSpecifications) > 1 {
+				return nil, false, dbterror.ErrTooLongKey.GenWithStackByArgs(sumLength, maxIndexLength)
+			}
+			// truncate index length and produce warning message in non-restrict sql mode.
+			colLenPerUint, err := getIndexColumnLength(col, 1)
+			if err != nil {
+				return nil, false, err
+			}
+			indexColLen = maxIndexLength / colLenPerUint
+			// produce warning message
+			ctx.GetSessionVars().StmtCtx.AppendWarning(dbterror.ErrTooLongKey.FastGenByArgs(sumLength, maxIndexLength))
 		}
 
 		idxParts = append(idxParts, &model.IndexColumn{
 			Name:   col.Name,
 			Offset: col.Offset,
-			Length: ip.Length,
+			Length: indexColLen,
 		})
 	}
 
-	return idxParts, nil
+	return idxParts, mvIndex, nil
 }
 
-func checkPKOnGeneratedColumn(tblInfo *model.TableInfo, indexPartSpecifications []*ast.IndexPartSpecification) (*model.ColumnInfo, error) {
+// CheckPKOnGeneratedColumn checks the specification of PK is valid.
+func CheckPKOnGeneratedColumn(tblInfo *model.TableInfo, indexPartSpecifications []*ast.IndexPartSpecification) (*model.ColumnInfo, error) {
 	var lastCol *model.ColumnInfo
 	for _, colName := range indexPartSpecifications {
-		lastCol = getColumnInfoByName(tblInfo, colName.Column.Name.L)
+		lastCol = tblInfo.FindPublicColumnByName(colName.Column.Name.L)
 		if lastCol == nil {
 			return nil, dbterror.ErrKeyColumnDoesNotExits.GenWithStackByArgs(colName.Column.Name)
 		}
@@ -116,12 +156,12 @@ func checkIndexPrefixLength(columns []*model.ColumnInfo, idxColumns []*model.Ind
 		return err
 	}
 	if idxLen > config.GetGlobalConfig().MaxIndexLength {
-		return dbterror.ErrTooLongKey.GenWithStackByArgs(config.GetGlobalConfig().MaxIndexLength)
+		return dbterror.ErrTooLongKey.GenWithStackByArgs(idxLen, config.GetGlobalConfig().MaxIndexLength)
 	}
 	return nil
 }
 
-func checkIndexColumn(col *model.ColumnInfo, indexColumnLen int) error {
+func checkIndexColumn(ctx sessionctx.Context, col *model.ColumnInfo, indexColumnLen int) error {
 	if col.GetFlen() == 0 && (types.IsTypeChar(col.FieldType.GetType()) || types.IsTypeVarchar(col.FieldType.GetType())) {
 		if col.Hidden {
 			return errors.Trace(dbterror.ErrWrongKeyColumnFunctionalIndex.GenWithStackByArgs(col.GeneratedExprString))
@@ -130,7 +170,7 @@ func checkIndexColumn(col *model.ColumnInfo, indexColumnLen int) error {
 	}
 
 	// JSON column cannot index.
-	if col.FieldType.GetType() == mysql.TypeJSON {
+	if col.FieldType.GetType() == mysql.TypeJSON && !col.FieldType.IsArray() {
 		if col.Hidden {
 			return dbterror.ErrFunctionalIndexOnJSONOrGeometryFunction
 		}
@@ -175,8 +215,10 @@ func checkIndexColumn(col *model.ColumnInfo, indexColumnLen int) error {
 		indexColumnLen *= desc.Maxlen
 	}
 	// Specified length must be shorter than the max length for prefix.
-	if indexColumnLen > config.GetGlobalConfig().MaxIndexLength {
-		return dbterror.ErrTooLongKey.GenWithStackByArgs(config.GetGlobalConfig().MaxIndexLength)
+	maxIndexLength := config.GetGlobalConfig().MaxIndexLength
+	if indexColumnLen > maxIndexLength && (ctx == nil || ctx.GetSessionVars().StrictSQLMode) {
+		// return error in strict sql mode
+		return dbterror.ErrTooLongKey.GenWithStackByArgs(indexColumnLen, maxIndexLength)
 	}
 	return nil
 }
@@ -193,7 +235,7 @@ func getIndexColumnLength(col *model.ColumnInfo, colLen int) (int, error) {
 	switch col.GetType() {
 	case mysql.TypeBit:
 		return (length + 7) >> 3, nil
-	case mysql.TypeVarchar, mysql.TypeString, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeBlob, mysql.TypeLongBlob:
+	case mysql.TypeVarchar, mysql.TypeString, mysql.TypeVarString, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeBlob, mysql.TypeLongBlob:
 		// Different charsets occupy different numbers of bytes on each character.
 		desc, err := charset.GetCharsetInfo(col.GetCharset())
 		if err != nil {
@@ -221,12 +263,23 @@ func calcBytesLengthForDecimal(m int) int {
 	return (m / 9 * 4) + ((m%9)+1)/2
 }
 
-func buildIndexInfo(tblInfo *model.TableInfo, indexName model.CIStr, indexPartSpecifications []*ast.IndexPartSpecification, state model.SchemaState) (*model.IndexInfo, error) {
+// BuildIndexInfo builds a new IndexInfo according to the index information.
+func BuildIndexInfo(
+	ctx sessionctx.Context,
+	allTableColumns []*model.ColumnInfo,
+	indexName model.CIStr,
+	isPrimary bool,
+	isUnique bool,
+	isGlobal bool,
+	indexPartSpecifications []*ast.IndexPartSpecification,
+	indexOption *ast.IndexOption,
+	state model.SchemaState,
+) (*model.IndexInfo, error) {
 	if err := checkTooLongIndex(indexName); err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	idxColumns, err := buildIndexColumns(tblInfo.Columns, indexPartSpecifications)
+	idxColumns, mvIndex, err := buildIndexColumns(ctx, allTableColumns, indexPartSpecifications)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -236,11 +289,33 @@ func buildIndexInfo(tblInfo *model.TableInfo, indexName model.CIStr, indexPartSp
 		Name:    indexName,
 		Columns: idxColumns,
 		State:   state,
+		Primary: isPrimary,
+		Unique:  isUnique,
+		Global:  isGlobal,
+		MVIndex: mvIndex,
 	}
+
+	if indexOption != nil {
+		idxInfo.Comment = indexOption.Comment
+		if indexOption.Visibility == ast.IndexVisibilityInvisible {
+			idxInfo.Invisible = true
+		}
+		if indexOption.Tp == model.IndexTypeInvalid {
+			// Use btree as default index type.
+			idxInfo.Tp = model.IndexTypeBtree
+		} else {
+			idxInfo.Tp = indexOption.Tp
+		}
+	} else {
+		// Use btree as default index type.
+		idxInfo.Tp = model.IndexTypeBtree
+	}
+
 	return idxInfo, nil
 }
 
-func addIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
+// AddIndexColumnFlag aligns the column flags of columns in TableInfo to IndexInfo.
+func AddIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
 	if indexInfo.Primary {
 		for _, col := range indexInfo.Columns {
 			tblInfo.Columns[col.Offset].AddFlag(mysql.PriKeyFlag)
@@ -256,7 +331,8 @@ func addIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
 	}
 }
 
-func dropIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
+// DropIndexColumnFlag drops the column flag of columns in TableInfo according to the IndexInfo.
+func DropIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
 	if indexInfo.Primary {
 		for _, col := range indexInfo.Columns {
 			tblInfo.Columns[col.Offset].DelFlag(mysql.PriKeyFlag)
@@ -278,11 +354,12 @@ func dropIndexColumnFlag(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) {
 			continue
 		}
 
-		addIndexColumnFlag(tblInfo, index)
+		AddIndexColumnFlag(tblInfo, index)
 	}
 }
 
-func validateRenameIndex(from, to model.CIStr, tbl *model.TableInfo) (ignore bool, err error) {
+// ValidateRenameIndex checks if index name is ok to be renamed.
+func ValidateRenameIndex(from, to model.CIStr, tbl *model.TableInfo) (ignore bool, err error) {
 	if fromIdx := tbl.FindIndexByName(from.L); fromIdx == nil {
 		return false, errors.Trace(infoschema.ErrKeyNotExists.GenWithStackByArgs(from.O, tbl.Name))
 	}
@@ -308,8 +385,13 @@ func onRenameIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 		return ver, errors.Trace(dbterror.ErrOptOnCacheTable.GenWithStackByArgs("Rename Index"))
 	}
 
-	idx := tblInfo.FindIndexByName(from.L)
-	idx.Name = to
+	if job.MultiSchemaInfo != nil && job.MultiSchemaInfo.Revertible {
+		job.MarkNonRevertible()
+		// Store the mark and enter the next DDL handling loop.
+		return updateVersionAndTableInfoWithCheck(d, t, job, tblInfo, false)
+	}
+
+	renameIndexes(tblInfo, from, to)
 	if ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
@@ -318,11 +400,16 @@ func onRenameIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 	return ver, nil
 }
 
-func validateAlterIndexVisibility(indexName model.CIStr, invisible bool, tbl *model.TableInfo) (bool, error) {
-	if idx := tbl.FindIndexByName(indexName.L); idx == nil {
+func validateAlterIndexVisibility(ctx sessionctx.Context, indexName model.CIStr, invisible bool, tbl *model.TableInfo) (bool, error) {
+	var idx *model.IndexInfo
+	if idx = tbl.FindIndexByName(indexName.L); idx == nil || idx.State != model.StatePublic {
 		return false, errors.Trace(infoschema.ErrKeyNotExists.GenWithStackByArgs(indexName.O, tbl.Name))
-	} else if idx.Invisible == invisible {
-		return true, nil
+	}
+	if ctx == nil || ctx.GetSessionVars() == nil || ctx.GetSessionVars().StmtCtx.MultiSchemaInfo == nil {
+		// Early return.
+		if idx.Invisible == invisible {
+			return true, nil
+		}
 	}
 	return false, nil
 }
@@ -332,14 +419,27 @@ func onAlterIndexVisibility(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64,
 	if err != nil || tblInfo == nil {
 		return ver, errors.Trace(err)
 	}
-	idx := tblInfo.FindIndexByName(from.L)
-	idx.Invisible = invisible
+
+	if job.MultiSchemaInfo != nil && job.MultiSchemaInfo.Revertible {
+		job.MarkNonRevertible()
+		return updateVersionAndTableInfo(d, t, job, tblInfo, false)
+	}
+
+	setIndexVisibility(tblInfo, from, invisible)
 	if ver, err = updateVersionAndTableInfoWithCheck(d, t, job, tblInfo, true); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
 	return ver, nil
+}
+
+func setIndexVisibility(tblInfo *model.TableInfo, name model.CIStr, invisible bool) {
+	for _, idx := range tblInfo.Indices {
+		if idx.Name.L == name.L || (isTempIdxInfo(idx, tblInfo) && getChangingIndexOriginName(idx) == name.O) {
+			idx.Invisible = invisible
+		}
+	}
 }
 
 func getNullColInfos(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) ([]*model.ColumnInfo, error) {
@@ -353,7 +453,7 @@ func getNullColInfos(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) ([]*m
 	return nullCols, nil
 }
 
-func checkPrimaryKeyNotNull(d *ddlCtx, w *worker, sqlMode mysql.SQLMode, t *meta.Meta, job *model.Job,
+func checkPrimaryKeyNotNull(d *ddlCtx, w *worker, t *meta.Meta, job *model.Job,
 	tblInfo *model.TableInfo, indexInfo *model.IndexInfo) (warnings []string, err error) {
 	if !indexInfo.Primary {
 		return nil, nil
@@ -381,10 +481,31 @@ func checkPrimaryKeyNotNull(d *ddlCtx, w *worker, sqlMode mysql.SQLMode, t *meta
 	return nil, err
 }
 
-func updateHiddenColumns(tblInfo *model.TableInfo, idxInfo *model.IndexInfo, state model.SchemaState) {
+// moveAndUpdateHiddenColumnsToPublic updates the hidden columns to public, and
+// moves the hidden columns to proper offsets, so that Table.Columns' states meet the assumption of
+// [public, public, ..., public, non-public, non-public, ..., non-public].
+func moveAndUpdateHiddenColumnsToPublic(tblInfo *model.TableInfo, idxInfo *model.IndexInfo) {
+	hiddenColOffset := make(map[int]struct{}, 0)
 	for _, col := range idxInfo.Columns {
 		if tblInfo.Columns[col.Offset].Hidden {
-			tblInfo.Columns[col.Offset].State = state
+			hiddenColOffset[col.Offset] = struct{}{}
+		}
+	}
+	if len(hiddenColOffset) == 0 {
+		return
+	}
+	// Find the first non-public column.
+	firstNonPublicPos := len(tblInfo.Columns) - 1
+	for i, c := range tblInfo.Columns {
+		if c.State != model.StatePublic {
+			firstNonPublicPos = i
+			break
+		}
+	}
+	for _, col := range idxInfo.Columns {
+		tblInfo.Columns[col.Offset].State = model.StatePublic
+		if _, needMove := hiddenColOffset[col.Offset]; needMove {
+			tblInfo.MoveColumnInfo(col.Offset, firstNonPublicPos)
 		}
 	}
 }
@@ -454,50 +575,36 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 
 	if indexInfo == nil {
 		if len(hiddenCols) > 0 {
-			pos := &ast.ColumnPosition{Tp: ast.ColumnPositionNone}
 			for _, hiddenCol := range hiddenCols {
-				_, _, _, err = createColumnInfo(tblInfo, hiddenCol, pos)
-				if err != nil {
-					job.State = model.JobStateCancelled
-					return ver, errors.Trace(err)
-				}
+				InitAndAddColumnToTable(tblInfo, hiddenCol)
 			}
 		}
 		if err = checkAddColumnTooManyColumns(len(tblInfo.Columns)); err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
-		indexInfo, err = buildIndexInfo(tblInfo, indexName, indexPartSpecifications, model.StateNone)
+		indexInfo, err = BuildIndexInfo(
+			nil,
+			tblInfo.Columns,
+			indexName,
+			isPK,
+			unique,
+			global,
+			indexPartSpecifications,
+			indexOption,
+			model.StateNone,
+		)
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
-		if indexOption != nil {
-			indexInfo.Comment = indexOption.Comment
-			if indexOption.Visibility == ast.IndexVisibilityInvisible {
-				indexInfo.Invisible = true
-			}
-			if indexOption.Tp == model.IndexTypeInvalid {
-				// Use btree as default index type.
-				indexInfo.Tp = model.IndexTypeBtree
-			} else {
-				indexInfo.Tp = indexOption.Tp
-			}
-		} else {
-			// Use btree as default index type.
-			indexInfo.Tp = model.IndexTypeBtree
-		}
-		indexInfo.Primary = false
 		if isPK {
-			if _, err = checkPKOnGeneratedColumn(tblInfo, indexPartSpecifications); err != nil {
+			if _, err = CheckPKOnGeneratedColumn(tblInfo, indexPartSpecifications); err != nil {
 				job.State = model.JobStateCancelled
 				return ver, err
 			}
-			indexInfo.Primary = true
 		}
-		indexInfo.Unique = unique
-		indexInfo.Global = global
-		indexInfo.ID = allocateIndexID(tblInfo)
+		indexInfo.ID = AllocateIndexID(tblInfo)
 		tblInfo.Indices = append(tblInfo.Indices, indexInfo)
 		if err = checkTooManyIndexes(tblInfo.Indices); err != nil {
 			job.State = model.JobStateCancelled
@@ -516,18 +623,30 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 	switch indexInfo.State {
 	case model.StateNone:
 		// none -> delete only
+		var reorgTp model.ReorgType
+		reorgTp, err = pickBackfillType(w.ctx, job, indexInfo.Unique, d)
+		if err != nil {
+			if !errorIsRetryable(err, job) {
+				job.State = model.JobStateCancelled
+			}
+			return ver, err
+		}
+		if reorgTp.NeedMergeProcess() {
+			// Increase telemetryAddIndexIngestUsage
+			telemetryAddIndexIngestUsage.Inc()
+			indexInfo.BackfillState = model.BackfillStateRunning
+		}
 		indexInfo.State = model.StateDeleteOnly
-		updateHiddenColumns(tblInfo, indexInfo, model.StatePublic)
+		moveAndUpdateHiddenColumnsToPublic(tblInfo, indexInfo)
 		ver, err = updateVersionAndTableInfoWithCheck(d, t, job, tblInfo, originalState != indexInfo.State)
 		if err != nil {
 			return ver, err
 		}
 		job.SchemaState = model.StateDeleteOnly
-		metrics.GetBackfillProgressByLabel(metrics.LblAddIndex).Set(0)
 	case model.StateDeleteOnly:
 		// delete only -> write only
 		indexInfo.State = model.StateWriteOnly
-		_, err = checkPrimaryKeyNotNull(d, w, sqlMode, t, job, tblInfo, indexInfo)
+		_, err = checkPrimaryKeyNotNull(d, w, t, job, tblInfo, indexInfo)
 		if err != nil {
 			break
 		}
@@ -539,7 +658,7 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 	case model.StateWriteOnly:
 		// write only -> reorganization
 		indexInfo.State = model.StateWriteReorganization
-		_, err = checkPrimaryKeyNotNull(d, w, sqlMode, t, job, tblInfo, indexInfo)
+		_, err = checkPrimaryKeyNotNull(d, w, t, job, tblInfo, indexInfo)
 		if err != nil {
 			break
 		}
@@ -552,31 +671,42 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 		job.SchemaState = model.StateWriteReorganization
 	case model.StateWriteReorganization:
 		// reorganization -> public
-		tbl, err := getTable(d.store, schemaID, tblInfo)
+		tbl, err := getTable((*asAutoIDRequirement)(d), schemaID, tblInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
 
 		var done bool
-		done, ver, err = doReorgWorkForCreateIndex(w, d, t, job, tbl, indexInfo)
+		if job.MultiSchemaInfo != nil {
+			done, ver, err = doReorgWorkForCreateIndexMultiSchema(w, d, t, job, tbl, indexInfo)
+		} else {
+			done, ver, err = doReorgWorkForCreateIndex(w, d, t, job, tbl, indexInfo)
+		}
 		if !done {
 			return ver, err
 		}
 
-		indexInfo.State = model.StatePublic
 		// Set column index flag.
-		addIndexColumnFlag(tblInfo, indexInfo)
+		AddIndexColumnFlag(tblInfo, indexInfo)
 		if isPK {
-			if err = updateColsNull2NotNull(tblInfo, indexInfo); err != nil {
+			if err = UpdateColsNull2NotNull(tblInfo, indexInfo); err != nil {
 				return ver, errors.Trace(err)
 			}
 		}
+		indexInfo.State = model.StatePublic
 		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != indexInfo.State)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
+		job.Args = []interface{}{indexInfo.ID, false /*if exists*/, getPartitionIDs(tbl.Meta())}
 		// Finish this job.
 		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tblInfo)
+		if !job.ReorgMeta.IsDistReorg && job.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
+			ingest.LitBackCtxMgr.Unregister(job.ID)
+		}
+		logutil.BgLogger().Info("[ddl] run add index job done",
+			zap.String("charset", job.Charset),
+			zap.String("collation", job.Collate))
 	default:
 		err = dbterror.ErrInvalidDDLState.GenWithStackByArgs("index", tblInfo.State)
 	}
@@ -584,58 +714,363 @@ func (w *worker) onCreateIndex(d *ddlCtx, t *meta.Meta, job *model.Job, isPK boo
 	return ver, errors.Trace(err)
 }
 
+// pickBackfillType determines which backfill process will be used.
+func pickBackfillType(ctx context.Context, job *model.Job, unique bool, d *ddlCtx) (model.ReorgType, error) {
+	if job.ReorgMeta.ReorgTp != model.ReorgTypeNone {
+		// The backfill task has been started.
+		// Don't change the backfill type.
+		return job.ReorgMeta.ReorgTp, nil
+	}
+	if !IsEnableFastReorg() {
+		job.ReorgMeta.ReorgTp = model.ReorgTypeTxn
+		return model.ReorgTypeTxn, nil
+	}
+	if ingest.LitInitialized {
+		available, err := ingest.LitBackCtxMgr.CheckAvailable()
+		if err != nil {
+			return model.ReorgTypeNone, err
+		}
+		if available {
+			err = cleanupSortPath(job.ID)
+			if err != nil {
+				return model.ReorgTypeNone, err
+			}
+			if variable.EnableDistTask.Load() {
+				_, err = ingest.LitBackCtxMgr.Register(ctx, unique, job.ID, d.etcdCli)
+			} else {
+				_, err = ingest.LitBackCtxMgr.Register(ctx, unique, job.ID, nil)
+			}
+			if err != nil {
+				return model.ReorgTypeNone, err
+			}
+			job.ReorgMeta.ReorgTp = model.ReorgTypeLitMerge
+			if variable.EnableDistTask.Load() {
+				job.ReorgMeta.IsDistReorg = true
+			}
+			return model.ReorgTypeLitMerge, nil
+		}
+	}
+	// The lightning environment is unavailable, but we can still use the txn-merge backfill.
+	logutil.BgLogger().Info("[ddl] fallback to txn-merge backfill process",
+		zap.Bool("lightning env initialized", ingest.LitInitialized))
+	job.ReorgMeta.ReorgTp = model.ReorgTypeTxnMerge
+	return model.ReorgTypeTxnMerge, nil
+}
+
+// cleanupSortPath is used to clean up the temp data of the previous jobs.
+// Because we don't remove all the files after the support of checkpoint,
+// there maybe some stale files in the sort path if TiDB is killed during the backfill process.
+func cleanupSortPath(currentJobID int64) error {
+	sortPath := ingest.ConfigSortPath()
+	err := os.MkdirAll(sortPath, 0700)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	entries, err := os.ReadDir(sortPath)
+	if err != nil {
+		logutil.BgLogger().Warn("[ddl-ingest] cannot read sort path", zap.Error(err))
+		return errors.Trace(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		jobID, err := ingest.DecodeBackendTag(entry.Name())
+		if err != nil {
+			logutil.BgLogger().Warn("[ddl-ingest] cannot cleanup sort path", zap.Error(err))
+			continue
+		}
+		if _, ok := ingest.LitBackCtxMgr.Load(jobID); ok {
+			// The job is still running, skip it.
+			logutil.BgLogger().Warn("[ddl-ingest] the job is still running, skip removing it",
+				zap.Int64("running job ID", jobID))
+			continue
+		}
+		// Remove all the temp data of the previous done jobs.
+		if jobID < currentJobID {
+			logutil.BgLogger().Info("[ddl-ingest] remove stale temp index data",
+				zap.Int64("jobID", jobID), zap.Int64("currentJobID", currentJobID))
+			err := os.RemoveAll(filepath.Join(sortPath, entry.Name()))
+			if err != nil {
+				logutil.BgLogger().Warn("[ddl-ingest] cannot cleanup sort path", zap.Error(err))
+				return nil
+			}
+		}
+	}
+	return nil
+}
+
+// IngestJobsNotExisted checks the ddl about `add index` with ingest method not existed.
+func IngestJobsNotExisted(ctx sessionctx.Context) bool {
+	se := sess.NewSession(ctx)
+	template := "select job_meta from mysql.tidb_ddl_job where reorg and (type = %d or type = %d) and processing;"
+	sql := fmt.Sprintf(template, model.ActionAddIndex, model.ActionAddPrimaryKey)
+	rows, err := se.Execute(context.Background(), sql, "check-pitr")
+	if err != nil {
+		logutil.BgLogger().Warn("cannot check ingest job", zap.Error(err))
+		return false
+	}
+	for _, row := range rows {
+		jobBinary := row.GetBytes(0)
+		runJob := model.Job{}
+		err := runJob.Decode(jobBinary)
+		if err != nil {
+			logutil.BgLogger().Warn("cannot check ingest job", zap.Error(err))
+			return false
+		}
+		// Check whether this add index job is using lightning to do the backfill work.
+		if runJob.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
+			return false
+		}
+	}
+	return true
+}
+
+func doReorgWorkForCreateIndexMultiSchema(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	if job.MultiSchemaInfo.Revertible {
+		done, ver, err = doReorgWorkForCreateIndex(w, d, t, job, tbl, indexInfo)
+		if done {
+			job.MarkNonRevertible()
+			if err == nil {
+				ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+			}
+		}
+		// We need another round to wait for all the others sub-jobs to finish.
+		return false, ver, err
+	}
+	return true, ver, err
+}
+
 func doReorgWorkForCreateIndex(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
 	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	var reorgTp model.ReorgType
+	reorgTp, err = pickBackfillType(w.ctx, job, indexInfo.Unique, d)
+	if err != nil {
+		return false, ver, err
+	}
+	if !reorgTp.NeedMergeProcess() {
+		return runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+	}
+	switch indexInfo.BackfillState {
+	case model.BackfillStateRunning:
+		logutil.BgLogger().Info("[ddl] index backfill state running",
+			zap.Int64("job ID", job.ID), zap.String("table", tbl.Meta().Name.O),
+			zap.Bool("ingest mode", reorgTp == model.ReorgTypeLitMerge),
+			zap.String("index", indexInfo.Name.O))
+		switch reorgTp {
+		case model.ReorgTypeLitMerge:
+			if job.ReorgMeta.IsDistReorg {
+				done, ver, err = runIngestReorgJobDist(w, d, t, job, tbl, indexInfo)
+			} else {
+				done, ver, err = runIngestReorgJob(w, d, t, job, tbl, indexInfo)
+			}
+		case model.ReorgTypeTxnMerge:
+			done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+		}
+		if err != nil || !done {
+			return false, ver, errors.Trace(err)
+		}
+		indexInfo.BackfillState = model.BackfillStateReadyToMerge
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateReadyToMerge:
+		logutil.BgLogger().Info("[ddl] index backfill state ready to merge", zap.Int64("job ID", job.ID),
+			zap.String("table", tbl.Meta().Name.O), zap.String("index", indexInfo.Name.O))
+		indexInfo.BackfillState = model.BackfillStateMerging
+		if reorgTp == model.ReorgTypeLitMerge {
+			ingest.LitBackCtxMgr.Unregister(job.ID)
+		}
+		job.SnapshotVer = 0 // Reset the snapshot version for merge index reorg.
+		ver, err = updateVersionAndTableInfo(d, t, job, tbl.Meta(), true)
+		return false, ver, errors.Trace(err)
+	case model.BackfillStateMerging:
+		done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, true)
+		if !done {
+			return false, ver, err
+		}
+		indexInfo.BackfillState = model.BackfillStateInapplicable // Prevent double-write on this index.
+		return true, ver, err
+	default:
+		return false, 0, dbterror.ErrInvalidDDLState.GenWithStackByArgs("backfill", indexInfo.BackfillState)
+	}
+}
+
+func runIngestReorgJobDist(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+	if err != nil {
+		return false, ver, errors.Trace(err)
+	}
+
+	if !done {
+		return false, ver, nil
+	}
+
+	return true, ver, nil
+}
+
+func runIngestReorgJob(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo) (done bool, ver int64, err error) {
+	bc, ok := ingest.LitBackCtxMgr.Load(job.ID)
+	if ok && bc.Done() {
+		return true, 0, nil
+	}
+	bc, err = ingest.LitBackCtxMgr.Register(w.ctx, indexInfo.Unique, job.ID, nil)
+	if err != nil {
+		ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
+		return false, ver, errors.Trace(err)
+	}
+	done, ver, err = runReorgJobAndHandleErr(w, d, t, job, tbl, indexInfo, false)
+	if err != nil {
+		if !errorIsRetryable(err, job) {
+			logutil.BgLogger().Warn("[ddl] run reorg job failed, convert job to rollback",
+				zap.String("job", job.String()), zap.Error(err))
+			ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
+		}
+		return false, ver, errors.Trace(err)
+	}
+	if !done {
+		return false, ver, nil
+	}
+	err = bc.FinishImport(indexInfo.ID, indexInfo.Unique, tbl)
+	if err != nil {
+		if common.ErrFoundDuplicateKeys.Equal(err) {
+			err = convertToKeyExistsErr(err, indexInfo, tbl.Meta())
+		}
+		if kv.ErrKeyExists.Equal(err) {
+			logutil.BgLogger().Warn("[ddl] import index duplicate key, convert job to rollback", zap.String("job", job.String()), zap.Error(err))
+			ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
+		} else {
+			logutil.BgLogger().Warn("[ddl] lightning import error", zap.Error(err))
+			if !errorIsRetryable(err, job) {
+				ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
+			}
+		}
+		return false, ver, errors.Trace(err)
+	}
+	bc.SetDone()
+	return true, ver, nil
+}
+
+func errorIsRetryable(err error, job *model.Job) bool {
+	if job.ErrorCount+1 >= variable.GetDDLErrorCountLimit() {
+		return false
+	}
+	originErr := errors.Cause(err)
+	if tErr, ok := originErr.(*terror.Error); ok {
+		sqlErr := terror.ToSQLError(tErr)
+		_, ok := dbterror.ReorgRetryableErrCodes[sqlErr.Code]
+		return ok
+	}
+	// For the unknown errors, we should retry.
+	return true
+}
+
+func convertToKeyExistsErr(originErr error, idxInfo *model.IndexInfo, tblInfo *model.TableInfo) error {
+	tErr, ok := errors.Cause(originErr).(*terror.Error)
+	if !ok {
+		return originErr
+	}
+	if len(tErr.Args()) != 2 {
+		return originErr
+	}
+	key, keyIsByte := tErr.Args()[0].([]byte)
+	value, valIsByte := tErr.Args()[1].([]byte)
+	if !keyIsByte || !valIsByte {
+		return originErr
+	}
+	return genKeyExistsErr(key, value, idxInfo, tblInfo)
+}
+
+func runReorgJobAndHandleErr(w *worker, d *ddlCtx, t *meta.Meta, job *model.Job,
+	tbl table.Table, indexInfo *model.IndexInfo, mergingTmpIdx bool) (done bool, ver int64, err error) {
 	elements := []*meta.Element{{ID: indexInfo.ID, TypeKey: meta.IndexElementKey}}
-	reorgInfo, err := getReorgInfo(w.JobContext, d, t, job, tbl, elements)
-	if err != nil || reorgInfo.first {
+
+	failpoint.Inject("mockDMLExecutionStateMerging", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		if val.(bool) && indexInfo.BackfillState == model.BackfillStateMerging &&
+			MockDMLExecutionStateMerging != nil {
+			MockDMLExecutionStateMerging()
+		}
+	})
+
+	sctx, err1 := w.sessPool.Get()
+	if err1 != nil {
+		err = err1
+		return
+	}
+	defer w.sessPool.Put(sctx)
+	rh := newReorgHandler(sess.NewSession(sctx))
+	dbInfo, err := t.GetDatabase(job.SchemaID)
+	if err != nil {
+		return false, ver, errors.Trace(err)
+	}
+	reorgInfo, err := getReorgInfo(d.jobContext(job.ID), d, rh, job, dbInfo, tbl, elements, mergingTmpIdx)
+	if err != nil || reorgInfo == nil || reorgInfo.first {
 		// If we run reorg firstly, we should update the job snapshot version
 		// and then run the reorg next time.
 		return false, ver, errors.Trace(err)
 	}
-
-	err = w.runReorgJob(t, reorgInfo, tbl.Meta(), d.lease, func() (addIndexErr error) {
+	err = overwriteReorgInfoFromGlobalCheckpoint(w, rh.s, job, reorgInfo)
+	if err != nil {
+		return false, ver, errors.Trace(err)
+	}
+	err = w.runReorgJob(rh, reorgInfo, tbl.Meta(), d.lease, func() (addIndexErr error) {
 		defer util.Recover(metrics.LabelDDL, "onCreateIndex",
 			func() {
 				addIndexErr = dbterror.ErrCancelledDDLJob.GenWithStack("add table `%v` index `%v` panic", tbl.Meta().Name, indexInfo.Name)
 			}, false)
-		return w.addTableIndex(tbl, indexInfo, reorgInfo)
+		return w.addTableIndex(tbl, reorgInfo)
 	})
 	if err != nil {
+		if dbterror.ErrPausedDDLJob.Equal(err) {
+			return false, ver, nil
+		}
 		if dbterror.ErrWaitReorgTimeout.Equal(err) {
 			// if timeout, we should return, check for the owner and re-wait job done.
 			return false, ver, nil
 		}
-		if kv.ErrKeyExists.Equal(err) || dbterror.ErrCancelledDDLJob.Equal(err) || dbterror.ErrCantDecodeRecord.Equal(err) {
+		if common.ErrFoundDuplicateKeys.Equal(err) {
+			err = convertToKeyExistsErr(err, indexInfo, tbl.Meta())
+		}
+		if !errorIsRetryable(err, job) ||
+			// TODO: Remove this check make it can be retry. Related test is TestModifyColumnReorgInfo.
+			job.ReorgMeta.IsDistReorg {
 			logutil.BgLogger().Warn("[ddl] run add index job failed, convert job to rollback", zap.String("job", job.String()), zap.Error(err))
 			ver, err = convertAddIdxJob2RollbackJob(d, t, job, tbl.Meta(), indexInfo, err)
-			if err1 := t.RemoveDDLReorgHandle(job, reorgInfo.elements); err1 != nil {
+			if err1 := rh.RemoveDDLReorgHandle(job, reorgInfo.elements); err1 != nil {
 				logutil.BgLogger().Warn("[ddl] run add index job failed, convert job to rollback, RemoveDDLReorgHandle failed", zap.String("job", job.String()), zap.Error(err1))
 			}
 		}
-		// Clean up the channel of notifyCancelReorgJob. Make sure it can't affect other jobs.
-		w.reorgCtx.cleanNotifyReorgCancel()
 		return false, ver, errors.Trace(err)
 	}
-	// Clean up the channel of notifyCancelReorgJob. Make sure it can't affect other jobs.
-	w.reorgCtx.cleanNotifyReorgCancel()
-	return true, ver, errors.Trace(err)
+	failpoint.Inject("mockDMLExecutionStateBeforeImport", func(_ failpoint.Value) {
+		if MockDMLExecutionStateBeforeImport != nil {
+			MockDMLExecutionStateBeforeImport()
+		}
+	})
+	return true, ver, nil
 }
 
 func onDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
-	tblInfo, indexInfo, err := checkDropIndex(t, job)
+	tblInfo, indexInfo, ifExists, err := checkDropIndex(d, t, job)
 	if err != nil {
+		if ifExists && dbterror.ErrCantDropFieldOrKey.Equal(err) {
+			job.Warning = toTError(err)
+			job.State = model.JobStateDone
+			return ver, nil
+		}
 		return ver, errors.Trace(err)
 	}
 	if tblInfo.TableCacheStatusType != model.TableCacheStatusDisable {
 		return ver, errors.Trace(dbterror.ErrOptOnCacheTable.GenWithStackByArgs("Drop Index"))
 	}
 
-	dependentHiddenCols := make([]*model.ColumnInfo, 0)
-	for _, indexColumn := range indexInfo.Columns {
-		if tblInfo.Columns[indexColumn.Offset].Hidden {
-			dependentHiddenCols = append(dependentHiddenCols, tblInfo.Columns[indexColumn.Offset])
-		}
+	if job.MultiSchemaInfo != nil && !job.IsRollingback() && job.MultiSchemaInfo.Revertible {
+		job.MarkNonRevertible()
+		job.SchemaState = indexInfo.State
+		return updateVersionAndTableInfo(d, t, job, tblInfo, false)
 	}
 
 	originalState := indexInfo.State
@@ -664,25 +1099,13 @@ func onDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	case model.StateDeleteReorganization:
 		// reorganization -> absent
 		indexInfo.State = model.StateNone
-		if len(dependentHiddenCols) > 0 {
-			firstHiddenOffset := dependentHiddenCols[0].Offset
-			for i := 0; i < len(dependentHiddenCols); i++ {
-				// Set this column's offset to the last and reset all following columns' offsets.
-				adjustColumnInfoInDropColumn(tblInfo, firstHiddenOffset)
-			}
-		}
-		newIndices := make([]*model.IndexInfo, 0, len(tblInfo.Indices))
-		for _, idx := range tblInfo.Indices {
-			if idx.Name.L != indexInfo.Name.L {
-				newIndices = append(newIndices, idx)
-			}
-		}
-		tblInfo.Indices = newIndices
 		// Set column index flag.
-		dropIndexColumnFlag(tblInfo, indexInfo)
+		DropIndexColumnFlag(tblInfo, indexInfo)
+		RemoveDependentHiddenColumns(tblInfo, indexInfo)
+		removeIndexInfo(tblInfo, indexInfo)
 
-		tblInfo.Columns = tblInfo.Columns[:len(tblInfo.Columns)-len(dependentHiddenCols)]
 		failpoint.Inject("mockExceedErrorLimit", func(val failpoint.Value) {
+			//nolint:forcetypeassert
 			if val.(bool) {
 				panic("panic test in cancelling add index")
 			}
@@ -697,11 +1120,17 @@ func onDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 		if job.IsRollingback() {
 			job.FinishTableJob(model.JobStateRollbackDone, model.StateNone, ver, tblInfo)
 			job.Args[0] = indexInfo.ID
+		} else {
 			// the partition ids were append by convertAddIdxJob2RollbackJob, it is weird, but for the compatibility,
 			// we should keep appending the partitions in the convertAddIdxJob2RollbackJob.
-		} else {
 			job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
-			job.Args = append(job.Args, indexInfo.ID, getPartitionIDs(tblInfo))
+			// Global index key has t{tableID}_ prefix.
+			// Assign partitionIDs empty to guarantee correct prefix in insertJobIntoDeleteRangeTable.
+			if indexInfo.Global {
+				job.Args = append(job.Args, indexInfo.ID, []int64{})
+			} else {
+				job.Args = append(job.Args, indexInfo.ID, getPartitionIDs(tblInfo))
+			}
 		}
 	default:
 		return ver, errors.Trace(dbterror.ErrInvalidDDLState.GenWithStackByArgs("index", indexInfo.State))
@@ -710,197 +1139,73 @@ func onDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	return ver, errors.Trace(err)
 }
 
-func checkDropIndex(t *meta.Meta, job *model.Job) (*model.TableInfo, *model.IndexInfo, error) {
+// RemoveDependentHiddenColumns removes hidden columns by the indexInfo.
+func RemoveDependentHiddenColumns(tblInfo *model.TableInfo, idxInfo *model.IndexInfo) {
+	hiddenColOffs := make([]int, 0)
+	for _, indexColumn := range idxInfo.Columns {
+		col := tblInfo.Columns[indexColumn.Offset]
+		if col.Hidden {
+			hiddenColOffs = append(hiddenColOffs, col.Offset)
+		}
+	}
+	// Sort the offset in descending order.
+	slices.SortFunc(hiddenColOffs, func(a, b int) bool { return a > b })
+	// Move all the dependent hidden columns to the end.
+	endOffset := len(tblInfo.Columns) - 1
+	for _, offset := range hiddenColOffs {
+		tblInfo.MoveColumnInfo(offset, endOffset)
+	}
+	tblInfo.Columns = tblInfo.Columns[:len(tblInfo.Columns)-len(hiddenColOffs)]
+}
+
+func removeIndexInfo(tblInfo *model.TableInfo, idxInfo *model.IndexInfo) {
+	indices := tblInfo.Indices
+	offset := -1
+	for i, idx := range indices {
+		if idxInfo.ID == idx.ID {
+			offset = i
+			break
+		}
+	}
+	if offset == -1 {
+		// The target index has been removed.
+		return
+	}
+	// Remove the target index.
+	tblInfo.Indices = append(tblInfo.Indices[:offset], tblInfo.Indices[offset+1:]...)
+}
+
+func checkDropIndex(d *ddlCtx, t *meta.Meta, job *model.Job) (*model.TableInfo, *model.IndexInfo, bool /* ifExists */, error) {
 	schemaID := job.SchemaID
 	tblInfo, err := GetTableInfoAndCancelFaultJob(t, job, schemaID)
 	if err != nil {
-		return nil, nil, errors.Trace(err)
+		return nil, nil, false, errors.Trace(err)
 	}
 
 	var indexName model.CIStr
-	if err = job.DecodeArgs(&indexName); err != nil {
+	var ifExists bool
+	if err = job.DecodeArgs(&indexName, &ifExists); err != nil {
 		job.State = model.JobStateCancelled
-		return nil, nil, errors.Trace(err)
+		return nil, nil, false, errors.Trace(err)
 	}
 
 	indexInfo := tblInfo.FindIndexByName(indexName.L)
 	if indexInfo == nil {
 		job.State = model.JobStateCancelled
-		return nil, nil, dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)
-	}
-
-	// Double check for drop index on auto_increment column.
-	err = checkDropIndexOnAutoIncrementColumn(tblInfo, indexInfo)
-	if err != nil {
-		job.State = model.JobStateCancelled
-		return nil, nil, autoid.ErrWrongAutoKey
+		return nil, nil, ifExists, dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)
 	}
 
 	// Check that drop primary index will not cause invisible implicit primary index.
 	if err := checkInvisibleIndexesOnPK(tblInfo, []*model.IndexInfo{indexInfo}, job); err != nil {
-		return nil, nil, errors.Trace(err)
-	}
-
-	return tblInfo, indexInfo, nil
-}
-
-func onDropIndexes(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
-	tblInfo, indexNames, ifExists, err := getSchemaInfos(t, job)
-	if err != nil {
-		return ver, errors.Trace(err)
-	}
-	if tblInfo.TableCacheStatusType != model.TableCacheStatusDisable {
-		return ver, errors.Trace(dbterror.ErrOptOnCacheTable.GenWithStackByArgs("Drop Indexes"))
-	}
-
-	indexInfos, err := checkDropIndexes(tblInfo, job, indexNames, ifExists)
-	if err != nil {
-		return ver, errors.Trace(err)
-	}
-
-	if len(indexInfos) == 0 {
 		job.State = model.JobStateCancelled
-		return ver, nil
+		return nil, nil, false, errors.Trace(err)
 	}
 
-	dependentHiddenCols := make([]*model.ColumnInfo, 0)
-	for _, indexInfo := range indexInfos {
-		for _, indexColumn := range indexInfo.Columns {
-			if tblInfo.Columns[indexColumn.Offset].Hidden {
-				dependentHiddenCols = append(dependentHiddenCols, tblInfo.Columns[indexColumn.Offset])
-			}
-		}
+	// Double check for drop index needed in foreign key.
+	if err := checkIndexNeededInForeignKeyInOwner(d, t, job, job.SchemaName, tblInfo, indexInfo); err != nil {
+		return nil, nil, false, errors.Trace(err)
 	}
-
-	originalState := indexInfos[0].State
-	switch indexInfos[0].State {
-	case model.StatePublic:
-		// public -> write only
-		setIndicesState(indexInfos, model.StateWriteOnly)
-		setColumnsState(dependentHiddenCols, model.StateWriteOnly)
-		for _, colInfo := range dependentHiddenCols {
-			adjustColumnInfoInDropColumn(tblInfo, colInfo.Offset)
-		}
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != indexInfos[0].State)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		job.SchemaState = model.StateWriteOnly
-	case model.StateWriteOnly:
-		// write only -> delete only
-		setIndicesState(indexInfos, model.StateDeleteOnly)
-		setColumnsState(dependentHiddenCols, model.StateDeleteOnly)
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != indexInfos[0].State)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		job.SchemaState = model.StateDeleteOnly
-	case model.StateDeleteOnly:
-		// delete only -> reorganization
-		setIndicesState(indexInfos, model.StateDeleteReorganization)
-		setColumnsState(dependentHiddenCols, model.StateDeleteReorganization)
-		ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != indexInfos[0].State)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-		job.SchemaState = model.StateDeleteReorganization
-	case model.StateDeleteReorganization:
-		// reorganization -> absent
-		indexIDs := make([]int64, 0, len(indexInfos))
-		indexNames := make(map[string]bool, len(indexInfos))
-		for _, indexInfo := range indexInfos {
-			indexNames[indexInfo.Name.L] = true
-			indexIDs = append(indexIDs, indexInfo.ID)
-		}
-
-		newIndices := make([]*model.IndexInfo, 0, len(tblInfo.Indices))
-		for _, idx := range tblInfo.Indices {
-			if _, ok := indexNames[idx.Name.L]; !ok {
-				newIndices = append(newIndices, idx)
-			}
-		}
-		tblInfo.Indices = newIndices
-
-		// Set column index flag.
-		for _, indexInfo := range indexInfos {
-			dropIndexColumnFlag(tblInfo, indexInfo)
-		}
-
-		tblInfo.Columns = tblInfo.Columns[:len(tblInfo.Columns)-len(dependentHiddenCols)]
-
-		ver, err = updateVersionAndTableInfoWithCheck(d, t, job, tblInfo, originalState != model.StateNone)
-		if err != nil {
-			return ver, errors.Trace(err)
-		}
-
-		job.FinishTableJob(model.JobStateDone, model.StateNone, ver, tblInfo)
-		job.Args = append(job.Args, indexIDs, getPartitionIDs(tblInfo))
-	default:
-		err = dbterror.ErrInvalidDDLState.GenWithStackByArgs("index", indexInfos[0].State)
-	}
-
-	return ver, errors.Trace(err)
-}
-
-func getSchemaInfos(t *meta.Meta, job *model.Job) (*model.TableInfo, []model.CIStr, []bool, error) {
-	schemaID := job.SchemaID
-	tblInfo, err := GetTableInfoAndCancelFaultJob(t, job, schemaID)
-	if err != nil {
-		return nil, nil, nil, errors.Trace(err)
-	}
-
-	var indexNames []model.CIStr
-	var ifExists []bool
-	if err = job.DecodeArgs(&indexNames, &ifExists); err != nil {
-		return nil, nil, nil, errors.Trace(err)
-	}
-
-	return tblInfo, indexNames, ifExists, nil
-}
-
-func checkDropIndexes(tblInfo *model.TableInfo, job *model.Job, indexNames []model.CIStr, ifExists []bool) ([]*model.IndexInfo, error) {
-	var warnings []*errors.Error
-	indexInfos := make([]*model.IndexInfo, 0, len(indexNames))
-	UniqueIndexNames := make(map[model.CIStr]bool, len(indexNames))
-	for i, indexName := range indexNames {
-		// Double check the index is exists.
-		indexInfo := tblInfo.FindIndexByName(indexName.L)
-		if indexInfo == nil {
-			if ifExists[i] {
-				warnings = append(warnings, toTError(dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)))
-				continue
-			}
-			job.State = model.JobStateCancelled
-			return nil, dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)
-		}
-
-		// Double check for drop index on auto_increment column.
-		if err := checkDropIndexOnAutoIncrementColumn(tblInfo, indexInfo); err != nil {
-			job.State = model.JobStateCancelled
-			return nil, autoid.ErrWrongAutoKey
-		}
-
-		// Check for dropping duplicate indexes.
-		if UniqueIndexNames[indexName] {
-			if !ifExists[i] {
-				job.State = model.JobStateCancelled
-				return nil, dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)
-			}
-			warnings = append(warnings, toTError(dbterror.ErrCantDropFieldOrKey.GenWithStack("index %s doesn't exist", indexName)))
-		}
-		UniqueIndexNames[indexName] = true
-
-		indexInfos = append(indexInfos, indexInfo)
-	}
-
-	// Check that drop primary index will not cause invisible implicit primary index.
-	if err := checkInvisibleIndexesOnPK(tblInfo, indexInfos, job); err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	job.MultiSchemaInfo = &model.MultiSchemaInfo{Warnings: warnings}
-
-	return indexInfos, nil
+	return tblInfo, indexInfo, false, nil
 }
 
 func checkInvisibleIndexesOnPK(tblInfo *model.TableInfo, indexInfos []*model.IndexInfo, job *model.Job) error {
@@ -927,33 +1232,6 @@ func checkInvisibleIndexesOnPK(tblInfo *model.TableInfo, indexInfos []*model.Ind
 	return nil
 }
 
-func checkDropIndexOnAutoIncrementColumn(tblInfo *model.TableInfo, indexInfo *model.IndexInfo) error {
-	cols := tblInfo.Columns
-	for _, idxCol := range indexInfo.Columns {
-		flag := cols[idxCol.Offset].GetFlag()
-		if !mysql.HasAutoIncrementFlag(flag) {
-			continue
-		}
-		// check the count of index on auto_increment column.
-		count := 0
-		for _, idx := range tblInfo.Indices {
-			for _, c := range idx.Columns {
-				if c.Name.L == idxCol.Name.L {
-					count++
-					break
-				}
-			}
-		}
-		if tblInfo.PKIsHandle && mysql.HasPriKeyFlag(flag) {
-			count++
-		}
-		if count < 2 {
-			return autoid.ErrWrongAutoKey
-		}
-	}
-	return nil
-}
-
 func checkRenameIndex(t *meta.Meta, job *model.Job) (*model.TableInfo, model.CIStr, model.CIStr, error) {
 	var from, to model.CIStr
 	schemaID := job.SchemaID
@@ -968,7 +1246,7 @@ func checkRenameIndex(t *meta.Meta, job *model.Job) (*model.TableInfo, model.CIS
 	}
 
 	// Double check. See function `RenameIndex` in ddl_api.go
-	duplicate, err := validateRenameIndex(from, to, tblInfo)
+	duplicate, err := ValidateRenameIndex(from, to, tblInfo)
 	if duplicate {
 		return nil, from, to, nil
 	}
@@ -996,7 +1274,7 @@ func checkAlterIndexVisibility(t *meta.Meta, job *model.Job) (*model.TableInfo, 
 		return nil, indexName, invisible, errors.Trace(err)
 	}
 
-	skip, err := validateAlterIndexVisibility(indexName, invisible, tblInfo)
+	skip, err := validateAlterIndexVisibility(nil, indexName, invisible, tblInfo)
 	if err != nil {
 		job.State = model.JobStateCancelled
 		return nil, indexName, invisible, errors.Trace(err)
@@ -1018,49 +1296,61 @@ type indexRecord struct {
 }
 
 type baseIndexWorker struct {
-	*backfillWorker
+	*backfillCtx
 	indexes []table.Index
 
-	metricCounter prometheus.Counter
-
+	tp backfillerType
 	// The following attributes are used to reduce memory allocation.
 	defaultVals []types.Datum
 	idxRecords  []*indexRecord
 	rowMap      map[int64]types.Datum
 	rowDecoder  *decoder.RowDecoder
-
-	sqlMode mysql.SQLMode
 }
 
-type addIndexWorker struct {
+type addIndexTxnWorker struct {
 	baseIndexWorker
 	index table.Index
 
 	// The following attributes are used to reduce memory allocation.
 	idxKeyBufs         [][]byte
 	batchCheckKeys     []kv.Key
+	batchCheckValues   [][]byte
 	distinctCheckFlags []bool
+	recordIdx          []int
 }
 
-func newAddIndexWorker(sessCtx sessionctx.Context, worker *worker, id int, t table.PhysicalTable, indexInfo *model.IndexInfo, decodeColMap map[int64]decoder.Column, sqlMode mysql.SQLMode) *addIndexWorker {
+func newAddIndexTxnWorker(decodeColMap map[int64]decoder.Column, t table.PhysicalTable, bfCtx *backfillCtx, jobID, eleID int64, eleTypeKey []byte) (*addIndexTxnWorker, error) {
+	if !bytes.Equal(eleTypeKey, meta.IndexElementKey) {
+		logutil.BgLogger().Error("Element type for addIndexTxnWorker incorrect",
+			zap.Int64("job ID", jobID), zap.ByteString("element type", eleTypeKey), zap.Int64("element ID", eleID))
+		return nil, errors.Errorf("element type is not index, typeKey: %v", eleTypeKey)
+	}
+	indexInfo := model.FindIndexInfoByID(t.Meta().Indices, eleID)
 	index := tables.NewIndex(t.GetPhysicalID(), t.Meta(), indexInfo)
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
-	return &addIndexWorker{
+
+	return &addIndexTxnWorker{
 		baseIndexWorker: baseIndexWorker{
-			backfillWorker: newBackfillWorker(sessCtx, worker, id, t),
-			indexes:        []table.Index{index},
-			rowDecoder:     rowDecoder,
-			defaultVals:    make([]types.Datum, len(t.WritableCols())),
-			rowMap:         make(map[int64]types.Datum, len(decodeColMap)),
-			metricCounter:  metrics.BackfillTotalCounter.WithLabelValues("add_idx_rate"),
-			sqlMode:        sqlMode,
+			backfillCtx: bfCtx,
+			indexes:     []table.Index{index},
+			rowDecoder:  rowDecoder,
+			defaultVals: make([]types.Datum, len(t.WritableCols())),
+			rowMap:      make(map[int64]types.Datum, len(decodeColMap)),
 		},
 		index: index,
-	}
+	}, nil
 }
 
 func (w *baseIndexWorker) AddMetricInfo(cnt float64) {
 	w.metricCounter.Add(cnt)
+}
+
+func (w *baseIndexWorker) String() string {
+	return w.tp.String()
+}
+
+func (w *baseIndexWorker) GetCtx() *backfillCtx {
+	return w.backfillCtx
 }
 
 // mockNotOwnerErrOnce uses to make sure `notOwnerErr` only mock error once.
@@ -1076,7 +1366,7 @@ func (w *baseIndexWorker) getIndexRecord(idxInfo *model.IndexInfo, handle kv.Han
 				failpoint.Return(nil, errors.Trace(dbterror.ErrCantDecodeRecord.GenWithStackByArgs("index",
 					errors.New("mock can't decode record error"))))
 			case "modifyColumnNotOwnerErr":
-				if idxInfo.Name.O == "_Idx$_idx" && handle.IntValue() == 7168 && atomic.CompareAndSwapUint32(&mockNotOwnerErrOnce, 0, 1) {
+				if idxInfo.Name.O == "_Idx$_idx_0" && handle.IntValue() == 7168 && atomic.CompareAndSwapUint32(&mockNotOwnerErrOnce, 0, 1) {
 					failpoint.Return(nil, errors.Trace(dbterror.ErrNotOwner))
 				}
 			case "addIdxNotOwnerErr":
@@ -1105,7 +1395,7 @@ func (w *baseIndexWorker) getIndexRecord(idxInfo *model.IndexInfo, handle kv.Han
 		idxVal[j] = idxColumnVal
 	}
 
-	rsData := tables.TryGetHandleRestoredDataWrapper(w.table, nil, w.rowMap, idxInfo)
+	rsData := tables.TryGetHandleRestoredDataWrapper(w.table.Meta(), nil, w.rowMap, idxInfo)
 	idxRecord := &indexRecord{handle: handle, key: recordKey, vals: idxVal, rsData: rsData}
 	return idxRecord, nil
 }
@@ -1121,19 +1411,19 @@ func (w *baseIndexWorker) getNextKey(taskRange reorgBackfillTask, taskDone bool)
 	if !taskDone {
 		// The task is not done. So we need to pick the last processed entry's handle and add one.
 		lastHandle := w.idxRecords[len(w.idxRecords)-1].handle
-		recordKey := tablecodec.EncodeRecordKey(w.table.RecordPrefix(), lastHandle)
+		recordKey := tablecodec.EncodeRecordKey(taskRange.physicalTable.RecordPrefix(), lastHandle)
 		return recordKey.Next()
 	}
-	return taskRange.endKey.Next()
+	if taskRange.endInclude {
+		return taskRange.endKey.Next()
+	}
+	return taskRange.endKey
 }
 
 func (w *baseIndexWorker) updateRowDecoder(handle kv.Handle, rawRecord []byte) error {
 	sysZone := w.sessCtx.GetSessionVars().StmtCtx.TimeZone
 	_, err := w.rowDecoder.DecodeAndEvalRowWithMap(w.sessCtx, handle, rawRecord, sysZone, w.rowMap)
-	if err != nil {
-		return errors.Trace(dbterror.ErrCantDecodeRecord.GenWithStackByArgs("index", err))
-	}
-	return nil
+	return errors.Trace(err)
 }
 
 // fetchRowColVals fetch w.batchCnt count records that need to reorganize indices, and build the corresponding indexRecord slice.
@@ -1150,13 +1440,17 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 	// taskDone means that the reorged handle is out of taskRange.endHandle.
 	taskDone := false
 	oprStartTime := startTime
-	err := iterateSnapshotRows(w.ddlWorker.JobContext, w.sessCtx.GetStore(), w.priority, w.table, txn.StartTS(), taskRange.startKey, taskRange.endKey,
-		func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
+	err := iterateSnapshotKeys(w.jobContext, w.sessCtx.GetStore(), taskRange.priority, taskRange.physicalTable.RecordPrefix(), txn.StartTS(),
+		taskRange.startKey, taskRange.endKey, func(handle kv.Handle, recordKey kv.Key, rawRow []byte) (bool, error) {
 			oprEndTime := time.Now()
-			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotRows in baseIndexWorker fetchRowColVals", 0)
+			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterateSnapshotKeys in baseIndexWorker fetchRowColVals", 0)
 			oprStartTime = oprEndTime
 
-			taskDone = recordKey.Cmp(taskRange.endKey) > 0
+			if taskRange.endInclude {
+				taskDone = recordKey.Cmp(taskRange.endKey) > 0
+			} else {
+				taskDone = recordKey.Cmp(taskRange.endKey) >= 0
+			}
 
 			if taskDone || len(w.idxRecords) >= w.batchCnt {
 				return false, nil
@@ -1179,7 +1473,6 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 			w.cleanRowMap()
 
 			if recordKey.Cmp(taskRange.endKey) == 0 {
-				// If taskRange.endIncluded == false, we will not reach here when handle == taskRange.endHandle
 				taskDone = true
 				return false, nil
 			}
@@ -1190,21 +1483,23 @@ func (w *baseIndexWorker) fetchRowColVals(txn kv.Transaction, taskRange reorgBac
 		taskDone = true
 	}
 
-	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Uint64("txnStartTS", txn.StartTS()),
+	logutil.BgLogger().Debug("[ddl] txn fetches handle info", zap.Stringer("worker", w), zap.Uint64("txnStartTS", txn.StartTS()),
 		zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
 	return w.idxRecords, w.getNextKey(taskRange, taskDone), taskDone, errors.Trace(err)
 }
 
-func (w *addIndexWorker) initBatchCheckBufs(batchCount int) {
+func (w *addIndexTxnWorker) initBatchCheckBufs(batchCount int) {
 	if len(w.idxKeyBufs) < batchCount {
 		w.idxKeyBufs = make([][]byte, batchCount)
 	}
 
 	w.batchCheckKeys = w.batchCheckKeys[:0]
+	w.batchCheckValues = w.batchCheckValues[:0]
 	w.distinctCheckFlags = w.distinctCheckFlags[:0]
+	w.recordIdx = w.recordIdx[:0]
 }
 
-func (w *addIndexWorker) checkHandleExists(key kv.Key, value []byte, handle kv.Handle) error {
+func (w *addIndexTxnWorker) checkHandleExists(key kv.Key, value []byte, handle kv.Handle) error {
 	idxInfo := w.index.Meta()
 	tblInfo := w.table.Meta()
 	idxColLen := len(idxInfo.Columns)
@@ -1216,28 +1511,40 @@ func (w *addIndexWorker) checkHandleExists(key kv.Key, value []byte, handle kv.H
 	if hasBeenBackFilled {
 		return nil
 	}
+	return genKeyExistsErr(key, value, idxInfo, tblInfo)
+}
+
+func genKeyExistsErr(key, value []byte, idxInfo *model.IndexInfo, tblInfo *model.TableInfo) error {
+	idxColLen := len(idxInfo.Columns)
+	indexName := fmt.Sprintf("%s.%s", tblInfo.Name.String(), idxInfo.Name.String())
 	colInfos := tables.BuildRowcodecColInfoForIndexColumns(idxInfo, tblInfo)
 	values, err := tablecodec.DecodeIndexKV(key, value, idxColLen, tablecodec.HandleNotNeeded, colInfos)
 	if err != nil {
-		return err
+		logutil.BgLogger().Warn("decode index key value failed", zap.String("index", indexName),
+			zap.String("key", hex.EncodeToString(key)), zap.String("value", hex.EncodeToString(value)), zap.Error(err))
+		return kv.ErrKeyExists.FastGenByArgs(key, indexName)
 	}
-	indexName := w.index.Meta().Name.String()
 	valueStr := make([]string, 0, idxColLen)
 	for i, val := range values[:idxColLen] {
 		d, err := tablecodec.DecodeColumnValue(val, colInfos[i].Ft, time.Local)
 		if err != nil {
-			return kv.ErrKeyExists.FastGenByArgs(key.String(), indexName)
+			logutil.BgLogger().Warn("decode column value failed", zap.String("index", indexName),
+				zap.String("key", hex.EncodeToString(key)), zap.String("value", hex.EncodeToString(value)), zap.Error(err))
+			return kv.ErrKeyExists.FastGenByArgs(key, indexName)
 		}
 		str, err := d.ToString()
 		if err != nil {
 			str = string(val)
+		}
+		if types.IsBinaryStr(colInfos[i].Ft) || types.IsTypeBit(colInfos[i].Ft) {
+			str = util.FmtNonASCIIPrintableCharToHex(str)
 		}
 		valueStr = append(valueStr, str)
 	}
 	return kv.ErrKeyExists.FastGenByArgs(strings.Join(valueStr, "-"), indexName)
 }
 
-func (w *addIndexWorker) batchCheckUniqueKey(txn kv.Transaction, idxRecords []*indexRecord) error {
+func (w *addIndexTxnWorker) batchCheckUniqueKey(txn kv.Transaction, idxRecords []*indexRecord) error {
 	idxInfo := w.index.Meta()
 	if !idxInfo.Unique {
 		// non-unique key need not to check, just overwrite it,
@@ -1247,16 +1554,31 @@ func (w *addIndexWorker) batchCheckUniqueKey(txn kv.Transaction, idxRecords []*i
 
 	w.initBatchCheckBufs(len(idxRecords))
 	stmtCtx := w.sessCtx.GetSessionVars().StmtCtx
+	cnt := 0
 	for i, record := range idxRecords {
-		idxKey, distinct, err := w.index.GenIndexKey(stmtCtx, record.vals, record.handle, w.idxKeyBufs[i])
-		if err != nil {
-			return errors.Trace(err)
+		// skip by default.
+		idxRecords[i].skip = true
+		iter := w.index.GenIndexKVIter(stmtCtx, record.vals, record.handle, idxRecords[i].rsData)
+		for iter.Valid() {
+			var buf []byte
+			if cnt < len(w.idxKeyBufs) {
+				buf = w.idxKeyBufs[cnt]
+			}
+			key, val, distinct, err := iter.Next(buf)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if cnt < len(w.idxKeyBufs) {
+				w.idxKeyBufs[cnt] = key
+			} else {
+				w.idxKeyBufs = append(w.idxKeyBufs, key)
+			}
+			cnt++
+			w.batchCheckKeys = append(w.batchCheckKeys, key)
+			w.batchCheckValues = append(w.batchCheckValues, val)
+			w.distinctCheckFlags = append(w.distinctCheckFlags, distinct)
+			w.recordIdx = append(w.recordIdx, i)
 		}
-		// save the buffer to reduce memory allocations.
-		w.idxKeyBufs[i] = idxKey
-
-		w.batchCheckKeys = append(w.batchCheckKeys, idxKey)
-		w.distinctCheckFlags = append(w.distinctCheckFlags, distinct)
 	}
 
 	batchVals, err := txn.BatchGet(context.Background(), w.batchCheckKeys)
@@ -1268,45 +1590,152 @@ func (w *addIndexWorker) batchCheckUniqueKey(txn kv.Transaction, idxRecords []*i
 	// 2. unique-key/primary-key is duplicate and the handle is not equal, return duplicate error.
 	// 3. non-unique-key is duplicate, skip it.
 	for i, key := range w.batchCheckKeys {
-		if val, found := batchVals[string(key)]; found {
+		val, found := batchVals[string(key)]
+		if found {
 			if w.distinctCheckFlags[i] {
-				if err := w.checkHandleExists(key, val, idxRecords[i].handle); err != nil {
+				if err := w.checkHandleExists(key, val, idxRecords[w.recordIdx[i]].handle); err != nil {
 					return errors.Trace(err)
 				}
 			}
-			idxRecords[i].skip = true
 		} else if w.distinctCheckFlags[i] {
 			// The keys in w.batchCheckKeys also maybe duplicate,
 			// so we need to backfill the not found key into `batchVals` map.
-			needRsData := tables.NeedRestoredData(w.index.Meta().Columns, w.table.Meta().Columns)
-			val, err := tablecodec.GenIndexValuePortal(stmtCtx, w.table.Meta(), w.index.Meta(), needRsData, w.distinctCheckFlags[i], false, idxRecords[i].vals, idxRecords[i].handle, 0, idxRecords[i].rsData)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			batchVals[string(key)] = val
+			batchVals[string(key)] = w.batchCheckValues[i]
 		}
+		idxRecords[w.recordIdx[i]].skip = found && idxRecords[w.recordIdx[i]].skip
 	}
 	// Constrains is already checked.
 	stmtCtx.BatchCheck = true
 	return nil
 }
 
-// BackfillDataInTxn will backfill table index in a transaction. A lock corresponds to a rowKey if the value of rowKey is changed,
+type addIndexIngestWorker struct {
+	d             *ddlCtx
+	metricCounter prometheus.Counter
+	sessCtx       sessionctx.Context
+
+	tbl              table.PhysicalTable
+	index            table.Index
+	writer           ingest.Writer
+	copReqSenderPool *copReqSenderPool
+	checkpointMgr    *ingest.CheckpointManager
+	flushLock        *sync.RWMutex
+
+	resultCh   chan *backfillResult
+	jobID      int64
+	distribute bool
+}
+
+func newAddIndexIngestWorker(t table.PhysicalTable, d *ddlCtx, ei ingest.Engine,
+	resultCh chan *backfillResult, jobID int64, schemaName string, indexID int64, writerID int,
+	copReqSenderPool *copReqSenderPool, sessCtx sessionctx.Context,
+	checkpointMgr *ingest.CheckpointManager, distribute bool) (*addIndexIngestWorker, error) {
+	indexInfo := model.FindIndexInfoByID(t.Meta().Indices, indexID)
+	index := tables.NewIndex(t.GetPhysicalID(), t.Meta(), indexInfo)
+	lw, err := ei.CreateWriter(writerID, indexInfo.Unique)
+	if err != nil {
+		return nil, err
+	}
+
+	return &addIndexIngestWorker{
+		d:       d,
+		sessCtx: sessCtx,
+		metricCounter: metrics.BackfillTotalCounter.WithLabelValues(
+			metrics.GenerateReorgLabel("add_idx_rate", schemaName, t.Meta().Name.O)),
+		tbl:              t,
+		index:            index,
+		writer:           lw,
+		copReqSenderPool: copReqSenderPool,
+		resultCh:         resultCh,
+		jobID:            jobID,
+		checkpointMgr:    checkpointMgr,
+		distribute:       distribute,
+	}, nil
+}
+
+// WriteLocal will write index records to lightning engine.
+func (w *addIndexIngestWorker) WriteLocal(rs *idxRecResult) (count int, nextKey kv.Key, err error) {
+	oprStartTime := time.Now()
+	copCtx := w.copReqSenderPool.copCtx
+	vars := w.sessCtx.GetSessionVars()
+	cnt, lastHandle, err := writeChunkToLocal(w.writer, w.index, copCtx, vars, rs.chunk)
+	if err != nil || cnt == 0 {
+		return 0, nil, err
+	}
+	w.metricCounter.Add(float64(cnt))
+	logSlowOperations(time.Since(oprStartTime), "writeChunkToLocal", 3000)
+	nextKey = tablecodec.EncodeRecordKey(w.tbl.RecordPrefix(), lastHandle)
+	return cnt, nextKey, nil
+}
+
+func writeChunkToLocal(writer ingest.Writer,
+	index table.Index, copCtx *copContext, vars *variable.SessionVars,
+	copChunk *chunk.Chunk) (int, kv.Handle, error) {
+	sCtx, writeBufs := vars.StmtCtx, vars.GetWriteStmtBufs()
+	iter := chunk.NewIterator4Chunk(copChunk)
+	idxDataBuf := make([]types.Datum, len(copCtx.idxColOutputOffsets))
+	handleDataBuf := make([]types.Datum, len(copCtx.handleOutputOffsets))
+	count := 0
+	var lastHandle kv.Handle
+	unlock := writer.LockForWrite()
+	defer unlock()
+	for row := iter.Begin(); row != iter.End(); row = iter.Next() {
+		idxDataBuf, handleDataBuf = idxDataBuf[:0], handleDataBuf[:0]
+		idxDataBuf = extractDatumByOffsets(row, copCtx.idxColOutputOffsets, copCtx.expColInfos, idxDataBuf)
+		handleDataBuf := extractDatumByOffsets(row, copCtx.handleOutputOffsets, copCtx.expColInfos, handleDataBuf)
+		handle, err := buildHandle(handleDataBuf, copCtx.tblInfo, copCtx.pkInfo, sCtx)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+		rsData := getRestoreData(copCtx.tblInfo, copCtx.idxInfo, copCtx.pkInfo, handleDataBuf)
+		err = writeOneKVToLocal(writer, index, sCtx, writeBufs, idxDataBuf, rsData, handle)
+		if err != nil {
+			return 0, nil, errors.Trace(err)
+		}
+		count++
+		lastHandle = handle
+	}
+	return count, lastHandle, nil
+}
+
+func writeOneKVToLocal(writer ingest.Writer,
+	index table.Index, sCtx *stmtctx.StatementContext, writeBufs *variable.WriteStmtBufs,
+	idxDt, rsData []types.Datum, handle kv.Handle) error {
+	iter := index.GenIndexKVIter(sCtx, idxDt, handle, rsData)
+	for iter.Valid() {
+		key, idxVal, _, err := iter.Next(writeBufs.IndexKeyBuf)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		err = writer.WriteRow(key, idxVal, handle)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		writeBufs.IndexKeyBuf = key
+	}
+	return nil
+}
+
+// BackfillData will backfill table index in a transaction. A lock corresponds to a rowKey if the value of rowKey is changed,
 // Note that index columns values may change, and an index is not allowed to be added, so the txn will rollback and retry.
-// BackfillDataInTxn will add w.batchCnt indices once, default value of w.batchCnt is 128.
-func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
+// BackfillData will add w.batchCnt indices once, default value of w.batchCnt is 128.
+func (w *addIndexTxnWorker) BackfillData(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	failpoint.Inject("errorMockPanic", func(val failpoint.Value) {
+		//nolint:forcetypeassert
 		if val.(bool) {
 			panic("panic test")
 		}
 	})
 
 	oprStartTime := time.Now()
-	errInTxn = kv.RunInNewTxn(context.Background(), w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
+	jobID := handleRange.getJobID()
+	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
+	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) (err error) {
+		taskCtx.finishTS = txn.StartTS()
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
-		txn.SetOption(kv.Priority, w.priority)
-		if tagger := w.ddlWorker.getResourceGroupTaggerForTopSQL(); tagger != nil {
+		txn.SetOption(kv.Priority, handleRange.priority)
+		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(jobID); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1331,20 +1760,18 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 			}
 
 			// We need to add this lock to make sure pessimistic transaction can realize this operation.
-			// For the normal pessimistic transaction, it's ok. But if async commmit is used, it may lead to inconsistent data and index.
+			// For the normal pessimistic transaction, it's ok. But if async commit is used, it may lead to inconsistent data and index.
 			err := txn.LockKeys(context.Background(), new(kv.LockCtx), idxRecord.key)
 			if err != nil {
 				return errors.Trace(err)
 			}
 
-			// Create the index.
-			handle, err := w.index.Create(w.sessCtx, txn, idxRecord.vals, idxRecord.handle, idxRecord.rsData, table.WithIgnoreAssertion)
+			handle, err := w.index.Create(w.sessCtx, txn, idxRecord.vals, idxRecord.handle, idxRecord.rsData, table.WithIgnoreAssertion, table.FromBackfill)
 			if err != nil {
 				if kv.ErrKeyExists.Equal(err) && idxRecord.handle.Equal(handle) {
 					// Index already exists, skip it.
 					continue
 				}
-
 				return errors.Trace(err)
 			}
 			taskCtx.addedCount++
@@ -1352,18 +1779,62 @@ func (w *addIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskC
 
 		return nil
 	})
-	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillDataInTxn", 3000)
-
+	logSlowOperations(time.Since(oprStartTime), "AddIndexBackfillData", 3000)
+	failpoint.Inject("mockDMLExecution", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		if val.(bool) && MockDMLExecution != nil {
+			MockDMLExecution()
+		}
+	})
 	return
 }
 
-func (w *worker) addPhysicalTableIndex(t table.PhysicalTable, indexInfo *model.IndexInfo, reorgInfo *reorgInfo) error {
+// MockDMLExecution is only used for test.
+var MockDMLExecution func()
+
+// MockDMLExecutionMerging is only used for test.
+var MockDMLExecutionMerging func()
+
+// MockDMLExecutionStateMerging is only used for test.
+var MockDMLExecutionStateMerging func()
+
+// MockDMLExecutionStateBeforeImport is only used for test.
+var MockDMLExecutionStateBeforeImport func()
+
+func (w *worker) addPhysicalTableIndex(t table.PhysicalTable, reorgInfo *reorgInfo) error {
+	if reorgInfo.mergingTmpIdx {
+		logutil.BgLogger().Info("[ddl] start to merge temp index", zap.String("job", reorgInfo.Job.String()), zap.String("reorgInfo", reorgInfo.String()))
+		return w.writePhysicalTableRecord(w.sessPool, t, typeAddIndexMergeTmpWorker, reorgInfo)
+	}
 	logutil.BgLogger().Info("[ddl] start to add table index", zap.String("job", reorgInfo.Job.String()), zap.String("reorgInfo", reorgInfo.String()))
-	return w.writePhysicalTableRecord(t, typeAddIndexWorker, indexInfo, nil, nil, reorgInfo)
+	return w.writePhysicalTableRecord(w.sessPool, t, typeAddIndexWorker, reorgInfo)
 }
 
 // addTableIndex handles the add index reorganization state for a table.
-func (w *worker) addTableIndex(t table.Table, idx *model.IndexInfo, reorgInfo *reorgInfo) error {
+func (w *worker) addTableIndex(t table.Table, reorgInfo *reorgInfo) error {
+	// TODO: Support typeAddIndexMergeTmpWorker.
+	if reorgInfo.Job.ReorgMeta.IsDistReorg && !reorgInfo.mergingTmpIdx {
+		if reorgInfo.ReorgMeta.ReorgTp == model.ReorgTypeLitMerge {
+			err := w.executeDistGlobalTask(reorgInfo)
+			if err != nil {
+				return err
+			}
+			indexInfo := model.FindIndexInfoByID(t.Meta().Indices, reorgInfo.currElement.ID)
+			if indexInfo == nil {
+				return errors.New("unexpected error, can't find index info")
+			}
+			if indexInfo.Unique {
+				bc, err := ingest.LitBackCtxMgr.Register(w.ctx, indexInfo.Unique, reorgInfo.ID, nil)
+				if err != nil {
+					return err
+				}
+				defer ingest.LitBackCtxMgr.Unregister(reorgInfo.ID)
+				return bc.CollectRemoteDuplicateRows(indexInfo.ID, t)
+			}
+			return nil
+		}
+	}
+
 	var err error
 	if tbl, ok := t.(table.PartitionedTable); ok {
 		var finish bool
@@ -1372,68 +1843,191 @@ func (w *worker) addTableIndex(t table.Table, idx *model.IndexInfo, reorgInfo *r
 			if p == nil {
 				return dbterror.ErrCancelledDDLJob.GenWithStack("Can not find partition id %d for table %d", reorgInfo.PhysicalTableID, t.Meta().ID)
 			}
-			err = w.addPhysicalTableIndex(p, idx, reorgInfo)
+			err = w.addPhysicalTableIndex(p, reorgInfo)
 			if err != nil {
 				break
 			}
-			finish, err = w.updateReorgInfo(tbl, reorgInfo)
+
+			finish, err = updateReorgInfo(w.sessPool, tbl, reorgInfo)
 			if err != nil {
 				return errors.Trace(err)
 			}
+			// Every time we finish a partition, we update the progress of the job.
+			if rc := w.getReorgCtx(reorgInfo.Job.ID); rc != nil {
+				reorgInfo.Job.SetRowCount(rc.getRowCount())
+			}
 		}
 	} else {
-		err = w.addPhysicalTableIndex(t.(table.PhysicalTable), idx, reorgInfo)
+		//nolint:forcetypeassert
+		phyTbl := t.(table.PhysicalTable)
+		err = w.addPhysicalTableIndex(phyTbl, reorgInfo)
 	}
 	return errors.Trace(err)
+}
+
+func (w *worker) executeDistGlobalTask(reorgInfo *reorgInfo) error {
+	if reorgInfo.mergingTmpIdx {
+		return errors.New("do not support merge index")
+	}
+
+	taskType := BackfillTaskType
+	taskMeta := &BackfillGlobalMeta{
+		Job:        *reorgInfo.Job.Clone(),
+		EleID:      reorgInfo.currElement.ID,
+		EleTypeKey: reorgInfo.currElement.TypeKey,
+	}
+
+	metaData, err := json.Marshal(taskMeta)
+	if err != nil {
+		return err
+	}
+
+	globalTaskManager, err := storage.GetTaskManager()
+	if err != nil {
+		return err
+	}
+
+	taskKey := fmt.Sprintf("ddl/%s/%d", taskType, reorgInfo.Job.ID)
+	globalTask, err := globalTaskManager.GetGlobalTaskByKey(taskKey)
+	if err != nil {
+		return err
+	}
+
+	if globalTask == nil {
+		taskID, err := globalTaskManager.AddNewGlobalTask(taskKey, taskType, distPhysicalTableConcurrency, metaData)
+		if err != nil {
+			return nil
+		}
+
+		globalTask, err = globalTaskManager.GetGlobalTaskByID(taskID)
+		if err != nil {
+			return err
+		}
+
+		if globalTask == nil {
+			return errors.Errorf("cannot find global task with ID %d", taskID)
+		}
+	}
+
+	ticker := time.NewTicker(CheckBackfillJobFinishInterval)
+	defer ticker.Stop()
+
+	for {
+		<-ticker.C
+		found, err := globalTaskManager.GetGlobalTaskByID(globalTask.ID)
+		if err != nil {
+			logutil.BgLogger().Info("[ddl] get global task error", zap.Int64("taskID", globalTask.ID), zap.Error(err))
+			continue
+		}
+
+		if found == nil {
+			return errors.Errorf("cannot find global task with ID %d", globalTask.ID)
+		}
+
+		if found.State == proto.TaskStateSucceed {
+			return nil
+		}
+
+		if found.State == proto.TaskStateReverted {
+			logutil.BgLogger().Error("[ddl] global task reverted", zap.Int64("taskID", globalTask.ID), zap.String("error", string(found.Error)))
+			return errors.New(string(found.Error))
+		}
+
+		// TODO: get the original error message.
+		if found.State == proto.TaskStateFailed || found.State == proto.TaskStateCanceled {
+			return errors.Errorf("ddl task stopped with state %s, err %s", found.State, found.Error)
+		}
+
+		if err = w.isReorgRunnable(reorgInfo.Job.ID, true); err != nil {
+			if !dbterror.ErrCancelledDDLJob.Equal(err) {
+				return errors.Trace(err)
+			}
+
+			if found.State == proto.TaskStatePending || found.State == proto.TaskStateRunning {
+				if err = globalTaskManager.CancelGlobalTask(globalTask.ID); err != nil {
+					logutil.BgLogger().Error("[ddl] cancel global task error", zap.Int64("taskID", globalTask.ID), zap.Error(err))
+				}
+			}
+		}
+	}
+}
+
+func getNextPartitionInfo(reorg *reorgInfo, t table.PartitionedTable, currPhysicalTableID int64) (int64, kv.Key, kv.Key, error) {
+	pi := t.Meta().GetPartitionInfo()
+	if pi == nil {
+		return 0, nil, nil, nil
+	}
+
+	// During data copying, copy data from partitions to be dropped
+	nextPartitionDefs := pi.DroppingDefinitions
+	if bytes.Equal(reorg.currElement.TypeKey, meta.IndexElementKey) {
+		// During index re-creation, process data from partitions to be added
+		nextPartitionDefs = pi.AddingDefinitions
+	}
+	if len(nextPartitionDefs) == 0 {
+		nextPartitionDefs = pi.Definitions
+	}
+	pid, err := findNextPartitionID(currPhysicalTableID, nextPartitionDefs)
+	if err != nil {
+		// Fatal error, should not run here.
+		logutil.BgLogger().Error("[ddl] find next partition ID failed", zap.Reflect("table", t), zap.Error(err))
+		return 0, nil, nil, errors.Trace(err)
+	}
+	if pid == 0 {
+		// Next partition does not exist, all the job done.
+		return 0, nil, nil, nil
+	}
+
+	failpoint.Inject("mockUpdateCachedSafePoint", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		if val.(bool) {
+			ts := oracle.GoTimeToTS(time.Now())
+			//nolint:forcetypeassert
+			s := reorg.d.store.(tikv.Storage)
+			s.UpdateSPCache(ts, time.Now())
+			time.Sleep(time.Second * 3)
+		}
+	})
+
+	var startKey, endKey kv.Key
+	if reorg.mergingTmpIdx {
+		indexID := reorg.currElement.ID
+		startKey, endKey = tablecodec.GetTableIndexKeyRange(pid, tablecodec.TempIndexPrefix|indexID)
+	} else {
+		currentVer, err := getValidCurrentVersion(reorg.d.store)
+		if err != nil {
+			return 0, nil, nil, errors.Trace(err)
+		}
+		startKey, endKey, err = getTableRange(reorg.d.jobContext(reorg.Job.ID), reorg.d, t.GetPartition(pid), currentVer.Ver, reorg.Job.Priority)
+		if err != nil {
+			return 0, nil, nil, errors.Trace(err)
+		}
+	}
+	return pid, startKey, endKey, nil
 }
 
 // updateReorgInfo will find the next partition according to current reorgInfo.
 // If no more partitions, or table t is not a partitioned table, returns true to
 // indicate that the reorganize work is finished.
-func (w *worker) updateReorgInfo(t table.PartitionedTable, reorg *reorgInfo) (bool, error) {
-	pi := t.Meta().GetPartitionInfo()
-	if pi == nil {
-		return true, nil
-	}
-
-	pid, err := findNextPartitionID(reorg.PhysicalTableID, pi.Definitions)
+func updateReorgInfo(sessPool *sess.Pool, t table.PartitionedTable, reorg *reorgInfo) (bool, error) {
+	pid, startKey, endKey, err := getNextPartitionInfo(reorg, t, reorg.PhysicalTableID)
 	if err != nil {
-		// Fatal error, should not run here.
-		logutil.BgLogger().Error("[ddl] find next partition ID failed", zap.Reflect("table", t), zap.Error(err))
 		return false, errors.Trace(err)
 	}
 	if pid == 0 {
 		// Next partition does not exist, all the job done.
 		return true, nil
 	}
-
-	failpoint.Inject("mockUpdateCachedSafePoint", func(val failpoint.Value) {
-		if val.(bool) {
-			ts := oracle.GoTimeToTS(time.Now())
-			s := reorg.d.store.(tikv.Storage)
-			s.UpdateSPCache(ts, time.Now())
-			time.Sleep(time.Millisecond * 3)
-		}
-	})
-	currentVer, err := getValidCurrentVersion(reorg.d.store)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	start, end, err := getTableRange(w.JobContext, reorg.d, t.GetPartition(pid), currentVer.Ver, reorg.Job.Priority)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	reorg.StartKey, reorg.EndKey, reorg.PhysicalTableID = start, end, pid
+	reorg.PhysicalTableID, reorg.StartKey, reorg.EndKey = pid, startKey, endKey
 
 	// Write the reorg info to store so the whole reorganize process can recover from panic.
-	err = reorg.UpdateReorgMeta(start)
+	err = reorg.UpdateReorgMeta(reorg.StartKey, sessPool)
 	logutil.BgLogger().Info("[ddl] job update reorgInfo",
 		zap.Int64("jobID", reorg.Job.ID),
-		zap.ByteString("elementType", reorg.currElement.TypeKey),
-		zap.Int64("elementID", reorg.currElement.ID),
+		zap.Stringer("element", reorg.currElement),
 		zap.Int64("partitionTableID", pid),
-		zap.String("startHandle", tryDecodeToHandleString(start)),
-		zap.String("endHandle", tryDecodeToHandleString(end)), zap.Error(err))
+		zap.String("startKey", hex.EncodeToString(reorg.StartKey)),
+		zap.String("endKey", hex.EncodeToString(reorg.EndKey)), zap.Error(err))
 	return false, errors.Trace(err)
 }
 
@@ -1451,7 +2045,8 @@ func findNextPartitionID(currentPartition int64, defs []model.PartitionDefinitio
 	return 0, errors.Errorf("partition id not found %d", currentPartition)
 }
 
-func allocateIndexID(tblInfo *model.TableInfo) int64 {
+// AllocateIndexID allocates an index ID from TableInfo.
+func AllocateIndexID(tblInfo *model.TableInfo) int64 {
 	tblInfo.MaxIndexID++
 	return tblInfo.MaxIndexID
 }
@@ -1487,7 +2082,7 @@ type cleanUpIndexWorker struct {
 	baseIndexWorker
 }
 
-func newCleanUpIndexWorker(sessCtx sessionctx.Context, worker *worker, id int, t table.PhysicalTable, decodeColMap map[int64]decoder.Column, sqlMode mysql.SQLMode) *cleanUpIndexWorker {
+func newCleanUpIndexWorker(sessCtx sessionctx.Context, id int, t table.PhysicalTable, decodeColMap map[int64]decoder.Column, reorgInfo *reorgInfo, jc *JobContext) *cleanUpIndexWorker {
 	indexes := make([]table.Index, 0, len(t.Indices()))
 	rowDecoder := decoder.NewRowDecoder(t, t.WritableCols(), decodeColMap)
 	for _, index := range t.Indices() {
@@ -1497,30 +2092,30 @@ func newCleanUpIndexWorker(sessCtx sessionctx.Context, worker *worker, id int, t
 	}
 	return &cleanUpIndexWorker{
 		baseIndexWorker: baseIndexWorker{
-			backfillWorker: newBackfillWorker(sessCtx, worker, id, t),
-			indexes:        indexes,
-			rowDecoder:     rowDecoder,
-			defaultVals:    make([]types.Datum, len(t.WritableCols())),
-			rowMap:         make(map[int64]types.Datum, len(decodeColMap)),
-			metricCounter:  metrics.BackfillTotalCounter.WithLabelValues("cleanup_idx_rate"),
-			sqlMode:        sqlMode,
+			backfillCtx: newBackfillCtx(reorgInfo.d, id, sessCtx, reorgInfo.SchemaName, t, jc, "cleanup_idx_rate", false),
+			indexes:     indexes,
+			rowDecoder:  rowDecoder,
+			defaultVals: make([]types.Datum, len(t.WritableCols())),
+			rowMap:      make(map[int64]types.Datum, len(decodeColMap)),
 		},
 	}
 }
 
-func (w *cleanUpIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
+func (w *cleanUpIndexWorker) BackfillData(handleRange reorgBackfillTask) (taskCtx backfillTaskContext, errInTxn error) {
 	failpoint.Inject("errorMockPanic", func(val failpoint.Value) {
+		//nolint:forcetypeassert
 		if val.(bool) {
 			panic("panic test")
 		}
 	})
 
 	oprStartTime := time.Now()
-	errInTxn = kv.RunInNewTxn(context.Background(), w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), w.jobContext.ddlJobSourceType())
+	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(ctx context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
-		txn.SetOption(kv.Priority, w.priority)
-		if tagger := w.ddlWorker.getResourceGroupTaggerForTopSQL(); tagger != nil {
+		txn.SetOption(kv.Priority, handleRange.priority)
+		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(handleRange.getJobID()); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
 		}
 
@@ -1555,7 +2150,7 @@ func (w *cleanUpIndexWorker) BackfillDataInTxn(handleRange reorgBackfillTask) (t
 // cleanupPhysicalTableIndex handles the drop partition reorganization state for a non-partitioned table or a partition.
 func (w *worker) cleanupPhysicalTableIndex(t table.PhysicalTable, reorgInfo *reorgInfo) error {
 	logutil.BgLogger().Info("[ddl] start to clean up index", zap.String("job", reorgInfo.Job.String()), zap.String("reorgInfo", reorgInfo.String()))
-	return w.writePhysicalTableRecord(t, typeCleanUpIndexWorker, nil, nil, nil, reorgInfo)
+	return w.writePhysicalTableRecord(w.sessPool, t, typeCleanUpIndexWorker, reorgInfo)
 }
 
 // cleanupGlobalIndex handles the drop partition reorganization state to clean up index entries of partitions.
@@ -1603,32 +2198,89 @@ func (w *worker) updateReorgInfoForPartitions(t table.PartitionedTable, reorg *r
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	start, end, err := getTableRange(w.JobContext, reorg.d, t.GetPartition(pid), currentVer.Ver, reorg.Job.Priority)
+	start, end, err := getTableRange(reorg.d.jobContext(reorg.Job.ID), reorg.d, t.GetPartition(pid), currentVer.Ver, reorg.Job.Priority)
 	if err != nil {
 		return false, errors.Trace(err)
 	}
 	reorg.StartKey, reorg.EndKey, reorg.PhysicalTableID = start, end, pid
 
 	// Write the reorg info to store so the whole reorganize process can recover from panic.
-	err = reorg.UpdateReorgMeta(reorg.StartKey)
-	logutil.BgLogger().Info("[ddl] job update reorgInfo", zap.Int64("jobID", reorg.Job.ID),
-		zap.ByteString("elementType", reorg.currElement.TypeKey), zap.Int64("elementID", reorg.currElement.ID),
-		zap.Int64("partitionTableID", pid), zap.String("startHandle", tryDecodeToHandleString(start)),
-		zap.String("endHandle", tryDecodeToHandleString(end)), zap.Error(err))
+	err = reorg.UpdateReorgMeta(reorg.StartKey, w.sessPool)
+	logutil.BgLogger().Info("[ddl] job update reorg info", zap.Int64("jobID", reorg.Job.ID),
+		zap.Stringer("element", reorg.currElement),
+		zap.Int64("partition table ID", pid), zap.String("start key", hex.EncodeToString(start)),
+		zap.String("end key", hex.EncodeToString(end)), zap.Error(err))
 	return false, errors.Trace(err)
 }
 
-func findIndexesByColName(indexes []*model.IndexInfo, colName string) ([]*model.IndexInfo, []int) {
-	idxInfos := make([]*model.IndexInfo, 0, len(indexes))
-	offsets := make([]int, 0, len(indexes))
-	for _, idxInfo := range indexes {
-		for i, c := range idxInfo.Columns {
-			if strings.EqualFold(colName, c.Name.L) {
-				idxInfos = append(idxInfos, idxInfo)
-				offsets = append(offsets, i)
-				break
+// changingIndex is used to store the index that need to be changed during modifying column.
+type changingIndex struct {
+	IndexInfo *model.IndexInfo
+	// Column offset in idxInfo.Columns.
+	Offset int
+	// When the modifying column is contained in the index, a temp index is created.
+	// isTemp indicates whether the indexInfo is a temp index created by a previous modify column job.
+	isTemp bool
+}
+
+// FindRelatedIndexesToChange finds the indexes that covering the given column.
+// The normal one will be overridden by the temp one.
+func FindRelatedIndexesToChange(tblInfo *model.TableInfo, colName model.CIStr) []changingIndex {
+	// In multi-schema change jobs that contains several "modify column" sub-jobs, there may be temp indexes for another temp index.
+	// To prevent reorganizing too many indexes, we should create the temp indexes that are really necessary.
+	var normalIdxInfos, tempIdxInfos []changingIndex
+	for _, idxInfo := range tblInfo.Indices {
+		if pos := findIdxCol(idxInfo, colName); pos != -1 {
+			isTemp := isTempIdxInfo(idxInfo, tblInfo)
+			r := changingIndex{IndexInfo: idxInfo, Offset: pos, isTemp: isTemp}
+			if isTemp {
+				tempIdxInfos = append(tempIdxInfos, r)
+			} else {
+				normalIdxInfos = append(normalIdxInfos, r)
 			}
 		}
 	}
-	return idxInfos, offsets
+	// Overwrite if the index has the corresponding temp index. For example,
+	// we try to find the indexes that contain the column `b` and there are two indexes, `i(a, b)` and `$i($a, b)`.
+	// Note that the symbol `$` means temporary. The index `$i($a, b)` is temporarily created by the previous "modify a" statement.
+	// In this case, we would create a temporary index like $$i($a, $b), so the latter should be chosen.
+	result := normalIdxInfos
+	for _, tmpIdx := range tempIdxInfos {
+		origName := getChangingIndexOriginName(tmpIdx.IndexInfo)
+		for i, normIdx := range normalIdxInfos {
+			if normIdx.IndexInfo.Name.O == origName {
+				result[i] = tmpIdx
+			}
+		}
+	}
+	return result
+}
+
+func isTempIdxInfo(idxInfo *model.IndexInfo, tblInfo *model.TableInfo) bool {
+	for _, idxCol := range idxInfo.Columns {
+		if tblInfo.Columns[idxCol.Offset].ChangeStateInfo != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func findIdxCol(idxInfo *model.IndexInfo, colName model.CIStr) int {
+	for offset, idxCol := range idxInfo.Columns {
+		if idxCol.Name.L == colName.L {
+			return offset
+		}
+	}
+	return -1
+}
+
+func renameIndexes(tblInfo *model.TableInfo, from, to model.CIStr) {
+	for _, idx := range tblInfo.Indices {
+		if idx.Name.L == from.L {
+			idx.Name = to
+		} else if isTempIdxInfo(idx, tblInfo) && getChangingIndexOriginName(idx) == from.O {
+			idx.Name.L = strings.Replace(idx.Name.L, from.L, to.L, 1)
+			idx.Name.O = strings.Replace(idx.Name.O, from.O, to.O, 1)
+		}
+	}
 }

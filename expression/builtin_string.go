@@ -324,6 +324,7 @@ func (b *builtinConcatSig) Clone() builtinFunc {
 // evalString evals a builtinConcatSig
 // See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_concat
 func (b *builtinConcatSig) evalString(row chunk.Row) (d string, isNull bool, err error) {
+	//nolint: prealloc
 	var s []byte
 	for _, a := range b.getArgs() {
 		d, isNull, err = a.EvalString(b.ctx, row)
@@ -1717,6 +1718,9 @@ func (c *unhexFunctionClass) getFunction(ctx sessionctx.Context, args []Expressi
 	default:
 		return nil, errors.Errorf("Unhex invalid args, need int or string but get %s", argType)
 	}
+	if argType.GetFlen() == types.UnspecifiedLength {
+		retFlen = types.UnspecifiedLength
+	}
 
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, types.ETString)
 	if err != nil {
@@ -1902,7 +1906,6 @@ func (b *builtinTrim3ArgsSig) evalString(row chunk.Row) (d string, isNull bool, 
 	default:
 		d = trimLeft(str, remstr)
 		d = trimRight(d, remstr)
-
 	}
 	return d, false, nil
 }
@@ -3531,7 +3534,12 @@ func (c *toBase64FunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
-	bf.tp.SetFlen(base64NeededEncodedLength(bf.args[0].GetType().GetFlen()))
+
+	if bf.args[0].GetType().GetFlen() == types.UnspecifiedLength {
+		bf.tp.SetFlen(types.UnspecifiedLength)
+	} else {
+		bf.tp.SetFlen(base64NeededEncodedLength(bf.args[0].GetType().GetFlen()))
+	}
 
 	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
 	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)

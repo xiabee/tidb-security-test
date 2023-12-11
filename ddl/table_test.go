@@ -21,11 +21,15 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
@@ -47,6 +51,7 @@ func testRenameTable(
 		Type:       model.ActionRenameTable,
 		BinlogInfo: &model.HistoryInfo{},
 		Args:       []interface{}{oldSchemaID, tblInfo.Name, oldSchemaName},
+		CtxVars:    []interface{}{[]int64{oldSchemaID, newSchemaID}, []int64{tblInfo.ID}},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	require.NoError(t, d.DoDDLJob(ctx, job))
@@ -63,6 +68,7 @@ func testRenameTables(t *testing.T, ctx sessionctx.Context, d ddl.DDL, oldSchema
 		Type:       model.ActionRenameTables,
 		BinlogInfo: &model.HistoryInfo{},
 		Args:       []interface{}{oldSchemaIDs, newSchemaIDs, newTableNames, oldTableIDs, oldSchemaNames, oldTableNames},
+		CtxVars:    []interface{}{append(oldSchemaIDs, newSchemaIDs...), oldTableIDs},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	require.NoError(t, d.DoDDLJob(ctx, job))
@@ -97,7 +103,8 @@ func testLockTable(t *testing.T, ctx sessionctx.Context, d ddl.DDL, newSchemaID 
 }
 
 func checkTableLockedTest(t *testing.T, store kv.Storage, dbInfo *model.DBInfo, tblInfo *model.TableInfo, serverID string, sessionID uint64, lockTp model.TableLockType) {
-	err := kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	err := kv.RunInNewTxn(ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		tt := meta.NewMeta(txn)
 		info, err := tt.GetTable(dbInfo.ID, tblInfo.ID)
 		require.NoError(t, err)
@@ -136,9 +143,10 @@ func testTruncateTable(t *testing.T, ctx sessionctx.Context, store kv.Storage, d
 	return job
 }
 
-func testGetTableWithError(store kv.Storage, schemaID, tableID int64) (table.Table, error) {
+func testGetTableWithError(r autoid.Requirement, schemaID, tableID int64) (table.Table, error) {
 	var tblInfo *model.TableInfo
-	err := kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	err := kv.RunInNewTxn(ctx, r.Store(), false, func(ctx context.Context, txn kv.Transaction) error {
 		t := meta.NewMeta(txn)
 		var err1 error
 		tblInfo, err1 = t.GetTable(schemaID, tableID)
@@ -153,8 +161,8 @@ func testGetTableWithError(store kv.Storage, schemaID, tableID int64) (table.Tab
 	if tblInfo == nil {
 		return nil, errors.New("table not found")
 	}
-	alloc := autoid.NewAllocator(store, schemaID, tblInfo.ID, false, autoid.RowIDAllocType)
-	tbl, err := table.TableFromMeta(autoid.NewAllocators(alloc), tblInfo)
+	alloc := autoid.NewAllocator(r, schemaID, tblInfo.ID, false, autoid.RowIDAllocType)
+	tbl, err := table.TableFromMeta(autoid.NewAllocators(false, alloc), tblInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -162,8 +170,7 @@ func testGetTableWithError(store kv.Storage, schemaID, tableID int64) (table.Tab
 }
 
 func TestTable(t *testing.T) {
-	store, domain, clean := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
-	defer clean()
+	store, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
 
 	d := domain.DDL()
 	dbInfo, err := testSchemaInfo(store, "test_table")
@@ -183,12 +190,15 @@ func TestTable(t *testing.T) {
 	require.NoError(t, err)
 	doDDLJobErr(t, dbInfo.ID, newTblInfo.ID, model.ActionCreateTable, []interface{}{newTblInfo}, ctx, d, store)
 
+	ctx = testkit.NewTestKit(t, store).Session()
+	require.NoError(t, sessiontxn.NewTxn(context.Background(), ctx))
 	count := 2000
 	tbl := testGetTable(t, domain, tblInfo.ID)
 	for i := 1; i <= count; i++ {
 		_, err := tbl.AddRecord(ctx, types.MakeDatums(i, i, i))
 		require.NoError(t, err)
 	}
+	require.NoError(t, ctx.CommitTxn(context.Background()))
 
 	jobID := testDropTable(testkit.NewTestKit(t, store), t, dbInfo.Name.L, tblInfo.Name.L, domain)
 	testCheckJobDone(t, store, jobID, false)
@@ -229,8 +239,82 @@ func TestTable(t *testing.T) {
 	testDropSchema(t, testkit.NewTestKit(t, store).Session(), d, dbInfo)
 }
 
+func TestCreateView(t *testing.T) {
+	store, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
+
+	d := domain.DDL()
+	dbInfo, err := testSchemaInfo(store, "test_table")
+	require.NoError(t, err)
+	testCreateSchema(t, testkit.NewTestKit(t, store).Session(), domain.DDL(), dbInfo)
+
+	ctx := testkit.NewTestKit(t, store).Session()
+
+	tblInfo, err := testTableInfo(store, "t", 3)
+	require.NoError(t, err)
+	job := testCreateTable(t, ctx, d, dbInfo, tblInfo)
+	testCheckTableState(t, store, dbInfo, tblInfo, model.StatePublic)
+	testCheckJobDone(t, store, job.ID, true)
+
+	// Create a view
+	newTblInfo0, err := testTableInfo(store, "v", 3)
+	require.NoError(t, err)
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionCreateView,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{newTblInfo0},
+	}
+	ctx.SetValue(sessionctx.QueryString, "skip")
+	err = d.DoDDLJob(ctx, job)
+	require.NoError(t, err)
+
+	v := getSchemaVer(t, ctx)
+	tblInfo.State = model.StatePublic
+	checkHistoryJobArgs(t, ctx, job.ID, &historyJobArgs{ver: v, tbl: newTblInfo0})
+	tblInfo.State = model.StateNone
+	testCheckTableState(t, store, dbInfo, tblInfo, model.StatePublic)
+	testCheckJobDone(t, store, job.ID, true)
+
+	// Replace a view
+	newTblInfo1, err := testTableInfo(store, "v", 3)
+	require.NoError(t, err)
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionCreateView,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{newTblInfo1, true, newTblInfo0.ID},
+	}
+	ctx.SetValue(sessionctx.QueryString, "skip")
+	err = d.DoDDLJob(ctx, job)
+	require.NoError(t, err)
+
+	v = getSchemaVer(t, ctx)
+	tblInfo.State = model.StatePublic
+	checkHistoryJobArgs(t, ctx, job.ID, &historyJobArgs{ver: v, tbl: newTblInfo1})
+	tblInfo.State = model.StateNone
+	testCheckTableState(t, store, dbInfo, tblInfo, model.StatePublic)
+	testCheckJobDone(t, store, job.ID, true)
+
+	// Replace a view with a non-existing table id
+	newTblInfo2, err := testTableInfo(store, "v", 3)
+	require.NoError(t, err)
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionCreateView,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{newTblInfo2, true, newTblInfo0.ID},
+	}
+	ctx.SetValue(sessionctx.QueryString, "skip")
+	err = d.DoDDLJob(ctx, job)
+	require.Error(t, err)
+}
+
 func checkTableCacheTest(t *testing.T, store kv.Storage, dbInfo *model.DBInfo, tblInfo *model.TableInfo) {
-	require.NoError(t, kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	require.NoError(t, kv.RunInNewTxn(ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		tt := meta.NewMeta(txn)
 		info, err := tt.GetTable(dbInfo.ID, tblInfo.ID)
 		require.NoError(t, err)
@@ -242,7 +326,8 @@ func checkTableCacheTest(t *testing.T, store kv.Storage, dbInfo *model.DBInfo, t
 }
 
 func checkTableNoCacheTest(t *testing.T, store kv.Storage, dbInfo *model.DBInfo, tblInfo *model.TableInfo) {
-	require.NoError(t, kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+	require.NoError(t, kv.RunInNewTxn(ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		tt := meta.NewMeta(txn)
 		info, err := tt.GetTable(dbInfo.ID, tblInfo.ID)
 		require.NoError(t, err)
@@ -286,8 +371,7 @@ func testAlterNoCacheTable(t *testing.T, ctx sessionctx.Context, d ddl.DDL, newS
 }
 
 func TestRenameTables(t *testing.T) {
-	store, domain, clean := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
-	defer clean()
+	store, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
 
 	d := domain.DDL()
 
@@ -315,8 +399,7 @@ func TestRenameTables(t *testing.T) {
 
 	job := testRenameTables(t, ctx, d, []int64{dbInfo.ID, dbInfo.ID}, []int64{dbInfo.ID, dbInfo.ID}, []*model.CIStr{&newTblInfos[0].Name, &newTblInfos[1].Name}, []int64{tblInfos[0].ID, tblInfos[1].ID}, []*model.CIStr{&dbInfo.Name, &dbInfo.Name}, []*model.CIStr{&tblInfos[0].Name, &tblInfos[1].Name})
 
-	txn, _ := ctx.Txn(true)
-	historyJob, err := meta.NewMeta(txn).GetHistoryDDLJob(job.ID)
+	historyJob, err := ddl.GetHistoryJobByID(testkit.NewTestKit(t, store).Session(), job.ID)
 	require.NoError(t, err)
 	wantTblInfos := historyJob.BinlogInfo.MultipleTableInfos
 	require.Equal(t, wantTblInfos[0].Name.L, "tt1")
@@ -324,8 +407,7 @@ func TestRenameTables(t *testing.T) {
 }
 
 func TestCreateTables(t *testing.T) {
-	store, domain, clean := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
-	defer clean()
+	store, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
 
 	d := domain.DDL()
 
@@ -367,13 +449,87 @@ func TestCreateTables(t *testing.T) {
 	testGetTable(t, domain, genIDs[2])
 }
 
+func TestAlterTTL(t *testing.T) {
+	store, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
+
+	d := domain.DDL()
+
+	dbInfo, err := testSchemaInfo(store, "test_table")
+	require.NoError(t, err)
+	testCreateSchema(t, testkit.NewTestKit(t, store).Session(), d, dbInfo)
+
+	ctx := testkit.NewTestKit(t, store).Session()
+
+	// initialize a table with ttlInfo
+	tableName := "t"
+	tblInfo, err := testTableInfo(store, tableName, 2)
+	require.NoError(t, err)
+	tblInfo.Columns[0].FieldType = *types.NewFieldType(mysql.TypeDatetime)
+	tblInfo.Columns[1].FieldType = *types.NewFieldType(mysql.TypeDatetime)
+	tblInfo.TTLInfo = &model.TTLInfo{
+		ColumnName:       tblInfo.Columns[0].Name,
+		IntervalExprStr:  "5",
+		IntervalTimeUnit: int(ast.TimeUnitDay),
+	}
+
+	// create table
+	job := testCreateTable(t, ctx, d, dbInfo, tblInfo)
+	testCheckTableState(t, store, dbInfo, tblInfo, model.StatePublic)
+	testCheckJobDone(t, store, job.ID, true)
+
+	// submit ddl job to modify ttlInfo
+	tableInfoAfterAlterTTLInfo := tblInfo.Clone()
+	require.NoError(t, err)
+	tableInfoAfterAlterTTLInfo.TTLInfo = &model.TTLInfo{
+		ColumnName:       tblInfo.Columns[1].Name,
+		IntervalExprStr:  "1",
+		IntervalTimeUnit: int(ast.TimeUnitYear),
+	}
+
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionAlterTTLInfo,
+		BinlogInfo: &model.HistoryInfo{},
+		Args: []interface{}{&model.TTLInfo{
+			ColumnName:       tblInfo.Columns[1].Name,
+			IntervalExprStr:  "1",
+			IntervalTimeUnit: int(ast.TimeUnitYear),
+		}},
+	}
+	ctx.SetValue(sessionctx.QueryString, "skip")
+	require.NoError(t, d.DoDDLJob(ctx, job))
+
+	v := getSchemaVer(t, ctx)
+	checkHistoryJobArgs(t, ctx, job.ID, &historyJobArgs{ver: v, tbl: nil})
+
+	// assert the ddlInfo as expected
+	historyJob, err := ddl.GetHistoryJobByID(testkit.NewTestKit(t, store).Session(), job.ID)
+	require.NoError(t, err)
+	require.Equal(t, tableInfoAfterAlterTTLInfo.TTLInfo, historyJob.BinlogInfo.TableInfo.TTLInfo)
+
+	// submit a ddl job to modify ttlEnabled
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		TableID:    tblInfo.ID,
+		Type:       model.ActionAlterTTLRemove,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{true},
+	}
+	ctx.SetValue(sessionctx.QueryString, "skip")
+	require.NoError(t, d.DoDDLJob(ctx, job))
+
+	v = getSchemaVer(t, ctx)
+	checkHistoryJobArgs(t, ctx, job.ID, &historyJobArgs{ver: v, tbl: nil})
+
+	// assert the ddlInfo as expected
+	historyJob, err = ddl.GetHistoryJobByID(testkit.NewTestKit(t, store).Session(), job.ID)
+	require.NoError(t, err)
+	require.Empty(t, historyJob.BinlogInfo.TableInfo.TTLInfo)
+}
+
 func TestRenameTableIntermediateState(t *testing.T) {
-	ddl.RunInGoTest = true
-	defer func() {
-		ddl.RunInGoTest = false
-	}()
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk2 := testkit.NewTestKit(t, store)
 	originHook := dom.DDL().GetHook()
@@ -394,12 +550,14 @@ func TestRenameTableIntermediateState(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		hook := &ddl.TestDDLCallback{Do: dom}
+		hook := &callback.TestDDLCallback{Do: dom}
 		runInsert := false
 		fn := func(job *model.Job) {
-			if job.SchemaState == model.StatePublic && !runInsert && !t.Failed() {
+			if job.Type == model.ActionRenameTable &&
+				job.SchemaState == model.StatePublic && !runInsert && !t.Failed() {
 				_, err := tk2.Exec(tc.insertSQL)
 				if len(tc.errMsg) > 0 {
+					assert.NotNil(t, err)
 					assert.Equal(t, tc.errMsg, err.Error())
 				} else {
 					assert.NoError(t, err)
@@ -407,7 +565,7 @@ func TestRenameTableIntermediateState(t *testing.T) {
 				runInsert = true
 			}
 		}
-		hook.OnJobUpdatedExported = fn
+		hook.OnJobUpdatedExported.Store(&fn)
 		dom.DDL().SetHook(hook)
 		tk.MustExec(tc.renameSQL)
 		result := tk.MustQuery(fmt.Sprintf("select * from %s;", tc.finalDB))

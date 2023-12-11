@@ -32,6 +32,7 @@ import (
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -86,6 +87,10 @@ func mockPlanBinaryDecoderFunc(plan string) (string, error) {
 	return plan, nil
 }
 
+func mockPlanBinaryCompressFunc(plan []byte) string {
+	return string(plan)
+}
+
 func TestTopSQLReporter(t *testing.T) {
 	err := cpuprofile.StartCPUProfiler()
 	require.NoError(t, err)
@@ -100,7 +105,7 @@ func TestTopSQLReporter(t *testing.T) {
 	})
 
 	topsqlstate.EnableTopSQL()
-	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc)
+	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc, mockPlanBinaryCompressFunc)
 	report.Start()
 	ds := reporter.NewSingleTargetDataSink(report)
 	ds.Start()
@@ -222,7 +227,7 @@ func TestTopSQLPubSub(t *testing.T) {
 	topsqlstate.GlobalState.ReportIntervalSeconds.Store(1)
 
 	topsqlstate.EnableTopSQL()
-	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc)
+	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc, mockPlanBinaryCompressFunc)
 	report.Start()
 	defer report.Close()
 	topsql.SetupTopSQLForTest(report)
@@ -237,7 +242,7 @@ func TestTopSQLPubSub(t *testing.T) {
 	conn, err := grpc.Dial(
 		server.Address(),
 		grpc.WithBlock(),
-		grpc.WithInsecure(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:    10 * time.Second,
 			Timeout: 3 * time.Second,
@@ -341,7 +346,7 @@ func TestTopSQLPubSub(t *testing.T) {
 
 func TestPubSubWhenReporterIsStopped(t *testing.T) {
 	topsqlstate.EnableTopSQL()
-	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc)
+	report := reporter.NewRemoteTopSQLReporter(mockPlanBinaryDecoderFunc, mockPlanBinaryCompressFunc)
 	report.Start()
 
 	server, err := mockServer.NewMockPubSubServer()
@@ -359,7 +364,7 @@ func TestPubSubWhenReporterIsStopped(t *testing.T) {
 	conn, err := grpc.Dial(
 		server.Address(),
 		grpc.WithBlock(),
-		grpc.WithInsecure(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:    10 * time.Second,
 			Timeout: 3 * time.Second,

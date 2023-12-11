@@ -16,9 +16,9 @@ package distsql
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -27,9 +27,11 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/planner/util"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/store/copr"
@@ -54,14 +56,15 @@ var (
 )
 
 var (
-	coprCacheHistogramHit  = metrics.DistSQLCoprCacheHistogram.WithLabelValues("hit")
-	coprCacheHistogramMiss = metrics.DistSQLCoprCacheHistogram.WithLabelValues("miss")
+	telemetryBatchedQueryTaskCnt     = metrics.TelemetryBatchedQueryTaskCnt
+	telemetryStoreBatchedCnt         = metrics.TelemetryStoreBatchedCnt
+	telemetryStoreBatchedFallbackCnt = metrics.TelemetryStoreBatchedFallbackCnt
 )
 
 var (
 	_ SelectResult = (*selectResult)(nil)
-	_ SelectResult = (*streamResult)(nil)
 	_ SelectResult = (*serialSelectResults)(nil)
+	_ SelectResult = (*sortedSelectResults)(nil)
 )
 
 // SelectResult is an iterator of coprocessor partial results.
@@ -72,6 +75,179 @@ type SelectResult interface {
 	Next(context.Context, *chunk.Chunk) error
 	// Close closes the iterator.
 	Close() error
+}
+
+type chunkRowHeap struct {
+	*sortedSelectResults
+}
+
+func (h chunkRowHeap) Len() int {
+	return len(h.rowPtrs)
+}
+
+func (h chunkRowHeap) Less(i, j int) bool {
+	iPtr := h.rowPtrs[i]
+	jPtr := h.rowPtrs[j]
+	return h.lessRow(h.cachedChunks[iPtr.ChkIdx].GetRow(int(iPtr.RowIdx)),
+		h.cachedChunks[jPtr.ChkIdx].GetRow(int(jPtr.RowIdx)))
+}
+
+func (h chunkRowHeap) Swap(i, j int) {
+	h.rowPtrs[i], h.rowPtrs[j] = h.rowPtrs[j], h.rowPtrs[i]
+}
+
+func (h *chunkRowHeap) Push(x interface{}) {
+	h.rowPtrs = append(h.rowPtrs, x.(chunk.RowPtr))
+}
+
+func (h *chunkRowHeap) Pop() interface{} {
+	ret := h.rowPtrs[len(h.rowPtrs)-1]
+	h.rowPtrs = h.rowPtrs[0 : len(h.rowPtrs)-1]
+	return ret
+}
+
+// NewSortedSelectResults is only for partition table
+// When pids != nil, the pid will be set in the last column of each chunk.Rows.
+// When schema == nil, sort by first few columns.
+func NewSortedSelectResults(selectResult []SelectResult, pids []int64, schema *expression.Schema, byitems []*util.ByItems, memTracker *memory.Tracker) SelectResult {
+	s := &sortedSelectResults{
+		schema:       schema,
+		selectResult: selectResult,
+		byItems:      byitems,
+		memTracker:   memTracker,
+		pids:         pids,
+	}
+	s.initCompareFuncs()
+	s.buildKeyColumns()
+	s.heap = &chunkRowHeap{s}
+	s.cachedChunks = make([]*chunk.Chunk, len(selectResult))
+	return s
+}
+
+type sortedSelectResults struct {
+	schema       *expression.Schema
+	selectResult []SelectResult
+	compareFuncs []chunk.CompareFunc
+	byItems      []*util.ByItems
+	keyColumns   []int
+
+	cachedChunks []*chunk.Chunk
+	rowPtrs      []chunk.RowPtr
+	heap         *chunkRowHeap
+
+	pids       []int64
+	memTracker *memory.Tracker
+}
+
+func (ssr *sortedSelectResults) updateCachedChunk(ctx context.Context, idx uint32) error {
+	prevMemUsage := ssr.cachedChunks[idx].MemoryUsage()
+	if err := ssr.selectResult[idx].Next(ctx, ssr.cachedChunks[idx]); err != nil {
+		return err
+	}
+	ssr.memTracker.Consume(ssr.cachedChunks[idx].MemoryUsage() - prevMemUsage)
+	if ssr.cachedChunks[idx].NumRows() == 0 {
+		return nil
+	}
+	heap.Push(ssr.heap, chunk.RowPtr{ChkIdx: idx, RowIdx: 0})
+	return nil
+}
+
+func (ssr *sortedSelectResults) initCompareFuncs() {
+	ssr.compareFuncs = make([]chunk.CompareFunc, len(ssr.byItems))
+	for i, item := range ssr.byItems {
+		keyType := item.Expr.GetType()
+		ssr.compareFuncs[i] = chunk.GetCompareFunc(keyType)
+	}
+}
+
+func (ssr *sortedSelectResults) buildKeyColumns() {
+	ssr.keyColumns = make([]int, 0, len(ssr.byItems))
+	for i, by := range ssr.byItems {
+		col := by.Expr.(*expression.Column)
+		if ssr.schema == nil {
+			ssr.keyColumns = append(ssr.keyColumns, i)
+		} else {
+			ssr.keyColumns = append(ssr.keyColumns, ssr.schema.ColumnIndex(col))
+		}
+	}
+}
+
+func (ssr *sortedSelectResults) lessRow(rowI, rowJ chunk.Row) bool {
+	for i, colIdx := range ssr.keyColumns {
+		cmpFunc := ssr.compareFuncs[i]
+		cmp := cmpFunc(rowI, colIdx, rowJ, colIdx)
+		if ssr.byItems[i].Desc {
+			cmp = -cmp
+		}
+		if cmp < 0 {
+			return true
+		} else if cmp > 0 {
+			return false
+		}
+	}
+	return false
+}
+
+func (*sortedSelectResults) NextRaw(context.Context) ([]byte, error) {
+	panic("Not support NextRaw for sortedSelectResults")
+}
+
+func (ssr *sortedSelectResults) Next(ctx context.Context, c *chunk.Chunk) (err error) {
+	c.Reset()
+	for i := range ssr.cachedChunks {
+		if ssr.cachedChunks[i] == nil {
+			ssr.cachedChunks[i] = c.CopyConstruct()
+			if len(ssr.pids) != 0 {
+				r := make([]int, c.NumCols()-1)
+				for i := range r {
+					r[i] = i
+				}
+				ssr.cachedChunks[i] = ssr.cachedChunks[i].Prune(r)
+			}
+			ssr.memTracker.Consume(ssr.cachedChunks[i].MemoryUsage())
+		}
+	}
+
+	if ssr.heap.Len() == 0 {
+		for i := range ssr.cachedChunks {
+			if err = ssr.updateCachedChunk(ctx, uint32(i)); err != nil {
+				return err
+			}
+		}
+	}
+
+	for c.NumRows() < c.RequiredRows() {
+		if ssr.heap.Len() == 0 {
+			break
+		}
+
+		idx := heap.Pop(ssr.heap).(chunk.RowPtr)
+		c.AppendRow(ssr.cachedChunks[idx.ChkIdx].GetRow(int(idx.RowIdx)))
+		if len(ssr.pids) != 0 {
+			c.AppendInt64(c.NumCols()-1, ssr.pids[idx.ChkIdx])
+		}
+
+		if int(idx.RowIdx) >= ssr.cachedChunks[idx.ChkIdx].NumRows()-1 {
+			if err = ssr.updateCachedChunk(ctx, idx.ChkIdx); err != nil {
+				return err
+			}
+		} else {
+			heap.Push(ssr.heap, chunk.RowPtr{ChkIdx: idx.ChkIdx, RowIdx: idx.RowIdx + 1})
+		}
+	}
+	return nil
+}
+
+func (ssr *sortedSelectResults) Close() (err error) {
+	for i, sr := range ssr.selectResult {
+		err = sr.Close()
+		if err != nil {
+			return err
+		}
+		ssr.memTracker.Consume(-ssr.cachedChunks[i].MemoryUsage())
+		ssr.cachedChunks[i] = nil
+	}
+	return nil
 }
 
 // NewSerialSelectResults create a SelectResult which will read each SelectResult serially.
@@ -140,7 +316,6 @@ type selectResult struct {
 	feedback     *statistics.QueryFeedback
 	partialCount int64 // number of partial results.
 	sqlType      string
-	encodeType   tipb.EncodeType
 
 	// copPlanIDs contains all copTasks' planIDs,
 	// which help to collect copTasks' runtime stats.
@@ -153,18 +328,18 @@ type selectResult struct {
 	durationReported bool
 	memTracker       *memory.Tracker
 
-	stats  *selectResultRuntimeStats
-	paging bool
+	stats *selectResultRuntimeStats
+	// distSQLConcurrency and paging are only for collecting information, and they don't affect the process of execution.
+	distSQLConcurrency int
+	paging             bool
 }
 
 func (r *selectResult) fetchResp(ctx context.Context) error {
 	defer func() {
 		if r.stats != nil {
-			coprCacheHistogramHit.Observe(float64(r.stats.CoprCacheHitNum))
-			coprCacheHistogramMiss.Observe(float64(len(r.stats.copRespTime) - int(r.stats.CoprCacheHitNum)))
 			// Ignore internal sql.
-			if !r.ctx.GetSessionVars().InRestrictedSQL && len(r.stats.copRespTime) > 0 {
-				ratio := float64(r.stats.CoprCacheHitNum) / float64(len(r.stats.copRespTime))
+			if !r.ctx.GetSessionVars().InRestrictedSQL && r.stats.copRespTime.Size() > 0 {
+				ratio := r.stats.calcCacheHit()
 				if ratio >= 1 {
 					telemetry.CurrentCoprCacheHitRatioGTE100Count.Inc()
 				}
@@ -269,13 +444,14 @@ func (r *selectResult) Next(ctx context.Context, chk *chunk.Chunk) error {
 		}
 	}
 	// TODO(Shenghui Wu): add metrics
-	switch r.selectResp.GetEncodeType() {
+	encodeType := r.selectResp.GetEncodeType()
+	switch encodeType {
 	case tipb.EncodeType_TypeDefault:
 		return r.readFromDefault(ctx, chk)
 	case tipb.EncodeType_TypeChunk:
 		return r.readFromChunk(ctx, chk)
 	}
-	return errors.Errorf("unsupported encode type:%v", r.encodeType)
+	return errors.Errorf("unsupported encode type:%v", encodeType)
 }
 
 // NextRaw returns the next raw partial result.
@@ -359,18 +535,22 @@ func (r *selectResult) updateCopRuntimeStats(ctx context.Context, copStats *copr
 
 	if copStats.ScanDetail != nil {
 		readKeys := copStats.ScanDetail.ProcessedKeys
-		readTime := copStats.TimeDetail.KvReadWallTimeMs.Seconds()
+		readTime := copStats.TimeDetail.KvReadWallTime.Seconds()
 		readSize := float64(copStats.ScanDetail.ProcessedKeysSize)
 		tikvmetrics.ObserveReadSLI(uint64(readKeys), readTime, readSize)
 	}
 
 	if r.stats == nil {
-		id := r.rootPlanID
 		r.stats = &selectResultRuntimeStats{
-			backoffSleep: make(map[string]time.Duration),
-			rpcStat:      tikv.NewRegionRequestRuntimeStats(),
+			backoffSleep:       make(map[string]time.Duration),
+			rpcStat:            tikv.NewRegionRequestRuntimeStats(),
+			distSQLConcurrency: r.distSQLConcurrency,
 		}
-		r.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(id, r.stats)
+		if ci, ok := r.resp.(copr.CopInfo); ok {
+			conc, extraConc := ci.GetConcurrency()
+			r.stats.distSQLConcurrency = conc
+			r.stats.extraConcurrency = extraConc
+		}
 	}
 	r.stats.mergeCopRuntimeStats(copStats, respTime)
 
@@ -461,31 +641,51 @@ func (r *selectResult) Close() error {
 	if respSize > 0 {
 		r.memConsume(-respSize)
 	}
+	if r.stats != nil {
+		defer func() {
+			if ci, ok := r.resp.(copr.CopInfo); ok {
+				r.stats.buildTaskDuration = ci.GetBuildTaskElapsed()
+				batched, fallback := ci.GetStoreBatchInfo()
+				if batched != 0 || fallback != 0 {
+					r.stats.storeBatchedNum, r.stats.storeBatchedFallbackNum = batched, fallback
+					telemetryStoreBatchedCnt.Add(float64(r.stats.storeBatchedNum))
+					telemetryStoreBatchedFallbackCnt.Add(float64(r.stats.storeBatchedFallbackNum))
+					telemetryBatchedQueryTaskCnt.Add(float64(r.stats.copRespTime.Size()))
+				}
+			}
+			r.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(r.rootPlanID, r.stats)
+		}()
+	}
 	return r.resp.Close()
 }
 
-// CopRuntimeStats is a interface uses to check whether the result has cop runtime stats.
+// CopRuntimeStats is an interface uses to check whether the result has cop runtime stats.
 type CopRuntimeStats interface {
 	// GetCopRuntimeStats gets the cop runtime stats information.
 	GetCopRuntimeStats() *copr.CopRuntimeStats
 }
 
 type selectResultRuntimeStats struct {
-	copRespTime      []time.Duration
-	procKeys         []int64
-	backoffSleep     map[string]time.Duration
-	totalProcessTime time.Duration
-	totalWaitTime    time.Duration
-	rpcStat          tikv.RegionRequestRuntimeStats
-	CoprCacheHitNum  int64
+	copRespTime             execdetails.Percentile[execdetails.Duration]
+	procKeys                execdetails.Percentile[execdetails.Int64]
+	backoffSleep            map[string]time.Duration
+	totalProcessTime        time.Duration
+	totalWaitTime           time.Duration
+	rpcStat                 tikv.RegionRequestRuntimeStats
+	distSQLConcurrency      int
+	extraConcurrency        int
+	CoprCacheHitNum         int64
+	storeBatchedNum         uint64
+	storeBatchedFallbackNum uint64
+	buildTaskDuration       time.Duration
 }
 
 func (s *selectResultRuntimeStats) mergeCopRuntimeStats(copStats *copr.CopRuntimeStats, respTime time.Duration) {
-	s.copRespTime = append(s.copRespTime, respTime)
+	s.copRespTime.Add(execdetails.Duration(respTime))
 	if copStats.ScanDetail != nil {
-		s.procKeys = append(s.procKeys, copStats.ScanDetail.ProcessedKeys)
+		s.procKeys.Add(execdetails.Int64(copStats.ScanDetail.ProcessedKeys))
 	} else {
-		s.procKeys = append(s.procKeys, 0)
+		s.procKeys.Add(0)
 	}
 	maps.Copy(s.backoffSleep, copStats.BackoffSleep)
 	s.totalProcessTime += copStats.TimeDetail.ProcessTime
@@ -498,13 +698,19 @@ func (s *selectResultRuntimeStats) mergeCopRuntimeStats(copStats *copr.CopRuntim
 
 func (s *selectResultRuntimeStats) Clone() execdetails.RuntimeStats {
 	newRs := selectResultRuntimeStats{
-		copRespTime:  make([]time.Duration, 0, len(s.copRespTime)),
-		procKeys:     make([]int64, 0, len(s.procKeys)),
-		backoffSleep: make(map[string]time.Duration, len(s.backoffSleep)),
-		rpcStat:      tikv.NewRegionRequestRuntimeStats(),
+		copRespTime:             execdetails.Percentile[execdetails.Duration]{},
+		procKeys:                execdetails.Percentile[execdetails.Int64]{},
+		backoffSleep:            make(map[string]time.Duration, len(s.backoffSleep)),
+		rpcStat:                 tikv.NewRegionRequestRuntimeStats(),
+		distSQLConcurrency:      s.distSQLConcurrency,
+		extraConcurrency:        s.extraConcurrency,
+		CoprCacheHitNum:         s.CoprCacheHitNum,
+		storeBatchedNum:         s.storeBatchedNum,
+		storeBatchedFallbackNum: s.storeBatchedFallbackNum,
+		buildTaskDuration:       s.buildTaskDuration,
 	}
-	newRs.copRespTime = append(newRs.copRespTime, s.copRespTime...)
-	newRs.procKeys = append(newRs.procKeys, s.procKeys...)
+	newRs.copRespTime.MergePercentile(&s.copRespTime)
+	newRs.procKeys.MergePercentile(&s.procKeys)
 	for k, v := range s.backoffSleep {
 		newRs.backoffSleep[k] += v
 	}
@@ -519,8 +725,8 @@ func (s *selectResultRuntimeStats) Merge(rs execdetails.RuntimeStats) {
 	if !ok {
 		return
 	}
-	s.copRespTime = append(s.copRespTime, other.copRespTime...)
-	s.procKeys = append(s.procKeys, other.procKeys...)
+	s.copRespTime.MergePercentile(&other.copRespTime)
+	s.procKeys.MergePercentile(&other.procKeys)
 
 	for k, v := range other.backoffSleep {
 		s.backoffSleep[k] += v
@@ -529,40 +735,40 @@ func (s *selectResultRuntimeStats) Merge(rs execdetails.RuntimeStats) {
 	s.totalWaitTime += other.totalWaitTime
 	s.rpcStat.Merge(other.rpcStat)
 	s.CoprCacheHitNum += other.CoprCacheHitNum
+	if other.distSQLConcurrency > s.distSQLConcurrency {
+		s.distSQLConcurrency = other.distSQLConcurrency
+	}
+	if other.extraConcurrency > s.extraConcurrency {
+		s.extraConcurrency = other.extraConcurrency
+	}
+	s.storeBatchedNum += other.storeBatchedNum
+	s.storeBatchedFallbackNum += other.storeBatchedFallbackNum
+	s.buildTaskDuration += other.buildTaskDuration
 }
 
 func (s *selectResultRuntimeStats) String() string {
 	buf := bytes.NewBuffer(nil)
 	rpcStat := s.rpcStat
-	if len(s.copRespTime) > 0 {
-		size := len(s.copRespTime)
+	if s.copRespTime.Size() > 0 {
+		size := s.copRespTime.Size()
 		if size == 1 {
-			buf.WriteString(fmt.Sprintf("cop_task: {num: 1, max: %v, proc_keys: %v", execdetails.FormatDuration(s.copRespTime[0]), s.procKeys[0]))
+			buf.WriteString(fmt.Sprintf("cop_task: {num: 1, max: %v, proc_keys: %v", execdetails.FormatDuration(time.Duration(s.copRespTime.GetPercentile(0))), s.procKeys.GetPercentile(0)))
 		} else {
-			sort.Slice(s.copRespTime, func(i, j int) bool {
-				return s.copRespTime[i] < s.copRespTime[j]
-			})
-			vMax, vMin := s.copRespTime[size-1], s.copRespTime[0]
-			vP95 := s.copRespTime[size*19/20]
-			sum := 0.0
-			for _, t := range s.copRespTime {
-				sum += float64(t)
-			}
+			vMax, vMin := s.copRespTime.GetMax(), s.copRespTime.GetMin()
+			vP95 := s.copRespTime.GetPercentile(0.95)
+			sum := s.copRespTime.Sum()
 			vAvg := time.Duration(sum / float64(size))
 
-			sort.Slice(s.procKeys, func(i, j int) bool {
-				return s.procKeys[i] < s.procKeys[j]
-			})
-			keyMax := s.procKeys[size-1]
-			keyP95 := s.procKeys[size*19/20]
+			keyMax := s.procKeys.GetMax()
+			keyP95 := s.procKeys.GetPercentile(0.95)
 			buf.WriteString(fmt.Sprintf("cop_task: {num: %v, max: %v, min: %v, avg: %v, p95: %v", size,
-				execdetails.FormatDuration(vMax), execdetails.FormatDuration(vMin),
-				execdetails.FormatDuration(vAvg), execdetails.FormatDuration(vP95)))
+				execdetails.FormatDuration(time.Duration(vMax.GetFloat64())), execdetails.FormatDuration(time.Duration(vMin.GetFloat64())),
+				execdetails.FormatDuration(vAvg), execdetails.FormatDuration(time.Duration(vP95))))
 			if keyMax > 0 {
 				buf.WriteString(", max_proc_keys: ")
-				buf.WriteString(strconv.FormatInt(keyMax, 10))
+				buf.WriteString(strconv.FormatInt(int64(keyMax), 10))
 				buf.WriteString(", p95_proc_keys: ")
-				buf.WriteString(strconv.FormatInt(keyP95, 10))
+				buf.WriteString(strconv.FormatInt(int64(keyP95), 10))
 			}
 		}
 		if s.totalProcessTime > 0 {
@@ -584,9 +790,29 @@ func (s *selectResultRuntimeStats) String() string {
 		}
 		if config.GetGlobalConfig().TiKVClient.CoprCache.CapacityMB > 0 {
 			buf.WriteString(fmt.Sprintf(", copr_cache_hit_ratio: %v",
-				strconv.FormatFloat(float64(s.CoprCacheHitNum)/float64(len(s.copRespTime)), 'f', 2, 64)))
+				strconv.FormatFloat(s.calcCacheHit(), 'f', 2, 64)))
 		} else {
 			buf.WriteString(", copr_cache: disabled")
+		}
+		if s.buildTaskDuration > 0 {
+			buf.WriteString(", build_task_duration: ")
+			buf.WriteString(execdetails.FormatDuration(s.buildTaskDuration))
+		}
+		if s.distSQLConcurrency > 0 {
+			buf.WriteString(", max_distsql_concurrency: ")
+			buf.WriteString(strconv.FormatInt(int64(s.distSQLConcurrency), 10))
+		}
+		if s.extraConcurrency > 0 {
+			buf.WriteString(", max_extra_concurrency: ")
+			buf.WriteString(strconv.FormatInt(int64(s.extraConcurrency), 10))
+		}
+		if s.storeBatchedNum > 0 {
+			buf.WriteString(", store_batch_num: ")
+			buf.WriteString(strconv.FormatInt(int64(s.storeBatchedNum), 10))
+		}
+		if s.storeBatchedFallbackNum > 0 {
+			buf.WriteString(", store_batch_fallback_num: ")
+			buf.WriteString(strconv.FormatInt(int64(s.storeBatchedFallbackNum), 10))
 		}
 		buf.WriteString("}")
 	}
@@ -613,6 +839,18 @@ func (s *selectResultRuntimeStats) String() string {
 }
 
 // Tp implements the RuntimeStats interface.
-func (s *selectResultRuntimeStats) Tp() int {
+func (*selectResultRuntimeStats) Tp() int {
 	return execdetails.TpSelectResultRuntimeStats
+}
+
+func (s *selectResultRuntimeStats) calcCacheHit() float64 {
+	hit := s.CoprCacheHitNum
+	tot := s.copRespTime.Size()
+	if s.storeBatchedNum > 0 {
+		tot += int(s.storeBatchedNum)
+	}
+	if tot == 0 {
+		return 0
+	}
+	return float64(hit) / float64(tot)
 }

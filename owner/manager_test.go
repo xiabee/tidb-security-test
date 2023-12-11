@@ -16,15 +16,16 @@ package owner_test
 
 import (
 	"context"
-	goctx "context"
 	"fmt"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	. "github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/infoschema"
+	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/owner"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/store/mockstore"
@@ -37,50 +38,67 @@ import (
 
 const testLease = 5 * time.Millisecond
 
-func TestSingle(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")
-	}
-	integration.BeforeTest(t)
+type testInfo struct {
+	store   kv.Storage
+	cluster *integration.ClusterV3
+	client  *clientv3.Client
+	ddl     DDL
+}
 
+func newTestInfo(t *testing.T) *testInfo {
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
-	defer func() {
-		err := store.Close()
-		require.NoError(t, err)
-	}()
+	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 4})
 
-	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
-	defer cluster.Terminate(t)
-
-	client := cluster.RandClient()
-	ctx := goctx.Background()
+	cli := cluster.Client(0)
 	ic := infoschema.NewCache(2)
 	ic.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d := NewDDL(
-		ctx,
-		WithEtcdClient(client),
+		context.Background(),
+		WithEtcdClient(cli),
 		WithStore(store),
 		WithLease(testLease),
 		WithInfoCache(ic),
 	)
-	err = d.Start(nil)
-	require.NoError(t, err)
-	defer func() {
-		_ = d.Stop()
-	}()
 
+	return &testInfo{
+		store:   store,
+		cluster: cluster,
+		client:  cli,
+		ddl:     d,
+	}
+}
+
+func (ti *testInfo) Close(t *testing.T) {
+	err := ti.ddl.Stop()
+	require.NoError(t, err)
+	err = ti.store.Close()
+	require.NoError(t, err)
+	ti.cluster.Terminate(t)
+}
+
+func TestSingle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")
+	}
+	integration.BeforeTestExternal(t)
+
+	tInfo := newTestInfo(t)
+	client, d := tInfo.client, tInfo.ddl
+	defer tInfo.Close(t)
+	require.NoError(t, d.OwnerManager().CampaignOwner())
 	isOwner := checkOwner(d, true)
 	require.True(t, isOwner)
 
 	// test for newSession failed
-	ctx, cancel := goctx.WithCancel(ctx)
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
 	manager := owner.NewOwnerManager(ctx, client, "ddl", "ddl_id", DDLOwnerKey)
 	cancel()
 
-	err = manager.CampaignOwner()
+	err := manager.CampaignOwner()
 	comment := fmt.Sprintf("campaigned result don't match, err %v", err)
-	require.True(t, terror.ErrorEqual(err, goctx.Canceled) || terror.ErrorEqual(err, goctx.DeadlineExceeded), comment)
+	require.True(t, terror.ErrorEqual(err, context.Canceled) || terror.ErrorEqual(err, context.DeadlineExceeded), comment)
 
 	isOwner = checkOwner(d, true)
 	require.True(t, isOwner)
@@ -93,15 +111,76 @@ func TestSingle(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// err is ok to be not nil since we canceled the manager.
-	ownerID, _ := manager.GetOwnerID(goctx.Background())
+	ownerID, _ := manager.GetOwnerID(ctx)
 	require.Equal(t, "", ownerID)
+	op, _ := owner.GetOwnerOpValue(ctx, client, DDLOwnerKey, "log prefix")
+	require.Equal(t, op, owner.OpNone)
+}
+
+func TestSetAndGetOwnerOpValue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")
+	}
+	integration.BeforeTestExternal(t)
+
+	tInfo := newTestInfo(t)
+	defer tInfo.Close(t)
+
+	require.NoError(t, tInfo.ddl.OwnerManager().CampaignOwner())
+	isOwner := checkOwner(tInfo.ddl, true)
+	require.True(t, isOwner)
+
+	// test set/get owner info
+	manager := tInfo.ddl.OwnerManager()
+	ownerID, err := manager.GetOwnerID(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, tInfo.ddl.GetID(), ownerID)
+	op, err := owner.GetOwnerOpValue(context.Background(), tInfo.client, DDLOwnerKey, "log prefix")
+	require.NoError(t, err)
+	require.Equal(t, op, owner.OpNone)
+	err = manager.SetOwnerOpValue(context.Background(), owner.OpGetUpgradingState)
+	require.NoError(t, err)
+	op, err = owner.GetOwnerOpValue(context.Background(), tInfo.client, DDLOwnerKey, "log prefix")
+	require.NoError(t, err)
+	require.Equal(t, op, owner.OpGetUpgradingState)
+	// update the same as the original value
+	err = manager.SetOwnerOpValue(context.Background(), owner.OpGetUpgradingState)
+	require.NoError(t, err)
+	op, err = owner.GetOwnerOpValue(context.Background(), tInfo.client, DDLOwnerKey, "log prefix")
+	require.NoError(t, err)
+	require.Equal(t, op, owner.OpGetUpgradingState)
+	// test del owner key when SetOwnerOpValue
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/owner/MockDelOwnerKey", `return("delOwnerKeyAndNotOwner")`))
+	err = manager.SetOwnerOpValue(context.Background(), owner.OpNone)
+	require.Error(t, err, "put owner key failed, cmp is false")
+	op, err = owner.GetOwnerOpValue(context.Background(), tInfo.client, DDLOwnerKey, "log prefix")
+	require.NotNil(t, err)
+	require.Equal(t, concurrency.ErrElectionNoLeader.Error(), err.Error())
+	require.Equal(t, op, owner.OpNone)
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/owner/MockDelOwnerKey"))
+
+	// Let ddl run for the owner again.
+	require.NoError(t, tInfo.ddl.OwnerManager().CampaignOwner())
+	isOwner = checkOwner(tInfo.ddl, true)
+	require.True(t, isOwner)
+	// Mock the manager become not owner because the owner is deleted(like TTL is timeout).
+	// And then the manager campaigns the owner again, and become the owner.
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/owner/MockDelOwnerKey", `return("onlyDelOwnerKey")`))
+	err = manager.SetOwnerOpValue(context.Background(), owner.OpGetUpgradingState)
+	require.Error(t, err, "put owner key failed, cmp is false")
+	isOwner = checkOwner(tInfo.ddl, true)
+	require.True(t, isOwner)
+	op, err = owner.GetOwnerOpValue(context.Background(), tInfo.client, DDLOwnerKey, "log prefix")
+	require.NoError(t, err)
+	require.Equal(t, op, owner.OpNone)
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/owner/MockDelOwnerKey"))
 }
 
 func TestCluster(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")
 	}
-	integration.BeforeTest(t)
+	integration.BeforeTestExternal(t)
 
 	originalTTL := owner.ManagerSessionTTL
 	owner.ManagerSessionTTL = 3
@@ -109,29 +188,10 @@ func TestCluster(t *testing.T) {
 		owner.ManagerSessionTTL = originalTTL
 	}()
 
-	store, err := mockstore.NewMockStore()
-	require.NoError(t, err)
-	defer func() {
-		err := store.Close()
-		require.NoError(t, err)
-	}()
-
-	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 4})
-	defer cluster.Terminate(t)
-
-	cli := cluster.Client(0)
-	ic := infoschema.NewCache(2)
-	ic.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
-	d := NewDDL(
-		goctx.Background(),
-		WithEtcdClient(cli),
-		WithStore(store),
-		WithLease(testLease),
-		WithInfoCache(ic),
-	)
-
-	err = d.Start(nil)
-	require.NoError(t, err)
+	tInfo := newTestInfo(t)
+	store, cluster, d := tInfo.store, tInfo.cluster, tInfo.ddl
+	defer tInfo.Close(t)
+	require.NoError(t, d.OwnerManager().CampaignOwner())
 
 	isOwner := checkOwner(d, true)
 	require.True(t, isOwner)
@@ -140,65 +200,53 @@ func TestCluster(t *testing.T) {
 	ic2 := infoschema.NewCache(2)
 	ic2.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d1 := NewDDL(
-		goctx.Background(),
+		context.Background(),
 		WithEtcdClient(cli1),
 		WithStore(store),
 		WithLease(testLease),
 		WithInfoCache(ic2),
 	)
-	err = d1.Start(nil)
-	require.NoError(t, err)
+	require.NoError(t, d1.OwnerManager().CampaignOwner())
 
 	isOwner = checkOwner(d1, false)
 	require.False(t, isOwner)
 
 	// Delete the leader key, the d1 become the owner.
 	cliRW := cluster.Client(2)
-	err = deleteLeader(cliRW, DDLOwnerKey)
+	err := deleteLeader(cliRW, DDLOwnerKey)
 	require.NoError(t, err)
 
 	isOwner = checkOwner(d, false)
 	require.False(t, isOwner)
 
-	err = d.Stop()
-	require.NoError(t, err)
-
+	d.OwnerManager().Cancel()
 	// d3 (not owner) stop
 	cli3 := cluster.Client(3)
 	ic3 := infoschema.NewCache(2)
 	ic3.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d3 := NewDDL(
-		goctx.Background(),
+		context.Background(),
 		WithEtcdClient(cli3),
 		WithStore(store),
 		WithLease(testLease),
 		WithInfoCache(ic3),
 	)
-	err = d3.Start(nil)
-	require.NoError(t, err)
-	defer func() {
-		err = d3.Stop()
-		require.NoError(t, err)
-	}()
+	require.NoError(t, d3.OwnerManager().CampaignOwner())
 
 	isOwner = checkOwner(d3, false)
 	require.False(t, isOwner)
 
-	err = d3.Stop()
-	require.NoError(t, err)
-
+	d3.OwnerManager().Cancel()
 	// Cancel the owner context, there is no owner.
-	err = d1.Stop()
-	require.NoError(t, err)
+	d1.OwnerManager().Cancel()
 
-	session, err := concurrency.NewSession(cliRW)
-	require.NoError(t, err)
-
-	election := concurrency.NewElection(session, DDLOwnerKey)
 	logPrefix := fmt.Sprintf("[ddl] %s ownerManager %s", DDLOwnerKey, "useless id")
 	logCtx := logutil.WithKeyValue(context.Background(), "owner info", logPrefix)
-	_, err = owner.GetOwnerInfo(goctx.Background(), logCtx, election, "useless id")
+	_, err = owner.GetOwnerKey(context.Background(), logCtx, cliRW, DDLOwnerKey, "useless id")
 	require.Truef(t, terror.ErrorEqual(err, concurrency.ErrElectionNoLeader), "get owner info result don't match, err %v", err)
+	op, err := owner.GetOwnerOpValue(context.Background(), cliRW, DDLOwnerKey, logPrefix)
+	require.Truef(t, terror.ErrorEqual(err, concurrency.ErrElectionNoLeader), "get owner info result don't match, err %v", err)
+	require.Equal(t, op, owner.OpNone)
 }
 
 func checkOwner(d DDL, fbVal bool) (isOwner bool) {
@@ -224,10 +272,10 @@ func deleteLeader(cli *clientv3.Client, prefixKey string) error {
 		_ = session.Close()
 	}()
 	election := concurrency.NewElection(session, prefixKey)
-	resp, err := election.Leader(goctx.Background())
+	resp, err := election.Leader(context.Background())
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = cli.Delete(goctx.Background(), string(resp.Kvs[0].Key))
+	_, err = cli.Delete(context.Background(), string(resp.Kvs[0].Key))
 	return errors.Trace(err)
 }

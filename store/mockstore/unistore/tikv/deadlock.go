@@ -20,14 +20,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
-
 	deadlockPb "github.com/pingcap/kvproto/pkg/deadlock"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/store/mockstore/unistore/pd"
 	"github.com/pingcap/tidb/store/mockstore/unistore/tikv/kverrors"
 	"github.com/pingcap/tidb/store/mockstore/unistore/util/lockwaiter"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Follower will send detection rpc to Leader
@@ -101,7 +101,7 @@ func (dt *DetectorClient) rebuildStreamClient() error {
 	if err != nil {
 		return err
 	}
-	cc, err := grpc.Dial(leaderAddr, grpc.WithInsecure())
+	cc, err := grpc.Dial(leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return err
 	}

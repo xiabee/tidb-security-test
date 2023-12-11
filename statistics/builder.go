@@ -24,6 +24,9 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
+	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/memory"
+	"go.uber.org/zap"
 )
 
 // SortedBuilder is used to build histograms for PK and index.
@@ -130,7 +133,7 @@ func BuildColumnHist(ctx sessionctx.Context, numBuckets, id int64, collector *Sa
 	}
 	hg := NewHistogram(id, ndv, nullCount, 0, tp, int(numBuckets), collector.TotalSize)
 
-	corrXYSum, err := buildHist(sc, hg, samples, count, ndv, numBuckets)
+	corrXYSum, err := buildHist(sc, hg, samples, count, ndv, numBuckets, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +143,7 @@ func BuildColumnHist(ctx sessionctx.Context, numBuckets, id int64, collector *Sa
 
 // buildHist builds histogram from samples and other information.
 // It stores the built histogram in hg and return corrXYSum used for calculating the correlation.
-func buildHist(sc *stmtctx.StatementContext, hg *Histogram, samples []*SampleItem, count, ndv, numBuckets int64) (corrXYSum float64, err error) {
+func buildHist(sc *stmtctx.StatementContext, hg *Histogram, samples []*SampleItem, count, ndv, numBuckets int64, memTracker *memory.Tracker) (corrXYSum float64, err error) {
 	sampleNum := int64(len(samples))
 	// As we use samples to build the histogram, the bucket number and repeat should multiply a factor.
 	sampleFactor := float64(count) / float64(sampleNum)
@@ -157,9 +160,24 @@ func buildHist(sc *stmtctx.StatementContext, hg *Histogram, samples []*SampleIte
 	var lastCount int64
 	corrXYSum = float64(0)
 	hg.AppendBucket(&samples[0].Value, &samples[0].Value, int64(sampleFactor), int64(ndvFactor))
+	bufferedMemSize := int64(0)
+	bufferedReleaseSize := int64(0)
+	defer func() {
+		if memTracker != nil {
+			memTracker.Consume(bufferedMemSize)
+			memTracker.Release(bufferedReleaseSize)
+		}
+	}()
 	for i := int64(1); i < sampleNum; i++ {
 		corrXYSum += float64(i) * float64(samples[i].Ordinal)
-		cmp, err := hg.GetUpper(bucketIdx).Compare(sc, &samples[i].Value, collate.GetBinaryCollator())
+		upper := hg.GetUpper(bucketIdx)
+		if memTracker != nil {
+			// tmp memory usage
+			deltaSize := upper.MemUsage()
+			memTracker.BufferedConsume(&bufferedMemSize, deltaSize)
+			memTracker.BufferedRelease(&bufferedReleaseSize, deltaSize)
+		}
+		cmp, err := upper.Compare(sc, &samples[i].Value, collate.GetBinaryCollator())
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -221,11 +239,27 @@ func BuildHistAndTopN(
 	collector *SampleCollector,
 	tp *types.FieldType,
 	isColumn bool,
+	memTracker *memory.Tracker,
 ) (*Histogram, *TopN, error) {
+	bufferedMemSize := int64(0)
+	bufferedReleaseSize := int64(0)
+	defer func() {
+		if memTracker != nil {
+			memTracker.Consume(bufferedMemSize)
+			memTracker.Release(bufferedReleaseSize)
+		}
+	}()
 	var getComparedBytes func(datum types.Datum) ([]byte, error)
 	if isColumn {
 		getComparedBytes = func(datum types.Datum) ([]byte, error) {
-			return codec.EncodeKey(ctx.GetSessionVars().StmtCtx, nil, datum)
+			encoded, err := codec.EncodeKey(ctx.GetSessionVars().StmtCtx, nil, datum)
+			if memTracker != nil {
+				// tmp memory usage
+				deltaSize := int64(cap(encoded))
+				memTracker.BufferedConsume(&bufferedMemSize, deltaSize)
+				memTracker.BufferedRelease(&bufferedReleaseSize, deltaSize)
+			}
+			return encoded, err
 		}
 	} else {
 		getComparedBytes = func(datum types.Datum) ([]byte, error) {
@@ -276,7 +310,7 @@ func BuildHistAndTopN(
 		}
 		// case 1, this value is equal to the last one: current count++
 		if bytes.Equal(cur, sampleBytes) {
-			curCnt += 1
+			curCnt++
 			continue
 		}
 		// case 2, meet a different value: counting for the "current" is complete
@@ -340,12 +374,46 @@ func BuildHistAndTopN(
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
+		// For debugging invalid sample data.
+		var (
+			foundTwice      bool
+			firstTimeSample types.Datum
+		)
 		for j := 0; j < len(topNList); j++ {
 			if bytes.Equal(sampleBytes, topNList[j].Encoded) {
-				// find the same value in topn: need to skip over this value in samples
+				// This should never happen, but we met this panic before, so we add this check here.
+				// See: https://github.com/pingcap/tidb/issues/35948
+				if foundTwice {
+					datumString, err := firstTimeSample.ToString()
+					if err != nil {
+						logutil.BgLogger().With(
+							zap.String("category", "stats"),
+						).Error("try to convert datum to string failed", zap.Error(err))
+					}
+
+					logutil.BgLogger().With(
+						zap.String("category", "stats"),
+					).Warn(
+						"invalid sample data",
+						zap.Bool("isColumn", isColumn),
+						zap.Int64("columnID", id),
+						zap.String("datum", datumString),
+						zap.Binary("sampleBytes", sampleBytes),
+						zap.Binary("topNBytes", topNList[j].Encoded),
+					)
+					// NOTE: if we don't return here, we may meet panic in the following code.
+					// The i may decrease to a negative value.
+					// We haven't fix the issue here, because we don't know how to
+					// remove the invalid sample data from the samples.
+					break
+				}
+				// First time to find the same value in topN: need to record the sample data for debugging.
+				firstTimeSample = samples[i].Value
+				// Found the same value in topn: need to skip over this value in samples.
 				copy(samples[i:], samples[uint64(i)+topNList[j].Count:])
 				samples = samples[:uint64(len(samples))-topNList[j].Count]
 				i--
+				foundTwice = true
 				continue
 			}
 		}
@@ -363,7 +431,7 @@ func BuildHistAndTopN(
 
 	// Step3: build histogram with the rest samples
 	if len(samples) > 0 {
-		_, err = buildHist(sc, hg, samples, count-int64(topn.TotalCount()), ndv-int64(len(topn.TopN)), int64(numBuckets))
+		_, err = buildHist(sc, hg, samples, count-int64(topn.TotalCount()), ndv-int64(len(topn.TopN)), int64(numBuckets), memTracker)
 		if err != nil {
 			return nil, nil, err
 		}

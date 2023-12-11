@@ -77,7 +77,9 @@ type Encoding interface {
 	// Foreach iterates the characters in in current encoding.
 	Foreach(src []byte, op Op, fn func(from, to []byte, ok bool) bool)
 	// Transform map the bytes in src to dest according to Op.
-	// **the caller should initialize the dest if it wants to avoid memory alloc every time, or else it will always make a new one**
+	// **the caller should initialize the dest if it wants to avoid memory alloc every time,
+	//   or else it will always make a new one**
+	//
 	// **the returned array may be the alias of `src`, edit the returned array on your own risk**
 	Transform(dest *bytes.Buffer, src []byte, op Op) ([]byte, error)
 	// ToUpper change a string to uppercase.
@@ -86,8 +88,10 @@ type Encoding interface {
 	ToLower(src string) string
 }
 
+// EncodingTp is the type of the encoding.
 type EncodingTp int8
 
+//revive:disable
 const (
 	EncodingTpNone EncodingTp = iota
 	EncodingTpUTF8
@@ -97,6 +101,8 @@ const (
 	EncodingTpBin
 	EncodingTpGBK
 )
+
+//revive:enable
 
 // Op is used by Encoding.Transform.
 type Op int16
@@ -111,7 +117,9 @@ const (
 	opSkipError
 )
 
+//revive:disable
 const (
+	// OpReplaceNoErr is used to replace invalid bytes with '?'.
 	OpReplaceNoErr  = opFromUTF8 | opTruncateReplace | opCollectFrom | opSkipError
 	OpReplace       = opFromUTF8 | opTruncateReplace | opCollectFrom
 	OpEncode        = opFromUTF8 | opTruncateTrim | opCollectTo
@@ -121,6 +129,8 @@ const (
 	OpDecodeNoErr   = OpDecode | opSkipError
 	OpDecodeReplace = opToUTF8 | opTruncateReplace | opCollectTo
 )
+
+//revive:enable
 
 // CountValidBytes counts the first valid bytes in src that
 // can be encoded to the current encoding.

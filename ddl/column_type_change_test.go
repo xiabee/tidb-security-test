@@ -15,19 +15,17 @@
 package ddl_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"testing"
 	"time"
 
-	errors2 "github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
@@ -43,9 +41,9 @@ import (
 )
 
 func TestColumnTypeChangeBetweenInteger(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Modify column from null to not null.
@@ -105,14 +103,13 @@ func TestColumnTypeChangeBetweenInteger(t *testing.T) {
 	tk.MustGetErrCode("alter table t modify column a mediumint", errno.ErrDataOutOfRange)
 	tk.MustGetErrCode("alter table t modify column a smallint", errno.ErrDataOutOfRange)
 	tk.MustGetErrCode("alter table t modify column a tinyint", errno.ErrDataOutOfRange)
-	_, err = tk.Exec("admin check table t")
-	require.NoError(t, err)
+	tk.MustExec("admin check table t")
 }
 
 func TestColumnTypeChangeStateBetweenInteger(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (c1 int, c2 int)")
@@ -127,7 +124,7 @@ func TestColumnTypeChangeStateBetweenInteger(t *testing.T) {
 	require.Equal(t, 2, len(tbl.Cols()))
 	require.NotNil(t, external.GetModifyColumn(t, tk, "test", "t", "c2", false))
 
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var checkErr error
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr != nil {
@@ -179,9 +176,9 @@ func TestColumnTypeChangeStateBetweenInteger(t *testing.T) {
 }
 
 func TestRollbackColumnTypeChangeBetweenInteger(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (c1 bigint, c2 bigint)")
@@ -192,7 +189,7 @@ func TestRollbackColumnTypeChangeBetweenInteger(t *testing.T) {
 	require.Equal(t, 2, len(tbl.Cols()))
 	require.NotNil(t, external.GetModifyColumn(t, tk, "test", "t", "c2", false))
 
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	// Mock roll back at model.StateNone.
 	customizeHookRollbackAtState(hook, tbl, model.StateNone)
 	dom.DDL().SetHook(hook)
@@ -224,7 +221,7 @@ func TestRollbackColumnTypeChangeBetweenInteger(t *testing.T) {
 	assertRollBackedColUnchanged(t, tk)
 }
 
-func customizeHookRollbackAtState(hook *ddl.TestDDLCallback, tbl table.Table, state model.SchemaState) {
+func customizeHookRollbackAtState(hook *callback.TestDDLCallback, tbl table.Table, state model.SchemaState) {
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if tbl.Meta().ID != job.TableID {
 			return
@@ -252,16 +249,16 @@ var mockTerrorMap = make(map[string]*terror.Error)
 
 func init() {
 	// Since terror new action will cause data race with other test suite (getTerrorCode) in parallel, we init it all here.
-	mockTerrorMap[model.StateNone.String()] = dbterror.ClassDDL.New(1, "MockRollingBackInCallBack-"+model.StateNone.String())
-	mockTerrorMap[model.StateDeleteOnly.String()] = dbterror.ClassDDL.New(1, "MockRollingBackInCallBack-"+model.StateDeleteOnly.String())
-	mockTerrorMap[model.StateWriteOnly.String()] = dbterror.ClassDDL.New(1, "MockRollingBackInCallBack-"+model.StateWriteOnly.String())
-	mockTerrorMap[model.StateWriteReorganization.String()] = dbterror.ClassDDL.New(1, "MockRollingBackInCallBack-"+model.StateWriteReorganization.String())
+	mockTerrorMap[model.StateNone.String()] = dbterror.ClassDDL.NewStdErr(1, mysql.Message("MockRollingBackInCallBack-"+model.StateNone.String(), nil))
+	mockTerrorMap[model.StateDeleteOnly.String()] = dbterror.ClassDDL.NewStdErr(1, mysql.Message("MockRollingBackInCallBack-"+model.StateDeleteOnly.String(), nil))
+	mockTerrorMap[model.StateWriteOnly.String()] = dbterror.ClassDDL.NewStdErr(1, mysql.Message("MockRollingBackInCallBack-"+model.StateWriteOnly.String(), nil))
+	mockTerrorMap[model.StateWriteReorganization.String()] = dbterror.ClassDDL.NewStdErr(1, mysql.Message("MockRollingBackInCallBack-"+model.StateWriteReorganization.String(), nil))
 }
 
 func TestColumnTypeChangeFromIntegerToOthers(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	prepare := func(tk *testkit.TestKit) {
@@ -411,9 +408,9 @@ func TestColumnTypeChangeFromIntegerToOthers(t *testing.T) {
 }
 
 func TestColumnTypeChangeBetweenVarcharAndNonVarchar(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop database if exists col_type_change_char;")
 	tk.MustExec("create database col_type_change_char;")
@@ -440,9 +437,9 @@ func TestColumnTypeChangeBetweenVarcharAndNonVarchar(t *testing.T) {
 }
 
 func TestColumnTypeChangeFromStringToOthers(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Set time zone to UTC.
@@ -629,7 +626,7 @@ func TestColumnTypeChangeFromStringToOthers(t *testing.T) {
 	tk.MustExec("alter table t modify txt json")
 	tk.MustExec("alter table t modify e json")
 	tk.MustExec("alter table t modify s json")
-	tk.MustQuery("select * from t").Check(testkit.Rows("{\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} \"{\\\"k1\\\": \\\"value\\\"}\" \"{\\\"k1\\\": \\\"value\\\"}\""))
+	tk.MustQuery("select * from t").Check(testkit.Rows("{\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"} {\"k1\": \"value\"}"))
 
 	reset(tk)
 	tk.MustExec("insert into t values ('123x', 'x123', 'abc', 'datetime', 'timestamp', 'date', '123', '123')")
@@ -661,17 +658,20 @@ func TestColumnTypeChangeFromStringToOthers(t *testing.T) {
 	reset(tk)
 	tk.MustExec("alter table t modify c char(15)")
 	tk.MustExec("insert into t(c) values ('{\"k1\": \"value\"')")
+	tk.MustExec("insert into t(e, s) values ('str', 'str')")
 	tk.MustGetErrCode("alter table t modify c json", errno.ErrInvalidJSONText)
+	tk.MustGetErrCode("alter table t modify e json", errno.ErrInvalidJSONText)
+	tk.MustGetErrCode("alter table t modify s json", errno.ErrInvalidJSONText)
 
 	// MySQL will get "ERROR 1366 (HY000): Incorrect DECIMAL value: '0' for column '' at row -1" error.
 	tk.MustExec("insert into t(vc) values ('abc')")
-	tk.MustGetErrCode("alter table t modify vc decimal(5,3)", errno.ErrBadNumber)
+	tk.MustGetErrCode("alter table t modify vc decimal(5,3)", errno.ErrTruncatedWrongValue)
 }
 
 func TestColumnTypeChangeFromNumericToOthers(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Set time zone to UTC.
@@ -934,16 +934,16 @@ func TestColumnTypeChangeFromNumericToOthers(t *testing.T) {
 
 // Test issue #20529.
 func TestColumnTypeChangeIgnoreDisplayLength(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	var assertResult bool
 	assertHasAlterWriteReorg := func(tbl table.Table) {
 		// Restore assertResult to false.
 		assertResult = false
-		hook := &ddl.TestDDLCallback{Do: dom}
+		hook := &callback.TestDDLCallback{Do: dom}
 		hook.OnJobRunBeforeExported = func(job *model.Job) {
 			if tbl.Meta().ID != job.TableID {
 				return
@@ -976,9 +976,9 @@ func TestColumnTypeChangeIgnoreDisplayLength(t *testing.T) {
 }
 
 func TestColumnTypeChangeFromDateTimeTypeToOthers(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Set time zone to UTC.
@@ -1151,13 +1151,13 @@ func TestColumnTypeChangeFromDateTimeTypeToOthers(t *testing.T) {
 	tk.MustExec("alter table t modify dt json")
 	tk.MustExec("alter table t modify tmp json")
 	tk.MustExec("alter table t modify y json")
-	tk.MustQuery("select * from t").Check(testkit.Rows("\"2020-10-30\" \"19:38:25.001\" \"2020-10-30 08:21:33.455555\" \"2020-10-30 08:21:33.455555\" 2020"))
+	tk.MustQuery("select * from t").Check(testkit.Rows("\"2020-10-30\" \"19:38:25.001000\" \"2020-10-30 08:21:33.455555\" \"2020-10-30 08:21:33.455555\" 2020"))
 }
 
 func TestColumnTypeChangeFromJsonToOthers(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Set time zone to UTC.
@@ -1302,7 +1302,7 @@ func TestColumnTypeChangeFromJsonToOthers(t *testing.T) {
 	tk.MustExec("alter table t modify ui decimal(20, 10)")
 	tk.MustExec("alter table t modify f64 decimal(20, 10)")
 	// MySQL will get "ERROR 1366 (HY000): Incorrect DECIMAL value: '0' for column '' at row -1".
-	tk.MustGetErrCode("alter table t modify str decimal(20, 10)", errno.ErrBadNumber)
+	tk.MustGetErrCode("alter table t modify str decimal(20, 10)", errno.ErrTruncatedWrongValue)
 	tk.MustExec("alter table t modify nul decimal(20, 10)")
 	tk.MustQuery("select * from t").Check(testkit.Rows("{\"obj\": 100} [-1, 0, 1] null 1.0000000000 0.0000000000 -22.0000000000 22.0000000000 323232323.3232323500 \"json string\" <nil>"))
 
@@ -1549,9 +1549,9 @@ func TestColumnTypeChangeFromJsonToOthers(t *testing.T) {
 }
 
 func TestUpdateDataAfterChangeTimestampToDate(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t, t1")
 	tk.MustExec("create table t (col timestamp default '1971-06-09' not null, col1 int default 1, unique key(col1));")
@@ -1572,8 +1572,7 @@ func TestUpdateDataAfterChangeTimestampToDate(t *testing.T) {
 
 // TestRowFormat is used to close issue #21391, the encoded row in column type change should be aware of the new row format.
 func TestRowFormat(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -1592,6 +1591,50 @@ func TestRowFormat(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 }
 
+func TestRowFormatWithChecksums(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (id int primary key, v varchar(10))")
+	tk.MustExec("insert into t values (1, \"123\");")
+	tk.MustExec("alter table t modify column v varchar(5);")
+
+	tbl := external.GetTableByName(t, tk, "test", "t")
+	encodedKey := tablecodec.EncodeRowKeyWithHandle(tbl.Meta().ID, kv.IntHandle(1))
+
+	h := helper.NewHelper(store.(helper.Storage))
+	data, err := h.GetMvccByEncodedKey(encodedKey)
+	require.NoError(t, err)
+	// row value with checksums
+	require.Equal(t, []byte{0x80, 0x2, 0x3, 0x0, 0x0, 0x0, 0x1, 0x2, 0x3, 0x1, 0x0, 0x4, 0x0, 0x7, 0x0, 0x1, 0x31, 0x32, 0x33, 0x31, 0x32, 0x33, 0x8, 0x52, 0x78, 0xc9, 0x28, 0x52, 0x78, 0xc9, 0x28}, data.Info.Writes[0].ShortValue)
+	tk.MustExec("drop table if exists t")
+}
+
+func TestRowLevelChecksumWithMultiSchemaChange(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (id int primary key, v varchar(10))")
+	tk.MustExec("insert into t values (1, \"123\")")
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/forceRowLevelChecksumOnUpdateColumnBackfill", "return"))
+	defer failpoint.Disable("github.com/pingcap/tidb/ddl/forceRowLevelChecksumOnUpdateColumnBackfill")
+	tk.MustExec("alter table t add column vv int, modify column v varchar(5)")
+
+	tbl := external.GetTableByName(t, tk, "test", "t")
+	encodedKey := tablecodec.EncodeRowKeyWithHandle(tbl.Meta().ID, kv.IntHandle(1))
+
+	h := helper.NewHelper(store.(helper.Storage))
+	data, err := h.GetMvccByEncodedKey(encodedKey)
+	require.NoError(t, err)
+	// checksum skipped and with a null col vv
+	require.Equal(t, []byte{0x80, 0x0, 0x3, 0x0, 0x1, 0x0, 0x1, 0x2, 0x4, 0x3, 0x1, 0x0, 0x4, 0x0, 0x7, 0x0, 0x1, 0x31, 0x32, 0x33, 0x31, 0x32, 0x33}, data.Info.Writes[0].ShortValue)
+	tk.MustExec("drop table if exists t")
+}
+
 // Close issue #22395
 // Background:
 // Since the changing column is implemented as adding a new column and substitute the old one when it finished.
@@ -1599,9 +1642,9 @@ func TestRowFormat(t *testing.T) {
 // It's good because the insert / update logic will cast the related column to changing column rather than use
 // origin default value directly.
 func TestChangingColOriginDefaultValue(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk1 := testkit.NewTestKit(t, store)
@@ -1614,13 +1657,13 @@ func TestChangingColOriginDefaultValue(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var (
 		once     bool
 		checkErr error
 	)
 	i := 0
-	hook.OnJobUpdatedExported = func(job *model.Job) {
+	onJobUpdatedExportedFunc := func(job *model.Job) {
 		if checkErr != nil {
 			return
 		}
@@ -1666,6 +1709,7 @@ func TestChangingColOriginDefaultValue(t *testing.T) {
 			i++
 		}
 	}
+	hook.OnJobUpdatedExported.Store(&onJobUpdatedExportedFunc)
 	dom.DDL().SetHook(hook)
 	tk.MustExec("alter table t modify column b tinyint NOT NULL")
 	dom.DDL().SetHook(originalHook)
@@ -1676,9 +1720,9 @@ func TestChangingColOriginDefaultValue(t *testing.T) {
 }
 
 func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk1 := testkit.NewTestKit(t, store)
@@ -1693,7 +1737,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var (
 		once     bool
 		checkErr error
@@ -1725,7 +1769,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 			// For writable column:
 			// Insert / Update should set the column with the casted-related column value.
 			sql := fmt.Sprintf("insert into t values(%d, %d, '2021-06-06 12:13:14')", i+3, i+3)
-			_, err := tk1.Exec(sql)
+			err := tk1.ExecToErr(sql)
 			if err != nil {
 				checkErr = err
 				return
@@ -1733,7 +1777,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 			if job.SchemaState == model.StateWriteOnly {
 				// The casted value will be inserted into changing column too.
 				// for point get
-				_, err := tk1.Exec("update t set b = -1 where a = 1")
+				err := tk1.ExecToErr("update t set b = -1 where a = 1")
 				if err != nil {
 					checkErr = err
 					return
@@ -1741,7 +1785,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 			} else {
 				// The casted value will be inserted into changing column too.
 				// for point get
-				_, err := tk1.Exec("update t set b = -2 where a = 2")
+				err := tk1.ExecToErr("update t set b = -2 where a = 2")
 				if err != nil {
 					checkErr = err
 					return
@@ -1764,9 +1808,9 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 
 // TestChangingColOriginDefaultValueAfterAddColAndCastFail tests #25383.
 func TestChangingColOriginDefaultValueAfterAddColAndCastFail(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk1 := testkit.NewTestKit(t, store)
@@ -1779,7 +1823,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastFail(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var checkErr error
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr != nil {
@@ -1822,14 +1866,13 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastFail(t *testing.T) {
 
 // Close issue #22820
 func TestChangingAttributeOfColumnWithFK(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	prepare := func() {
-		tk.MustExec("drop table if exists users")
-		tk.MustExec("drop table if exists orders")
+		tk.MustExec("drop table if exists users, orders")
 		tk.MustExec("CREATE TABLE users (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, doc JSON);")
 		tk.MustExec("CREATE TABLE orders (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, user_id INT NOT NULL, doc JSON, FOREIGN KEY fk_user_id (user_id) REFERENCES users(id));")
 	}
@@ -1859,9 +1902,9 @@ func TestChangingAttributeOfColumnWithFK(t *testing.T) {
 }
 
 func TestAlterPrimaryKeyToNull(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk.MustExec("drop table if exists t, t1")
@@ -1875,8 +1918,7 @@ func TestAlterPrimaryKeyToNull(t *testing.T) {
 
 // Close https://github.com/pingcap/tidb/issues/24839.
 func TestChangeUnsignedIntToDatetime(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -1897,9 +1939,9 @@ func TestChangeUnsignedIntToDatetime(t *testing.T) {
 
 // Close issue #23202
 func TestDDLExitWhenCancelMeetPanic(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk.MustExec("drop table if exists t")
@@ -1913,7 +1955,7 @@ func TestDDLExitWhenCancelMeetPanic(t *testing.T) {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/mockExceedErrorLimit"))
 	}()
 
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var jobID int64
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if jobID != 0 {
@@ -1932,13 +1974,7 @@ func TestDDLExitWhenCancelMeetPanic(t *testing.T) {
 	require.Less(t, int64(0), jobID)
 
 	// Verification of the history job state.
-	var job *model.Job
-	err = kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
-		m := meta.NewMeta(txn)
-		var err1 error
-		job, err1 = m.GetHistoryDDLJob(jobID)
-		return errors2.Trace(err1)
-	})
+	job, err := ddl.GetHistoryJobByID(tk.Session(), jobID)
 	require.NoError(t, err)
 	require.Equal(t, int64(4), job.ErrorCount)
 	require.Equal(t, "[ddl:-1]panic in handling DDL logic and error count beyond the limitation 3, cancelled", job.Error.Error())
@@ -1946,9 +1982,9 @@ func TestDDLExitWhenCancelMeetPanic(t *testing.T) {
 
 // Close issue #24253
 func TestChangeIntToBitWillPanicInBackfillIndexes(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk.MustExec("drop table if exists t")
@@ -1972,14 +2008,14 @@ func TestChangeIntToBitWillPanicInBackfillIndexes(t *testing.T) {
 		"  KEY `idx3` (`a`,`b`),\n" +
 		"  KEY `idx4` (`a`,`b`,`c`)\n" +
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-	tk.MustQuery("select * from t").Check(testkit.Rows("\x13 1 1.00", "\x11 2 2.00"))
+	tk.MustQuery("select * from t").Sort().Check(testkit.Rows("\x11 2 2.00", "\x13 1 1.00"))
 }
 
 // Close issue #24584
 func TestCancelCTCInReorgStateWillCauseGoroutineLeak(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/mockInfiniteReorgLogic", `return(true)`))
@@ -1996,7 +2032,7 @@ func TestCancelCTCInReorgStateWillCauseGoroutineLeak(t *testing.T) {
 	tk.MustExec("insert into ctc_goroutine_leak values(1),(2),(3)")
 	tbl := external.GetTableByName(t, tk, "test", "ctc_goroutine_leak")
 
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	var jobID int64
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if jobID != 0 {
@@ -2030,9 +2066,9 @@ func TestCancelCTCInReorgStateWillCauseGoroutineLeak(t *testing.T) {
 
 // Close issue #24971, #24973, #24974
 func TestCTCShouldCastTheDefaultValue(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk.MustExec("drop table if exists t")
@@ -2062,9 +2098,9 @@ func TestCTCShouldCastTheDefaultValue(t *testing.T) {
 // 1: for default value of binary of create-table, it should append the \0 as the suffix to meet flen.
 // 2: when cast the bit to binary, we should consider to convert it to uint then cast uint to string, rather than taking the bit to string directly.
 func TestCTCCastBitToBinary(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// For point 1:
@@ -2090,8 +2126,7 @@ func TestCTCCastBitToBinary(t *testing.T) {
 }
 
 func TestChangePrefixedIndexColumnToNonPrefixOne(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2126,8 +2161,7 @@ func TestChangePrefixedIndexColumnToNonPrefixOne(t *testing.T) {
 
 // Fix issue https://github.com/pingcap/tidb/issues/25469
 func TestCastToTimeStampDecodeError(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2152,8 +2186,7 @@ func TestCastToTimeStampDecodeError(t *testing.T) {
 
 // https://github.com/pingcap/tidb/issues/25285.
 func TestCastFromZeroIntToTimeError(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2199,8 +2232,7 @@ func TestCastFromZeroIntToTimeError(t *testing.T) {
 }
 
 func TestChangeFromTimeToYear(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2231,9 +2263,9 @@ func TestChangeFromTimeToYear(t *testing.T) {
 // For select statement, it truncates the string and return no errors. (which is 3977-02-22 00:00:00 here)
 // For ddl reorging or changing column in ctc, it needs report some errors.
 func TestCastDateToTimestampInReorgAttribute(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomainWithSchemaLease(t, 600*time.Millisecond)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomainWithSchemaLease(t, 600*time.Millisecond)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	tk.MustExec("CREATE TABLE `t` (`a` DATE NULL DEFAULT '8497-01-06')")
@@ -2245,7 +2277,7 @@ func TestCastDateToTimestampInReorgAttribute(t *testing.T) {
 	var checkErr1 error
 	var checkErr2 error
 
-	hook := &ddl.TestDDLCallback{Do: dom}
+	hook := &callback.TestDDLCallback{Do: dom}
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr1 != nil || checkErr2 != nil || tbl.Meta().ID != job.TableID {
 			return
@@ -2267,8 +2299,7 @@ func TestCastDateToTimestampInReorgAttribute(t *testing.T) {
 
 // https://github.com/pingcap/tidb/issues/25282.
 func TestChangeFromUnsignedIntToTime(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2283,8 +2314,7 @@ func TestChangeFromUnsignedIntToTime(t *testing.T) {
 // See https://github.com/pingcap/tidb/issues/25287.
 // Revised according to https://github.com/pingcap/tidb/pull/31031#issuecomment-1001404832.
 func TestChangeFromBitToStringInvalidUtf8ErrMsg(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 
@@ -2296,10 +2326,10 @@ func TestChangeFromBitToStringInvalidUtf8ErrMsg(t *testing.T) {
 }
 
 func TestForIssue24621(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a char(250));")
@@ -2309,9 +2339,9 @@ func TestForIssue24621(t *testing.T) {
 }
 
 func TestChangeNullValueFromOtherTypeToTimestamp(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// Some ddl cases.
@@ -2341,26 +2371,20 @@ func TestChangeNullValueFromOtherTypeToTimestamp(t *testing.T) {
 
 	prepare2()
 	// only from other type NULL to timestamp type NOT NULL, it should be successful. (timestamp to timestamp excluded)
-	_, err = tk.Exec("alter table t modify column a timestamp NOT NULL")
-	require.Error(t, err)
-	require.Equal(t, "[ddl:1265]Data truncated for column 'a' at row 1", err.Error())
+	tk.MustGetErrMsg("alter table t modify column a timestamp NOT NULL", "[ddl:1265]Data truncated for column 'a' at row 1")
 
 	// Some dml cases.
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a timestamp NOT NULL)")
-	_, err = tk.Exec("insert into t values()")
-	require.Error(t, err)
-	require.Equal(t, "[table:1364]Field 'a' doesn't have a default value", err.Error())
-
-	_, err = tk.Exec("insert into t values(null)")
-	require.Equal(t, "[table:1048]Column 'a' cannot be null", err.Error())
+	tk.MustGetErrMsg("insert into t values()", "[table:1364]Field 'a' doesn't have a default value")
+	tk.MustGetErrMsg("insert into t values(null)", "[table:1048]Column 'a' cannot be null")
 }
 
 func TestColumnTypeChangeBetweenFloatAndDouble(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	// issue #31372
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	prepare := func(createTableStmt string) {
@@ -2385,9 +2409,9 @@ func TestColumnTypeChangeBetweenFloatAndDouble(t *testing.T) {
 }
 
 func TestColumnTypeChangeTimestampToInt(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
 	tk.MustExec("use test")
 
 	// 1. modify a timestamp column to bigint
@@ -2471,4 +2495,20 @@ func TestColumnTypeChangeTimestampToInt(t *testing.T) {
 	tk.MustQuery("select * from t").Check(testkit.Rows("1 20160313033000"))
 	tk.MustExec("alter table t add index idx1(id, c1);")
 	tk.MustExec("admin check table t")
+}
+
+func TestFixDDLTxnWillConflictWithReorgTxn(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set global tidb_enable_row_level_checksum = 1")
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t (a int)")
+	tk.MustExec("set global tidb_ddl_enable_fast_reorg = OFF")
+	tk.MustExec("alter table t add index(a)")
+	tk.MustExec("set @@sql_mode=''")
+	tk.MustExec("insert into t values(128),(129)")
+	tk.MustExec("alter table t modify column a tinyint")
+
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1690 2 warnings with this error code, first warning: constant 128 overflows tinyint"))
 }

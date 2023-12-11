@@ -32,7 +32,6 @@ import (
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
-	"github.com/tikv/client-go/v2/oracle"
 )
 
 // CoprocessorDAGHandler uses to handle cop dag request.
@@ -60,7 +59,7 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 		return h.buildErrorResponse(err)
 	}
 
-	chk := newFirstChunk(e)
+	chk := tryNewCacheChunk(e)
 	tps := e.base().retFieldTypes
 	var totalChunks, partChunks []tipb.Chunk
 	memTracker := h.sctx.GetSessionVars().StmtCtx.MemTracker
@@ -100,7 +99,7 @@ func (h *CoprocessorDAGHandler) HandleStreamRequest(ctx context.Context, req *co
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
-	chk := newFirstChunk(e)
+	chk := tryNewCacheChunk(e)
 	tps := e.base().retFieldTypes
 	for {
 		chk.Reset()
@@ -174,7 +173,7 @@ func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (Exec
 	}
 	plan = core.InjectExtraProjection(plan)
 	// Build executor.
-	b := newExecutorBuilder(h.sctx, is, nil, oracle.GlobalTxnScope)
+	b := newExecutorBuilder(h.sctx, is, nil)
 	return b.build(plan), nil
 }
 

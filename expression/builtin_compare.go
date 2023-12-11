@@ -25,10 +25,10 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/pkg/errors"
 )
 
 var (
@@ -135,11 +135,6 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		fieldEvalTps = append(fieldEvalTps, retEvalTp)
 	}
 
-	fsp, err := getExpressionFsp(ctx, args[0])
-	if err != nil {
-		return nil, err
-	}
-
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, retEvalTp, fieldEvalTps...)
 	if err != nil {
 		return nil, err
@@ -152,6 +147,8 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	// Set retType to BINARY(0) if all arguments are of type NULL.
 	if resultFieldType.GetType() == mysql.TypeNull {
 		types.SetBinChsClnFlag(bf.tp)
+		resultFieldType.SetFlen(0)
+		resultFieldType.SetDecimal(0)
 	} else {
 		maxIntLen := 0
 		maxFlen := 0
@@ -160,7 +157,7 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		// and max integer-part length in `maxIntLen`.
 		for _, argTp := range fieldTps {
 			if argTp.GetDecimal() > resultFieldType.GetDecimal() {
-				resultFieldType.SetDecimal(argTp.GetDecimal())
+				resultFieldType.SetDecimalUnderLimit(argTp.GetDecimal())
 			}
 			argIntLen := argTp.GetFlen()
 			if argTp.GetDecimal() > 0 {
@@ -181,12 +178,12 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		// For integer, field length = maxIntLen + (1/0 for sign bit)
 		// For decimal, field length = maxIntLen + maxDecimal + (1/0 for sign bit)
 		if resultEvalType == types.ETInt || resultEvalType == types.ETDecimal {
-			resultFieldType.SetFlen(maxIntLen + resultFieldType.GetDecimal())
+			resultFieldType.SetFlenUnderLimit(maxIntLen + resultFieldType.GetDecimal())
 			if resultFieldType.GetDecimal() > 0 {
-				resultFieldType.SetFlen(resultFieldType.GetFlen() + 1)
+				resultFieldType.SetFlenUnderLimit(resultFieldType.GetFlen() + 1)
 			}
 			if !mysql.HasUnsignedFlag(resultFieldType.GetFlag()) {
-				resultFieldType.SetFlen(resultFieldType.GetFlen() + 1)
+				resultFieldType.SetFlenUnderLimit(resultFieldType.GetFlen() + 1)
 			}
 			bf.tp = resultFieldType
 		} else {
@@ -212,10 +209,11 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		sig = &builtinCoalesceStringSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceString)
 	case types.ETDatetime, types.ETTimestamp:
+		bf.tp.SetDecimal(resultFieldType.GetDecimal())
 		sig = &builtinCoalesceTimeSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceTime)
 	case types.ETDuration:
-		bf.tp.SetDecimal(fsp)
+		bf.tp.SetDecimal(resultFieldType.GetDecimal())
 		sig = &builtinCoalesceDurationSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceDuration)
 	case types.ETJson:
@@ -327,8 +325,10 @@ func (b *builtinCoalesceTimeSig) Clone() builtinFunc {
 }
 
 func (b *builtinCoalesceTimeSig) evalTime(row chunk.Row) (res types.Time, isNull bool, err error) {
+	fsp := b.tp.GetDecimal()
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalTime(b.ctx, row)
+		res.SetFsp(fsp)
 		if err != nil || !isNull {
 			break
 		}
@@ -351,6 +351,7 @@ func (b *builtinCoalesceDurationSig) Clone() builtinFunc {
 func (b *builtinCoalesceDurationSig) evalDuration(row chunk.Row) (res types.Duration, isNull bool, err error) {
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalDuration(b.ctx, row)
+		res.Fsp = b.tp.GetDecimal()
 		if err != nil || !isNull {
 			break
 		}
@@ -370,7 +371,7 @@ func (b *builtinCoalesceJSONSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinCoalesceJSONSig) evalJSON(row chunk.Row) (res json.BinaryJSON, isNull bool, err error) {
+func (b *builtinCoalesceJSONSig) evalJSON(row chunk.Row) (res types.BinaryJSON, isNull bool, err error) {
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalJSON(b.ctx, row)
 		if err != nil || !isNull {
@@ -551,8 +552,8 @@ func (c *greatestFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	}
 
 	flen, decimal := fixFlenAndDecimalForGreatestAndLeast(args)
-	sig.getRetTp().SetFlen(flen)
-	sig.getRetTp().SetDecimal(decimal)
+	sig.getRetTp().SetFlenUnderLimit(flen)
+	sig.getRetTp().SetDecimalUnderLimit(decimal)
 
 	return sig, nil
 }
@@ -863,8 +864,8 @@ func (c *leastFunctionClass) getFunction(ctx sessionctx.Context, args []Expressi
 		}
 	}
 	flen, decimal := fixFlenAndDecimalForGreatestAndLeast(args)
-	sig.getRetTp().SetFlen(flen)
-	sig.getRetTp().SetDecimal(decimal)
+	sig.getRetTp().SetFlenUnderLimit(flen)
+	sig.getRetTp().SetDecimalUnderLimit(decimal)
 	return sig, nil
 }
 
@@ -1339,8 +1340,7 @@ func GetAccurateCmpType(lhs, rhs Expression) types.EvalType {
 	lhsFieldType, rhsFieldType := lhs.GetType(), rhs.GetType()
 	lhsEvalType, rhsEvalType := lhsFieldType.EvalType(), rhsFieldType.EvalType()
 	cmpType := getBaseCmpType(lhsEvalType, rhsEvalType, lhsFieldType, rhsFieldType)
-	if (lhsEvalType.IsStringKind() && rhsFieldType.GetType() == mysql.TypeJSON) ||
-		(lhsFieldType.GetType() == mysql.TypeJSON && rhsEvalType.IsStringKind()) {
+	if (lhsEvalType.IsStringKind() && lhsFieldType.GetType() == mysql.TypeJSON) || (rhsEvalType.IsStringKind() && rhsFieldType.GetType() == mysql.TypeJSON) {
 		cmpType = types.ETJson
 	} else if cmpType == types.ETString && (types.IsTypeTime(lhsFieldType.GetType()) || types.IsTypeTime(rhsFieldType.GetType())) {
 		// date[time] <cmp> date[time]
@@ -1585,7 +1585,8 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		exprType := args[1-conIdx].GetType()
 		exprEvalType := exprType.EvalType()
 		if exprType.GetType() == mysql.TypeYear {
-			ctx.GetSessionVars().StmtCtx.SkipPlanCache = true
+			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
 
@@ -1594,7 +1595,8 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		conEvalType := args[conIdx].GetType().EvalType()
 		if exprEvalType == types.ETInt &&
 			(conEvalType == types.ETString || conEvalType == types.ETReal || conEvalType == types.ETDecimal) {
-			ctx.GetSessionVars().StmtCtx.SkipPlanCache = true
+			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
 
@@ -1603,7 +1605,8 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		// see https://github.com/pingcap/tidb/issues/38361 for more details
 		_, exprIsCon := args[1-conIdx].(*Constant)
 		if !exprIsCon && matchRefineRule3Pattern(conEvalType, exprType) {
-			ctx.GetSessionVars().StmtCtx.SkipPlanCache = true
+			reason := errors.Errorf("'%v' may be converted to datetime", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
 	}
@@ -2623,21 +2626,21 @@ func (b *builtinNullEQIntSig) evalInt(row chunk.Row) (val int64, isNull bool, er
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case isUnsigned0 && isUnsigned1 && types.CompareUint64(uint64(arg0), uint64(arg1)) == 0:
 		res = 1
 	case !isUnsigned0 && !isUnsigned1 && types.CompareInt64(arg0, arg1) == 0:
 		res = 1
 	case isUnsigned0 && !isUnsigned1:
 		if arg1 < 0 {
-			break
+			return res, false, nil
 		}
 		if types.CompareInt64(arg0, arg1) == 0 {
 			res = 1
 		}
 	case !isUnsigned0 && isUnsigned1:
 		if arg0 < 0 {
-			break
+			return res, false, nil
 		}
 		if types.CompareInt64(arg0, arg1) == 0 {
 			res = 1
@@ -2670,7 +2673,7 @@ func (b *builtinNullEQRealSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case types.CompareFloat64(arg0, arg1) == 0:
 		res = 1
 	}
@@ -2701,7 +2704,7 @@ func (b *builtinNullEQDecimalSig) evalInt(row chunk.Row) (val int64, isNull bool
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2732,7 +2735,7 @@ func (b *builtinNullEQStringSig) evalInt(row chunk.Row) (val int64, isNull bool,
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case types.CompareString(arg0, arg1, b.collation) == 0:
 		res = 1
 	}
@@ -2763,7 +2766,7 @@ func (b *builtinNullEQDurationSig) evalInt(row chunk.Row) (val int64, isNull boo
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2794,7 +2797,7 @@ func (b *builtinNullEQTimeSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2825,9 +2828,9 @@ func (b *builtinNullEQJSONSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	default:
-		cmpRes := json.CompareBinary(arg0, arg1)
+		cmpRes := types.CompareBinaryJSON(arg0, arg1)
 		if cmpRes == 0 {
 			res = 1
 		}
@@ -3075,5 +3078,5 @@ func CompareJSON(sctx sessionctx.Context, lhsArg, rhsArg Expression, lhsRow, rhs
 	if isNull0 || isNull1 {
 		return compareNull(isNull0, isNull1), true, nil
 	}
-	return int64(json.CompareBinary(arg0, arg1)), false, nil
+	return int64(types.CompareBinaryJSON(arg0, arg1)), false, nil
 }

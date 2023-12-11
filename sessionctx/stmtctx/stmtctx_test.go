@@ -16,16 +16,23 @@ package stmtctx_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math/rand"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
+	"go.uber.org/atomic"
 )
 
 func TestCopTasksDetails(t *testing.T) {
@@ -33,12 +40,14 @@ func TestCopTasksDetails(t *testing.T) {
 	backoffs := []string{"tikvRPC", "pdRPC", "regionMiss"}
 	for i := 0; i < 100; i++ {
 		d := &execdetails.ExecDetails{
-			CalleeAddress: fmt.Sprintf("%v", i+1),
-			BackoffSleep:  make(map[string]time.Duration),
-			BackoffTimes:  make(map[string]int),
-			TimeDetail: util.TimeDetail{
-				ProcessTime: time.Second * time.Duration(i+1),
-				WaitTime:    time.Millisecond * time.Duration(i+1),
+			DetailsNeedP90: execdetails.DetailsNeedP90{
+				CalleeAddress: fmt.Sprintf("%v", i+1),
+				BackoffSleep:  make(map[string]time.Duration),
+				BackoffTimes:  make(map[string]int),
+				TimeDetail: util.TimeDetail{
+					ProcessTime: time.Second * time.Duration(i+1),
+					WaitTime:    time.Millisecond * time.Duration(i+1),
+				},
 			},
 		}
 		for _, backoff := range backoffs {
@@ -78,14 +87,14 @@ func TestStatementContextPushDownFLags(t *testing.T) {
 		{&stmtctx.StatementContext{InUpdateStmt: true}, 16},
 		{&stmtctx.StatementContext{InDeleteStmt: true}, 16},
 		{&stmtctx.StatementContext{InSelectStmt: true}, 32},
-		{&stmtctx.StatementContext{IgnoreTruncate: true}, 1},
+		{&stmtctx.StatementContext{IgnoreTruncate: *atomic.NewBool(true)}, 1},
 		{&stmtctx.StatementContext{TruncateAsWarning: true}, 2},
 		{&stmtctx.StatementContext{OverflowAsWarning: true}, 64},
 		{&stmtctx.StatementContext{IgnoreZeroInDate: true}, 128},
 		{&stmtctx.StatementContext{DividedByZeroAsWarning: true}, 256},
 		{&stmtctx.StatementContext{InLoadDataStmt: true}, 1024},
 		{&stmtctx.StatementContext{InSelectStmt: true, TruncateAsWarning: true}, 34},
-		{&stmtctx.StatementContext{DividedByZeroAsWarning: true, IgnoreTruncate: true}, 257},
+		{&stmtctx.StatementContext{DividedByZeroAsWarning: true, IgnoreTruncate: *atomic.NewBool(true)}, 257},
 		{&stmtctx.StatementContext{InUpdateStmt: true, IgnoreZeroInDate: true, InLoadDataStmt: true}, 1168},
 	}
 	for _, tt := range testCases {
@@ -95,8 +104,7 @@ func TestStatementContextPushDownFLags(t *testing.T) {
 }
 
 func TestWeakConsistencyRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -142,4 +150,149 @@ func TestWeakConsistencyRead(t *testing.T) {
 	execAndCheck("select * from t", testkit.Rows("1 1 2"), kv.SI)
 	execAndCheck("execute s", testkit.Rows("1 1 2"), kv.SI)
 	tk.MustExec("rollback")
+}
+
+func TestMarshalSQLWarn(t *testing.T) {
+	warns := []stmtctx.SQLWarn{
+		{
+			Level: stmtctx.WarnLevelError,
+			Err:   errors.New("any error"),
+		},
+		{
+			Level: stmtctx.WarnLevelError,
+			Err:   errors.Trace(errors.New("any error")),
+		},
+		{
+			Level: stmtctx.WarnLevelWarning,
+			Err:   variable.ErrUnknownSystemVar.GenWithStackByArgs("unknown"),
+		},
+		{
+			Level: stmtctx.WarnLevelWarning,
+			Err:   errors.Trace(variable.ErrUnknownSystemVar.GenWithStackByArgs("unknown")),
+		},
+	}
+
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	// First query can trigger loading global variables, which produces warnings.
+	tk.MustQuery("select 1")
+	tk.Session().GetSessionVars().StmtCtx.SetWarnings(warns)
+	rows := tk.MustQuery("show warnings").Rows()
+	require.Equal(t, len(warns), len(rows))
+
+	// The unmarshalled result doesn't need to be exactly the same with the original one.
+	// We only need that the results of `show warnings` are the same.
+	bytes, err := json.Marshal(warns)
+	require.NoError(t, err)
+	var newWarns []stmtctx.SQLWarn
+	err = json.Unmarshal(bytes, &newWarns)
+	require.NoError(t, err)
+	tk.Session().GetSessionVars().StmtCtx.SetWarnings(newWarns)
+	tk.MustQuery("show warnings").Check(rows)
+}
+
+func TestApproxRuntimeInfo(t *testing.T) {
+	var n = rand.Intn(19000) + 1000
+	var valRange = rand.Int31n(10000) + 1000
+	backoffs := []string{"tikvRPC", "pdRPC", "regionMiss"}
+	details := []*execdetails.ExecDetails{}
+	for i := 0; i < n; i++ {
+		d := &execdetails.ExecDetails{
+			DetailsNeedP90: execdetails.DetailsNeedP90{
+				CalleeAddress: fmt.Sprintf("%v", i+1),
+				BackoffSleep:  make(map[string]time.Duration),
+				BackoffTimes:  make(map[string]int),
+				TimeDetail: util.TimeDetail{
+					ProcessTime: time.Second * time.Duration(rand.Int31n(valRange)),
+					WaitTime:    time.Millisecond * time.Duration(rand.Int31n(valRange)),
+				},
+			},
+		}
+		details = append(details, d)
+		for _, backoff := range backoffs {
+			d.BackoffSleep[backoff] = time.Millisecond * 100 * time.Duration(rand.Int31n(valRange))
+			d.BackoffTimes[backoff] = rand.Intn(int(valRange))
+		}
+	}
+
+	// Make CalleeAddress for each max value is deterministic.
+	details[rand.Intn(n)].DetailsNeedP90.TimeDetail.ProcessTime = time.Second * time.Duration(valRange)
+	details[rand.Intn(n)].DetailsNeedP90.TimeDetail.WaitTime = time.Millisecond * time.Duration(valRange)
+	for _, backoff := range backoffs {
+		details[rand.Intn(n)].BackoffSleep[backoff] = time.Millisecond * 100 * time.Duration(valRange)
+	}
+
+	ctx := new(stmtctx.StatementContext)
+	for i := 0; i < n; i++ {
+		ctx.MergeExecDetails(details[i], nil)
+	}
+	d := ctx.CopTasksDetails()
+
+	require.Equal(t, d.NumCopTasks, n)
+	sort.Slice(details, func(i, j int) bool {
+		return details[i].TimeDetail.ProcessTime.Nanoseconds() < details[j].TimeDetail.ProcessTime.Nanoseconds()
+	})
+	var timeSum time.Duration
+	for _, detail := range details {
+		timeSum += detail.TimeDetail.ProcessTime
+	}
+	require.Equal(t, d.AvgProcessTime, timeSum/time.Duration(n))
+	require.InEpsilon(t, d.P90ProcessTime.Nanoseconds(), details[n*9/10].TimeDetail.ProcessTime.Nanoseconds(), 0.05)
+	require.Equal(t, d.MaxProcessTime, details[n-1].TimeDetail.ProcessTime)
+	require.Equal(t, d.MaxProcessAddress, details[n-1].CalleeAddress)
+
+	sort.Slice(details, func(i, j int) bool {
+		return details[i].TimeDetail.WaitTime.Nanoseconds() < details[j].TimeDetail.WaitTime.Nanoseconds()
+	})
+	timeSum = 0
+	for _, detail := range details {
+		timeSum += detail.TimeDetail.WaitTime
+	}
+	require.Equal(t, d.AvgWaitTime, timeSum/time.Duration(n))
+	require.InEpsilon(t, d.P90WaitTime.Nanoseconds(), details[n*9/10].TimeDetail.WaitTime.Nanoseconds(), 0.05)
+	require.Equal(t, d.MaxWaitTime, details[n-1].TimeDetail.WaitTime)
+	require.Equal(t, d.MaxWaitAddress, details[n-1].CalleeAddress)
+
+	fields := d.ToZapFields()
+	require.Equal(t, 9, len(fields))
+	for _, backoff := range backoffs {
+		sort.Slice(details, func(i, j int) bool {
+			return details[i].BackoffSleep[backoff].Nanoseconds() < details[j].BackoffSleep[backoff].Nanoseconds()
+		})
+		timeSum = 0
+		var timesSum = 0
+		for _, detail := range details {
+			timeSum += detail.BackoffSleep[backoff]
+			timesSum += detail.BackoffTimes[backoff]
+		}
+		require.Equal(t, d.MaxBackoffAddress[backoff], details[n-1].CalleeAddress)
+		require.Equal(t, d.MaxBackoffTime[backoff], details[n-1].BackoffSleep[backoff])
+		require.InEpsilon(t, d.P90BackoffTime[backoff], details[n*9/10].BackoffSleep[backoff], 0.1)
+		require.Equal(t, d.AvgBackoffTime[backoff], timeSum/time.Duration(n))
+
+		require.Equal(t, d.TotBackoffTimes[backoff], timesSum)
+		require.Equal(t, d.TotBackoffTime[backoff], timeSum)
+	}
+}
+
+func TestStmtHintsClone(t *testing.T) {
+	hints := stmtctx.StmtHints{}
+	value := reflect.ValueOf(&hints).Elem()
+	for i := 0; i < value.NumField(); i++ {
+		field := value.Field(i)
+		switch field.Kind() {
+		case reflect.Int, reflect.Int32, reflect.Int64:
+			field.SetInt(1)
+		case reflect.Uint, reflect.Uint32, reflect.Uint64:
+			field.SetUint(1)
+		case reflect.Uint8: // byte
+			field.SetUint(1)
+		case reflect.Bool:
+			field.SetBool(true)
+		case reflect.String:
+			field.SetString("test")
+		default:
+		}
+	}
+	require.Equal(t, hints, *hints.Clone())
 }

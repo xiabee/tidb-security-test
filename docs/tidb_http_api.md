@@ -463,12 +463,19 @@ timezone.*
     ```shell
     curl http://{TiDBIP}:10080/ddl/history
     ```
+	**Note**: When the DDL history is very very long, it may consume a lot memory and even cause OOM. Consider adding `start_job_id` and `limit`.
 
 1. Get count {number} TiDB DDL job history information.
 
     ```shell
     curl http://{TiDBIP}:10080/ddl/history?limit={number}
     ```
+
+1. Get count {number} TiDB DDL job history information, start with job {id}
+
+	```shell
+	curl http://{TIDBIP}:10080/ddl/history?start_job_id={id}&limit={number}
+	```
 
 1. Download TiDB debug info
 
@@ -557,3 +564,40 @@ timezone.*
     # reset the size of the ballast object (2GB in this example)
     curl -v -X POST -d "2147483648" http://{TiDBIP}:10080/debug/ballast-object-sz
     ```
+    
+1. Set deadlock history table capacity
+
+    ```shell
+    curl -X POST -d "deadlock_history_capacity={number}" http://{TiDBIP}:10080/settings
+    ```
+
+1. Set whether deadlock history (`DEADLOCKS`) collect retryable deadlocks
+
+    ```shell
+    curl -X POST -d "deadlock_history_collect_retryable={bool_val}" http://{TiDBIP}:10080/settings
+    ```
+
+1. Set transaction_id to digest mapping minimum duration threshold, only transactions which last longer than this threshold will be collected into `TRX_SUMMARY`.
+
+    ```shell
+    curl -X POST -d "transaction_id_digest_min_duration={number}" http://{TiDBIP}:10080/settings
+    ```
+    
+    Unit of duration here is ms.
+
+1. Set transaction summary table (`TRX_SUMMARY`) capacity
+
+    ```shell
+    curl -X POST -d "transaction_summary_capacity={number}" http://{TiDBIP}:10080/settings
+    ```
+
+1. Send upgrade operations to the cluster. The operations here include `start` and `finish`.
+
+   ```shell
+   curl -X POST http://{TiDBIP}:10080/upgrade/{op}
+   ```
+
+   ```shell
+   $curl -X POST http://127.0.0.1:10080/upgrade/start
+   "success!"
+   ```

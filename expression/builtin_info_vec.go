@@ -15,7 +15,6 @@
 package expression
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/pingcap/errors"
@@ -24,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/printer"
+	"golang.org/x/exp/slices"
 )
 
 func (b *builtinDatabaseSig) vectorized() bool {
@@ -119,6 +119,23 @@ func (b *builtinCurrentUserSig) vecEvalString(input *chunk.Chunk, result *chunk.
 	return nil
 }
 
+func (b *builtinCurrentResourceGroupSig) vectorized() bool {
+	return true
+}
+
+func (b *builtinCurrentResourceGroupSig) vecEvalString(input *chunk.Chunk, result *chunk.Column) error {
+	data := b.ctx.GetSessionVars()
+	if data == nil {
+		return errors.Errorf("Missing session variable when eval builtin")
+	}
+	n := input.NumRows()
+	result.ReserveString(n)
+	for i := 0; i < n; i++ {
+		result.AppendString(data.ResourceGroupName)
+	}
+	return nil
+}
+
 func (b *builtinCurrentRoleSig) vectorized() bool {
 	return true
 }
@@ -145,7 +162,7 @@ func (b *builtinCurrentRoleSig) vecEvalString(input *chunk.Chunk, result *chunk.
 	for _, r := range data.ActiveRoles {
 		sortedRes = append(sortedRes, r.String())
 	}
-	sort.Strings(sortedRes)
+	slices.Sort(sortedRes)
 	res := strings.Join(sortedRes, ",")
 	for i := 0; i < n; i++ {
 		result.AppendString(res)

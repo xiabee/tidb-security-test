@@ -16,9 +16,6 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"go.uber.org/multierr"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tidb/br/pkg/version"
 	dbconfig "github.com/pingcap/tidb/config"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
@@ -26,10 +23,13 @@ import (
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/store/helper"
+	"go.uber.org/multierr"
+	"go.uber.org/zap"
 )
 
 const (
 	orderByTiDBRowID = "ORDER BY `_tidb_rowid`"
+	snapshotVar      = "tidb_snapshot"
 )
 
 type listTableType int
@@ -204,9 +204,9 @@ func ShowCreateSequence(tctx *tcontext.Context, db *BaseConn, database, sequence
 			return "", err
 		}
 		for _, oneRow := range results {
-			nextGlobalRowId, idType := oneRow[0], oneRow[1]
+			nextGlobalRowID, idType := oneRow[0], oneRow[1]
 			if idType == "SEQUENCE" {
-				nextNotCachedValue, _ = strconv.ParseInt(nextGlobalRowId, 10, 64)
+				nextNotCachedValue, _ = strconv.ParseInt(nextGlobalRowID, 10, 64)
 			}
 		}
 		fmt.Fprintf(&createSequenceSQL, "SELECT SETVAL(`%s`,%d);\n", escapeString(sequence), nextNotCachedValue)
@@ -361,6 +361,7 @@ func ListAllDatabasesTables(tctx *tcontext.Context, db *sql.Conn, databaseNames 
 	return dbTables, nil
 }
 
+// ListAllPlacementPolicyNames returns all placement policy names.
 func ListAllPlacementPolicyNames(tctx *tcontext.Context, db *BaseConn) ([]string, error) {
 	var policyList []string
 	var policy string
@@ -662,14 +663,13 @@ func GetSpecifiedColumnValueAndClose(rows *sql.Rows, columnName string) ([]strin
 		return []string{}, nil
 	}
 	defer rows.Close()
-	columnName = strings.ToUpper(columnName)
 	var strs []string
 	columns, _ := rows.Columns()
 	addr := make([]interface{}, len(columns))
 	oneRow := make([]sql.NullString, len(columns))
 	fieldIndex := -1
 	for i, col := range columns {
-		if strings.ToUpper(col) == columnName {
+		if strings.EqualFold(col, columnName) {
 			fieldIndex = i
 		}
 		addr[i] = &oneRow[i]
@@ -706,7 +706,7 @@ func GetSpecifiedColumnValuesAndClose(rows *sql.Rows, columnName ...string) ([][
 	for i, col := range columns {
 		addr[i] = &oneRow[i]
 		for j, name := range columnName {
-			if strings.ToUpper(col) == name {
+			if strings.EqualFold(col, name) {
 				fieldIndexMp[i] = j
 			}
 		}
@@ -778,7 +778,9 @@ func getTiDBConfig(db *sql.Conn) (dbconfig.Config, error) {
 func CheckTiDBWithTiKV(db *sql.DB) (bool, error) {
 	conn, err := db.Conn(context.Background())
 	if err == nil {
-		defer conn.Close()
+		defer func() {
+			_ = conn.Close()
+		}()
 		tidbConfig, err := getTiDBConfig(conn)
 		if err == nil {
 			return tidbConfig.Store == "tikv", nil
@@ -850,7 +852,9 @@ func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Con
 		s := fmt.Sprintf("SET SESSION %s = ?", k)
 		_, err := db.ExecContext(tctx, s, pv)
 		if err != nil {
-			if isUnknownSystemVariableErr(err) {
+			if k == snapshotVar {
+				err = errors.Annotate(err, "fail to set snapshot for tidb, please set --consistency=none/--consistency=lock or fix snapshot problem")
+			} else if isUnknownSystemVariableErr(err) {
 				tctx.L().Info("session variable is not supported by db", zap.String("variable", k), zap.Reflect("value", v))
 				continue
 			}
@@ -875,7 +879,11 @@ func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Con
 		}
 		cfg.Params[k] = s
 	}
+	failpoint.Inject("SkipResetDB", func(_ failpoint.Value) {
+		failpoint.Return(db, nil)
+	})
 
+	db.Close()
 	c, err := mysql.NewConnector(cfg)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -883,8 +891,8 @@ func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Con
 	newDB := sql.OpenDB(c)
 	// ping to make sure all session parameters are set correctly
 	err = newDB.PingContext(tctx)
-	if err == nil {
-		db.Close()
+	if err != nil {
+		newDB.Close()
 	}
 	return newDB, nil
 }
@@ -1516,7 +1524,7 @@ func GetCharsetAndDefaultCollation(ctx context.Context, db *sql.Conn) (map[strin
 	if err = rows.Close(); err != nil {
 		return nil, errors.Annotatef(err, "sql: %s", query)
 	}
-	if rows.Err() != nil {
+	if err = rows.Err(); err != nil {
 		return nil, errors.Annotatef(err, "sql: %s", query)
 	}
 	return charsetAndDefaultCollation, err

@@ -20,12 +20,13 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/cteutil"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/disk"
 	"github.com/pingcap/tidb/util/memory"
 )
@@ -110,15 +111,24 @@ func (e *CTEExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 
 // Close implements the Executor interface.
 func (e *CTEExec) Close() (err error) {
-	e.producer.resTbl.Lock()
-	if !e.producer.closed {
-		// closeProducer() only close seedExec and recursiveExec, will not touch resTbl.
-		// It means you can still read resTbl after call closeProducer().
-		// You can even call all three functions(openProducer/produce/closeProducer) in CTEExec.Next().
-		// Separating these three function calls is only to follow the abstraction of the volcano model.
-		err = e.producer.closeProducer()
-	}
-	e.producer.resTbl.Unlock()
+	func() {
+		e.producer.resTbl.Lock()
+		defer e.producer.resTbl.Unlock()
+		if !e.producer.closed {
+			failpoint.Inject("mock_cte_exec_panic_avoid_deadlock", func(v failpoint.Value) {
+				ok := v.(bool)
+				if ok {
+					// mock an oom panic, returning ErrMemoryExceedForQuery for error identification in recovery work.
+					panic(memory.PanicMemoryExceedWarnMsg)
+				}
+			})
+			// closeProducer() only close seedExec and recursiveExec, will not touch resTbl.
+			// It means you can still read resTbl after call closeProducer().
+			// You can even call all three functions(openProducer/produce/closeProducer) in CTEExec.Next().
+			// Separating these three function calls is only to follow the abstraction of the volcano model.
+			err = e.producer.closeProducer()
+		}
+	}()
 	if err != nil {
 		return err
 	}
@@ -176,7 +186,11 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 		return err
 	}
 
-	p.memTracker = memory.NewTracker(cteExec.id, -1)
+	if p.memTracker != nil {
+		p.memTracker.Reset()
+	} else {
+		p.memTracker = memory.NewTracker(cteExec.id, -1)
+	}
 	p.diskTracker = disk.NewTracker(cteExec.id, -1)
 	p.memTracker.AttachTo(p.ctx.GetSessionVars().StmtCtx.MemTracker)
 	p.diskTracker.AttachTo(p.ctx.GetSessionVars().StmtCtx.DiskTracker)
@@ -305,7 +319,7 @@ func (p *cteProducer) produce(ctx context.Context, cteExec *CTEExec) (err error)
 	}
 
 	failpoint.Inject("testCTEStorageSpill", func(val failpoint.Value) {
-		if val.(bool) && config.GetGlobalConfig().OOMUseTmpStorage {
+		if val.(bool) && variable.EnableTmpStorageOnOOM.Load() {
 			defer resAction.WaitForTest()
 			defer iterInAction.WaitForTest()
 			if iterOutAction != nil {
@@ -340,7 +354,7 @@ func (p *cteProducer) computeSeedPart(ctx context.Context) (err error) {
 		if p.limitDone(p.iterInTbl) {
 			break
 		}
-		chk := newFirstChunk(p.seedExec)
+		chk := tryNewCacheChunk(p.seedExec)
 		if err = Next(ctx, p.seedExec, chk); err != nil {
 			return
 		}
@@ -377,7 +391,7 @@ func (p *cteProducer) computeRecursivePart(ctx context.Context) (err error) {
 	}
 
 	if p.curIter > p.ctx.GetSessionVars().CTEMaxRecursionDepth {
-		return ErrCTEMaxRecursionDepth.GenWithStackByArgs(p.curIter)
+		return exeerrors.ErrCTEMaxRecursionDepth.GenWithStackByArgs(p.curIter)
 	}
 
 	if p.limitDone(p.resTbl) {
@@ -385,7 +399,7 @@ func (p *cteProducer) computeRecursivePart(ctx context.Context) (err error) {
 	}
 
 	for {
-		chk := newFirstChunk(p.recursiveExec)
+		chk := tryNewCacheChunk(p.recursiveExec)
 		if err = Next(ctx, p.recursiveExec, chk); err != nil {
 			return
 		}
@@ -403,7 +417,7 @@ func (p *cteProducer) computeRecursivePart(ctx context.Context) (err error) {
 			p.curIter++
 			p.iterInTbl.SetIter(p.curIter)
 			if p.curIter > p.ctx.GetSessionVars().CTEMaxRecursionDepth {
-				return ErrCTEMaxRecursionDepth.GenWithStackByArgs(p.curIter)
+				return exeerrors.ErrCTEMaxRecursionDepth.GenWithStackByArgs(p.curIter)
 			}
 			// Make sure iterInTbl is setup before Close/Open,
 			// because some executors will read iterInTbl in Open() (like IndexLookupJoin).
@@ -499,14 +513,14 @@ func setupCTEStorageTracker(tbl cteutil.Storage, ctx sessionctx.Context, parentM
 	diskTracker.SetLabel(memory.LabelForCTEStorage)
 	diskTracker.AttachTo(parentDiskTracker)
 
-	if config.GetGlobalConfig().OOMUseTmpStorage {
+	if variable.EnableTmpStorageOnOOM.Load() {
 		actionSpill = tbl.ActionSpill()
 		failpoint.Inject("testCTEStorageSpill", func(val failpoint.Value) {
 			if val.(bool) {
 				actionSpill = tbl.(*cteutil.StorageRC).ActionSpillForTest()
 			}
 		})
-		ctx.GetSessionVars().StmtCtx.MemTracker.FallbackOldAndSetNewAction(actionSpill)
+		ctx.GetSessionVars().MemTracker.FallbackOldAndSetNewAction(actionSpill)
 	}
 	return actionSpill
 }

@@ -27,8 +27,7 @@ import (
 )
 
 func TestString(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	txn, err := store.Begin()
 	require.NoError(t, err)
@@ -78,8 +77,7 @@ func TestString(t *testing.T) {
 }
 
 func TestList(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	txn, err := store.Begin()
 	require.NoError(t, err)
@@ -189,8 +187,7 @@ func TestList(t *testing.T) {
 }
 
 func TestHash(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	txn, err := store.Begin()
 	require.NoError(t, err)
@@ -224,6 +221,15 @@ func TestHash(t *testing.T) {
 	require.Equal(t, []structure.HashPair{
 		{Field: []byte("1"), Value: []byte("1")},
 		{Field: []byte("2"), Value: []byte("2")}}, res)
+
+	idx := 0
+	err = tx.HGetIter(key, func(pair structure.HashPair) error {
+		require.Less(t, idx, 2)
+		require.Equal(t, res[idx], pair)
+		idx += 1
+		return nil
+	})
+	require.NoError(t, err)
 
 	res, err = tx.HGetLastN(key, 1)
 	require.NoError(t, err)
@@ -316,7 +322,8 @@ func TestHash(t *testing.T) {
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
 
-	err = kv.RunInNewTxn(context.Background(), store, false, func(ctx context.Context, txn kv.Transaction) error {
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnMeta)
+	err = kv.RunInNewTxn(ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		newTxn := structure.NewStructure(txn, txn, []byte{0x00})
 		err = newTxn.Set(key, []byte("abc"))
 		require.NoError(t, err)

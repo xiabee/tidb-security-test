@@ -15,6 +15,7 @@
 package kv
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"time"
@@ -31,7 +32,10 @@ import (
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
+	"go.uber.org/atomic"
+	"golang.org/x/exp/slices"
 )
 
 // UnCommitIndexKVFlag uses to indicate the index key/value is no need to commit.
@@ -48,7 +52,7 @@ var (
 	// TxnEntrySizeLimit is limit of single entry size (len(key) + len(value)).
 	TxnEntrySizeLimit uint64 = config.DefTxnEntrySizeLimit
 	// TxnTotalSizeLimit is limit of the sum of all entry size.
-	TxnTotalSizeLimit uint64 = config.DefTxnTotalSizeLimit
+	TxnTotalSizeLimit = atomic.NewUint64(config.DefTxnTotalSizeLimit)
 )
 
 // Getter is the interface for the Get method.
@@ -78,33 +82,33 @@ type Retriever interface {
 type EmptyIterator struct{}
 
 // Valid returns true if the current iterator is valid.
-func (i *EmptyIterator) Valid() bool { return false }
+func (*EmptyIterator) Valid() bool { return false }
 
 // Key returns the current key. Always return nil for this iterator
-func (i *EmptyIterator) Key() Key { return nil }
+func (*EmptyIterator) Key() Key { return nil }
 
 // Value returns the current value. Always return nil for this iterator
-func (i *EmptyIterator) Value() []byte { return nil }
+func (*EmptyIterator) Value() []byte { return nil }
 
 // Next goes the next position. Always return error for this iterator
-func (i *EmptyIterator) Next() error { return errors.New("iterator is invalid") }
+func (*EmptyIterator) Next() error { return errors.New("iterator is invalid") }
 
 // Close closes the iterator.
-func (i *EmptyIterator) Close() {}
+func (*EmptyIterator) Close() {}
 
 // EmptyRetriever is a retriever without any entry
 type EmptyRetriever struct{}
 
 // Get gets the value for key k from kv store. Always return nil for this retriever
-func (r *EmptyRetriever) Get(_ context.Context, _ Key) ([]byte, error) {
+func (*EmptyRetriever) Get(_ context.Context, _ Key) ([]byte, error) {
 	return nil, ErrNotExist
 }
 
 // Iter creates an Iterator. Always return EmptyIterator for this retriever
-func (r *EmptyRetriever) Iter(_ Key, _ Key) (Iterator, error) { return &EmptyIterator{}, nil }
+func (*EmptyRetriever) Iter(_ Key, _ Key) (Iterator, error) { return &EmptyIterator{}, nil }
 
 // IterReverse creates a reversed Iterator. Always return EmptyIterator for this retriever
-func (r *EmptyRetriever) IterReverse(_ Key) (Iterator, error) {
+func (*EmptyRetriever) IterReverse(_ Key) (Iterator, error) {
 	return &EmptyIterator{}, nil
 }
 
@@ -149,6 +153,8 @@ type MemBuffer interface {
 	GetFlags(Key) (KeyFlags, error)
 	// SetWithFlags put key-value into the last active staging buffer with the given KeyFlags.
 	SetWithFlags(Key, []byte, ...FlagsOp) error
+	// UpdateFlags updates the flags associated with key.
+	UpdateFlags(Key, ...FlagsOp)
 	// DeleteWithFlags delete key with the given KeyFlags
 	DeleteWithFlags(Key, ...FlagsOp) error
 
@@ -174,6 +180,20 @@ type MemBuffer interface {
 
 	// Size returns sum of keys and values length.
 	Size() int
+
+	// RemoveFromBuffer removes the entry from the buffer. It's used for testing.
+	RemoveFromBuffer(Key)
+}
+
+// FindKeysInStage returns all keys in the given stage that satisfies the given condition.
+func FindKeysInStage(m MemBuffer, h StagingHandle, predicate func(Key, KeyFlags, []byte) bool) []Key {
+	result := make([]Key, 0)
+	m.InspectStage(h, func(k Key, f KeyFlags, v []byte) {
+		if predicate(k, f, v) {
+			result = append(result, k)
+		}
+	})
+	return result
 }
 
 // LockCtx contains information for LockKeys method.
@@ -184,8 +204,13 @@ type LockCtx = tikvstore.LockCtx
 type Transaction interface {
 	RetrieverMutator
 	AssertionProto
+	FairLockingController
 	// Size returns sum of keys and values length.
 	Size() int
+	// Mem returns the memory consumption of the transaction.
+	Mem() uint64
+	// SetMemoryFootprintChangeHook sets the hook that will be called when the memory footprint changes.
+	SetMemoryFootprintChangeHook(func(uint64))
 	// Len returns the number of entries in the DB.
 	Len() int
 	// Reset reset the Transaction to initial states.
@@ -228,17 +253,26 @@ type Transaction interface {
 	// If a key doesn't exist, there shouldn't be any corresponding entry in the result map.
 	BatchGet(ctx context.Context, keys []Key) (map[string][]byte, error)
 	IsPessimistic() bool
-	// CacheIndexName caches the index name.
+	// CacheTableInfo caches the index name.
 	// PresumeKeyNotExists will use this to help decode error message.
 	CacheTableInfo(id int64, info *model.TableInfo)
-	// GetIndexName returns the cached index name.
+	// GetTableInfo returns the cached index name.
 	// If there is no such index already inserted through CacheIndexName, it will return UNKNOWN.
 	GetTableInfo(id int64) *model.TableInfo
 
-	// set allowed options of current operation in each TiKV disk usage level.
+	// SetDiskFullOpt set allowed options of current operation in each TiKV disk usage level.
 	SetDiskFullOpt(level kvrpcpb.DiskFullOpt)
-	// clear allowed flag
+	// ClearDiskFullOpt clear allowed flag
 	ClearDiskFullOpt()
+
+	// GetMemDBCheckpoint gets the transaction's memDB checkpoint.
+	GetMemDBCheckpoint() *tikv.MemDBCheckpoint
+
+	// RollbackMemDBToCheckpoint rollbacks the transaction's memDB to the specified checkpoint.
+	RollbackMemDBToCheckpoint(*tikv.MemDBCheckpoint)
+
+	// UpdateMemBufferFlags updates the flags of a node in the mem buffer.
+	UpdateMemBufferFlags(key []byte, flags ...FlagsOp)
 }
 
 // AssertionProto is an interface defined for the assertion protocol.
@@ -247,6 +281,15 @@ type AssertionProto interface {
 	// TODO: Use a special type instead of `FlagsOp`. Otherwise there's risk that the assertion flag is incorrectly used
 	// in other places like `MemBuffer.SetWithFlags`.
 	SetAssertion(key []byte, assertion ...FlagsOp) error
+}
+
+// FairLockingController is the interface that defines fair locking related operations.
+type FairLockingController interface {
+	StartFairLocking() error
+	RetryFairLocking(ctx context.Context) error
+	CancelFairLocking(ctx context.Context) error
+	DoneFairLocking(ctx context.Context) error
+	IsInFairLockingMode() bool
 }
 
 // Client is used to send request to KV layer.
@@ -309,13 +352,168 @@ func (t StoreType) Name() string {
 	return "unspecified"
 }
 
+// KeyRanges wrap the ranges for partitioned table cases.
+// We might send ranges from different in the one request.
+type KeyRanges struct {
+	ranges        [][]KeyRange
+	rowCountHints [][]int
+
+	isPartitioned bool
+}
+
+// NewPartitionedKeyRanges constructs a new RequestRange for partitioned table.
+func NewPartitionedKeyRanges(ranges [][]KeyRange) *KeyRanges {
+	return NewPartitionedKeyRangesWithHints(ranges, nil)
+}
+
+// NewNonParitionedKeyRanges constructs a new RequestRange for a non partitioned table.
+func NewNonParitionedKeyRanges(ranges []KeyRange) *KeyRanges {
+	return NewNonParitionedKeyRangesWithHint(ranges, nil)
+}
+
+// NewPartitionedKeyRangesWithHints constructs a new RequestRange for partitioned table with row count hint.
+func NewPartitionedKeyRangesWithHints(ranges [][]KeyRange, hints [][]int) *KeyRanges {
+	return &KeyRanges{
+		ranges:        ranges,
+		rowCountHints: hints,
+		isPartitioned: true,
+	}
+}
+
+// NewNonParitionedKeyRangesWithHint constructs a new RequestRange for a non partitioned table with rou count hint.
+func NewNonParitionedKeyRangesWithHint(ranges []KeyRange, hints []int) *KeyRanges {
+	rr := &KeyRanges{
+		ranges:        [][]KeyRange{ranges},
+		isPartitioned: false,
+	}
+	if hints != nil {
+		rr.rowCountHints = [][]int{hints}
+	}
+	return rr
+}
+
+// FirstPartitionRange returns the the result of first range.
+// We may use some func to generate ranges for both partitioned table and non partitioned table.
+// This method provides a way to fallback to non-partitioned ranges.
+func (rr *KeyRanges) FirstPartitionRange() []KeyRange {
+	if len(rr.ranges) == 0 {
+		return []KeyRange{}
+	}
+	return rr.ranges[0]
+}
+
+// SetToNonPartitioned set the status to non-partitioned.
+func (rr *KeyRanges) SetToNonPartitioned() error {
+	if len(rr.ranges) > 1 {
+		return errors.Errorf("you want to change the partitioned ranges to non-partitioned ranges")
+	}
+	rr.isPartitioned = false
+	return nil
+}
+
+// AppendSelfTo appends itself to another slice.
+func (rr *KeyRanges) AppendSelfTo(ranges []KeyRange) []KeyRange {
+	for _, r := range rr.ranges {
+		ranges = append(ranges, r...)
+	}
+	return ranges
+}
+
+// SortByFunc sorts each partition's ranges.
+// Since the ranges are sorted in most cases, we check it first.
+func (rr *KeyRanges) SortByFunc(sortFunc func(i, j KeyRange) bool) {
+	if !slices.IsSortedFunc(rr.ranges, func(i, j []KeyRange) bool {
+		// A simple short-circuit since the empty range actually won't make anything wrong.
+		if len(i) == 0 || len(j) == 0 {
+			return true
+		}
+		return sortFunc(i[0], j[0])
+	}) {
+		slices.SortFunc(rr.ranges, func(i, j []KeyRange) bool {
+			if len(i) == 0 {
+				return true
+			}
+			if len(j) == 0 {
+				return false
+			}
+			return sortFunc(i[0], j[0])
+		})
+	}
+	for i := range rr.ranges {
+		if !slices.IsSortedFunc(rr.ranges[i], sortFunc) {
+			slices.SortFunc(rr.ranges[i], sortFunc)
+		}
+	}
+}
+
+// ForEachPartitionWithErr runs the func for each partition with an error check.
+func (rr *KeyRanges) ForEachPartitionWithErr(theFunc func([]KeyRange, []int) error) (err error) {
+	for i := range rr.ranges {
+		var hints []int
+		if len(rr.rowCountHints) > i {
+			hints = rr.rowCountHints[i]
+		}
+		err = theFunc(rr.ranges[i], hints)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForEachPartition runs the func for each partition without error check.
+func (rr *KeyRanges) ForEachPartition(theFunc func([]KeyRange)) {
+	for i := range rr.ranges {
+		theFunc(rr.ranges[i])
+	}
+}
+
+// PartitionNum returns how many partition is involved in the ranges.
+func (rr *KeyRanges) PartitionNum() int {
+	return len(rr.ranges)
+}
+
+// IsFullySorted checks whether the ranges are sorted inside partition and each partition is also sorated.
+func (rr *KeyRanges) IsFullySorted() bool {
+	sortedByPartition := slices.IsSortedFunc(rr.ranges, func(i, j []KeyRange) bool {
+		// A simple short-circuit since the empty range actually won't make anything wrong.
+		if len(i) == 0 || len(j) == 0 {
+			return true
+		}
+		return bytes.Compare(i[0].StartKey, j[0].StartKey) < 0
+	})
+	if !sortedByPartition {
+		return false
+	}
+	for _, ranges := range rr.ranges {
+		if !slices.IsSortedFunc(ranges, func(i, j KeyRange) bool {
+			return bytes.Compare(i.StartKey, j.StartKey) < 0
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+// TotalRangeNum returns how many ranges there are.
+func (rr *KeyRanges) TotalRangeNum() int {
+	ret := 0
+	for _, r := range rr.ranges {
+		ret += len(r)
+	}
+	return ret
+}
+
 // Request represents a kv request.
 type Request struct {
 	// Tp is the request type.
-	Tp        int64
-	StartTs   uint64
-	Data      []byte
-	KeyRanges []KeyRange
+	Tp      int64
+	StartTs uint64
+	Data    []byte
+
+	// KeyRanges makes sure that the request is sent first by partition then by region.
+	// When the table is small, it's possible that multiple partitions are in the same region.
+	KeyRanges *KeyRanges
 
 	// For PartitionTableScan used by tiflash.
 	PartitionIDAndRanges []PartitionIDAndRanges
@@ -336,9 +534,6 @@ type Request struct {
 	Desc bool
 	// NotFillCache makes this request do not touch the LRU cache of the underlying storage.
 	NotFillCache bool
-	// Streaming indicates using streaming API for this request, result in that one Next()
-	// call would not corresponds to a whole region result.
-	Streaming bool
 	// ReplicaRead is used for reading data from replicas, only follower is supported at this time.
 	ReplicaRead ReplicaReadType
 	// StoreType represents this request is sent to the which type of store.
@@ -353,17 +548,44 @@ type Request struct {
 	TaskID uint64
 	// TiDBServerID is the specified TiDB serverID to execute request. `0` means all TiDB instances.
 	TiDBServerID uint64
+	// TxnScope is the scope of the txn
+	TxnScope string
 	// ReadReplicaScope is the scope of the read replica.
 	ReadReplicaScope string
 	// IsStaleness indicates whether the request read staleness data
 	IsStaleness bool
+	// ClosestReplicaReadAdjuster used to adjust a copr request.
+	ClosestReplicaReadAdjuster CoprRequestAdjuster
 	// MatchStoreLabels indicates the labels the store should be matched
 	MatchStoreLabels []*metapb.StoreLabel
 	// ResourceGroupTagger indicates the kv request task group tagger.
 	ResourceGroupTagger tikvrpc.ResourceGroupTagger
 	// Paging indicates whether the request is a paging request.
-	Paging bool
+	Paging struct {
+		Enable bool
+		// MinPagingSize is used when Paging is true.
+		MinPagingSize uint64
+		// MaxPagingSize is used when Paging is true.
+		MaxPagingSize uint64
+	}
+	// RequestSource indicates whether the request is an internal request.
+	RequestSource util.RequestSource
+	// StoreBatchSize indicates the batch size of coprocessor in the same store.
+	StoreBatchSize int
+	// ResourceGroupName is the name of the bind resource group.
+	ResourceGroupName string
+	// LimitSize indicates whether the request is scan and limit
+	LimitSize uint64
+	// StoreBusyThreshold is the threshold for the store to return ServerIsBusy
+	StoreBusyThreshold time.Duration
+
+	// ConnID stores the session connection id.
+	ConnID uint64
 }
+
+// CoprRequestAdjuster is used to check and adjust a copr request according to specific rules.
+// return true if the request is changed.
+type CoprRequestAdjuster func(*Request, int) bool
 
 // PartitionIDAndRanges used by PartitionTableScan in tiflash.
 type PartitionIDAndRanges struct {
@@ -467,6 +689,8 @@ type Storage interface {
 	GetMinSafeTS(txnScope string) uint64
 	// GetLockWaits return all lock wait information
 	GetLockWaits() ([]*deadlockpb.WaitForEntry, error)
+	// GetCodec gets the codec of the storage.
+	GetCodec() tikv.Codec
 }
 
 // EtcdBackend is used for judging a storage is a real TiKV.

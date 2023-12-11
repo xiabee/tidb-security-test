@@ -159,10 +159,10 @@ func TestCA(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := util.ClientWithTLS(clientTLS1).Get(url)
 	require.NoError(t, err)
-	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "This an example server", string(body))
+	require.NoError(t, resp.Body.Close())
 
 	// test without CA
 	clientTLS2, err := util.NewTLSConfig(
@@ -193,8 +193,7 @@ func TestCA(t *testing.T) {
 	resp, err = util.ClientWithTLS(clientTLS3).Get(url)
 	require.ErrorContains(t, err, "different CA is used")
 	if resp != nil {
-		err = resp.Body.Close()
-		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
 	}
 }
 

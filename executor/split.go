@@ -34,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/tikv/client-go/v2/tikv"
@@ -241,7 +242,7 @@ func (e *SplitIndexRegionExec) getSplitIdxPhysicalKeysFromBound(physicalID int64
 		upperStr := datumSliceToString(e.upper)
 		errMsg := fmt.Sprintf("Split index `%v` region lower value %v should less than the upper value %v",
 			e.indexInfo.Name, lowerStr, upperStr)
-		return nil, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
+		return nil, exeerrors.ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 	}
 	return getValuesList(lowerIdxKey, upperIdxKey, e.num, keys), nil
 }
@@ -366,6 +367,7 @@ func (e *SplitTableRegionExec) splitTableRegion(ctx context.Context) error {
 	start := time.Now()
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, e.ctx.GetSessionVars().GetSplitRegionTimeout())
 	defer cancel()
+	ctxWithTimeout = kv.WithInternalSourceType(ctxWithTimeout, kv.InternalTxnDDL)
 
 	regionIDs, err := s.SplitRegions(ctxWithTimeout, e.splitKeys, true, &e.tableInfo.ID)
 	if err != nil {
@@ -546,7 +548,7 @@ func (e *SplitTableRegionExec) calculateIntBoundValue() (lowerValue int64, step 
 		upperRecordID := e.upper[0].GetUint64()
 		if upperRecordID <= lowerRecordID {
 			errMsg := fmt.Sprintf("lower value %v should less than the upper value %v", lowerRecordID, upperRecordID)
-			return 0, 0, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
+			return 0, 0, exeerrors.ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 		}
 		step = int64((upperRecordID - lowerRecordID) / uint64(e.num))
 		lowerValue = int64(lowerRecordID)
@@ -555,14 +557,14 @@ func (e *SplitTableRegionExec) calculateIntBoundValue() (lowerValue int64, step 
 		upperRecordID := e.upper[0].GetInt64()
 		if upperRecordID <= lowerRecordID {
 			errMsg := fmt.Sprintf("lower value %v should less than the upper value %v", lowerRecordID, upperRecordID)
-			return 0, 0, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
+			return 0, 0, exeerrors.ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 		}
 		step = int64(uint64(upperRecordID-lowerRecordID) / uint64(e.num))
 		lowerValue = lowerRecordID
 	}
 	if step < minRegionStepValue {
 		errMsg := fmt.Sprintf("the region size is too small, expected at least %d, but got %d", minRegionStepValue, step)
-		return 0, 0, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
+		return 0, 0, exeerrors.ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 	}
 	return lowerValue, step, nil
 }
@@ -601,7 +603,7 @@ func (e *SplitTableRegionExec) getSplitTablePhysicalKeysFromBound(physicalID int
 		upperStr := datumSliceToString(e.upper)
 		errMsg := fmt.Sprintf("Split table `%v` region lower value %v should less than the upper value %v",
 			e.tableInfo.Name.O, lowerStr, upperStr)
-		return nil, ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
+		return nil, exeerrors.ErrInvalidSplitRegionRanges.GenWithStackByArgs(errMsg)
 	}
 	low := tablecodec.EncodeRecordKey(recordPrefix, lowerHandle)
 	up := tablecodec.EncodeRecordKey(recordPrefix, upperHandle)
@@ -620,6 +622,9 @@ type regionMeta struct {
 	readBytes       uint64
 	approximateSize int64
 	approximateKeys int64
+
+	// this is for propagating scheduling info for this region
+	physicalID int64
 }
 
 func getPhysicalTableRegions(physicalTableID int64, tableInfo *model.TableInfo, tikvStore helper.Storage, s kv.SplittableStore, uniqueRegionMap map[uint64]struct{}) ([]regionMeta, error) {
@@ -784,12 +789,15 @@ func getRegionMeta(tikvStore helper.Storage, regionMetas []*tikv.Region, uniqueR
 			continue
 		}
 		uniqueRegionMap[r.GetID()] = struct{}{}
-		regions = append(regions, regionMeta{
-			region:   r.GetMeta(),
-			leaderID: r.GetLeaderPeerID(),
-			storeID:  r.GetLeaderStoreID(),
-		})
+		regions = append(regions,
+			regionMeta{
+				region:     r.GetMeta(),
+				leaderID:   r.GetLeaderPeerID(),
+				storeID:    r.GetLeaderStoreID(),
+				physicalID: physicalTableID,
+			})
 	}
+
 	regions, err := getRegionInfo(tikvStore, regions)
 	if err != nil {
 		return regions, err

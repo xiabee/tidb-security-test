@@ -14,7 +14,7 @@
 package parser
 
 import (
-	"io/ioutil"
+	gio "io"
 	"os"
 	"sort"
 	"strings"
@@ -27,7 +27,7 @@ func TestKeywordConsistent(t *testing.T) {
 	parserFilename := "parser.y"
 	parserFile, err := os.Open(parserFilename)
 	requires.NoError(t, err)
-	data, err := ioutil.ReadAll(parserFile)
+	data, err := gio.ReadAll(parserFile)
 	requires.NoError(t, err)
 	content := string(data)
 
@@ -73,6 +73,7 @@ func extractMiddle(str, startMarker, endMarker string) string {
 }
 
 func extractQuotedWords(strs []string) []string {
+	//nolint: prealloc
 	var words []string
 	for _, str := range strs {
 		word := extractMiddle(str, "\"", "\"")

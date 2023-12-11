@@ -25,7 +25,6 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +47,7 @@ import (
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // Storage represents a storage that connects TiKV.
@@ -78,6 +78,7 @@ type Storage interface {
 	Closed() <-chan struct{}
 	GetMinSafeTS(txnScope string) uint64
 	GetLockWaits() ([]*deadlockpb.WaitForEntry, error)
+	GetCodec() tikv.Codec
 }
 
 // Helper is a middleware to get some information from tikv/pd. It can be used for TiDB's http api or mem table.
@@ -94,25 +95,112 @@ func NewHelper(store Storage) *Helper {
 	}
 }
 
+// MaxBackoffTimeoutForMvccGet is a derived value from previous implementation possible experiencing value 5000ms.
+const MaxBackoffTimeoutForMvccGet = 5000
+
+// GetMvccByEncodedKeyWithTS get the MVCC value by the specific encoded key, if lock is encountered it would be resolved.
+func (h *Helper) GetMvccByEncodedKeyWithTS(encodedKey kv.Key, startTS uint64) (*kvrpcpb.MvccGetByKeyResponse, error) {
+	bo := tikv.NewBackofferWithVars(context.Background(), MaxBackoffTimeoutForMvccGet, nil)
+	tikvReq := tikvrpc.NewRequest(tikvrpc.CmdMvccGetByKey, &kvrpcpb.MvccGetByKeyRequest{Key: encodedKey})
+	for {
+		keyLocation, err := h.RegionCache.LocateKey(bo, encodedKey)
+		if err != nil {
+			return nil, derr.ToTiDBErr(err)
+		}
+		kvResp, err := h.Store.SendReq(bo, tikvReq, keyLocation.Region, time.Minute)
+		if err != nil {
+			logutil.BgLogger().Warn("get MVCC by encoded key failed",
+				zap.Stringer("encodeKey", encodedKey),
+				zap.Reflect("region", keyLocation.Region),
+				zap.Stringer("keyLocation", keyLocation),
+				zap.Reflect("kvResp", kvResp),
+				zap.Error(err))
+			return nil, errors.Trace(err)
+		}
+
+		regionErr, err := kvResp.GetRegionError()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		if regionErr != nil {
+			if err = bo.Backoff(tikv.BoRegionMiss(), errors.New(regionErr.String())); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		mvccResp := kvResp.Resp.(*kvrpcpb.MvccGetByKeyResponse)
+		if errMsg := mvccResp.GetError(); errMsg != "" {
+			logutil.BgLogger().Warn("get MVCC by encoded key failed",
+				zap.Stringer("encodeKey", encodedKey),
+				zap.Reflect("region", keyLocation.Region),
+				zap.Stringer("keyLocation", keyLocation),
+				zap.Reflect("kvResp", kvResp),
+				zap.String("error", errMsg))
+			return nil, errors.New(errMsg)
+		}
+		if mvccResp.Info == nil {
+			errMsg := "Invalid mvcc response result, the info field is nil"
+			logutil.BgLogger().Warn(errMsg,
+				zap.Stringer("encodeKey", encodedKey),
+				zap.Reflect("region", keyLocation.Region),
+				zap.Stringer("keyLocation", keyLocation),
+				zap.Reflect("kvResp", kvResp))
+			return nil, errors.New(errMsg)
+		}
+
+		// Try to resolve the lock and retry mvcc get again if the input startTS is a valid value.
+		if startTS > 0 && mvccResp.Info.GetLock() != nil {
+			latestTS, err := h.Store.GetOracle().GetLowResolutionTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
+			if err != nil {
+				logutil.BgLogger().Warn("Failed to get latest ts", zap.Error(err))
+				return nil, err
+			}
+			if startTS > latestTS {
+				errMsg := fmt.Sprintf("Snapshot ts=%v is larger than latest allocated ts=%v, lock could not be resolved",
+					startTS, latestTS)
+				logutil.BgLogger().Warn(errMsg)
+				return nil, errors.New(errMsg)
+			}
+			lockInfo := mvccResp.Info.GetLock()
+			lock := &txnlock.Lock{
+				Key:             []byte(encodedKey),
+				Primary:         lockInfo.GetPrimary(),
+				TxnID:           lockInfo.GetStartTs(),
+				TTL:             lockInfo.GetTtl(),
+				TxnSize:         lockInfo.GetTxnSize(),
+				LockType:        lockInfo.GetType(),
+				UseAsyncCommit:  lockInfo.GetUseAsyncCommit(),
+				LockForUpdateTS: lockInfo.GetForUpdateTs(),
+			}
+			// Disable for read to avoid async resolve.
+			resolveLocksOpts := txnlock.ResolveLocksOptions{
+				CallerStartTS: startTS,
+				Locks:         []*txnlock.Lock{lock},
+				Lite:          true,
+				ForRead:       false,
+				Detail:        nil,
+			}
+			resolveLockRes, err := h.Store.GetLockResolver().ResolveLocksWithOpts(bo, resolveLocksOpts)
+			if err != nil {
+				return nil, err
+			}
+			msBeforeExpired := resolveLockRes.TTL
+			if msBeforeExpired > 0 {
+				if err = bo.BackoffWithCfgAndMaxSleep(tikv.BoTxnLock(), int(msBeforeExpired),
+					errors.Errorf("resolve lock fails lock: %v", lock)); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		return mvccResp, nil
+	}
+}
+
 // GetMvccByEncodedKey get the MVCC value by the specific encoded key.
 func (h *Helper) GetMvccByEncodedKey(encodedKey kv.Key) (*kvrpcpb.MvccGetByKeyResponse, error) {
-	keyLocation, err := h.RegionCache.LocateKey(tikv.NewBackofferWithVars(context.Background(), 500, nil), encodedKey)
-	if err != nil {
-		return nil, derr.ToTiDBErr(err)
-	}
-
-	tikvReq := tikvrpc.NewRequest(tikvrpc.CmdMvccGetByKey, &kvrpcpb.MvccGetByKeyRequest{Key: encodedKey})
-	kvResp, err := h.Store.SendReq(tikv.NewBackofferWithVars(context.Background(), 500, nil), tikvReq, keyLocation.Region, time.Minute)
-	if err != nil {
-		logutil.BgLogger().Info("get MVCC by encoded key failed",
-			zap.Stringer("encodeKey", encodedKey),
-			zap.Reflect("region", keyLocation.Region),
-			zap.Stringer("keyLocation", keyLocation),
-			zap.Reflect("kvResp", kvResp),
-			zap.Error(err))
-		return nil, errors.Trace(err)
-	}
-	return kvResp.Resp.(*kvrpcpb.MvccGetByKeyResponse), nil
+	return h.GetMvccByEncodedKeyWithTS(encodedKey, 0)
 }
 
 // MvccKV wraps the key's mvcc info in tikv.
@@ -183,7 +271,7 @@ func (h *Helper) GetMvccByStartTs(startTS uint64, startKey, endKey kv.Key) (*Mvc
 		if len(curRegion.EndKey) == 0 {
 			return nil, nil
 		}
-		startKey = kv.Key(curRegion.EndKey)
+		startKey = curRegion.EndKey
 	}
 }
 
@@ -313,7 +401,7 @@ func (h *Helper) FetchRegionTableIndex(metrics map[uint64]RegionMetric, allSchem
 }
 
 // FindTableIndexOfRegion finds what table is involved in this hot region. And constructs the new frame item for future use.
-func (h *Helper) FindTableIndexOfRegion(allSchemas []*model.DBInfo, hotRange *RegionFrameRange) *FrameItem {
+func (*Helper) FindTableIndexOfRegion(allSchemas []*model.DBInfo, hotRange *RegionFrameRange) *FrameItem {
 	for _, db := range allSchemas {
 		for _, tbl := range db.Tables {
 			if f := findRangeInTable(hotRange, db, tbl); f != nil {
@@ -608,26 +696,17 @@ func isBehind(x, y withKeyRange) bool {
 }
 
 // IsBefore returns true is x is before [startKey, endKey)
-func isBeforeKeyRange(x withKeyRange, startKey, endKey string) bool {
+func isBeforeKeyRange(x withKeyRange, startKey, _ string) bool {
 	return x.getEndKey() != "" && x.getEndKey() <= startKey
 }
 
 // IsBehind returns true is x is behind [startKey, endKey)
-func isBehindKeyRange(x withKeyRange, startKey, endKey string) bool {
+func isBehindKeyRange(x withKeyRange, _, endKey string) bool {
 	return endKey != "" && x.getStartKey() >= endKey
 }
 
 func (r *RegionInfo) getStartKey() string { return r.StartKey }
 func (r *RegionInfo) getEndKey() string   { return r.EndKey }
-
-// for sorting
-type byRegionStartKey []*RegionInfo
-
-func (xs byRegionStartKey) Len() int      { return len(xs) }
-func (xs byRegionStartKey) Swap(i, j int) { xs[i], xs[j] = xs[j], xs[i] }
-func (xs byRegionStartKey) Less(i, j int) bool {
-	return xs[i].getStartKey() < xs[j].getStartKey()
-}
 
 // TableInfoWithKeyRange stores table or index informations with its key range.
 type TableInfoWithKeyRange struct {
@@ -638,15 +717,6 @@ type TableInfoWithKeyRange struct {
 
 func (t TableInfoWithKeyRange) getStartKey() string { return t.StartKey }
 func (t TableInfoWithKeyRange) getEndKey() string   { return t.EndKey }
-
-// for sorting
-type byTableStartKey []TableInfoWithKeyRange
-
-func (xs byTableStartKey) Len() int      { return len(xs) }
-func (xs byTableStartKey) Swap(i, j int) { xs[i], xs[j] = xs[j], xs[i] }
-func (xs byTableStartKey) Less(i, j int) bool {
-	return xs[i].getStartKey() < xs[j].getStartKey()
-}
 
 // NewTableWithKeyRange constructs TableInfoWithKeyRange for given table, it is exported only for test.
 func NewTableWithKeyRange(db *model.DBInfo, table *model.TableInfo) TableInfoWithKeyRange {
@@ -671,11 +741,11 @@ func newTableWithKeyRange(db *model.DBInfo, table *model.TableInfo) TableInfoWit
 
 // NewIndexWithKeyRange constructs TableInfoWithKeyRange for given index, it is exported only for test.
 func NewIndexWithKeyRange(db *model.DBInfo, table *model.TableInfo, index *model.IndexInfo) TableInfoWithKeyRange {
-	return newIndexWithKeyRange(db, table, index)
+	return newIndexWithKeyRange(db, table, index, table.ID)
 }
 
-func newIndexWithKeyRange(db *model.DBInfo, table *model.TableInfo, index *model.IndexInfo) TableInfoWithKeyRange {
-	sk, ek := tablecodec.GetTableIndexKeyRange(table.ID, index.ID)
+func newIndexWithKeyRange(db *model.DBInfo, table *model.TableInfo, index *model.IndexInfo, physicalID int64) TableInfoWithKeyRange {
+	sk, ek := tablecodec.GetTableIndexKeyRange(physicalID, index.ID)
 	startKey := bytesKeyToHex(codec.EncodeBytes(nil, sk))
 	endKey := bytesKeyToHex(codec.EncodeBytes(nil, ek))
 	return TableInfoWithKeyRange{
@@ -707,7 +777,7 @@ func newPartitionTableWithKeyRange(db *model.DBInfo, table *model.TableInfo, par
 }
 
 // FilterMemDBs filters memory databases in the input schemas.
-func (h *Helper) FilterMemDBs(oldSchemas []*model.DBInfo) (schemas []*model.DBInfo) {
+func (*Helper) FilterMemDBs(oldSchemas []*model.DBInfo) (schemas []*model.DBInfo) {
 	for _, dbInfo := range oldSchemas {
 		if util.IsMemDB(dbInfo.Name.L) {
 			continue
@@ -733,7 +803,7 @@ func (h *Helper) GetRegionsTableInfo(regionsInfo *RegionsInfo, schemas []*model.
 }
 
 // GetTablesInfoWithKeyRange returns a slice containing tableInfos with key ranges of all tables in schemas.
-func (h *Helper) GetTablesInfoWithKeyRange(schemas []*model.DBInfo) []TableInfoWithKeyRange {
+func (*Helper) GetTablesInfoWithKeyRange(schemas []*model.DBInfo) []TableInfoWithKeyRange {
 	tables := []TableInfoWithKeyRange{}
 	for _, db := range schemas {
 		for _, table := range db.Tables {
@@ -745,23 +815,33 @@ func (h *Helper) GetTablesInfoWithKeyRange(schemas []*model.DBInfo) []TableInfoW
 				tables = append(tables, newTableWithKeyRange(db, table))
 			}
 			for _, index := range table.Indices {
-				tables = append(tables, newIndexWithKeyRange(db, table, index))
+				if table.Partition == nil || index.Global {
+					tables = append(tables, newIndexWithKeyRange(db, table, index, table.ID))
+					continue
+				}
+				for _, partition := range table.Partition.Definitions {
+					tables = append(tables, newIndexWithKeyRange(db, table, index, partition.ID))
+				}
 			}
 		}
 	}
-	sort.Sort(byTableStartKey(tables))
+	slices.SortFunc(tables, func(i, j TableInfoWithKeyRange) bool {
+		return i.getStartKey() < j.getStartKey()
+	})
 	return tables
 }
 
 // ParseRegionsTableInfos parses the tables or indices in regions according to key range.
-func (h *Helper) ParseRegionsTableInfos(regionsInfo []*RegionInfo, tables []TableInfoWithKeyRange) map[int64][]TableInfo {
+func (*Helper) ParseRegionsTableInfos(regionsInfo []*RegionInfo, tables []TableInfoWithKeyRange) map[int64][]TableInfo {
 	tableInfos := make(map[int64][]TableInfo, len(regionsInfo))
 
 	if len(tables) == 0 || len(regionsInfo) == 0 {
 		return tableInfos
 	}
 	// tables is sorted in GetTablesInfoWithKeyRange func
-	sort.Sort(byRegionStartKey(regionsInfo))
+	slices.SortFunc(regionsInfo, func(i, j *RegionInfo) bool {
+		return i.getStartKey() < j.getStartKey()
+	})
 
 	idx := 0
 OutLoop:
@@ -815,7 +895,7 @@ func (h *Helper) GetRegionInfoByID(regionID uint64) (*RegionInfo, error) {
 // GetRegionsInfoByRange scans region by key range
 func (h *Helper) GetRegionsInfoByRange(sk, ek []byte) (*RegionsInfo, error) {
 	var regionsInfo RegionsInfo
-	err := h.requestPD("GetRegionByRange", "GET", fmt.Sprintf("%v?key=%s&end_key=%s", pdapi.ScanRegions,
+	err := h.requestPD("GetRegionByRange", "GET", fmt.Sprintf("%v?key=%s&end_key=%s&limit=-1", pdapi.ScanRegions,
 		url.QueryEscape(string(sk)), url.QueryEscape(string(ek))), nil, &regionsInfo)
 	return &regionsInfo, err
 }
@@ -876,6 +956,24 @@ func requestPDForOneHost(host, apiName, method, uri string, body io.Reader, res 
 				zap.String("url", urlVar), zap.Error(err))
 		}
 	}()
+
+	if resp.StatusCode != http.StatusOK {
+		logFields := []zap.Field{
+			zap.String("url", urlVar),
+			zap.String("status", resp.Status),
+		}
+
+		bs, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			logFields = append(logFields, zap.NamedError("readBodyError", err))
+		} else {
+			logFields = append(logFields, zap.ByteString("body", bs))
+		}
+
+		logutil.BgLogger().Warn("requestPDForOneHost failed with non 200 status", logFields...)
+		return errors.Errorf("PD request failed with status: '%s'", resp.Status)
+	}
+
 	err = json.NewDecoder(resp.Body).Decode(res)
 	if err != nil {
 		return errors.Trace(err)
@@ -997,7 +1095,13 @@ func (h *Helper) GetPDRegionStats(tableID int64, stats *PDRegionStats, noIndexSt
 			logutil.BgLogger().Error("err", zap.Error(err))
 		}
 	}()
-
+	if resp.StatusCode != http.StatusOK {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return errors.Errorf("GetPDRegionStats %d: %s", resp.StatusCode, err)
+		}
+		return errors.Errorf("GetPDRegionStats %d: %s", resp.StatusCode, string(body))
+	}
 	dec := json.NewDecoder(resp.Body)
 
 	return dec.Decode(stats)
@@ -1147,7 +1251,7 @@ func GetTiFlashTableIDFromEndKey(endKey string) int64 {
 	e, _ := hex.DecodeString(endKey)
 	_, decodedEndKey, _ := codec.DecodeBytes(e, []byte{})
 	tableID := tablecodec.DecodeTableID(decodedEndKey)
-	tableID -= 1
+	tableID--
 	return tableID
 }
 
@@ -1176,7 +1280,7 @@ func ComputeTiFlashStatus(reader *bufio.Reader, regionReplica *map[int64]int) er
 		if s == "" {
 			continue
 		}
-		realN += 1
+		realN++
 		r, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			return errors.Trace(err)
@@ -1195,10 +1299,16 @@ func ComputeTiFlashStatus(reader *bufio.Reader, regionReplica *map[int64]int) er
 
 // CollectTiFlashStatus query sync status of one table from TiFlash store.
 // `regionReplica` is a map from RegionID to count of TiFlash Replicas in this region.
-func CollectTiFlashStatus(statusAddress string, tableID int64, regionReplica *map[int64]int) error {
-	statURL := fmt.Sprintf("%s://%s/tiflash/sync-status/%d",
+func CollectTiFlashStatus(statusAddress string, keyspaceID tikv.KeyspaceID, tableID int64, regionReplica *map[int64]int) error {
+	// The new query schema is like: http://<host>/tiflash/sync-status/keyspace/<keyspaceID>/table/<tableID>.
+	// For TiDB forward compatibility, we define the Nullspace as the "keyspace" of the old table.
+	// The query URL is like: http://<host>/sync-status/keyspace/<NullspaceID>/table/<tableID>
+	// The old query schema is like: http://<host>/sync-status/<tableID>
+	// This API is preserved in TiFlash for compatibility with old versions of TiDB.
+	statURL := fmt.Sprintf("%s://%s/tiflash/sync-status/keyspace/%d/table/%d",
 		util.InternalHTTPSchema(),
 		statusAddress,
+		keyspaceID,
 		tableID,
 	)
 	resp, err := util.InternalHTTPClient().Get(statURL)

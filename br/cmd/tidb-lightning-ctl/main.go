@@ -28,7 +28,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
-	"github.com/pingcap/tidb/br/pkg/lightning/restore"
+	"github.com/pingcap/tidb/br/pkg/lightning/importer"
 	"github.com/pingcap/tidb/br/pkg/lightning/tikv"
 )
 
@@ -88,7 +88,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err = cfg.TiDB.Security.RegisterMySQL(); err != nil {
+	if err = cfg.TiDB.Security.BuildTLSConfig(); err != nil {
 		return err
 	}
 
@@ -128,7 +128,7 @@ func compactCluster(ctx context.Context, cfg *config.Config, tls *common.TLS) er
 		tls.WithHost(cfg.TiDB.PdAddr),
 		tikv.StoreStateDisconnected,
 		func(c context.Context, store *tikv.Store) error {
-			return tikv.Compact(c, tls, store.Address, restore.FullLevelCompact)
+			return tikv.Compact(c, tls, store.Address, importer.FullLevelCompact)
 		},
 	)
 }
@@ -155,6 +155,7 @@ func checkpointErrorIgnore(ctx context.Context, cfg *config.Config, tableName st
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer cpdb.Close()
 
 	return errors.Trace(cpdb.IgnoreErrorCheckpoint(ctx, tableName))
@@ -165,9 +166,10 @@ func checkpointErrorDestroy(ctx context.Context, cfg *config.Config, tls *common
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer cpdb.Close()
 
-	target, err := restore.NewTiDBManager(ctx, cfg.TiDB, tls)
+	target, err := importer.NewTiDBManager(ctx, cfg.TiDB, tls)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -194,7 +196,7 @@ func checkpointErrorDestroy(ctx context.Context, cfg *config.Config, tls *common
 	// we need either lightning process alive or engine map persistent.
 	// both of them seems unnecessary if we only need to do is cleanup specify engine directory.
 	// so we didn't choose to use common API.
-	if cfg.TikvImporter.Backend == "local" {
+	if cfg.TikvImporter.Backend == config.BackendLocal {
 		for _, table := range targetTables {
 			for engineID := table.MinEngineID; engineID <= table.MaxEngineID; engineID++ {
 				fmt.Fprintln(os.Stderr, "Closing and cleaning up engine:", table.TableName, engineID)
@@ -222,6 +224,7 @@ func checkpointDump(ctx context.Context, cfg *config.Config, dumpFolder string) 
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer cpdb.Close()
 
 	if err := os.MkdirAll(dumpFolder, 0o750); err != nil {
@@ -262,7 +265,7 @@ func checkpointDump(ctx context.Context, cfg *config.Config, dumpFolder string) 
 }
 
 func getLocalStoringTables(ctx context.Context, cfg *config.Config) (err2 error) {
-	//nolint:prealloc // This is a placeholder.
+	//nolint: prealloc
 	var tables []string
 	defer func() {
 		if err2 == nil {
@@ -288,6 +291,7 @@ func getLocalStoringTables(ctx context.Context, cfg *config.Config) (err2 error)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer cpdb.Close()
 
 	tableWithEngine, err := cpdb.GetLocalStoringTables(ctx)

@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 const (
@@ -26,18 +29,33 @@ type LocalStorage struct {
 	base string
 }
 
-func (l *LocalStorage) DeleteFile(ctx context.Context, name string) error {
+// DeleteFile deletes the file.
+func (l *LocalStorage) DeleteFile(_ context.Context, name string) error {
 	path := filepath.Join(l.base, name)
 	return os.Remove(path)
 }
 
 // WriteFile writes data to a file to storage.
-func (l *LocalStorage) WriteFile(ctx context.Context, name string, data []byte) error {
+func (l *LocalStorage) WriteFile(_ context.Context, name string, data []byte) error {
 	// because `os.WriteFile` is not atomic, directly write into it may reset the file
 	// to an empty file if write is not finished.
-	tmpPath := filepath.Join(l.base, name) + ".tmp"
+	tmpPath := filepath.Join(l.base, name) + ".tmp." + uuid.NewString()
 	if err := os.WriteFile(tmpPath, data, localFilePerm); err != nil {
-		return errors.Trace(err)
+		path := filepath.Dir(tmpPath)
+		log.Info("failed to write file, try to mkdir the path", zap.String("path", path))
+		exists, existErr := pathExists(path)
+		if existErr != nil {
+			return errors.Annotatef(err, "after failed to write file, failed to check path exists : %v", existErr)
+		}
+		if exists {
+			return errors.Trace(err)
+		}
+		if mkdirErr := mkdirAll(path); mkdirErr != nil {
+			return errors.Annotatef(err, "after failed to write file, failed to mkdir : %v", mkdirErr)
+		}
+		if err := os.WriteFile(tmpPath, data, localFilePerm); err != nil {
+			return errors.Trace(err)
+		}
 	}
 	if err := os.Rename(tmpPath, filepath.Join(l.base, name)); err != nil {
 		return errors.Trace(err)
@@ -46,13 +64,13 @@ func (l *LocalStorage) WriteFile(ctx context.Context, name string, data []byte) 
 }
 
 // ReadFile reads the file from the storage and returns the contents.
-func (l *LocalStorage) ReadFile(ctx context.Context, name string) ([]byte, error) {
+func (l *LocalStorage) ReadFile(_ context.Context, name string) ([]byte, error) {
 	path := filepath.Join(l.base, name)
 	return os.ReadFile(path)
 }
 
 // FileExists implement ExternalStorage.FileExists.
-func (l *LocalStorage) FileExists(ctx context.Context, name string) (bool, error) {
+func (l *LocalStorage) FileExists(_ context.Context, name string) (bool, error) {
 	path := filepath.Join(l.base, name)
 	return pathExists(path)
 }
@@ -63,7 +81,7 @@ func (l *LocalStorage) FileExists(ctx context.Context, name string) (bool, error
 // The first argument is the file path that can be used in `Open`
 // function; the second argument is the size in byte of the file determined
 // by path.
-func (l *LocalStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(string, int64) error) error {
+func (l *LocalStorage) WalkDir(_ context.Context, opt *WalkOption, fn func(string, int64) error) error {
 	if opt == nil {
 		opt = &WalkOption{}
 	}
@@ -103,16 +121,17 @@ func (l *LocalStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(str
 
 // URI returns the base path as an URI with a file:/// prefix.
 func (l *LocalStorage) URI() string {
-	return LocalURIPrefix + "/" + l.base
+	return LocalURIPrefix + l.base
 }
 
 // Open a Reader by file path, path is a relative path to base path.
-func (l *LocalStorage) Open(ctx context.Context, path string) (ExternalFileReader, error) {
+func (l *LocalStorage) Open(_ context.Context, path string) (ExternalFileReader, error) {
+	//nolint: gosec
 	return os.Open(filepath.Join(l.base, path))
 }
 
 // Create implements ExternalStorage interface.
-func (l *LocalStorage) Create(ctx context.Context, name string) (ExternalFileWriter, error) {
+func (l *LocalStorage) Create(_ context.Context, name string, _ *WriterOption) (ExternalFileWriter, error) {
 	file, err := os.Create(filepath.Join(l.base, name))
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -122,7 +141,7 @@ func (l *LocalStorage) Create(ctx context.Context, name string) (ExternalFileWri
 }
 
 // Rename implements ExternalStorage interface.
-func (l *LocalStorage) Rename(ctx context.Context, oldFileName, newFileName string) error {
+func (l *LocalStorage) Rename(_ context.Context, oldFileName, newFileName string) error {
 	return errors.Trace(os.Rename(filepath.Join(l.base, oldFileName), filepath.Join(l.base, newFileName)))
 }
 

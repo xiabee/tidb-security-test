@@ -28,10 +28,9 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
-	"github.com/pingcap/tidb/br/pkg/lightning/glue"
-	"github.com/pingcap/tidb/br/pkg/restore"
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
+	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/store/pdtypes"
 	"github.com/pingcap/tidb/tablecodec"
@@ -43,31 +42,30 @@ import (
 
 func init() {
 	// Reduce the time cost for test cases.
-	restore.ScanRegionAttemptTimes = 2
 	splitRetryTimes = 2
 }
 
-type testClient struct {
+type testSplitClient struct {
 	mu           sync.RWMutex
 	stores       map[uint64]*metapb.Store
-	regions      map[uint64]*restore.RegionInfo
+	regions      map[uint64]*split.RegionInfo
 	regionsInfo  *pdtypes.RegionTree // For now it's only used in ScanRegions
 	nextRegionID uint64
 	splitCount   atomic.Int32
 	hook         clientHook
 }
 
-func newTestClient(
+func newTestSplitClient(
 	stores map[uint64]*metapb.Store,
-	regions map[uint64]*restore.RegionInfo,
+	regions map[uint64]*split.RegionInfo,
 	nextRegionID uint64,
 	hook clientHook,
-) *testClient {
+) *testSplitClient {
 	regionsInfo := &pdtypes.RegionTree{}
 	for _, regionInfo := range regions {
 		regionsInfo.SetRegion(pdtypes.NewRegionInfo(regionInfo.Region, regionInfo.Leader))
 	}
-	return &testClient{
+	return &testSplitClient{
 		stores:       stores,
 		regions:      regions,
 		regionsInfo:  regionsInfo,
@@ -77,17 +75,17 @@ func newTestClient(
 }
 
 // ScatterRegions scatters regions in a batch.
-func (c *testClient) ScatterRegions(ctx context.Context, regionInfo []*restore.RegionInfo) error {
+func (c *testSplitClient) ScatterRegions(ctx context.Context, regionInfo []*split.RegionInfo) error {
 	return nil
 }
 
-func (c *testClient) GetAllRegions() map[uint64]*restore.RegionInfo {
+func (c *testSplitClient) GetAllRegions() map[uint64]*split.RegionInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.regions
 }
 
-func (c *testClient) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error) {
+func (c *testSplitClient) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	store, ok := c.stores[storeID]
@@ -97,19 +95,18 @@ func (c *testClient) GetStore(ctx context.Context, storeID uint64) (*metapb.Stor
 	return store, nil
 }
 
-func (c *testClient) GetRegion(ctx context.Context, key []byte) (*restore.RegionInfo, error) {
+func (c *testSplitClient) GetRegion(ctx context.Context, key []byte) (*split.RegionInfo, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for _, region := range c.regions {
-		if bytes.Compare(key, region.Region.StartKey) >= 0 &&
-			(len(region.Region.EndKey) == 0 || bytes.Compare(key, region.Region.EndKey) < 0) {
+		if bytes.Compare(key, region.Region.StartKey) >= 0 && beforeEnd(key, region.Region.EndKey) {
 			return region, nil
 		}
 	}
 	return nil, errors.Errorf("region not found: key=%s", string(key))
 }
 
-func (c *testClient) GetRegionByID(ctx context.Context, regionID uint64) (*restore.RegionInfo, error) {
+func (c *testSplitClient) GetRegionByID(ctx context.Context, regionID uint64) (*split.RegionInfo, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	region, ok := c.regions[regionID]
@@ -119,25 +116,25 @@ func (c *testClient) GetRegionByID(ctx context.Context, regionID uint64) (*resto
 	return region, nil
 }
 
-func (c *testClient) SplitRegion(
+func (c *testSplitClient) SplitRegion(
 	ctx context.Context,
-	regionInfo *restore.RegionInfo,
+	regionInfo *split.RegionInfo,
 	key []byte,
-) (*restore.RegionInfo, error) {
+) (*split.RegionInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var target *restore.RegionInfo
+	var target *split.RegionInfo
 	splitKey := codec.EncodeBytes([]byte{}, key)
 	for _, region := range c.regions {
 		if bytes.Compare(splitKey, region.Region.StartKey) >= 0 &&
-			(len(region.Region.EndKey) == 0 || bytes.Compare(splitKey, region.Region.EndKey) < 0) {
+			beforeEnd(splitKey, region.Region.EndKey) {
 			target = region
 		}
 	}
 	if target == nil {
 		return nil, errors.Errorf("region not found: key=%s", string(key))
 	}
-	newRegion := &restore.RegionInfo{
+	newRegion := &split.RegionInfo{
 		Region: &metapb.Region{
 			Peers:    target.Region.Peers,
 			Id:       c.nextRegionID,
@@ -159,9 +156,9 @@ func (c *testClient) SplitRegion(
 	return newRegion, nil
 }
 
-func (c *testClient) BatchSplitRegionsWithOrigin(
-	ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte,
-) (*restore.RegionInfo, []*restore.RegionInfo, error) {
+func (c *testSplitClient) BatchSplitRegionsWithOrigin(
+	ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte,
+) (*split.RegionInfo, []*split.RegionInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.splitCount.Inc()
@@ -179,7 +176,7 @@ func (c *testClient) BatchSplitRegionsWithOrigin(
 	default:
 	}
 
-	newRegions := make([]*restore.RegionInfo, 0)
+	newRegions := make([]*split.RegionInfo, 0)
 	target, ok := c.regions[regionInfo.Region.Id]
 	if !ok {
 		return nil, nil, errors.New("region not found")
@@ -202,7 +199,7 @@ func (c *testClient) BatchSplitRegionsWithOrigin(
 		if bytes.Compare(key, startKey) <= 0 || bytes.Compare(key, target.Region.EndKey) >= 0 {
 			continue
 		}
-		newRegion := &restore.RegionInfo{
+		newRegion := &split.RegionInfo{
 			Region: &metapb.Region{
 				Peers:    target.Region.Peers,
 				Id:       c.nextRegionID,
@@ -234,32 +231,36 @@ func (c *testClient) BatchSplitRegionsWithOrigin(
 	return target, newRegions, err
 }
 
-func (c *testClient) BatchSplitRegions(
-	ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte,
-) ([]*restore.RegionInfo, error) {
+func (c *testSplitClient) BatchSplitRegions(
+	ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte,
+) ([]*split.RegionInfo, error) {
 	_, newRegions, err := c.BatchSplitRegionsWithOrigin(ctx, regionInfo, keys)
 	return newRegions, err
 }
 
-func (c *testClient) ScatterRegion(ctx context.Context, regionInfo *restore.RegionInfo) error {
+func (c *testSplitClient) ScatterRegion(ctx context.Context, regionInfo *split.RegionInfo) error {
 	return nil
 }
 
-func (c *testClient) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
+func (c *testSplitClient) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
 	return &pdpb.GetOperatorResponse{
 		Header: new(pdpb.ResponseHeader),
 	}, nil
 }
 
-func (c *testClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*restore.RegionInfo, error) {
+func (c *testSplitClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*split.RegionInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if c.hook != nil {
 		key, endKey, limit = c.hook.BeforeScanRegions(ctx, key, endKey, limit)
 	}
 
 	infos := c.regionsInfo.ScanRange(key, endKey, limit)
-	regions := make([]*restore.RegionInfo, 0, len(infos))
+	regions := make([]*split.RegionInfo, 0, len(infos))
 	for _, info := range infos {
-		regions = append(regions, &restore.RegionInfo{
+		regions = append(regions, &split.RegionInfo{
 			Region: info.Meta,
 			Leader: info.Leader,
 		})
@@ -272,23 +273,23 @@ func (c *testClient) ScanRegions(ctx context.Context, key, endKey []byte, limit 
 	return regions, err
 }
 
-func (c *testClient) GetPlacementRule(ctx context.Context, groupID, ruleID string) (r pdtypes.Rule, err error) {
+func (c *testSplitClient) GetPlacementRule(ctx context.Context, groupID, ruleID string) (r pdtypes.Rule, err error) {
 	return
 }
 
-func (c *testClient) SetPlacementRule(ctx context.Context, rule pdtypes.Rule) error {
+func (c *testSplitClient) SetPlacementRule(ctx context.Context, rule pdtypes.Rule) error {
 	return nil
 }
 
-func (c *testClient) DeletePlacementRule(ctx context.Context, groupID, ruleID string) error {
+func (c *testSplitClient) DeletePlacementRule(ctx context.Context, groupID, ruleID string) error {
 	return nil
 }
 
-func (c *testClient) SetStoresLabel(ctx context.Context, stores []uint64, labelKey, labelValue string) error {
+func (c *testSplitClient) SetStoresLabel(ctx context.Context, stores []uint64, labelKey, labelValue string) error {
 	return nil
 }
 
-func cloneRegion(region *restore.RegionInfo) *restore.RegionInfo {
+func cloneRegion(region *split.RegionInfo) *split.RegionInfo {
 	r := &metapb.Region{}
 	if region.Region != nil {
 		b, _ := region.Region.Marshal()
@@ -300,18 +301,18 @@ func cloneRegion(region *restore.RegionInfo) *restore.RegionInfo {
 		b, _ := region.Region.Marshal()
 		_ = l.Unmarshal(b)
 	}
-	return &restore.RegionInfo{Region: r, Leader: l}
+	return &split.RegionInfo{Region: r, Leader: l}
 }
 
 // For keys ["", "aay", "bba", "bbh", "cca", ""], the key ranges of
 // regions are [, aay), [aay, bba), [bba, bbh), [bbh, cca), [cca, ).
-func initTestClient(keys [][]byte, hook clientHook) *testClient {
+func initTestSplitClient(keys [][]byte, hook clientHook) *testSplitClient {
 	peers := make([]*metapb.Peer, 1)
 	peers[0] = &metapb.Peer{
 		Id:      1,
 		StoreId: 1,
 	}
-	regions := make(map[uint64]*restore.RegionInfo)
+	regions := make(map[uint64]*split.RegionInfo)
 	for i := uint64(1); i < uint64(len(keys)); i++ {
 		startKey := keys[i-1]
 		if len(startKey) != 0 {
@@ -321,7 +322,7 @@ func initTestClient(keys [][]byte, hook clientHook) *testClient {
 		if len(endKey) != 0 {
 			endKey = codec.EncodeBytes([]byte{}, endKey)
 		}
-		regions[i] = &restore.RegionInfo{
+		regions[i] = &split.RegionInfo{
 			Region: &metapb.Region{
 				Id:          i,
 				Peers:       peers,
@@ -329,16 +330,59 @@ func initTestClient(keys [][]byte, hook clientHook) *testClient {
 				EndKey:      endKey,
 				RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
 			},
+			Leader: peers[0],
 		}
 	}
 	stores := make(map[uint64]*metapb.Store)
 	stores[1] = &metapb.Store{
 		Id: 1,
 	}
-	return newTestClient(stores, regions, uint64(len(keys)), hook)
+	return newTestSplitClient(stores, regions, uint64(len(keys)), hook)
 }
 
-func checkRegionRanges(t *testing.T, regions []*restore.RegionInfo, keys [][]byte) {
+// initTestSplitClient3Replica will create a client that each region has 3 replicas, and their IDs and StoreIDs are
+// (1, 2, 3), (11, 12, 13), ...
+// For keys ["", "aay", "bba", "bbh", "cca", ""], the key ranges of
+// region ranges are [, aay), [aay, bba), [bba, bbh), [bbh, cca), [cca, ).
+func initTestSplitClient3Replica(keys [][]byte, hook clientHook) *testSplitClient {
+	regions := make(map[uint64]*split.RegionInfo)
+	stores := make(map[uint64]*metapb.Store)
+	for i := uint64(1); i < uint64(len(keys)); i++ {
+		startKey := keys[i-1]
+		if len(startKey) != 0 {
+			startKey = codec.EncodeBytes([]byte{}, startKey)
+		}
+		endKey := keys[i]
+		if len(endKey) != 0 {
+			endKey = codec.EncodeBytes([]byte{}, endKey)
+		}
+		baseID := (i-1)*10 + 1
+		peers := make([]*metapb.Peer, 3)
+		for j := 0; j < 3; j++ {
+			peers[j] = &metapb.Peer{
+				Id:      baseID + uint64(j),
+				StoreId: baseID + uint64(j),
+			}
+		}
+
+		regions[baseID] = &split.RegionInfo{
+			Region: &metapb.Region{
+				Id:          baseID,
+				Peers:       peers,
+				StartKey:    startKey,
+				EndKey:      endKey,
+				RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
+			},
+			Leader: peers[0],
+		}
+		stores[baseID] = &metapb.Store{
+			Id: baseID,
+		}
+	}
+	return newTestSplitClient(stores, regions, uint64(len(keys)), hook)
+}
+
+func checkRegionRanges(t *testing.T, regions []*split.RegionInfo, keys [][]byte) {
 	for i, r := range regions {
 		_, regionStart, _ := codec.DecodeBytes(r.Region.StartKey, []byte{})
 		_, regionEnd, _ := codec.DecodeBytes(r.Region.EndKey, []byte{})
@@ -348,21 +392,21 @@ func checkRegionRanges(t *testing.T, regions []*restore.RegionInfo, keys [][]byt
 }
 
 type clientHook interface {
-	BeforeSplitRegion(ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte) (*restore.RegionInfo, [][]byte)
-	AfterSplitRegion(context.Context, *restore.RegionInfo, [][]byte, []*restore.RegionInfo, error) ([]*restore.RegionInfo, error)
+	BeforeSplitRegion(ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte) (*split.RegionInfo, [][]byte)
+	AfterSplitRegion(context.Context, *split.RegionInfo, [][]byte, []*split.RegionInfo, error) ([]*split.RegionInfo, error)
 	BeforeScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]byte, []byte, int)
-	AfterScanRegions([]*restore.RegionInfo, error) ([]*restore.RegionInfo, error)
+	AfterScanRegions([]*split.RegionInfo, error) ([]*split.RegionInfo, error)
 }
 
 type noopHook struct{}
 
-func (h *noopHook) BeforeSplitRegion(ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte) (*restore.RegionInfo, [][]byte) {
+func (h *noopHook) BeforeSplitRegion(ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte) (*split.RegionInfo, [][]byte) {
 	delayTime := rand.Int31n(10) + 1
 	time.Sleep(time.Duration(delayTime) * time.Millisecond)
 	return regionInfo, keys
 }
 
-func (h *noopHook) AfterSplitRegion(c context.Context, r *restore.RegionInfo, keys [][]byte, res []*restore.RegionInfo, err error) ([]*restore.RegionInfo, error) {
+func (h *noopHook) AfterSplitRegion(c context.Context, r *split.RegionInfo, keys [][]byte, res []*split.RegionInfo, err error) ([]*split.RegionInfo, error) {
 	return res, err
 }
 
@@ -370,29 +414,26 @@ func (h *noopHook) BeforeScanRegions(ctx context.Context, key, endKey []byte, li
 	return key, endKey, limit
 }
 
-func (h *noopHook) AfterScanRegions(res []*restore.RegionInfo, err error) ([]*restore.RegionInfo, error) {
+func (h *noopHook) AfterScanRegions(res []*split.RegionInfo, err error) ([]*split.RegionInfo, error) {
 	return res, err
 }
 
 type batchSplitHook interface {
 	setup(t *testing.T) func()
-	check(t *testing.T, cli *testClient)
+	check(t *testing.T, cli *testSplitClient)
 }
 
 type defaultHook struct{}
 
 func (d defaultHook) setup(t *testing.T) func() {
-	oldLimit := maxBatchSplitKeys
 	oldSplitBackoffTime := splitRegionBaseBackOffTime
-	maxBatchSplitKeys = 4
 	splitRegionBaseBackOffTime = time.Millisecond
 	return func() {
-		maxBatchSplitKeys = oldLimit
 		splitRegionBaseBackOffTime = oldSplitBackoffTime
 	}
 }
 
-func (d defaultHook) check(t *testing.T, cli *testClient) {
+func (d defaultHook) check(t *testing.T, cli *testSplitClient) {
 	// so with a batch split size of 4, there will be 7 time batch split
 	// 1. region: [aay, bba), keys: [b, ba, bb]
 	// 2. region: [bbh, cca), keys: [bc, bd, be, bf]
@@ -414,16 +455,19 @@ func doTestBatchSplitRegionByRanges(ctx context.Context, t *testing.T, hook clie
 	defer deferFunc()
 
 	keys := [][]byte{[]byte(""), []byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca"), []byte("")}
-	client := initTestClient(keys, hook)
-	local := &local{
-		splitCli: client,
-		g:        glue.NewExternalTiDBGlue(nil, mysql.ModeNone),
+	client := initTestSplitClient(keys, hook)
+	local := &Backend{
+		splitCli:         client,
+		regionSizeGetter: &TableRegionSizeGetterImpl{},
+		logger:           log.L(),
 	}
+	local.RegionSplitBatchSize = 4
+	local.RegionSplitConcurrency = 4
 
 	// current region ranges: [, aay), [aay, bba), [bba, bbh), [bbh, cca), [cca, )
 	rangeStart := codec.EncodeBytes([]byte{}, []byte("b"))
 	rangeEnd := codec.EncodeBytes([]byte{}, []byte("c"))
-	regions, err := restore.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
+	regions, err := split.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
 	require.NoError(t, err)
 	// regions is: [aay, bba), [bba, bbh), [bbh, cca)
 	checkRegionRanges(t, regions, [][]byte{[]byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca")})
@@ -449,7 +493,7 @@ func doTestBatchSplitRegionByRanges(ctx context.Context, t *testing.T, hook clie
 	splitHook.check(t, client)
 
 	// check split ranges
-	regions, err = restore.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
+	regions, err = split.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
 	require.NoError(t, err)
 	result := [][]byte{
 		[]byte("b"), []byte("ba"), []byte("bb"), []byte("bba"), []byte("bbh"), []byte("bc"),
@@ -465,6 +509,91 @@ func TestBatchSplitRegionByRanges(t *testing.T) {
 	doTestBatchSplitRegionByRanges(context.Background(), t, nil, "", nil)
 }
 
+type checkScatterClient struct {
+	*testSplitClient
+
+	mu                sync.Mutex
+	notFoundFirstTime map[uint64]struct{}
+	scatterCounter    atomic.Int32
+}
+
+func newCheckScatterClient(inner *testSplitClient) *checkScatterClient {
+	return &checkScatterClient{
+		testSplitClient:   inner,
+		notFoundFirstTime: map[uint64]struct{}{},
+		scatterCounter:    atomic.Int32{},
+	}
+}
+
+func (c *checkScatterClient) ScatterRegion(ctx context.Context, regionInfo *split.RegionInfo) error {
+	c.scatterCounter.Add(1)
+	return nil
+}
+
+func (c *checkScatterClient) GetRegionByID(ctx context.Context, regionID uint64) (*split.RegionInfo, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.notFoundFirstTime[regionID]; !ok {
+		c.notFoundFirstTime[regionID] = struct{}{}
+		return nil, nil
+	}
+	return c.testSplitClient.GetRegionByID(ctx, regionID)
+}
+
+func TestMissingScatter(t *testing.T) {
+	ctx := context.Background()
+	splitHook := defaultHook{}
+	deferFunc := splitHook.setup(t)
+	defer deferFunc()
+
+	keys := [][]byte{[]byte(""), []byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca"), []byte("")}
+	client := initTestSplitClient(keys, nil)
+	checkClient := newCheckScatterClient(client)
+	local := &Backend{
+		splitCli: checkClient,
+		logger:   log.L(),
+	}
+	local.RegionSplitBatchSize = 4
+	local.RegionSplitConcurrency = 4
+
+	// current region ranges: [, aay), [aay, bba), [bba, bbh), [bbh, cca), [cca, )
+	rangeStart := codec.EncodeBytes([]byte{}, []byte("b"))
+	rangeEnd := codec.EncodeBytes([]byte{}, []byte("c"))
+	regions, err := split.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
+	require.NoError(t, err)
+	// regions is: [aay, bba), [bba, bbh), [bbh, cca)
+	checkRegionRanges(t, regions, [][]byte{[]byte("aay"), []byte("bba"), []byte("bbh"), []byte("cca")})
+
+	// generate:  ranges [b, ba), [ba, bb), [bb, bc), ... [by, bz)
+	ranges := make([]Range, 0)
+	start := []byte{'b'}
+	for i := byte('a'); i <= 'z'; i++ {
+		end := []byte{'b', i}
+		ranges = append(ranges, Range{start: start, end: end})
+		start = end
+	}
+
+	err = local.SplitAndScatterRegionByRanges(ctx, ranges, nil, true, 1000)
+	require.NoError(t, err)
+
+	splitHook.check(t, client)
+
+	// check split ranges
+	regions, err = split.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
+	require.NoError(t, err)
+	result := [][]byte{
+		[]byte("b"), []byte("ba"), []byte("bb"), []byte("bba"), []byte("bbh"), []byte("bc"),
+		[]byte("bd"), []byte("be"), []byte("bf"), []byte("bg"), []byte("bh"), []byte("bi"), []byte("bj"),
+		[]byte("bk"), []byte("bl"), []byte("bm"), []byte("bn"), []byte("bo"), []byte("bp"), []byte("bq"),
+		[]byte("br"), []byte("bs"), []byte("bt"), []byte("bu"), []byte("bv"), []byte("bw"), []byte("bx"),
+		[]byte("by"), []byte("bz"), []byte("cca"),
+	}
+	checkRegionRanges(t, regions, result)
+
+	// the old regions will not be scattered. They are [..., bba), [bba, bbh), [..., cca)
+	require.Equal(t, len(result)-3, int(checkClient.scatterCounter.Load()))
+}
+
 type batchSizeHook struct{}
 
 func (h batchSizeHook) setup(t *testing.T) func() {
@@ -478,7 +607,7 @@ func (h batchSizeHook) setup(t *testing.T) func() {
 	}
 }
 
-func (h batchSizeHook) check(t *testing.T, cli *testClient) {
+func (h batchSizeHook) check(t *testing.T, cli *testSplitClient) {
 	// so with a batch split key size of 6, there will be 9 time batch split
 	// 1. region: [aay, bba), keys: [b, ba, bb]
 	// 2. region: [bbh, cca), keys: [bc, bd, be]
@@ -503,7 +632,7 @@ type scanRegionEmptyHook struct {
 	cnt int
 }
 
-func (h *scanRegionEmptyHook) AfterScanRegions(res []*restore.RegionInfo, err error) ([]*restore.RegionInfo, error) {
+func (h *scanRegionEmptyHook) AfterScanRegions(res []*split.RegionInfo, err error) ([]*split.RegionInfo, error) {
 	h.cnt++
 	// skip the first call
 	if h.cnt == 1 {
@@ -513,6 +642,11 @@ func (h *scanRegionEmptyHook) AfterScanRegions(res []*restore.RegionInfo, err er
 }
 
 func TestBatchSplitRegionByRangesScanFailed(t *testing.T) {
+	backup := split.WaitRegionOnlineAttemptTimes
+	split.WaitRegionOnlineAttemptTimes = 3
+	defer func() {
+		split.WaitRegionOnlineAttemptTimes = backup
+	}()
 	doTestBatchSplitRegionByRanges(context.Background(), t, &scanRegionEmptyHook{}, "scan region return empty result", defaultHook{})
 }
 
@@ -520,7 +654,7 @@ type splitRegionEpochNotMatchHook struct {
 	noopHook
 }
 
-func (h *splitRegionEpochNotMatchHook) BeforeSplitRegion(ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte) (*restore.RegionInfo, [][]byte) {
+func (h *splitRegionEpochNotMatchHook) BeforeSplitRegion(ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte) (*split.RegionInfo, [][]byte) {
 	regionInfo, keys = h.noopHook.BeforeSplitRegion(ctx, regionInfo, keys)
 	regionInfo = cloneRegion(regionInfo)
 	// decrease the region epoch, so split region will fail
@@ -538,7 +672,7 @@ type splitRegionEpochNotMatchHookRandom struct {
 	cnt atomic.Int32
 }
 
-func (h *splitRegionEpochNotMatchHookRandom) BeforeSplitRegion(ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte) (*restore.RegionInfo, [][]byte) {
+func (h *splitRegionEpochNotMatchHookRandom) BeforeSplitRegion(ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte) (*split.RegionInfo, [][]byte) {
 	regionInfo, keys = h.noopHook.BeforeSplitRegion(ctx, regionInfo, keys)
 	if h.cnt.Inc() != 0 {
 		return regionInfo, keys
@@ -559,7 +693,7 @@ type splitRegionNoValidKeyHook struct {
 	errorCnt       atomic.Int32
 }
 
-func (h *splitRegionNoValidKeyHook) BeforeSplitRegion(ctx context.Context, regionInfo *restore.RegionInfo, keys [][]byte) (*restore.RegionInfo, [][]byte) {
+func (h *splitRegionNoValidKeyHook) BeforeSplitRegion(ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte) (*split.RegionInfo, [][]byte) {
 	regionInfo, keys = h.noopHook.BeforeSplitRegion(ctx, regionInfo, keys)
 	if h.errorCnt.Inc() <= h.returnErrTimes {
 		// clean keys to trigger "no valid keys" error
@@ -582,11 +716,14 @@ func TestSplitAndScatterRegionInBatches(t *testing.T) {
 	defer deferFunc()
 
 	keys := [][]byte{[]byte(""), []byte("a"), []byte("b"), []byte("")}
-	client := initTestClient(keys, nil)
-	local := &local{
-		splitCli: client,
-		g:        glue.NewExternalTiDBGlue(nil, mysql.ModeNone),
+	client := initTestSplitClient(keys, nil)
+	local := &Backend{
+		splitCli:         client,
+		regionSizeGetter: &TableRegionSizeGetterImpl{},
+		logger:           log.L(),
 	}
+	local.RegionSplitBatchSize = 4
+	local.RegionSplitConcurrency = 4
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -604,7 +741,7 @@ func TestSplitAndScatterRegionInBatches(t *testing.T) {
 
 	rangeStart := codec.EncodeBytes([]byte{}, []byte("a"))
 	rangeEnd := codec.EncodeBytes([]byte{}, []byte("b"))
-	regions, err := restore.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
+	regions, err := split.PaginateScanRegion(ctx, client, rangeStart, rangeEnd, 5)
 	require.NoError(t, err)
 	result := [][]byte{[]byte("a"), []byte("a00"), []byte("a01"), []byte("a02"), []byte("a03"), []byte("a04"),
 		[]byte("a05"), []byte("a06"), []byte("a07"), []byte("a08"), []byte("a09"), []byte("a10"), []byte("a11"),
@@ -619,7 +756,7 @@ type reportAfterSplitHook struct {
 	ch chan<- struct{}
 }
 
-func (h *reportAfterSplitHook) AfterSplitRegion(ctx context.Context, region *restore.RegionInfo, keys [][]byte, resultRegions []*restore.RegionInfo, err error) ([]*restore.RegionInfo, error) {
+func (h *reportAfterSplitHook) AfterSplitRegion(ctx context.Context, region *split.RegionInfo, keys [][]byte, resultRegions []*split.RegionInfo, err error) ([]*split.RegionInfo, error) {
 	h.ch <- struct{}{}
 	return resultRegions, err
 }
@@ -643,12 +780,9 @@ func TestBatchSplitByRangeCtxCanceled(t *testing.T) {
 }
 
 func doTestBatchSplitByRangesWithClusteredIndex(t *testing.T, hook clientHook) {
-	oldLimit := maxBatchSplitKeys
 	oldSplitBackoffTime := splitRegionBaseBackOffTime
-	maxBatchSplitKeys = 10
 	splitRegionBaseBackOffTime = time.Millisecond
 	defer func() {
-		maxBatchSplitKeys = oldLimit
 		splitRegionBaseBackOffTime = oldSplitBackoffTime
 	}()
 
@@ -668,11 +802,14 @@ func doTestBatchSplitByRangesWithClusteredIndex(t *testing.T, hook clientHook) {
 		keys = append(keys, key)
 	}
 	keys = append(keys, tableEndKey, []byte(""))
-	client := initTestClient(keys, hook)
-	local := &local{
-		splitCli: client,
-		g:        glue.NewExternalTiDBGlue(nil, mysql.ModeNone),
+	client := initTestSplitClient(keys, hook)
+	local := &Backend{
+		splitCli:         client,
+		regionSizeGetter: &TableRegionSizeGetterImpl{},
+		logger:           log.L(),
 	}
+	local.RegionSplitBatchSize = 10
+	local.RegionSplitConcurrency = 10
 	ctx := context.Background()
 
 	// we batch generate a batch of row keys for table 1 with common handle
@@ -701,7 +838,7 @@ func doTestBatchSplitByRangesWithClusteredIndex(t *testing.T, hook clientHook) {
 	startKey := codec.EncodeBytes([]byte{}, rangeKeys[0])
 	endKey := codec.EncodeBytes([]byte{}, rangeKeys[len(rangeKeys)-1])
 	// check split ranges
-	regions, err := restore.PaginateScanRegion(ctx, client, startKey, endKey, 5)
+	regions, err := split.PaginateScanRegion(ctx, client, startKey, endKey, 5)
 	require.NoError(t, err)
 	require.Equal(t, len(ranges)+1, len(regions))
 
@@ -729,14 +866,14 @@ func TestNeedSplit(t *testing.T) {
 	keys := []int64{10, 100, 500, 1000, 999999, -1}
 	start := tablecodec.EncodeRowKeyWithHandle(tableID, kv.IntHandle(0))
 	regionStart := codec.EncodeBytes([]byte{}, start)
-	regions := make([]*restore.RegionInfo, 0)
+	regions := make([]*split.RegionInfo, 0)
 	for _, end := range keys {
 		var regionEndKey []byte
 		if end >= 0 {
 			endKey := tablecodec.EncodeRowKeyWithHandle(tableID, kv.IntHandle(end))
 			regionEndKey = codec.EncodeBytes([]byte{}, endKey)
 		}
-		region := &restore.RegionInfo{
+		region := &split.RegionInfo{
 			Region: &metapb.Region{
 				Id:          1,
 				Peers:       peers,
@@ -762,11 +899,198 @@ func TestNeedSplit(t *testing.T) {
 
 	for hdl, idx := range checkMap {
 		checkKey := tablecodec.EncodeRowKeyWithHandle(tableID, kv.IntHandle(hdl))
-		res := needSplit(checkKey, regions)
+		res := needSplit(checkKey, regions, log.L())
 		if idx < 0 {
 			require.Nil(t, res)
 		} else {
 			require.Equal(t, regions[idx], res)
 		}
 	}
+}
+
+func TestStoreWriteLimiter(t *testing.T) {
+	// Test create store write limiter with limit math.MaxInt.
+	limiter := newStoreWriteLimiter(math.MaxInt)
+	err := limiter.WaitN(context.Background(), 1, 1024)
+	require.NoError(t, err)
+
+	// Test WaitN exceeds the burst.
+	limiter = newStoreWriteLimiter(100)
+	start := time.Now()
+	// 120 is the initial burst, 150 is the number of new tokens.
+	err = limiter.WaitN(context.Background(), 1, 120+120)
+	require.NoError(t, err)
+	require.Greater(t, time.Since(start), time.Second)
+
+	// Test WaitN with different store id.
+	limiter = newStoreWriteLimiter(100)
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
+	defer cancel()
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(storeID uint64) {
+			defer wg.Done()
+			start := time.Now()
+			var gotTokens int
+			for {
+				n := rand.Intn(50)
+				if limiter.WaitN(ctx, storeID, n) != nil {
+					break
+				}
+				gotTokens += n
+			}
+			elapsed := time.Since(start)
+			maxTokens := 120 + int(float64(elapsed)/float64(time.Second)*100)
+			// In theory, gotTokens should be less than or equal to maxTokens.
+			// But we allow a little of error to avoid the test being flaky.
+			require.LessOrEqual(t, gotTokens, maxTokens+1)
+		}(uint64(i))
+	}
+	wg.Wait()
+}
+
+type scatterRegionCli struct {
+	split.SplitClient
+
+	respM    map[uint64][]*pdpb.GetOperatorResponse
+	scatterM map[uint64]int
+}
+
+func newScatterRegionCli() *scatterRegionCli {
+	return &scatterRegionCli{
+		respM:    make(map[uint64][]*pdpb.GetOperatorResponse),
+		scatterM: make(map[uint64]int),
+	}
+}
+
+func (c *scatterRegionCli) ScatterRegion(_ context.Context, regionInfo *split.RegionInfo) error {
+	c.scatterM[regionInfo.Region.Id]++
+	return nil
+}
+
+func (c *scatterRegionCli) GetOperator(_ context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
+	ret := c.respM[regionID][0]
+	c.respM[regionID] = c.respM[regionID][1:]
+	return ret, nil
+}
+
+func TestWaitForScatterRegions(t *testing.T) {
+	ctx := context.Background()
+
+	regionCnt := 6
+	regions := make([]*split.RegionInfo, 0, regionCnt)
+	for i := 1; i <= regionCnt; i++ {
+		regions = append(regions, &split.RegionInfo{
+			Region: &metapb.Region{
+				Id: uint64(i),
+			},
+		})
+	}
+	checkRespDrained := func(cli *scatterRegionCli) {
+		for i := 1; i <= regionCnt; i++ {
+			require.Len(t, cli.respM[uint64(i)], 0)
+		}
+	}
+	checkNoRetry := func(cli *scatterRegionCli) {
+		for i := 1; i <= regionCnt; i++ {
+			require.Equal(t, 0, cli.scatterM[uint64(i)])
+		}
+	}
+
+	cli := newScatterRegionCli()
+	cli.respM[1] = []*pdpb.GetOperatorResponse{
+		{Header: &pdpb.ResponseHeader{Error: &pdpb.Error{Type: pdpb.ErrorType_REGION_NOT_FOUND}}},
+	}
+	cli.respM[2] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("not-scatter-region")},
+	}
+	cli.respM[3] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_SUCCESS},
+	}
+	cli.respM[4] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_SUCCESS},
+	}
+	cli.respM[5] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_CANCEL},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_CANCEL},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_CANCEL},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING},
+		{Desc: []byte("not-scatter-region")},
+	}
+	// should trigger a retry
+	cli.respM[6] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_REPLACE},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_SUCCESS},
+	}
+
+	local := &Backend{splitCli: cli}
+	cnt, err := local.waitForScatterRegions(ctx, regions)
+	require.NoError(t, err)
+	require.Equal(t, 6, cnt)
+	for i := 1; i <= 4; i++ {
+		require.Equal(t, 0, cli.scatterM[uint64(i)])
+	}
+	require.Equal(t, 3, cli.scatterM[uint64(5)])
+	require.Equal(t, 1, cli.scatterM[uint64(6)])
+	checkRespDrained(cli)
+
+	// test non-retryable error
+
+	cli = newScatterRegionCli()
+	cli.respM[1] = []*pdpb.GetOperatorResponse{
+		{Header: &pdpb.ResponseHeader{Error: &pdpb.Error{Type: pdpb.ErrorType_REGION_NOT_FOUND}}},
+	}
+	cli.respM[2] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("not-scatter-region")},
+	}
+	// mimic non-retryable error
+	cli.respM[3] = []*pdpb.GetOperatorResponse{
+		{Header: &pdpb.ResponseHeader{Error: &pdpb.Error{Type: pdpb.ErrorType_DATA_COMPACTED}}},
+	}
+	local = &Backend{splitCli: cli}
+	cnt, err = local.waitForScatterRegions(ctx, regions)
+	require.ErrorContains(t, err, "failed to get region operator, error type: DATA_COMPACTED")
+	require.Equal(t, 2, cnt)
+	checkRespDrained(cli)
+	checkNoRetry(cli)
+
+	// test backoff is timed-out
+
+	backup := split.WaitRegionOnlineAttemptTimes
+	split.WaitRegionOnlineAttemptTimes = 2
+	t.Cleanup(func() {
+		split.WaitRegionOnlineAttemptTimes = backup
+	})
+
+	cli = newScatterRegionCli()
+	cli.respM[1] = []*pdpb.GetOperatorResponse{
+		{Header: &pdpb.ResponseHeader{Error: &pdpb.Error{Type: pdpb.ErrorType_REGION_NOT_FOUND}}},
+	}
+	cli.respM[2] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("not-scatter-region")},
+	}
+	cli.respM[3] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_SUCCESS},
+	}
+	cli.respM[4] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING},
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING}, // first retry
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_RUNNING}, // second retry
+	}
+	cli.respM[5] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("not-scatter-region")},
+	}
+	cli.respM[6] = []*pdpb.GetOperatorResponse{
+		{Desc: []byte("scatter-region"), Status: pdpb.OperatorStatus_SUCCESS},
+	}
+	local = &Backend{splitCli: cli}
+	cnt, err = local.waitForScatterRegions(ctx, regions)
+	require.ErrorContains(t, err, "wait for scatter region timeout, print the first unfinished region id:4")
+	require.Equal(t, 5, cnt)
+	checkRespDrained(cli)
+	checkNoRetry(cli)
 }

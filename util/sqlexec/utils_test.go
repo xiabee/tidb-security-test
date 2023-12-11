@@ -105,13 +105,16 @@ func TestEscapeBackslash(t *testing.T) {
 	}
 }
 
+type myInt int
+type myStr string
+
 func TestEscapeSQL(t *testing.T) {
 	type TestCase struct {
 		name   string
 		input  string
-		params []interface{}
 		output string
 		err    string
+		params []interface{}
 	}
 	time2, err := time.Parse("2006-01-02 15:04:05", "2018-01-23 04:03:05")
 	require.NoError(t, err)
@@ -385,6 +388,18 @@ func TestEscapeSQL(t *testing.T) {
 			params: []interface{}{[]float64{55.2, 0.66}},
 			output: "select 55.2,0.66",
 		},
+		{
+			name:   "myInt",
+			input:  "select %?",
+			params: []interface{}{myInt(3)},
+			output: "select 3",
+		},
+		{
+			name:   "myStr",
+			input:  "select %?",
+			params: []interface{}{myStr("3")},
+			output: "select '3'",
+		},
 	}
 	for _, v := range tests {
 		// copy iterator variable into a new variable, see issue #27779
@@ -401,7 +416,6 @@ func TestEscapeSQL(t *testing.T) {
 				require.Equal(t, v.output, r2)
 				require.NoError(t, e3)
 				require.Equal(t, v.output, r3.String())
-
 			} else {
 				require.Error(t, e1)
 				require.Regexp(t, v.err, e1.Error())
@@ -427,4 +441,52 @@ func TestMustUtils(t *testing.T) {
 	sql := new(strings.Builder)
 	MustFormatSQL(sql, "t")
 	MustEscapeSQL("tt")
+}
+
+func TestEscapeString(t *testing.T) {
+	type testCase struct {
+		input  string
+		output string
+	}
+	tests := []testCase{
+		{
+			input:  "testData",
+			output: "testData",
+		},
+		{
+			input:  `it's all good`,
+			output: `it\'s all good`,
+		},
+		{
+			input:  `+ -><()~*:""&|`,
+			output: `+ -><()~*:\"\"&|`,
+		},
+	}
+	for _, v := range tests {
+		require.Equal(t, v.output, EscapeString(v.input))
+	}
+}
+
+func BenchmarkEscapeString(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		escapeSQL("select %?", "3")
+	}
+}
+
+func BenchmarkUnderlyingString(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		escapeSQL("select %?", myStr("3"))
+	}
+}
+
+func BenchmarkEscapeInt(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		escapeSQL("select %?", 3)
+	}
+}
+
+func BenchmarkUnderlyingInt(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		escapeSQL("select %?", myInt(3))
+	}
 }

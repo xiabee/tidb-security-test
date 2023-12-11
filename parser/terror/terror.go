@@ -15,6 +15,7 @@ package terror
 
 import (
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,7 @@ const (
 // ErrClass represents a class of errors.
 type ErrClass int
 
+// Error implements error interface.
 type Error = errors.Error
 
 // Error classes.
@@ -101,7 +103,10 @@ func newCode2ErrClassMap() *code2ErrClassMap {
 
 func (m *code2ErrClassMap) Get(key string) (ErrClass, bool) {
 	ret, have := m.data.Load(key)
-	return ret.(ErrClass), have
+	if !have {
+		return ErrClass(-1), false
+	}
+	return ret.(ErrClass), true
 }
 
 func (m *code2ErrClassMap) Put(key string, err ErrClass) {
@@ -162,6 +167,7 @@ func (ec ErrClass) NotEqualClass(err error) bool {
 
 func (ec ErrClass) initError(code ErrCode) string {
 	if frozen() {
+		debug.PrintStack()
 		panic("register error after initialized is prohibited")
 	}
 	clsMap, ok := ErrClassToMySQLCodes[ec]
@@ -193,7 +199,10 @@ func (ec ErrClass) New(code ErrCode, message string) *Error {
 // message and workaround to create standard error.
 func (ec ErrClass) NewStdErr(code ErrCode, message *mysql.ErrMessage) *Error {
 	rfcCode := ec.initError(code)
-	err := errors.Normalize(message.Raw, errors.RedactArgs(message.RedactArgPos), errors.MySQLErrorCode(int(code)), errors.RFCCodeText(rfcCode))
+	err := errors.Normalize(
+		message.Raw, errors.RedactArgs(message.RedactArgPos),
+		errors.MySQLErrorCode(int(code)), errors.RFCCodeText(rfcCode),
+	)
 	return err
 }
 
@@ -210,7 +219,10 @@ func (ec ErrClass) NewStd(code ErrCode) *Error {
 // so it's goroutine-safe
 // and often be used to create Error came from other systems like TiKV.
 func (ec ErrClass) Synthesize(code ErrCode, message string) *Error {
-	return errors.Normalize(message, errors.MySQLErrorCode(int(code)), errors.RFCCodeText(fmt.Sprintf("%s:%d", errClass2Desc[ec], code)))
+	return errors.Normalize(
+		message, errors.MySQLErrorCode(int(code)),
+		errors.RFCCodeText(fmt.Sprintf("%s:%d", errClass2Desc[ec], code)),
+	)
 }
 
 // ToSQLError convert Error to mysql.SQLError.
@@ -225,12 +237,12 @@ func getMySQLErrorCode(e *Error) uint16 {
 	rfcCode := e.RFCCode()
 	var class ErrClass
 	if index := strings.Index(string(rfcCode), ":"); index > 0 {
-		if ec, has := rfcCode2errClass.Get(string(rfcCode)[:index]); has {
-			class = ec
-		} else {
+		ec, has := rfcCode2errClass.Get(string(rfcCode)[:index])
+		if !has {
 			log.Warn("Unknown error class", zap.String("class", string(rfcCode)[:index]))
 			return defaultMySQLErrorCode
 		}
+		class = ec
 	}
 	codeMap, ok := ErrClassToMySQLCodes[class]
 	if !ok {
@@ -247,9 +259,14 @@ func getMySQLErrorCode(e *Error) uint16 {
 
 var (
 	// ErrClassToMySQLCodes is the map of ErrClass to code-set.
-	ErrClassToMySQLCodes  = make(map[ErrClass]map[ErrCode]struct{})
-	ErrCritical           = ClassGlobal.NewStdErr(CodeExecResultIsEmpty, mysql.Message("critical error %v", nil))
-	ErrResultUndetermined = ClassGlobal.NewStdErr(CodeResultUndetermined, mysql.Message("execution result undetermined", nil))
+	ErrClassToMySQLCodes = make(map[ErrClass]map[ErrCode]struct{})
+	// ErrCritical is the critical error class.
+	ErrCritical = ClassGlobal.NewStdErr(CodeExecResultIsEmpty, mysql.Message("critical error %v", nil))
+	// ErrResultUndetermined is the error when execution result is unknown.
+	ErrResultUndetermined = ClassGlobal.NewStdErr(
+		CodeResultUndetermined,
+		mysql.Message("execution result undetermined", nil),
+	)
 )
 
 func init() {
@@ -308,6 +325,7 @@ func Log(err error) {
 	}
 }
 
+// GetErrClass returns the error class of the error.
 func GetErrClass(e *Error) ErrClass {
 	rfcCode := e.RFCCode()
 	if index := strings.Index(string(rfcCode), ":"); index > 0 {

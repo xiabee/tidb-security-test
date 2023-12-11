@@ -44,6 +44,7 @@ import (
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // MVCCStore is a wrapper of badger.DB to provide MVCC functions.
@@ -174,18 +175,18 @@ func (store *MVCCStore) getDBItems(reqCtx *requestCtx, mutations []*kvrpcpb.Muta
 }
 
 func sortMutations(mutations []*kvrpcpb.Mutation) []*kvrpcpb.Mutation {
-	fn := func(i, j int) bool {
-		return bytes.Compare(mutations[i].Key, mutations[j].Key) < 0
+	fn := func(i, j *kvrpcpb.Mutation) bool {
+		return bytes.Compare(i.Key, j.Key) < 0
 	}
-	if sort.SliceIsSorted(mutations, fn) {
+	if slices.IsSortedFunc(mutations, fn) {
 		return mutations
 	}
-	sort.Slice(mutations, fn)
+	slices.SortFunc(mutations, fn)
 	return mutations
 }
 
 func sortPrewrite(req *kvrpcpb.PrewriteRequest) []*kvrpcpb.Mutation {
-	if len(req.IsPessimisticLock) == 0 {
+	if len(req.PessimisticActions) == 0 {
 		return sortMutations(req.Mutations)
 	}
 	sorter := pessimisticPrewriteSorter{PrewriteRequest: req}
@@ -210,22 +211,36 @@ func (sorter pessimisticPrewriteSorter) Len() int {
 
 func (sorter pessimisticPrewriteSorter) Swap(i, j int) {
 	sorter.Mutations[i], sorter.Mutations[j] = sorter.Mutations[j], sorter.Mutations[i]
-	sorter.IsPessimisticLock[i], sorter.IsPessimisticLock[j] = sorter.IsPessimisticLock[j], sorter.IsPessimisticLock[i]
+	sorter.PessimisticActions[i], sorter.PessimisticActions[j] = sorter.PessimisticActions[j], sorter.PessimisticActions[i]
 }
 
 func sortKeys(keys [][]byte) [][]byte {
-	less := func(i, j int) bool {
-		return bytes.Compare(keys[i], keys[j]) < 0
+	less := func(i, j []byte) bool {
+		return bytes.Compare(i, j) < 0
 	}
-	if sort.SliceIsSorted(keys, less) {
+	if slices.IsSortedFunc(keys, less) {
 		return keys
 	}
-	sort.Slice(keys, less)
+	slices.SortFunc(keys, less)
 	return keys
 }
 
 // PessimisticLock will add pessimistic lock on key
 func (store *MVCCStore) PessimisticLock(reqCtx *requestCtx, req *kvrpcpb.PessimisticLockRequest, resp *kvrpcpb.PessimisticLockResponse) (*lockwaiter.Waiter, error) {
+	waiter, err := store.pessimisticLockInner(reqCtx, req, resp)
+	if err != nil && req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock {
+		// The execution of `pessimisticLockInner` is broken by error. If resp.Results is not completely set yet, fill it with LockResultFailed.
+		for len(resp.Results) < len(req.Mutations) {
+			resp.Results = append(resp.Results, &kvrpcpb.PessimisticLockKeyResult{
+				Type: kvrpcpb.PessimisticLockKeyResultType_LockResultFailed,
+			})
+		}
+	}
+
+	return waiter, err
+}
+
+func (store *MVCCStore) pessimisticLockInner(reqCtx *requestCtx, req *kvrpcpb.PessimisticLockRequest, resp *kvrpcpb.PessimisticLockResponse) (*lockwaiter.Waiter, error) {
 	mutations := req.Mutations
 	if !req.ReturnValues {
 		mutations = sortMutations(req.Mutations)
@@ -236,6 +251,12 @@ func (store *MVCCStore) PessimisticLock(reqCtx *requestCtx, req *kvrpcpb.Pessimi
 	regCtx.AcquireLatches(hashVals)
 	defer regCtx.ReleaseLatches(hashVals)
 
+	if req.LockOnlyIfExists && !req.ReturnValues {
+		return nil, errors.New("LockOnlyIfExists is set for LockKeys but ReturnValues is not set")
+	}
+	if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock && len(req.Mutations) > 1 {
+		return nil, errors.New("Trying to lock more than one key in WakeUpModeForceLock, which is not supported yet")
+	}
 	batch := store.dbWriter.NewWriteBatch(startTS, 0, reqCtx.rpcCtx)
 	var dup bool
 	for _, m := range mutations {
@@ -269,14 +290,19 @@ func (store *MVCCStore) PessimisticLock(reqCtx *requestCtx, req *kvrpcpb.Pessimi
 		}
 	}
 	items, err := store.getDBItems(reqCtx, mutations)
+	lockedWithConflictTSList := make([]uint64, 0, len(mutations))
 	if err != nil {
 		return nil, err
 	}
 	if !dup {
 		for i, m := range mutations {
-			lock, err1 := store.buildPessimisticLock(m, items[i], req)
+			lock, lockedWithConflictTS, err1 := store.buildPessimisticLock(m, items[i], req)
+			lockedWithConflictTSList = append(lockedWithConflictTSList, lockedWithConflictTS)
 			if err1 != nil {
 				return nil, err1
+			}
+			if lock == nil {
+				continue
 			}
 			batch.PessimisticLock(m.Key, lock)
 		}
@@ -294,24 +320,73 @@ func (store *MVCCStore) PessimisticLock(reqCtx *requestCtx, req *kvrpcpb.Pessimi
 		resp.Value = val
 		resp.CommitTs = dbMeta.CommitTS()
 	}
-	if req.ReturnValues || req.CheckExistence {
-		for _, item := range items {
-			if item == nil {
-				if req.ReturnValues {
-					resp.Values = append(resp.Values, nil)
+
+	if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeNormal {
+		if req.ReturnValues || req.CheckExistence {
+			for _, item := range items {
+				if item == nil {
+					if req.ReturnValues {
+						resp.Values = append(resp.Values, nil)
+					}
+					resp.NotFounds = append(resp.NotFounds, true)
+					continue
 				}
-				resp.NotFounds = append(resp.NotFounds, true)
-				continue
+				val, err1 := item.ValueCopy(nil)
+				if err1 != nil {
+					return nil, err1
+				}
+				if req.ReturnValues {
+					resp.Values = append(resp.Values, val)
+				}
+				resp.NotFounds = append(resp.NotFounds, len(val) == 0)
 			}
-			val, err1 := item.ValueCopy(nil)
-			if err1 != nil {
-				return nil, err1
-			}
-			if req.ReturnValues {
-				resp.Values = append(resp.Values, val)
-			}
-			resp.NotFounds = append(resp.NotFounds, len(val) == 0)
 		}
+	} else if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock {
+		for i, item := range items {
+			res := &kvrpcpb.PessimisticLockKeyResult{
+				Type:                 kvrpcpb.PessimisticLockKeyResultType_LockResultNormal,
+				Value:                nil,
+				Existence:            false,
+				LockedWithConflictTs: 0,
+			}
+
+			if lockedWithConflictTSList[i] != 0 {
+				res.Type = kvrpcpb.PessimisticLockKeyResultType_LockResultLockedWithConflict
+				res.LockedWithConflictTs = lockedWithConflictTSList[i]
+				if item == nil {
+					res.Value = nil
+					res.Existence = false
+				} else {
+					val, err1 := item.ValueCopy(nil)
+					if err1 != nil {
+						return nil, err1
+					}
+					res.Value = val
+					res.Existence = len(val) != 0
+				}
+			} else if req.ReturnValues {
+				if item != nil {
+					val, err1 := item.ValueCopy(nil)
+					if err1 != nil {
+						return nil, err1
+					}
+					res.Value = val
+					res.Existence = len(val) != 0
+				}
+			} else if req.CheckExistence {
+				if item != nil {
+					val, err1 := item.ValueCopy(nil)
+					if err1 != nil {
+						return nil, err1
+					}
+					res.Existence = len(val) != 0
+				}
+			}
+
+			resp.Results = append(resp.Results, res)
+		}
+	} else {
+		panic("unreachable")
 	}
 	return nil, err
 }
@@ -412,6 +487,13 @@ func (store *MVCCStore) CheckTxnStatus(reqCtx *requestCtx,
 	lock := store.getLock(reqCtx, req.PrimaryKey)
 	batch := store.dbWriter.NewWriteBatch(req.LockTs, 0, reqCtx.rpcCtx)
 	if lock != nil && lock.StartTS == req.LockTs {
+		if !bytes.Equal(req.PrimaryKey, lock.Primary) {
+			return TxnStatus{}, &kverrors.ErrPrimaryMismatch{
+				Key:  req.PrimaryKey,
+				Lock: lock,
+			}
+		}
+
 		// For an async-commit lock, never roll it back or push forward it MinCommitTS.
 		if lock.UseAsyncCommit && !req.ForceSyncCommit {
 			log.S().Debugf("async commit startTS=%v secondaries=%v minCommitTS=%v", lock.StartTS, lock.Secondaries, lock.MinCommitTS)
@@ -568,35 +650,75 @@ func (store *MVCCStore) handleCheckPessimisticErr(startTS uint64, err error, isF
 	return nil, err
 }
 
+// buildPessimisticLock builds the lock according to the request and the current state of the key.
+// Returns the built lock, and the LockedWithConflictTS (if any, otherwise 0).
 func (store *MVCCStore) buildPessimisticLock(m *kvrpcpb.Mutation, item *badger.Item,
-	req *kvrpcpb.PessimisticLockRequest) (*mvcc.Lock, error) {
+	req *kvrpcpb.PessimisticLockRequest) (*mvcc.Lock, uint64, error) {
+	var lockedWithConflictTS uint64 = 0
+
+	var writeConflictError error
+
 	if item != nil {
 		userMeta := mvcc.DBUserMeta(item.UserMeta())
 		if !req.Force {
 			if userMeta.CommitTS() > req.ForUpdateTs {
-				return nil, &kverrors.ErrConflict{
+				writeConflictError = &kverrors.ErrConflict{
 					StartTS:          req.StartVersion,
 					ConflictTS:       userMeta.StartTS(),
 					ConflictCommitTS: userMeta.CommitTS(),
 					Key:              item.KeyCopy(nil),
+					Reason:           kvrpcpb.WriteConflict_PessimisticRetry,
+				}
+
+				if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeNormal {
+					return nil, 0, writeConflictError
+				} else if req.GetWakeUpMode() == kvrpcpb.PessimisticLockWakeUpMode_WakeUpModeForceLock {
+					lockedWithConflictTS = userMeta.CommitTS()
+				} else {
+					panic("unreachable")
 				}
 			}
 		}
 		if m.Assertion == kvrpcpb.Assertion_NotExist && !item.IsEmpty() {
-			return nil, &kverrors.ErrKeyAlreadyExists{Key: m.Key}
+			if lockedWithConflictTS != 0 {
+				// If constraint is violated, disable locking with conflict behavior.
+				if writeConflictError == nil {
+					panic("unreachable")
+				}
+				return nil, 0, writeConflictError
+			}
+			return nil, 0, &kverrors.ErrKeyAlreadyExists{Key: m.Key}
 		}
+	}
+
+	if ok, err := doesNeedLock(item, req); !ok {
+		if err != nil {
+			return nil, 0, err
+		}
+		if lockedWithConflictTS > 0 {
+			// If lockIfOnlyExist is used on a not-existing key, disable locking with conflict behavior.
+			if writeConflictError == nil {
+				panic("unreachable")
+			}
+			return nil, 0, writeConflictError
+		}
+		return nil, 0, nil
+	}
+	actualWrittenForUpdateTS := req.ForUpdateTs
+	if lockedWithConflictTS > 0 {
+		actualWrittenForUpdateTS = lockedWithConflictTS
 	}
 	lock := &mvcc.Lock{
 		LockHdr: mvcc.LockHdr{
 			StartTS:     req.StartVersion,
-			ForUpdateTS: req.ForUpdateTs,
+			ForUpdateTS: actualWrittenForUpdateTS,
 			Op:          uint8(kvrpcpb.Op_PessimisticLock),
 			TTL:         uint32(req.LockTtl),
 			PrimaryLen:  uint16(len(req.PrimaryLock)),
 		},
 		Primary: req.PrimaryLock,
 	}
-	return lock, nil
+	return lock, lockedWithConflictTS, nil
 }
 
 // Prewrite implements the MVCCStore interface.
@@ -667,6 +789,7 @@ func (store *MVCCStore) prewriteOptimistic(reqCtx *requestCtx, mutations []*kvrp
 					ConflictTS:       userMeta.StartTS(),
 					ConflictCommitTS: userMeta.CommitTS(),
 					Key:              item.KeyCopy(nil),
+					Reason:           kvrpcpb.WriteConflict_Optimistic,
 				}
 			}
 		}
@@ -690,16 +813,37 @@ func (store *MVCCStore) prewriteOptimistic(reqCtx *requestCtx, mutations []*kvrp
 
 func (store *MVCCStore) prewritePessimistic(reqCtx *requestCtx, mutations []*kvrpcpb.Mutation, req *kvrpcpb.PrewriteRequest) error {
 	startTS := req.StartVersion
+
+	expectedForUpdateTSMap := make(map[int]uint64, len(req.GetForUpdateTsConstraints()))
+	for _, constraint := range req.GetForUpdateTsConstraints() {
+		index := int(constraint.Index)
+		if index >= len(mutations) {
+			return errors.Errorf("prewrite request invalid: for_update_ts constraint set for index %v while %v mutations were given", index, len(mutations))
+		}
+
+		expectedForUpdateTSMap[index] = constraint.ExpectedForUpdateTs
+	}
+
+	reader := reqCtx.getDBReader()
+	txn := reader.GetTxn()
+
 	for i, m := range mutations {
 		if m.Op == kvrpcpb.Op_CheckNotExists {
 			return kverrors.ErrInvalidOp{Op: m.Op}
 		}
 		lock := store.getLock(reqCtx, m.Key)
-		isPessimisticLock := len(req.IsPessimisticLock) > 0 && req.IsPessimisticLock[i]
+		isPessimisticLock := len(req.PessimisticActions) > 0 && req.PessimisticActions[i] == kvrpcpb.PrewriteRequest_DO_PESSIMISTIC_CHECK
+		needConstraintCheck := len(req.PessimisticActions) > 0 && req.PessimisticActions[i] == kvrpcpb.PrewriteRequest_DO_CONSTRAINT_CHECK
 		lockExists := lock != nil
 		lockMatch := lockExists && lock.StartTS == startTS
+		lockConstraintPasses := true
+		if expectedForUpdateTS, ok := expectedForUpdateTSMap[i]; ok {
+			if lock.ForUpdateTS != expectedForUpdateTS {
+				lockConstraintPasses = false
+			}
+		}
 		if isPessimisticLock {
-			valid := lockExists && lockMatch
+			valid := lockExists && lockMatch && lockConstraintPasses
 			if !valid {
 				return errors.New("pessimistic lock not found")
 			}
@@ -710,6 +854,24 @@ func (store *MVCCStore) prewritePessimistic(reqCtx *requestCtx, mutations []*kvr
 			// Do not overwrite lock ttl if prewrite ttl smaller than pessimisitc lock ttl
 			if uint64(lock.TTL) > req.LockTtl {
 				req.LockTtl = uint64(lock.TTL)
+			}
+		} else if needConstraintCheck {
+			item, err := txn.Get(m.Key)
+			if err != nil && err != badger.ErrKeyNotFound {
+				return errors.Trace(err)
+			}
+			// check conflict
+			if item != nil {
+				userMeta := mvcc.DBUserMeta(item.UserMeta())
+				if userMeta.CommitTS() > startTS {
+					return &kverrors.ErrConflict{
+						StartTS:          startTS,
+						ConflictTS:       userMeta.StartTS(),
+						ConflictCommitTS: userMeta.CommitTS(),
+						Key:              item.KeyCopy(nil),
+						Reason:           kvrpcpb.WriteConflict_LazyUniquenessCheck,
+					}
+				}
 			}
 		} else {
 			// non pessimistic lock in pessimistic transaction, e.g. non-unique index.
@@ -899,16 +1061,16 @@ func (store *MVCCStore) buildPrewriteLock(reqCtx *requestCtx, m *kvrpcpb.Mutatio
 		lock.Op = uint8(kvrpcpb.Op_Put)
 	}
 	if rowcodec.IsRowKey(m.Key) && lock.Op == uint8(kvrpcpb.Op_Put) {
-		if rowcodec.IsNewFormat(m.Value) {
-			reqCtx.buf = m.Value
-		} else {
+		if !rowcodec.IsNewFormat(m.Value) {
 			reqCtx.buf, err = encodeFromOldRow(m.Value, reqCtx.buf)
 			if err != nil {
 				log.Error("encode data failed", zap.Binary("value", m.Value), zap.Binary("key", m.Key), zap.Stringer("op", m.Op), zap.Error(err))
 				return nil, err
 			}
+
+			lock.Value = make([]byte, len(reqCtx.buf))
+			copy(lock.Value, reqCtx.buf)
 		}
-		lock.Value = reqCtx.buf
 	}
 
 	lock.ForUpdateTS = req.ForUpdateTs
@@ -988,10 +1150,6 @@ func (store *MVCCStore) Commit(req *requestCtx, keys [][]byte, startTS, commitTS
 				MinCommitTs: lock.MinCommitTS,
 				Key:         key,
 			}
-		}
-		if lock.Op == uint8(kvrpcpb.Op_PessimisticLock) {
-			log.Warn("commit a pessimistic lock with Lock type", zap.Binary("key", key), zap.Uint64("start ts", startTS), zap.Uint64("commit ts", commitTS))
-			lock.Op = uint8(kvrpcpb.Op_Lock)
 		}
 		isPessimisticTxn = lock.ForUpdateTS > 0
 		tmpDiff += len(key) + len(lock.Value)
@@ -1179,6 +1337,7 @@ func checkLockForRcCheckTS(lock mvcc.Lock, key []byte, startTS uint64, resolved 
 		StartTS:    startTS,
 		ConflictTS: lock.StartTS,
 		Key:        safeCopy(key),
+		Reason:     kvrpcpb.WriteConflict_RcCheckTs,
 	}
 }
 
@@ -1358,7 +1517,7 @@ func (store *MVCCStore) UpdateSafePoint(safePoint uint64) {
 }
 
 func tsToTime(ts uint64) time.Time {
-	return time.Unix(0, int64(ts>>18)*1000000)
+	return time.UnixMilli(int64(ts >> 18))
 }
 
 // StartDeadlockDetection implements the MVCCStore interface.
@@ -1407,8 +1566,8 @@ func (store *MVCCStore) MvccGetByKey(reqCtx *requestCtx, key []byte) (*kvrpcpb.M
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(mvccInfo.Writes, func(i, j int) bool {
-		return mvccInfo.Writes[i].CommitTs > mvccInfo.Writes[j].CommitTs
+	slices.SortFunc(mvccInfo.Writes, func(i, j *kvrpcpb.MvccWrite) bool {
+		return i.CommitTs > j.CommitTs
 	})
 	mvccInfo.Values = make([]*kvrpcpb.MvccValue, len(mvccInfo.Writes))
 	for i := 0; i < len(mvccInfo.Writes); i++ {
@@ -1791,4 +1950,21 @@ func (f *GCCompactionFilter) Guards() []badger.Guard {
 	return []badger.Guard{
 		baseGuard, raftGuard, metaGuard, metaExtraGuard, tableIndexGuard, tableExtraGuard,
 	}
+}
+
+func doesNeedLock(item *badger.Item,
+	req *kvrpcpb.PessimisticLockRequest) (bool, error) {
+	if req.LockOnlyIfExists {
+		if item == nil {
+			return false, nil
+		}
+		val, err := item.Value()
+		if err != nil {
+			return false, err
+		}
+		if len(val) == 0 {
+			return false, nil
+		}
+	}
+	return true, nil
 }

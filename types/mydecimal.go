@@ -15,6 +15,7 @@
 package types
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/util/mathutil"
 	"go.uber.org/zap"
 )
 
@@ -123,19 +125,20 @@ func zeroMyDecimalWithFrac(frac int8) MyDecimal {
 }
 
 // add adds a and b and carry, returns the sum and new carry.
-func add(a, b, carry int32) (int32, int32) {
-	sum := a + b + carry
+func add(a, b, carry int32) (sum int32, newCarry int32) {
+	sum = a + b + carry
 	if sum >= wordBase {
-		carry = 1
+		newCarry = 1
 		sum -= wordBase
 	} else {
-		carry = 0
+		newCarry = 0
 	}
-	return sum, carry
+	return sum, newCarry
 }
 
 // add2 adds a and b and carry, returns the sum and new carry.
 // It is only used in DecimalMul.
+// nolint: revive
 func add2(a, b, carry int32) (int32, int32) {
 	sum := int64(a) + int64(b) + int64(carry)
 	if sum >= wordBase {
@@ -153,32 +156,32 @@ func add2(a, b, carry int32) (int32, int32) {
 }
 
 // sub subtracts b and carry from a, returns the diff and new carry.
-func sub(a, b, carry int32) (int32, int32) {
-	diff := a - b - carry
+func sub(a, b, carry int32) (diff int32, newCarry int32) {
+	diff = a - b - carry
 	if diff < 0 {
-		carry = 1
+		newCarry = 1
 		diff += wordBase
 	} else {
-		carry = 0
+		newCarry = 0
 	}
-	return diff, carry
+	return diff, newCarry
 }
 
 // sub2 subtracts b and carry from a, returns the diff and new carry.
 // the new carry may be 2.
-func sub2(a, b, carry int32) (int32, int32) {
-	diff := a - b - carry
+func sub2(a, b, carry int32) (diff int32, newCarray int32) {
+	diff = a - b - carry
 	if diff < 0 {
-		carry = 1
+		newCarray = 1
 		diff += wordBase
 	} else {
-		carry = 0
+		newCarray = 0
 	}
 	if diff < 0 {
 		diff += wordBase
-		carry++
+		newCarray++
 	}
-	return diff, carry
+	return diff, newCarray
 }
 
 // fixWordCntError limits word count in wordBufLen, and returns overflow or truncate error.
@@ -351,7 +354,7 @@ func (d *MyDecimal) ToString() (str []byte) {
 		for ; digitsFrac > 0; digitsFrac -= digitsPerWord {
 			x := d.wordBuf[wordIdx]
 			wordIdx++
-			for i := myMin(digitsFrac, digitsPerWord); i > 0; i-- {
+			for i := mathutil.Min(digitsFrac, digitsPerWord); i > 0; i-- {
 				y := x / digMask
 				str[fracIdx] = byte(y) + '0'
 				fracIdx++
@@ -378,7 +381,7 @@ func (d *MyDecimal) ToString() (str []byte) {
 		for ; digitsInt > 0; digitsInt -= digitsPerWord {
 			wordIdx--
 			x := d.wordBuf[wordIdx]
-			for i := myMin(digitsInt, digitsPerWord); i > 0; i-- {
+			for i := mathutil.Min(digitsInt, digitsPerWord); i > 0; i-- {
 				y := x / 10
 				strIdx--
 				str[strIdx] = '0' + byte(x-y*10)
@@ -401,7 +404,7 @@ func (d *MyDecimal) FromString(str []byte) error {
 	}
 	if len(str) == 0 {
 		*d = zeroMyDecimal
-		return ErrBadNumber
+		return ErrTruncatedWrongVal.GenWithStackByArgs("DECIMAL", str)
 	}
 	switch str[0] {
 	case '-':
@@ -429,7 +432,7 @@ func (d *MyDecimal) FromString(str []byte) error {
 	}
 	if digitsInt+digitsFrac == 0 {
 		*d = zeroMyDecimal
-		return ErrBadNumber
+		return ErrTruncatedWrongVal.GenWithStackByArgs("DECIMAL", str)
 	}
 	wordsInt := digitsToWords(digitsInt)
 	wordsFrac := digitsToWords(digitsFrac)
@@ -838,7 +841,7 @@ func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err err
 	if to != d {
 		copy(to.wordBuf[:], d.wordBuf[:])
 		to.negative = d.negative
-		to.digitsInt = int8(myMin(wordsInt, wordBufLen) * digitsPerWord)
+		to.digitsInt = int8(mathutil.Min(wordsInt, wordBufLen) * digitsPerWord)
 	}
 	if wordsFracTo > wordsFrac {
 		idx := wordsInt + wordsFrac
@@ -939,7 +942,7 @@ func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err err
 				frac = wordsFracTo * digitsPerWord
 				err = ErrTruncated
 			}
-			for toIdx = wordsInt + myMax(wordsFracTo, 0); toIdx > 0; toIdx-- {
+			for toIdx = wordsInt + mathutil.Max(wordsFracTo, 0); toIdx > 0; toIdx-- {
 				if toIdx < wordBufLen {
 					to.wordBuf[toIdx] = to.wordBuf[toIdx-1]
 				} else {
@@ -963,7 +966,7 @@ func (d *MyDecimal) Round(to *MyDecimal, frac int, roundMode RoundMode) (err err
 				/* making 'zero' with the proper scale */
 				idx := wordsFracTo + 1
 				to.digitsInt = 1
-				to.digitsFrac = int8(myMax(frac, 0))
+				to.digitsFrac = int8(mathutil.Max(frac, 0))
 				to.negative = false
 				for toIdx < idx {
 					to.wordBuf[toIdx] = 0
@@ -1550,6 +1553,41 @@ func (d *MyDecimal) Compare(to *MyDecimal) int {
 	return 1
 }
 
+// None of ToBin, ToFloat64, or ToString can encode MyDecimal without loss.
+// So we still need a MarshalJSON/UnmarshalJSON function.
+type jsonMyDecimal struct {
+	DigitsInt  int8
+	DigitsFrac int8
+	ResultFrac int8
+	Negative   bool
+	WordBuf    [maxWordBufLen]int32
+}
+
+// MarshalJSON implements Marshaler.MarshalJSON interface.
+func (d *MyDecimal) MarshalJSON() ([]byte, error) {
+	var r jsonMyDecimal
+	r.DigitsInt = d.digitsInt
+	r.DigitsFrac = d.digitsFrac
+	r.ResultFrac = d.resultFrac
+	r.Negative = d.negative
+	r.WordBuf = d.wordBuf
+	return json.Marshal(r)
+}
+
+// UnmarshalJSON implements Unmarshaler.UnmarshalJSON interface.
+func (d *MyDecimal) UnmarshalJSON(data []byte) error {
+	var r jsonMyDecimal
+	err := json.Unmarshal(data, &r)
+	if err == nil {
+		d.digitsInt = r.DigitsInt
+		d.digitsFrac = r.DigitsFrac
+		d.resultFrac = r.ResultFrac
+		d.negative = r.Negative
+		d.wordBuf = r.WordBuf
+	}
+	return err
+}
+
 // DecimalNeg reverses decimal's sign.
 func DecimalNeg(from *MyDecimal) *MyDecimal {
 	to := *from
@@ -1565,7 +1603,7 @@ func DecimalNeg(from *MyDecimal) *MyDecimal {
 // of `to` may be changed during evaluating.
 func DecimalAdd(from1, from2, to *MyDecimal) error {
 	from1, from2, to = validateArgs(from1, from2, to)
-	to.resultFrac = myMaxInt8(from1.resultFrac, from2.resultFrac)
+	to.resultFrac = mathutil.Max(from1.resultFrac, from2.resultFrac)
 	if from1.negative == from2.negative {
 		return doAdd(from1, from2, to)
 	}
@@ -1576,7 +1614,7 @@ func DecimalAdd(from1, from2, to *MyDecimal) error {
 // DecimalSub subs one decimal from another, sets the result to 'to'.
 func DecimalSub(from1, from2, to *MyDecimal) error {
 	from1, from2, to = validateArgs(from1, from2, to)
-	to.resultFrac = myMaxInt8(from1.resultFrac, from2.resultFrac)
+	to.resultFrac = mathutil.Max(from1.resultFrac, from2.resultFrac)
 	if from1.negative == from2.negative {
 		_, err := doSub(from1, from2, to)
 		return err
@@ -1612,7 +1650,7 @@ func doSub(from1, from2, to *MyDecimal) (cmp int, err error) {
 		wordsFrac1  = digitsToWords(int(from1.digitsFrac))
 		wordsInt2   = digitsToWords(int(from2.digitsInt))
 		wordsFrac2  = digitsToWords(int(from2.digitsFrac))
-		wordsFracTo = myMax(wordsFrac1, wordsFrac2)
+		wordsFracTo = mathutil.Max(wordsFrac1, wordsFrac2)
 
 		start1 = 0
 		stop1  = wordsInt1
@@ -1661,15 +1699,14 @@ func doSub(from1, from2, to *MyDecimal) (cmp int, err error) {
 				carry = 0
 			}
 		} else {
-			if idx2 <= end2 {
-				carry = 1
-			} else {
+			if idx2 > end2 {
 				if to == nil {
 					return 0, nil
 				}
 				*to = zeroMyDecimalWithFrac(to.resultFrac)
 				return 0, nil
 			}
+			carry = 1
 		}
 	}
 
@@ -1778,8 +1815,8 @@ func doAdd(from1, from2, to *MyDecimal) error {
 		wordsFrac1  = digitsToWords(int(from1.digitsFrac))
 		wordsInt2   = digitsToWords(int(from2.digitsInt))
 		wordsFrac2  = digitsToWords(int(from2.digitsFrac))
-		wordsIntTo  = myMax(wordsInt1, wordsInt2)
-		wordsFracTo = myMax(wordsFrac1, wordsFrac2)
+		wordsIntTo  = mathutil.Max(wordsInt1, wordsInt2)
+		wordsFracTo = mathutil.Max(wordsFrac1, wordsFrac2)
 	)
 
 	var x int32
@@ -1803,7 +1840,7 @@ func doAdd(from1, from2, to *MyDecimal) error {
 	idxTo := wordsIntTo + wordsFracTo
 	to.negative = from1.negative
 	to.digitsInt = int8(wordsIntTo * digitsPerWord)
-	to.digitsFrac = myMaxInt8(from1.digitsFrac, from2.digitsFrac)
+	to.digitsFrac = mathutil.Max(from1.digitsFrac, from2.digitsFrac)
 
 	if err != nil {
 		if to.digitsFrac > int8(wordsFracTo*digitsPerWord) {
@@ -1941,7 +1978,7 @@ func DecimalMul(from1, from2, to *MyDecimal) error {
 		tmp1        = wordsIntTo
 		tmp2        = wordsFracTo
 	)
-	to.resultFrac = myMinInt8(from1.resultFrac+from2.resultFrac, mysql.MaxDecimalScale)
+	to.resultFrac = mathutil.Min(from1.resultFrac+from2.resultFrac, mysql.MaxDecimalScale)
 	wordsIntTo, wordsFracTo, err = fixWordCntError(wordsIntTo, wordsFracTo)
 	to.negative = from1.negative != from2.negative
 	to.digitsFrac = from1.digitsFrac + from2.digitsFrac
@@ -2056,7 +2093,7 @@ func DecimalMul(from1, from2, to *MyDecimal) error {
 // fracIncr - increment of fraction
 func DecimalDiv(from1, from2, to *MyDecimal, fracIncr int) error {
 	from1, from2, to = validateArgs(from1, from2, to)
-	to.resultFrac = myMinInt8(from1.resultFrac+int8(fracIncr), mysql.MaxDecimalScale)
+	to.resultFrac = mathutil.Min(from1.resultFrac+int8(fracIncr), mysql.MaxDecimalScale)
 	return doDivMod(from1, from2, to, nil, fracIncr)
 }
 
@@ -2086,7 +2123,7 @@ DecimalMod does modulus of two decimals.
 */
 func DecimalMod(from1, from2, to *MyDecimal) error {
 	from1, from2, to = validateArgs(from1, from2, to)
-	to.resultFrac = myMaxInt8(from1.resultFrac, from2.resultFrac)
+	to.resultFrac = mathutil.Max(from1.resultFrac, from2.resultFrac)
 	return doDivMod(from1, from2, nil, to, 0)
 }
 
@@ -2154,7 +2191,7 @@ func doDivMod(from1, from2, to, mod *MyDecimal, fracIncr int) error {
 		// digitsFrac=max(frac1, frac2), as for subtraction
 		// digitsInt=from2.digitsInt
 		to.negative = from1.negative
-		to.digitsFrac = myMaxInt8(from1.digitsFrac, from2.digitsFrac)
+		to.digitsFrac = mathutil.Max(from1.digitsFrac, from2.digitsFrac)
 	} else {
 		wordsFracTo = digitsToWords(frac1 + frac2 + fracIncr)
 		wordsIntTo, wordsFracTo, err = fixWordCntError(wordsIntTo, wordsFracTo)
@@ -2319,7 +2356,7 @@ func doDivMod(from1, from2, to, mod *MyDecimal, fracIncr int) error {
 				return ErrOverflow
 			}
 			stop1 = start1 + wordsIntTo + wordsFracTo
-			to.digitsInt = int8(myMin(wordsIntTo*digitsPerWord, int(from2.digitsInt)))
+			to.digitsInt = int8(mathutil.Min(wordsIntTo*digitsPerWord, int(from2.digitsInt)))
 		}
 		if wordsIntTo+wordsFracTo > wordBufLen {
 			stop1 -= wordsIntTo + wordsFracTo - wordBufLen

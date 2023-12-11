@@ -17,8 +17,10 @@ package owner
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/ddl/util"
 )
 
 var _ Manager = &mockManager{}
@@ -27,9 +29,10 @@ var _ Manager = &mockManager{}
 // It's used for local store and testing.
 // So this worker will always be the owner.
 type mockManager struct {
-	owner  int32
-	id     string // id is the ID of manager.
-	cancel context.CancelFunc
+	owner       int32
+	id          string // id is the ID of manager.
+	cancel      context.CancelFunc
+	beOwnerHook func()
 }
 
 // NewMockManager creates a new mock Manager.
@@ -52,6 +55,9 @@ func (m *mockManager) IsOwner() bool {
 }
 
 func (m *mockManager) toBeOwner() {
+	if m.beOwnerHook != nil {
+		m.beOwnerHook()
+	}
 	atomic.StoreInt32(&m.owner, 1)
 }
 
@@ -66,21 +72,28 @@ func (m *mockManager) Cancel() {
 }
 
 // GetOwnerID implements Manager.GetOwnerID interface.
-func (m *mockManager) GetOwnerID(ctx context.Context) (string, error) {
+func (m *mockManager) GetOwnerID(_ context.Context) (string, error) {
 	if m.IsOwner() {
 		return m.ID(), nil
 	}
 	return "", errors.New("no owner")
 }
 
+var mockOwnerOpValue = OpNone
+
+func (*mockManager) SetOwnerOpValue(_ context.Context, op OpType) error {
+	mockOwnerOpValue = op
+	return nil
+}
+
 // CampaignOwner implements Manager.CampaignOwner interface.
-func (m *mockManager) CampaignOwner() error {
+func (m *mockManager) CampaignOwner(_ ...int) error {
 	m.toBeOwner()
 	return nil
 }
 
 // ResignOwner lets the owner start a new election.
-func (m *mockManager) ResignOwner(ctx context.Context) error {
+func (m *mockManager) ResignOwner(_ context.Context) error {
 	if m.IsOwner() {
 		m.RetireOwner()
 	}
@@ -88,6 +101,58 @@ func (m *mockManager) ResignOwner(ctx context.Context) error {
 }
 
 // RequireOwner implements Manager.RequireOwner interface.
-func (m *mockManager) RequireOwner(context.Context) error {
+func (*mockManager) RequireOwner(context.Context) error {
+	return nil
+}
+
+func (m *mockManager) SetBeOwnerHook(hook func()) {
+	m.beOwnerHook = hook
+}
+
+// CampaignCancel implements Manager.CampaignCancel interface
+func (m *mockManager) CampaignCancel() {
+	// do nothing
+}
+
+func mockDelOwnerKey(mockCal, ownerKey string, m *ownerManager) error {
+	checkIsOwner := func(m *ownerManager, checkTrue bool) error {
+		// 5s
+		for i := 0; i < 100; i++ {
+			if m.IsOwner() == checkTrue {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if m.IsOwner() != checkTrue {
+			return errors.Errorf("expect manager state:%v", checkTrue)
+		}
+		return nil
+	}
+
+	needCheckOwner := false
+	switch mockCal {
+	case "delOwnerKeyAndNotOwner":
+		m.CampaignCancel()
+		// Make sure the manager is not owner. And it will exit campaignLoop.
+		err := checkIsOwner(m, false)
+		if err != nil {
+			return err
+		}
+	case "onlyDelOwnerKey":
+		needCheckOwner = true
+	}
+
+	err := util.DeleteKeyFromEtcd(ownerKey, m.etcdCli, 1, keyOpDefaultTimeout)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if needCheckOwner {
+		// Mock the manager become not owner because the owner is deleted(like TTL is timeout).
+		// And then the manager campaigns the owner again, and become the owner.
+		err = checkIsOwner(m, true)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }

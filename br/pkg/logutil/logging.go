@@ -4,6 +4,7 @@ package logutil
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/redact"
+	"github.com/pingcap/tidb/kv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -61,6 +63,11 @@ func (file zapFileMarshaler) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 
 type zapFilesMarshaler []*backuppb.File
 
+// MarshalLogObjectForFiles is an internal util function to zap something having `Files` field.
+func MarshalLogObjectForFiles(files []*backuppb.File, encoder zapcore.ObjectEncoder) error {
+	return zapFilesMarshaler(files).MarshalLogObject(encoder)
+}
+
 func (fs zapFilesMarshaler) MarshalLogObject(encoder zapcore.ObjectEncoder) error {
 	total := len(fs)
 	encoder.AddInt("total", total)
@@ -104,6 +111,7 @@ func (t zapStreamBackupTaskInfo) MarshalLogObject(enc zapcore.ObjectEncoder) err
 	return nil
 }
 
+// StreamBackupTaskInfo makes the zap fields for a stream backup task info.
 func StreamBackupTaskInfo(t *backuppb.StreamBackupTaskInfo) zap.Field {
 	return zap.Object("streamTaskInfo", zapStreamBackupTaskInfo{t})
 }
@@ -268,4 +276,67 @@ func Redact(field zap.Field) zap.Field {
 		return zap.String(field.Key, "?")
 	}
 	return field
+}
+
+// StringifyKeys wraps the key range into a stringer.
+type StringifyKeys []kv.KeyRange
+
+func (kr StringifyKeys) String() string {
+	sb := new(strings.Builder)
+	sb.WriteString("{")
+	for i, rng := range kr {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(StringifyRange(rng).String())
+	}
+	sb.WriteString("}")
+	return sb.String()
+}
+
+// StringifyRange is the wrapper for displaying a key range.
+type StringifyRange kv.KeyRange
+
+func (rng StringifyRange) String() string {
+	sb := new(strings.Builder)
+	sb.WriteString("[")
+	sb.WriteString(redact.Key(rng.StartKey))
+	sb.WriteString(", ")
+	var endKey string
+	if len(rng.EndKey) == 0 {
+		endKey = "inf"
+	} else {
+		endKey = redact.Key(rng.EndKey)
+	}
+	sb.WriteString(redact.String(endKey))
+	sb.WriteString(")")
+	return sb.String()
+}
+
+// StringifyMany returns an array marshaler for a slice of stringers.
+func StringifyMany[T fmt.Stringer](items []T) zapcore.ArrayMarshaler {
+	return zapcore.ArrayMarshalerFunc(func(ae zapcore.ArrayEncoder) error {
+		for _, item := range items {
+			ae.AppendString(item.String())
+		}
+		return nil
+	})
+}
+
+// HexBytes is a wrapper which make a byte sequence printed by the hex format.
+type HexBytes []byte
+
+var (
+	_ fmt.Stringer   = HexBytes{}
+	_ json.Marshaler = HexBytes{}
+)
+
+// String implements fmt.Stringer.
+func (b HexBytes) String() string {
+	return hex.EncodeToString(b)
+}
+
+// MarshalJSON implements json.Marshaler.
+func (b HexBytes) MarshalJSON() ([]byte, error) {
+	return json.Marshal(hex.EncodeToString(b))
 }

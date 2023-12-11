@@ -17,6 +17,7 @@ package cophandler
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/fnv"
 	"io"
 	"math"
 	"sort"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/mpp"
 	"github.com/pingcap/tidb/expression"
@@ -100,8 +102,9 @@ func (b *baseMPPExec) stop() error {
 }
 
 type scanResult struct {
-	chk *chunk.Chunk
-	err error
+	chk              *chunk.Chunk
+	lastProcessedKey kv.Key
+	err              error
 }
 
 type tableScanExec struct {
@@ -126,6 +129,8 @@ type tableScanExec struct {
 
 	// if ExtraPhysTblIDCol is requested, fill in the physical table id in this column position
 	physTblIDColIdx *int
+	// This is used to update the paging range result, updated in next().
+	paging *coprocessor.KeyRange
 }
 
 func (e *tableScanExec) SkipValue() bool { return false }
@@ -147,8 +152,9 @@ func (e *tableScanExec) Process(key, value []byte) error {
 	e.rowCnt++
 
 	if e.chk.IsFull() {
+		lastProcessed := kv.Key(append([]byte{}, key...)) // make a copy to avoid data race
 		select {
-		case e.result <- scanResult{chk: e.chk, err: nil}:
+		case e.result <- scanResult{chk: e.chk, lastProcessedKey: lastProcessed, err: nil}:
 			e.chk = chunk.NewChunkWithCapacity(e.fieldTypes, DefaultBatchSize)
 		case <-e.done:
 			return dbreader.ErrScanBreak
@@ -178,7 +184,9 @@ func (e *tableScanExec) open() error {
 	e.wg.Run(func() {
 		// close the channel when done scanning, so that next() will got nil chunk
 		defer close(e.result)
-		for i, ran := range e.kvRanges {
+		var i int
+		var ran kv.KeyRange
+		for i, ran = range e.kvRanges {
 			oldCnt := e.rowCnt
 			if e.desc {
 				err = e.dbReader.ReverseScan(ran.StartKey, ran.EndKey, math.MaxInt64, e.startTS, e)
@@ -211,6 +219,23 @@ func (e *tableScanExec) open() error {
 
 func (e *tableScanExec) next() (*chunk.Chunk, error) {
 	result := <-e.result
+	// Update the range for coprocessor paging protocol.
+	if e.paging != nil && result.err == nil {
+		if e.desc {
+			if result.lastProcessedKey != nil {
+				*e.paging = coprocessor.KeyRange{Start: result.lastProcessedKey}
+			} else {
+				*e.paging = coprocessor.KeyRange{Start: e.kvRanges[len(e.kvRanges)-1].StartKey}
+			}
+		} else {
+			if result.lastProcessedKey != nil {
+				*e.paging = coprocessor.KeyRange{End: result.lastProcessedKey.Next()}
+			} else {
+				*e.paging = coprocessor.KeyRange{End: e.kvRanges[len(e.kvRanges)-1].EndKey}
+			}
+		}
+	}
+
 	if result.chk == nil || result.err != nil {
 		return nil, result.err
 	}
@@ -251,6 +276,9 @@ type indexScanExec struct {
 
 	// if ExtraPhysTblIDCol is requested, fill in the physical table id in this column position
 	physTblIDColIdx *int
+	// This is used to update the paging range result, updated in next().
+	paging                 *coprocessor.KeyRange
+	chunkLastProcessedKeys []kv.Key
 }
 
 func (e *indexScanExec) SkipValue() bool { return false }
@@ -291,6 +319,10 @@ func (e *indexScanExec) Process(key, value []byte) error {
 	}
 	if e.chk.IsFull() {
 		e.chunks = append(e.chunks, e.chk)
+		if e.paging != nil {
+			lastProcessed := kv.Key(append([]byte{}, key...)) // need a deep copy to store the key
+			e.chunkLastProcessedKeys = append(e.chunkLastProcessedKeys, lastProcessed)
+		}
 		e.chk = chunk.NewChunkWithCapacity(e.fieldTypes, DefaultBatchSize)
 	}
 	return nil
@@ -329,9 +361,32 @@ func (e *indexScanExec) open() error {
 
 func (e *indexScanExec) next() (*chunk.Chunk, error) {
 	if e.chkIdx < len(e.chunks) {
-		e.chkIdx += 1
+		e.chkIdx++
 		e.execSummary.updateOnlyRows(e.chunks[e.chkIdx-1].NumRows())
+		if e.paging != nil {
+			if e.desc {
+				if e.chkIdx == len(e.chunks) {
+					*e.paging = coprocessor.KeyRange{Start: e.kvRanges[len(e.kvRanges)-1].StartKey}
+				} else {
+					*e.paging = coprocessor.KeyRange{Start: e.chunkLastProcessedKeys[e.chkIdx-1]}
+				}
+			} else {
+				if e.chkIdx == len(e.chunks) {
+					*e.paging = coprocessor.KeyRange{End: e.kvRanges[len(e.kvRanges)-1].EndKey}
+				} else {
+					*e.paging = coprocessor.KeyRange{End: e.chunkLastProcessedKeys[e.chkIdx-1].Next()}
+				}
+			}
+		}
 		return e.chunks[e.chkIdx-1], nil
+	}
+
+	if e.paging != nil {
+		if e.desc {
+			*e.paging = coprocessor.KeyRange{Start: e.kvRanges[len(e.kvRanges)-1].StartKey}
+		} else {
+			*e.paging = coprocessor.KeyRange{End: e.kvRanges[len(e.kvRanges)-1].EndKey}
+		}
 	}
 	return nil, nil
 }
@@ -361,6 +416,110 @@ func (e *limitExec) next() (*chunk.Chunk, error) {
 	return chk, nil
 }
 
+// expandExec is the basic mock logic for expand executor in uniStore,
+// with which we can validate the mpp plan correctness from explain result and result returned.
+type expandExec struct {
+	baseMPPExec
+
+	lastNum              int
+	lastChunk            *chunk.Chunk
+	groupingSets         expression.GroupingSets
+	groupingSetOffsetMap []map[int]struct{}
+	groupingSetScope     map[int]struct{}
+}
+
+func (e *expandExec) open() error {
+	if err := e.children[0].open(); err != nil {
+		return err
+	}
+	// building the quick finding map
+	e.groupingSetOffsetMap = make([]map[int]struct{}, 0, len(e.groupingSets))
+	e.groupingSetScope = make(map[int]struct{}, len(e.groupingSets))
+	for _, gs := range e.groupingSets {
+		tmp := make(map[int]struct{}, len(gs))
+		// for every grouping set, collect column offsets under this grouping set.
+		for _, groupingExprs := range gs {
+			for _, groupingExpr := range groupingExprs {
+				col, ok := groupingExpr.(*expression.Column)
+				if !ok {
+					return errors.New("grouping set expr is not column ref")
+				}
+				tmp[col.Index] = struct{}{}
+				e.groupingSetScope[col.Index] = struct{}{}
+			}
+		}
+		e.groupingSetOffsetMap = append(e.groupingSetOffsetMap, tmp)
+	}
+	return nil
+}
+
+func (e *expandExec) isGroupingCol(index int) bool {
+	if _, ok := e.groupingSetScope[index]; ok {
+		return true
+	}
+	return false
+}
+
+func (e *expandExec) next() (*chunk.Chunk, error) {
+	var (
+		err error
+	)
+	if e.groupingSets.IsEmpty() {
+		return e.children[0].next()
+	}
+	resChk := chunk.NewChunkWithCapacity(e.getFieldTypes(), DefaultBatchSize)
+	for {
+		if e.lastChunk == nil || e.lastChunk.NumRows() == e.lastNum {
+			// fetch one chunk from children.
+			e.lastChunk, err = e.children[0].next()
+			if err != nil {
+				return nil, err
+			}
+			e.lastNum = 0
+			if e.lastChunk == nil || e.lastChunk.NumRows() == 0 {
+				break
+			}
+			e.execSummary.updateOnlyRows(e.lastChunk.NumRows())
+		}
+		numRows := e.lastChunk.NumRows()
+		numGroupingOffset := len(e.groupingSets)
+
+		for i := e.lastNum; i < numRows; i++ {
+			row := e.lastChunk.GetRow(i)
+			e.lastNum++
+			// for every grouping set, expand the base row N times.
+			for g := 0; g < numGroupingOffset; g++ {
+				repeatRow := chunk.MutRowFromTypes(e.fieldTypes)
+				// for every targeted grouping set:
+				// 1: for every column in this grouping set, setting them as it was.
+				// 2: for every column in other target grouping set, setting them as null.
+				// 3: for every column not in any grouping set, setting them as it was.
+				//      * normal agg only aimed at one replica of them with groupingID = 1
+				// 		* so we don't need to change non-related column to be nullable.
+				//		* so we don't need to mutate the column to be null when groupingID > 1
+				for datumOffset, datumType := range e.fieldTypes[:len(e.fieldTypes)-1] {
+					if _, ok := e.groupingSetOffsetMap[g][datumOffset]; ok {
+						repeatRow.SetDatum(datumOffset, row.GetDatum(datumOffset, datumType))
+					} else if !e.isGroupingCol(datumOffset) {
+						repeatRow.SetDatum(datumOffset, row.GetDatum(datumOffset, datumType))
+					} else {
+						repeatRow.SetDatum(datumOffset, types.NewDatum(nil))
+					}
+				}
+				// the last one column should be groupingID col.
+				groupingID := g + 1
+				repeatRow.SetDatum(len(e.fieldTypes)-1, types.NewDatum(groupingID))
+				resChk.AppendRow(repeatRow.ToRow())
+			}
+			if DefaultBatchSize-resChk.NumRows() < numGroupingOffset {
+				// no enough room for another repeated N rows, return this chunk immediately.
+				return resChk, nil
+			}
+		}
+	}
+	return resChk, nil
+}
+
 type topNExec struct {
 	baseMPPExec
 
@@ -370,6 +529,9 @@ type topNExec struct {
 	conds []expression.Expression
 	row   *sortRow
 	recv  []*chunk.Chunk
+
+	// When dummy is true, topNExec just copy what it read from children to its parent.
+	dummy bool
 }
 
 func (e *topNExec) open() error {
@@ -379,6 +541,11 @@ func (e *topNExec) open() error {
 	if err != nil {
 		return err
 	}
+
+	if e.dummy {
+		return nil
+	}
+
 	for {
 		chk, err = e.children[0].next()
 		if err != nil {
@@ -413,6 +580,10 @@ func (e *topNExec) open() error {
 }
 
 func (e *topNExec) next() (*chunk.Chunk, error) {
+	if e.dummy {
+		return e.children[0].next()
+	}
+
 	chk := chunk.NewChunkWithCapacity(e.getFieldTypes(), DefaultBatchSize)
 	for ; !chk.IsFull() && e.idx < e.topn && e.idx < uint64(e.heap.heapSize); e.idx++ {
 		row := e.heap.rows[e.idx]
@@ -426,10 +597,11 @@ func (e *topNExec) next() (*chunk.Chunk, error) {
 type exchSenderExec struct {
 	baseMPPExec
 
-	tunnels       []*ExchangerTunnel
-	outputOffsets []uint32
-	exchangeTp    tipb.ExchangeType
-	hashKeyOffset int
+	tunnels        []*ExchangerTunnel
+	outputOffsets  []uint32
+	exchangeTp     tipb.ExchangeType
+	hashKeyOffsets []int
+	hashKeyTypes   []*types.FieldType
 }
 
 func (e *exchSenderExec) open() error {
@@ -482,15 +654,22 @@ func (e *exchSenderExec) next() (*chunk.Chunk, error) {
 				for i := 0; i < len(e.tunnels); i++ {
 					targetChunks = append(targetChunks, chunk.NewChunkWithCapacity(e.fieldTypes, rows))
 				}
+				hashVals := fnv.New64()
+				payload := make([]byte, 1)
 				for i := 0; i < rows; i++ {
 					row := chk.GetRow(i)
-					d := row.GetDatum(e.hashKeyOffset, e.fieldTypes[e.hashKeyOffset])
-					if d.IsNull() {
-						targetChunks[0].AppendRow(row)
-					} else {
-						hashKey := int(d.GetInt64() % int64(len(e.tunnels)))
-						targetChunks[hashKey].AppendRow(row)
+					hashVals.Reset()
+					// use hash values to get unique uint64 to mod.
+					// collect all the hash key datum.
+					err := codec.HashChunkRow(e.sc, hashVals, row, e.hashKeyTypes, e.hashKeyOffsets, payload)
+					if err != nil {
+						for _, tunnel := range e.tunnels {
+							tunnel.ErrCh <- err
+						}
+						return nil, nil
 					}
+					hashKey := hashVals.Sum64() % uint64(len(e.tunnels))
+					targetChunks[hashKey].AppendRow(row)
 				}
 				for i, tunnel := range e.tunnels {
 					if targetChunks[i].NumRows() > 0 {
@@ -552,6 +731,7 @@ func (e *exchRecvExec) init() error {
 		}
 		serverMetas = append(serverMetas, meta)
 	}
+	// for receiver: open conn worker for every receive meta.
 	for _, meta := range serverMetas {
 		e.wg.Add(1)
 		go e.runTunnelWorker(e.mppCtx.TaskHandler, meta)
@@ -602,6 +782,7 @@ func (e *exchRecvExec) EstablishConnAndReceiveData(h *MPPTaskHandler, meta *mpp.
 			}
 			return nil, errors.Trace(err)
 		}
+		// stream resp
 		if mppResponse == nil {
 			return ret, nil
 		}

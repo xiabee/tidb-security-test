@@ -5,9 +5,11 @@ package glue
 import (
 	"context"
 
+	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx"
 	pd "github.com/tikv/pd/client"
 )
 
@@ -41,15 +43,18 @@ type Session interface {
 	Execute(ctx context.Context, sql string) error
 	ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error
 	CreateDatabase(ctx context.Context, schema *model.DBInfo) error
-	CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo) error
+	CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo,
+		cs ...ddl.CreateTableWithInfoConfigurier) error
 	CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error
 	Close()
 	GetGlobalVariable(name string) (string, error)
+	GetSessionCtx() sessionctx.Context
 }
 
 // BatchCreateTableSession is an interface to batch create table parallelly
 type BatchCreateTableSession interface {
-	CreateTables(ctx context.Context, tables map[string][]*model.TableInfo) error
+	CreateTables(ctx context.Context, tables map[string][]*model.TableInfo,
+		cs ...ddl.CreateTableWithInfoConfigurier) error
 }
 
 // Progress is an interface recording the current execution progress.
@@ -57,6 +62,11 @@ type Progress interface {
 	// Inc increases the progress. This method must be goroutine-safe, and can
 	// be called from any goroutine.
 	Inc()
+	// IncBy increases the progress by cnt. This method must be goroutine-safe, and can
+	// be called from any goroutine.
+	IncBy(cnt int64)
+	// GetCurrent reports the progress.
+	GetCurrent() int64
 	// Close marks the progress as 100% complete and that Inc() can no longer be
 	// called.
 	Close()

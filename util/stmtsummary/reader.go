@@ -309,6 +309,10 @@ const (
 	PrevSampleTextStr                 = "PREV_SAMPLE_TEXT"
 	PlanDigestStr                     = "PLAN_DIGEST"
 	PlanStr                           = "PLAN"
+	BinaryPlan                        = "BINARY_PLAN"
+	Charset                           = "CHARSET"
+	Collation                         = "COLLATION"
+	PlanHint                          = "PLAN_HINT"
 )
 
 type columnValueFactory func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{}
@@ -615,5 +619,17 @@ var columnValueFactoryMap = map[string]columnValueFactory{
 			plan = ""
 		}
 		return plan
+	},
+	BinaryPlan: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
+		return ssElement.sampleBinaryPlan
+	},
+	Charset: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
+		return ssElement.charset
+	},
+	Collation: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
+		return ssElement.collation
+	},
+	PlanHint: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
+		return ssElement.planHint
 	},
 }

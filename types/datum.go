@@ -15,6 +15,7 @@
 package types
 
 import (
+	gjson "encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -30,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
@@ -396,12 +396,12 @@ func (d *Datum) SetMysqlSet(b Set, collation string) {
 }
 
 // GetMysqlJSON gets json.BinaryJSON value
-func (d *Datum) GetMysqlJSON() json.BinaryJSON {
-	return json.BinaryJSON{TypeCode: byte(d.i), Value: d.b}
+func (d *Datum) GetMysqlJSON() BinaryJSON {
+	return BinaryJSON{TypeCode: byte(d.i), Value: d.b}
 }
 
 // SetMysqlJSON sets json.BinaryJSON value
-func (d *Datum) SetMysqlJSON(b json.BinaryJSON) {
+func (d *Datum) SetMysqlJSON(b BinaryJSON) {
 	d.k = KindMysqlJSON
 	d.i = int64(b.TypeCode)
 	d.b = b.Value
@@ -457,28 +457,44 @@ func (d Datum) String() string {
 		t = "KindString"
 	case KindBytes:
 		t = "KindBytes"
+	case KindBinaryLiteral:
+		t = "KindBinaryLiteral"
 	case KindMysqlDecimal:
 		t = "KindMysqlDecimal"
 	case KindMysqlDuration:
 		t = "KindMysqlDuration"
 	case KindMysqlEnum:
 		t = "KindMysqlEnum"
-	case KindBinaryLiteral:
-		t = "KindBinaryLiteral"
 	case KindMysqlBit:
 		t = "KindMysqlBit"
 	case KindMysqlSet:
 		t = "KindMysqlSet"
-	case KindMysqlJSON:
-		t = "KindMysqlJSON"
 	case KindMysqlTime:
 		t = "KindMysqlTime"
+	case KindInterface:
+		t = "KindInterface"
+	case KindMinNotNull:
+		t = "KindMinNotNull"
+	case KindMaxValue:
+		t = "KindMaxValue"
+	case KindRaw:
+		t = "KindRaw"
+	case KindMysqlJSON:
+		t = "KindMysqlJSON"
 	default:
 		t = "Unknown"
 	}
 	v := d.GetValue()
-	if b, ok := v.([]byte); ok && d.k == KindBytes {
-		v = string(b)
+	switch v.(type) {
+	case []byte, string:
+		quote := `"`
+		// We only need the escape functionality of %q, the quoting is not needed,
+		// so we trim the \" prefix and suffix here.
+		v = strings.TrimSuffix(
+			strings.TrimPrefix(
+				fmt.Sprintf("%q", v),
+				quote),
+			quote)
 	}
 	return fmt.Sprintf("%v %v", t, v)
 }
@@ -556,7 +572,7 @@ func (d *Datum) SetValueWithDefaultCollation(val interface{}) {
 		d.SetBinaryLiteral(BinaryLiteral(x))
 	case Set:
 		d.SetMysqlSet(x, mysql.DefaultCollationName)
-	case json.BinaryJSON:
+	case BinaryJSON:
 		d.SetMysqlJSON(x)
 	case Time:
 		d.SetMysqlTime(x)
@@ -604,7 +620,7 @@ func (d *Datum) SetValue(val interface{}, tp *types.FieldType) {
 		d.SetBinaryLiteral(BinaryLiteral(x))
 	case Set:
 		d.SetMysqlSet(x, tp.GetCollate())
-	case json.BinaryJSON:
+	case BinaryJSON:
 		d.SetMysqlJSON(x)
 	case Time:
 		d.SetMysqlTime(x)
@@ -754,7 +770,7 @@ func (d *Datum) compareString(sc *stmtctx.StatementContext, s string, comparer c
 		dt, err := ParseDatetime(sc, s)
 		return d.GetMysqlTime().Compare(dt), errors.Trace(err)
 	case KindMysqlDuration:
-		dur, err := ParseDuration(sc, s, MaxFsp)
+		dur, _, err := ParseDuration(sc, s, MaxFsp)
 		return d.GetMysqlDuration().Compare(dur), errors.Trace(err)
 	case KindMysqlSet:
 		return comparer.Compare(d.GetMysqlSet().String(), s), nil
@@ -801,7 +817,7 @@ func (d *Datum) compareMysqlDuration(sc *stmtctx.StatementContext, dur Duration)
 	case KindMysqlDuration:
 		return d.GetMysqlDuration().Compare(dur), nil
 	case KindString, KindBytes:
-		dDur, err := ParseDuration(sc, d.GetString(), MaxFsp)
+		dDur, _, err := ParseDuration(sc, d.GetString(), MaxFsp)
 		return dDur.Compare(dur), errors.Trace(err)
 	default:
 		return d.compareFloat64(sc, dur.Seconds())
@@ -854,12 +870,17 @@ func (d *Datum) compareMysqlSet(sc *stmtctx.StatementContext, set Set, comparer 
 	}
 }
 
-func (d *Datum) compareMysqlJSON(sc *stmtctx.StatementContext, target json.BinaryJSON) (int, error) {
+func (d *Datum) compareMysqlJSON(_ *stmtctx.StatementContext, target BinaryJSON) (int, error) {
+	// json is not equal with NULL
+	if d.k == KindNull {
+		return 1, nil
+	}
+
 	origin, err := d.ToMysqlJSON()
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
-	return json.CompareBinary(origin, target), nil
+	return CompareBinaryJSON(origin, target), nil
 }
 
 func (d *Datum) compareMysqlTime(sc *stmtctx.StatementContext, time Time) (int, error) {
@@ -1091,8 +1112,10 @@ func ProduceStrWithSpecifiedTp(s string, tp *FieldType, sc *stmtctx.StatementCon
 						r, size = utf8.DecodeLastRuneInString(tempStr)
 						if r == utf8.RuneError && size == 0 {
 							// Empty string
+							continue
 						} else if r == utf8.RuneError && size == 1 {
 							// Invalid string
+							continue
 						} else {
 							// Get the truncate position
 							break
@@ -1123,7 +1146,6 @@ func ProduceStrWithSpecifiedTp(s string, tp *FieldType, sc *stmtctx.StatementCon
 					s = truncateStr(s, truncateLen)
 				}
 			}
-
 		} else if len(s) > flen {
 			characterLen = len(s)
 			overflowed = s[flen:]
@@ -1381,13 +1403,13 @@ func (d *Datum) convertToMysqlDuration(sc *stmtctx.StatementContext, target *Fie
 		if timeNum < -MaxDuration {
 			return ret, ErrWrongValue.GenWithStackByArgs(TimeStr, timeStr)
 		}
-		t, err := ParseDuration(sc, timeStr, fsp)
+		t, _, err := ParseDuration(sc, timeStr, fsp)
 		ret.SetMysqlDuration(t)
 		if err != nil {
 			return ret, errors.Trace(err)
 		}
 	case KindString, KindBytes:
-		t, err := ParseDuration(sc, d.GetString(), fsp)
+		t, _, err := ParseDuration(sc, d.GetString(), fsp)
 		ret.SetMysqlDuration(t)
 		if err != nil {
 			return ret, errors.Trace(err)
@@ -1398,7 +1420,7 @@ func (d *Datum) convertToMysqlDuration(sc *stmtctx.StatementContext, target *Fie
 		if err != nil {
 			return ret, errors.Trace(err)
 		}
-		t, err := ParseDuration(sc, s, fsp)
+		t, _, err := ParseDuration(sc, s, fsp)
 		ret.SetMysqlDuration(t)
 		if err != nil {
 			return ret, errors.Trace(err)
@@ -1665,38 +1687,52 @@ func (d *Datum) convertToMysqlSet(sc *stmtctx.StatementContext, target *FieldTyp
 	return ret, err
 }
 
-func (d *Datum) convertToMysqlJSON(sc *stmtctx.StatementContext, target *FieldType) (ret Datum, err error) {
+func (d *Datum) convertToMysqlJSON(_ *stmtctx.StatementContext, _ *FieldType) (ret Datum, err error) {
 	switch d.k {
 	case KindString, KindBytes:
-		var j json.BinaryJSON
-		if j, err = json.ParseBinaryFromString(d.GetString()); err == nil {
+		var j BinaryJSON
+		if j, err = ParseBinaryJSONFromString(d.GetString()); err == nil {
 			ret.SetMysqlJSON(j)
+		}
+	case KindMysqlSet, KindMysqlEnum:
+		var j BinaryJSON
+		var s string
+		if s, err = d.ToString(); err == nil {
+			if j, err = ParseBinaryJSONFromString(s); err == nil {
+				ret.SetMysqlJSON(j)
+			}
 		}
 	case KindInt64:
 		i64 := d.GetInt64()
-		ret.SetMysqlJSON(json.CreateBinary(i64))
+		ret.SetMysqlJSON(CreateBinaryJSON(i64))
 	case KindUint64:
 		u64 := d.GetUint64()
-		ret.SetMysqlJSON(json.CreateBinary(u64))
+		ret.SetMysqlJSON(CreateBinaryJSON(u64))
 	case KindFloat32, KindFloat64:
 		f64 := d.GetFloat64()
-		ret.SetMysqlJSON(json.CreateBinary(f64))
+		ret.SetMysqlJSON(CreateBinaryJSON(f64))
 	case KindMysqlDecimal:
 		var f64 float64
 		if f64, err = d.GetMysqlDecimal().ToFloat64(); err == nil {
-			ret.SetMysqlJSON(json.CreateBinary(f64))
+			ret.SetMysqlJSON(CreateBinaryJSON(f64))
 		}
 	case KindMysqlJSON:
 		ret = *d
+	case KindMysqlTime:
+		tm := d.GetMysqlTime()
+		ret.SetMysqlJSON(CreateBinaryJSON(tm))
+	case KindMysqlDuration:
+		dur := d.GetMysqlDuration()
+		ret.SetMysqlJSON(CreateBinaryJSON(dur))
 	case KindBinaryLiteral:
-		err = json.ErrInvalidJSONCharset.GenWithStackByArgs(charset.CharsetBin)
+		err = ErrInvalidJSONCharset.GenWithStackByArgs(charset.CharsetBin)
 	default:
 		var s string
 		if s, err = d.ToString(); err == nil {
 			// TODO: fix precision of MysqlTime. For example,
 			// On MySQL 5.7 CAST(NOW() AS JSON) -> "2011-11-11 11:11:11.111111",
 			// But now we can only return "2011-11-11 11:11:11".
-			ret.SetMysqlJSON(json.CreateBinary(s))
+			ret.SetMysqlJSON(CreateBinaryJSON(s))
 		}
 	}
 	return ret, errors.Trace(err)
@@ -1802,8 +1838,7 @@ func (d *Datum) ToDecimal(sc *stmtctx.StatementContext) (*MyDecimal, error) {
 
 // ToInt64 converts to a int64.
 func (d *Datum) ToInt64(sc *stmtctx.StatementContext) (int64, error) {
-	switch d.Kind() {
-	case KindMysqlBit:
+	if d.Kind() == KindMysqlBit {
 		uintVal, err := d.GetBinaryLiteral().ToInt(sc)
 		return int64(uintVal), err
 	}
@@ -1976,9 +2011,23 @@ func (d *Datum) ToBytes() ([]byte, error) {
 	}
 }
 
+// ToHashKey gets the bytes representation of the datum considering collation.
+func (d *Datum) ToHashKey() ([]byte, error) {
+	switch d.k {
+	case KindString, KindBytes:
+		return collate.GetCollator(d.Collation()).Key(d.GetString()), nil
+	default:
+		str, err := d.ToString()
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		return collate.GetCollator(d.Collation()).Key(str), nil
+	}
+}
+
 // ToMysqlJSON is similar to convertToMysqlJSON, except the
 // latter parses from string, but the former uses it as primitive.
-func (d *Datum) ToMysqlJSON() (j json.BinaryJSON, err error) {
+func (d *Datum) ToMysqlJSON() (j BinaryJSON, err error) {
 	var in interface{}
 	switch d.Kind() {
 	case KindMysqlJSON:
@@ -1998,6 +2047,10 @@ func (d *Datum) ToMysqlJSON() (j json.BinaryJSON, err error) {
 		in = d.GetBinaryLiteral().ToString()
 	case KindNull:
 		in = nil
+	case KindMysqlTime:
+		in = d.GetMysqlTime()
+	case KindMysqlDuration:
+		in = d.GetMysqlDuration()
 	default:
 		in, err = d.ToString()
 	}
@@ -2005,7 +2058,7 @@ func (d *Datum) ToMysqlJSON() (j json.BinaryJSON, err error) {
 		err = errors.Trace(err)
 		return
 	}
-	j = json.CreateBinary(in)
+	j = CreateBinaryJSON(in)
 	return
 }
 
@@ -2013,6 +2066,62 @@ func (d *Datum) ToMysqlJSON() (j json.BinaryJSON, err error) {
 func (d *Datum) MemUsage() (sum int64) {
 	// d.x is not considered now since MemUsage is now only used by analyze samples which is bytesDatum
 	return EmptyDatumSize + int64(cap(d.b)) + int64(len(d.collation))
+}
+
+type jsonDatum struct {
+	K         byte       `json:"k"`
+	Decimal   uint16     `json:"decimal,omitempty"`
+	Length    uint32     `json:"length,omitempty"`
+	I         int64      `json:"i,omitempty"`
+	Collation string     `json:"collation,omitempty"`
+	B         []byte     `json:"b,omitempty"`
+	Time      Time       `json:"time,omitempty"`
+	MyDecimal *MyDecimal `json:"mydecimal,omitempty"`
+}
+
+// MarshalJSON implements Marshaler.MarshalJSON interface.
+func (d *Datum) MarshalJSON() ([]byte, error) {
+	jd := &jsonDatum{
+		K:         d.k,
+		Decimal:   d.decimal,
+		Length:    d.length,
+		I:         d.i,
+		Collation: d.collation,
+		B:         d.b,
+	}
+	switch d.k {
+	case KindMysqlTime:
+		jd.Time = d.GetMysqlTime()
+	case KindMysqlDecimal:
+		jd.MyDecimal = d.GetMysqlDecimal()
+	default:
+		if d.x != nil {
+			return nil, fmt.Errorf("unsupported type: %d", d.k)
+		}
+	}
+	return gjson.Marshal(jd)
+}
+
+// UnmarshalJSON implements Unmarshaler.UnmarshalJSON interface.
+func (d *Datum) UnmarshalJSON(data []byte) error {
+	var jd jsonDatum
+	if err := gjson.Unmarshal(data, &jd); err != nil {
+		return err
+	}
+	d.k = jd.K
+	d.decimal = jd.Decimal
+	d.length = jd.Length
+	d.i = jd.I
+	d.collation = jd.Collation
+	d.b = jd.B
+
+	switch jd.K {
+	case KindMysqlTime:
+		d.SetMysqlTime(jd.Time)
+	case KindMysqlDecimal:
+		d.SetMysqlDecimal(jd.MyDecimal)
+	}
+	return nil
 }
 
 func invalidConv(d *Datum, tp byte) (Datum, error) {
@@ -2091,7 +2200,7 @@ func NewDecimalDatum(dec *MyDecimal) (d Datum) {
 }
 
 // NewJSONDatum creates a new Datum from a BinaryJSON value
-func NewJSONDatum(j json.BinaryJSON) (d Datum) {
+func NewJSONDatum(j BinaryJSON) (d Datum) {
 	d.SetMysqlJSON(j)
 	return d
 }
@@ -2345,8 +2454,8 @@ func ChangeReverseResultByUpperLowerBound(
 		resRetType.SetType(mysql.TypeDouble)
 	case KindMysqlDecimal:
 		resRetType.SetType(mysql.TypeNewDecimal)
-		resRetType.SetFlen(int(res.GetMysqlDecimal().GetDigitsFrac() + res.GetMysqlDecimal().GetDigitsInt()))
-		resRetType.SetDecimal(int(res.GetMysqlDecimal().GetDigitsInt()))
+		resRetType.SetFlenUnderLimit(int(res.GetMysqlDecimal().GetDigitsFrac() + res.GetMysqlDecimal().GetDigitsInt()))
+		resRetType.SetDecimalUnderLimit(int(res.GetMysqlDecimal().GetDigitsInt()))
 	}
 	bound := getDatumBound(&resRetType, rType)
 	cmp, err := d.Compare(sc, &bound, collate.GetCollator(resRetType.GetCollate()))

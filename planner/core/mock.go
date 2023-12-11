@@ -73,7 +73,7 @@ func MockSignedTable() *model.TableInfo {
 			Unique: true,
 		},
 		{
-			Name: model.NewCIStr("e"),
+			Name: model.NewCIStr("x"),
 			Columns: []*model.IndexColumn{
 				{
 					Name:   model.NewCIStr("e"),
@@ -401,9 +401,13 @@ func MockContext() sessionctx.Context {
 	ctx.Store = &mock.Store{
 		Client: &mock.Client{},
 	}
+	initStatsCtx := mock.NewContext()
+	initStatsCtx.Store = &mock.Store{
+		Client: &mock.Client{},
+	}
 	ctx.GetSessionVars().CurrentDB = "test"
-	do := &domain.Domain{}
-	if err := do.CreateStatsHandle(ctx); err != nil {
+	do := domain.NewMockDomain()
+	if err := do.CreateStatsHandle(ctx, initStatsCtx); err != nil {
 		panic(fmt.Sprintf("create mock context panic: %+v", err))
 	}
 	domain.BindDomain(ctx, do)
@@ -552,4 +556,56 @@ func MockListPartitionTable() *model.TableInfo {
 	tableInfo.Columns = cols
 	tableInfo.Partition = partition
 	return tableInfo
+}
+
+// MockStateNoneColumnTable is only used for plan related tests.
+func MockStateNoneColumnTable() *model.TableInfo {
+	// column: a, b
+	// PK: a
+	// indeices: b
+	indices := []*model.IndexInfo{
+		{
+			Name: model.NewCIStr("b"),
+			Columns: []*model.IndexColumn{
+				{
+					Name:   model.NewCIStr("b"),
+					Length: types.UnspecifiedLength,
+					Offset: 1,
+				},
+			},
+			State:  model.StatePublic,
+			Unique: true,
+		},
+	}
+	pkColumn := &model.ColumnInfo{
+		State:     model.StatePublic,
+		Offset:    0,
+		Name:      model.NewCIStr("a"),
+		FieldType: newLongType(),
+		ID:        1,
+	}
+	col0 := &model.ColumnInfo{
+		State:     model.StatePublic,
+		Offset:    1,
+		Name:      model.NewCIStr("b"),
+		FieldType: newLongType(),
+		ID:        2,
+	}
+	col1 := &model.ColumnInfo{
+		State:     model.StateNone,
+		Offset:    2,
+		Name:      model.NewCIStr("c"),
+		FieldType: newLongType(),
+		ID:        3,
+	}
+	pkColumn.SetFlag(mysql.PriKeyFlag | mysql.NotNullFlag | mysql.UnsignedFlag)
+	col0.SetFlag(mysql.NotNullFlag)
+	col1.SetFlag(mysql.UnsignedFlag)
+	table := &model.TableInfo{
+		Columns:    []*model.ColumnInfo{pkColumn, col0, col1},
+		Indices:    indices,
+		Name:       model.NewCIStr("T_StateNoneColumn"),
+		PKIsHandle: true,
+	}
+	return table
 }

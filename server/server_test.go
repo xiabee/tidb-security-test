@@ -15,7 +15,9 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -40,6 +42,11 @@ import (
 	"github.com/pingcap/tidb/kv"
 	tmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/testkit/testdata"
+	"github.com/pingcap/tidb/testkit/testenv"
+	"github.com/pingcap/tidb/util/arena"
+	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/replayer"
 	"github.com/pingcap/tidb/util/versioninfo"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -61,6 +68,7 @@ type testServerClient struct {
 
 // newTestServerClient return a testServerClient with unique address
 func newTestServerClient() *testServerClient {
+	testenv.SetGOMAXPROCSForTest()
 	return &testServerClient{
 		port:         0,
 		statusPort:   0,
@@ -519,10 +527,9 @@ func (cli *testServerClient) runTestLoadDataAutoRandom(t *testing.T) {
 		config.Params["sql_mode"] = "''"
 	}, "load_data_batch_dml", func(dbt *testkit.DBTestKit) {
 		// Set batch size, and check if load data got a invalid txn error.
-		dbt.MustExec("set @@session.tidb_dml_batch_size = 128")
 		dbt.MustExec("drop table if exists t")
 		dbt.MustExec("create table t(c1 bigint auto_random primary key, c2 bigint, c3 bigint)")
-		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t (c2, c3)", path))
+		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t (c2, c3) with batch_size = 128", path))
 		rows := dbt.MustQuery("select count(*) from t")
 		cli.checkRows(t, rows, "50000")
 		require.NoError(t, rows.Close())
@@ -577,10 +584,9 @@ func (cli *testServerClient) runTestLoadDataAutoRandomWithSpecialTerm(t *testing
 		config.Params = map[string]string{"sql_mode": "''"}
 	}, "load_data_batch_dml", func(dbt *testkit.DBTestKit) {
 		// Set batch size, and check if load data got a invalid txn error.
-		dbt.MustExec("set @@session.tidb_dml_batch_size = 128")
 		dbt.MustExec("drop table if exists t1")
 		dbt.MustExec("create table t1(c1 bigint auto_random primary key, c2 bigint, c3 bigint)")
-		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t1 fields terminated by ',' enclosed by '\\'' lines terminated by '|' (c2, c3)", path))
+		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t1 fields terminated by ',' enclosed by '\\'' lines terminated by '|' (c2, c3) with batch_size = 128", path))
 		rows := dbt.MustQuery("select count(*) from t1")
 		cli.checkRows(t, rows, "50000")
 		rows = dbt.MustQuery("select bit_xor(c2), bit_xor(c3) from t1")
@@ -627,8 +633,8 @@ func (cli *testServerClient) runTestLoadDataForListPartition(t *testing.T) {
 		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t", path))
 		rows = dbt.MustQuery("show warnings")
 		cli.checkRows(t, rows,
-			"Warning 1062 Duplicate entry '1' for key 'idx'",
-			"Warning 1062 Duplicate entry '2' for key 'idx'")
+			"Warning 1062 Duplicate entry '1' for key 't.idx'",
+			"Warning 1062 Duplicate entry '2' for key 't.idx'")
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("select * from t order by id")
 		cli.checkRows(t, rows, "1 a", "2 b", "3 c", "4 e", "7 a")
@@ -681,8 +687,8 @@ func (cli *testServerClient) runTestLoadDataForListPartition2(t *testing.T) {
 		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t (id,name)", path))
 		rows = dbt.MustQuery("show warnings")
 		cli.checkRows(t, rows,
-			"Warning 1062 Duplicate entry '1-2' for key 'idx'",
-			"Warning 1062 Duplicate entry '2-2' for key 'idx'")
+			"Warning 1062 Duplicate entry '1-2' for key 't.idx'",
+			"Warning 1062 Duplicate entry '2-2' for key 't.idx'")
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("select id,name from t order by id")
 		cli.checkRows(t, rows, "1 a", "2 b", "3 c", "4 e", "7 a")
@@ -736,8 +742,8 @@ func (cli *testServerClient) runTestLoadDataForListColumnPartition(t *testing.T)
 		dbt.MustExec(fmt.Sprintf("load data local infile %q into table t", path))
 		rows = dbt.MustQuery("show warnings")
 		cli.checkRows(t, rows,
-			"Warning 1062 Duplicate entry '1' for key 'idx'",
-			"Warning 1062 Duplicate entry '2' for key 'idx'")
+			"Warning 1062 Duplicate entry '1' for key 't.idx'",
+			"Warning 1062 Duplicate entry '2' for key 't.idx'")
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("select * from t order by id")
 		cli.checkRows(t, rows, "1 a", "2 b", "3 c", "4 e", "7 a")
@@ -790,7 +796,7 @@ func (cli *testServerClient) runTestLoadDataForListColumnPartition2(t *testing.T
 		require.NoError(t, err)
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("show warnings")
-		cli.checkRows(t, rows, "Warning 1062 Duplicate entry 'w-1' for key 'idx'")
+		cli.checkRows(t, rows, "Warning 1062 Duplicate entry 'w-1' for key 't.idx'")
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("select * from t order by id")
 		cli.checkRows(t, rows, "w 1 1", "w 2 2", "e 5 5", "n 9 9")
@@ -808,7 +814,7 @@ func (cli *testServerClient) runTestLoadDataForListColumnPartition2(t *testing.T
 		rows = dbt.MustQuery("show warnings")
 		cli.checkRows(t, rows,
 			"Warning 1526 Table has no partition for value from column_list",
-			"Warning 1062 Duplicate entry 'w-1' for key 'idx'")
+			"Warning 1062 Duplicate entry 'w-1' for key 't.idx'")
 		require.NoError(t, rows.Close())
 		rows = dbt.MustQuery("select * from t order by id")
 		cli.checkRows(t, rows, "w 1 1", "w 2 2", "w 3 3", "e 5 5", "e 8 8", "n 9 9")
@@ -979,6 +985,18 @@ func (cli *testServerClient) runTestLoadDataWithColumnList(t *testing.T, _ *Serv
 		require.NoError(t, err)
 		columnsAsExpected(t, columns, strings.Split("1,4,a,2022-04-19,a,2022-04-19 00:00:01", ","))
 	})
+
+	// Also test for name mismatches
+	cli.runTestsOnNewDB(t, func(config *mysql.Config) {
+		config.AllowAllFiles = true
+		config.Params["sql_mode"] = "''"
+	}, "LoadData", func(db *testkit.DBTestKit) {
+		db.MustExec("use test")
+		db.MustExec("drop table if exists t66")
+		db.MustExec("create table t66 (id int primary key, c1 varchar(255))")
+		_, err = db.GetDB().Exec(fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE t66 FIELDS TERMINATED BY ',' ENCLOSED BY '\\\"' IGNORE 1 LINES (c1, c2)", path))
+		require.EqualError(t, err, "Error 1054 (42S22): Unknown column 'c2' in 'field list'")
+	})
 }
 
 func columnsAsExpected(t *testing.T, columns []*sql.NullString, expected []string) {
@@ -1008,17 +1026,16 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		"xxx row5_col1	- 	row5_col3")
 	require.NoError(t, err)
 
-	originalTxnTotalSizeLimit := kv.TxnTotalSizeLimit
+	originalTxnTotalSizeLimit := kv.TxnTotalSizeLimit.Load()
 	// If the MemBuffer can't be committed once in each batch, it will return an error like "transaction is too large".
-	kv.TxnTotalSizeLimit = 10240
-	defer func() { kv.TxnTotalSizeLimit = originalTxnTotalSizeLimit }()
+	kv.TxnTotalSizeLimit.Store(10240)
+	defer func() { kv.TxnTotalSizeLimit.Store(originalTxnTotalSizeLimit) }()
 
 	// support ClientLocalFiles capability
 	cli.runTestsOnNewDB(t, func(config *mysql.Config) {
 		config.AllowAllFiles = true
 		config.Params["sql_mode"] = "''"
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
 		dbt.MustExec("create table test (a varchar(255), b varchar(255) default 'default value', c int not null auto_increment, primary key(c))")
 		dbt.MustExec("create view v1 as select 1")
 		dbt.MustExec("create sequence s1")
@@ -1026,12 +1043,12 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		// can't insert into views (in TiDB) or sequences. issue #20880
 		_, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table v1", path))
 		require.Error(t, err)
-		require.Equal(t, "Error 1105: can only load data into base tables", err.Error())
+		require.Equal(t, "Error 1288 (HY000): The target table v1 of the LOAD is not updatable", err.Error())
 		_, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table s1", path))
 		require.Error(t, err)
-		require.Equal(t, "Error 1105: can only load data into base tables", err.Error())
+		require.Equal(t, "Error 1288 (HY000): The target table s1 of the LOAD is not updatable", err.Error())
 
-		rs, err1 := dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test", path))
+		rs, err1 := dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test with batch_size = 3", path))
 		require.NoError(t, err1)
 		lastID, err1 := rs.LastInsertId()
 		require.NoError(t, err1)
@@ -1081,8 +1098,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 
 		// specify faileds and lines
 		dbt.MustExec("delete from test")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		rs, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test fields terminated by '\t- ' lines starting by 'xxx ' terminated by '\n'", path))
+		rs, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test fields terminated by '\t- ' lines starting by 'xxx ' terminated by '\n' with batch_size = 3", path))
 		require.NoError(t, err)
 		lastID, err = rs.LastInsertId()
 		require.NoError(t, err)
@@ -1125,8 +1141,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 			_, err = fp.WriteString(fmt.Sprintf("xxx row%d_col1	- row%d_col2\n", i, i))
 			require.NoError(t, err)
 		}
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		rs, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test fields terminated by '\t- ' lines starting by 'xxx ' terminated by '\n'", path))
+		rs, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test fields terminated by '\t- ' lines starting by 'xxx ' terminated by '\n' with batch_size = 3", path))
 		require.NoError(t, err)
 		lastID, err = rs.LastInsertId()
 		require.NoError(t, err)
@@ -1138,12 +1153,10 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		require.Truef(t, rows.Next(), "unexpected data")
 		require.NoError(t, rows.Close())
 		// don't support lines terminated is ""
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
 		_, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test lines terminated by ''", path))
 		require.NotNil(t, err)
 
 		// infile doesn't exist
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
 		_, err = dbt.GetDB().Exec("load data local infile '/tmp/nonexistence.csv' into table test")
 		require.NotNil(t, err)
 	})
@@ -1169,8 +1182,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		config.Params["sql_mode"] = "''"
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("create table test (str varchar(10) default null, i int default null)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' enclosed by '"'`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' enclosed by '"' with batch_size = 3`, path))
 		require.NoError(t, err1)
 		var (
 			str string
@@ -1218,8 +1230,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		config.Params["sql_mode"] = "''"
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("create table test (a date, b date, c date not null, d date)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ','`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' with batch_size = 3`, path))
 		require.NoError(t, err1)
 		var (
 			a sql.NullString
@@ -1275,8 +1286,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		config.Params["sql_mode"] = "''"
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("create table test (a varchar(20), b varchar(20))")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' enclosed by '"'`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' enclosed by '"' with batch_size = 3`, path))
 		require.NoError(t, err1)
 		var (
 			a sql.NullString
@@ -1322,8 +1332,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		config.AllowAllFiles = true
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("create table test (id INT NOT NULL PRIMARY KEY,  b INT,  c varchar(10))")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' IGNORE 1 LINES`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table test FIELDS TERMINATED BY ',' OPTIONALLY ENCLOSED BY '\"' IGNORE 1 LINES with batch_size = 3`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1348,7 +1357,6 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		config.AllowAllFiles = true
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("create table test (a varchar(255), b varchar(255) default 'default value', c int not null auto_increment, primary key(c))")
-		dbt.MustExec("set @@tidb_dml_batch_size = 3")
 		_, err = dbt.GetDB().Exec(fmt.Sprintf("load data local infile %q into table test", path))
 		require.Error(t, err)
 		checkErrorCode(t, err, errno.ErrNotAllowedCommand)
@@ -1376,8 +1384,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("drop table if exists pn")
 		dbt.MustExec("create table pn (c1 int, c2 int)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 1")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ','`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ','  with batch_size = 1`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1428,8 +1435,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("drop table if exists pn")
 		dbt.MustExec("create table pn (c1 int, c2 int)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 1")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, c2)`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, c2) with batch_size = 1`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1472,8 +1478,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("drop table if exists pn")
 		dbt.MustExec("create table pn (c1 int, c2 int, c3 int)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 1")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @dummy)`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @dummy) with batch_size = 1`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1519,8 +1524,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("drop table if exists pn")
 		dbt.MustExec("create table pn (c1 int, c2 int, c3 int)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 1")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @val1, @val2) SET c3 = @val2 * 100, c2 = CAST(@val1 AS UNSIGNED)`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @val1, @val2) SET c3 = @val2 * 100, c2 = CAST(@val1 AS UNSIGNED) with batch_size = 1`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1552,8 +1556,7 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 	}, "LoadData", func(dbt *testkit.DBTestKit) {
 		dbt.MustExec("drop table if exists pn")
 		dbt.MustExec("create table pn (c1 int, c2 int, c3 int)")
-		dbt.MustExec("set @@tidb_dml_batch_size = 1")
-		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @VAL1, @VAL2) SET c3 = @VAL2 * 100, c2 = CAST(@VAL1 AS UNSIGNED)`, path))
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @VAL1, @VAL2) SET c3 = @VAL2 * 100, c2 = CAST(@VAL1 AS UNSIGNED) with batch_size = 1`, path))
 		require.NoError(t, err1)
 		var (
 			a int
@@ -1573,6 +1576,73 @@ func (cli *testServerClient) runTestLoadData(t *testing.T, server *Server) {
 		require.Equal(t, 4, a)
 		require.Equal(t, 5, b)
 		require.Equal(t, 600, c)
+		require.Falsef(t, rows.Next(), "unexpected data")
+		require.NoError(t, rows.Close())
+		dbt.MustExec("drop table if exists pn")
+	})
+
+	err = fp.Close()
+	require.NoError(t, err)
+	err = os.Remove(path)
+	require.NoError(t, err)
+
+	fp, err = os.Create(path)
+	require.NoError(t, err)
+	require.NotNil(t, fp)
+
+	_, err = fp.WriteString(
+		`1,2` + "\n" +
+			`1,2,,4` + "\n" +
+			`1,2,3` + "\n" +
+			`,,,` + "\n" +
+			`,,3` + "\n" +
+			`1,,,4` + "\n")
+	require.NoError(t, err)
+
+	nullInt32 := func(val int32, valid bool) sql.NullInt32 {
+		return sql.NullInt32{Int32: val, Valid: valid}
+	}
+	expects := []struct {
+		col1 sql.NullInt32
+		col2 sql.NullInt32
+		col3 sql.NullInt32
+		col4 sql.NullInt32
+	}{
+		{nullInt32(1, true), nullInt32(2, true), nullInt32(0, false), nullInt32(0, false)},
+		{nullInt32(1, true), nullInt32(2, true), nullInt32(0, false), nullInt32(4, true)},
+		{nullInt32(1, true), nullInt32(2, true), nullInt32(3, true), nullInt32(0, false)},
+		{nullInt32(0, true), nullInt32(0, false), nullInt32(0, false), nullInt32(0, false)},
+		{nullInt32(0, true), nullInt32(0, false), nullInt32(3, true), nullInt32(0, false)},
+		{nullInt32(1, true), nullInt32(0, false), nullInt32(0, false), nullInt32(4, true)},
+	}
+
+	cli.runTestsOnNewDB(t, func(config *mysql.Config) {
+		config.AllowAllFiles = true
+		config.Params["sql_mode"] = "''"
+	}, "LoadData", func(dbt *testkit.DBTestKit) {
+		dbt.MustExec("drop table if exists pn")
+		dbt.MustExec("create table pn (c1 int, c2 int, c3 int, c4 int)")
+		dbt.MustExec("set @@tidb_dml_batch_size = 1")
+		_, err1 := dbt.GetDB().Exec(fmt.Sprintf(`load data local infile %q into table pn FIELDS TERMINATED BY ',' (c1, @val2, @val3, @val4)
+							 SET c2 = NULLIF(@val2, ''), c3 = NULLIF(@val3, ''), c4 = NULLIF(@val4, '')`, path))
+		require.NoError(t, err1)
+		var (
+			a sql.NullInt32
+			b sql.NullInt32
+			c sql.NullInt32
+			d sql.NullInt32
+		)
+		rows := dbt.MustQuery("select * from pn")
+		for _, expect := range expects {
+			require.Truef(t, rows.Next(), "unexpected data")
+			err = rows.Scan(&a, &b, &c, &d)
+			require.NoError(t, err)
+			require.Equal(t, expect.col1, a)
+			require.Equal(t, expect.col2, b)
+			require.Equal(t, expect.col3, c)
+			require.Equal(t, expect.col4, d)
+		}
+
 		require.Falsef(t, rows.Next(), "unexpected data")
 		require.NoError(t, rows.Close())
 		dbt.MustExec("drop table if exists pn")
@@ -1636,6 +1706,7 @@ func (cli *testServerClient) runTestExplainForConn(t *testing.T) {
 
 func (cli *testServerClient) runTestErrorCode(t *testing.T) {
 	cli.runTestsOnNewDB(t, nil, "ErrorCode", func(dbt *testkit.DBTestKit) {
+		dbt.MustExec("set @@tidb_txn_mode=''")
 		dbt.MustExec("create table test (c int PRIMARY KEY);")
 		dbt.MustExec("insert into test values (1);")
 		txn1, err := dbt.GetDB().Begin()
@@ -1775,7 +1846,7 @@ func (cli *testServerClient) runTestIssue3662(t *testing.T) {
 	// is valid, call Ping."
 	err = db.Ping()
 	require.Error(t, err)
-	require.Equal(t, "Error 1049: Unknown database 'non_existing_schema'", err.Error())
+	require.Equal(t, "Error 1049 (42000): Unknown database 'non_existing_schema'", err.Error())
 }
 
 func (cli *testServerClient) runTestIssue3680(t *testing.T) {
@@ -1793,7 +1864,7 @@ func (cli *testServerClient) runTestIssue3680(t *testing.T) {
 	// is valid, call Ping."
 	err = db.Ping()
 	require.Error(t, err)
-	require.Equal(t, "Error 1045: Access denied for user 'non_existing_user'@'127.0.0.1' (using password: NO)", err.Error())
+	require.Equal(t, "Error 1045 (28000): Access denied for user 'non_existing_user'@'127.0.0.1' (using password: NO)", err.Error())
 }
 
 func (cli *testServerClient) runTestIssue22646(t *testing.T) {
@@ -1830,7 +1901,106 @@ func (cli *testServerClient) runTestIssue3682(t *testing.T) {
 	}()
 	err = db.Ping()
 	require.Error(t, err)
-	require.Equal(t, "Error 1045: Access denied for user 'issue3682'@'127.0.0.1' (using password: YES)", err.Error())
+	require.Equal(t, "Error 1045 (28000): Access denied for user 'issue3682'@'127.0.0.1' (using password: YES)", err.Error())
+}
+
+func (cli *testServerClient) runTestAccountLock(t *testing.T) {
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`CREATE USER 'test1' ACCOUNT LOCK;`)
+		dbt.MustExec(`CREATE USER 'test2';`) // unlocked default
+		dbt.MustExec(`GRANT ALL on test.* to 'test1', 'test2'`)
+		dbt.MustExec(`GRANT ALL on mysql.* to 'test1', 'test2'`)
+	})
+	defer cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`DROP USER 'test1', 'test2';`)
+	})
+
+	// 1. test1 can not connect to server
+	db, err := sql.Open("mysql", cli.getDSN(func(config *mysql.Config) {
+		config.User = "test1"
+	}))
+	require.NoError(t, err)
+	err = db.Ping()
+	require.Error(t, err)
+	require.Equal(t, "Error 3118 (HY000): Access denied for user 'test1'@'127.0.0.1'. Account is locked.", err.Error())
+	require.NoError(t, db.Close())
+
+	// 2. test1 can connect after unlocked
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`ALTER USER 'test1' ACCOUNT UNLOCK;`)
+	})
+	db, err = sql.Open("mysql", cli.getDSN(func(config *mysql.Config) {
+		config.User = "test1"
+	}))
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
+	require.NoError(t, db.Close())
+
+	// 3. if multiple 'ACCOUNT (UN)LOCK' declared, the last declaration takes effect
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		rows := dbt.MustQuery(`SELECT user, account_locked FROM mysql.user WHERE user LIKE 'test%' ORDER BY user;`)
+		cli.checkRows(t, rows, "test1 N", "test2 N")
+		dbt.MustExec(`ALTER USER test1, test2 ACCOUNT UNLOCK ACCOUNT LOCK;`)
+		rows = dbt.MustQuery(`SELECT user, account_locked FROM mysql.user WHERE user LIKE 'test%' ORDER BY user;`)
+		cli.checkRows(t, rows, "test1 Y", "test2 Y")
+		dbt.MustExec(`ALTER USER test1, test2 ACCOUNT LOCK ACCOUNT UNLOCK;`)
+		rows = dbt.MustQuery(`SELECT user, account_locked FROM mysql.user WHERE user LIKE 'test%' ORDER BY user;`)
+		cli.checkRows(t, rows, "test1 N", "test2 N")
+		dbt.MustExec(`ALTER USER test1, test2;`) // if not specified, remain the same
+		rows = dbt.MustQuery(`SELECT user, account_locked FROM mysql.user WHERE user LIKE 'test%' ORDER BY user;`)
+		cli.checkRows(t, rows, "test1 N", "test2 N")
+	})
+
+	// 4. A role can be created default with account locked
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`CREATE ROLE role1;`)
+		dbt.MustExec(`GRANT ALL on test.* to 'role1'`)
+		rows := dbt.MustQuery(`SELECT user, account_locked, password_expired FROM mysql.user WHERE user = 'role1';`)
+		cli.checkRows(t, rows, "role1 Y Y")
+	})
+	// When created, the role is locked by default and cannot log in to TiDB
+	db, err = sql.Open("mysql", cli.getDSN(func(config *mysql.Config) {
+		config.User = "role1"
+	}))
+	require.NoError(t, err)
+	err = db.Ping()
+	require.Error(t, err)
+	require.Equal(t, "Error 3118 (HY000): Access denied for user 'role1'@'127.0.0.1'. Account is locked.", err.Error())
+	require.NoError(t, db.Close())
+	// After unlocked by the ALTER USER statement, the role can connect to server like a user
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`ALTER USER role1 ACCOUNT UNLOCK;`)
+		dbt.MustExec(`ALTER USER role1 IDENTIFIED BY ''`)
+		rows := dbt.MustQuery(`SELECT user, account_locked, password_expired FROM mysql.user WHERE user = 'role1';`)
+		cli.checkRows(t, rows, "role1 N N")
+	})
+	defer cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`DROP ROLE role1;`)
+	})
+	db, err = sql.Open("mysql", cli.getDSN(func(config *mysql.Config) {
+		config.User = "role1"
+	}))
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
+	require.NoError(t, db.Close())
+
+	// 5. The ability to use a view is not affected by locking the account.
+	cli.runTests(t, func(config *mysql.Config) {
+		config.User = "test1"
+	}, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec("CREATE TABLE IF NOT EXISTS t (id INT, name VARCHAR(16))")
+		dbt.MustExec("INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+	})
+	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
+		dbt.MustExec(`ALTER USER test1 ACCOUNT LOCK;`)
+		rows := dbt.MustQuery(`SELECT user, account_locked FROM mysql.user WHERE user = 'test1';`)
+		cli.checkRows(t, rows, "test1 Y")
+		_ = dbt.MustExec("CREATE VIEW v AS SELECT name FROM t WHERE id = 2")
+		rows = dbt.MustQuery("SELECT definer, security_type FROM information_schema.views WHERE table_name = 'v'")
+		cli.checkRows(t, rows, "root@% DEFINER")
+		rows = dbt.MustQuery(`SELECT * FROM v;`)
+		cli.checkRows(t, rows, "b")
+	})
 }
 
 func (cli *testServerClient) runTestDBNameEscape(t *testing.T) {
@@ -1873,11 +2043,10 @@ func (cli *testServerClient) runTestStatusAPI(t *testing.T) {
 
 func (cli *testServerClient) runFailedTestMultiStatements(t *testing.T) {
 	cli.runTestsOnNewDB(t, nil, "FailedMultiStatements", func(dbt *testkit.DBTestKit) {
-
 		// Default is now OFF in new installations.
 		// It is still WARN in upgrade installations (for now)
 		_, err := dbt.GetDB().Exec("SELECT 1; SELECT 1; SELECT 2; SELECT 3;")
-		require.Equal(t, "Error 8130: client has multi-statement capability disabled. Run SET GLOBAL tidb_multi_statement_mode='ON' after you understand the security risk", err.Error())
+		require.Equal(t, "Error 8130 (HY000): client has multi-statement capability disabled. Run SET GLOBAL tidb_multi_statement_mode='ON' after you understand the security risk", err.Error())
 
 		// Change to WARN (legacy mode)
 		dbt.MustExec("SET tidb_multi_statement_mode='WARN'")
@@ -1934,7 +2103,6 @@ func (cli *testServerClient) runFailedTestMultiStatements(t *testing.T) {
 }
 
 func (cli *testServerClient) runTestMultiStatements(t *testing.T) {
-
 	cli.runTestsOnNewDB(t, func(config *mysql.Config) {
 		config.Params["multiStatements"] = "true"
 	}, "MultiStatements", func(dbt *testkit.DBTestKit) {
@@ -2016,11 +2184,72 @@ func (cli *testServerClient) runTestStmtCount(t *testing.T) {
 		require.Equal(t, originStmtCnt["CreateTable"]+1, currentStmtCnt["CreateTable"])
 		require.Equal(t, originStmtCnt["Insert"]+5, currentStmtCnt["Insert"])
 		require.Equal(t, originStmtCnt["Delete"]+1, currentStmtCnt["Delete"])
-		require.Equal(t, originStmtCnt["Update"]+1, currentStmtCnt["Update"])
-		require.Equal(t, originStmtCnt["Select"]+2, currentStmtCnt["Select"])
+		require.Equal(t, originStmtCnt["Update"]+2, currentStmtCnt["Update"])
+		require.Equal(t, originStmtCnt["Select"]+3, currentStmtCnt["Select"])
 		require.Equal(t, originStmtCnt["Prepare"]+2, currentStmtCnt["Prepare"])
-		require.Equal(t, originStmtCnt["Execute"]+2, currentStmtCnt["Execute"])
+		require.Equal(t, originStmtCnt["Execute"]+0, currentStmtCnt["Execute"])
 		require.Equal(t, originStmtCnt["Replace"]+1, currentStmtCnt["Replace"])
+	})
+}
+
+func (cli *testServerClient) runTestDBStmtCount(t *testing.T) {
+	// When run this test solely, the test can be stable.
+	// But if other tests run during this, the result can be unstable.
+	// Because the test collect some metrics before / after the test, and the metrics data are polluted.
+	t.Skip("unstable test")
+
+	cli.runTestsOnNewDB(t, nil, "DBStatementCount", func(dbt *testkit.DBTestKit) {
+		originStmtCnt := getDBStmtCnt(string(cli.getMetrics(t)), "DBStatementCount")
+
+		dbt.MustExec("create table test (a int)")
+
+		dbt.MustExec("insert into test values(1)")
+		dbt.MustExec("insert into test values(2)")
+		dbt.MustExec("insert into test values(3)")
+		dbt.MustExec("insert into test values(4)")
+		dbt.MustExec("insert into test values(5)")
+
+		dbt.MustExec("delete from test where a = 3")
+		dbt.MustExec("update test set a = 2 where a = 1")
+		dbt.MustExec("select * from test")
+		dbt.MustExec("select 2")
+
+		dbt.MustExec("prepare stmt1 from 'update test set a = 1 where a = 2'")
+		dbt.MustExec("execute stmt1")
+		dbt.MustExec("prepare stmt2 from 'select * from test'")
+		dbt.MustExec("execute stmt2")
+		dbt.MustExec("replace into test(a) values(6);")
+		// test for CTE
+		dbt.MustExec("WITH RECURSIVE cte (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM cte WHERE n < 5) SELECT * FROM cte;")
+
+		dbt.MustExec("use DBStatementCount")
+		dbt.MustExec("create table t2 (id int);")
+		dbt.MustExec("truncate table t2;")
+		dbt.MustExec("show tables;")
+		dbt.MustExec("show create table t2;")
+		dbt.MustExec("analyze table t2;")
+		dbt.MustExec("analyze table test;")
+		dbt.MustExec("alter table t2 add column name varchar(10);")
+		dbt.MustExec("rename table t2 to t3;")
+		dbt.MustExec("rename table t3 to t2;")
+		dbt.MustExec("drop table t2;")
+
+		currentStmtCnt := getStmtCnt(string(cli.getMetrics(t)))
+		require.Equal(t, originStmtCnt["CreateTable"]+3, currentStmtCnt["CreateTable"])
+		require.Equal(t, originStmtCnt["Insert"]+5, currentStmtCnt["Insert"])
+		require.Equal(t, originStmtCnt["Delete"]+1, currentStmtCnt["Delete"])
+		require.Equal(t, originStmtCnt["Update"]+2, currentStmtCnt["Update"])
+		require.Equal(t, originStmtCnt["Select"]+5, currentStmtCnt["Select"])
+		require.Equal(t, originStmtCnt["Prepare"]+2, currentStmtCnt["Prepare"])
+		require.Equal(t, originStmtCnt["Execute"]+0, currentStmtCnt["Execute"])
+		require.Equal(t, originStmtCnt["Replace"]+1, currentStmtCnt["Replace"])
+		require.Equal(t, originStmtCnt["Use"]+6, currentStmtCnt["Use"])
+		require.Equal(t, originStmtCnt["TruncateTable"]+1, currentStmtCnt["TruncateTable"])
+		require.Equal(t, originStmtCnt["Show"]+2, currentStmtCnt["Show"])
+		require.Equal(t, originStmtCnt["AnalyzeTable"]+2, currentStmtCnt["AnalyzeTable"])
+		require.Equal(t, originStmtCnt["AlterTable"]+1, currentStmtCnt["AlterTable"])
+		require.Equal(t, originStmtCnt["DropTable"]+1, currentStmtCnt["DropTable"])
+		require.Equal(t, originStmtCnt["other"]+2, currentStmtCnt["other"])
 	})
 }
 
@@ -2103,7 +2332,18 @@ func (cli *testServerClient) getMetrics(t *testing.T) []byte {
 
 func getStmtCnt(content string) (stmtCnt map[string]int) {
 	stmtCnt = make(map[string]int)
-	r := regexp.MustCompile("tidb_executor_statement_total{type=\"([A-Z|a-z|-]+)\"} (\\d+)")
+	r := regexp.MustCompile("tidb_executor_statement_total{db=\"\",type=\"([A-Z|a-z|-]+)\"} (\\d+)")
+	matchResult := r.FindAllStringSubmatch(content, -1)
+	for _, v := range matchResult {
+		cnt, _ := strconv.Atoi(v[2])
+		stmtCnt[v[1]] = cnt
+	}
+	return stmtCnt
+}
+
+func getDBStmtCnt(content, dbName string) (stmtCnt map[string]int) {
+	stmtCnt = make(map[string]int)
+	r := regexp.MustCompile(fmt.Sprintf("tidb_executor_statement_total{db=\"%s\",type=\"([A-Z|a-z|-]+)\"} (\\d+)", dbName))
 	matchResult := r.FindAllStringSubmatch(content, -1)
 	for _, v := range matchResult {
 		cnt, _ := strconv.Atoi(v[2])
@@ -2167,7 +2407,6 @@ func (cli *testServerClient) waitUntilServerOnline() {
 }
 
 func (cli *testServerClient) runTestInitConnect(t *testing.T) {
-
 	cli.runTests(t, nil, func(dbt *testkit.DBTestKit) {
 		dbt.MustExec(`SET GLOBAL init_connect="insert into test.ts VALUES (NOW());SET @a=1;"`)
 		dbt.MustExec(`CREATE USER init_nonsuper`)
@@ -2201,8 +2440,6 @@ func (cli *testServerClient) runTestInitConnect(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "", a)
 		require.NoError(t, rows.Close())
-		// change the init-connect to invalid.
-		dbt.MustExec(`SET GLOBAL init_connect="invalidstring"`)
 	})
 	// set global init_connect to empty to avoid fail other tests
 	defer cli.runTests(t, func(config *mysql.Config) {
@@ -2215,17 +2452,14 @@ func (cli *testServerClient) runTestInitConnect(t *testing.T) {
 	db, err := sql.Open("mysql", cli.getDSN(func(config *mysql.Config) {
 		config.User = "init_nonsuper"
 	}))
-	require.NoError(t, err)      // doesn't fail because of lazy loading
-	defer db.Close()             // may already be closed
-	_, err = db.Exec("SELECT 1") // fails because of init sql
-	require.Error(t, err)
+	require.NoError(t, err) // doesn't fail because of lazy loading
+	defer db.Close()        // may already be closed
 }
 
 // Client errors are only incremented when using the TiDB Server protocol,
 // and not internal SQL statements. Thus, this test is in the server-test suite.
 func (cli *testServerClient) runTestInfoschemaClientErrors(t *testing.T) {
 	cli.runTestsOnNewDB(t, nil, "clientErrors", func(dbt *testkit.DBTestKit) {
-
 		clientErrors := []struct {
 			stmt              string
 			incrementWarnings bool
@@ -2255,7 +2489,6 @@ func (cli *testServerClient) runTestInfoschemaClientErrors(t *testing.T) {
 
 		for _, test := range clientErrors {
 			for _, tbl := range sources {
-
 				var errors, warnings int
 				rows := dbt.MustQuery("SELECT SUM(error_count), SUM(warning_count) FROM information_schema."+tbl+" WHERE error_number = ? GROUP BY error_number", test.errCode)
 				if rows.Next() {
@@ -2290,8 +2523,52 @@ func (cli *testServerClient) runTestInfoschemaClientErrors(t *testing.T) {
 				require.Equalf(t, warnings, newWarnings, "source=information_schema.%s code=%d statement=%s", tbl, test.errCode, test.stmt)
 			}
 		}
-
 	})
+}
+
+func TestIssue46197(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tidbdrv := NewTiDBDriver(store)
+	cfg := newTestConfig()
+	cfg.Port, cfg.Status.StatusPort = 0, 0
+	cfg.Status.ReportStatus = false
+	server, err := NewServer(cfg, tidbdrv)
+	require.NoError(t, err)
+	defer server.Close()
+
+	// Mock the content of the SQL file in PacketIO buffer.
+	// First 4 bytes are the header, followed by the actual content.
+	// This acts like we are sending "select * from t1;" from the client when tidb requests the "a.txt" file.
+	var inBuffer bytes.Buffer
+	_, err = inBuffer.Write([]byte{0x11, 0x00, 0x00, 0x01})
+	require.NoError(t, err)
+	_, err = inBuffer.Write([]byte("select * from t1;"))
+	require.NoError(t, err)
+
+	// clientConn setup
+	brc := newBufferedReadConn(&bytesConn{b: inBuffer})
+	pkt := newPacketIO(brc)
+	pkt.bufWriter = bufio.NewWriter(bytes.NewBuffer(nil))
+	cc := &clientConn{
+		server:     server,
+		alloc:      arena.NewAllocator(1024),
+		chunkAlloc: chunk.NewAllocator(),
+		pkt:        pkt,
+		capability: tmysql.ClientLocalFiles,
+	}
+	ctx := context.Background()
+	cc.setCtx(&TiDBContext{Session: tk.Session(), stmts: make(map[int]*TiDBStatement)})
+
+	tk.MustExec("use test")
+	tk.MustExec("create table t1 (a int, b int)")
+
+	// 3 is mysql.ComQuery, followed by the SQL text.
+	require.NoError(t, cc.dispatch(ctx, []byte("\u0003plan replayer dump explain 'a.txt'")))
+
+	// clean up
+	path := testdata.ConvertRowsToStrings(tk.MustQuery("select @@tidb_last_plan_replayer_token").Rows())
+	require.NoError(t, os.Remove(filepath.Join(replayer.GetPlanReplayerDirName(), path[0])))
 }
 
 func (cli *testServerClient) RunTestStmtCountLimit(t *testing.T) {
@@ -2314,7 +2591,7 @@ func (cli *testServerClient) RunTestStmtCountLimit(t *testing.T) {
 		dbt.MustExec("insert into t values (2);")
 		_, err := dbt.GetDB().Query("select * from t for update;")
 		require.Error(t, err)
-		require.Equal(t, "Error 1105: statement count 4 exceeds the transaction limitation, transaction has been rollback, autocommit = false", err.Error())
+		require.Equal(t, "Error 1105 (HY000): statement count 4 exceeds the transaction limitation, transaction has been rollback, autocommit = false", err.Error())
 		dbt.MustExec("insert into t values (3);")
 		dbt.MustExec("commit;")
 		rows := dbt.MustQuery("select * from t;")
@@ -2337,7 +2614,7 @@ func (cli *testServerClient) RunTestStmtCountLimit(t *testing.T) {
 		dbt.MustExec("insert into t values (2);")
 		_, err = dbt.GetDB().Exec("insert into t values (3);")
 		require.Error(t, err)
-		require.Equal(t, "Error 1105: statement count 4 exceeds the transaction limitation, transaction has been rollback, autocommit = false", err.Error())
+		require.Equal(t, "Error 1105 (HY000): statement count 4 exceeds the transaction limitation, transaction has been rollback, autocommit = false", err.Error())
 		dbt.MustExec("commit;")
 		rows = dbt.MustQuery("select count(*) from t;")
 		for rows.Next() {

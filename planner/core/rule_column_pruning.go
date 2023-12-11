@@ -31,7 +31,7 @@ import (
 type columnPruner struct {
 }
 
-func (s *columnPruner) optimize(ctx context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (*columnPruner) optimize(_ context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
 	err := lp.PruneColumns(lp.Schema().Columns, opt)
 	return lp, err
 }
@@ -115,6 +115,7 @@ func (la *LogicalAggregation) PruneColumns(parentUsedCols []*expression.Column, 
 	}
 	appendColumnPruneTraceStep(la, prunedColumns, opt)
 	appendFunctionPruneTraceStep(la, prunedFunctions, opt)
+	//nolint: prealloc
 	var selfUsedCols []*expression.Column
 	for _, aggrFunc := range la.AggFuncs {
 		selfUsedCols = expression.ExtractColumnsFromExpressions(selfUsedCols, aggrFunc.Args, nil)
@@ -191,19 +192,17 @@ func pruneByItems(p LogicalPlan, old []*util.ByItems, opt *logicalOptimizeOp) (b
 		_, hashMatch := seen[hash]
 		seen[hash] = struct{}{}
 		cols := expression.ExtractColumns(byItem.Expr)
-		if hashMatch {
-			// do nothing, should be filtered
-		} else if len(cols) == 0 {
-			if !expression.IsRuntimeConstExpr(byItem.Expr) {
+		if !hashMatch {
+			if len(cols) == 0 {
+				if !expression.IsRuntimeConstExpr(byItem.Expr) {
+					pruned = false
+					byItems = append(byItems, byItem)
+				}
+			} else if byItem.Expr.GetType().GetType() != mysql.TypeNull {
 				pruned = false
+				parentUsedCols = append(parentUsedCols, cols...)
 				byItems = append(byItems, byItem)
 			}
-		} else if byItem.Expr.GetType().GetType() == mysql.TypeNull {
-			// do nothing, should be filtered
-		} else {
-			pruned = false
-			parentUsedCols = append(parentUsedCols, cols...)
-			byItems = append(byItems, byItem)
 		}
 		if pruned {
 			prunedByItems = append(prunedByItems, byItem)
@@ -248,6 +247,9 @@ func (p *LogicalUnionAll) PruneColumns(parentUsedCols []*expression.Column, opt 
 	if !hasBeenUsed {
 		parentUsedCols = make([]*expression.Column, len(p.schema.Columns))
 		copy(parentUsedCols, p.schema.Columns)
+		for i := range used {
+			used[i] = true
+		}
 	}
 	for _, child := range p.Children() {
 		err := child.PruneColumns(parentUsedCols, opt)
@@ -257,16 +259,15 @@ func (p *LogicalUnionAll) PruneColumns(parentUsedCols []*expression.Column, opt 
 	}
 
 	prunedColumns := make([]*expression.Column, 0)
+	for i := len(used) - 1; i >= 0; i-- {
+		if !used[i] {
+			prunedColumns = append(prunedColumns, p.schema.Columns[i])
+			p.schema.Columns = append(p.schema.Columns[:i], p.schema.Columns[i+1:]...)
+		}
+	}
+	appendColumnPruneTraceStep(p, prunedColumns, opt)
 	if hasBeenUsed {
 		// keep the schema of LogicalUnionAll same as its children's
-		used := expression.GetUsedList(p.children[0].Schema().Columns, p.schema)
-		for i := len(used) - 1; i >= 0; i-- {
-			if !used[i] {
-				prunedColumns = append(prunedColumns, p.schema.Columns[i])
-				p.schema.Columns = append(p.schema.Columns[:i], p.schema.Columns[i+1:]...)
-			}
-		}
-		appendColumnPruneTraceStep(p, prunedColumns, opt)
 		// It's possible that the child operator adds extra columns to the schema.
 		// Currently, (*LogicalAggregation).PruneColumns() might do this.
 		// But we don't need such columns, so we add an extra Projection to prune this column when this happened.
@@ -313,6 +314,14 @@ func (ds *DataSource) PruneColumns(parentUsedCols []*expression.Column, opt *log
 
 	originSchemaColumns := ds.schema.Columns
 	originColumns := ds.Columns
+
+	ds.colsRequiringFullLen = make([]*expression.Column, 0, len(used))
+	for i, col := range ds.schema.Columns {
+		if used[i] || (ds.containExprPrefixUk && expression.GcColumnExprIsTidbShard(col.VirtualExpr)) {
+			ds.colsRequiringFullLen = append(ds.colsRequiringFullLen, col)
+		}
+	}
+
 	for i := len(used) - 1; i >= 0; i-- {
 		if !used[i] && !exprUsed[i] {
 			// If ds has a shard index, and the column is generated column by `tidb_shard()`
@@ -332,22 +341,15 @@ func (ds *DataSource) PruneColumns(parentUsedCols []*expression.Column, opt *log
 	if ds.schema.Len() == 0 {
 		var handleCol *expression.Column
 		var handleColInfo *model.ColumnInfo
-		if ds.table.Type().IsClusterTable() && len(originColumns) > 0 {
-			// use the first line.
-			handleCol = originSchemaColumns[0]
-			handleColInfo = originColumns[0]
-		} else {
-			if ds.handleCols != nil {
-				handleCol = ds.handleCols.GetCol(0)
-				handleColInfo = handleCol.ToInfo()
-			} else {
-				handleCol = ds.newExtraHandleSchemaCol()
-				handleColInfo = model.NewExtraHandleColInfo()
-			}
-		}
+		handleCol, handleColInfo = preferKeyColumnFromTable(ds, originSchemaColumns, originColumns)
 		ds.Columns = append(ds.Columns, handleColInfo)
 		ds.schema.Append(handleCol)
 	}
+	// ref: https://github.com/pingcap/tidb/issues/44579
+	// when first entering columnPruner, we kept a column-a in datasource since upper agg function count(a) is used.
+	//		then we mark the handleCols as nil here.
+	// when second entering columnPruner, the count(a) is eliminated since it always not null. we should fill another
+	// 		extra col, in this way, handle col is useful again, otherwise, _tidb_rowid will be filled.
 	if ds.handleCols != nil && ds.handleCols.IsInt() && ds.schema.ColumnIndex(ds.handleCols.GetCol(0)) == -1 {
 		ds.handleCols = nil
 	}
@@ -411,6 +413,9 @@ func (p *LogicalJoin) extractUsedCols(parentUsedCols []*expression.Column) (left
 	}
 	for _, otherCond := range p.OtherConditions {
 		parentUsedCols = append(parentUsedCols, expression.ExtractColumns(otherCond)...)
+	}
+	for _, naeqCond := range p.NAEQConditions {
+		parentUsedCols = append(parentUsedCols, expression.ExtractColumns(naeqCond)...)
 	}
 	lChild := p.children[0]
 	rChild := p.children[1]
@@ -647,4 +652,29 @@ func appendItemPruneTraceStep(p LogicalPlan, itemType string, prunedObjects []fm
 		return ""
 	}
 	opt.appendStepToCurrent(p.ID(), p.TP(), reason, action)
+}
+
+func preferKeyColumnFromTable(dataSource *DataSource, originColumns []*expression.Column,
+	originSchemaColumns []*model.ColumnInfo) (*expression.Column, *model.ColumnInfo) {
+	var resultColumnInfo *model.ColumnInfo
+	var resultColumn *expression.Column
+	if dataSource.table.Type().IsClusterTable() && len(originColumns) > 0 {
+		// use the first column.
+		resultColumnInfo = originSchemaColumns[0]
+		resultColumn = originColumns[0]
+	} else {
+		if dataSource.handleCols != nil {
+			resultColumn = dataSource.handleCols.GetCol(0)
+			resultColumnInfo = resultColumn.ToInfo()
+		} else if dataSource.table.Meta().PKIsHandle {
+			// dataSource.handleCols = nil doesn't mean datasource doesn't have a intPk handle.
+			// since datasource.handleCols will be cleared in the first columnPruner.
+			resultColumn = dataSource.unMutableHandleCols.GetCol(0)
+			resultColumnInfo = resultColumn.ToInfo()
+		} else {
+			resultColumn = dataSource.newExtraHandleSchemaCol()
+			resultColumnInfo = model.NewExtraHandleColInfo()
+		}
+	}
+	return resultColumn, resultColumnInfo
 }

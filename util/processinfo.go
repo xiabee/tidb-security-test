@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,35 +26,49 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/session/txninfo"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/util/disk"
 	"github.com/pingcap/tidb/util/execdetails"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/tikv/client-go/v2/oracle"
 )
 
+// OOMAlarmVariablesInfo is a struct for OOM alarm variables.
+type OOMAlarmVariablesInfo struct {
+	SessionAnalyzeVersion         int
+	SessionEnabledRateLimitAction bool
+	SessionMemQuotaQuery          int64
+}
+
 // ProcessInfo is a struct used for show processlist statement.
 type ProcessInfo struct {
-	ID                uint64
-	User              string
-	Host              string
-	Port              string
-	DB                string
-	Digest            string
-	Plan              interface{}
-	PlanExplainRows   [][]string
-	RuntimeStatsColl  *execdetails.RuntimeStatsColl
-	Time              time.Time
-	Info              string
-	CurTxnStartTS     uint64
-	StmtCtx           *stmtctx.StatementContext
-	RefCountOfStmtCtx *stmtctx.ReferenceCount
-	StatsInfo         func(interface{}) map[string]uint64
+	Time                  time.Time
+	ExpensiveLogTime      time.Time
+	Plan                  interface{}
+	StmtCtx               *stmtctx.StatementContext
+	RefCountOfStmtCtx     *stmtctx.ReferenceCount
+	MemTracker            *memory.Tracker
+	DiskTracker           *disk.Tracker
+	StatsInfo             func(interface{}) map[string]uint64
+	RuntimeStatsColl      *execdetails.RuntimeStatsColl
+	DB                    string
+	Digest                string
+	Host                  string
+	User                  string
+	Info                  string
+	Port                  string
+	ResourceGroupName     string
+	PlanExplainRows       [][]string
+	TableIDs              []int64
+	IndexNames            []string
+	OOMAlarmVariablesInfo OOMAlarmVariablesInfo
+	ID                    uint64
+	CurTxnStartTS         uint64
 	// MaxExecutionTime is the timeout for select statement, in milliseconds.
 	// If the query takes too long, kill it.
 	MaxExecutionTime uint64
-
-	State                     uint16
-	Command                   byte
-	ExceedExpensiveTimeThresh bool
-	RedactSQL                 bool
+	State            uint16
+	Command          byte
+	RedactSQL        bool
 }
 
 // ToRowForShow returns []interface{} for the row data of "SHOW [FULL] PROCESSLIST".
@@ -73,7 +88,7 @@ func (pi *ProcessInfo) ToRowForShow(full bool) []interface{} {
 	}
 	var host string
 	if pi.Port != "" {
-		host = fmt.Sprintf("%s:%s", pi.Host, pi.Port)
+		host = net.JoinHostPort(pi.Host, pi.Port)
 	} else {
 		host = pi.Host
 	}
@@ -108,14 +123,14 @@ func (pi *ProcessInfo) ToRow(tz *time.Location) []interface{} {
 	bytesConsumed := int64(0)
 	diskConsumed := int64(0)
 	if pi.StmtCtx != nil {
-		if pi.StmtCtx.MemTracker != nil {
-			bytesConsumed = pi.StmtCtx.MemTracker.BytesConsumed()
+		if pi.MemTracker != nil {
+			bytesConsumed = pi.MemTracker.BytesConsumed()
 		}
-		if pi.StmtCtx.DiskTracker != nil {
-			diskConsumed = pi.StmtCtx.DiskTracker.BytesConsumed()
+		if pi.DiskTracker != nil {
+			diskConsumed = pi.DiskTracker.BytesConsumed()
 		}
 	}
-	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed, pi.txnStartTs(tz))
+	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed, pi.txnStartTs(tz), pi.ResourceGroupName)
 }
 
 // ascServerStatus is a slice of all defined server status in ascending order.
@@ -154,7 +169,8 @@ var mapServerStatus2Str = map[uint16]string{
 // Param state is a bit-field. (e.g. 0x0003 = "in transaction; autocommit").
 func serverStatus2Str(state uint16) string {
 	// l collect server status strings.
-	var l []string // nolint: prealloc
+	//nolint: prealloc
+	var l []string
 	// check each defined server status, if match, append to collector.
 	for _, s := range ascServerStatus {
 		if state&s == 0 {
@@ -175,36 +191,38 @@ type SessionManager interface {
 	KillAllConnections()
 	UpdateTLSConfig(cfg *tls.Config)
 	ServerID() uint64
-	// Put the internal session pointer to the map in the SessionManager
+	// StoreInternalSession puts the internal session pointer to the map in the SessionManager.
 	StoreInternalSession(se interface{})
-	// Delete the internal session pointer from the map in the SessionManager
+	// DeleteInternalSession deletes the internal session pointer from the map in the SessionManager.
 	DeleteInternalSession(se interface{})
-	// Get all startTS of every transactions running in the current internal sessions
+	// GetInternalSessionStartTSList gets all startTS of every transactions running in the current internal sessions.
 	GetInternalSessionStartTSList() []uint64
+	// CheckOldRunningTxn checks if there is an old transaction running in the current sessions
+	CheckOldRunningTxn(job2ver map[int64]int64, job2ids map[int64]string)
+	// KillNonFlashbackClusterConn kill all non flashback cluster connections.
+	KillNonFlashbackClusterConn()
 }
 
 // GlobalConnID is the global connection ID, providing UNIQUE connection IDs across the whole TiDB cluster.
 // 64 bits version:
-//
-//	63 62                 41 40                                   1   0
-//
-// +--+---------------------+--------------------------------------+------+
-// |  |      serverId       |             local connId             |markup|
-// |=0|       (22b)         |                 (40b)                |  =1  |
-// +--+---------------------+--------------------------------------+------+
-// 32 bits version(coming soon):
-//
-//	31                          1   0
-//
-// +-----------------------------+------+
-// |             ???             |markup|
-// |             ???             |  =0  |
-// +-----------------------------+------+
+/*
+  63 62                 41 40                                   1   0
+ +--+---------------------+--------------------------------------+------+
+ |  |      serverId       |             local connId             |markup|
+ |=0|       (22b)         |                 (40b)                |  =1  |
+ +--+---------------------+--------------------------------------+------+
+ 32 bits version(coming soon):
+  31                          1   0
+ +-----------------------------+------+
+ |             ???             |markup|
+ |             ???             |  =0  |
+ +-----------------------------+------+
+*/
 type GlobalConnID struct {
+	ServerIDGetter func() uint64
 	ServerID       uint64
 	LocalConnID    uint64
 	Is64bits       bool
-	ServerIDGetter func() uint64
 }
 
 // NewGlobalConnID creates GlobalConnID with serverID

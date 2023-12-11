@@ -15,26 +15,29 @@
 package lightning
 
 import (
-	"github.com/pingcap/tidb/br/pkg/lightning/glue"
+	"database/sql"
+
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
+	"github.com/pingcap/tidb/util/promutil"
+	"go.uber.org/atomic"
+	"go.uber.org/zap"
 )
 
 type options struct {
-	glue              glue.Glue
 	dumpFileStorage   storage.ExternalStorage
 	checkpointStorage storage.ExternalStorage
 	checkpointName    string
+	promFactory       promutil.Factory
+	promRegistry      promutil.Registry
+	logger            log.Logger
+	dupIndicator      *atomic.Bool
+	// only used in tests
+	db *sql.DB
 }
 
+// Option is a function that configures a lightning task.
 type Option func(*options)
-
-// WithGlue sets the glue to a lightning task.
-// Typically, the glue is set when lightning is integrated with a TiDB.
-func WithGlue(g glue.Glue) Option {
-	return func(o *options) {
-		o.glue = g
-	}
-}
 
 // WithDumpFileStorage sets the external storage to a lightning task.
 // Typically, the external storage is set when lightning is integrated with dataflow engine by DM.
@@ -50,5 +53,35 @@ func WithCheckpointStorage(s storage.ExternalStorage, cpName string) Option {
 	return func(o *options) {
 		o.checkpointStorage = s
 		o.checkpointName = cpName
+	}
+}
+
+// WithPromFactory sets the prometheus factory to a lightning task.
+func WithPromFactory(f promutil.Factory) Option {
+	return func(o *options) {
+		o.promFactory = f
+	}
+}
+
+// WithPromRegistry sets the prometheus registry to a lightning task.
+// The task metrics will be registered to the registry before the task starts
+// and unregistered after the task ends.
+func WithPromRegistry(r promutil.Registry) Option {
+	return func(o *options) {
+		o.promRegistry = r
+	}
+}
+
+// WithLogger sets the logger to a lightning task.
+func WithLogger(logger *zap.Logger) Option {
+	return func(o *options) {
+		o.logger = log.Logger{Logger: logger}
+	}
+}
+
+// WithDupIndicator sets a *bool to indicate duplicate detection has found duplicate data.
+func WithDupIndicator(b *atomic.Bool) Option {
+	return func(o *options) {
+		o.dupIndicator = b
 	}
 }

@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/pingcap/errors"
-	"go.uber.org/zap"
-
+	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
+	"go.uber.org/zap"
 )
 
 // rowIter implements the SQLRowIter interface.
@@ -92,12 +92,10 @@ func (iter *multiQueriesChunkIter) nextRows() {
 	for iter.id < len(iter.queries) {
 		rows := iter.rows
 		if rows != nil {
-			err = rows.Close()
-			if err != nil {
+			if err = rows.Close(); err != nil {
 				return
 			}
-			err = rows.Err()
-			if err != nil {
+			if err = rows.Err(); err != nil {
 				return
 			}
 		}
@@ -234,6 +232,8 @@ func (td *tableData) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 }
 
 func (td *tableData) Rows() SQLRowIter {
+	// should be initialized lazily since it calls rows.Next() which might close the rows when
+	// there's nothing to read, causes code which relies on rows not closed to fail.
 	if td.SQLRowIter == nil {
 		td.SQLRowIter = newRowIter(td.rows, td.colLen)
 	}
@@ -241,7 +241,13 @@ func (td *tableData) Rows() SQLRowIter {
 }
 
 func (td *tableData) Close() error {
-	return td.SQLRowIter.Close()
+	if td.SQLRowIter != nil {
+		// will close td.rows internally
+		return td.SQLRowIter.Close()
+	} else if td.rows != nil {
+		return td.rows.Close()
+	}
+	return nil
 }
 
 func (td *tableData) RawRows() *sql.Rows {
@@ -356,6 +362,7 @@ func newMultiQueriesChunk(queries []string, colLength int) *multiQueriesChunk {
 func (td *multiQueriesChunk) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 	td.tctx = tctx
 	td.conn = conn
+	td.SQLRowIter = nil
 	return nil
 }
 
@@ -367,9 +374,31 @@ func (td *multiQueriesChunk) Rows() SQLRowIter {
 }
 
 func (td *multiQueriesChunk) Close() error {
-	return td.SQLRowIter.Close()
+	if td.SQLRowIter != nil {
+		return td.SQLRowIter.Close()
+	}
+	return nil
 }
 
-func (td *multiQueriesChunk) RawRows() *sql.Rows {
+func (*multiQueriesChunk) RawRows() *sql.Rows {
 	return nil
+}
+
+var serverSpecialComments = map[version.ServerType][]string{
+	version.ServerTypeMySQL: {
+		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
+		"/*!40101 SET NAMES binary*/;",
+	},
+	version.ServerTypeTiDB: {
+		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
+		"/*!40101 SET NAMES binary*/;",
+	},
+	version.ServerTypeMariaDB: {
+		"/*!40101 SET NAMES binary*/;",
+		"SET FOREIGN_KEY_CHECKS=0;",
+	},
+}
+
+func getSpecialComments(serverType version.ServerType) []string {
+	return serverSpecialComments[serverType]
 }

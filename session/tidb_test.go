@@ -35,7 +35,7 @@ func TestDomapHandleNil(t *testing.T) {
 }
 
 func TestSysSessionPoolGoroutineLeak(t *testing.T) {
-	store, dom := createStoreAndBootstrap(t)
+	store, dom := CreateStoreAndBootstrap(t)
 	defer func() { require.NoError(t, store.Close()) }()
 	defer dom.Close()
 
@@ -55,7 +55,8 @@ func TestSysSessionPoolGoroutineLeak(t *testing.T) {
 	for i := 0; i < count; i++ {
 		s := stmts[i]
 		wg.Run(func() {
-			_, _, err := se.ExecRestrictedStmt(context.Background(), s)
+			ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
+			_, _, err := se.ExecRestrictedStmt(ctx, s)
 			require.NoError(t, err)
 		})
 	}

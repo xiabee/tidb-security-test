@@ -10,11 +10,10 @@ import (
 	"text/template"
 
 	"github.com/pingcap/errors"
-	"go.uber.org/zap"
-
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
+	"go.uber.org/zap"
 )
 
 // Writer is the abstraction that keep pulling data from database and write to files.
@@ -26,6 +25,7 @@ type Writer struct {
 	conn       *sql.Conn
 	extStorage storage.ExternalStorage
 	fileFmt    FileFormat
+	metrics    *metrics
 
 	receivedTaskCount int
 
@@ -35,13 +35,21 @@ type Writer struct {
 }
 
 // NewWriter returns a new Writer with given configurations
-func NewWriter(tctx *tcontext.Context, id int64, config *Config, conn *sql.Conn, externalStore storage.ExternalStorage) *Writer {
+func NewWriter(
+	tctx *tcontext.Context,
+	id int64,
+	config *Config,
+	conn *sql.Conn,
+	externalStore storage.ExternalStorage,
+	metrics *metrics,
+) *Writer {
 	sw := &Writer{
 		id:                  id,
 		tctx:                tctx,
 		conf:                config,
 		conn:                conn,
 		extStorage:          externalStore,
+		metrics:             metrics,
 		finishTaskCallBack:  func(Task) {},
 		finishTableCallBack: func(Task) {},
 	}
@@ -125,7 +133,7 @@ func (w *Writer) WritePolicyMeta(policy, createSQL string) error {
 	if err != nil {
 		return err
 	}
-	return writeMetaToFile(tctx, "placement-policy", createSQL, w.extStorage, fileName+".sql", conf.CompressType)
+	return w.writeMetaToFile(tctx, "placement-policy", createSQL, fileName+".sql")
 }
 
 // WriteDatabaseMeta writes database meta to a file
@@ -135,7 +143,7 @@ func (w *Writer) WriteDatabaseMeta(db, createSQL string) error {
 	if err != nil {
 		return err
 	}
-	return writeMetaToFile(tctx, db, createSQL, w.extStorage, fileName+".sql", conf.CompressType)
+	return w.writeMetaToFile(tctx, db, createSQL, fileName+".sql")
 }
 
 // WriteTableMeta writes table meta to a file
@@ -145,7 +153,7 @@ func (w *Writer) WriteTableMeta(db, table, createSQL string) error {
 	if err != nil {
 		return err
 	}
-	return writeMetaToFile(tctx, db, createSQL, w.extStorage, fileName+".sql", conf.CompressType)
+	return w.writeMetaToFile(tctx, db, createSQL, fileName+".sql")
 }
 
 // WriteViewMeta writes view meta to a file
@@ -159,11 +167,11 @@ func (w *Writer) WriteViewMeta(db, view, createTableSQL, createViewSQL string) e
 	if err != nil {
 		return err
 	}
-	err = writeMetaToFile(tctx, db, createTableSQL, w.extStorage, fileNameTable+".sql", conf.CompressType)
+	err = w.writeMetaToFile(tctx, db, createTableSQL, fileNameTable+".sql")
 	if err != nil {
 		return err
 	}
-	return writeMetaToFile(tctx, db, createViewSQL, w.extStorage, fileNameView+".sql", conf.CompressType)
+	return w.writeMetaToFile(tctx, db, createViewSQL, fileNameView+".sql")
 }
 
 // WriteSequenceMeta writes sequence meta to a file
@@ -173,7 +181,7 @@ func (w *Writer) WriteSequenceMeta(db, sequence, createSQL string) error {
 	if err != nil {
 		return err
 	}
-	return writeMetaToFile(tctx, db, createSQL, w.extStorage, fileName+".sql", conf.CompressType)
+	return w.writeMetaToFile(tctx, db, createSQL, fileName+".sql")
 }
 
 // WriteTableData writes table data to a file with retry
@@ -185,7 +193,7 @@ func (w *Writer) WriteTableData(meta TableMeta, ir TableDataIR, currentChunk int
 		defer func() {
 			lastErr = err
 			if err != nil {
-				IncCounter(errorCount, conf.Labels)
+				IncCounter(w.metrics.errorCount)
 			}
 		}()
 		retryTime++
@@ -205,12 +213,18 @@ func (w *Writer) WriteTableData(meta TableMeta, ir TableDataIR, currentChunk int
 			return
 		}
 		if conf.SQL != "" {
-			meta, err = setTableMetaFromRows(ir.RawRows())
+			rows := ir.RawRows()
+			meta, err = setTableMetaFromRows(w.conf.ServerInfo.ServerType, rows)
 			if err != nil {
 				return err
 			}
+			if err = rows.Err(); err != nil {
+				return errors.Trace(err)
+			}
 		}
-		defer ir.Close()
+		defer func() {
+			_ = ir.Close()
+		}()
 		return w.tryToWriteTableData(tctx, meta, ir, currentChunk)
 	}, newRebuildConnBackOffer(canRebuildConn(conf.Consistency, conf.TransactionalConsistency)))
 }
@@ -226,10 +240,13 @@ func (w *Writer) tryToWriteTableData(tctx *tcontext.Context, meta TableMeta, ir 
 	somethingIsWritten := false
 	for {
 		fileWriter, tearDown := buildInterceptFileWriter(tctx, w.extStorage, fileName, conf.CompressType)
-		n, err := format.WriteInsert(tctx, conf, meta, ir, fileWriter)
-		tearDown(tctx)
+		n, err := format.WriteInsert(tctx, conf, meta, ir, fileWriter, w.metrics)
+		tearDownErr := tearDown(tctx)
 		if err != nil {
 			return err
+		}
+		if tearDownErr != nil {
+			return tearDownErr
 		}
 
 		if w, ok := fileWriter.(*InterceptFileWriter); ok && !w.SomethingIsWritten {
@@ -260,20 +277,21 @@ func (w *Writer) tryToWriteTableData(tctx *tcontext.Context, meta TableMeta, ir 
 	return nil
 }
 
-func writeMetaToFile(tctx *tcontext.Context, target, metaSQL string, s storage.ExternalStorage, path string, compressType storage.CompressType) error {
-	fileWriter, tearDown, err := buildFileWriter(tctx, s, path, compressType)
+func (w *Writer) writeMetaToFile(tctx *tcontext.Context, target, metaSQL string, path string) error {
+	fileWriter, tearDown, err := buildFileWriter(tctx, w.extStorage, path, w.conf.CompressType)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer tearDown(tctx)
-
-	return WriteMeta(tctx, &metaData{
-		target:  target,
-		metaSQL: metaSQL,
-		specCmts: []string{
-			"/*!40101 SET NAMES binary*/;",
-		},
+	err = WriteMeta(tctx, &metaData{
+		target:   target,
+		metaSQL:  metaSQL,
+		specCmts: getSpecialComments(w.conf.ServerInfo.ServerType),
 	}, fileWriter)
+	tearDownErr := tearDown(tctx)
+	if err == nil {
+		return tearDownErr
+	}
+	return err
 }
 
 type outputFileNamer struct {

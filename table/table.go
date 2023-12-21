@@ -22,6 +22,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	mysql "github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
@@ -30,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tidb/util/tracing"
 )
 
 // Type is used to distinguish between different tables that store data in different ways.
@@ -66,9 +66,6 @@ var (
 	// ErrUnknownColumn is returned when accessing an unknown column.
 	ErrUnknownColumn   = dbterror.ClassTable.NewStd(mysql.ErrBadField)
 	errDuplicateColumn = dbterror.ClassTable.NewStd(mysql.ErrFieldSpecifiedTwice)
-
-	// ErrWarnNullToNotnull is like ErrColumnCantNull but it's used in LOAD DATA
-	ErrWarnNullToNotnull = dbterror.ClassExecutor.NewStd(mysql.ErrWarnNullToNotnull)
 
 	errGetDefaultFailed = dbterror.ClassTable.NewStd(mysql.ErrFieldGetDefaultFailed)
 
@@ -199,15 +196,14 @@ type Table interface {
 
 	// Type returns the type of table
 	Type() Type
-
-	// GetPartitionedTable returns nil if not partitioned
-	GetPartitionedTable() PartitionedTable
 }
 
 // AllocAutoIncrementValue allocates an auto_increment value for a new row.
 func AllocAutoIncrementValue(ctx context.Context, t Table, sctx sessionctx.Context) (int64, error) {
-	r, ctx := tracing.StartRegionEx(ctx, "table.AllocAutoIncrementValue")
-	defer r.End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("table.AllocAutoIncrementValue", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+	}
 	increment := sctx.GetSessionVars().AutoIncrementIncrement
 	offset := sctx.GetSessionVars().AutoIncrementOffset
 	alloc := t.Allocators(sctx).Get(autoid.AutoIncrementType)
@@ -249,7 +245,6 @@ type PartitionedTable interface {
 	GetPartition(physicalID int64) PhysicalTable
 	GetPartitionByRow(sessionctx.Context, []types.Datum) (PhysicalTable, error)
 	GetAllPartitionIDs() []int64
-	GetPartitionColumnIDs() []int64
 	GetPartitionColumnNames() []model.CIStr
 	CheckForExchangePartition(ctx sessionctx.Context, pi *model.PartitionInfo, r []types.Datum, pid int64) error
 }

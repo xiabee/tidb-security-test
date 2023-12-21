@@ -25,10 +25,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/bindinfo"
 	"github.com/pingcap/tidb/config"
-	domain_metrics "github.com/pingcap/tidb/domain/metrics"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
@@ -43,8 +41,6 @@ import (
 )
 
 const (
-	// PlanReplayerSQLMetaFile indicates sql meta path for plan replayer
-	PlanReplayerSQLMetaFile = "sql_meta.toml"
 	// PlanReplayerConfigFile indicates config file path for plan replayer
 	PlanReplayerConfigFile = "config.toml"
 	// PlanReplayerMetaFile meta file path for plan replayer
@@ -57,23 +53,6 @@ const (
 	PlanReplayerSessionBindingFile = "session_bindings.sql"
 	// PlanReplayerGlobalBindingFile indicates global binding file path for plan replayer
 	PlanReplayerGlobalBindingFile = "global_bindings.sql"
-	// PlanReplayerSchemaMetaFile indicates the schema meta
-	PlanReplayerSchemaMetaFile = "schema_meta.txt"
-)
-
-const (
-	// PlanReplayerSQLMetaStartTS indicates the startTS in plan replayer sql meta
-	PlanReplayerSQLMetaStartTS = "startTS"
-	// PlanReplayerTaskMetaIsCapture indicates whether this task is capture task
-	PlanReplayerTaskMetaIsCapture = "isCapture"
-	// PlanReplayerTaskMetaIsContinues indicates whether this task is continues task
-	PlanReplayerTaskMetaIsContinues = "isContinues"
-	// PlanReplayerTaskMetaSQLDigest indicates the sql digest of this task
-	PlanReplayerTaskMetaSQLDigest = "sqlDigest"
-	// PlanReplayerTaskMetaPlanDigest indicates the plan digest of this task
-	PlanReplayerTaskMetaPlanDigest = "planDigest"
-	// PlanReplayerTaskEnableHistoricalStats indicates whether the task is using historical stats
-	PlanReplayerTaskEnableHistoricalStats = "enableHistoricalStats"
 )
 
 type tableNamePair struct {
@@ -90,22 +69,6 @@ type tableNameExtractor struct {
 	names    map[tableNamePair]struct{}
 	cteNames map[string]struct{}
 	err      error
-}
-
-func (tne *tableNameExtractor) getTablesAndViews() map[tableNamePair]struct{} {
-	r := make(map[tableNamePair]struct{})
-	for tablePair := range tne.names {
-		if tablePair.IsView {
-			r[tablePair] = struct{}{}
-			continue
-		}
-		// remove cte in table names
-		_, ok := tne.cteNames[tablePair.TableName]
-		if !ok {
-			r[tablePair] = struct{}{}
-		}
-	}
-	return r
 }
 
 func (tne *tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
@@ -125,11 +88,11 @@ func (tne *tableNameExtractor) Leave(in ast.Node) (ast.Node, bool) {
 			tne.err = err
 			return in, true
 		}
-		if tne.is.TableExists(t.Schema, t.Name) {
-			tp := tableNamePair{DBName: t.Schema.L, TableName: t.Name.L, IsView: isView}
-			if tp.DBName == "" {
-				tp.DBName = tne.curDB.L
-			}
+		tp := tableNamePair{DBName: t.Schema.L, TableName: t.Name.L, IsView: isView}
+		if tp.DBName == "" {
+			tp.DBName = tne.curDB.L
+		}
+		if _, ok := tne.names[tp]; !ok {
 			tne.names[tp] = struct{}{}
 		}
 	} else if s, ok := in.(*ast.SelectStmt); ok {
@@ -168,10 +131,8 @@ func (tne *tableNameExtractor) handleIsView(t *ast.TableName) (bool, error) {
 // DumpPlanReplayerInfo will dump the information about sqls.
 // The files will be organized into the following format:
 /*
- |-sql_meta.toml
  |-meta.txt
  |-schema
- |	 |-schema_meta.txt
  |	 |-db1.table1.schema.txt
  |	 |-db2.table2.schema.txt
  |	 |-....
@@ -183,10 +144,6 @@ func (tne *tableNameExtractor) handleIsView(t *ast.TableName) (bool, error) {
  |   |-stats1.json
  |   |-stats2.json
  |   |-....
- |-statsMem
- |   |-stats1.txt
- |   |-stats2.txt
- |   |-....
  |-config.toml
  |-table_tiflash_replica.txt
  |-variables.toml
@@ -195,7 +152,10 @@ func (tne *tableNameExtractor) handleIsView(t *ast.TableName) (bool, error) {
  |   |-sql1.sql
  |   |-sql2.sql
  |	 |-....
- |-explain.txt
+ |_explain
+     |-explain1.txt
+     |-explain2.txt
+     |-....
 */
 func DumpPlanReplayerInfo(ctx context.Context, sctx sessionctx.Context,
 	task *PlanReplayerDumpTask) (err error) {
@@ -204,62 +164,25 @@ func DumpPlanReplayerInfo(ctx context.Context, sctx sessionctx.Context,
 	sessionVars := task.SessionVars
 	execStmts := task.ExecStmts
 	zw := zip.NewWriter(zf)
-	var records []PlanReplayerStatusRecord
-	sqls := make([]string, 0)
-	for _, execStmt := range task.ExecStmts {
-		sqls = append(sqls, execStmt.Text())
-	}
-	if task.IsCapture {
-		logutil.BgLogger().Info("[plan-replayer-dump] start to dump plan replayer result",
-			zap.String("sql-digest", task.SQLDigest),
-			zap.String("plan-digest", task.PlanDigest),
-			zap.Strings("sql", sqls),
-			zap.Bool("isContinues", task.IsContinuesCapture))
-	} else {
-		logutil.BgLogger().Info("[plan-replayer-dump] start to dump plan replayer result",
-			zap.Strings("sqls", sqls))
-	}
+	records := generateRecords(task)
 	defer func() {
-		errMsg := ""
 		if err != nil {
-			if task.IsCapture {
-				logutil.BgLogger().Info("[plan-replayer-dump] dump file failed",
-					zap.String("sql-digest", task.SQLDigest),
-					zap.String("plan-digest", task.PlanDigest),
-					zap.Strings("sql", sqls),
-					zap.Bool("isContinues", task.IsContinuesCapture))
-			} else {
-				logutil.BgLogger().Info("[plan-replayer-dump] start to dump plan replayer result",
-					zap.Strings("sqls", sqls))
-			}
-			errMsg = err.Error()
-			domain_metrics.PlanReplayerDumpTaskFailed.Inc()
-		} else {
-			domain_metrics.PlanReplayerDumpTaskSuccess.Inc()
+			logutil.BgLogger().Error("dump plan replayer failed", zap.Error(err))
 		}
-		err1 := zw.Close()
-		if err1 != nil {
-			logutil.BgLogger().Error("[plan-replayer-dump] Closing zip writer failed", zap.Error(err), zap.String("filename", fileName))
-			errMsg = errMsg + "," + err1.Error()
+		err = zw.Close()
+		if err != nil {
+			logutil.BgLogger().Error("Closing zip writer failed", zap.Error(err), zap.String("filename", fileName))
 		}
-		err2 := zf.Close()
-		if err2 != nil {
-			logutil.BgLogger().Error("[plan-replayer-dump] Closing zip file failed", zap.Error(err), zap.String("filename", fileName))
-			errMsg = errMsg + "," + err2.Error()
-		}
-		if len(errMsg) > 0 {
+		err = zf.Close()
+		if err != nil {
+			logutil.BgLogger().Error("Closing zip file failed", zap.Error(err), zap.String("filename", fileName))
 			for i, record := range records {
-				record.FailedReason = errMsg
+				record.FailedReason = err.Error()
 				records[i] = record
 			}
 		}
 		insertPlanReplayerStatus(ctx, sctx, records)
 	}()
-	// Dump SQLMeta
-	if err = dumpSQLMeta(zw, task); err != nil {
-		return err
-	}
-
 	// Dump config
 	if err = dumpConfig(zw); err != nil {
 		return err
@@ -289,29 +212,8 @@ func DumpPlanReplayerInfo(ctx context.Context, sctx sessionctx.Context,
 		return err
 	}
 
-	// For continuous capture task, we dump stats in storage only if EnableHistoricalStatsForCapture is disabled.
-	// For manual plan replayer dump command or capture, we directly dump stats in storage
-	if task.IsCapture && task.IsContinuesCapture {
-		if !variable.EnableHistoricalStatsForCapture.Load() {
-			// Dump stats
-			if err = dumpStats(zw, pairs, do); err != nil {
-				return err
-			}
-		} else {
-			failpoint.Inject("shouldDumpStats", func(val failpoint.Value) {
-				if val.(bool) {
-					panic("shouldDumpStats")
-				}
-			})
-		}
-	} else {
-		// Dump stats
-		if err = dumpStats(zw, pairs, do); err != nil {
-			return err
-		}
-	}
-
-	if err = dumpStatsMemStatus(zw, pairs, do); err != nil {
+	// Dump stats
+	if err = dumpStats(zw, pairs, task.JSONTblStats, do); err != nil {
 		return err
 	}
 
@@ -342,23 +244,10 @@ func DumpPlanReplayerInfo(ctx context.Context, sctx sessionctx.Context,
 	}
 
 	if len(task.EncodedPlan) > 0 {
-		records = generateRecords(task)
-		if err = dumpEncodedPlan(sctx, zw, task.EncodedPlan); err != nil {
-			return err
-		}
-	} else {
-		// Dump explain
-		if err = dumpPlanReplayerExplain(sctx, zw, task, &records); err != nil {
-			return err
-		}
+		return dumpEncodedPlan(sctx, zw, task.EncodedPlan)
 	}
-
-	if task.DebugTrace != nil {
-		if err = dumpDebugTrace(zw, task.DebugTrace); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Dump explain
+	return dumpExplain(sctx, zw, execStmts, task.Analyze)
 }
 
 func generateRecords(task *PlanReplayerDumpTask) []PlanReplayerStatusRecord {
@@ -374,24 +263,6 @@ func generateRecords(task *PlanReplayerDumpTask) []PlanReplayerStatusRecord {
 		}
 	}
 	return records
-}
-
-func dumpSQLMeta(zw *zip.Writer, task *PlanReplayerDumpTask) error {
-	cf, err := zw.Create(PlanReplayerSQLMetaFile)
-	if err != nil {
-		return errors.AddStack(err)
-	}
-	varMap := make(map[string]string)
-	varMap[PlanReplayerSQLMetaStartTS] = strconv.FormatUint(task.StartTS, 10)
-	varMap[PlanReplayerTaskMetaIsCapture] = strconv.FormatBool(task.IsCapture)
-	varMap[PlanReplayerTaskMetaIsContinues] = strconv.FormatBool(task.IsContinuesCapture)
-	varMap[PlanReplayerTaskMetaSQLDigest] = task.SQLDigest
-	varMap[PlanReplayerTaskMetaPlanDigest] = task.PlanDigest
-	varMap[PlanReplayerTaskEnableHistoricalStats] = strconv.FormatBool(variable.EnableHistoricalStatsForCapture.Load())
-	if err := toml.NewEncoder(cf).Encode(varMap); err != nil {
-		return errors.AddStack(err)
-	}
-	return nil
 }
 
 func dumpConfig(zw *zip.Writer) error {
@@ -443,70 +314,21 @@ func dumpTiFlashReplica(ctx sessionctx.Context, zw *zip.Writer, pairs map[tableN
 }
 
 func dumpSchemas(ctx sessionctx.Context, zw *zip.Writer, pairs map[tableNamePair]struct{}) error {
-	tables := make(map[tableNamePair]struct{})
 	for pair := range pairs {
 		err := getShowCreateTable(pair, zw, ctx)
 		if err != nil {
 			return err
 		}
-		if !pair.IsView {
-			tables[pair] = struct{}{}
-		}
-	}
-	return dumpSchemaMeta(zw, tables)
-}
-
-func dumpSchemaMeta(zw *zip.Writer, tables map[tableNamePair]struct{}) error {
-	zf, err := zw.Create(fmt.Sprintf("schema/%v", PlanReplayerSchemaMetaFile))
-	if err != nil {
-		return err
-	}
-	for table := range tables {
-		_, err := fmt.Fprintf(zf, "%s.%s;", table.DBName, table.TableName)
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }
 
-func dumpStatsMemStatus(zw *zip.Writer, pairs map[tableNamePair]struct{}, do *Domain) error {
-	statsHandle := do.StatsHandle()
-	is := do.InfoSchema()
+func dumpStats(zw *zip.Writer, pairs map[tableNamePair]struct{}, tblJSONStats map[int64]*handle.JSONTable, do *Domain) error {
 	for pair := range pairs {
 		if pair.IsView {
 			continue
 		}
-		tbl, err := is.TableByName(model.NewCIStr(pair.DBName), model.NewCIStr(pair.TableName))
-		if err != nil {
-			return err
-		}
-		tblStats := statsHandle.GetTableStats(tbl.Meta())
-		if tblStats == nil {
-			continue
-		}
-		statsMemFw, err := zw.Create(fmt.Sprintf("statsMem/%v.%v.txt", pair.DBName, pair.TableName))
-		if err != nil {
-			return errors.AddStack(err)
-		}
-		fmt.Fprintf(statsMemFw, "[INDEX]\n")
-		for _, indice := range tblStats.Indices {
-			fmt.Fprintf(statsMemFw, "%s\n", fmt.Sprintf("%s=%s", indice.Info.Name.String(), indice.StatusToString()))
-		}
-		fmt.Fprintf(statsMemFw, "[COLUMN]\n")
-		for _, col := range tblStats.Columns {
-			fmt.Fprintf(statsMemFw, "%s\n", fmt.Sprintf("%s=%s", col.Info.Name.String(), col.StatusToString()))
-		}
-	}
-	return nil
-}
-
-func dumpStats(zw *zip.Writer, pairs map[tableNamePair]struct{}, do *Domain) error {
-	for pair := range pairs {
-		if pair.IsView {
-			continue
-		}
-		jsonTbl, err := getStatsForTable(do, pair)
+		jsonTbl, err := getStatsForTable(do, tblJSONStats, pair)
 		if err != nil {
 			return err
 		}
@@ -666,64 +488,42 @@ func dumpEncodedPlan(ctx sessionctx.Context, zw *zip.Writer, encodedPlan string)
 	return nil
 }
 
-func dumpExplain(ctx sessionctx.Context, zw *zip.Writer, isAnalyze bool, sqls []string, emptyAsNil bool) (debugTraces []interface{}, err error) {
-	fw, err := zw.Create("explain.txt")
-	if err != nil {
-		return nil, errors.AddStack(err)
-	}
-	ctx.GetSessionVars().InPlanReplayer = true
-	defer func() {
-		ctx.GetSessionVars().InPlanReplayer = false
-	}()
-	for i, sql := range sqls {
+func dumpExplain(ctx sessionctx.Context, zw *zip.Writer, execStmts []ast.StmtNode, isAnalyze bool) error {
+	for i, stmtExec := range execStmts {
+		sql := stmtExec.Text()
 		var recordSets []sqlexec.RecordSet
+		var err error
 		if isAnalyze {
 			// Explain analyze
 			recordSets, err = ctx.(sqlexec.SQLExecutor).Execute(context.Background(), fmt.Sprintf("explain analyze %s", sql))
 			if err != nil {
-				return nil, err
+				return err
 			}
 		} else {
 			// Explain
 			recordSets, err = ctx.(sqlexec.SQLExecutor).Execute(context.Background(), fmt.Sprintf("explain %s", sql))
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
-		debugTrace := ctx.GetSessionVars().StmtCtx.OptimizerDebugTrace
-		debugTraces = append(debugTraces, debugTrace)
-		sRows, err := resultSetToStringSlice(context.Background(), recordSets[0], emptyAsNil)
+		sRows, err := resultSetToStringSlice(context.Background(), recordSets[0], false)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		fw, err := zw.Create(fmt.Sprintf("explain/sql%v.txt", i))
+		if err != nil {
+			return errors.AddStack(err)
 		}
 		for _, row := range sRows {
 			fmt.Fprintf(fw, "%s\n", strings.Join(row, "\t"))
 		}
 		if len(recordSets) > 0 {
 			if err := recordSets[0].Close(); err != nil {
-				return nil, err
+				return err
 			}
 		}
-		if i < len(sqls)-1 {
-			fmt.Fprintf(fw, "<--------->\n")
-		}
 	}
-	return
-}
-
-func dumpPlanReplayerExplain(ctx sessionctx.Context, zw *zip.Writer, task *PlanReplayerDumpTask, records *[]PlanReplayerStatusRecord) error {
-	sqls := make([]string, 0)
-	for _, execStmt := range task.ExecStmts {
-		sql := execStmt.Text()
-		sqls = append(sqls, sql)
-		*records = append(*records, PlanReplayerStatusRecord{
-			OriginSQL: sql,
-			Token:     task.FileName,
-		})
-	}
-	debugTraces, err := dumpExplain(ctx, zw, task.Analyze, sqls, false)
-	task.DebugTrace = debugTraces
-	return err
+	return nil
 }
 
 func extractTableNames(ctx context.Context, sctx sessionctx.Context,
@@ -742,17 +542,34 @@ func extractTableNames(ctx context.Context, sctx sessionctx.Context,
 	if tableExtractor.err != nil {
 		return nil, tableExtractor.err
 	}
-	return tableExtractor.getTablesAndViews(), nil
+	r := make(map[tableNamePair]struct{})
+	for tablePair := range tableExtractor.names {
+		if tablePair.IsView {
+			r[tablePair] = struct{}{}
+			continue
+		}
+		// remove cte in table names
+		_, ok := tableExtractor.cteNames[tablePair.TableName]
+		if !ok {
+			r[tablePair] = struct{}{}
+		}
+	}
+	return r, nil
 }
 
-func getStatsForTable(do *Domain, pair tableNamePair) (*handle.JSONTable, error) {
+func getStatsForTable(do *Domain, tblJSONStats map[int64]*handle.JSONTable, pair tableNamePair) (*handle.JSONTable, error) {
 	is := do.InfoSchema()
 	h := do.StatsHandle()
 	tbl, err := is.TableByName(model.NewCIStr(pair.DBName), model.NewCIStr(pair.TableName))
 	if err != nil {
 		return nil, err
 	}
-	return h.DumpStatsToJSON(pair.DBName, tbl.Meta(), nil, true)
+	js, ok := tblJSONStats[tbl.Meta().ID]
+	if ok && js != nil {
+		return js, nil
+	}
+	js, err = h.DumpStatsToJSON(pair.DBName, tbl.Meta(), nil, true)
+	return js, err
 }
 
 func getShowCreateTable(pair tableNamePair, zw *zip.Writer, ctx sessionctx.Context) error {
@@ -845,25 +662,4 @@ func getRows(ctx context.Context, rs sqlexec.RecordSet) ([]chunk.Row, error) {
 		}
 	}
 	return rows, nil
-}
-
-func dumpDebugTrace(zw *zip.Writer, debugTraces []interface{}) error {
-	for i, trace := range debugTraces {
-		fw, err := zw.Create(fmt.Sprintf("debug_trace/debug_trace%d.json", i))
-		if err != nil {
-			return errors.AddStack(err)
-		}
-		err = dumpOneDebugTrace(fw, trace)
-		if err != nil {
-			return errors.AddStack(err)
-		}
-	}
-	return nil
-}
-
-func dumpOneDebugTrace(w io.Writer, debugTrace interface{}) error {
-	jsonEncoder := json.NewEncoder(w)
-	// If we do not set this to false, ">", "<", "&"... will be escaped to "\u003c","\u003e", "\u0026"...
-	jsonEncoder.SetEscapeHTML(false)
-	return jsonEncoder.Encode(debugTrace)
 }

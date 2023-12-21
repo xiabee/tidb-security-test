@@ -233,7 +233,7 @@ func TestParseHint(t *testing.T) {
 			},
 		},
 		{
-			input: "USE_TOJA(TRUE) IGNORE_PLAN_CACHE() USE_CASCADES(TRUE) QUERY_TYPE(@qb1 OLAP) QUERY_TYPE(OLTP) NO_INDEX_MERGE() RESOURCE_GROUP(rg1)",
+			input: "USE_TOJA(TRUE) IGNORE_PLAN_CACHE() USE_CASCADES(TRUE) QUERY_TYPE(@qb1 OLAP) QUERY_TYPE(OLTP) NO_INDEX_MERGE()",
 			output: []*ast.TableOptimizerHint{
 				{
 					HintName: model.NewCIStr("USE_TOJA"),
@@ -257,10 +257,6 @@ func TestParseHint(t *testing.T) {
 				},
 				{
 					HintName: model.NewCIStr("NO_INDEX_MERGE"),
-				},
-				{
-					HintName: model.NewCIStr("RESOURCE_GROUP"),
-					HintData: "rg1",
 				},
 			},
 		},

@@ -36,7 +36,6 @@ go_test(
     flaky = True,
     deps = [
         "//kv",
-        "//parser/model",
         "//parser/mysql",
         "//sessionctx/stmtctx",
         "//tablecodec",

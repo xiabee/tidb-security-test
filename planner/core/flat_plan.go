@@ -54,34 +54,23 @@ type FlatPhysicalPlan struct {
 // depth-first traversal plus some special rule for some operators.
 type FlatPlanTree []*FlatOperator
 
-// GetSelectPlan skips Insert, Delete, and Update at the beginning of the FlatPlanTree and the foreign key check/cascade plan at the end of the FlatPlanTree.
+// GetSelectPlan skips Insert, Delete and Update at the beginning of the FlatPlanTree.
 // Note:
 //
 //	It returns a reference to the original FlatPlanTree, please avoid modifying the returned value.
-//	The second return value is the offset. Because the returned FlatPlanTree is a part of the original slice, you need to minus them by the offset when using the returned FlatOperator.Depth and FlatOperator.ChildrenIdx.
-func (e FlatPlanTree) GetSelectPlan() (FlatPlanTree, int) {
+//	Since you get a part of the original slice, you need to adjust the FlatOperator.Depth and FlatOperator.ChildrenIdx when using them.
+func (e FlatPlanTree) GetSelectPlan() FlatPlanTree {
 	if len(e) == 0 {
-		return nil, 0
+		return nil
 	}
-	hasDML := false
 	for i, op := range e {
 		switch op.Origin.(type) {
 		case *Insert, *Delete, *Update:
-			hasDML = true
 		default:
-			if hasDML {
-				for j := i; j < len(e); j++ {
-					switch e[j].Origin.(type) {
-					case *FKCheck, *FKCascade:
-						// The later plans are belong to foreign key check/cascade plans, doesn't belong to select plan, just skip it.
-						return e[i:j], i
-					}
-				}
-			}
-			return e[i:], i
+			return e[i:]
 		}
 	}
-	return nil, 0
+	return nil
 }
 
 // FlatOperator is a simplified operator.

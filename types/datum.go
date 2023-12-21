@@ -457,44 +457,28 @@ func (d Datum) String() string {
 		t = "KindString"
 	case KindBytes:
 		t = "KindBytes"
-	case KindBinaryLiteral:
-		t = "KindBinaryLiteral"
 	case KindMysqlDecimal:
 		t = "KindMysqlDecimal"
 	case KindMysqlDuration:
 		t = "KindMysqlDuration"
 	case KindMysqlEnum:
 		t = "KindMysqlEnum"
+	case KindBinaryLiteral:
+		t = "KindBinaryLiteral"
 	case KindMysqlBit:
 		t = "KindMysqlBit"
 	case KindMysqlSet:
 		t = "KindMysqlSet"
-	case KindMysqlTime:
-		t = "KindMysqlTime"
-	case KindInterface:
-		t = "KindInterface"
-	case KindMinNotNull:
-		t = "KindMinNotNull"
-	case KindMaxValue:
-		t = "KindMaxValue"
-	case KindRaw:
-		t = "KindRaw"
 	case KindMysqlJSON:
 		t = "KindMysqlJSON"
+	case KindMysqlTime:
+		t = "KindMysqlTime"
 	default:
 		t = "Unknown"
 	}
 	v := d.GetValue()
-	switch v.(type) {
-	case []byte, string:
-		quote := `"`
-		// We only need the escape functionality of %q, the quoting is not needed,
-		// so we trim the \" prefix and suffix here.
-		v = strings.TrimSuffix(
-			strings.TrimPrefix(
-				fmt.Sprintf("%q", v),
-				quote),
-			quote)
+	if b, ok := v.([]byte); ok && d.k == KindBytes {
+		v = string(b)
 	}
 	return fmt.Sprintf("%v %v", t, v)
 }
@@ -2011,20 +1995,6 @@ func (d *Datum) ToBytes() ([]byte, error) {
 	}
 }
 
-// ToHashKey gets the bytes representation of the datum considering collation.
-func (d *Datum) ToHashKey() ([]byte, error) {
-	switch d.k {
-	case KindString, KindBytes:
-		return collate.GetCollator(d.Collation()).Key(d.GetString()), nil
-	default:
-		str, err := d.ToString()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		return collate.GetCollator(d.Collation()).Key(str), nil
-	}
-}
-
 // ToMysqlJSON is similar to convertToMysqlJSON, except the
 // latter parses from string, but the former uses it as primitive.
 func (d *Datum) ToMysqlJSON() (j BinaryJSON, err error) {
@@ -2047,10 +2017,6 @@ func (d *Datum) ToMysqlJSON() (j BinaryJSON, err error) {
 		in = d.GetBinaryLiteral().ToString()
 	case KindNull:
 		in = nil
-	case KindMysqlTime:
-		in = d.GetMysqlTime()
-	case KindMysqlDuration:
-		in = d.GetMysqlDuration()
 	default:
 		in, err = d.ToString()
 	}

@@ -39,7 +39,6 @@ import (
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/util/collate"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/ranger"
@@ -73,10 +72,10 @@ func (e *AnalyzeColumnsExecV2) analyzeColumnsPushDownWithRetryV2() *statistics.A
 	} else {
 		statsTbl = statsHandle.GetPartitionStats(e.tableInfo, tid)
 	}
-	if statsTbl == nil || statsTbl.RealtimeCount <= 0 {
+	if statsTbl == nil || statsTbl.Count <= 0 {
 		return analyzeResult
 	}
-	newSampleRate := math.Min(1, float64(config.DefRowsForSampleRate)/float64(statsTbl.RealtimeCount))
+	newSampleRate := math.Min(1, float64(config.DefRowsForSampleRate)/float64(statsTbl.Count))
 	if newSampleRate >= *e.analyzePB.ColReq.SampleRate {
 		return analyzeResult
 	}
@@ -285,6 +284,7 @@ func (e *AnalyzeColumnsExecV2) buildSamplingStats(
 			mergeResult.collector.Base().Count, e.tableID.TableID, e.tableID.PartitionID, e.tableID.IsPartitionTable(),
 			"merge subMergeWorker in AnalyzeColumnsExecV2", -1)
 		e.memTracker.Consume(rootRowCollector.Base().MemSize - oldRootCollectorSize - mergeResult.collector.Base().MemSize)
+		mergeResult.collector.DestroyAndPutToPool()
 	}
 	defer e.memTracker.Release(rootRowCollector.Base().MemSize)
 	if err != nil {
@@ -635,6 +635,7 @@ func (e *AnalyzeColumnsExecV2) subMergeWorker(resultCh chan<- *samplingMergeResu
 		subCollectorSize := subCollector.Base().MemSize
 		e.memTracker.Consume(newRetCollectorSize - oldRetCollectorSize - subCollectorSize)
 		e.memTracker.Release(dataSize + colRespSize)
+		subCollector.DestroyAndPutToPool()
 	}
 	resultCh <- &samplingMergeResult{collector: retCollector}
 }
@@ -820,7 +821,7 @@ func readDataAndSendTask(ctx sessionctx.Context, handler *tableResultHandler, me
 			dom.SysProcTracker().KillSysProcess(util.GetAutoAnalyzeProcID(dom.ServerID))
 		})
 		if atomic.LoadUint32(&ctx.GetSessionVars().Killed) == 1 {
-			return errors.Trace(exeerrors.ErrQueryInterrupted)
+			return errors.Trace(ErrQueryInterrupted)
 		}
 		failpoint.Inject("mockSlowAnalyzeV2", func() {
 			time.Sleep(1000 * time.Second)

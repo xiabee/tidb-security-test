@@ -55,56 +55,6 @@ var (
 	CheckVersFirstWaitTime = 50 * time.Millisecond
 )
 
-// Watcher is responsible for watching the etcd path related operations.
-type Watcher interface {
-	// WatchChan returns the chan for watching etcd path.
-	WatchChan() clientv3.WatchChan
-	// Watch watches the etcd path.
-	Watch(ctx context.Context, etcdCli *clientv3.Client, path string)
-	// Rewatch rewatches the etcd path.
-	Rewatch(ctx context.Context, etcdCli *clientv3.Client, path string)
-}
-
-type watcher struct {
-	sync.RWMutex
-	wCh clientv3.WatchChan
-}
-
-// WatchChan implements SyncerWatch.WatchChan interface.
-func (w *watcher) WatchChan() clientv3.WatchChan {
-	w.RLock()
-	defer w.RUnlock()
-	return w.wCh
-}
-
-// Watch implements SyncerWatch.Watch interface.
-func (w *watcher) Watch(ctx context.Context, etcdCli *clientv3.Client, path string) {
-	w.Lock()
-	w.wCh = etcdCli.Watch(ctx, path)
-	w.Unlock()
-}
-
-// Rewatch implements SyncerWatch.Rewatch interface.
-func (w *watcher) Rewatch(ctx context.Context, etcdCli *clientv3.Client, path string) {
-	startTime := time.Now()
-	// Make sure the wCh doesn't receive the information of 'close' before we finish the rewatch.
-	w.Lock()
-	w.wCh = nil
-	w.Unlock()
-
-	go func() {
-		defer func() {
-			metrics.DeploySyncerHistogram.WithLabelValues(metrics.SyncerRewatch, metrics.RetLabel(nil)).Observe(time.Since(startTime).Seconds())
-		}()
-		wCh := etcdCli.Watch(ctx, path)
-
-		w.Lock()
-		w.wCh = wCh
-		w.Unlock()
-		logutil.BgLogger().Info("[ddl] syncer rewatch global info finished")
-	}()
-}
-
 // SchemaSyncer is used to synchronize schema version between the DDL worker leader and followers through etcd.
 type SchemaSyncer interface {
 	// Init sets the global schema version path to etcd if it isn't exist,
@@ -134,8 +84,11 @@ type schemaVersionSyncer struct {
 	selfSchemaVerPath string
 	etcdCli           *clientv3.Client
 	session           unsafe.Pointer
-	globalVerWatcher  watcher
-	ddlID             string
+	mu                struct {
+		sync.RWMutex
+		globalVerCh clientv3.WatchChan
+	}
+	ddlID string
 }
 
 // NewSchemaSyncer creates a new SchemaSyncer.
@@ -169,7 +122,9 @@ func (s *schemaVersionSyncer) Init(ctx context.Context) error {
 	}
 	s.storeSession(session)
 
-	s.globalVerWatcher.Watch(ctx, s.etcdCli, util.DDLGlobalSchemaVersion)
+	s.mu.Lock()
+	s.mu.globalVerCh = s.etcdCli.Watch(ctx, util.DDLGlobalSchemaVersion)
+	s.mu.Unlock()
 
 	err = util.PutKVToEtcd(ctx, s.etcdCli, keyOpDefaultRetryCnt, s.selfSchemaVerPath, InitialVersion,
 		clientv3.WithLease(s.loadSession().Lease()))
@@ -222,12 +177,30 @@ func (s *schemaVersionSyncer) Restart(ctx context.Context) error {
 
 // GlobalVersionCh implements SchemaSyncer.GlobalVersionCh interface.
 func (s *schemaVersionSyncer) GlobalVersionCh() clientv3.WatchChan {
-	return s.globalVerWatcher.WatchChan()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mu.globalVerCh
 }
 
 // WatchGlobalSchemaVer implements SchemaSyncer.WatchGlobalSchemaVer interface.
 func (s *schemaVersionSyncer) WatchGlobalSchemaVer(ctx context.Context) {
-	s.globalVerWatcher.Rewatch(ctx, s.etcdCli, util.DDLGlobalSchemaVersion)
+	startTime := time.Now()
+	// Make sure the globalVerCh doesn't receive the information of 'close' before we finish the rewatch.
+	s.mu.Lock()
+	s.mu.globalVerCh = nil
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			metrics.DeploySyncerHistogram.WithLabelValues(metrics.SyncerRewatch, metrics.RetLabel(nil)).Observe(time.Since(startTime).Seconds())
+		}()
+		ch := s.etcdCli.Watch(ctx, util.DDLGlobalSchemaVersion)
+
+		s.mu.Lock()
+		s.mu.globalVerCh = ch
+		s.mu.Unlock()
+		logutil.BgLogger().Info("[ddl] syncer watch global schema finished")
+	}()
 }
 
 // UpdateSelfVersion implements SchemaSyncer.UpdateSelfVersion interface.
@@ -359,7 +332,7 @@ func (s *schemaVersionSyncer) OwnerCheckAllVersions(ctx context.Context, jobID i
 			if len(updatedMap) > 0 {
 				succ = false
 				for _, info := range updatedMap {
-					logutil.BgLogger().Info("[ddl] syncer check all versions, someone is not synced", zap.String("info", info), zap.Int64("ddl job id", jobID), zap.Int64("ver", latestVer))
+					logutil.BgLogger().Info("[ddl] syncer check all versions, someone is not synced", zap.String("info", info), zap.Any("ddl id", jobID), zap.Any("ver", latestVer))
 				}
 			}
 		} else {

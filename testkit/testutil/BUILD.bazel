@@ -4,7 +4,6 @@ go_library(
     name = "testutil",
     srcs = [
         "handle.go",
-        "loghook.go",
         "require.go",
     ],
     importpath = "github.com/pingcap/tidb/testkit/testutil",
@@ -16,12 +15,8 @@ go_library(
         "//types",
         "//util/codec",
         "//util/collate",
-        "//util/logutil",
-        "@com_github_pingcap_log//:log",
         "@com_github_stretchr_testify//require",
         "@org_golang_x_exp//slices",
-        "@org_uber_go_zap//:zap",
-        "@org_uber_go_zap//zapcore",
     ],
 )
 

@@ -15,7 +15,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -25,12 +24,9 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/session"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/gcutil"
 	"github.com/tikv/client-go/v2/oracle"
-	"go.uber.org/zap"
 )
 
 // StatsHandler is the handler for dumping statistics.
@@ -109,14 +105,14 @@ func (sh StatsHistoryHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 		return
 	}
 	defer se.Close()
-	enabeld, err := sh.do.StatsHandle().CheckHistoricalStatsEnable()
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if !enabeld {
-		writeError(w, fmt.Errorf("%v should be enabled", variable.TiDBEnableHistoricalStats))
-		return
+
+	dumpPartitionStats := true
+	if len(params[pDumpPartitionStats]) > 0 {
+		dumpPartitionStats, err = strconv.ParseBool(params[pDumpPartitionStats])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 
 	se.GetSessionVars().StmtCtx.TimeZone = time.Local
@@ -131,30 +127,27 @@ func (sh StatsHistoryHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 		return
 	}
 	snapshot := oracle.GoTimeToTS(t1)
-	tbl, err := getSnapshotTableInfo(sh.do, snapshot, params[pDBName], params[pTableName])
+	err = gcutil.ValidateSnapshot(se, snapshot)
 	if err != nil {
-		logutil.BgLogger().Info("fail to get snapshot TableInfo in historical stats API, switch to use latest infoschema", zap.Error(err))
-		is := sh.do.InfoSchema()
-		tbl, err = is.TableByName(model.NewCIStr(params[pDBName]), model.NewCIStr(params[pTableName]))
-		if err != nil {
-			writeError(w, err)
-			return
-		}
+		writeError(w, err)
+		return
 	}
 
+	is, err := sh.do.GetSnapshotInfoSchema(snapshot)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	h := sh.do.StatsHandle()
-	js, err := h.DumpHistoricalStatsBySnapshot(params[pDBName], tbl.Meta(), snapshot)
+	tbl, err := is.TableByName(model.NewCIStr(params[pDBName]), model.NewCIStr(params[pTableName]))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	js, err := h.DumpStatsToJSONBySnapshot(params[pDBName], tbl.Meta(), snapshot, dumpPartitionStats)
 	if err != nil {
 		writeError(w, err)
 	} else {
 		writeData(w, js)
 	}
-}
-
-func getSnapshotTableInfo(dom *domain.Domain, snapshot uint64, dbName, tblName string) (table.Table, error) {
-	is, err := dom.GetSnapshotInfoSchema(snapshot)
-	if err != nil {
-		return nil, err
-	}
-	return is.TableByName(model.NewCIStr(dbName), model.NewCIStr(tblName))
 }

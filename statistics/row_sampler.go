@@ -37,6 +37,7 @@ type RowSampleCollector interface {
 	MergeCollector(collector RowSampleCollector)
 	sampleRow(row []types.Datum, rng *rand.Rand)
 	Base() *baseCollector
+	DestroyAndPutToPool()
 }
 
 type baseCollector struct {
@@ -172,7 +173,7 @@ func (s *RowSampleBuilder) Collect() (RowSampleCollector, error) {
 			return nil, err
 		}
 		if chk.NumRows() == 0 {
-			break
+			return collector, nil
 		}
 		collector.Base().Count += int64(chk.NumRows())
 		for row := it.Begin(); row != it.End(); row = it.Next() {
@@ -212,20 +213,12 @@ func (s *RowSampleBuilder) Collect() (RowSampleCollector, error) {
 			collector.sampleRow(newCols, s.Rng)
 		}
 	}
-	for i, group := range s.ColGroups {
-		if len(group) != 1 {
-			continue
-		}
-		// For the single-column group, its FMSketch is the same as that of the corresponding column. Hence, we don't
-		// maintain its FMSketch in collectColumnGroups. We just copy the corresponding column's FMSketch after
-		// iterating all rows. Also, we can directly copy TotalSize and NullCount.
-		colIdx := group[0]
-		colGroupIdx := len(s.ColsFieldType) + i
-		collector.Base().FMSketches[colGroupIdx] = collector.Base().FMSketches[colIdx].Copy()
-		collector.Base().NullCount[colGroupIdx] = collector.Base().NullCount[colIdx]
-		collector.Base().TotalSizes[colGroupIdx] = collector.Base().TotalSizes[colIdx]
+}
+
+func (s *baseCollector) destroyAndPutToPool() {
+	for _, sketch := range s.FMSketches {
+		sketch.DestroyAndPutToPool()
 	}
-	return collector, nil
 }
 
 func (s *baseCollector) collectColumns(sc *stmtctx.StatementContext, cols []types.Datum, sizes []int64) error {
@@ -248,19 +241,17 @@ func (s *baseCollector) collectColumnGroups(sc *stmtctx.StatementContext, cols [
 	colLen := len(cols)
 	datumBuffer := make([]types.Datum, 0, len(cols))
 	for i, group := range colGroups {
-		if len(group) == 1 {
-			// For the single-column group, its FMSketch is the same as that of the corresponding column. Hence, we
-			// don't need to maintain its FMSketch. We just copy the corresponding column's FMSketch after iterating
-			// all rows. Also, we can directly copy TotalSize and NullCount.
-			continue
-		}
-		// We don't maintain the null counts information for the multi-column group.
 		datumBuffer = datumBuffer[:0]
+		hasNull := true
 		for _, c := range group {
 			datumBuffer = append(datumBuffer, cols[c])
-			if !cols[c].IsNull() {
-				s.TotalSizes[colLen+i] += sizes[c] - 1
-			}
+			hasNull = hasNull && cols[c].IsNull()
+			s.TotalSizes[colLen+i] += sizes[c] - 1
+		}
+		// We don't maintain the null counts information for the multi-column group
+		if hasNull && len(group) == 1 {
+			s.NullCount[colLen+i]++
+			continue
 		}
 		err := s.FMSketches[colLen+i].InsertRowValue(sc, datumBuffer)
 		if err != nil {
@@ -389,6 +380,11 @@ func (s *ReservoirRowSampleCollector) MergeCollector(subCollector RowSampleColle
 	}
 }
 
+// DestroyAndPutToPool implements the interface RowSampleCollector.
+func (s *ReservoirRowSampleCollector) DestroyAndPutToPool() {
+	s.baseCollector.destroyAndPutToPool()
+}
+
 // RowSamplesToProto converts the samp slice to the pb struct.
 func RowSamplesToProto(samples WeightedRowSampleHeap) []*tipb.RowSample {
 	if len(samples) == 0 {
@@ -471,4 +467,9 @@ func (s *BernoulliRowSampleCollector) MergeCollector(subCollector RowSampleColle
 // Base implements the interface RowSampleCollector.
 func (s *BernoulliRowSampleCollector) Base() *baseCollector {
 	return s.baseCollector
+}
+
+// DestroyAndPutToPool implements the interface RowSampleCollector.
+func (s *BernoulliRowSampleCollector) DestroyAndPutToPool() {
+	s.baseCollector.destroyAndPutToPool()
 }

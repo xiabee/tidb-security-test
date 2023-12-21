@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/session/txninfo"
-	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util"
 )
 
@@ -36,8 +35,6 @@ type MockSessionManager struct {
 	Dom     *domain.Domain
 	Conn    map[uint64]session.Session
 	mu      sync.Mutex
-
-	internalSessions map[interface{}]struct{}
 }
 
 // ShowTxnList is to show txn list.
@@ -107,7 +104,7 @@ func (msm *MockSessionManager) GetProcessInfo(id uint64) (*util.ProcessInfo, boo
 func (*MockSessionManager) Kill(uint64, bool) {
 }
 
-// KillAllConnections implements the SessionManager.KillAllConnections interface.
+// KillAllConnections implements the SessionManager.KillAllConections interface.
 func (*MockSessionManager) KillAllConnections() {
 }
 
@@ -121,36 +118,14 @@ func (msm *MockSessionManager) ServerID() uint64 {
 }
 
 // StoreInternalSession is to store internal session.
-func (msm *MockSessionManager) StoreInternalSession(s interface{}) {
-	msm.mu.Lock()
-	if msm.internalSessions == nil {
-		msm.internalSessions = make(map[interface{}]struct{})
-	}
-	msm.internalSessions[s] = struct{}{}
-	msm.mu.Unlock()
-}
+func (*MockSessionManager) StoreInternalSession(interface{}) {}
 
 // DeleteInternalSession is to delete the internal session pointer from the map in the SessionManager
-func (msm *MockSessionManager) DeleteInternalSession(s interface{}) {
-	msm.mu.Lock()
-	delete(msm.internalSessions, s)
-	msm.mu.Unlock()
-}
+func (*MockSessionManager) DeleteInternalSession(interface{}) {}
 
-// GetInternalSessionStartTSList is to get all startTS of every transaction running in the current internal sessions
-func (msm *MockSessionManager) GetInternalSessionStartTSList() []uint64 {
-	msm.mu.Lock()
-	defer msm.mu.Unlock()
-	ret := make([]uint64, 0, len(msm.internalSessions))
-	for internalSess := range msm.internalSessions {
-		se := internalSess.(sessionctx.Context)
-		sessVars := se.GetSessionVars()
-		sessVars.TxnCtxMu.Lock()
-		startTS := sessVars.TxnCtx.StartTS
-		sessVars.TxnCtxMu.Unlock()
-		ret = append(ret, startTS)
-	}
-	return ret
+// GetInternalSessionStartTSList is to get all startTS of every transactions running in the current internal sessions
+func (*MockSessionManager) GetInternalSessionStartTSList() []uint64 {
+	return nil
 }
 
 // KillNonFlashbackClusterConn implement SessionManager interface.

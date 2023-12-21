@@ -32,8 +32,6 @@ var (
 	ErrInvalidDDLJob = ClassDDL.NewStd(mysql.ErrInvalidDDLJob)
 	// ErrCancelledDDLJob means the DDL job is cancelled.
 	ErrCancelledDDLJob = ClassDDL.NewStd(mysql.ErrCancelledDDLJob)
-	// ErrPausedDDLJob returns when the DDL job cannot be paused.
-	ErrPausedDDLJob = ClassDDL.NewStd(mysql.ErrPausedDDLJob)
 	// ErrRunMultiSchemaChanges means we run multi schema changes.
 	ErrRunMultiSchemaChanges = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "multi schema change for %s"), nil))
 	// ErrOperateSameColumn means we change the same columns multiple times in a DDL.
@@ -371,8 +369,6 @@ var (
 	ErrDependentByFunctionalIndex = ClassDDL.NewStd(mysql.ErrDependentByFunctionalIndex)
 	// ErrFunctionalIndexOnBlob when the expression of expression index returns blob or text.
 	ErrFunctionalIndexOnBlob = ClassDDL.NewStd(mysql.ErrFunctionalIndexOnBlob)
-	// ErrDependentByPartitionFunctional returns when the dropped column depends by expression partition.
-	ErrDependentByPartitionFunctional = ClassDDL.NewStd(mysql.ErrDependentByPartitionFunctional)
 
 	// ErrUnsupportedAlterTableSpec means we don't support this alter table specification (i.e. unknown)
 	ErrUnsupportedAlterTableSpec = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "Unsupported/unknown ALTER TABLE specification"), nil))
@@ -393,16 +389,8 @@ var (
 	ErrCancelFinishedDDLJob = ClassDDL.NewStd(mysql.ErrCancelFinishedDDLJob)
 	// ErrCannotCancelDDLJob returns when cancel a almost finished ddl job, because cancel in now may cause data inconsistency.
 	ErrCannotCancelDDLJob = ClassDDL.NewStd(mysql.ErrCannotCancelDDLJob)
-	// ErrCannotPauseDDLJob returns when the State is not qualified to be paused.
-	ErrCannotPauseDDLJob = ClassDDL.NewStd(mysql.ErrCannotPauseDDLJob)
-	// ErrCannotResumeDDLJob returns  when the State is not qualified to be resumed.
-	ErrCannotResumeDDLJob = ClassDDL.NewStd(mysql.ErrCannotResumeDDLJob)
-	// ErrDDLSetting returns when failing to enable/disable DDL.
+	// ErrDDLSetting returns when failing to enable/disable DDL
 	ErrDDLSetting = ClassDDL.NewStd(mysql.ErrDDLSetting)
-	// ErrIngestFailed returns when the DDL ingest job is failed.
-	ErrIngestFailed = ClassDDL.NewStd(mysql.ErrIngestFailed)
-	// ErrIngestCheckEnvFailed returns when the DDL ingest env is failed to init.
-	ErrIngestCheckEnvFailed = ClassDDL.NewStd(mysql.ErrIngestCheckEnvFailed)
 
 	// ErrColumnInChange indicates there is modification on the column in parallel.
 	ErrColumnInChange = ClassDDL.NewStd(mysql.ErrColumnInChange)
@@ -433,36 +421,10 @@ var (
 	ErrUnsupportedColumnInTTLConfig = ClassDDL.NewStd(mysql.ErrUnsupportedColumnInTTLConfig)
 	// ErrTTLColumnCannotDrop returns when a column is dropped while referenced by TTL config
 	ErrTTLColumnCannotDrop = ClassDDL.NewStd(mysql.ErrTTLColumnCannotDrop)
-	// ErrSetTTLOptionForNonTTLTable returns when the `TTL_ENABLE` or `TTL_JOB_INTERVAL` option is set on a non-TTL table
-	ErrSetTTLOptionForNonTTLTable = ClassDDL.NewStd(mysql.ErrSetTTLOptionForNonTTLTable)
+	// ErrSetTTLEnableForNonTTLTable returns when the `TTL_ENABLE` option is set on a non-TTL table
+	ErrSetTTLEnableForNonTTLTable = ClassDDL.NewStd(mysql.ErrSetTTLEnableForNonTTLTable)
 	// ErrTempTableNotAllowedWithTTL returns when setting TTL config for a temp table
 	ErrTempTableNotAllowedWithTTL = ClassDDL.NewStd(mysql.ErrTempTableNotAllowedWithTTL)
 	// ErrUnsupportedTTLReferencedByFK returns when the TTL config is set for a table referenced by foreign key
 	ErrUnsupportedTTLReferencedByFK = ClassDDL.NewStd(mysql.ErrUnsupportedTTLReferencedByFK)
-	// ErrUnsupportedPrimaryKeyTypeWithTTL returns when create or alter a table with TTL options but the primary key is not supported
-	ErrUnsupportedPrimaryKeyTypeWithTTL = ClassDDL.NewStd(mysql.ErrUnsupportedPrimaryKeyTypeWithTTL)
-
-	// ErrNotSupportedYet returns when tidb does not support this feature.
-	ErrNotSupportedYet = ClassDDL.NewStd(mysql.ErrNotSupportedYet)
 )
-
-// ReorgRetryableErrCodes is the error codes that are retryable for reorganization.
-var ReorgRetryableErrCodes = map[uint16]struct{}{
-	mysql.ErrPDServerTimeout:           {},
-	mysql.ErrTiKVServerTimeout:         {},
-	mysql.ErrTiKVServerBusy:            {},
-	mysql.ErrResolveLockTimeout:        {},
-	mysql.ErrRegionUnavailable:         {},
-	mysql.ErrGCTooEarly:                {},
-	mysql.ErrWriteConflict:             {},
-	mysql.ErrTiKVStoreLimit:            {},
-	mysql.ErrTiKVStaleCommand:          {},
-	mysql.ErrTiKVMaxTimestampNotSynced: {},
-	mysql.ErrTiFlashServerTimeout:      {},
-	mysql.ErrTiFlashServerBusy:         {},
-	mysql.ErrInfoSchemaExpired:         {},
-	mysql.ErrInfoSchemaChanged:         {},
-	mysql.ErrWriteConflictInTiDB:       {},
-	mysql.ErrTxnRetryable:              {},
-	mysql.ErrNotOwner:                  {},
-}

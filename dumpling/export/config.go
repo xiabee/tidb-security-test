@@ -4,7 +4,6 @@ package export
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,6 +15,7 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/storage"
@@ -25,7 +25,6 @@ import (
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -104,7 +103,7 @@ type Config struct {
 	User     string
 	Password string `json:"-"`
 	Security struct {
-		TLS          *tls.Config `json:"-"`
+		DriveTLSName string `json:"-"`
 		CAPath       string
 		CertPath     string
 		KeyPath      string
@@ -145,9 +144,6 @@ type Config struct {
 	PromFactory  promutil.Factory        `json:"-"`
 	PromRegistry promutil.Registry       `json:"-"`
 	ExtStorage   storage.ExternalStorage `json:"-"`
-
-	IOTotalBytes *atomic.Uint64
-	Net          string
 }
 
 // ServerInfoUnknown is the unknown database type to dumpling
@@ -216,9 +212,6 @@ func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	driverCfg.User = conf.User
 	driverCfg.Passwd = conf.Password
 	driverCfg.Net = "tcp"
-	if conf.Net != "" {
-		driverCfg.Net = conf.Net
-	}
 	driverCfg.Addr = hostPort
 	driverCfg.DBName = db
 	driverCfg.Collation = "utf8mb4_general_ci"
@@ -226,17 +219,8 @@ func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	driverCfg.WriteTimeout = 30 * time.Second
 	driverCfg.InterpolateParams = true
 	driverCfg.MaxAllowedPacket = 0
-	if conf.Security.TLS != nil {
-		driverCfg.TLS = conf.Security.TLS
-	} else {
-		// Use TLS first.
-		driverCfg.AllowFallbackToPlaintext = true
-		/* #nosec G402 */
-		driverCfg.TLS = &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS10,
-			NextProtos:         []string{"h2", "http/1.1"}, // specify `h2` to let Go use HTTP/2.
-		}
+	if conf.Security.DriveTLSName != "" {
+		driverCfg.TLSConfig = conf.Security.DriveTLSName
 	}
 	if conf.AllowCleartextPasswords {
 		driverCfg.AllowCleartextPasswords = true
@@ -669,7 +653,7 @@ func adjustConfig(conf *Config, fns ...func(*Config) error) error {
 	return nil
 }
 
-func buildTLSConfig(conf *Config) error {
+func registerTLSConfig(conf *Config) error {
 	tlsConfig, err := util.NewTLSConfig(
 		util.WithCAPath(conf.Security.CAPath),
 		util.WithCertAndKeyPath(conf.Security.CertPath, conf.Security.KeyPath),
@@ -679,8 +663,14 @@ func buildTLSConfig(conf *Config) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	conf.Security.TLS = tlsConfig
-	return nil
+
+	if tlsConfig == nil {
+		return nil
+	}
+
+	conf.Security.DriveTLSName = "dumpling" + uuid.NewString()
+	err = mysql.RegisterTLSConfig(conf.Security.DriveTLSName, tlsConfig)
+	return errors.Trace(err)
 }
 
 func validateSpecifiedSQL(conf *Config) error {

@@ -214,18 +214,3 @@ func (e *ReplaceExec) setMessage() {
 		stmtCtx.SetMessage(msg)
 	}
 }
-
-// GetFKChecks implements WithForeignKeyTrigger interface.
-func (e *ReplaceExec) GetFKChecks() []*FKCheckExec {
-	return e.fkChecks
-}
-
-// GetFKCascades implements WithForeignKeyTrigger interface.
-func (e *ReplaceExec) GetFKCascades() []*FKCascadeExec {
-	return e.fkCascades
-}
-
-// HasFKCascades implements WithForeignKeyTrigger interface.
-func (e *ReplaceExec) HasFKCascades() bool {
-	return len(e.fkCascades) > 0
-}

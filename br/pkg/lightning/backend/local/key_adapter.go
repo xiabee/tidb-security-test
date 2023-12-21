@@ -15,10 +15,9 @@
 package local
 
 import (
-	"math"
+	"encoding/binary"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/util/codec"
 )
 
@@ -26,13 +25,13 @@ import (
 type KeyAdapter interface {
 	// Encode encodes the key with its corresponding rowID. It appends the encoded key to dst and returns the
 	// resulting slice. The encoded key is guaranteed to be in ascending order for comparison.
-	Encode(dst []byte, key []byte, rowID []byte) []byte
+	Encode(dst []byte, key []byte, rowID int64) []byte
 
 	// Decode decodes the original key to dst. It appends the encoded key to dst and returns the resulting slice.
 	Decode(dst []byte, data []byte) ([]byte, error)
 
 	// EncodedLen returns the encoded key length.
-	EncodedLen(key []byte, rowID []byte) int
+	EncodedLen(key []byte) int
 }
 
 func reallocBytes(b []byte, n int) []byte {
@@ -47,7 +46,7 @@ func reallocBytes(b []byte, n int) []byte {
 
 type noopKeyAdapter struct{}
 
-func (noopKeyAdapter) Encode(dst []byte, key []byte, _ []byte) []byte {
+func (noopKeyAdapter) Encode(dst []byte, key []byte, _ int64) []byte {
 	return append(dst, key...)
 }
 
@@ -55,7 +54,7 @@ func (noopKeyAdapter) Decode(dst []byte, data []byte) ([]byte, error) {
 	return append(dst, data...), nil
 }
 
-func (noopKeyAdapter) EncodedLen(key []byte, _ []byte) int {
+func (noopKeyAdapter) EncodedLen(key []byte) int {
 	return len(key)
 }
 
@@ -63,25 +62,20 @@ var _ KeyAdapter = noopKeyAdapter{}
 
 type dupDetectKeyAdapter struct{}
 
-func (dupDetectKeyAdapter) Encode(dst []byte, key []byte, rowID []byte) []byte {
+func (dupDetectKeyAdapter) Encode(dst []byte, key []byte, rowID int64) []byte {
 	dst = codec.EncodeBytes(dst, key)
-	dst = reallocBytes(dst, len(rowID)+2)
-	dst = append(dst, rowID...)
-	rowIDLen := uint16(len(rowID))
-	dst = append(dst, byte(rowIDLen>>8), byte(rowIDLen))
+	dst = reallocBytes(dst, 8)
+	n := len(dst)
+	dst = dst[:n+8]
+	binary.BigEndian.PutUint64(dst[n:n+8], codec.EncodeIntToCmpUint(rowID))
 	return dst
 }
 
 func (dupDetectKeyAdapter) Decode(dst []byte, data []byte) ([]byte, error) {
-	if len(data) < 2 {
+	if len(data) < 8 {
 		return nil, errors.New("insufficient bytes to decode value")
 	}
-	rowIDLen := uint16(data[len(data)-2])<<8 | uint16(data[len(data)-1])
-	tailLen := int(rowIDLen + 2)
-	if len(data) < tailLen {
-		return nil, errors.New("insufficient bytes to decode value")
-	}
-	_, key, err := codec.DecodeBytes(data[:len(data)-tailLen], dst[len(dst):cap(dst)])
+	_, key, err := codec.DecodeBytes(data[:len(data)-8], dst[len(dst):cap(dst)])
 	if err != nil {
 		return nil, err
 	}
@@ -96,14 +90,8 @@ func (dupDetectKeyAdapter) Decode(dst []byte, data []byte) ([]byte, error) {
 	return append(dst, key...), nil
 }
 
-func (dupDetectKeyAdapter) EncodedLen(key []byte, rowID []byte) int {
-	return codec.EncodedBytesLength(len(key)) + len(rowID) + 2
+func (dupDetectKeyAdapter) EncodedLen(key []byte) int {
+	return codec.EncodedBytesLength(len(key)) + 8
 }
 
 var _ KeyAdapter = dupDetectKeyAdapter{}
-
-// static vars for rowID
-var (
-	MinRowID  = common.EncodeIntRowID(math.MinInt64)
-	ZeroRowID = common.EncodeIntRowID(0)
-)

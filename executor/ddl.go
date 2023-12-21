@@ -37,7 +37,6 @@ import (
 	"github.com/pingcap/tidb/table/temptable"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbterror"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/gcutil"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
@@ -205,12 +204,6 @@ func (e *DDLExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 		err = e.executeDropPlacementPolicy(x)
 	case *ast.AlterPlacementPolicyStmt:
 		err = e.executeAlterPlacementPolicy(x)
-	case *ast.CreateResourceGroupStmt:
-		err = e.executeCreateResourceGroup(x)
-	case *ast.DropResourceGroupStmt:
-		err = e.executeDropResourceGroup(x)
-	case *ast.AlterResourceGroupStmt:
-		err = e.executeAlterResourceGroup(x)
 	}
 	if err != nil {
 		// If the owner return ErrTableNotExists error when running this DDL, it may be caused by schema changed,
@@ -302,7 +295,7 @@ func (e *DDLExec) executeCreateView(ctx context.Context, s *ast.CreateViewStmt) 
 		return errors.Trace(err)
 	}
 	if ret.IsStaleness {
-		return exeerrors.ErrViewInvalid.GenWithStackByArgs(s.ViewName.Schema.L, s.ViewName.Name.L)
+		return ErrViewInvalid.GenWithStackByArgs(s.ViewName.Schema.L, s.ViewName.Name.L)
 	}
 
 	return domain.GetDomain(e.ctx).DDL().CreateView(e.ctx, s)
@@ -392,10 +385,11 @@ func (e *DDLExec) executeRecoverTable(s *ast.RecoverTableStmt) error {
 	var job *model.Job
 	var err error
 	var tblInfo *model.TableInfo
-	if s.JobID != 0 {
-		job, tblInfo, err = e.getRecoverTableByJobID(s, dom)
-	} else {
+	// Let check table first. Related isssue #46296.
+	if s.Table != nil {
 		job, tblInfo, err = e.getRecoverTableByTableName(s.Table)
+	} else {
+		job, tblInfo, err = e.getRecoverTableByJobID(s, dom)
 	}
 	if err != nil {
 		return err
@@ -532,12 +526,18 @@ func (e *DDLExec) getRecoverTableByTableName(tableName *ast.TableName) (*model.J
 	}
 	// Dropping local temporary tables won't appear in DDL jobs.
 	if tableInfo.TempTableType == model.TempTableGlobal {
-		return nil, nil, exeerrors.ErrUnsupportedFlashbackTmpTable
+		return nil, nil, errUnsupportedFlashbackTmpTable
 	}
 	return jobInfo, tableInfo, nil
 }
 
 func (e *DDLExec) executeFlashBackCluster(s *ast.FlashBackToTimestampStmt) error {
+	// Check `TO TSO` clause
+	if s.FlashbackTSO > 0 {
+		return domain.GetDomain(e.ctx).DDL().FlashbackCluster(e.ctx, s.FlashbackTSO)
+	}
+
+	// Check `TO TIMESTAMP` clause
 	flashbackTS, err := staleread.CalculateAsOfTsExpr(context.Background(), e.ctx, s.FlashbackTS)
 	if err != nil {
 		return err
@@ -688,7 +688,7 @@ func (e *DDLExec) getRecoverDBByName(schemaName model.CIStr) (recoverSchemaInfo 
 
 func (e *DDLExec) executeLockTables(s *ast.LockTablesStmt) error {
 	if !config.TableLockEnabled() {
-		e.ctx.GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrFuncNotEnabled.GenWithStackByArgs("LOCK TABLES", "enable-table-lock"))
+		e.ctx.GetSessionVars().StmtCtx.AppendWarning(ErrFuncNotEnabled.GenWithStackByArgs("LOCK TABLES", "enable-table-lock"))
 		return nil
 	}
 
@@ -703,7 +703,7 @@ func (e *DDLExec) executeLockTables(s *ast.LockTablesStmt) error {
 
 func (e *DDLExec) executeUnlockTables(_ *ast.UnlockTablesStmt) error {
 	if !config.TableLockEnabled() {
-		e.ctx.GetSessionVars().StmtCtx.AppendWarning(exeerrors.ErrFuncNotEnabled.GenWithStackByArgs("UNLOCK TABLES", "enable-table-lock"))
+		e.ctx.GetSessionVars().StmtCtx.AppendWarning(ErrFuncNotEnabled.GenWithStackByArgs("UNLOCK TABLES", "enable-table-lock"))
 		return nil
 	}
 	lockedTables := e.ctx.GetAllTableLocks()
@@ -741,25 +741,4 @@ func (e *DDLExec) executeDropPlacementPolicy(s *ast.DropPlacementPolicyStmt) err
 
 func (e *DDLExec) executeAlterPlacementPolicy(s *ast.AlterPlacementPolicyStmt) error {
 	return domain.GetDomain(e.ctx).DDL().AlterPlacementPolicy(e.ctx, s)
-}
-
-func (e *DDLExec) executeCreateResourceGroup(s *ast.CreateResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() && !e.ctx.GetSessionVars().InRestrictedSQL {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().AddResourceGroup(e.ctx, s)
-}
-
-func (e *DDLExec) executeAlterResourceGroup(s *ast.AlterResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() && !e.ctx.GetSessionVars().InRestrictedSQL {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().AlterResourceGroup(e.ctx, s)
-}
-
-func (e *DDLExec) executeDropResourceGroup(s *ast.DropResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() && !e.ctx.GetSessionVars().InRestrictedSQL {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().DropResourceGroup(e.ctx, s)
 }

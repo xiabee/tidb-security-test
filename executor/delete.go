@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
 	"go.uber.org/zap"
@@ -151,13 +150,13 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 func (e *DeleteExec) doBatchDelete(ctx context.Context) error {
 	txn, err := e.ctx.Txn(false)
 	if err != nil {
-		return exeerrors.ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
+		return ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
 	}
 	e.memTracker.Consume(-int64(txn.Size()))
-	e.ctx.StmtCommit(ctx)
+	e.ctx.StmtCommit()
 	if err := sessiontxn.NewTxnInStmt(ctx, e.ctx); err != nil {
 		// We should return a special error for batch insert.
-		return exeerrors.ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
+		return ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
 	}
 	return nil
 }
@@ -229,8 +228,8 @@ func (e *DeleteExec) deleteMultiTablesByChunk(ctx context.Context) error {
 func (e *DeleteExec) removeRowsInTblRowMap(tblRowMap tableRowMapType) error {
 	for id, rowMap := range tblRowMap {
 		var err error
-		rowMap.Range(func(h kv.Handle, val []types.Datum) bool {
-			err = e.removeRow(e.ctx, e.tblID2Table[id], h, val)
+		rowMap.Range(func(h kv.Handle, val interface{}) bool {
+			err = e.removeRow(e.ctx, e.tblID2Table[id], h, val.([]types.Datum))
 			return err == nil
 		})
 		if err != nil {
@@ -246,8 +245,7 @@ func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handl
 	if err != nil {
 		return err
 	}
-	tid := t.Meta().ID
-	err = onRemoveRowForFK(ctx, data, e.fkChecks[tid], e.fkCascades[tid])
+	err = e.onRemoveRowForFK(ctx, t, data)
 	if err != nil {
 		return err
 	}
@@ -255,7 +253,8 @@ func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handl
 	return nil
 }
 
-func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FKCheckExec, fkCascades []*FKCascadeExec) error {
+func (e *DeleteExec) onRemoveRowForFK(ctx sessionctx.Context, t table.Table, data []types.Datum) error {
+	fkChecks := e.fkChecks[t.Meta().ID]
 	sc := ctx.GetSessionVars().StmtCtx
 	for _, fkc := range fkChecks {
 		err := fkc.deleteRowNeedToCheck(sc, data)
@@ -263,6 +262,7 @@ func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FK
 			return err
 		}
 	}
+	fkCascades := e.fkCascades[t.Meta().ID]
 	for _, fkc := range fkCascades {
 		err := fkc.onDeleteRow(sc, data)
 		if err != nil {

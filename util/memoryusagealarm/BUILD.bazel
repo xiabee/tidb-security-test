@@ -20,7 +20,6 @@ go_library(
 
 go_test(
     name = "memoryusagealarm_test",
-    timeout = "short",
     srcs = ["memoryusagealarm_test.go"],
     embed = [":memoryusagealarm"],
     flaky = True,

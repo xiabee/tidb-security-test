@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
 )
@@ -57,16 +56,20 @@ func (worker *analyzeSaveStatsWorker) run(ctx context.Context, analyzeSnapshot b
 	}()
 	for results := range worker.resultsCh {
 		if atomic.LoadUint32(worker.killed) == 1 {
-			worker.errCh <- errors.Trace(exeerrors.ErrQueryInterrupted)
+			worker.errCh <- errors.Trace(ErrQueryInterrupted)
 			return
 		}
-		err := handle.SaveTableStatsToStorage(worker.sctx, results, analyzeSnapshot, handle.StatsMetaHistorySourceAnalyze)
+		err := handle.SaveTableStatsToStorage(worker.sctx, results, analyzeSnapshot)
 		if err != nil {
 			logutil.Logger(ctx).Error("save table stats to storage failed", zap.Error(err))
 			finishJobWithLog(worker.sctx, results.Job, err)
 			worker.errCh <- err
 		} else {
 			finishJobWithLog(worker.sctx, results.Job, nil)
+			// Dump stats to historical storage.
+			if err := recordHistoricalStats(worker.sctx, results.TableID.TableID); err != nil {
+				logutil.BgLogger().Error("record historical stats failed", zap.Error(err))
+			}
 		}
 		invalidInfoSchemaStatCache(results.TableID.GetStatisticsID())
 		if err != nil {

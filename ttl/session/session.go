@@ -30,16 +30,6 @@ import (
 	"github.com/pingcap/tidb/util/sqlexec"
 )
 
-// TxnMode represents using optimistic or pessimistic mode in the transaction
-type TxnMode int
-
-const (
-	// TxnModeOptimistic means using the optimistic transaction with "BEGIN OPTIMISTIC"
-	TxnModeOptimistic TxnMode = iota
-	// TxnModePessimistic means using the pessimistic transaction with "BEGIN PESSIMISTIC"
-	TxnModePessimistic
-)
-
 // Session is used to execute queries for TTL case
 type Session interface {
 	sessionctx.Context
@@ -48,7 +38,7 @@ type Session interface {
 	// ExecuteSQL executes the sql
 	ExecuteSQL(ctx context.Context, sql string, args ...interface{}) ([]chunk.Row, error)
 	// RunInTxn executes the specified function in a txn
-	RunInTxn(ctx context.Context, fn func() error, mode TxnMode) (err error)
+	RunInTxn(ctx context.Context, fn func() error) (err error)
 	// ResetWithGlobalTimeZone resets the session time zone to global time zone
 	ResetWithGlobalTimeZone(ctx context.Context) error
 	// Close closes the session
@@ -104,21 +94,12 @@ func (s *session) ExecuteSQL(ctx context.Context, sql string, args ...interface{
 }
 
 // RunInTxn executes the specified function in a txn
-func (s *session) RunInTxn(ctx context.Context, fn func() error, txnMode TxnMode) (err error) {
+func (s *session) RunInTxn(ctx context.Context, fn func() error) (err error) {
 	tracer := metrics.PhaseTracerFromCtx(ctx)
 	defer tracer.EnterPhase(tracer.Phase())
 
 	tracer.EnterPhase(metrics.PhaseBeginTxn)
-	sql := "BEGIN "
-	switch txnMode {
-	case TxnModeOptimistic:
-		sql += "OPTIMISTIC"
-	case TxnModePessimistic:
-		sql += "PESSIMISTIC"
-	default:
-		return errors.New("unknown transaction mode")
-	}
-	if _, err = s.ExecuteSQL(ctx, sql); err != nil {
+	if _, err = s.ExecuteSQL(ctx, "BEGIN OPTIMISTIC"); err != nil {
 		return err
 	}
 	tracer.EnterPhase(metrics.PhaseOther)
@@ -148,23 +129,21 @@ func (s *session) RunInTxn(ctx context.Context, fn func() error, txnMode TxnMode
 // ResetWithGlobalTimeZone resets the session time zone to global time zone
 func (s *session) ResetWithGlobalTimeZone(ctx context.Context) error {
 	sessVar := s.GetSessionVars()
-	if sessVar.TimeZone != nil {
-		globalTZ, err := sessVar.GetGlobalSystemVar(ctx, variable.TimeZone)
-		if err != nil {
-			return err
-		}
-
-		tz, err := sessVar.GetSessionOrGlobalSystemVar(ctx, variable.TimeZone)
-		if err != nil {
-			return err
-		}
-
-		if globalTZ == tz {
-			return nil
-		}
+	globalTZ, err := sessVar.GetGlobalSystemVar(ctx, variable.TimeZone)
+	if err != nil {
+		return err
 	}
 
-	_, err := s.ExecuteSQL(ctx, "SET @@time_zone=@@global.time_zone")
+	tz, err := sessVar.GetSessionOrGlobalSystemVar(ctx, variable.TimeZone)
+	if err != nil {
+		return err
+	}
+
+	if globalTZ == tz {
+		return nil
+	}
+
+	_, err = s.ExecuteSQL(ctx, "SET @@time_zone=@@global.time_zone")
 	return err
 }
 

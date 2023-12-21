@@ -152,7 +152,7 @@ type ttlTableSession struct {
 	expire time.Time
 }
 
-func (s *ttlTableSession) ExecuteSQLWithCheck(ctx context.Context, sql string) ([]chunk.Row, bool, error) {
+func (s *ttlTableSession) ExecuteSQLWithCheck(ctx context.Context, sql string) (rows []chunk.Row, shouldRetry bool, err error) {
 	tracer := metrics.PhaseTracerFromCtx(ctx)
 	defer tracer.EnterPhase(tracer.Phase())
 
@@ -161,16 +161,14 @@ func (s *ttlTableSession) ExecuteSQLWithCheck(ctx context.Context, sql string) (
 		return nil, false, errors.New("global TTL job is disabled")
 	}
 
-	if err := s.ResetWithGlobalTimeZone(ctx); err != nil {
+	if err = s.ResetWithGlobalTimeZone(ctx); err != nil {
 		return nil, false, err
 	}
 
-	var result []chunk.Row
-	shouldRetry := true
-	err := s.RunInTxn(ctx, func() error {
+	err = s.RunInTxn(ctx, func() error {
 		tracer.EnterPhase(metrics.PhaseQuery)
 		defer tracer.EnterPhase(tracer.Phase())
-		rows, err := s.ExecuteSQL(ctx, sql)
+		rows, err = s.ExecuteSQL(ctx, sql)
 		tracer.EnterPhase(metrics.PhaseCheckTTL)
 		// We must check the configuration after ExecuteSQL because of MDL and the meta the current transaction used
 		// can only be determined after executed one query.
@@ -180,18 +178,17 @@ func (s *ttlTableSession) ExecuteSQLWithCheck(ctx context.Context, sql string) (
 		}
 
 		if err != nil {
+			shouldRetry = true
 			return err
 		}
-
-		result = rows
 		return nil
-	}, session.TxnModeOptimistic)
+	})
 
 	if err != nil {
 		return nil, shouldRetry, err
 	}
 
-	return result, false, nil
+	return rows, false, nil
 }
 
 func validateTTLWork(ctx context.Context, s session.Session, tbl *cache.PhysicalTable, expire time.Time) error {

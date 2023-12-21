@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 )
@@ -34,7 +33,6 @@ import (
 type SelectIntoExec struct {
 	baseExecutor
 	intoOpt *ast.SelectIntoOption
-	core.LineFieldsInfo
 
 	lineBuf   []byte
 	realBuf   []byte
@@ -92,7 +90,7 @@ func (s *SelectIntoExec) considerEncloseOpt(et types.EvalType) bool {
 }
 
 func (s *SelectIntoExec) escapeField(f []byte) []byte {
-	if len(s.FieldsEscapedBy) == 0 {
+	if s.intoOpt.FieldsInfo.Escaped == 0 {
 		return f
 	}
 	s.escapeBuf = s.escapeBuf[:0]
@@ -103,17 +101,17 @@ func (s *SelectIntoExec) escapeField(f []byte) []byte {
 			// we always escape 0
 			escape = true
 			b = '0'
-		case b == s.FieldsEscapedBy[0] || (len(s.FieldsEnclosedBy) > 0 && b == s.FieldsEnclosedBy[0]):
+		case b == s.intoOpt.FieldsInfo.Escaped || b == s.intoOpt.FieldsInfo.Enclosed:
 			escape = true
-		case !s.enclosed && len(s.FieldsTerminatedBy) > 0 && b == s.FieldsTerminatedBy[0]:
+		case !s.enclosed && len(s.intoOpt.FieldsInfo.Terminated) > 0 && b == s.intoOpt.FieldsInfo.Terminated[0]:
 			// if field is enclosed, we only escape line terminator, otherwise both field and line terminator will be escaped
 			escape = true
-		case len(s.LinesTerminatedBy) > 0 && b == s.LinesTerminatedBy[0]:
+		case len(s.intoOpt.LinesInfo.Terminated) > 0 && b == s.intoOpt.LinesInfo.Terminated[0]:
 			// we always escape line terminator
 			escape = true
 		}
 		if escape {
-			s.escapeBuf = append(s.escapeBuf, s.FieldsEscapedBy[0])
+			s.escapeBuf = append(s.escapeBuf, s.intoOpt.FieldsInfo.Escaped)
 		}
 		s.escapeBuf = append(s.escapeBuf, b)
 	}
@@ -121,17 +119,25 @@ func (s *SelectIntoExec) escapeField(f []byte) []byte {
 }
 
 func (s *SelectIntoExec) dumpToOutfile() error {
+	lineTerm := "\n"
+	if s.intoOpt.LinesInfo.Terminated != "" {
+		lineTerm = s.intoOpt.LinesInfo.Terminated
+	}
+	fieldTerm := "\t"
+	if s.intoOpt.FieldsInfo.Terminated != "" {
+		fieldTerm = s.intoOpt.FieldsInfo.Terminated
+	}
 	encloseFlag := false
 	var encloseByte byte
 	encloseOpt := false
-	if len(s.FieldsEnclosedBy) > 0 {
-		encloseByte = s.FieldsEnclosedBy[0]
+	if s.intoOpt.FieldsInfo.Enclosed != byte(0) {
+		encloseByte = s.intoOpt.FieldsInfo.Enclosed
 		encloseFlag = true
-		encloseOpt = s.FieldsOptEnclosed
+		encloseOpt = s.intoOpt.FieldsInfo.OptEnclosed
 	}
 	nullTerm := []byte("\\N")
-	if len(s.FieldsEscapedBy) > 0 {
-		nullTerm[0] = s.FieldsEscapedBy[0]
+	if s.intoOpt.FieldsInfo.Escaped != byte(0) {
+		nullTerm[0] = s.intoOpt.FieldsInfo.Escaped
 	} else {
 		nullTerm = []byte("NULL")
 	}
@@ -142,7 +148,7 @@ func (s *SelectIntoExec) dumpToOutfile() error {
 		s.lineBuf = s.lineBuf[:0]
 		for j, col := range cols {
 			if j != 0 {
-				s.lineBuf = append(s.lineBuf, s.FieldsTerminatedBy...)
+				s.lineBuf = append(s.lineBuf, fieldTerm...)
 			}
 			if row.IsNull(j) {
 				s.lineBuf = append(s.lineBuf, nullTerm...)
@@ -201,7 +207,7 @@ func (s *SelectIntoExec) dumpToOutfile() error {
 				s.lineBuf = append(s.lineBuf, encloseByte)
 			}
 		}
-		s.lineBuf = append(s.lineBuf, s.LinesTerminatedBy...)
+		s.lineBuf = append(s.lineBuf, lineTerm...)
 		if _, err := s.writer.Write(s.lineBuf); err != nil {
 			return errors.Trace(err)
 		}

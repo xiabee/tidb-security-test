@@ -38,8 +38,6 @@ const (
 	DefaultLogFormat = "text"
 	// DefaultSlowThreshold is the default slow log threshold in millisecond.
 	DefaultSlowThreshold = 300
-	// DefaultSlowTxnThreshold is the default slow txn log threshold in ms.
-	DefaultSlowTxnThreshold = 0
 	// DefaultQueryLogMaxLen is the default max length of the query in the log.
 	DefaultQueryLogMaxLen = 4096
 	// DefaultRecordPlanInSlowLog is the default value for whether enable log query plan in the slow log.
@@ -100,9 +98,8 @@ const (
 var SlowQueryLogger = log.L()
 
 // InitLogger initializes a logger with cfg.
-func InitLogger(cfg *LogConfig, opts ...zap.Option) error {
-	opts = append(opts, zap.AddStacktrace(zapcore.FatalLevel))
-	gl, props, err := log.InitLogger(&cfg.Config, opts...)
+func InitLogger(cfg *LogConfig) error {
+	gl, props, err := log.InitLogger(&cfg.Config, zap.AddStacktrace(zapcore.FatalLevel))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -141,9 +138,8 @@ func initGRPCLogger(gl *zap.Logger) {
 }
 
 // ReplaceLogger replace global logger instance with given log config.
-func ReplaceLogger(cfg *LogConfig, opts ...zap.Option) error {
-	opts = append(opts, zap.AddStacktrace(zapcore.FatalLevel))
-	gl, props, err := log.InitLogger(&cfg.Config, opts...)
+func ReplaceLogger(cfg *LogConfig) error {
+	gl, props, err := log.InitLogger(&cfg.Config, zap.AddStacktrace(zapcore.FatalLevel))
 	if err != nil {
 		return errors.Trace(err)
 	}

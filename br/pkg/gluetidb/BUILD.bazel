@@ -32,7 +32,6 @@ go_test(
     srcs = ["glue_test.go"],
     embed = [":gluetidb"],
     flaky = True,
-    shard_count = 4,
     deps = [
         "//br/pkg/glue",
         "//ddl",

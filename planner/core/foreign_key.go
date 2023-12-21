@@ -159,17 +159,6 @@ func (p *Insert) buildOnInsertFKTriggers(ctx sessionctx.Context, is infoschema.I
 		if len(referredFKCascades) > 0 {
 			fkCascades = append(fkCascades, referredFKCascades...)
 		}
-	} else if p.IsReplace {
-		referredFKChecks, referredFKCascades, err := p.buildOnReplaceReferredFKTriggers(ctx, is, dbName, tblInfo)
-		if err != nil {
-			return err
-		}
-		if len(referredFKChecks) > 0 {
-			fkChecks = append(fkChecks, referredFKChecks...)
-		}
-		if len(referredFKCascades) > 0 {
-			fkCascades = append(fkCascades, referredFKCascades...)
-		}
 	}
 	for _, fk := range tblInfo.ForeignKeys {
 		if fk.Version < 1 {
@@ -195,25 +184,6 @@ func (p *Insert) buildOnDuplicateUpdateColumns() map[string]struct{} {
 		m[assign.ColName.L] = struct{}{}
 	}
 	return m
-}
-
-func (p *Insert) buildOnReplaceReferredFKTriggers(ctx sessionctx.Context, is infoschema.InfoSchema, dbName string, tblInfo *model.TableInfo) ([]*FKCheck, []*FKCascade, error) {
-	referredFKs := is.GetTableReferredForeignKeys(dbName, tblInfo.Name.L)
-	fkChecks := make([]*FKCheck, 0, len(referredFKs))
-	fkCascades := make([]*FKCascade, 0, len(referredFKs))
-	for _, referredFK := range referredFKs {
-		fkCheck, fkCascade, err := buildOnDeleteOrUpdateFKTrigger(ctx, is, referredFK, FKCascadeOnDelete)
-		if err != nil {
-			return nil, nil, err
-		}
-		if fkCheck != nil {
-			fkChecks = append(fkChecks, fkCheck)
-		}
-		if fkCascade != nil {
-			fkCascades = append(fkCascades, fkCascade)
-		}
-	}
-	return fkChecks, fkCascades, nil
 }
 
 func (updt *Update) buildOnUpdateFKTriggers(ctx sessionctx.Context, is infoschema.InfoSchema, tblID2table map[int64]table.Table) error {
@@ -444,7 +414,7 @@ func buildFKCheck(ctx sessionctx.Context, tbl table.Table, cols []model.CIStr, f
 		}
 	}
 
-	referTbIdxInfo := model.FindIndexByColumns(tblInfo, tblInfo.Indices, cols...)
+	referTbIdxInfo := model.FindIndexByColumns(tblInfo, cols...)
 	if referTbIdxInfo == nil {
 		return nil, failedErr
 	}
@@ -490,7 +460,7 @@ func buildFKCascade(ctx sessionctx.Context, tp FKCascadeType, referredFK *model.
 			return fkCascade, nil
 		}
 	}
-	indexForFK := model.FindIndexByColumns(childTable.Meta(), childTable.Meta().Indices, fk.Cols...)
+	indexForFK := model.FindIndexByColumns(childTable.Meta(), fk.Cols...)
 	if indexForFK == nil {
 		return nil, errors.Errorf("Missing index for '%s' foreign key columns in the table '%s'", fk.Name, childTable.Meta().Name)
 	}

@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/store/mockstore/unistore/util/lockwaiter"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Follower will send detection rpc to Leader
@@ -101,7 +100,7 @@ func (dt *DetectorClient) rebuildStreamClient() error {
 	if err != nil {
 		return err
 	}
-	cc, err := grpc.Dial(leaderAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cc, err := grpc.Dial(leaderAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}

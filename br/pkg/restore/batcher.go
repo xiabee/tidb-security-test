@@ -11,9 +11,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/rtree"
-	"github.com/pingcap/tidb/br/pkg/summary"
 	"go.uber.org/zap"
 )
 
@@ -52,14 +50,10 @@ type Batcher struct {
 	// outCh is for output the restored table, so it can be sent to do something like checksum.
 	outCh chan<- *CreatedTable
 
-	updateCh glue.Progress
-
 	sender             BatchSender
 	manager            ContextManager
 	batchSizeThreshold int
 	size               int32
-
-	checkpointSetWithTableID map[int64]map[string]struct{}
 }
 
 // Len calculate the current size of this batcher.
@@ -109,7 +103,6 @@ func NewBatcher(
 	sender BatchSender,
 	manager ContextManager,
 	errCh chan<- error,
-	updateCh glue.Progress,
 ) (*Batcher, chan *CreatedTable) {
 	outCh := DefaultOutputTableChan()
 	sendChan := make(chan SendType, 2)
@@ -120,7 +113,6 @@ func NewBatcher(
 		sender:             sender,
 		manager:            manager,
 		sendCh:             sendChan,
-		updateCh:           updateCh,
 		cachedTablesMu:     new(sync.Mutex),
 		everythingIsDone:   new(sync.WaitGroup),
 		batchSizeThreshold: 1,
@@ -229,75 +221,24 @@ type DrainResult struct {
 	BlankTablesAfterSend []CreatedTable
 	RewriteRules         *RewriteRules
 	Ranges               []rtree.Range
-	// Record which part of ranges belongs to the table
-	TableEndOffsetInRanges []int
 }
 
 // Files returns all files of this drain result.
-func (result DrainResult) Files() []TableIDWithFiles {
-	tableIDWithFiles := make([]TableIDWithFiles, 0, len(result.TableEndOffsetInRanges))
-	var startOffset int = 0
-	for i, endOffset := range result.TableEndOffsetInRanges {
-		tableID := result.TablesToSend[i].Table.ID
-		ranges := result.Ranges[startOffset:endOffset]
-		files := make([]*backuppb.File, 0, len(result.Ranges)*2)
-		for _, rg := range ranges {
-			files = append(files, rg.Files...)
-		}
-
-		tableIDWithFiles = append(tableIDWithFiles, TableIDWithFiles{
-			TableID: tableID,
-			Files:   files,
-		})
-
-		// update start offset
-		startOffset = endOffset
+func (result DrainResult) Files() []*backuppb.File {
+	files := make([]*backuppb.File, 0, len(result.Ranges)*2)
+	for _, fs := range result.Ranges {
+		files = append(files, fs.Files...)
 	}
-
-	return tableIDWithFiles
+	return files
 }
 
 func newDrainResult() DrainResult {
 	return DrainResult{
-		TablesToSend:           make([]CreatedTable, 0),
-		BlankTablesAfterSend:   make([]CreatedTable, 0),
-		RewriteRules:           EmptyRewriteRule(),
-		Ranges:                 make([]rtree.Range, 0),
-		TableEndOffsetInRanges: make([]int, 0),
+		TablesToSend:         make([]CreatedTable, 0),
+		BlankTablesAfterSend: make([]CreatedTable, 0),
+		RewriteRules:         EmptyRewriteRule(),
+		Ranges:               make([]rtree.Range, 0),
 	}
-}
-
-// fileterOutRanges filter out the files from `drained-range` that exists in the checkpoint set.
-func (b *Batcher) filterOutRanges(checkpointSet map[string]struct{}, drained []rtree.Range) []rtree.Range {
-	progress := int(0)
-	totalKVs := uint64(0)
-	totalBytes := uint64(0)
-	for i, rg := range drained {
-		newFiles := make([]*backuppb.File, 0, len(rg.Files))
-		for _, f := range rg.Files {
-			rangeKey := getFileRangeKey(f.Name)
-			if _, exists := checkpointSet[rangeKey]; exists {
-				// the range has been import done, so skip it and
-				// update the summary information
-				progress += 1
-				totalKVs += f.TotalKvs
-				totalBytes += f.TotalBytes
-			} else {
-				newFiles = append(newFiles, f)
-			}
-		}
-		// the newFiles may be empty
-		drained[i].Files = newFiles
-	}
-	if progress > 0 {
-		// (split/scatter + download/ingest) / (default cf + write cf)
-		b.updateCh.IncBy(int64(progress) * 2 / 2)
-		summary.CollectSuccessUnit(summary.TotalKV, progress, totalKVs)
-		summary.CollectSuccessUnit(summary.SkippedKVCountByCheckpoint, progress, totalKVs)
-		summary.CollectSuccessUnit(summary.TotalBytes, progress, totalBytes)
-		summary.CollectSuccessUnit(summary.SkippedBytesByCheckpoint, progress, totalBytes)
-	}
-	return drained
 }
 
 // drainRanges 'drains' ranges from current tables.
@@ -325,7 +266,6 @@ func (b *Batcher) drainRanges() DrainResult {
 	defer b.cachedTablesMu.Unlock()
 
 	for offset, thisTable := range b.cachedTables {
-		t, exists := b.checkpointSetWithTableID[thisTable.Table.ID]
 		thisTableLen := len(thisTable.Range)
 		collected := len(result.Ranges)
 
@@ -347,28 +287,16 @@ func (b *Batcher) drainRanges() DrainResult {
 				zap.Int("size", thisTableLen),
 				zap.Int("drained", drainSize),
 			)
-			// Firstly calculated the batcher size, and then
-			// filter out ranges by checkpoint.
-			atomic.AddInt32(&b.size, -int32(len(drained)))
-			if exists {
-				drained = b.filterOutRanges(t, drained)
-			}
 			result.Ranges = append(result.Ranges, drained...)
-			result.TableEndOffsetInRanges = append(result.TableEndOffsetInRanges, len(result.Ranges))
 			b.cachedTables = b.cachedTables[offset:]
+			atomic.AddInt32(&b.size, -int32(len(drained)))
 			return result
 		}
 
 		result.BlankTablesAfterSend = append(result.BlankTablesAfterSend, thisTable.CreatedTable)
-		// Firstly calculated the batcher size, and then filter out ranges by checkpoint.
-		atomic.AddInt32(&b.size, -int32(len(thisTable.Range)))
 		// let's 'drain' the ranges of current table. This op must not make the batch full.
-		if exists {
-			result.Ranges = append(result.Ranges, b.filterOutRanges(t, thisTable.Range)...)
-		} else {
-			result.Ranges = append(result.Ranges, thisTable.Range...)
-		}
-		result.TableEndOffsetInRanges = append(result.TableEndOffsetInRanges, len(result.Ranges))
+		result.Ranges = append(result.Ranges, thisTable.Range...)
+		atomic.AddInt32(&b.size, -int32(len(thisTable.Range)))
 		// clear the table length.
 		b.cachedTables[offset].Range = []rtree.Range{}
 		log.Debug("draining table to batch",
@@ -444,8 +372,4 @@ func (b *Batcher) Close() {
 // just set threshold before anything starts(e.g. EnableAutoCommit), please.
 func (b *Batcher) SetThreshold(newThreshold int) {
 	b.batchSizeThreshold = newThreshold
-}
-
-func (b *Batcher) SetCheckpoint(sets map[int64]map[string]struct{}) {
-	b.checkpointSetWithTableID = sets
 }

@@ -1287,10 +1287,8 @@ yynewstate:
 		}
 	case 16:
 		{
-			parser.yyVAL.hint = &ast.TableOptimizerHint{
-				HintName: model.NewCIStr(yyS[yypt-3].ident),
-				HintData: yyS[yypt-1].ident,
-			}
+			parser.warnUnsupportedHint(yyS[yypt-3].ident)
+			parser.yyVAL.hint = nil
 		}
 	case 17:
 		{

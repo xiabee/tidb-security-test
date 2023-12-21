@@ -403,35 +403,22 @@ var (
 	dumpStatsMaxDuration = time.Hour
 )
 
-// needDumpStatsDelta checks whether to dump stats delta.
-// 1. If the table doesn't exist or is a mem table or system table, then return false.
-// 2. If the mode is DumpAll, then return true.
-// 3. If the stats delta haven't been dumped in the past hour, then return true.
-// 4. If the table stats is pseudo or empty or `Modify Count / Table Count` exceeds the threshold.
-func (h *Handle) needDumpStatsDelta(is infoschema.InfoSchema, mode dumpMode, id int64, item variable.TableDelta, currentTime time.Time) bool {
-	tbl, ok := h.getTableByPhysicalID(is, id)
-	if !ok {
-		return false
-	}
-	dbInfo, ok := is.SchemaByTable(tbl.Meta())
-	if !ok {
-		return false
-	}
-	if util.IsMemOrSysDB(dbInfo.Name.L) {
-		return false
-	}
-	if mode == DumpAll {
-		return true
-	}
+// needDumpStatsDelta returns true when only updates a small portion of the table and the time since last update
+// do not exceed one hour.
+func needDumpStatsDelta(h *Handle, id int64, item variable.TableDelta, currentTime time.Time) bool {
 	if item.InitTime.IsZero() {
 		item.InitTime = currentTime
+	}
+	tbl, ok := h.statsCache.Load().(statsCache).Get(id)
+	if !ok {
+		// No need to dump if the stats is invalid.
+		return false
 	}
 	if currentTime.Sub(item.InitTime) > dumpStatsMaxDuration {
 		// Dump the stats to kv at least once an hour.
 		return true
 	}
-	statsTbl := h.GetPartitionStats(tbl.Meta(), id)
-	if statsTbl.Pseudo || statsTbl.RealtimeCount == 0 || float64(item.Count)/float64(statsTbl.RealtimeCount) > DumpStatsDeltaRatio {
+	if tbl.Count == 0 || float64(item.Count)/float64(tbl.Count) > DumpStatsDeltaRatio {
 		// Dump the stats when there are many modifications.
 		return true
 	}
@@ -500,15 +487,9 @@ func (h *Handle) DumpStatsDeltaToKV(mode dumpMode) error {
 		h.globalMap.data = deltaMap
 		h.globalMap.Unlock()
 	}()
-	// TODO: pass in do.InfoSchema() to DumpStatsDeltaToKV.
-	is := func() infoschema.InfoSchema {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.mu.ctx.GetDomainInfoSchema().(infoschema.InfoSchema)
-	}()
 	currentTime := time.Now()
 	for id, item := range deltaMap {
-		if !h.needDumpStatsDelta(is, mode, id, item, currentTime) {
+		if mode == DumpDelta && !needDumpStatsDelta(h, id, item, currentTime) {
 			continue
 		}
 		updated, err := h.dumpTableStatCountToKV(id, item)
@@ -538,7 +519,7 @@ func (h *Handle) dumpTableStatCountToKV(id int64, delta variable.TableDelta) (up
 	statsVer := uint64(0)
 	defer func() {
 		if err == nil && statsVer != 0 {
-			h.recordHistoricalStatsMeta(id, statsVer, StatsMetaHistorySourceFlushStats)
+			err = h.recordHistoricalStatsMeta(id, statsVer)
 		}
 	}()
 	if delta.Count == 0 {
@@ -563,8 +544,7 @@ func (h *Handle) dumpTableStatCountToKV(id int64, delta variable.TableDelta) (up
 	startTS := txn.StartTS()
 	updateStatsMeta := func(id int64) error {
 		var err error
-		// This lock is already locked on it so it use isTableLocked without lock.
-		if h.isTableLocked(id) {
+		if h.IsTableLocked(id) {
 			if delta.Delta < 0 {
 				_, err = exec.ExecuteInternal(ctx, "update mysql.stats_table_locked set version = %?, count = count - %?, modify_count = modify_count + %? where table_id = %? and count >= %?", startTS, -delta.Delta, delta.Count, id, -delta.Delta)
 			} else {
@@ -698,7 +678,9 @@ func (h *Handle) UpdateStatsByLocalFeedback(is infoschema.InfoSchema) {
 OUTER:
 	for _, fbs := range feedback.Feedbacks {
 		for _, fb := range fbs {
+			h.mu.Lock()
 			table, ok := h.getTableByPhysicalID(is, fb.PhysicalID)
+			h.mu.Unlock()
 			if !ok {
 				continue
 			}
@@ -841,7 +823,9 @@ func (h *Handle) handleSingleHistogramUpdate(is infoschema.InfoSchema, rows []ch
 			err = errors.Trace(h.deleteOutdatedFeedback(physicalTableID, histID, isIndex))
 		}
 	}()
+	h.mu.Lock()
 	table, ok := h.getTableByPhysicalID(is, physicalTableID)
+	h.mu.Unlock()
 	// The table has been deleted.
 	if !ok {
 		return nil
@@ -919,7 +903,7 @@ func (h *Handle) deleteOutdatedFeedback(tableID, histID, isIndex int64) error {
 func (h *Handle) dumpStatsUpdateToKV(tableID, isIndex int64, q *statistics.QueryFeedback, hist *statistics.Histogram, cms *statistics.CMSketch, topN *statistics.TopN, statsVersion int64) error {
 	hist = statistics.UpdateHistogram(hist, q, int(statsVersion))
 	// feedback for partition is not ready.
-	err := h.SaveStatsToStorage(tableID, -1, 0, int(isIndex), hist, cms, topN, int(statsVersion), 0, false, StatsMetaHistorySourceFeedBack)
+	err := h.SaveStatsToStorage(tableID, -1, 0, int(isIndex), hist, cms, topN, int(statsVersion), 0, false)
 	metrics.UpdateStatsCounter.WithLabelValues(metrics.RetLabel(err)).Inc()
 	return errors.Trace(err)
 }
@@ -1021,7 +1005,7 @@ func NeedAnalyzeTable(tbl *statistics.Table, limit time.Duration, autoAnalyzeRat
 		return false, ""
 	}
 	// No need to analyze it.
-	tblCnt := float64(tbl.RealtimeCount)
+	tblCnt := float64(tbl.Count)
 	if histCnt := tbl.GetColRowCount(); histCnt > 0 {
 		tblCnt = histCnt
 	}
@@ -1165,7 +1149,7 @@ func (h *Handle) HandleAutoAnalyze(is infoschema.InfoSchema) (analyzed bool) {
 }
 
 func (h *Handle) autoAnalyzeTable(tblInfo *model.TableInfo, statsTbl *statistics.Table, ratio float64, analyzeSnapshot bool, sql string, params ...interface{}) bool {
-	if statsTbl.Pseudo || statsTbl.RealtimeCount < AutoAnalyzeMinCnt {
+	if statsTbl.Pseudo || statsTbl.Count < AutoAnalyzeMinCnt {
 		return false
 	}
 	if needAnalyze, reason := NeedAnalyzeTable(statsTbl, 20*h.Lease(), ratio); needAnalyze {
@@ -1205,7 +1189,7 @@ func (h *Handle) autoAnalyzePartitionTableInDynamicMode(tblInfo *model.TableInfo
 	partitionNames := make([]interface{}, 0, len(pi.Definitions))
 	for _, def := range pi.Definitions {
 		partitionStatsTbl := h.GetPartitionStats(tblInfo, def.ID)
-		if partitionStatsTbl.Pseudo || partitionStatsTbl.RealtimeCount < AutoAnalyzeMinCnt {
+		if partitionStatsTbl.Pseudo || partitionStatsTbl.Count < AutoAnalyzeMinCnt {
 			continue
 		}
 		if needAnalyze, _ := NeedAnalyzeTable(partitionStatsTbl, 20*h.Lease(), ratio); needAnalyze {
@@ -1320,8 +1304,8 @@ func formatBuckets(hg *statistics.Histogram, lowBkt, highBkt, idxCols int) strin
 }
 
 func colRangeToStr(c *statistics.Column, ran *ranger.Range, actual int64, factor float64) string {
-	lowCount, lowBkt := c.LessRowCountWithBktIdx(nil, ran.LowVal[0])
-	highCount, highBkt := c.LessRowCountWithBktIdx(nil, ran.HighVal[0])
+	lowCount, lowBkt := c.LessRowCountWithBktIdx(ran.LowVal[0])
+	highCount, highBkt := c.LessRowCountWithBktIdx(ran.HighVal[0])
 	return fmt.Sprintf("range: %s, actual: %d, expected: %d, buckets: {%s}", ran.String(), actual,
 		int64((highCount-lowCount)*factor), formatBuckets(&c.Histogram, lowBkt, highBkt, 0))
 }
@@ -1341,11 +1325,11 @@ func logForIndexRange(idx *statistics.Index, ran *ranger.Range, actual int64, fa
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("value: %s, actual: %d, expected: %d", str, actual, int64(float64(idx.QueryBytes(nil, lb))*factor))
+		return fmt.Sprintf("value: %s, actual: %d, expected: %d", str, actual, int64(float64(idx.QueryBytes(lb))*factor))
 	}
 	l, r := types.NewBytesDatum(lb), types.NewBytesDatum(rb)
-	lowCount, lowBkt := idx.LessRowCountWithBktIdx(nil, l)
-	highCount, highBkt := idx.LessRowCountWithBktIdx(nil, r)
+	lowCount, lowBkt := idx.LessRowCountWithBktIdx(l)
+	highCount, highBkt := idx.LessRowCountWithBktIdx(r)
 	return fmt.Sprintf("range: %s, actual: %d, expected: %d, histogram: {%s}", ran.String(), actual,
 		int64((highCount-lowCount)*factor), formatBuckets(&idx.Histogram, lowBkt, highBkt, len(idx.Info.Columns)))
 }
@@ -1373,7 +1357,7 @@ func logForIndex(prefix string, t *statistics.Table, idx *statistics.Index, rang
 		if err != nil {
 			continue
 		}
-		equalityCount := idx.QueryBytes(nil, bytes)
+		equalityCount := idx.QueryBytes(bytes)
 		rang := ranger.Range{
 			LowVal:    []types.Datum{ran.LowVal[rangePosition]},
 			HighVal:   []types.Datum{ran.HighVal[rangePosition]},
@@ -1395,7 +1379,7 @@ func logForIndex(prefix string, t *statistics.Table, idx *statistics.Index, rang
 					zap.String("range", rangeString))
 			}
 		} else {
-			count, err := statistics.GetPseudoRowCountByColumnRanges(sc, float64(t.RealtimeCount), []*ranger.Range{&rang}, 0)
+			count, err := statistics.GetPseudoRowCountByColumnRanges(sc, float64(t.Count), []*ranger.Range{&rang}, 0)
 			if err == nil {
 				logutil.BgLogger().Debug(prefix, zap.String("index", idx.Info.Name.O), zap.Int64("actual", actual[i]),
 					zap.String("equality", equalityString), zap.Uint64("expected equality", equalityCount),
@@ -1426,13 +1410,13 @@ func (h *Handle) logDetailedInfo(q *statistics.QueryFeedback) {
 		if idx == nil || idx.Histogram.Len() == 0 {
 			return
 		}
-		logForIndex(logPrefix, t, idx, ranges, actual, idx.GetIncreaseFactor(t.RealtimeCount))
+		logForIndex(logPrefix, t, idx, ranges, actual, idx.GetIncreaseFactor(t.Count))
 	} else {
 		c := t.Columns[q.Hist.ID]
 		if c == nil || c.Histogram.Len() == 0 {
 			return
 		}
-		logForPK(logPrefix, c, ranges, actual, c.GetIncreaseFactor(t.RealtimeCount))
+		logForPK(logPrefix, c, ranges, actual, c.GetIncreaseFactor(t.Count))
 	}
 }
 
@@ -1486,10 +1470,10 @@ func (h *Handle) RecalculateExpectCount(q *statistics.QueryFeedback, enablePseud
 	expected := 0.0
 	if isIndex {
 		idx := t.Indices[id]
-		expected, err = idx.GetRowCount(sctx, nil, ranges, t.RealtimeCount, t.ModifyCount)
+		expected, err = idx.GetRowCount(sctx, nil, ranges, t.Count, t.ModifyCount)
 	} else {
 		c := t.Columns[id]
-		expected, err = c.GetColumnRowCount(sctx, ranges, t.RealtimeCount, t.ModifyCount, true)
+		expected, err = c.GetColumnRowCount(sctx, ranges, t.Count, t.ModifyCount, true)
 	}
 	q.Expected = int64(expected)
 	return err
@@ -1531,7 +1515,7 @@ func (h *Handle) dumpRangeFeedback(sc *stmtctx.StatementContext, ran *ranger.Ran
 		// `betweenRowCount` to compute the estimation since the ranges of feedback are all in `[l, r)`
 		// form, that is to say, we ignore the exclusiveness of ranges from `SplitRange` and just use
 		// its result of boundary values.
-		count := q.Hist.BetweenRowCount(nil, r.LowVal[0], r.HighVal[0])
+		count := q.Hist.BetweenRowCount(r.LowVal[0], r.HighVal[0])
 		// We have to include `NullCount` of histogram for [l, r) cases where l is null because `betweenRowCount`
 		// does not include null values of lower bound.
 		if i == 0 && lowIsNull {
@@ -1599,7 +1583,7 @@ func (h *Handle) DumpFeedbackForIndex(q *statistics.QueryFeedback, t *statistics
 			logutil.BgLogger().Debug("encode keys fail", zap.Error(err))
 			continue
 		}
-		equalityCount := float64(idx.QueryBytes(nil, bytes)) * idx.GetIncreaseFactor(t.RealtimeCount)
+		equalityCount := float64(idx.QueryBytes(bytes)) * idx.GetIncreaseFactor(t.Count)
 		rang := &ranger.Range{
 			LowVal:    []types.Datum{ran.LowVal[rangePosition]},
 			HighVal:   []types.Datum{ran.HighVal[rangePosition]},
@@ -1626,7 +1610,7 @@ func (h *Handle) DumpFeedbackForIndex(q *statistics.QueryFeedback, t *statistics
 			continue
 		}
 
-		equalityCount, rangeCount = getNewCountForIndex(equalityCount, rangeCount, float64(t.RealtimeCount), float64(q.Feedback[i].Count))
+		equalityCount, rangeCount = getNewCountForIndex(equalityCount, rangeCount, float64(t.Count), float64(q.Feedback[i].Count))
 		value := types.NewBytesDatum(bytes)
 		q.Feedback[i] = statistics.Feedback{Lower: &value, Upper: &value, Count: int64(equalityCount)}
 		err = h.dumpRangeFeedback(sc, rang, rangeCount, rangeFB)

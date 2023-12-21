@@ -176,12 +176,6 @@ func (t *mockTxn) Mem() uint64 {
 	return 0
 }
 
-func (t *mockTxn) StartFairLocking() error                   { return nil }
-func (t *mockTxn) RetryFairLocking(_ context.Context) error  { return nil }
-func (t *mockTxn) CancelFairLocking(_ context.Context) error { return nil }
-func (t *mockTxn) DoneFairLocking(_ context.Context) error   { return nil }
-func (t *mockTxn) IsInFairLockingMode() bool                 { return false }
-
 // newMockTxn new a mockTxn.
 func newMockTxn() Transaction {
 	return &mockTxn{
@@ -192,10 +186,6 @@ func newMockTxn() Transaction {
 
 // mockStorage is used to start a must commit-failed txn.
 type mockStorage struct{}
-
-func (s *mockStorage) GetCodec() tikv.Codec {
-	return nil
-}
 
 func (s *mockStorage) Begin(opts ...tikv.TxnOption) (Transaction, error) {
 	return newMockTxn(), nil

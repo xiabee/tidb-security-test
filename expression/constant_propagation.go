@@ -15,8 +15,6 @@
 package expression
 
 import (
-	"errors"
-
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
@@ -56,7 +54,7 @@ func (s *basePropConstSolver) insertCol(col *Column) {
 // tryToUpdateEQList tries to update the eqList. When the eqList has store this column with a different constant, like
 // a = 1 and a = 2, we set the second return value to false.
 func (s *basePropConstSolver) tryToUpdateEQList(col *Column, con *Constant) (bool, bool) {
-	if con.ConstItem(s.ctx.GetSessionVars().StmtCtx) && con.Value.IsNull() {
+	if con.Value.IsNull() {
 		return false, true
 	}
 	id := s.getColID(col)
@@ -88,6 +86,9 @@ func validEqualCondHelper(ctx sessionctx.Context, eq *ScalarFunction, colIsLeft 
 		con, conOk = eq.GetArgs()[0].(*Constant)
 	}
 	if !conOk {
+		return nil, nil
+	}
+	if MaybeOverOptimized4PlanCache(ctx, []Expression{con}) {
 		return nil, nil
 	}
 	if col.GetType().GetCollate() != con.GetType().GetCollate() {
@@ -280,9 +281,6 @@ func (s *propConstSolver) propagateColumnEQ() {
 }
 
 func (s *propConstSolver) setConds2ConstFalse() {
-	if MaybeOverOptimized4PlanCache(s.ctx, s.conditions) {
-		s.ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("some parameters may be overwritten when constant propagation"))
-	}
 	s.conditions = []Expression{&Constant{
 		Value:   types.NewDatum(false),
 		RetType: types.NewFieldType(mysql.TypeTiny),
@@ -305,6 +303,9 @@ func (s *propConstSolver) pickNewEQConds(visited []bool) (retMapper map[int]*Con
 				continue
 			}
 			visited[i] = true
+			if MaybeOverOptimized4PlanCache(s.ctx, []Expression{con}) {
+				continue
+			}
 			value, _, err := EvalBool(s.ctx, []Expression{con}, chunk.Row{})
 			if err != nil {
 				terror.Log(err)
@@ -409,6 +410,9 @@ func (s *propOuterJoinConstSolver) pickEQCondsOnOuterCol(retMapper map[int]*Cons
 				continue
 			}
 			visited[i+condsOffset] = true
+			if MaybeOverOptimized4PlanCache(s.ctx, []Expression{con}) {
+				continue
+			}
 			value, _, err := EvalBool(s.ctx, []Expression{con}, chunk.Row{})
 			if err != nil {
 				terror.Log(err)

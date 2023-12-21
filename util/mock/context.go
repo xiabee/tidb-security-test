@@ -248,8 +248,8 @@ func (*Context) SetGlobalSysVar(_ sessionctx.Context, name string, value string)
 	return nil
 }
 
-// GetSessionPlanCache implements the sessionctx.Context interface.
-func (c *Context) GetSessionPlanCache() sessionctx.PlanCache {
+// GetPlanCache implements the sessionctx.Context interface.
+func (c *Context) GetPlanCache(_ bool) sessionctx.PlanCache {
 	return c.pcache
 }
 
@@ -346,10 +346,11 @@ func (*Context) GetTxnWriteThroughputSLI() *sli.TxnWriteThroughputSLI {
 }
 
 // StmtCommit implements the sessionctx.Context interface.
-func (*Context) StmtCommit(context.Context) {}
+func (*Context) StmtCommit() {}
 
 // StmtRollback implements the sessionctx.Context interface.
-func (*Context) StmtRollback(context.Context, bool) {}
+func (*Context) StmtRollback() {
+}
 
 // StmtGetMutation implements the sessionctx.Context interface.
 func (*Context) StmtGetMutation(_ int64) *binlog.TableMutation {

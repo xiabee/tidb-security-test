@@ -286,10 +286,8 @@ TableOptimizerHintOpt:
 	}
 |	"RESOURCE_GROUP" '(' Identifier ')'
 	{
-		$$ = &ast.TableOptimizerHint{
-			HintName: model.NewCIStr($1),
-			HintData: $3,
-		}
+		parser.warnUnsupportedHint($1)
+		$$ = nil
 	}
 |	"QB_NAME" '(' Identifier ')'
 	{

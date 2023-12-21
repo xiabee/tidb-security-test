@@ -276,6 +276,7 @@ func TestTableSampleUnsignedIntHandle(t *testing.T) {
 	tk.MustQuery("SPLIT TABLE a BY (500);").Check(testkit.Rows("1 1"))
 	tk.MustQuery("SELECT * FROM a TABLESAMPLE REGIONS() ORDER BY pk;").Check(testkit.Rows("500 a", "9223372036854775809 b"))
 }
+
 func TestMaxChunkSize(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := createSampleTestkit(t, store)

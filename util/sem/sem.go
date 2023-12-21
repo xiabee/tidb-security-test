@@ -136,6 +136,7 @@ func IsInvisibleStatusVar(varName string) bool {
 func IsInvisibleSysVar(varNameInLower string) bool {
 	switch varNameInLower {
 	case variable.TiDBDDLSlowOprThreshold, // ddl_slow_threshold
+		variable.TiDBAllowRemoveAutoInc,
 		variable.TiDBCheckMb4ValueInUTF8,
 		variable.TiDBConfig,
 		variable.TiDBEnableSlowLog,
@@ -151,7 +152,6 @@ func IsInvisibleSysVar(varNameInLower string) bool {
 		variable.TiDBRowFormatVersion,
 		variable.TiDBSlowQueryFile,
 		variable.TiDBSlowLogThreshold,
-		variable.TiDBSlowTxnLogThreshold,
 		variable.TiDBEnableCollectExecutionInfo,
 		variable.TiDBMemoryUsageAlarmRatio,
 		variable.TiDBRedactLog,

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/store/mockstore"
 	"github.com/pingcap/tidb/store/mockstore/unistore"
 	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/util/syncutil"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
@@ -914,7 +914,7 @@ type compactRequestMocker struct {
 	t        *testing.T
 	handlers []*compactClientHandler
 
-	mu                     syncutil.Mutex
+	mu                     sync.Mutex
 	receivedRequestsOfAddr map[string]int
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/testkit/testdata"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,8 +71,7 @@ func TestDefaultFunction(t *testing.T) {
 		c int default '10',
 		d double default '3.14',
 		e datetime default '20180101',
-		f datetime default current_timestamp,
-		g date default current_date);`)
+		f datetime default current_timestamp);`)
 	tk.MustExec("insert into t1(a, b, c, d) values ('1', '1', 1, 1)")
 	tk.MustExec("set @@timestamp = 1321009871")
 	defer tk.MustExec("set @@timestamp = DEFAULT")
@@ -83,9 +83,8 @@ func TestDefaultFunction(t *testing.T) {
 		default(c) as defc,
 		default(d) as defd,
 		default(e) as defe,
-		default(f) as deff,
-		default(g) as defg
-		from t1`).Check(testkit.RowsWithSep("|", "def|<nil>|10|3.14|2018-01-01 00:00:00|2011-11-11 11:11:11|2011-11-11"))
+		default(f) as deff
+		from t1`).Check(testkit.RowsWithSep("|", "def|<nil>|10|3.14|2018-01-01 00:00:00|2011-11-11 11:11:11"))
 	require.EqualError(t, tk.ExecToErr("select default(x) from t1"), "[planner:1054]Unknown column 'x' in 'field list'")
 
 	tk.MustQuery("select default(a0) from (select a as a0 from t1) as t0").Check(testkit.Rows("def"))
@@ -378,19 +377,63 @@ func TestInsertOnDuplicateLazyMoreThan1Row(t *testing.T) {
 	tk.MustExec("DROP TABLE if exists t1, t2, source;")
 }
 
-func TestConvertIfNullToCast(t *testing.T) {
+func TestMultiColInExpression(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
-	tk.MustExec("DROP TABLE if exists t1;")
-	tk.MustExec("CREATE TABLE t1(cnotnull tinyint not null, cnull tinyint null);")
-	tk.MustExec("INSERT INTO t1 VALUES(1, 1);")
-	tk.MustQuery("select CAST(IFNULL(cnull, '1') AS DATE), CAST(IFNULL(cnotnull, '1') AS DATE) from t1;").Check(testkit.Rows("<nil> <nil>"))
-	tk.MustQuery("explain format=\"brief\" select IFNULL(cnotnull, '1') from t1;").Check(testkit.Rows(
-		"Projection 10000.00 root  cast(test.t1.cnotnull, varchar(4) BINARY CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)->Column#4]\n" +
-			"[└─TableReader 10000.00 root  data:TableFullScan]\n" +
-			"[  └─TableFullScan 10000.00 cop[tikv] table:t1 keep order:false, stats:pseudo",
-	))
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("drop table if exists t1, t2")
+	tk.MustExec("create table t1(a int, b int)")
+	tk.MustExec("insert into t1 values(1,1),(2,null),(null,3),(4,4)")
+	tk.MustExec("analyze table t1")
+	tk.MustExec("create table t2(a int, b int)")
+	tk.MustExec("insert into t2 values(1,1),(2,null),(null,3),(5,4)")
+	tk.MustExec("analyze table t2")
+	var input []string
+	var output []struct {
+		SQL  string
+		Plan []string
+		Res  []string
+	}
+
+	// Default RPC encoding may cause statistics explain result differ and then the test unstable.
+	tk.MustExec("set @@tidb_enable_chunk_rpc = on")
+
+	expressionRewriterSuiteData := plannercore.GetExpressionRewriterSuiteData()
+	expressionRewriterSuiteData.LoadTestCases(t, &input, &output)
+	for i, tt := range input {
+		testdata.OnRecord(func() {
+			output[i].SQL = tt
+			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery("explain format = 'brief' " + tt).Rows())
+			output[i].Res = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Sort().Rows())
+		})
+		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
+		tk.MustQuery(tt).Sort().Check(testkit.Rows(output[i].Res...))
+	}
+}
+
+func TestBitFuncsReturnType(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("create table t (a timestamp, b varbinary(32))")
+	tk.MustExec("insert into t values ('2006-08-27 21:57:57', 0x373037343631313230)")
+	tk.MustExec("analyze table t")
+	var input []string
+	var output []struct {
+		Plan []string
+	}
+
+	expressionRewriterSuiteData := plannercore.GetExpressionRewriterSuiteData()
+	expressionRewriterSuiteData.LoadTestCases(t, &input, &output)
+	for i, tt := range input {
+		testdata.OnRecord(func() {
+			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery("explain format = 'brief' " + tt).Rows())
+		})
+		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
+	}
 }
 
 func TestCompareIssue38361(t *testing.T) {
@@ -406,15 +449,15 @@ func TestCompareIssue38361(t *testing.T) {
 	tk.MustQuery("select a > 20230809 from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select a = 20230809 from t").Check(testkit.Rows("1"))
 	tk.MustQuery("select a < 20230810 from t").Check(testkit.Rows("1"))
-	//// 20231310 can't be converted to valid datetime, thus should be compared using real date type,and datetime will be
-	//// converted to something like 'YYYYMMDDHHMMSS', bigger than 20231310
+	// 20231310 can't be converted to valid datetime, thus should be compared using real date type,and datetime will be
+	// converted to something like 'YYYYMMDDHHMMSS', bigger than 20231310
 	tk.MustQuery("select a < 20231310 from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select 20230809 < a from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select 20230809 = a from t").Check(testkit.Rows("1"))
 	tk.MustQuery("select 20230810 > a from t").Check(testkit.Rows("1"))
 	tk.MustQuery("select 20231310 > a from t").Check(testkit.Rows("0"))
 
-	//// constant datetime cmp numeric constant should be compared as real data type
+	// constant datetime cmp numeric constant should be compared as real data type
 	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) > 20230809 from t").Check(testkit.Rows("1"))
 	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) = 20230809 from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) < 20230810 from t").Check(testkit.Rows("0"))
@@ -424,7 +467,7 @@ func TestCompareIssue38361(t *testing.T) {
 	tk.MustQuery("select 20230810 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select 20231310 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
 
-	//// datetime column cmp numeric column should be compared as real data type
+	// datetime column cmp numeric column should be compared as real data type
 	tk.MustQuery("select a > b from t").Check(testkit.Rows("1"))
 	tk.MustQuery("select a = b from t").Check(testkit.Rows("0"))
 	tk.MustQuery("select a < b + 1 from t").Check(testkit.Rows("0"))

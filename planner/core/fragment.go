@@ -16,12 +16,10 @@ package core
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/infoschema"
@@ -33,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tidb/util/size"
-	"github.com/pingcap/tidb/util/tiflashcompute"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
@@ -82,47 +79,29 @@ type tasksAndFrags struct {
 }
 
 type mppTaskGenerator struct {
-	ctx        sessionctx.Context
-	startTS    uint64
-	mppQueryID kv.MPPQueryID
-	is         infoschema.InfoSchema
-	frags      []*Fragment
-	cache      map[int]tasksAndFrags
+	ctx     sessionctx.Context
+	startTS uint64
+	is      infoschema.InfoSchema
+	frags   []*Fragment
+	cache   map[int]tasksAndFrags
 }
 
 // GenerateRootMPPTasks generate all mpp tasks and return root ones.
-func GenerateRootMPPTasks(ctx sessionctx.Context, startTs uint64, mppQueryID kv.MPPQueryID, sender *PhysicalExchangeSender, is infoschema.InfoSchema) ([]*Fragment, error) {
+func GenerateRootMPPTasks(ctx sessionctx.Context, startTs uint64, sender *PhysicalExchangeSender, is infoschema.InfoSchema) ([]*Fragment, error) {
 	g := &mppTaskGenerator{
-		ctx:        ctx,
-		startTS:    startTs,
-		mppQueryID: mppQueryID,
-		is:         is,
-		cache:      make(map[int]tasksAndFrags),
+		ctx:     ctx,
+		startTS: startTs,
+		is:      is,
+		cache:   make(map[int]tasksAndFrags),
 	}
 	return g.generateMPPTasks(sender)
 }
 
-// AllocMPPTaskID allocates task id for mpp tasks. It will reset the task id when the query finished.
-func AllocMPPTaskID(ctx sessionctx.Context) int64 {
-	mppQueryInfo := &ctx.GetSessionVars().StmtCtx.MPPQueryInfo
-	return mppQueryInfo.AllocatedMPPTaskID.Add(1)
-}
-
-var mppQueryID uint64 = 1
-
-// AllocMPPQueryID allocates local query id for mpp queries.
-func AllocMPPQueryID() uint64 {
-	return atomic.AddUint64(&mppQueryID, 1)
-}
-
 func (e *mppTaskGenerator) generateMPPTasks(s *PhysicalExchangeSender) ([]*Fragment, error) {
-	mppVersion := e.ctx.GetSessionVars().ChooseMppVersion()
-	logutil.BgLogger().Info("Mpp will generate tasks", zap.String("plan", ToString(s)), zap.Int64("mpp-version", mppVersion.ToInt64()))
+	logutil.BgLogger().Info("Mpp will generate tasks", zap.String("plan", ToString(s)))
 	tidbTask := &kv.MPPTask{
-		StartTs:    e.startTS,
-		MppQueryID: e.mppQueryID,
-		ID:         -1,
-		MppVersion: mppVersion,
+		StartTs: e.startTS,
+		ID:      -1,
 	}
 	_, frags, err := e.generateMPPTasksForExchangeSender(s)
 	if err != nil {
@@ -139,8 +118,6 @@ type mppAddr struct {
 	addr string
 }
 
-var _ kv.MPPTaskMeta = &mppAddr{}
-
 func (m *mppAddr) GetAddress() string {
 	return m.addr
 }
@@ -152,16 +129,13 @@ func (e *mppTaskGenerator) constructMPPTasksByChildrenTasks(tasks []*kv.MPPTask)
 	newTasks := make([]*kv.MPPTask, 0, len(tasks))
 	for _, task := range tasks {
 		addr := task.Meta.GetAddress()
-		// for upper fragment, the task num is equal to address num covered by lower tasks
 		_, ok := addressMap[addr]
 		if !ok {
 			mppTask := &kv.MPPTask{
-				Meta:       &mppAddr{addr: addr},
-				ID:         AllocMPPTaskID(e.ctx),
-				MppQueryID: e.mppQueryID,
-				StartTs:    e.startTS,
-				TableID:    -1,
-				MppVersion: e.ctx.GetSessionVars().ChooseMppVersion(),
+				Meta:    &mppAddr{addr: addr},
+				ID:      e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS),
+				StartTs: e.startTS,
+				TableID: -1,
 			}
 			newTasks = append(newTasks, mppTask)
 			addressMap[addr] = struct{}{}
@@ -195,7 +169,7 @@ func (f *Fragment) init(p PhysicalPlan) error {
 
 // We would remove all the union-all operators by 'untwist'ing and copying the plans above union-all.
 // This will make every route from root (ExchangeSender) to leaf nodes (ExchangeReceiver and TableScan)
-// a new isolated tree (and also a fragment) without union all. These trees (fragments then tasks) will
+// a new ioslated tree (and also a fragment) without union all. These trees (fragments then tasks) will
 // finally be gathered to TiDB or be exchanged to upper tasks again.
 // For instance, given a plan "select c1 from t union all select c1 from s"
 // after untwist, there will be two plans in `forest` slice:
@@ -280,7 +254,6 @@ func (e *mppTaskGenerator) generateMPPTasksForExchangeSender(s *PhysicalExchange
 	}
 	results := make([]*kv.MPPTask, 0, len(frags))
 	for _, f := range frags {
-		// from the bottom up
 		tasks, err := e.generateMPPTasksForFragment(f)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
@@ -294,7 +267,6 @@ func (e *mppTaskGenerator) generateMPPTasksForExchangeSender(s *PhysicalExchange
 
 func (e *mppTaskGenerator) generateMPPTasksForFragment(f *Fragment) (tasks []*kv.MPPTask, err error) {
 	for _, r := range f.ExchangeReceivers {
-		// chain call: to get lower fragments and tasks
 		r.Tasks, r.frags, err = e.generateMPPTasksForExchangeSender(r.GetExchangeSender())
 		if err != nil {
 			return nil, errors.Trace(err)
@@ -385,30 +357,17 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 	var allPartitionsIDs []int64
 	var err error
 	splitedRanges, _ := distsql.SplitRangesAcrossInt64Boundary(ts.Ranges, false, false, ts.Table.IsCommonHandle)
-	// True when:
-	// 0. Is disaggregated tiflash. because in non-disaggregated tiflash, we dont use mpp for static pruning.
-	// 1. Is partition table.
-	// 2. Dynamic prune is not used.
-	var isDisaggregatedTiFlashStaticPrune bool
 	if ts.Table.GetPartitionInfo() != nil {
-		isDisaggregatedTiFlashStaticPrune = config.GetGlobalConfig().DisaggregatedTiFlash &&
-			!e.ctx.GetSessionVars().StmtCtx.UseDynamicPartitionPrune()
-
 		tmp, _ := e.is.TableByID(ts.Table.ID)
 		tbl := tmp.(table.PartitionedTable)
-		if !isDisaggregatedTiFlashStaticPrune {
-			var partitions []table.PhysicalTable
-			partitions, err = partitionPruning(e.ctx, tbl, ts.PartitionInfo.PruningConds, ts.PartitionInfo.PartitionNames, ts.PartitionInfo.Columns, ts.PartitionInfo.ColumnNames)
-			if err != nil {
-				return nil, errors.Trace(err)
-			}
-			req, allPartitionsIDs, err = e.constructMPPBuildTaskReqForPartitionedTable(ts, splitedRanges, partitions)
-		} else {
-			singlePartTbl := tbl.GetPartition(ts.physicalTableID)
-			req, err = e.constructMPPBuildTaskForNonPartitionTable(singlePartTbl.GetPhysicalID(), ts.Table.IsCommonHandle, splitedRanges)
+		var partitions []table.PhysicalTable
+		partitions, err = partitionPruning(e.ctx, tbl, ts.PartitionInfo.PruningConds, ts.PartitionInfo.PartitionNames, ts.PartitionInfo.Columns, ts.PartitionInfo.ColumnNames)
+		if err != nil {
+			return nil, errors.Trace(err)
 		}
+		req, allPartitionsIDs, err = e.constructMPPBuildTaskReqForPartitionedTable(ts, splitedRanges, partitions)
 	} else {
-		req, err = e.constructMPPBuildTaskForNonPartitionTable(ts.Table.ID, ts.Table.IsCommonHandle, splitedRanges)
+		req, err = e.constructMPPBuildTaskForNonPartitionTable(ts, splitedRanges)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -419,28 +378,14 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 		logutil.BgLogger().Warn("MPP store fail ttl is invalid", zap.Error(err))
 		ttl = 30 * time.Second
 	}
-	dispatchPolicy := tiflashcompute.DispatchPolicyInvalid
-	if config.GetGlobalConfig().DisaggregatedTiFlash {
-		dispatchPolicy = e.ctx.GetSessionVars().TiFlashComputeDispatchPolicy
-		ttl = time.Duration(0)
-	}
-	metas, err := e.ctx.GetMPPClient().ConstructMPPTasks(ctx, req, ttl, dispatchPolicy)
+	metas, err := e.ctx.GetMPPClient().ConstructMPPTasks(ctx, req, ttl)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	tasks := make([]*kv.MPPTask, 0, len(metas))
 	for _, meta := range metas {
-		task := &kv.MPPTask{
-			Meta:                              meta,
-			ID:                                AllocMPPTaskID(e.ctx),
-			MppVersion:                        e.ctx.GetSessionVars().ChooseMppVersion(),
-			StartTs:                           e.startTS,
-			MppQueryID:                        e.mppQueryID,
-			TableID:                           ts.Table.ID,
-			PartitionTableIDs:                 allPartitionsIDs,
-			IsDisaggregatedTiFlashStaticPrune: isDisaggregatedTiFlashStaticPrune,
-		}
+		task := &kv.MPPTask{Meta: meta, ID: e.ctx.GetSessionVars().AllocMPPTaskID(e.startTS), StartTs: e.startTS, TableID: ts.Table.ID, PartitionTableIDs: allPartitionsIDs}
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
@@ -467,8 +412,8 @@ func (e *mppTaskGenerator) constructMPPBuildTaskReqForPartitionedTable(ts *Physi
 	return &kv.MPPBuildTasksRequest{PartitionIDAndRanges: partitionIDAndRanges}, allPartitionsIDs, nil
 }
 
-func (e *mppTaskGenerator) constructMPPBuildTaskForNonPartitionTable(tid int64, isCommonHandle bool, splitedRanges []*ranger.Range) (*kv.MPPBuildTasksRequest, error) {
-	kvRanges, err := distsql.TableHandleRangesToKVRanges(e.ctx.GetSessionVars().StmtCtx, []int64{tid}, isCommonHandle, splitedRanges, nil)
+func (e *mppTaskGenerator) constructMPPBuildTaskForNonPartitionTable(ts *PhysicalTableScan, splitedRanges []*ranger.Range) (*kv.MPPBuildTasksRequest, error) {
+	kvRanges, err := distsql.TableHandleRangesToKVRanges(e.ctx.GetSessionVars().StmtCtx, []int64{ts.Table.ID}, ts.Table.IsCommonHandle, splitedRanges, nil)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

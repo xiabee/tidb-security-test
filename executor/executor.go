@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/pprof"
+	"runtime/trace"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,7 +59,6 @@ import (
 	"github.com/pingcap/tidb/util/admin"
 	"github.com/pingcap/tidb/util/channel"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/deadlockhistory"
 	"github.com/pingcap/tidb/util/disk"
 	"github.com/pingcap/tidb/util/execdetails"
@@ -66,10 +66,8 @@ import (
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/resourcegrouptag"
-	"github.com/pingcap/tidb/util/syncutil"
 	"github.com/pingcap/tidb/util/topsql"
 	topsqlstate "github.com/pingcap/tidb/util/topsql/state"
-	"github.com/pingcap/tidb/util/tracing"
 	tikverr "github.com/tikv/client-go/v2/error"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	tikvutil "github.com/tikv/client-go/v2/util"
@@ -149,7 +147,7 @@ const (
 // globalPanicOnExceed panics when GlobalDisTracker storage usage exceeds storage quota.
 type globalPanicOnExceed struct {
 	memory.BaseOOMAction
-	mutex syncutil.Mutex // For synchronization.
+	mutex sync.Mutex // For synchronization.
 }
 
 func init() {
@@ -314,12 +312,16 @@ func Next(ctx context.Context, e Executor, req *chunk.Chunk) error {
 	}
 	sessVars := base.ctx.GetSessionVars()
 	if atomic.LoadUint32(&sessVars.Killed) == 1 {
-		return exeerrors.ErrQueryInterrupted
+		return ErrQueryInterrupted
 	}
-
-	r, ctx := tracing.StartRegionEx(ctx, fmt.Sprintf("%T.Next", e))
-	defer r.End()
-
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan(fmt.Sprintf("%T.Next", e), opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
+	if trace.IsEnabled() {
+		defer trace.StartRegion(ctx, fmt.Sprintf("%T.Next", e)).End()
+	}
 	if topsqlstate.TopSQLEnabled() && sessVars.StmtCtx.IsSQLAndPlanRegistered.CompareAndSwap(false, true) {
 		registerSQLAndPlanInExecForTopSQL(sessVars)
 	}
@@ -330,40 +332,34 @@ func Next(ctx context.Context, e Executor, req *chunk.Chunk) error {
 	}
 	// recheck whether the session/query is killed during the Next()
 	if atomic.LoadUint32(&sessVars.Killed) == 1 {
-		err = exeerrors.ErrQueryInterrupted
+		err = ErrQueryInterrupted
 	}
 	return err
 }
 
-// CommandDDLJobsExec is the general struct for Cancel/Pause/Resume commands on
-// DDL jobs. These command currently by admin have the very similar struct and
-// operations, it should be a better idea to have them in the same struct.
-type CommandDDLJobsExec struct {
+// CancelDDLJobsExec represents a cancel DDL jobs executor.
+type CancelDDLJobsExec struct {
 	baseExecutor
 
 	cursor int
 	jobIDs []int64
 	errs   []error
-
-	execute func(se sessionctx.Context, ids []int64) (errs []error, err error)
 }
 
-// Open implements the Executor for all Cancel/Pause/Resume command on DDL jobs
-// just with different processes. And, it should not be called directly by the
-// Executor.
-func (e *CommandDDLJobsExec) Open(ctx context.Context) error {
+// Open implements the Executor Open interface.
+func (e *CancelDDLJobsExec) Open(ctx context.Context) error {
 	// We want to use a global transaction to execute the admin command, so we don't use e.ctx here.
 	newSess, err := e.getSysSession()
 	if err != nil {
 		return err
 	}
-	e.errs, err = e.execute(newSess, e.jobIDs)
+	e.errs, err = ddl.CancelJobs(newSess, e.ctx.GetStore(), e.jobIDs)
 	e.releaseSysSession(kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL), newSess)
 	return err
 }
 
-// Next implements the Executor Next interface for Cancel/Pause/Resume
-func (e *CommandDDLJobsExec) Next(ctx context.Context, req *chunk.Chunk) error {
+// Next implements the Executor Next interface.
+func (e *CancelDDLJobsExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.GrowAndReset(e.maxChunkSize)
 	if e.cursor >= len(e.jobIDs) {
 		return nil
@@ -379,21 +375,6 @@ func (e *CommandDDLJobsExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 	e.cursor += numCurBatch
 	return nil
-}
-
-// CancelDDLJobsExec represents a cancel DDL jobs executor.
-type CancelDDLJobsExec struct {
-	*CommandDDLJobsExec
-}
-
-// PauseDDLJobsExec indicates an Executor for Pause a DDL Job.
-type PauseDDLJobsExec struct {
-	*CommandDDLJobsExec
-}
-
-// ResumeDDLJobsExec indicates an Executor for Resume a DDL Job.
-type ResumeDDLJobsExec struct {
-	*CommandDDLJobsExec
 }
 
 // ShowNextRowIDExec represents a show the next row ID executor.
@@ -617,7 +598,7 @@ func (e *DDLJobRetriever) appendJobToChunk(req *chunk.Chunk, job *model.Job, che
 			req.AppendInt64(0, job.ID)
 			req.AppendString(1, schemaName)
 			req.AppendString(2, tableName)
-			req.AppendString(3, subJob.Type.String()+" /* subjob */"+showAddIdxReorgTpInSubJob(subJob))
+			req.AppendString(3, subJob.Type.String()+" /* subjob */")
 			req.AppendString(4, subJob.SchemaState.String())
 			req.AppendInt64(5, job.SchemaID)
 			req.AppendInt64(6, job.TableID)
@@ -642,16 +623,6 @@ func showAddIdxReorgTp(job *model.Job) string {
 	return ""
 }
 
-func showAddIdxReorgTpInSubJob(subJob *model.SubJob) string {
-	if subJob.Type == model.ActionAddIndex || subJob.Type == model.ActionAddPrimaryKey {
-		tp := subJob.ReorgTp.String()
-		if len(tp) > 0 {
-			return " /* " + tp + " */"
-		}
-	}
-	return ""
-}
-
 func ts2Time(timestamp uint64, loc *time.Location) types.Time {
 	duration := time.Duration(math.Pow10(9-types.DefaultFsp)) * time.Nanosecond
 	t := model.TSConvert2Time(timestamp)
@@ -661,7 +632,7 @@ func ts2Time(timestamp uint64, loc *time.Location) types.Time {
 
 // ShowDDLJobQueriesExec represents a show DDL job queries executor.
 // The jobs id that is given by 'admin show ddl job queries' statement,
-// only be searched in the latest 10 history jobs.
+// only be searched in the latest 10 history jobs
 type ShowDDLJobQueriesExec struct {
 	baseExecutor
 
@@ -706,21 +677,8 @@ func (e *ShowDDLJobQueriesExec) Open(ctx context.Context) error {
 		return err
 	}
 
-	appendedJobID := make(map[int64]struct{})
-	// deduplicate job results
-	// for situations when this operation happens at the same time with new DDLs being executed
-	for _, job := range jobs {
-		if _, ok := appendedJobID[job.ID]; !ok {
-			appendedJobID[job.ID] = struct{}{}
-			e.jobs = append(e.jobs, job)
-		}
-	}
-	for _, historyJob := range historyJobs {
-		if _, ok := appendedJobID[historyJob.ID]; !ok {
-			appendedJobID[historyJob.ID] = struct{}{}
-			e.jobs = append(e.jobs, historyJob)
-		}
-	}
+	e.jobs = append(e.jobs, jobs...)
+	e.jobs = append(e.jobs, historyJobs...)
 
 	return nil
 }
@@ -794,25 +752,8 @@ func (e *ShowDDLJobQueriesWithRangeExec) Open(ctx context.Context) error {
 		return err
 	}
 
-	appendedJobID := make(map[int64]struct{})
-	// deduplicate job results
-	// for situations when this operation happens at the same time with new DDLs being executed
-	for _, job := range jobs {
-		if _, ok := appendedJobID[job.ID]; !ok {
-			appendedJobID[job.ID] = struct{}{}
-			e.jobs = append(e.jobs, job)
-		}
-	}
-	for _, historyJob := range historyJobs {
-		if _, ok := appendedJobID[historyJob.ID]; !ok {
-			appendedJobID[historyJob.ID] = struct{}{}
-			e.jobs = append(e.jobs, historyJob)
-		}
-	}
-
-	if e.cursor < int(e.offset) {
-		e.cursor = int(e.offset)
-	}
+	e.jobs = append(e.jobs, jobs...)
+	e.jobs = append(e.jobs, historyJobs...)
 
 	return nil
 }
@@ -828,12 +769,9 @@ func (e *ShowDDLJobQueriesWithRangeExec) Next(ctx context.Context, req *chunk.Ch
 	}
 	numCurBatch := mathutil.Min(req.Capacity(), len(e.jobs)-e.cursor)
 	for i := e.cursor; i < e.cursor+numCurBatch; i++ {
-		// i is make true to be >= int(e.offset)
-		if i < int(e.offset+e.limit) {
+		if i >= int(e.offset) && i < int(e.offset+e.limit) {
 			req.AppendString(0, strconv.FormatInt(e.jobs[i].ID, 10))
 			req.AppendString(1, e.jobs[i].Query)
-		} else {
-			break
 		}
 	}
 	e.cursor += numCurBatch
@@ -1024,9 +962,6 @@ func (e *CheckTableExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 	idxNames := make([]string, 0, len(e.indexInfos))
 	for _, idx := range e.indexInfos {
-		if idx.MVIndex {
-			continue
-		}
 		idxNames = append(idxNames, idx.Name.O)
 	}
 	greater, idxOffset, err := admin.CheckIndicesCount(e.ctx, e.dbName, e.table.Meta().Name.O, idxNames)
@@ -1046,13 +981,7 @@ func (e *CheckTableExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	// The number of table rows is equal to the number of index rows.
 	// TODO: Make the value of concurrency adjustable. And we can consider the number of records.
 	if len(e.srcs) == 1 {
-		err = e.checkIndexHandle(ctx, e.srcs[0])
-		if err == nil && e.srcs[0].index.MVIndex {
-			err = e.checkTableRecord(ctx, 0)
-		}
-		if err != nil {
-			return err
-		}
+		return e.checkIndexHandle(ctx, e.srcs[0])
 	}
 	taskCh := make(chan *IndexLookUpExecutor, len(e.srcs))
 	failure := atomicutil.NewBool(false)
@@ -1071,14 +1000,6 @@ func (e *CheckTableExec) Next(ctx context.Context, req *chunk.Chunk) error {
 					select {
 					case src := <-taskCh:
 						err1 := e.checkIndexHandle(ctx, src)
-						if err1 == nil && src.index.MVIndex {
-							for offset, idx := range e.indexInfos {
-								if idx.ID == src.index.ID {
-									err1 = e.checkTableRecord(ctx, offset)
-									break
-								}
-							}
-						}
 						if err1 != nil {
 							failure.Store(true)
 							logutil.Logger(ctx).Info("check index handle failed", zap.Error(err1))
@@ -1415,9 +1336,6 @@ type LimitExec struct {
 
 	// columnIdxsUsedByChild keep column indexes of child executor used for inline projection
 	columnIdxsUsedByChild []int
-
-	// Log the close time when opentracing is enabled.
-	span opentracing.Span
 }
 
 // Next implements the Executor Next interface.
@@ -1495,29 +1413,13 @@ func (e *LimitExec) Open(ctx context.Context) error {
 	e.childResult = tryNewCacheChunk(e.children[0])
 	e.cursor = 0
 	e.meetFirstBatch = e.begin == 0
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		e.span = span
-	}
 	return nil
 }
 
 // Close implements the Executor Close interface.
 func (e *LimitExec) Close() error {
-	start := time.Now()
-
 	e.childResult = nil
-	err := e.baseExecutor.Close()
-
-	elapsed := time.Since(start)
-	if elapsed > time.Millisecond {
-		logutil.BgLogger().Info("limit executor close takes a long time",
-			zap.Duration("elapsed", elapsed))
-		if e.span != nil {
-			span1 := e.span.Tracer().StartSpan("limitExec.Close", opentracing.ChildOf(e.span.Context()), opentracing.StartTime(start))
-			defer span1.Finish()
-		}
-	}
-	return err
+	return e.baseExecutor.Close()
 }
 
 func (e *LimitExec) adjustRequiredRows(chk *chunk.Chunk) *chunk.Chunk {
@@ -1545,13 +1447,15 @@ func init() {
 	plannercore.EvalSubqueryFirstRow = func(ctx context.Context, p plannercore.PhysicalPlan, is infoschema.InfoSchema, sctx sessionctx.Context) ([]types.Datum, error) {
 		defer func(begin time.Time) {
 			s := sctx.GetSessionVars()
-			s.StmtCtx.SetSkipPlanCache(errors.New("query has uncorrelated sub-queries is un-cacheable"))
 			s.RewritePhaseInfo.PreprocessSubQueries++
 			s.RewritePhaseInfo.DurationPreprocessSubQuery += time.Since(begin)
 		}(time.Now())
 
-		r, ctx := tracing.StartRegionEx(ctx, "executor.EvalSubQuery")
-		defer r.End()
+		if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+			span1 := span.Tracer().StartSpan("executor.EvalSubQuery", opentracing.ChildOf(span.Context()))
+			defer span1.Finish()
+			ctx = opentracing.ContextWithSpan(ctx, span1)
+		}
 
 		e := newExecutorBuilder(sctx, is, nil)
 		exec := e.build(p)
@@ -1824,7 +1728,7 @@ func (e *MaxOneRowExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 		return nil
 	} else if num != 1 {
-		return exeerrors.ErrSubqueryMoreThan1Row
+		return ErrSubqueryMoreThan1Row
 	}
 
 	childChunk := tryNewCacheChunk(e.children[0])
@@ -1833,7 +1737,7 @@ func (e *MaxOneRowExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		return err
 	}
 	if childChunk.NumRows() != 0 {
-		return exeerrors.ErrSubqueryMoreThan1Row
+		return ErrSubqueryMoreThan1Row
 	}
 
 	return nil
@@ -1873,7 +1777,7 @@ type UnionExec struct {
 	wg          sync.WaitGroup
 	initialized bool
 	mu          struct {
-		*syncutil.Mutex
+		*sync.Mutex
 		maxOpenedChildID int
 	}
 
@@ -1900,7 +1804,7 @@ func (e *UnionExec) Open(ctx context.Context) error {
 	e.stopFetchData.Store(false)
 	e.initialized = false
 	e.finished = make(chan struct{})
-	e.mu.Mutex = &syncutil.Mutex{}
+	e.mu.Mutex = &sync.Mutex{}
 	e.mu.maxOpenedChildID = -1
 	return nil
 }
@@ -2056,6 +1960,7 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	sc.EnableOptimizeTrace = false
 	sc.OptimizeTracer = nil
 	sc.OptimizerCETrace = nil
+	sc.StatsLoadStatus = make(map[model.TableItemID]string)
 	sc.IsSyncStatsFailed = false
 	sc.IsExplainAnalyzeDML = false
 	// Firstly we assume that UseDynamicPruneMode can be enabled according session variable, then we will check other conditions
@@ -2148,12 +2053,9 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	sc.OriginalSQL = s.Text()
 	if explainStmt, ok := s.(*ast.ExplainStmt); ok {
 		sc.InExplainStmt = true
-		sc.ExplainFormat = explainStmt.Format
 		sc.IgnoreExplainIDSuffix = strings.ToLower(explainStmt.Format) == types.ExplainFormatBrief
 		sc.InVerboseExplain = strings.ToLower(explainStmt.Format) == types.ExplainFormatVerbose
 		s = explainStmt.Stmt
-	} else {
-		sc.ExplainFormat = ""
 	}
 	if explainForStmt, ok := s.(*ast.ExplainForStmt); ok {
 		sc.InExplainStmt = true
@@ -2169,7 +2071,14 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	case *ast.UpdateStmt:
 		ResetUpdateStmtCtx(sc, stmt, vars)
 	case *ast.DeleteStmt:
-		ResetDeleteStmtCtx(sc, stmt, vars)
+		sc.InDeleteStmt = true
+		sc.DupKeyAsWarning = stmt.IgnoreErr
+		sc.BadNullAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
+		sc.TruncateAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
+		sc.DividedByZeroAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
+		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
+		sc.IgnoreZeroInDate = !vars.SQLMode.HasNoZeroInDateMode() || !vars.SQLMode.HasNoZeroDateMode() || !vars.StrictSQLMode || stmt.IgnoreErr || sc.AllowInvalidDate
+		sc.Priority = stmt.Priority
 	case *ast.InsertStmt:
 		sc.InInsertStmt = true
 		// For insert statement (not for update statement), disabling the StrictSQLMode
@@ -2191,6 +2100,11 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 		sc.NoZeroDate = vars.SQLMode.HasNoZeroDateMode()
 		sc.TruncateAsWarning = !vars.StrictSQLMode
 	case *ast.LoadDataStmt:
+		sc.BadNullAsWarning = true
+		// With IGNORE or LOCAL, data-interpretation errors become warnings and the load operation continues,
+		// even if the SQL mode is restrictive. For details: https://dev.mysql.com/doc/refman/8.0/en/load-data.html
+		// TODO: since TiDB only support the LOCAL by now, so the TruncateAsWarning are always true here.
+		sc.TruncateAsWarning = true
 		sc.InLoadDataStmt = true
 		// return warning instead of error when load data meet no partition for value
 		sc.IgnoreNoPartition = true
@@ -2219,7 +2133,7 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 		sc.IgnoreZeroInDate = true
 		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
 	case *ast.ShowStmt:
-		sc.IgnoreTruncate.Store(true)
+		sc.IgnoreTruncate = true
 		sc.IgnoreZeroInDate = true
 		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
 		if stmt.Tp == ast.ShowWarnings || stmt.Tp == ast.ShowErrors || stmt.Tp == ast.ShowSessionStates {
@@ -2227,23 +2141,23 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 			sc.SetWarnings(vars.StmtCtx.GetWarnings())
 		}
 	case *ast.SplitRegionStmt:
-		sc.IgnoreTruncate.Store(false)
+		sc.IgnoreTruncate = false
 		sc.IgnoreZeroInDate = true
 		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
 	case *ast.SetSessionStatesStmt:
 		sc.InSetSessionStatesStmt = true
-		sc.IgnoreTruncate.Store(true)
+		sc.IgnoreTruncate = true
 		sc.IgnoreZeroInDate = true
 		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
 	default:
-		sc.IgnoreTruncate.Store(true)
+		sc.IgnoreTruncate = true
 		sc.IgnoreZeroInDate = true
 		sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
 	}
 	sc.SkipUTF8Check = vars.SkipUTF8Check
 	sc.SkipASCIICheck = vars.SkipASCIICheck
 	sc.SkipUTF8MB4Check = !globalConfig.Instance.CheckMb4ValueInUTF8.Load()
-	vars.PlanCacheParams.Reset()
+	vars.PreparedParams = vars.PreparedParams[:0]
 	if priority := mysql.PriorityEnum(atomic.LoadInt32(&variable.ForcePriority)); priority != mysql.NoPriority {
 		sc.Priority = priority
 	}
@@ -2279,7 +2193,6 @@ func ResetContextOfStmt(ctx sessionctx.Context, s ast.StmtNode) (err error) {
 	vars.ClearStmtVars()
 	vars.PrevFoundInBinding = vars.FoundInBinding
 	vars.FoundInBinding = false
-	vars.DurationWaitTS = 0
 	vars.CurrInsertBatchExtraCols = nil
 	vars.CurrInsertValues = chunk.Row{}
 	return
@@ -2308,18 +2221,6 @@ func ResetUpdateStmtCtx(sc *stmtctx.StatementContext, stmt *ast.UpdateStmt, vars
 	sc.IgnoreZeroInDate = !vars.SQLMode.HasNoZeroInDateMode() || !vars.SQLMode.HasNoZeroDateMode() || !vars.StrictSQLMode || stmt.IgnoreErr || sc.AllowInvalidDate
 	sc.Priority = stmt.Priority
 	sc.IgnoreNoPartition = stmt.IgnoreErr
-}
-
-// ResetDeleteStmtCtx resets statement context for DeleteStmt.
-func ResetDeleteStmtCtx(sc *stmtctx.StatementContext, stmt *ast.DeleteStmt, vars *variable.SessionVars) {
-	sc.InDeleteStmt = true
-	sc.DupKeyAsWarning = stmt.IgnoreErr
-	sc.BadNullAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
-	sc.TruncateAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
-	sc.DividedByZeroAsWarning = !vars.StrictSQLMode || stmt.IgnoreErr
-	sc.AllowInvalidDate = vars.SQLMode.HasAllowInvalidDatesMode()
-	sc.IgnoreZeroInDate = !vars.SQLMode.HasNoZeroInDateMode() || !vars.SQLMode.HasNoZeroDateMode() || !vars.StrictSQLMode || stmt.IgnoreErr || sc.AllowInvalidDate
-	sc.Priority = stmt.Priority
 }
 
 func setOptionForTopSQL(sc *stmtctx.StatementContext, snapshot kv.Snapshot) {

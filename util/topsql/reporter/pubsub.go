@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
-	reporter_metrics "github.com/pingcap/tidb/util/topsql/reporter/metrics"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
 )
@@ -86,7 +85,7 @@ func (ds *pubSubDataSink) TrySend(data *ReportData, deadline time.Time) error {
 	case <-ds.ctx.Done():
 		return ds.ctx.Err()
 	default:
-		reporter_metrics.IgnoreReportChannelFullCounter.Inc()
+		ignoreReportChannelFullCounter.Inc()
 		return errors.New("the channel of pubsub dataSink is full")
 	}
 }
@@ -113,9 +112,9 @@ func (ds *pubSubDataSink) run() error {
 				err = ds.doSend(ctx, task.data)
 
 				if err != nil {
-					reporter_metrics.ReportAllDurationFailedHistogram.Observe(time.Since(start).Seconds())
+					reportAllDurationFailedHistogram.Observe(time.Since(start).Seconds())
 				} else {
-					reporter_metrics.ReportAllDurationSuccHistogram.Observe(time.Since(start).Seconds())
+					reportAllDurationSuccHistogram.Observe(time.Since(start).Seconds())
 				}
 			}, nil)
 
@@ -164,11 +163,11 @@ func (ds *pubSubDataSink) sendTopSQLRecords(ctx context.Context, records []tipb.
 	start := time.Now()
 	sentCount := 0
 	defer func() {
-		reporter_metrics.TopSQLReportRecordCounterHistogram.Observe(float64(sentCount))
+		topSQLReportRecordCounterHistogram.Observe(float64(sentCount))
 		if err != nil {
-			reporter_metrics.ReportRecordDurationFailedHistogram.Observe(time.Since(start).Seconds())
+			reportRecordDurationFailedHistogram.Observe(time.Since(start).Seconds())
 		} else {
-			reporter_metrics.ReportRecordDurationSuccHistogram.Observe(time.Since(start).Seconds())
+			reportRecordDurationSuccHistogram.Observe(time.Since(start).Seconds())
 		}
 	}()
 
@@ -201,11 +200,11 @@ func (ds *pubSubDataSink) sendSQLMeta(ctx context.Context, sqlMetas []tipb.SQLMe
 	start := time.Now()
 	sentCount := 0
 	defer func() {
-		reporter_metrics.TopSQLReportSQLCountHistogram.Observe(float64(sentCount))
+		topSQLReportSQLCountHistogram.Observe(float64(sentCount))
 		if err != nil {
-			reporter_metrics.ReportSQLDurationFailedHistogram.Observe(time.Since(start).Seconds())
+			reportSQLDurationFailedHistogram.Observe(time.Since(start).Seconds())
 		} else {
-			reporter_metrics.ReportSQLDurationSuccHistogram.Observe(time.Since(start).Seconds())
+			reportSQLDurationSuccHistogram.Observe(time.Since(start).Seconds())
 		}
 	}()
 
@@ -238,11 +237,11 @@ func (ds *pubSubDataSink) sendPlanMeta(ctx context.Context, planMetas []tipb.Pla
 	start := time.Now()
 	sentCount := 0
 	defer func() {
-		reporter_metrics.TopSQLReportPlanCountHistogram.Observe(float64(sentCount))
+		topSQLReportPlanCountHistogram.Observe(float64(sentCount))
 		if err != nil {
-			reporter_metrics.ReportPlanDurationFailedHistogram.Observe(time.Since(start).Seconds())
+			reportPlanDurationFailedHistogram.Observe(time.Since(start).Seconds())
 		} else {
-			reporter_metrics.ReportPlanDurationSuccHistogram.Observe(time.Since(start).Seconds())
+			reportPlanDurationSuccHistogram.Observe(time.Since(start).Seconds())
 		}
 	}()
 

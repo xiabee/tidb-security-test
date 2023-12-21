@@ -2,7 +2,6 @@ load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "metadatalocktest_test",
-    timeout = "short",
     srcs = [
         "main_test.go",
         "mdl_test.go",
@@ -16,8 +15,10 @@ go_test(
         "//server",
         "//testkit",
         "//testkit/testsetup",
+        "//util/logutil",
         "@com_github_pingcap_failpoint//:failpoint",
         "@com_github_stretchr_testify//require",
         "@org_uber_go_goleak//:goleak",
+        "@org_uber_go_zap//:zap",
     ],
 )

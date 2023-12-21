@@ -179,7 +179,7 @@ func TestBaselineDBLowerCase(t *testing.T) {
 	tk.MustExec("create database SPM")
 	tk.MustExec("use SPM")
 	tk.MustExec("create table t(a int, b int)")
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec("update t set a = a + 1")
 	tk.MustExec("update t set a = a + 1")
 	tk.MustExec("admin capture bindings")
@@ -269,7 +269,7 @@ func TestShowGlobalBindings(t *testing.T) {
 	tk.MustExec("use SPM")
 	tk.MustExec("create table t(a int, b int, key(a))")
 	tk.MustExec("create table t0(a int, b int, key(a))")
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	rows := tk.MustQuery("show global bindings").Rows()
 	require.Len(t, rows, 0)
 	// Simulate existing bindings in the mysql.bind_info.
@@ -520,15 +520,4 @@ func TestPreparedStmt(t *testing.T) {
 	tk.MustExec("execute stmt using @p,@p")
 	require.Len(t, tk.Session().GetSessionVars().StmtCtx.IndexNames, 1)
 	require.Equal(t, "t:idx_c", tk.Session().GetSessionVars().StmtCtx.IndexNames[0])
-}
-
-func TestSetVarBinding(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("create table t1 (a int, b varchar(20))")
-	tk.MustExec("insert into t1 values (1, '111111111111111')")
-	tk.MustExec("insert into t1 values (2, '222222222222222')")
-	tk.MustExec("create binding for select group_concat(b) from test.t1 using select /*+ SET_VAR(group_concat_max_len = 4) */ group_concat(b) from test.t1 ;")
-	tk.MustQuery("select group_concat(b) from test.t1").Check(testkit.Rows("1111"))
 }

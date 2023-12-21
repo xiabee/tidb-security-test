@@ -17,7 +17,6 @@ package sqlexec
 import (
 	"encoding/json"
 	"io"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -162,7 +161,11 @@ func escapeSQL(sql string, args ...interface{}) ([]byte, error) {
 				case float64:
 					buf = strconv.AppendFloat(buf, v, 'g', -1, 64)
 				case bool:
-					buf = appendSQLArgBool(buf, v)
+					if v {
+						buf = append(buf, '1')
+					} else {
+						buf = append(buf, '0')
+					}
 				case time.Time:
 					if v.IsZero() {
 						buf = append(buf, "'0000-00-00'"...)
@@ -184,7 +187,9 @@ func escapeSQL(sql string, args ...interface{}) ([]byte, error) {
 						buf = append(buf, '\'')
 					}
 				case string:
-					buf = appendSQLArgString(buf, v)
+					buf = append(buf, '\'')
+					buf = escapeStringBackslash(buf, v)
+					buf = append(buf, '\'')
 				case []string:
 					for i, k := range v {
 						if i > 0 {
@@ -209,25 +214,7 @@ func escapeSQL(sql string, args ...interface{}) ([]byte, error) {
 						buf = strconv.AppendFloat(buf, k, 'g', -1, 64)
 					}
 				default:
-					// slow path based on reflection
-					reflectTp := reflect.TypeOf(arg)
-					kind := reflectTp.Kind()
-					switch kind {
-					case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-						buf = strconv.AppendInt(buf, reflect.ValueOf(arg).Int(), 10)
-					case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-						buf = strconv.AppendUint(buf, reflect.ValueOf(arg).Uint(), 10)
-					case reflect.Float32:
-						buf = strconv.AppendFloat(buf, reflect.ValueOf(arg).Float(), 'g', -1, 32)
-					case reflect.Float64:
-						buf = strconv.AppendFloat(buf, reflect.ValueOf(arg).Float(), 'g', -1, 64)
-					case reflect.Bool:
-						buf = appendSQLArgBool(buf, reflect.ValueOf(arg).Bool())
-					case reflect.String:
-						buf = appendSQLArgString(buf, reflect.ValueOf(arg).String())
-					default:
-						return nil, errors.Errorf("unsupported %d-th argument: %v", argPos, arg)
-					}
+					return nil, errors.Errorf("unsupported %d-th argument: %v", argPos, arg)
 				}
 			}
 			i++ // skip specifier
@@ -239,20 +226,6 @@ func escapeSQL(sql string, args ...interface{}) ([]byte, error) {
 		}
 	}
 	return buf, nil
-}
-
-func appendSQLArgBool(buf []byte, v bool) []byte {
-	if v {
-		return append(buf, '1')
-	}
-	return append(buf, '0')
-}
-
-func appendSQLArgString(buf []byte, s string) []byte {
-	buf = append(buf, '\'')
-	buf = escapeStringBackslash(buf, s)
-	buf = append(buf, '\'')
-	return buf
 }
 
 // EscapeSQL will escape input arguments into the sql string, doing necessary processing.

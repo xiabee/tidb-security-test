@@ -47,8 +47,6 @@ type ParquetParser struct {
 	curIndex    int
 	lastRow     Row
 	logger      log.Logger
-
-	readSeekCloser ReadSeekCloser
 }
 
 // readerWrapper is a used for implement `source.ParquetFile`
@@ -146,9 +144,9 @@ func OpenParquetReader(
 	}, nil
 }
 
-// readParquetFileRowCount reads the parquet file row count.
+// ReadParquetFileRowCount reads the parquet file row count.
 // It is a special func to fetch parquet file row count fast.
-func readParquetFileRowCount(
+func ReadParquetFileRowCount(
 	ctx context.Context,
 	store storage.ExternalStorage,
 	r storage.ReadSeekCloser,
@@ -172,23 +170,6 @@ func readParquetFileRowCount(
 		return 0, err
 	}
 	return numRows, nil
-}
-
-// ReadParquetFileRowCountByFile reads the parquet file row count through fileMeta.
-func ReadParquetFileRowCountByFile(
-	ctx context.Context,
-	store storage.ExternalStorage,
-	fileMeta SourceFileMeta,
-) (int64, error) {
-	r, err := store.Open(ctx, fileMeta.Path)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	numberRows, err := readParquetFileRowCount(ctx, store, r, fileMeta.Path)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	return numberRows, nil
 }
 
 // NewParquetParser generates a parquet parser.
@@ -235,11 +216,10 @@ func NewParquetParser(
 	}
 
 	return &ParquetParser{
-		Reader:         reader,
-		columns:        columns,
-		columnMetas:    columnMetas,
-		logger:         log.FromContext(ctx),
-		readSeekCloser: wrapper,
+		Reader:      reader,
+		columns:     columns,
+		columnMetas: columnMetas,
+		logger:      log.FromContext(ctx),
 	}, nil
 }
 
@@ -371,10 +351,10 @@ func (pp *ParquetParser) SetPos(pos int64, rowID int64) error {
 	return nil
 }
 
-// ScannedPos implements the Parser interface.
-// For parquet it's parquet file's reader current position.
-func (pp *ParquetParser) ScannedPos() (int64, error) {
-	return pp.readSeekCloser.Seek(0, io.SeekCurrent)
+// RealPos implements the Parser interface.
+// For parquet it's equal to Pos().
+func (pp *ParquetParser) RealPos() (int64, error) {
+	return pp.curStart + int64(pp.curIndex), nil
 }
 
 // Close closes the parquet file of the parser.

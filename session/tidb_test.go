@@ -35,7 +35,7 @@ func TestDomapHandleNil(t *testing.T) {
 }
 
 func TestSysSessionPoolGoroutineLeak(t *testing.T) {
-	store, dom := CreateStoreAndBootstrap(t)
+	store, dom := createStoreAndBootstrap(t)
 	defer func() { require.NoError(t, store.Close()) }()
 	defer dom.Close()
 

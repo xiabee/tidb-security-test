@@ -61,10 +61,10 @@ func TestCaseWhen(t *testing.T) {
 func TestIf(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	origin := stmtCtx.IgnoreTruncate.Load()
-	stmtCtx.IgnoreTruncate.Store(true)
+	origin := stmtCtx.IgnoreTruncate
+	stmtCtx.IgnoreTruncate = true
 	defer func() {
-		stmtCtx.IgnoreTruncate.Store(origin)
+		stmtCtx.IgnoreTruncate = origin
 	}()
 	tbl := []struct {
 		Arg1 interface{}

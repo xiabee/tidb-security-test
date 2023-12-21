@@ -14,8 +14,6 @@ go_library(
         "//table",
         "//table/tables",
         "//types",
-        "//util/logutil",
         "@com_github_pingcap_errors//:errors",
-        "@org_uber_go_zap//:zap",
     ],
 )

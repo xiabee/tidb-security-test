@@ -28,7 +28,6 @@ go_test(
     ],
     embed = [":auth"],
     flaky = True,
-    shard_count = 16,
     deps = [
         "//parser/mysql",
         "@com_github_stretchr_testify//require",

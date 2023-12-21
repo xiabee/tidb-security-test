@@ -5,8 +5,6 @@ package restore_test
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
-	"math/rand"
 	"testing"
 
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
@@ -16,7 +14,6 @@ import (
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
-	"github.com/pingcap/tidb/store/pdtypes"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/require"
@@ -54,8 +51,7 @@ func TestGetSSTMetaFromFile(t *testing.T) {
 		StartKey: []byte("t2abc"),
 		EndKey:   []byte("t3a"),
 	}
-	sstMeta, err := restore.GetSSTMetaFromFile([]byte{}, file, region, rule, restore.RewriteModeLegacy)
-	require.Nil(t, err)
+	sstMeta := restore.GetSSTMetaFromFile([]byte{}, file, region, rule)
 	require.Equal(t, "t2abc", string(sstMeta.GetRange().GetStart()))
 	require.Equal(t, "t2\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", string(sstMeta.GetRange().GetEnd()))
 }
@@ -233,10 +229,10 @@ func TestPaginateScanRegion(t *testing.T) {
 	regionMap := make(map[uint64]*split.RegionInfo)
 	var regions []*split.RegionInfo
 	var batch []*split.RegionInfo
-	backup := split.WaitRegionOnlineAttemptTimes
-	split.WaitRegionOnlineAttemptTimes = 3
+	backup := split.ScanRegionAttemptTimes
+	split.ScanRegionAttemptTimes = 3
 	defer func() {
-		split.WaitRegionOnlineAttemptTimes = backup
+		split.ScanRegionAttemptTimes = backup
 	}()
 	_, err := split.PaginateScanRegion(ctx, NewTestClient(stores, regionMap, 0), []byte{}, []byte{}, 3)
 	require.Error(t, err)
@@ -295,49 +291,11 @@ func TestPaginateScanRegion(t *testing.T) {
 	require.True(t, berrors.ErrPDBatchScanRegion.Equal(err))
 
 	// make the regionMap losing some region, this will cause scan region check fails
-	// region ID is key+1, so region 4 is deleted
-	missingRegion := regions[3]
 	delete(regionMap, uint64(3))
-	missingRegion2 := regions[4]
-	delete(regionMap, uint64(4))
 	_, err = split.PaginateScanRegion(ctx, NewTestClient(stores, regionMap, 0), regions[1].Region.EndKey, regions[5].Region.EndKey, 3)
 	require.Error(t, err)
 	require.True(t, berrors.ErrPDBatchScanRegion.Equal(err))
-	require.Regexp(t, ".*region 3's endKey not equal to next region 6's startKey.*", err.Error())
-
-	// test should not increase retry counter when region becomes more
-	tc = NewTestClient(stores, regionMap, 0)
-	mockClient := &regionOnlineSlowClient{
-		TestClient:     tc,
-		missingRegion:  missingRegion,
-		missingRegion2: missingRegion2,
-	}
-	_, err = split.PaginateScanRegion(ctx, mockClient, regions[1].Region.EndKey, regions[5].Region.EndKey, 3)
-	require.NoError(t, err)
-}
-
-type regionOnlineSlowClient struct {
-	*TestClient
-	scanRegionCnt  int
-	missingRegion  *split.RegionInfo
-	missingRegion2 *split.RegionInfo
-}
-
-func (c *regionOnlineSlowClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*split.RegionInfo, error) {
-	c.scanRegionCnt++
-	var toAddRegion *split.RegionInfo
-	switch c.scanRegionCnt {
-	case 2:
-		toAddRegion = c.missingRegion
-	case 4:
-		toAddRegion = c.missingRegion2
-	}
-	if toAddRegion != nil {
-		mapKey := toAddRegion.Region.Id - 1
-		c.TestClient.regions[mapKey] = toAddRegion
-		c.TestClient.regionsInfo.SetRegion(pdtypes.NewRegionInfo(toAddRegion.Region, toAddRegion.Leader))
-	}
-	return c.TestClient.ScanRegions(ctx, key, endKey, limit)
+	require.Regexp(t, ".*region endKey not equal to next region startKey.*", err.Error())
 }
 
 func TestRewriteFileKeys(t *testing.T) {
@@ -551,80 +509,4 @@ func TestSelectRegionLeader(t *testing.T) {
 	storeScore := make(map[uint64]int, len(peer))
 	leader = restore.SelectRegionLeader(storeScore, peer)
 	require.Equal(t, validPeer3, leader)
-}
-
-func TestLogFilesSkipMap(t *testing.T) {
-	var (
-		metaNum  = 2
-		groupNum = 4
-		fileNum  = 1000
-
-		ratio = 0.1
-	)
-
-	for ratio < 1 {
-		skipmap := restore.NewLogFilesSkipMap()
-		nativemap := make(map[string]map[int]map[int]struct{})
-		count := 0
-		for i := 0; i < int(ratio*float64(metaNum*groupNum*fileNum)); i++ {
-			metaKey := fmt.Sprint(rand.Intn(metaNum))
-			groupOff := rand.Intn(groupNum)
-			fileOff := rand.Intn(fileNum)
-
-			mp, exists := nativemap[metaKey]
-			if !exists {
-				mp = make(map[int]map[int]struct{})
-				nativemap[metaKey] = mp
-			}
-			gp, exists := mp[groupOff]
-			if !exists {
-				gp = make(map[int]struct{})
-				mp[groupOff] = gp
-			}
-			if _, exists := gp[fileOff]; !exists {
-				gp[fileOff] = struct{}{}
-				skipmap.Insert(metaKey, groupOff, fileOff)
-				count += 1
-			}
-		}
-
-		ncount := 0
-		for metaKey, mp := range nativemap {
-			for groupOff, gp := range mp {
-				for fileOff := range gp {
-					require.True(t, skipmap.NeedSkip(metaKey, groupOff, fileOff))
-					ncount++
-				}
-			}
-		}
-
-		require.Equal(t, count, ncount)
-
-		continueFunc := func(metaKey string, groupi, filei int) bool {
-			mp, exists := nativemap[metaKey]
-			if !exists {
-				return false
-			}
-			gp, exists := mp[groupi]
-			if !exists {
-				return false
-			}
-			_, exists = gp[filei]
-			return exists
-		}
-
-		for metai := 0; metai < metaNum; metai++ {
-			metaKey := fmt.Sprint(metai)
-			for groupi := 0; groupi < groupNum; groupi++ {
-				for filei := 0; filei < fileNum; filei++ {
-					if continueFunc(metaKey, groupi, filei) {
-						continue
-					}
-					require.False(t, skipmap.NeedSkip(metaKey, groupi, filei))
-				}
-			}
-		}
-
-		ratio = ratio * 2
-	}
 }

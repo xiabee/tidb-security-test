@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/pingcap/errors"
@@ -96,6 +97,8 @@ type PointGetPlan struct {
 	// probeParents records the IndexJoins and Applys with this operator in their inner children.
 	// Please see comments in PhysicalPlan for details.
 	probeParents []PhysicalPlan
+	// stmtHints should restore in executing context.
+	stmtHints *stmtctx.StmtHints
 }
 
 func (p *PointGetPlan) getEstRowCountForDisplay() float64 {
@@ -731,7 +734,7 @@ func newBatchPointGetPlan(
 		}
 	}
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible ||
 			!indexIsAvailableByHints(idxInfo, indexHints) {
 			continue
 		}
@@ -1099,7 +1102,7 @@ func tryPointGetPlan(ctx sessionctx.Context, selStmt *ast.SelectStmt, check bool
 	var err error
 
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible ||
 			!indexIsAvailableByHints(idxInfo, tblName.IndexHints) {
 			continue
 		}
@@ -1509,13 +1512,57 @@ func findInPairs(colName string, pairs []nameValuePair) int {
 	return -1
 }
 
-func tryUpdatePointPlan(ctx sessionctx.Context, updateStmt *ast.UpdateStmt) Plan {
-	// avoid using the point_get when assignment_list contains the subquery in the UPDATE.
-	for _, list := range updateStmt.List {
-		if _, ok := list.Expr.(*ast.SubqueryExpr); ok {
-			return nil
+// Use cache to avoid allocating memory every time.
+var subQueryCheckerPool = &sync.Pool{New: func() any { return &subQueryChecker{} }}
+
+type subQueryChecker struct {
+	hasSubQuery bool
+}
+
+func (s *subQueryChecker) Enter(in ast.Node) (node ast.Node, skipChildren bool) {
+	if s.hasSubQuery {
+		return in, true
+	}
+
+	if _, ok := in.(*ast.SubqueryExpr); ok {
+		s.hasSubQuery = true
+		return in, true
+	}
+
+	return in, false
+}
+
+func (s *subQueryChecker) Leave(in ast.Node) (ast.Node, bool) {
+	// Before we enter the sub-query, we should keep visiting its children.
+	return in, !s.hasSubQuery
+}
+
+func isExprHasSubQuery(expr ast.Node) bool {
+	checker := subQueryCheckerPool.Get().(*subQueryChecker)
+	defer func() {
+		// Do not forget to reset the flag.
+		checker.hasSubQuery = false
+		subQueryCheckerPool.Put(checker)
+	}()
+	expr.Accept(checker)
+	return checker.hasSubQuery
+}
+
+func checkIfAssignmentListHasSubQuery(list []*ast.Assignment) bool {
+	for _, a := range list {
+		if isExprHasSubQuery(a) {
+			return true
 		}
 	}
+	return false
+}
+
+func tryUpdatePointPlan(ctx sessionctx.Context, updateStmt *ast.UpdateStmt) Plan {
+	// Avoid using the point_get when assignment_list contains the sub-query in the UPDATE.
+	if checkIfAssignmentListHasSubQuery(updateStmt.List) {
+		return nil
+	}
+
 	selStmt := &ast.SelectStmt{
 		Fields:  &ast.FieldList{},
 		From:    updateStmt.TableRefs,
@@ -1688,12 +1735,10 @@ func buildPointDeletePlan(ctx sessionctx.Context, pointPlan PhysicalPlan, dbName
 	var err error
 	is := sessiontxn.GetTxnManager(ctx).GetTxnInfoSchema()
 	t, _ := is.TableByID(tbl.ID)
-	if t != nil {
-		tblID2Table := map[int64]table.Table{tbl.ID: t}
-		err = delPlan.buildOnDeleteFKTriggers(ctx, is, tblID2Table)
-		if err != nil {
-			return nil
-		}
+	tblID2Table := map[int64]table.Table{tbl.ID: t}
+	err = delPlan.buildOnDeleteFKTriggers(ctx, is, tblID2Table)
+	if err != nil {
+		return nil
 	}
 	return delPlan
 }

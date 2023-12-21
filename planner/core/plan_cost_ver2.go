@@ -242,7 +242,7 @@ func (p *PhysicalIndexLookUpReader) getPlanCostVer2(taskType property.TaskType, 
 
 	// index-side
 	indexNetCost := netCostVer2(option, indexRows, indexRowSize, netFactor)
-	indexChildCost, err := p.indexPlan.getPlanCostVer2(property.CopDoubleReadTaskType, option)
+	indexChildCost, err := p.indexPlan.getPlanCostVer2(property.CopMultiReadTaskType, option)
 	if err != nil {
 		return zeroCostVer2, err
 	}
@@ -250,7 +250,7 @@ func (p *PhysicalIndexLookUpReader) getPlanCostVer2(taskType property.TaskType, 
 
 	// table-side
 	tableNetCost := netCostVer2(option, tableRows, tableRowSize, netFactor)
-	tableChildCost, err := p.tablePlan.getPlanCostVer2(property.CopDoubleReadTaskType, option)
+	tableChildCost, err := p.tablePlan.getPlanCostVer2(property.CopMultiReadTaskType, option)
 	if err != nil {
 		return zeroCostVer2, err
 	}
@@ -388,6 +388,11 @@ func (p *PhysicalTopN) getPlanCostVer2(taskType property.TaskType, option *PlanC
 	rows := getCardinality(p.children[0], option.CostFlag)
 	N := math.Max(1, float64(p.Count+p.Offset))
 	rowSize := getAvgRowSize(p.statsInfo(), p.Schema().Columns)
+	if N > 10000 {
+		// It's only used to prevent some extreme cases, e.g. `select * from t order by a limit 18446744073709551615`.
+		// For normal cases, considering that `rows` may be under-estimated, better to keep `n` unchanged.
+		N = math.Min(N, rows)
+	}
 	cpuFactor := getTaskCPUFactorVer2(p, taskType)
 	memFactor := getTaskMemFactorVer2(p, taskType)
 

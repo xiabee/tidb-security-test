@@ -53,6 +53,8 @@ type PrepareExec struct {
 	Fields     []*ast.ResultField
 	Stmt       interface{}
 
+	IsGeneralStmt bool
+
 	// If it's generated from executing "prepare stmt from '...'", the process is parse -> plan -> executor
 	// If it's generated from the prepare protocol, the process is session.PrepareStmt -> NewPrepareExec
 	// They both generate a PrepareExec struct, but the second case needs to reset the statement context while the first already do that.
@@ -115,7 +117,7 @@ func (e *PrepareExec) Next(ctx context.Context, req *chunk.Chunk) error {
 			return err
 		}
 	}
-	stmt, p, paramCnt, err := plannercore.GeneratePlanCacheStmtWithAST(ctx, e.ctx, stmt0.Text(), stmt0)
+	stmt, p, paramCnt, err := plannercore.GeneratePlanCacheStmtWithAST(ctx, e.ctx, stmt0)
 	if err != nil {
 		return err
 	}
@@ -133,15 +135,19 @@ func (e *PrepareExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if !isNoResultPlan(p) {
 		e.Fields = colNames2ResultFields(p.Schema(), p.OutputNames(), vars.CurrentDB)
 	}
-	if e.ID == 0 {
+	if e.ID == 0 && !e.IsGeneralStmt {
 		e.ID = vars.GetNextPreparedStmtID()
 	}
-	if e.name != "" {
+	if e.name != "" && !e.IsGeneralStmt {
 		vars.PreparedStmtNameToID[e.name] = e.ID
 	}
 
 	e.ParamCount = paramCnt
 	e.Stmt = stmt
+	if e.IsGeneralStmt {
+		vars.AddGeneralPlanCacheStmt(e.sqlText, stmt)
+		return nil
+	}
 	return vars.AddPreparedStmt(e.ID, stmt)
 }
 

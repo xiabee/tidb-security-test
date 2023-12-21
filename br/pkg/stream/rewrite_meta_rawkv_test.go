@@ -7,10 +7,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/tablecodec"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +84,80 @@ func TestRewriteValueForDB(t *testing.T) {
 	require.Equal(t, newId, sr.DbMap[dbID].NewDBID)
 }
 
-func TestRewriteValueForTable(t *testing.T) {
+func TestRewriteKeyForTable(t *testing.T) {
+	var (
+		dbID    int64  = 1
+		tableID int64  = 57
+		ts      uint64 = 400036290571534337
+	)
+	cases := []struct {
+		encodeTableFn func(int64) []byte
+		decodeTableFn func([]byte) (int64, error)
+	}{
+		{
+			meta.TableKey,
+			meta.ParseTableKey,
+		},
+		{
+			meta.AutoIncrementIDKey,
+			meta.ParseAutoIncrementIDKey,
+		},
+		{
+			meta.AutoTableIDKey,
+			meta.ParseAutoTableIDKey,
+		},
+		{
+			meta.AutoRandomTableIDKey,
+			meta.ParseAutoRandomTableIDKey,
+		},
+		{
+			meta.SequenceKey,
+			meta.ParseSequenceKey,
+		},
+	}
+
+	for _, ca := range cases {
+		encodedKey := encodeTxnMetaKey(meta.DBkey(dbID), ca.encodeTableFn(tableID), ts)
+		// create schemasReplace.
+		sr := MockEmptySchemasReplace(nil)
+
+		newKey, needWrite, err := sr.rewriteKeyForTable(encodedKey, DefaultCF, ca.decodeTableFn, ca.encodeTableFn)
+		require.Nil(t, err)
+		require.True(t, needWrite)
+		require.Equal(t, len(sr.DbMap), 1)
+		require.Equal(t, len(sr.DbMap[dbID].TableMap), 1)
+		downStreamDbID := sr.DbMap[dbID].NewDBID
+		downStreamTblID := sr.DbMap[dbID].TableMap[tableID].NewTableID
+
+		decodedKey, err := ParseTxnMetaKeyFrom(newKey)
+		require.Nil(t, err)
+		require.Equal(t, decodedKey.Ts, ts)
+
+		newDbID, err := meta.ParseDBKey(decodedKey.Key)
+		require.Nil(t, err)
+		require.Equal(t, newDbID, downStreamDbID)
+		newTblID, err := ca.decodeTableFn(decodedKey.Field)
+		require.Nil(t, err)
+		require.Equal(t, newTblID, downStreamTblID)
+
+		// rewrite it again, and get the same result.
+		newKey, needWrite, err = sr.rewriteKeyForTable(encodedKey, WriteCF, ca.decodeTableFn, ca.encodeTableFn)
+		require.True(t, needWrite)
+		require.Nil(t, err)
+		decodedKey, err = ParseTxnMetaKeyFrom(newKey)
+		require.Nil(t, err)
+		require.Equal(t, decodedKey.Ts, sr.RewriteTS)
+
+		newDbID, err = meta.ParseDBKey(decodedKey.Key)
+		require.Nil(t, err)
+		require.Equal(t, newDbID, downStreamDbID)
+		newTblID, err = ca.decodeTableFn(decodedKey.Field)
+		require.Nil(t, err)
+		require.Equal(t, newTblID, downStreamTblID)
+	}
+}
+
+func TestRewriteTableInfo(t *testing.T) {
 	var (
 		dbId      int64 = 40
 		tableID   int64 = 100
@@ -315,52 +387,6 @@ func TestRewriteValueForExchangePartition(t *testing.T) {
 	require.Equal(t, tableInfo.ID, pt1ID+100)
 }
 
-func TestRewriteValueForTTLTable(t *testing.T) {
-	var (
-		dbId      int64 = 40
-		tableID   int64 = 100
-		colID     int64 = 1000
-		colName         = "t"
-		tableName       = "t1"
-		tableInfo model.TableInfo
-	)
-
-	tbl := model.TableInfo{
-		ID:   tableID,
-		Name: model.NewCIStr(tableName),
-		Columns: []*model.ColumnInfo{
-			{
-				ID:        colID,
-				Name:      model.NewCIStr(colName),
-				FieldType: *types.NewFieldType(mysql.TypeTimestamp),
-			},
-		},
-		TTLInfo: &model.TTLInfo{
-			ColumnName:       model.NewCIStr(colName),
-			IntervalExprStr:  "1",
-			IntervalTimeUnit: int(ast.TimeUnitDay),
-			Enable:           true,
-		},
-	}
-	value, err := json.Marshal(&tbl)
-	require.Nil(t, err)
-
-	sr := MockEmptySchemasReplace(nil)
-	newValue, needRewrite, err := sr.rewriteTableInfo(value, dbId)
-	require.Nil(t, err)
-	require.True(t, needRewrite)
-
-	err = json.Unmarshal(newValue, &tableInfo)
-	require.Nil(t, err)
-	require.Equal(t, tableInfo.Name.String(), tableName)
-	require.Equal(t, tableInfo.ID, sr.DbMap[dbId].TableMap[tableID].NewTableID)
-	require.NotNil(t, tableInfo.TTLInfo)
-	require.Equal(t, colName, tableInfo.TTLInfo.ColumnName.O)
-	require.Equal(t, "1", tableInfo.TTLInfo.IntervalExprStr)
-	require.Equal(t, int(ast.TimeUnitDay), tableInfo.TTLInfo.IntervalTimeUnit)
-	require.False(t, tableInfo.TTLInfo.Enable)
-}
-
 // db:70->80 -
 //           | - t0:71->81 -
 //           |             | - p0:72->82
@@ -410,8 +436,10 @@ var (
 	dropTable0Job           = &model.Job{Type: model.ActionDropTable, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`["",[72,73,74],[""]]`)}
 	dropTable1Job           = &model.Job{Type: model.ActionDropTable, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`["",[],[""]]`)}
 	dropTable0Partition1Job = &model.Job{Type: model.ActionDropTablePartition, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[73]]`)}
-	rollBackTable0IndexJob  = &model.Job{Type: model.ActionAddIndex, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[2,false,[72,73,74]]`)}
-	rollBackTable1IndexJob  = &model.Job{Type: model.ActionAddIndex, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`[2,false,[]]`)}
+	rollBackTable0IndexJob  = &model.Job{Type: model.ActionAddIndex, State: model.JobStateRollbackDone, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[2,false,[72,73,74]]`)}
+	rollBackTable1IndexJob  = &model.Job{Type: model.ActionAddIndex, State: model.JobStateRollbackDone, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`[2,false,[]]`)}
+	addTable0IndexJob       = &model.Job{Type: model.ActionAddIndex, State: model.JobStateSynced, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[2,false,[72,73,74]]`)}
+	addTable1IndexJob       = &model.Job{Type: model.ActionAddIndex, State: model.JobStateSynced, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`[2,false,[]]`)}
 	dropTable0IndexJob      = &model.Job{Type: model.ActionDropIndex, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`["",false,2,[72,73,74]]`)}
 	dropTable1IndexJob      = &model.Job{Type: model.ActionDropIndex, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`["",false,2,[]]`)}
 	dropTable0IndexesJob    = &model.Job{Type: model.ActionDropIndexes, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[],[],[2,3],[72,73,74]]`)}
@@ -556,23 +584,44 @@ func TestDeleteRangeForMDDLJob(t *testing.T) {
 	require.Equal(t, targs.tableIDs[0], mDDLJobPartition1NewID)
 
 	// roll back add index for table0
-	err = schemaReplace.deleteRange(rollBackTable0IndexJob)
+	err = schemaReplace.tryToGCJob(rollBackTable0IndexJob)
+	require.NoError(t, err)
+	for i := 0; i < len(mDDLJobALLNewPartitionIDSet); i++ {
+		iargs = <-midr.indexCh
+		_, exist := mDDLJobALLNewPartitionIDSet[iargs.tableID]
+		require.True(t, exist)
+		require.Equal(t, len(iargs.indexIDs), 2)
+		require.Equal(t, iargs.indexIDs[0], int64(2))
+		require.Equal(t, iargs.indexIDs[1], int64(tablecodec.TempIndexPrefix|2))
+	}
+
+	// roll back add index for table1
+	err = schemaReplace.tryToGCJob(rollBackTable1IndexJob)
+	require.NoError(t, err)
+	iargs = <-midr.indexCh
+	require.Equal(t, iargs.tableID, mDDLJobTable1NewID)
+	require.Equal(t, len(iargs.indexIDs), 2)
+	require.Equal(t, iargs.indexIDs[0], int64(2))
+	require.Equal(t, iargs.indexIDs[1], int64(tablecodec.TempIndexPrefix|2))
+
+	// add index for table 0
+	err = schemaReplace.tryToGCJob(addTable0IndexJob)
 	require.NoError(t, err)
 	for i := 0; i < len(mDDLJobALLNewPartitionIDSet); i++ {
 		iargs = <-midr.indexCh
 		_, exist := mDDLJobALLNewPartitionIDSet[iargs.tableID]
 		require.True(t, exist)
 		require.Equal(t, len(iargs.indexIDs), 1)
-		require.Equal(t, iargs.indexIDs[0], int64(2))
+		require.Equal(t, iargs.indexIDs[0], int64(tablecodec.TempIndexPrefix|2))
 	}
 
-	// roll back add index for table1
-	err = schemaReplace.deleteRange(rollBackTable1IndexJob)
+	// add index for table 1
+	err = schemaReplace.tryToGCJob(addTable1IndexJob)
 	require.NoError(t, err)
 	iargs = <-midr.indexCh
 	require.Equal(t, iargs.tableID, mDDLJobTable1NewID)
 	require.Equal(t, len(iargs.indexIDs), 1)
-	require.Equal(t, iargs.indexIDs[0], int64(2))
+	require.Equal(t, iargs.indexIDs[0], int64(tablecodec.TempIndexPrefix|2))
 
 	// drop index for table0
 	err = schemaReplace.deleteRange(dropTable0IndexJob)

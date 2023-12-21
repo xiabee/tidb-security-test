@@ -31,11 +31,9 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/logutil"
-	"github.com/pingcap/tidb/util/replayer"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/zap"
 )
@@ -55,7 +53,6 @@ type PlanReplayerExec struct {
 type PlanReplayerCaptureInfo struct {
 	SQLDigest  string
 	PlanDigest string
-	Remove     bool
 }
 
 // PlanReplayerDumpInfo indicates dump info
@@ -75,9 +72,6 @@ func (e *PlanReplayerExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		return nil
 	}
 	if e.CaptureInfo != nil {
-		if e.CaptureInfo.Remove {
-			return e.removeCaptureTask(ctx)
-		}
 		return e.registerCaptureTask(ctx)
 	}
 	err := e.createFile()
@@ -106,25 +100,6 @@ func (e *PlanReplayerExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return nil
 }
 
-func (e *PlanReplayerExec) removeCaptureTask(ctx context.Context) error {
-	ctx1 := kv.WithInternalSourceType(ctx, kv.InternalTxnStats)
-	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
-	_, _, err := exec.ExecRestrictedSQL(ctx1, nil, fmt.Sprintf("delete from mysql.plan_replayer_task where sql_digest = '%s' and plan_digest = '%s'",
-		e.CaptureInfo.SQLDigest, e.CaptureInfo.PlanDigest))
-	if err != nil {
-		logutil.BgLogger().Warn("remove mysql.plan_replayer_status record failed",
-			zap.Error(err))
-		return err
-	}
-	err = domain.GetDomain(e.ctx).GetPlanReplayerHandle().CollectPlanReplayerTask()
-	if err != nil {
-		logutil.BgLogger().Warn("collect task failed", zap.Error(err))
-	}
-	logutil.BgLogger().Info("collect plan replayer task success")
-	e.endFlag = true
-	return nil
-}
-
 func (e *PlanReplayerExec) registerCaptureTask(ctx context.Context) error {
 	ctx1 := kv.WithInternalSourceType(ctx, kv.InternalTxnStats)
 	exists, err := domain.CheckPlanReplayerTaskExists(ctx1, e.ctx, e.CaptureInfo.SQLDigest, e.CaptureInfo.PlanDigest)
@@ -134,26 +109,21 @@ func (e *PlanReplayerExec) registerCaptureTask(ctx context.Context) error {
 	if exists {
 		return errors.New("plan replayer capture task already exists")
 	}
-	exec := e.ctx.(sqlexec.RestrictedSQLExecutor)
-	_, _, err = exec.ExecRestrictedSQL(ctx1, nil, fmt.Sprintf("insert into mysql.plan_replayer_task (sql_digest, plan_digest) values ('%s','%s')",
+	exec := e.ctx.(sqlexec.SQLExecutor)
+	_, err = exec.ExecuteInternal(ctx1, fmt.Sprintf("insert into mysql.plan_replayer_task (sql_digest, plan_digest) values ('%s','%s')",
 		e.CaptureInfo.SQLDigest, e.CaptureInfo.PlanDigest))
 	if err != nil {
 		logutil.BgLogger().Warn("insert mysql.plan_replayer_status record failed",
 			zap.Error(err))
 		return err
 	}
-	err = domain.GetDomain(e.ctx).GetPlanReplayerHandle().CollectPlanReplayerTask()
-	if err != nil {
-		logutil.BgLogger().Warn("collect task failed", zap.Error(err))
-	}
-	logutil.BgLogger().Info("collect plan replayer task success")
 	e.endFlag = true
 	return nil
 }
 
 func (e *PlanReplayerExec) createFile() error {
 	var err error
-	e.DumpInfo.File, e.DumpInfo.FileName, err = replayer.GeneratePlanReplayerFile(false, false, false)
+	e.DumpInfo.File, e.DumpInfo.FileName, err = domain.GeneratePlanReplayerFile()
 	if err != nil {
 		return err
 	}
@@ -163,12 +133,7 @@ func (e *PlanReplayerExec) createFile() error {
 func (e *PlanReplayerDumpInfo) dump(ctx context.Context) (err error) {
 	fileName := e.FileName
 	zf := e.File
-	startTS, err := sessiontxn.GetTxnManager(e.ctx).GetStmtReadTS()
-	if err != nil {
-		return err
-	}
 	task := &domain.PlanReplayerDumpTask{
-		StartTS:     startTS,
 		FileName:    fileName,
 		Zf:          zf,
 		SessionVars: e.ctx.GetSessionVars(),
@@ -410,23 +375,21 @@ func createSchemaAndItems(ctx sessionctx.Context, f *zip.File) error {
 	if err != nil {
 		return errors.AddStack(err)
 	}
-	originText := buf.String()
-	index1 := strings.Index(originText, ";")
-	createDatabaseSQL := originText[:index1+1]
-	index2 := strings.Index(originText[index1+1:], ";")
-	useDatabaseSQL := originText[index1+1:][:index2+1]
-	createTableSQL := originText[index1+1:][index2+1:]
+	sqls := strings.Split(buf.String(), ";")
+	if len(sqls) != 3 {
+		return errors.New("plan replayer: create schema and tables failed")
+	}
 	c := context.Background()
 	// create database if not exists
-	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, createDatabaseSQL)
+	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, sqls[0])
 	logutil.BgLogger().Debug("plan replayer: skip error", zap.Error(err))
 	// use database
-	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, useDatabaseSQL)
+	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, sqls[1])
 	if err != nil {
 		return err
 	}
 	// create table or view
-	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, createTableSQL)
+	_, err = ctx.(sqlexec.SQLExecutor).Execute(c, sqls[2])
 	if err != nil {
 		return err
 	}
@@ -473,11 +436,8 @@ func (e *PlanReplayerLoadInfo) Update(data []byte) error {
 
 	// build schema and table first
 	for _, zipFile := range z.File {
-		if zipFile.Name == fmt.Sprintf("schema/%v", domain.PlanReplayerSchemaMetaFile) {
-			continue
-		}
 		path := strings.Split(zipFile.Name, "/")
-		if len(path) == 2 && strings.Compare(path[0], "schema") == 0 {
+		if len(path) == 2 && strings.Compare(path[0], "schema") == 0 && zipFile.Mode().IsRegular() {
 			err = createSchemaAndItems(e.Ctx, zipFile)
 			if err != nil {
 				return err
@@ -494,7 +454,7 @@ func (e *PlanReplayerLoadInfo) Update(data []byte) error {
 	// build view next
 	for _, zipFile := range z.File {
 		path := strings.Split(zipFile.Name, "/")
-		if len(path) == 2 && strings.Compare(path[0], "view") == 0 {
+		if len(path) == 2 && strings.Compare(path[0], "view") == 0 && zipFile.Mode().IsRegular() {
 			err = createSchemaAndItems(e.Ctx, zipFile)
 			if err != nil {
 				return err
@@ -505,7 +465,7 @@ func (e *PlanReplayerLoadInfo) Update(data []byte) error {
 	// load stats
 	for _, zipFile := range z.File {
 		path := strings.Split(zipFile.Name, "/")
-		if len(path) == 2 && strings.Compare(path[0], "stats") == 0 {
+		if len(path) == 2 && strings.Compare(path[0], "stats") == 0 && zipFile.Mode().IsRegular() {
 			err = loadStats(e.Ctx, zipFile)
 			if err != nil {
 				return err

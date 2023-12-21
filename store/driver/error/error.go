@@ -102,6 +102,9 @@ func ToTiDBErr(err error) error {
 
 	var pdServerTimeout *tikverr.ErrPDServerTimeout
 	if stderrs.As(err, &pdServerTimeout) {
+		if len(pdServerTimeout.Error()) == 0 {
+			return ErrPDServerTimeout
+		}
 		return ErrPDServerTimeout.GenWithStackByArgs(pdServerTimeout.Error())
 	}
 

@@ -238,7 +238,7 @@ func (s *GCSStorage) URI() string {
 }
 
 // Create implements ExternalStorage interface.
-func (s *GCSStorage) Create(ctx context.Context, name string) (ExternalFileWriter, error) {
+func (s *GCSStorage) Create(ctx context.Context, name string, _ *WriterOption) (ExternalFileWriter, error) {
 	object := s.objectName(name)
 	wc := s.bucket.Object(object).NewWriter(ctx)
 	wc.StorageClass = s.gcs.StorageClass
@@ -288,6 +288,9 @@ func NewGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorage
 	if gcs.Endpoint != "" {
 		clientOps = append(clientOps, option.WithEndpoint(gcs.Endpoint))
 	}
+	// the HTTPClient should has credential, currently the HTTPClient only has the http.Transport.
+	// So we remove the HTTPClient in the storage.New().
+	// Issue: https: //github.com/pingcap/tidb/issues/47022
 	if opts.HTTPClient != nil {
 		clientOps = append(clientOps, option.WithHTTPClient(opts.HTTPClient))
 	}

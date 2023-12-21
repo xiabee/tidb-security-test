@@ -246,7 +246,7 @@ func convertDecimalStrToUint(sc *stmtctx.StatementContext, str string, upperBoun
 	if intStr == "" {
 		intStr = "0"
 	}
-	if sc.ShouldClipToZero() && intStr[0] == '-' {
+	if intStr[0] == '-' {
 		return 0, overflow(str, tp)
 	}
 
@@ -255,8 +255,7 @@ func convertDecimalStrToUint(sc *stmtctx.StatementContext, str string, upperBoun
 		round++
 	}
 
-	upperBound -= round
-	upperStr := strconv.FormatUint(upperBound, 10)
+	upperStr := strconv.FormatUint(upperBound-round, 10)
 	if len(intStr) > len(upperStr) ||
 		(len(intStr) == len(upperStr) && intStr > upperStr) {
 		return upperBound, overflow(str, tp)
@@ -757,8 +756,6 @@ func ToString(value interface{}) (string, error) {
 	case Enum:
 		return v.String(), nil
 	case Set:
-		return v.String(), nil
-	case BinaryJSON:
 		return v.String(), nil
 	default:
 		return "", errors.Errorf("cannot convert %v(type %T) to string", value, value)

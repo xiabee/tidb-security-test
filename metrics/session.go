@@ -169,31 +169,6 @@ var (
 			Help:      "Counter of setting tidb_constraint_check_in_place to false, note that it doesn't count the default value set by tidb config",
 		},
 	)
-
-	PessimisticDMLDurationByAttempt = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "tidb",
-			Subsystem: "session",
-			Name:      "transaction_pessimistic_dml_duration_by_attempt",
-			Help:      "Bucketed histogram of duration of pessimistic DMLs, distinguished by first attempt and retries",
-			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 28), // 1ms ~ 1.5days
-		}, []string{LblType, LblPhase})
-
-	ResourceGroupQueryTotalCounter = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "tidb",
-			Subsystem: "session",
-			Name:      "resource_group_query_total",
-			Help:      "Counter of the total number of queries for the resource group",
-		}, []string{LblName})
-
-	AggressiveLockingUsageCount = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "tidb",
-			Subsystem: "server",
-			Name:      "transaction_aggressive_locking_usage",
-			Help:      "The counter of statements and transactions in which aggressive locking is used or takes effect",
-		}, []string{LblType})
 )
 
 // Label constants.
@@ -235,11 +210,4 @@ const (
 	LblModule         = "module"
 	LblRCReadCheckTS  = "read_check"
 	LblRCWriteCheckTS = "write_check"
-
-	LblName = "name"
-
-	LblAggressiveLockingTxnUsed       = "txn-used"
-	LblAggressiveLockingTxnEffective  = "txn-effective"
-	LblAggressiveLockingStmtUsed      = "stmt-used"
-	LblAggressiveLockingStmtEffective = "stmt-effective"
 )

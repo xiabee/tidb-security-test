@@ -41,6 +41,7 @@ import (
 	_ "net/http/pprof" // #nosec G108
 	"os"
 	"os/user"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -146,6 +147,7 @@ type Server struct {
 	autoIDService       *autoid.Service
 	authTokenCancelFunc context.CancelFunc
 	wg                  sync.WaitGroup
+	printMDLLogTime     time.Time
 }
 
 // ConnectionCount gets current connection count.
@@ -206,6 +208,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		clients:           make(map[uint64]*clientConn),
 		globalConnID:      util.NewGlobalConnID(0, true),
 		internalSessions:  make(map[interface{}]struct{}, 100),
+		printMDLLogTime:   time.Now(),
 	}
 	s.capability = defaultCapability
 	setTxnScope()
@@ -287,7 +290,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 			proxyTarget = s.socket
 		}
 		ppListener, err := proxyprotocol.NewLazyListener(proxyTarget, s.cfg.ProxyProtocol.Networks,
-			int(s.cfg.ProxyProtocol.HeaderTimeout))
+			int(s.cfg.ProxyProtocol.HeaderTimeout), s.cfg.ProxyProtocol.Fallbackable)
 		if err != nil {
 			logutil.BgLogger().Error("ProxyProtocol networks parameter invalid")
 			return nil, errors.Trace(err)
@@ -435,7 +438,19 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 
 		clientConn := s.newConn(conn)
 		if isUnixSocket {
-			uc, ok := conn.(*net.UnixConn)
+			var (
+				uc *net.UnixConn
+				ok bool
+			)
+			if clientConn.ppEnabled {
+				// Using reflect to get Raw Conn object from proxy protocol wrapper connection object
+				ppv := reflect.ValueOf(conn)
+				vconn := ppv.Elem().FieldByName("Conn")
+				rconn := vconn.Interface()
+				uc, ok = rconn.(*net.UnixConn)
+			} else {
+				uc, ok = conn.(*net.UnixConn)
+			}
 			if !ok {
 				logutil.BgLogger().Error("Expected UNIX socket, but got something else")
 				return
@@ -450,25 +465,11 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 			}
 		}
 
-		err = plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
-			authPlugin := plugin.DeclareAuditManifest(p.Manifest)
-			if authPlugin.OnConnectionEvent == nil {
-				return nil
-			}
-			host, _, err := clientConn.PeerHost("")
-			if err != nil {
-				logutil.BgLogger().Error("get peer host failed", zap.Error(err))
-				terror.Log(clientConn.Close())
-				return errors.Trace(err)
-			}
-			if err = authPlugin.OnConnectionEvent(context.Background(), plugin.PreAuth,
-				&variable.ConnectionInfo{Host: host}); err != nil {
-				logutil.BgLogger().Info("do connection event failed", zap.Error(err))
-				terror.Log(clientConn.Close())
-				return errors.Trace(err)
-			}
-			return nil
-		})
+		err = nil
+		if !clientConn.ppEnabled {
+			// Check audit plugins when ProxyProtocol not enabled
+			err = s.checkAuditPlugin(clientConn)
+		}
 		if err != nil {
 			continue
 		}
@@ -481,6 +482,28 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 
 		go s.onConn(clientConn)
 	}
+}
+
+func (s *Server) checkAuditPlugin(clientConn *clientConn) error {
+	return plugin.ForeachPlugin(plugin.Audit, func(p *plugin.Plugin) error {
+		authPlugin := plugin.DeclareAuditManifest(p.Manifest)
+		if authPlugin.OnConnectionEvent == nil {
+			return nil
+		}
+		host, _, err := clientConn.PeerHost("", false)
+		if err != nil {
+			logutil.BgLogger().Error("get peer host failed", zap.Error(err))
+			terror.Log(clientConn.Close())
+			return errors.Trace(err)
+		}
+		if err = authPlugin.OnConnectionEvent(context.Background(), plugin.PreAuth,
+			&variable.ConnectionInfo{Host: host}); err != nil {
+			logutil.BgLogger().Info("do connection event failed", zap.Error(err))
+			terror.Log(clientConn.Close())
+			return errors.Trace(err)
+		}
+		return nil
+	})
 }
 
 func (s *Server) startShutdown() {
@@ -535,7 +558,7 @@ func (s *Server) Close() {
 // onConn runs in its own goroutine, handles queries from this connection.
 func (s *Server) onConn(conn *clientConn) {
 	// init the connInfo
-	_, _, err := conn.PeerHost("")
+	_, _, err := conn.PeerHost("", false)
 	if err != nil {
 		logutil.BgLogger().With(zap.Uint64("conn", conn.connectionID)).
 			Error("get peer host failed", zap.Error(err))
@@ -950,9 +973,15 @@ func setSystemTimeZoneVariable() {
 func (s *Server) CheckOldRunningTxn(job2ver map[int64]int64, job2ids map[int64]string) {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
+
+	printLog := false
+	if time.Since(s.printMDLLogTime) > 10*time.Second {
+		printLog = true
+		s.printMDLLogTime = time.Now()
+	}
 	for _, client := range s.clients {
 		if client.ctx.Session != nil {
-			session.RemoveLockDDLJobs(client.ctx.Session, job2ver, job2ids)
+			session.RemoveLockDDLJobs(client.ctx.Session, job2ver, job2ids, printLog)
 		}
 	}
 }
@@ -980,38 +1009,4 @@ func (s *Server) KillNonFlashbackClusterConn() {
 	for _, id := range connIDs {
 		s.Kill(id, false)
 	}
-}
-
-// GetMinStartTS implements SessionManager interface.
-func (s *Server) GetMinStartTS(lowerBound uint64) (ts uint64) {
-	// sys processes
-	if s.dom != nil {
-		for _, pi := range s.dom.SysProcTracker().GetSysProcessList() {
-			if thisTS := pi.GetMinStartTS(lowerBound); thisTS > lowerBound && (thisTS < ts || ts == 0) {
-				ts = thisTS
-			}
-		}
-	}
-	// user sessions
-	func() {
-		s.rwlock.RLock()
-		defer s.rwlock.RUnlock()
-		for _, client := range s.clients {
-			if thisTS := client.ctx.ShowProcess().GetMinStartTS(lowerBound); thisTS > lowerBound && (thisTS < ts || ts == 0) {
-				ts = thisTS
-			}
-		}
-	}()
-	// internal sessions
-	func() {
-		s.sessionMapMutex.Lock()
-		defer s.sessionMapMutex.Unlock()
-		analyzeProcID := util.GetAutoAnalyzeProcID(s.ServerID)
-		for se := range s.internalSessions {
-			if thisTS, processInfoID := session.GetStartTSFromSession(se); processInfoID != analyzeProcID && thisTS > lowerBound && (thisTS < ts || ts == 0) {
-				ts = thisTS
-			}
-		}
-	}()
-	return
 }

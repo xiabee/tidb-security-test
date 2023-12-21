@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/internal/callback"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/external"
@@ -51,7 +50,7 @@ func TestCancelAddIndexJobError(t *testing.T) {
 	require.NotNil(t, tbl)
 
 	d := dom.DDL()
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var (
 		checkErr error
 		jobID    int64

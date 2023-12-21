@@ -17,7 +17,6 @@ go_library(
         "//parser/ast",
         "//parser/auth",
         "//parser/charset",
-        "//parser/duration",
         "//parser/model",
         "//parser/mysql",
         "//parser/opcode",

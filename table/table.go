@@ -22,6 +22,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	mysql "github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
@@ -30,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/sqlexec"
-	"github.com/pingcap/tidb/util/tracing"
 )
 
 // Type is used to distinguish between different tables that store data in different ways.
@@ -200,8 +200,10 @@ type Table interface {
 
 // AllocAutoIncrementValue allocates an auto_increment value for a new row.
 func AllocAutoIncrementValue(ctx context.Context, t Table, sctx sessionctx.Context) (int64, error) {
-	r, ctx := tracing.StartRegionEx(ctx, "table.AllocAutoIncrementValue")
-	defer r.End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("table.AllocAutoIncrementValue", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+	}
 	increment := sctx.GetSessionVars().AutoIncrementIncrement
 	offset := sctx.GetSessionVars().AutoIncrementOffset
 	alloc := t.Allocators(sctx).Get(autoid.AutoIncrementType)
@@ -265,7 +267,7 @@ type CachedTable interface {
 	// TryReadFromCache checks if the cache table is readable.
 	TryReadFromCache(ts uint64, leaseDuration time.Duration) (kv.MemBuffer, bool)
 
-	// UpdateLockForRead If you cannot meet the conditions of the read buffer,
+	// UpdateLockForRead if you cannot meet the conditions of the read buffer,
 	// you need to update the lock information and read the data from the original table
 	UpdateLockForRead(ctx context.Context, store kv.Storage, ts uint64, leaseDuration time.Duration)
 

@@ -1015,27 +1015,6 @@
     ]
   },
   {
-    "name": "TestMppFineGrainedJoinAndAgg",
-    "cases": [
-      "desc format = 'brief' select * from tt t1 where exists (select * from t t2 where t1.b1 = t2.c3 and t2.c1 < t2.c2)",
-      "desc format = 'brief' select count(*) from tt group by b1"
-    ]
-  },
-  {
-    "name": "TestMppVersion",
-    "cases": [
-      "desc format = 'brief' select count(*) as cnt from t group by a, b",
-      "set mpp_exchange_compression_mode = UNSPECIFIED",
-      "desc format = 'brief' select count(*) as cnt from t group by a, b",
-      "set mpp_version = 0",
-      "set mpp_exchange_compression_mode = fast",
-      "desc format = 'brief' select count(*) as cnt from t group by a, b",
-      "set mpp_version = -1",
-      "set mpp_exchange_compression_mode = high_compression",
-      "desc format = 'brief' select count(*) as cnt from t group by a, b"
-    ]
-  },
-  {
     "name": "TestPushDownAggForMPP",
     "cases": [
       "desc format = 'brief' select /*+ hash_agg()*/ count(b) from  (select id + 1 as b from t)A",
@@ -1255,6 +1234,21 @@
       "select b from t2 use index(idx) where b is null",
       "select b from t3 where a = 1 and b is not null",
       "select b from t3 where a = 1 and b is null"
+    ]
+  },
+  {
+    "name": "TestDowncastPointGetOrRangeScan",
+    "cases": [
+      "select * from v1 where a = 1; -- the condition should be downcast through both side and go get point",
+      "select * from v1 where a = '1test'; -- the condition should be downcast through both side and go get point too",
+      "select * from v1 where a > 1; -- the condition should be downcast through both side and go range scan",
+      "select * from v2 where a = 'test';",
+      "select * from v2 where a = 1;",
+      "select * from v2 where a > 'test';",
+      "select * from v3 where a = 'test' -- the condition shouldn't be downcast through both side and go get point",
+      "select * from v3 where a > 'test' -- the condition shouldn't be downcast through both side and go get point too",
+      "select * from v4 where a = 'test' -- diff column union may have precision loss couldn't downcast the condition to get the range",
+      "select * from v4 where a > 'test' -- diff column union may have precision loss couldn't downcast the condition to get the range"
     ]
   }
 ]

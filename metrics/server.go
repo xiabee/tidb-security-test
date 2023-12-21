@@ -120,6 +120,14 @@ var (
 			Help:      "Counter of system time jumps backward.",
 		})
 
+	KeepAliveCounter = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "tidb",
+			Subsystem: "monitor",
+			Name:      "keep_alive_total",
+			Help:      "Counter of TiDB keep alive.",
+		})
+
 	PlanCacheCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
@@ -211,6 +219,15 @@ var (
 			Name:      "slow_query_wait_duration_seconds",
 			Help:      "Bucketed histogram of all cop waiting time (s) of of slow queries.",
 			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 28), // 1ms ~ 1.5days
+		}, []string{LblSQLType})
+
+	CopMVCCRatioHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "slow_query_cop_mvcc_ratio",
+			Help:      "Bucketed histogram of all cop total keys / processed keys in slow queries.",
+			Buckets:   prometheus.ExponentialBuckets(0.5, 2, 21), // 0.5 ~ 262144
 		}, []string{LblSQLType})
 
 	MaxProcs = prometheus.NewGauge(

@@ -1186,11 +1186,7 @@ func (b *builtinCastJSONAsStringSig) vecEvalString(input *chunk.Chunk, result *c
 			result.AppendNull()
 			continue
 		}
-		s, err := types.ProduceStrWithSpecifiedTp(buf.GetJSON(i).String(), b.tp, b.ctx.GetSessionVars().StmtCtx, false)
-		if err != nil {
-			return err
-		}
-		result.AppendString(s)
+		result.AppendString(buf.GetJSON(i).String())
 	}
 	return nil
 }

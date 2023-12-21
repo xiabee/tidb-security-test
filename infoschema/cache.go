@@ -15,11 +15,12 @@
 package infoschema
 
 import (
-	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/pingcap/tidb/metrics"
+	"github.com/pingcap/tidb/util/logutil"
+	"go.uber.org/zap"
 )
 
 var (
@@ -72,22 +73,31 @@ func (h *InfoCache) GetLatest() InfoSchema {
 	return nil
 }
 
-// GetSchemaByTimestamp returns the schema used at the specific timestamp
-func (h *InfoCache) GetSchemaByTimestamp(ts uint64) (InfoSchema, error) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.getSchemaByTimestampNoLock(ts)
+// Len returns the size of the cache
+func (h *InfoCache) Len() int {
+	return len(h.cache)
 }
 
-func (h *InfoCache) getSchemaByTimestampNoLock(ts uint64) (InfoSchema, error) {
-	i := sort.Search(len(h.cache), func(i int) bool {
-		return uint64(h.cache[i].timestamp) <= ts
-	})
-	if i < len(h.cache) {
-		return h.cache[i].infoschema, nil
+func (h *InfoCache) getSchemaByTimestampNoLock(ts uint64) (InfoSchema, bool) {
+	logutil.BgLogger().Debug("SCHEMA CACHE get schema", zap.Uint64("timestamp", ts))
+	// search one by one instead of binary search, because the timestamp of a schema could be 0
+	// this is ok because the size of h.cache is small (currently set to 16)
+	// moreover, the most likely hit element in the array is the first one in steady mode
+	// thus it may have better performance than binary search
+	for i, is := range h.cache {
+		if is.timestamp == 0 || (i > 0 && h.cache[i-1].infoschema.SchemaMetaVersion() != is.infoschema.SchemaMetaVersion()+1) {
+			// the schema version doesn't have a timestamp or there is a gap in the schema cache
+			// ignore all the schema cache equals or less than this version in search by timestamp
+			break
+		}
+		if ts >= uint64(is.timestamp) {
+			// found the largest version before the given ts
+			return is.infoschema, true
+		}
 	}
 
-	return nil, fmt.Errorf("no schema cached for timestamp %d", ts)
+	logutil.BgLogger().Debug("SCHEMA CACHE no schema found")
+	return nil, false
 }
 
 // GetByVersion gets the information schema based on schemaVersion. Returns nil if it is not loaded.
@@ -129,14 +139,14 @@ func (h *InfoCache) getByVersionNoLock(version int64) InfoSchema {
 }
 
 // GetBySnapshotTS gets the information schema based on snapshotTS.
-// If the snapshotTS is new than maxUpdatedSnapshotTS, that's mean it can directly use
-// the latest infoschema. otherwise, will return nil.
+// It searches the schema cache and find the schema with max schema ts that equals or smaller than given snapshot ts
+// Where the schema ts is the commitTs of the txn creates the schema diff
 func (h *InfoCache) GetBySnapshotTS(snapshotTS uint64) InfoSchema {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	getTSCounter.Inc()
-	if schema, err := h.getSchemaByTimestampNoLock(snapshotTS); err == nil {
+	if schema, ok := h.getSchemaByTimestampNoLock(snapshotTS); ok {
 		hitTSCounter.Inc()
 		return schema
 	}
@@ -146,7 +156,9 @@ func (h *InfoCache) GetBySnapshotTS(snapshotTS uint64) InfoSchema {
 // Insert will **TRY** to insert the infoschema into the cache.
 // It only promised to cache the newest infoschema.
 // It returns 'true' if it is cached, 'false' otherwise.
-func (h *InfoCache) Insert(is InfoSchema, snapshotTS uint64) bool {
+// schemaTs is the commitTs of the txn creates the schema diff, which indicates since when the schema version is taking effect
+func (h *InfoCache) Insert(is InfoSchema, schemaTS uint64) bool {
+	logutil.BgLogger().Debug("INSERT SCHEMA", zap.Uint64("schema ts", schemaTS), zap.Int64("schema version", is.SchemaMetaVersion()))
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -159,8 +171,9 @@ func (h *InfoCache) Insert(is InfoSchema, snapshotTS uint64) bool {
 
 	// cached entry
 	if i < len(h.cache) && h.cache[i].infoschema.SchemaMetaVersion() == version {
-		if h.cache[i].timestamp > int64(snapshotTS) {
-			h.cache[i].timestamp = int64(snapshotTS)
+		// update timestamp if it is not 0 and cached one is 0
+		if schemaTS > 0 && h.cache[i].timestamp == 0 {
+			h.cache[i].timestamp = int64(schemaTS)
 		}
 		return true
 	}
@@ -171,18 +184,19 @@ func (h *InfoCache) Insert(is InfoSchema, snapshotTS uint64) bool {
 		copy(h.cache[i+1:], h.cache[i:])
 		h.cache[i] = schemaAndTimestamp{
 			infoschema: is,
-			timestamp:  int64(snapshotTS),
+			timestamp:  int64(schemaTS),
 		}
-		return true
 	} else if i < len(h.cache) {
 		// drop older schema
 		copy(h.cache[i+1:], h.cache[i:])
 		h.cache[i] = schemaAndTimestamp{
 			infoschema: is,
-			timestamp:  int64(snapshotTS),
+			timestamp:  int64(schemaTS),
 		}
-		return true
+	} else {
+		// older than all cached schemas, refuse to cache it
+		return false
 	}
-	// older than all cached schemas, refuse to cache it
-	return false
+
+	return true
 }

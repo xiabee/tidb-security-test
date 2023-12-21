@@ -29,7 +29,6 @@ import (
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Client is a PD (Placement Driver) client.
@@ -232,7 +231,7 @@ func (c *client) getOrCreateConn(addr string) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	cc, err := grpc.Dial(u.Host, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	cc, err := grpc.Dial(u.Host, grpc.WithInsecure())
 	if err != nil {
 		return nil, err
 	}

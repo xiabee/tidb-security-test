@@ -73,10 +73,6 @@ func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	err = session.InitMDLVariable(store)
-	if err != nil {
-		return nil, err
-	}
 	// create stats handler for backup and restore.
 	err = dom.UpdateTableStatsLoop(se, initStatsSe)
 	if err != nil {
@@ -140,10 +136,6 @@ func (g Glue) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(glue
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if err = session.InitMDLVariable(store); err != nil {
-		return errors.Trace(err)
-	}
-
 	// because domain was created during the whole program exists.
 	// and it will register br info to info syncer.
 	// we'd better close it as soon as possible.
@@ -176,6 +168,12 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 	if err != nil {
 		return errors.Trace(err)
 	}
+	defer func() {
+		vars := gs.se.GetSessionVars()
+		vars.TxnCtxMu.Lock()
+		vars.TxnCtx.InfoSchema = nil
+		vars.TxnCtxMu.Unlock()
+	}()
 	// Some of SQLs (like ADMIN RECOVER INDEX) may lazily take effect
 	// when we polling the result set.
 	// At least call `next` once for triggering theirs side effect.
@@ -270,6 +268,7 @@ func (gs *tidbSession) CreateTables(ctx context.Context, tables map[string][]*mo
 			cloneTables = append(cloneTables, table)
 		}
 		gs.se.SetValue(sessionctx.QueryString, queryBuilder.String())
+
 		if err := gs.SplitBatchCreateTable(dbName, cloneTables, cs...); err != nil {
 			//It is possible to failure when TiDB does not support model.ActionCreateTables.
 			//In this circumstance, BatchCreateTableWithInfo returns errno.ErrInvalidDDLJob,
@@ -290,8 +289,6 @@ func (gs *tidbSession) CreateTable(ctx context.Context, dbName model.CIStr, tabl
 		return errors.Trace(err)
 	}
 	gs.se.SetValue(sessionctx.QueryString, query)
-	// Disable foreign key check when batch create tables.
-	gs.se.GetSessionVars().ForeignKeyChecks = false
 	// Clone() does not clone partitions yet :(
 	table = table.Clone()
 	if table.Partition != nil {

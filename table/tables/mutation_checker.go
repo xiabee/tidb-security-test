@@ -159,7 +159,7 @@ func checkHandleConsistency(rowInsertion mutation, indexMutations []mutation, in
 				continue
 			}
 			var tempIdxVal tablecodec.TempIndexValue
-			tempIdxVal, err = tablecodec.DecodeTempIndexValue(m.value, tblInfo.IsCommonHandle)
+			tempIdxVal, err = tablecodec.DecodeTempIndexValue(m.value)
 			if err != nil {
 				return err
 			}
@@ -171,7 +171,7 @@ func checkHandleConsistency(rowInsertion mutation, indexMutations []mutation, in
 				continue
 			}
 			orgKey = append(orgKey, m.key...)
-			tablecodec.TempIndexKey2IndexKey(idxID, orgKey)
+			tablecodec.TempIndexKey2IndexKey(orgKey)
 			indexHandle, err = tablecodec.DecodeIndexHandle(orgKey, value, len(indexInfo.Columns))
 		} else {
 			indexHandle, err = tablecodec.DecodeIndexHandle(m.key, m.value, len(indexInfo.Columns))
@@ -227,7 +227,7 @@ func checkIndexKeys(
 				// We never commit the untouched key values to the storage. Skip this check.
 				continue
 			}
-			tmpVal, err := tablecodec.DecodeTempIndexValue(m.value, t.Meta().IsCommonHandle)
+			tmpVal, err := tablecodec.DecodeTempIndexValue(m.value)
 			if err != nil {
 				return err
 			}
@@ -258,7 +258,7 @@ func checkIndexKeys(
 		}
 
 		for i, v := range decodedIndexValues {
-			fieldType := t.Columns[indexInfo.Columns[i].Offset].FieldType.ArrayType()
+			fieldType := &t.Columns[indexInfo.Columns[i].Offset].FieldType
 			datum, err := tablecodec.DecodeColumnValue(v, fieldType, sessVars.Location())
 			if err != nil {
 				return errors.Trace(err)
@@ -369,9 +369,7 @@ func compareIndexData(
 			cols[indexInfo.Columns[i].Offset].ColumnInfo,
 		)
 
-		comparison, err := CompareIndexAndVal(sc, expectedDatum, decodedMutationDatum,
-			collate.GetCollator(decodedMutationDatum.Collation()),
-			cols[indexInfo.Columns[i].Offset].ColumnInfo.FieldType.IsArray() && expectedDatum.Kind() == types.KindMysqlJSON)
+		comparison, err := decodedMutationDatum.Compare(sc, &expectedDatum, collate.GetCollator(decodedMutationDatum.Collation()))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -386,30 +384,6 @@ func compareIndexData(
 		}
 	}
 	return nil
-}
-
-// CompareIndexAndVal compare index valued and row value.
-func CompareIndexAndVal(sctx *stmtctx.StatementContext, rowVal types.Datum, idxVal types.Datum, collator collate.Collator, cmpMVIndex bool) (int, error) {
-	var cmpRes int
-	var err error
-	if cmpMVIndex {
-		// If it is multi-valued index, we should check the JSON contains the indexed value.
-		bj := rowVal.GetMysqlJSON()
-		count := bj.GetElemCount()
-		for elemIdx := 0; elemIdx < count; elemIdx++ {
-			jsonDatum := types.NewJSONDatum(bj.ArrayGetElem(elemIdx))
-			cmpRes, err = jsonDatum.Compare(sctx, &idxVal, collate.GetBinaryCollator())
-			if err != nil {
-				return 0, errors.Trace(err)
-			}
-			if cmpRes == 0 {
-				break
-			}
-		}
-	} else {
-		cmpRes, err = idxVal.Compare(sctx, &rowVal, collator)
-	}
-	return cmpRes, err
 }
 
 // getColumnMaps tries to get the columnMaps from transaction options. If there isn't one, it builds one and stores it.

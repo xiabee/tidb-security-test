@@ -183,6 +183,16 @@ func TestInapplicableIndexJoinHint(t *testing.T) {
 	tk.MustQuery(`show warnings;`).Check(testkit.Rows(`Warning 1815 Optimizer Hint /*+ INL_MERGE_JOIN(t1) */ is inapplicable`))
 	tk.MustQuery(`select /*+ INL_MERGE_JOIN(t2) */ * from t1 right join t2 on t1.a=t2.a;`).Check(testkit.Rows())
 	tk.MustQuery(`show warnings;`).Check(testkit.Rows(`Warning 1815 Optimizer Hint /*+ INL_MERGE_JOIN(t2) */ is inapplicable`))
+
+	// Test for issues/46160
+	tk.MustExec(`drop table if exists t1, t2;`)
+	tk.MustExec("use test")
+	tk.MustExec(`create table t1 (a int, key(a))`)
+	tk.MustExec(`create table t2 (a int, key(a))`)
+
+	query := `select /*+ tidb_inlj(bb) */ aa.* from (select * from t1) as aa left join
+    (select t2.a, t2.a*2 as a2 from t2) as bb on aa.a=bb.a;`
+	tk.HasPlan(query, "IndexJoin")
 }
 
 func TestIndexJoinOverflow(t *testing.T) {
@@ -352,7 +362,7 @@ func TestIssue23722(t *testing.T) {
 	tk.MustExec("insert into t values (20301,'Charlie',x'7a');")
 	tk.MustQuery("select * from t;").Check(testkit.Rows("20301 Charlie z"))
 	tk.MustQuery("select * from t where c in (select c from t where t.c >= 'a');").Check(testkit.Rows("20301 Charlie z"))
-	tk.MustQuery("select @@last_sql_use_alloc").Check(testkit.Rows("1"))
+	tk.MustQuery("select @@last_sql_use_alloc").Check(testkit.Rows("0"))
 
 	// Test lookup content exceeds primary key prefix.
 	tk.MustExec("drop table if exists t;")
@@ -492,4 +502,22 @@ func TestPartitionTableIndexJoinAndIndexReader(t *testing.T) {
 		result := tk.MustQuery("select t1.a from tnormal t1, tnormal t2 where t1.a=t2.b and " + cond).Sort().Rows()
 		tk.MustQuery("select /*+ TIDB_INLJ(t1, t2) */ t1.a from t t1, t t2 where t1.a=t2.b and " + cond).Sort().Check(result)
 	}
+}
+
+func TestIssue45716(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_mem_quota_query = 120000;")
+	tk.MustExec("drop table if exists t1, t2;")
+	tk.MustExec("create table t1(a int, index(a));")
+	tk.MustExec("create table t2(a int, index(a));")
+	tk.MustExec("insert into t1 values (1), (2);")
+	tk.MustExec("insert into t2 values (1),(1),(2),(2);")
+
+	failpoint.Enable("github.com/pingcap/tidb/executor/inlNewInnerPanic", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/executor/inlNewInnerPanic")
+	err := tk.QueryToErr("select /*+ inl_join(t2) */ * from t1 join t2 on t1.a = t2.a;")
+	tk.MustContainErrMsg(err.Error(), "test inlNewInnerPanic")
 }

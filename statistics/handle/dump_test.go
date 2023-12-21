@@ -33,7 +33,6 @@ func requireTableEqual(t *testing.T, a *statistics.Table, b *statistics.Table) {
 	require.Equal(t, b.ModifyCount, a.ModifyCount)
 	require.Equal(t, len(b.Columns), len(a.Columns))
 	for i := range a.Columns {
-		require.Equal(t, b.Columns[i].Count, a.Columns[i].Count)
 		require.True(t, statistics.HistogramEqual(&a.Columns[i].Histogram, &b.Columns[i].Histogram, false))
 		if a.Columns[i].CMSketch == nil {
 			require.Nil(t, b.Columns[i].CMSketch)
@@ -261,7 +260,7 @@ func TestDumpCMSketchWithTopN(t *testing.T) {
 	cms, _, _, _ := statistics.NewCMSketchAndTopN(5, 2048, fakeData, 20, 100)
 
 	stat := h.GetTableStats(tableInfo)
-	err = h.SaveStatsToStorage(tableInfo.ID, 1, 0, 0, &stat.Columns[tableInfo.Columns[0].ID].Histogram, cms, nil, statistics.Version2, 1, false, handle.StatsMetaHistorySourceLoadStats)
+	err = h.SaveStatsToStorage(tableInfo.ID, 1, 0, 0, &stat.Columns[tableInfo.Columns[0].ID].Histogram, cms, nil, statistics.Version2, 1, false)
 	require.NoError(t, err)
 	require.Nil(t, h.Update(is))
 

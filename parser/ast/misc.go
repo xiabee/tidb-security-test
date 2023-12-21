@@ -268,10 +268,7 @@ type PlanReplayerStmt struct {
 	Load    bool
 
 	// Capture indicates 'plan replayer capture <sql_digest> <plan_digest>'
-	Capture bool
-	// Remove indicates `plan replayer capture remove <sql_digest> <plan_digest>
-	Remove bool
-
+	Capture    bool
 	SQLDigest  string
 	PlanDigest string
 
@@ -301,14 +298,6 @@ func (n *PlanReplayerStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(n.PlanDigest)
 		return nil
 	}
-	if n.Remove {
-		ctx.WriteKeyWord("PLAN REPLAYER CAPTURE REMOVE ")
-		ctx.WriteString(n.SQLDigest)
-		ctx.WriteKeyWord(" ")
-		ctx.WriteString(n.PlanDigest)
-		return nil
-	}
-
 	ctx.WriteKeyWord("PLAN REPLAYER DUMP EXPLAIN ")
 	if n.Analyze {
 		ctx.WriteKeyWord("ANALYZE ")
@@ -531,6 +520,7 @@ type Prepared struct {
 	StmtType      string
 	Params        []ParamMarkerExpr
 	SchemaVersion int64
+	UseCache      bool
 	CachedPlan    interface{}
 	CachedNames   interface{}
 }
@@ -1528,8 +1518,6 @@ const (
 	PasswordLockTimeUnbounded
 	UserCommentType
 	UserAttributeType
-
-	UserResourceGroupName
 )
 
 type PasswordOrLockOption struct {
@@ -1594,16 +1582,6 @@ func (c *CommentOrAttributeOption) Restore(ctx *format.RestoreCtx) error {
 	return nil
 }
 
-type ResourceGroupNameOption struct {
-	Value string
-}
-
-func (c *ResourceGroupNameOption) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord(" RESOURCE GROUP ")
-	ctx.WriteName(c.Value)
-	return nil
-}
-
 // CreateUserStmt creates user account.
 // See https://dev.mysql.com/doc/refman/8.0/en/create-user.html
 type CreateUserStmt struct {
@@ -1616,7 +1594,6 @@ type CreateUserStmt struct {
 	ResourceOptions          []*ResourceOption
 	PasswordOrLockOptions    []*PasswordOrLockOption
 	CommentOrAttributeOption *CommentOrAttributeOption
-	ResourceGroupNameOption  *ResourceGroupNameOption
 }
 
 // Restore implements Node interface.
@@ -1675,12 +1652,6 @@ func (n *CreateUserStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 	}
 
-	if n.ResourceGroupNameOption != nil {
-		if err := n.ResourceGroupNameOption.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore CreateUserStmt.ResourceGroupNameOption")
-		}
-	}
-
 	return nil
 }
 
@@ -1717,7 +1688,6 @@ type AlterUserStmt struct {
 	ResourceOptions          []*ResourceOption
 	PasswordOrLockOptions    []*PasswordOrLockOption
 	CommentOrAttributeOption *CommentOrAttributeOption
-	ResourceGroupNameOption  *ResourceGroupNameOption
 }
 
 // Restore implements Node interface.
@@ -1776,12 +1746,6 @@ func (n *AlterUserStmt) Restore(ctx *format.RestoreCtx) error {
 	if n.CommentOrAttributeOption != nil {
 		if err := n.CommentOrAttributeOption.Restore(ctx); err != nil {
 			return errors.Annotatef(err, "An error occurred while restore AlterUserStmt.CommentOrAttributeOption")
-		}
-	}
-
-	if n.ResourceGroupNameOption != nil {
-		if err := n.ResourceGroupNameOption.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore AlterUserStmt.ResourceGroupNameOption")
 		}
 	}
 
@@ -2010,7 +1974,6 @@ type SetBindingStmt struct {
 	BindingStatusType BindingStatusType
 	OriginNode        StmtNode
 	HintedNode        StmtNode
-	SQLDigest         string
 }
 
 func (n *SetBindingStmt) Restore(ctx *format.RestoreCtx) error {
@@ -2023,18 +1986,13 @@ func (n *SetBindingStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("DISABLED ")
 	}
 	ctx.WriteKeyWord("FOR ")
-	if n.OriginNode == nil {
-		ctx.WriteKeyWord("SQL DIGEST ")
-		ctx.WriteString(n.SQLDigest)
-	} else {
-		if err := n.OriginNode.Restore(ctx); err != nil {
+	if err := n.OriginNode.Restore(ctx); err != nil {
+		return errors.Trace(err)
+	}
+	if n.HintedNode != nil {
+		ctx.WriteKeyWord(" USING ")
+		if err := n.HintedNode.Restore(ctx); err != nil {
 			return errors.Trace(err)
-		}
-		if n.HintedNode != nil {
-			ctx.WriteKeyWord(" USING ")
-			if err := n.HintedNode.Restore(ctx); err != nil {
-				return errors.Trace(err)
-			}
 		}
 	}
 	return nil
@@ -2046,20 +2004,17 @@ func (n *SetBindingStmt) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*SetBindingStmt)
-	if n.OriginNode != nil {
-		// OriginNode is nil means we set binding stmt by sql digest
-		origNode, ok := n.OriginNode.Accept(v)
+	origNode, ok := n.OriginNode.Accept(v)
+	if !ok {
+		return n, false
+	}
+	n.OriginNode = origNode.(StmtNode)
+	if n.HintedNode != nil {
+		hintedNode, ok := n.HintedNode.Accept(v)
 		if !ok {
 			return n, false
 		}
-		n.OriginNode = origNode.(StmtNode)
-		if n.HintedNode != nil {
-			hintedNode, ok := n.HintedNode.Accept(v)
-			if !ok {
-				return n, false
-			}
-			n.HintedNode = hintedNode.(StmtNode)
-		}
+		n.HintedNode = hintedNode.(StmtNode)
 	}
 	return v.Leave(n)
 }
@@ -3824,9 +3779,9 @@ func (n *TableOptimizerHint) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteString(hintData.To)
 	case "set_var":
 		hintData := n.HintData.(HintSetVar)
-		ctx.WritePlain(hintData.VarName)
-		ctx.WritePlain(" = ")
-		ctx.WritePlain(hintData.Value)
+		ctx.WriteString(hintData.VarName)
+		ctx.WritePlain(", ")
+		ctx.WriteString(hintData.Value)
 	}
 	ctx.WritePlain(")")
 	return nil

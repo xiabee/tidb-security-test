@@ -300,6 +300,10 @@ func CastValue(ctx sessionctx.Context, val types.Datum, col *model.ColumnInfo, r
 	if returnErr && err != nil {
 		return casted, err
 	}
+	if err != nil {
+		logutil.BgLogger().Debug("[debug] ConvertTo FieldType failed", zap.Stringer("FieldType", &col.FieldType),
+			zap.Stringer("Datum", val), zap.Error(err))
+	}
 	if err != nil && types.ErrTruncated.Equal(err) && col.GetType() != mysql.TypeSet && col.GetType() != mysql.TypeEnum {
 		str, err1 := val.ToString()
 		if err1 != nil {
@@ -323,7 +327,6 @@ func CastValue(ctx sessionctx.Context, val types.Datum, col *model.ColumnInfo, r
 	}
 
 	err = sc.HandleTruncate(err)
-	err = sc.HandleOverflow(err, err)
 
 	if forceIgnoreTruncate {
 		err = nil
@@ -538,9 +541,7 @@ func getColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo, defaultVa
 		return getColDefaultValueFromNil(ctx, col)
 	}
 
-	switch col.GetType() {
-	case mysql.TypeTimestamp, mysql.TypeDate, mysql.TypeDatetime:
-	default:
+	if col.GetType() != mysql.TypeTimestamp && col.GetType() != mysql.TypeDatetime {
 		value, err := CastValue(ctx, types.NewDatum(defaultVal), col, false, false)
 		if err != nil {
 			return types.Datum{}, err

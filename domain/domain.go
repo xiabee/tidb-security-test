@@ -31,7 +31,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/bindinfo"
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
@@ -46,9 +45,9 @@ import (
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/infoschema/perfschema"
-	"github.com/pingcap/tidb/keyspace"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/owner"
 	"github.com/pingcap/tidb/parser/ast"
@@ -60,6 +59,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/statistics/handle"
+	"github.com/pingcap/tidb/store/helper"
 	"github.com/pingcap/tidb/telemetry"
 	"github.com/pingcap/tidb/ttl/ttlworker"
 	"github.com/pingcap/tidb/types"
@@ -67,12 +67,10 @@ import (
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/domainutil"
 	"github.com/pingcap/tidb/util/engine"
-	"github.com/pingcap/tidb/util/etcd"
 	"github.com/pingcap/tidb/util/expensivequery"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/memoryusagealarm"
-	"github.com/pingcap/tidb/util/replayer"
 	"github.com/pingcap/tidb/util/servermemorylimit"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/tikv/client-go/v2/tikv"
@@ -91,7 +89,7 @@ func NewMockDomain() *Domain {
 	do := &Domain{
 		infoCache: infoschema.NewCache(1),
 	}
-	do.infoCache.Insert(infoschema.MockInfoSchema(nil), 1)
+	do.infoCache.Insert(infoschema.MockInfoSchema(nil), 0)
 	return do
 }
 
@@ -111,29 +109,29 @@ type Domain struct {
 	SchemaValidator SchemaValidator
 	sysSessionPool  *sessionPool
 	exit            chan struct{}
-	// `etcdClient` must be used when keyspace is not set, or when the logic to each etcd path needs to be separated by keyspace.
-	etcdClient *clientv3.Client
-	// `unprefixedEtcdCli` will never set the etcd namespace prefix by keyspace.
-	// It is only used in storeMinStartTS and RemoveMinStartTS now.
-	// It must be used when the etcd path isn't needed to separate by keyspace.
-	// See keyspace RFC: https://github.com/pingcap/tidb/pull/39685
-	unprefixedEtcdCli       *clientv3.Client
+	etcdClient      *clientv3.Client
+	// autoidClient is used when there are tables with AUTO_ID_CACHE=1, it is the client to the autoid service.
+	autoidClient            *autoid.ClientDiscover
 	sysVarCache             sysVarCache // replaces GlobalVariableCache
 	slowQuery               *topNSlowQueries
 	expensiveQueryHandle    *expensivequery.Handle
 	memoryUsageAlarmHandle  *memoryusagealarm.Handle
 	serverMemoryLimitHandle *servermemorylimit.Handle
-	// TODO: use Run for each process in future pr
-	wg                    *util.WaitGroupEnhancedWrapper
-	statsUpdating         atomicutil.Int32
-	cancel                context.CancelFunc
-	indexUsageSyncLease   time.Duration
-	dumpFileGcChecker     *dumpFileGcChecker
-	planReplayerHandle    *planReplayerHandle
-	expiredTimeStamp4PC   types.Time
+	wg                      util.WaitGroupWrapper
+	statsUpdating           atomicutil.Int32
+	cancel                  context.CancelFunc
+	indexUsageSyncLease     time.Duration
+	dumpFileGcChecker       *dumpFileGcChecker
+	planReplayerHandle      *planReplayerHandle
+	expiredTimeStamp4PC     struct {
+		// let `expiredTimeStamp4PC` use its own lock to avoid any block across domain.Reload()
+		// and compiler.Compile(), see issue https://github.com/pingcap/tidb/issues/45400
+		sync.RWMutex
+		expiredTimeStamp types.Time
+	}
 	logBackupAdvancer     *daemon.OwnerDaemon
 	historicalStatsWorker *HistoricalStatsWorker
-	ttlJobManager         atomic.Pointer[ttlworker.JobManager]
+	ttlJobManager         *ttlworker.JobManager
 
 	serverID             uint64
 	serverIDSession      *concurrency.Session
@@ -149,6 +147,8 @@ type Domain struct {
 		sync.Mutex
 		sctxs map[sessionctx.Context]bool
 	}
+
+	stopAutoAnalyze atomicutil.Bool
 }
 
 type mdlCheckTableInfo struct {
@@ -182,8 +182,17 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	if err != nil {
 		return nil, false, 0, nil, err
 	}
+	// fetch the commit timestamp of the schema diff
+	schemaTs, err := do.getTimestampForSchemaVersionWithNonEmptyDiff(m, neededSchemaVersion, startTS)
+	if err != nil {
+		logutil.BgLogger().Warn("failed to get schema version", zap.Error(err), zap.Int64("version", neededSchemaVersion))
+		schemaTs = 0
+	}
 
 	if is := do.infoCache.GetByVersion(neededSchemaVersion); is != nil {
+		// try to insert here as well to correct the schemaTs if previous is wrong
+		// the insert method check if schemaTs is zero
+		do.infoCache.Insert(is, uint64(schemaTs))
 		return is, true, 0, nil, nil
 	}
 
@@ -198,12 +207,11 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	// 1. Not first time bootstrap loading, which needs a full load.
 	// 2. It is newer than the current one, so it will be "the current one" after this function call.
 	// 3. There are less 100 diffs.
-	// 4. No regenrated schema diff.
 	startTime := time.Now()
 	if currentSchemaVersion != 0 && neededSchemaVersion > currentSchemaVersion && neededSchemaVersion-currentSchemaVersion < 100 {
 		is, relatedChanges, err := do.tryLoadSchemaDiffs(m, currentSchemaVersion, neededSchemaVersion)
 		if err == nil {
-			do.infoCache.Insert(is, startTS)
+			do.infoCache.Insert(is, uint64(schemaTs))
 			logutil.BgLogger().Info("diff load InfoSchema success",
 				zap.Int64("currentSchemaVersion", currentSchemaVersion),
 				zap.Int64("neededSchemaVersion", neededSchemaVersion),
@@ -226,12 +234,7 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 		return nil, false, currentSchemaVersion, nil, err
 	}
 
-	resourceGroups, err := do.fetchResourceGroups(m)
-	if err != nil {
-		return nil, false, currentSchemaVersion, nil, err
-	}
-
-	newISBuilder, err := infoschema.NewBuilder(do.Store(), do.sysFacHack).InitWithDBInfos(schemas, policies, resourceGroups, neededSchemaVersion)
+	newISBuilder, err := infoschema.NewBuilder(do, do.sysFacHack).InitWithDBInfos(schemas, policies, neededSchemaVersion)
 	if err != nil {
 		return nil, false, currentSchemaVersion, nil, err
 	}
@@ -241,8 +244,25 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 		zap.Duration("start time", time.Since(startTime)))
 
 	is := newISBuilder.Build()
-	do.infoCache.Insert(is, startTS)
+	do.infoCache.Insert(is, uint64(schemaTs))
 	return is, false, currentSchemaVersion, nil, nil
+}
+
+// Returns the timestamp of a schema version, which is the commit timestamp of the schema diff
+func (do *Domain) getTimestampForSchemaVersionWithNonEmptyDiff(m *meta.Meta, version int64, startTS uint64) (int64, error) {
+	tikvStore, ok := do.Store().(helper.Storage)
+	if ok {
+		newHelper := helper.NewHelper(tikvStore)
+		mvccResp, err := newHelper.GetMvccByEncodedKeyWithTS(m.EncodeSchemaDiffKey(version), startTS)
+		if err != nil {
+			return 0, err
+		}
+		if mvccResp == nil || mvccResp.Info == nil || len(mvccResp.Info.Writes) == 0 {
+			return 0, errors.Errorf("There is no Write MVCC info for the schema version")
+		}
+		return int64(mvccResp.Info.Writes[0].CommitTs), nil
+	}
+	return 0, errors.Errorf("cannot get store from domain")
 }
 
 func (do *Domain) sysFacHack() (pools.Resource, error) {
@@ -261,14 +281,6 @@ func (do *Domain) fetchPolicies(m *meta.Meta) ([]*model.PolicyInfo, error) {
 		return nil, err
 	}
 	return allPolicies, nil
-}
-
-func (do *Domain) fetchResourceGroups(m *meta.Meta) ([]*model.ResourceGroupInfo, error) {
-	allResourceGroups, err := m.ListResourceGroups()
-	if err != nil {
-		return nil, err
-	}
-	return allResourceGroups, nil
 }
 
 func (do *Domain) fetchAllSchemasWithTables(m *meta.Meta) ([]*model.DBInfo, error) {
@@ -362,7 +374,7 @@ func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64
 		}
 		diffs = append(diffs, diff)
 	}
-	builder := infoschema.NewBuilder(do.Store(), do.sysFacHack).InitWithOldInfoSchema(do.infoCache.GetLatest())
+	builder := infoschema.NewBuilder(do, do.sysFacHack).InitWithOldInfoSchema(do.infoCache.GetLatest())
 	builder.SetDeltaUpdateBundles()
 	phyTblIDs := make([]int64, 0, len(diffs))
 	actions := make([]uint64, 0, len(diffs))
@@ -371,15 +383,12 @@ func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64
 		if err != nil {
 			return nil, nil, err
 		}
-		if diff.RegenerateSchemaMap {
-			return nil, nil, errors.Errorf("Meets a schema diff with RegenerateSchemaMap flag")
-		}
 		if canSkipSchemaCheckerDDL(diff.Type) {
 			continue
 		}
 		phyTblIDs = append(phyTblIDs, IDs...)
 		for i := 0; i < len(IDs); i++ {
-			actions = append(actions, uint64(diff.Type))
+			actions = append(actions, uint64(1<<diff.Type))
 		}
 	}
 
@@ -421,18 +430,18 @@ func (do *Domain) GetSnapshotMeta(startTS uint64) (*meta.Meta, error) {
 
 // ExpiredTimeStamp4PC gets expiredTimeStamp4PC from domain.
 func (do *Domain) ExpiredTimeStamp4PC() types.Time {
-	do.m.Lock()
-	defer do.m.Unlock()
+	do.expiredTimeStamp4PC.RLock()
+	defer do.expiredTimeStamp4PC.RUnlock()
 
-	return do.expiredTimeStamp4PC
+	return do.expiredTimeStamp4PC.expiredTimeStamp
 }
 
 // SetExpiredTimeStamp4PC sets the expiredTimeStamp4PC from domain.
 func (do *Domain) SetExpiredTimeStamp4PC(time types.Time) {
-	do.m.Lock()
-	defer do.m.Unlock()
+	do.expiredTimeStamp4PC.Lock()
+	defer do.expiredTimeStamp4PC.Unlock()
 
-	do.expiredTimeStamp4PC = time
+	do.expiredTimeStamp4PC.expiredTimeStamp = time
 }
 
 // DDL gets DDL from domain.
@@ -452,7 +461,7 @@ func (do *Domain) InfoSyncer() *infosync.InfoSyncer {
 
 // NotifyGlobalConfigChange notify global config syncer to store the global config into PD.
 func (do *Domain) NotifyGlobalConfigChange(name, value string) {
-	do.globalCfgSyncer.Notify(pd.GlobalConfigItem{Name: name, Value: value, EventType: pdpb.EventType_PUT})
+	do.globalCfgSyncer.Notify(pd.GlobalConfigItem{Name: name, Value: value})
 }
 
 // GetGlobalConfigSyncer exports for testing.
@@ -469,18 +478,6 @@ func (do *Domain) Store() kv.Storage {
 func (do *Domain) GetScope(status string) variable.ScopeFlag {
 	// Now domain status variables scope are all default scope.
 	return variable.DefaultStatusVarScopeFlag
-}
-
-func getFlashbackStartTSFromErrorMsg(err error) uint64 {
-	slices := strings.Split(err.Error(), "is in flashback progress, FlashbackStartTS is ")
-	if len(slices) != 2 {
-		return 0
-	}
-	version, err := strconv.ParseUint(slices[1], 10, 0)
-	if err != nil {
-		return 0
-	}
-	return version
 }
 
 // Reload reloads InfoSchema.
@@ -502,15 +499,7 @@ func (do *Domain) Reload() error {
 		return err
 	}
 
-	version := ver.Ver
-	is, hitCache, oldSchemaVersion, changes, err := do.loadInfoSchema(version)
-	if err != nil {
-		if version = getFlashbackStartTSFromErrorMsg(err); version != 0 {
-			// use the lastest available version to create domain
-			version -= 1
-			is, hitCache, oldSchemaVersion, changes, err = do.loadInfoSchema(version)
-		}
-	}
+	is, hitCache, oldSchemaVersion, changes, err := do.loadInfoSchema(ver.Ver)
 	metrics.LoadSchemaDuration.Observe(time.Since(startTime).Seconds())
 	if err != nil {
 		metrics.LoadSchemaCounter.WithLabelValues("failed").Inc()
@@ -539,7 +528,7 @@ func (do *Domain) Reload() error {
 	}
 
 	// lease renew, so it must be executed despite it is cache or not
-	do.SchemaValidator.Update(version, oldSchemaVersion, is.SchemaMetaVersion(), changes)
+	do.SchemaValidator.Update(ver.Ver, oldSchemaVersion, is.SchemaMetaVersion(), changes)
 	lease := do.DDL().GetLease()
 	sub := time.Since(startTime)
 	// Reload interval is lease / 2, if load schema time elapses more than this interval,
@@ -581,6 +570,7 @@ func (do *Domain) topNSlowQueryLoop() {
 	ticker := time.NewTicker(time.Minute * 10)
 	defer func() {
 		ticker.Stop()
+		do.wg.Done()
 		logutil.BgLogger().Info("topNSlowQueryLoop exited.")
 	}()
 	for {
@@ -609,6 +599,7 @@ func (do *Domain) topNSlowQueryLoop() {
 
 func (do *Domain) infoSyncerKeeper() {
 	defer func() {
+		do.wg.Done()
 		logutil.BgLogger().Info("infoSyncerKeeper exited.")
 		util.Recover(metrics.LabelDomain, "infoSyncerKeeper", nil, false)
 	}()
@@ -633,6 +624,7 @@ func (do *Domain) infoSyncerKeeper() {
 
 func (do *Domain) globalConfigSyncerKeeper() {
 	defer func() {
+		do.wg.Done()
 		logutil.BgLogger().Info("globalConfigSyncerKeeper exited.")
 		util.Recover(metrics.LabelDomain, "globalConfigSyncerKeeper", nil, false)
 	}()
@@ -655,6 +647,7 @@ func (do *Domain) topologySyncerKeeper() {
 	ticker := time.NewTicker(infosync.TopologyTimeToRefresh)
 	defer func() {
 		ticker.Stop()
+		do.wg.Done()
 		logutil.BgLogger().Info("topologySyncerKeeper exited.")
 	}()
 
@@ -685,10 +678,15 @@ func (do *Domain) refreshMDLCheckTableInfo() {
 		logutil.BgLogger().Warn("get system session failed", zap.Error(err))
 		return
 	}
+	// Make sure the session is new.
+	if _, err := se.(sqlexec.SQLExecutor).ExecuteInternal(kv.WithInternalSourceType(context.Background(), kv.InternalTxnMeta), "rollback"); err != nil {
+		se.Close()
+		return
+	}
 	defer do.sysSessionPool.Put(se)
 	exec := se.(sqlexec.RestrictedSQLExecutor)
 	domainSchemaVer := do.InfoSchema().SchemaMetaVersion()
-	rows, _, err := exec.ExecRestrictedSQL(kv.WithInternalSourceType(context.Background(), kv.InternalTxnTelemetry), nil, fmt.Sprintf("select job_id, version, table_ids from mysql.tidb_mdl_info where version <= %d", domainSchemaVer))
+	rows, _, err := exec.ExecRestrictedSQL(kv.WithInternalSourceType(context.Background(), kv.InternalTxnMeta), nil, fmt.Sprintf("select job_id, version, table_ids from mysql.tidb_mdl_info where version <= %d", domainSchemaVer))
 	if err != nil {
 		logutil.BgLogger().Warn("get mdl info from tidb_mdl_info failed", zap.Error(err))
 		return
@@ -772,6 +770,7 @@ func (do *Domain) mdlCheckLoop() {
 				err := do.ddl.SchemaSyncer().UpdateSelfVersion(context.Background(), jobID, ver)
 				if err != nil {
 					logutil.BgLogger().Warn("update self version failed", zap.Error(err))
+					jobNeedToSync = true
 				} else {
 					jobCache[jobID] = ver
 				}
@@ -789,6 +788,7 @@ func (do *Domain) loadSchemaInLoop(ctx context.Context, lease time.Duration) {
 	ticker := time.NewTicker(lease / 2)
 	defer func() {
 		ticker.Stop()
+		do.wg.Done()
 		logutil.BgLogger().Info("loadSchemaInLoop exited.")
 	}()
 	syncer := do.ddl.SchemaSyncer()
@@ -907,10 +907,6 @@ func (do *Domain) Close() {
 		terror.Log(errors.Trace(do.etcdClient.Close()))
 	}
 
-	if do.unprefixedEtcdCli != nil {
-		terror.Log(errors.Trace(do.unprefixedEtcdCli.Close()))
-	}
-
 	do.slowQuery.Close()
 	if do.cancel != nil {
 		do.cancel()
@@ -937,46 +933,26 @@ func NewDomain(store kv.Storage, ddlLease time.Duration, statsLease time.Duratio
 		infoCache:           infoschema.NewCache(16),
 		slowQuery:           newTopNSlowQueries(30, time.Hour*24*7, 500),
 		indexUsageSyncLease: idxUsageSyncLease,
-		dumpFileGcChecker:   &dumpFileGcChecker{gcLease: dumpFileGcLease, paths: []string{replayer.GetPlanReplayerDirName(), GetOptimizerTraceDirName()}},
-		expiredTimeStamp4PC: types.NewTime(types.ZeroCoreTime, mysql.TypeTimestamp, types.DefaultFsp),
+		dumpFileGcChecker:   &dumpFileGcChecker{gcLease: dumpFileGcLease, paths: []string{GetPlanReplayerDirName(), GetOptimizerTraceDirName()}},
 		mdlCheckTableInfo: &mdlCheckTableInfo{
 			mu:         sync.Mutex{},
 			jobsVerMap: make(map[int64]int64),
 			jobsIdsMap: make(map[int64]string),
 		},
 	}
-	do.wg = util.NewWaitGroupEnhancedWrapper("domain", do.exit, config.GetGlobalConfig().TiDBEnableExitCheck)
+
+	do.stopAutoAnalyze.Store(false)
 	do.SchemaValidator = NewSchemaValidator(ddlLease, do)
 	do.expensiveQueryHandle = expensivequery.NewExpensiveQueryHandle(do.exit)
 	do.memoryUsageAlarmHandle = memoryusagealarm.NewMemoryUsageAlarmHandle(do.exit)
 	do.serverMemoryLimitHandle = servermemorylimit.NewServerMemoryLimitHandle(do.exit)
 	do.sysProcesses = SysProcesses{mu: &sync.RWMutex{}, procMap: make(map[uint64]sessionctx.Context)}
 	do.initDomainSysVars()
+	do.expiredTimeStamp4PC.expiredTimeStamp = types.NewTime(types.ZeroCoreTime, mysql.TypeTimestamp, types.DefaultFsp)
 	return do
 }
 
 const serverIDForStandalone = 1 // serverID for standalone deployment.
-
-func newEtcdCli(addrs []string, ebd kv.EtcdBackend) (*clientv3.Client, error) {
-	cfg := config.GetGlobalConfig()
-	etcdLogCfg := zap.NewProductionConfig()
-	etcdLogCfg.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
-	cli, err := clientv3.New(clientv3.Config{
-		LogConfig:        &etcdLogCfg,
-		Endpoints:        addrs,
-		AutoSyncInterval: 30 * time.Second,
-		DialTimeout:      5 * time.Second,
-		DialOptions: []grpc.DialOption{
-			grpc.WithBackoffMaxDelay(time.Second * 3),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:    time.Duration(cfg.TiKVClient.GrpcKeepAliveTime) * time.Second,
-				Timeout: time.Duration(cfg.TiKVClient.GrpcKeepAliveTimeout) * time.Second,
-			}),
-		},
-		TLS: ebd.TLSConfig(),
-	})
-	return cli, err
-}
 
 // Init initializes a domain.
 func (do *Domain) Init(
@@ -993,20 +969,30 @@ func (do *Domain) Init(
 			return err
 		}
 		if addrs != nil {
-			cli, err := newEtcdCli(addrs, ebd)
+			cfg := config.GetGlobalConfig()
+			// silence etcd warn log, when domain closed, it won't randomly print warn log
+			// see details at the issue https://github.com/pingcap/tidb/issues/15479
+			etcdLogCfg := zap.NewProductionConfig()
+			etcdLogCfg.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+			cli, err := clientv3.New(clientv3.Config{
+				LogConfig:        &etcdLogCfg,
+				Endpoints:        addrs,
+				AutoSyncInterval: 30 * time.Second,
+				DialTimeout:      5 * time.Second,
+				DialOptions: []grpc.DialOption{
+					grpc.WithBackoffMaxDelay(time.Second * 3),
+					grpc.WithKeepaliveParams(keepalive.ClientParameters{
+						Time:    time.Duration(cfg.TiKVClient.GrpcKeepAliveTime) * time.Second,
+						Timeout: time.Duration(cfg.TiKVClient.GrpcKeepAliveTimeout) * time.Second,
+					}),
+				},
+				TLS: ebd.TLSConfig(),
+			})
 			if err != nil {
 				return errors.Trace(err)
 			}
-
-			etcd.SetEtcdCliByNamespace(cli, keyspace.MakeKeyspaceEtcdNamespace(do.store.GetCodec()))
-
 			do.etcdClient = cli
-
-			unprefixedEtcdCli, err := newEtcdCli(addrs, ebd)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			do.unprefixedEtcdCli = unprefixedEtcdCli
+			do.autoidClient = autoid.NewClientDiscover(cli)
 		}
 	}
 
@@ -1033,6 +1019,7 @@ func (do *Domain) Init(
 		ctx,
 		ddl.WithEtcdClient(do.etcdClient),
 		ddl.WithStore(do.store),
+		ddl.WithAutoIDClient(do.autoidClient),
 		ddl.WithInfoCache(do.infoCache),
 		ddl.WithHook(callback),
 		ddl.WithLease(ddlLease),
@@ -1067,15 +1054,18 @@ func (do *Domain) Init(
 	}
 
 	// step 1: prepare the info/schema syncer which domain reload needed.
-	pdCli := do.GetPDClient()
 	skipRegisterToDashboard := config.GetGlobalConfig().SkipRegisterToDashboard
-	do.info, err = infosync.GlobalInfoSyncerInit(ctx, do.ddl.GetID(), do.ServerID,
-		do.etcdClient, do.unprefixedEtcdCli, pdCli, do.Store().GetCodec(),
-		skipRegisterToDashboard)
+	do.info, err = infosync.GlobalInfoSyncerInit(ctx, do.ddl.GetID(), do.ServerID, do.etcdClient, skipRegisterToDashboard)
 	if err != nil {
 		return err
 	}
-	do.globalCfgSyncer = globalconfigsync.NewGlobalConfigSyncer(pdCli)
+
+	var pdClient pd.Client
+	if store, ok := do.store.(kv.StorageWithPD); ok {
+		pdClient = store.GetPDClient()
+	}
+	do.globalCfgSyncer = globalconfigsync.NewGlobalConfigSyncer(pdClient)
+
 	err = do.ddl.SchemaSyncer().Init(ctx)
 	if err != nil {
 		return err
@@ -1094,24 +1084,24 @@ func (do *Domain) Init(
 	// Only when the store is local that the lease value is 0.
 	// If the store is local, it doesn't need loadSchemaInLoop.
 	if ddlLease > 0 {
+		do.wg.Add(1)
 		// Local store needs to get the change information for every DDL state in each session.
-		do.wg.Run(func() {
-			do.loadSchemaInLoop(ctx, ddlLease)
-		}, "loadSchemaInLoop")
+		go do.loadSchemaInLoop(ctx, ddlLease)
 	}
-	do.wg.Run(do.mdlCheckLoop, "mdlCheckLoop")
-	do.wg.Run(do.topNSlowQueryLoop, "topNSlowQueryLoop")
-	do.wg.Run(do.infoSyncerKeeper, "infoSyncerKeeper")
-	do.wg.Run(do.globalConfigSyncerKeeper, "globalConfigSyncerKeeper")
+	do.wg.Run(do.mdlCheckLoop)
+	do.wg.Add(3)
+	go do.topNSlowQueryLoop()
+	go do.infoSyncerKeeper()
+	go do.globalConfigSyncerKeeper()
 	if !skipRegisterToDashboard {
-		do.wg.Run(do.topologySyncerKeeper, "topologySyncerKeeper")
+		do.wg.Add(1)
+		go do.topologySyncerKeeper()
 	}
-	if pdCli != nil {
-		do.wg.Run(func() {
-			do.closestReplicaReadCheckLoop(ctx, pdCli)
-		}, "closestReplicaReadCheckLoop")
+	if pdClient != nil {
+		do.wg.Add(1)
+		go do.closestReplicaReadCheckLoop(ctx, pdClient)
 	}
-	err = do.initLogBackup(ctx, pdCli)
+	err = do.initLogBackup(ctx, pdClient)
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1120,12 @@ func (do *Domain) initLogBackup(ctx context.Context, pdClient pd.Client) error {
 		log.Warn("pd / etcd client not provided, won't begin Advancer.")
 		return nil
 	}
-	env, err := streamhelper.TiDBEnv(pdClient, do.etcdClient, cfg)
+	tikvStore, ok := do.Store().(tikv.Storage)
+	if !ok {
+		log.Warn("non tikv store, stop begin Advancer.")
+		return nil
+	}
+	env, err := streamhelper.TiDBEnv(tikvStore, pdClient, do.etcdClient, cfg)
 	if err != nil {
 		return err
 	}
@@ -1140,7 +1135,7 @@ func (do *Domain) initLogBackup(ctx context.Context, pdClient pd.Client) error {
 	if err != nil {
 		return err
 	}
-	do.wg.Run(loop, "logBackupAdvancer")
+	do.wg.Run(loop)
 	return nil
 }
 
@@ -1157,6 +1152,7 @@ func (do *Domain) closestReplicaReadCheckLoop(ctx context.Context, pdClient pd.C
 	ticker := time.NewTicker(time.Minute)
 	defer func() {
 		ticker.Stop()
+		do.wg.Done()
 		logutil.BgLogger().Info("closestReplicaReadCheckLoop exited.")
 	}()
 	for {
@@ -1356,6 +1352,11 @@ func (do *Domain) GetEtcdClient() *clientv3.Client {
 	return do.etcdClient
 }
 
+// AutoIDClient returns the autoid client.
+func (do *Domain) AutoIDClient() *autoid.ClientDiscover {
+	return do.autoidClient
+}
+
 // GetPDClient returns the PD client.
 func (do *Domain) GetPDClient() pd.Client {
 	if store, ok := do.store.(kv.StorageWithPD); ok {
@@ -1386,8 +1387,10 @@ func (do *Domain) LoadPrivilegeLoop(sctx sessionctx.Context) error {
 		duration = 10 * time.Minute
 	}
 
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("loadPrivilegeInLoop exited.")
 			util.Recover(metrics.LabelDomain, "loadPrivilegeInLoop", nil, false)
 		}()
@@ -1417,7 +1420,7 @@ func (do *Domain) LoadPrivilegeLoop(sctx sessionctx.Context) error {
 				logutil.BgLogger().Error("load privilege failed", zap.Error(err))
 			}
 		}
-	}, "loadPrivilegeInLoop")
+	}()
 	return nil
 }
 
@@ -1434,9 +1437,10 @@ func (do *Domain) LoadSysVarCacheLoop(ctx sessionctx.Context) error {
 	if do.etcdClient != nil {
 		watchCh = do.etcdClient.Watch(context.Background(), sysVarCacheKey)
 	}
-
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("LoadSysVarCacheLoop exited.")
 			util.Recover(metrics.LabelDomain, "LoadSysVarCacheLoop", nil, false)
 		}()
@@ -1479,63 +1483,7 @@ func (do *Domain) LoadSysVarCacheLoop(ctx sessionctx.Context) error {
 				logutil.BgLogger().Error("LoadSysVarCacheLoop failed", zap.Error(err))
 			}
 		}
-	}, "LoadSysVarCacheLoop")
-	return nil
-}
-
-// WatchTiFlashComputeNodeChange create a routine to watch if the topology of tiflash_compute node is changed.
-// TODO: tiflashComputeNodeKey is not put to etcd yet(finish this when AutoScaler is done)
-//
-//	store cache will only be invalidated every n seconds.
-func (do *Domain) WatchTiFlashComputeNodeChange() error {
-	var watchCh clientv3.WatchChan
-	if do.etcdClient != nil {
-		watchCh = do.etcdClient.Watch(context.Background(), tiflashComputeNodeKey)
-	}
-	duration := 10 * time.Second
-	do.wg.Run(func() {
-		defer func() {
-			logutil.BgLogger().Info("WatchTiFlashComputeNodeChange exit")
-			util.Recover(metrics.LabelDomain, "WatchTiFlashComputeNodeChange", nil, false)
-		}()
-
-		var count int
-		var logCount int
-		for {
-			ok := true
-			var watched bool
-			select {
-			case <-do.exit:
-				return
-			case _, ok = <-watchCh:
-				watched = true
-			case <-time.After(duration):
-			}
-			if !ok {
-				logutil.BgLogger().Error("WatchTiFlashComputeNodeChange watch channel closed")
-				watchCh = do.etcdClient.Watch(context.Background(), tiflashComputeNodeKey)
-				count++
-				if count > 10 {
-					time.Sleep(time.Duration(count) * time.Second)
-				}
-				continue
-			}
-			count = 0
-			switch s := do.store.(type) {
-			case tikv.Storage:
-				logCount++
-				s.GetRegionCache().InvalidateTiFlashComputeStores()
-				if logCount == 6 {
-					// Print log every 6*duration seconds.
-					logutil.BgLogger().Debug("tiflash_compute store cache invalied, will update next query", zap.Bool("watched", watched))
-					logCount = 0
-				}
-			default:
-				logutil.BgLogger().Debug("No need to watch tiflash_compute store cache for non-tikv store")
-				return
-			}
-		}
-	}, "WatchTiFlashComputeNodeChange")
+	}()
 	return nil
 }
 
@@ -1570,8 +1518,10 @@ func (do *Domain) LoadBindInfoLoop(ctxForHandle sessionctx.Context, ctxForEvolve
 }
 
 func (do *Domain) globalBindHandleWorkerLoop(owner owner.Manager) {
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("globalBindHandleWorkerLoop exited.")
 			util.Recover(metrics.LabelDomain, "globalBindHandleWorkerLoop", nil, false)
 		}()
@@ -1608,12 +1558,14 @@ func (do *Domain) globalBindHandleWorkerLoop(owner owner.Manager) {
 				}
 			}
 		}
-	}, "globalBindHandleWorkerLoop")
+	}()
 }
 
 func (do *Domain) handleEvolvePlanTasksLoop(ctx sessionctx.Context, owner owner.Manager) {
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("handleEvolvePlanTasksLoop exited.")
 			util.Recover(metrics.LabelDomain, "handleEvolvePlanTasksLoop", nil, false)
 		}()
@@ -1631,7 +1583,7 @@ func (do *Domain) handleEvolvePlanTasksLoop(ctx sessionctx.Context, owner owner.
 				}
 			}
 		}
-	}, "handleEvolvePlanTasksLoop")
+	}()
 }
 
 // TelemetryReportLoop create a goroutine that reports usage data in a loop, it should be called only once
@@ -1643,8 +1595,10 @@ func (do *Domain) TelemetryReportLoop(ctx sessionctx.Context) {
 		logutil.BgLogger().Warn("Initial telemetry run failed", zap.Error(err))
 	}
 
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("TelemetryReportLoop exited.")
 			util.Recover(metrics.LabelDomain, "TelemetryReportLoop", nil, false)
 		}()
@@ -1665,14 +1619,16 @@ func (do *Domain) TelemetryReportLoop(ctx sessionctx.Context) {
 				}
 			}
 		}
-	}, "TelemetryReportLoop")
+	}()
 }
 
 // TelemetryRotateSubWindowLoop create a goroutine that rotates the telemetry window regularly.
 func (do *Domain) TelemetryRotateSubWindowLoop(ctx sessionctx.Context) {
 	ctx.GetSessionVars().InRestrictedSQL = true
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Info("TelemetryRotateSubWindowLoop exited.")
 			util.Recover(metrics.LabelDomain, "TelemetryRotateSubWindowLoop", nil, false)
 		}()
@@ -1684,35 +1640,21 @@ func (do *Domain) TelemetryRotateSubWindowLoop(ctx sessionctx.Context) {
 				telemetry.RotateSubWindow()
 			}
 		}
-	}, "TelemetryRotateSubWindowLoop")
+	}()
 }
 
 // SetupPlanReplayerHandle setup plan replayer handle
-func (do *Domain) SetupPlanReplayerHandle(collectorSctx sessionctx.Context, workersSctxs []sessionctx.Context) {
+func (do *Domain) SetupPlanReplayerHandle(collectorSctx, dumperSctx sessionctx.Context) {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnStats)
 	do.planReplayerHandle = &planReplayerHandle{}
 	do.planReplayerHandle.planReplayerTaskCollectorHandle = &planReplayerTaskCollectorHandle{
 		ctx:  ctx,
 		sctx: collectorSctx,
 	}
-	taskCH := make(chan *PlanReplayerDumpTask, 16)
-	taskStatus := &planReplayerDumpTaskStatus{}
-	taskStatus.finishedTaskMu.finishedTask = map[replayer.PlanReplayerTaskKey]struct{}{}
-	taskStatus.runningTaskMu.runningTasks = map[replayer.PlanReplayerTaskKey]struct{}{}
-
 	do.planReplayerHandle.planReplayerTaskDumpHandle = &planReplayerTaskDumpHandle{
-		taskCH: taskCH,
-		status: taskStatus,
-	}
-	do.planReplayerHandle.planReplayerTaskDumpHandle.workers = make([]*planReplayerTaskDumpWorker, 0)
-	for i := 0; i < len(workersSctxs); i++ {
-		worker := &planReplayerTaskDumpWorker{
-			ctx:    ctx,
-			sctx:   workersSctxs[i],
-			taskCH: taskCH,
-			status: taskStatus,
-		}
-		do.planReplayerHandle.planReplayerTaskDumpHandle.workers = append(do.planReplayerHandle.planReplayerTaskDumpHandle.workers, worker)
+		ctx:    ctx,
+		sctx:   dumperSctx,
+		taskCH: make(chan *PlanReplayerDumpTask, 16),
 	}
 }
 
@@ -1727,7 +1669,6 @@ func (do *Domain) SetupHistoricalStatsWorker(ctx sessionctx.Context) {
 // SetupDumpFileGCChecker setup sctx
 func (do *Domain) SetupDumpFileGCChecker(ctx sessionctx.Context) {
 	do.dumpFileGcChecker.setupSctx(ctx)
-	do.dumpFileGcChecker.planReplayerTaskStatus = do.planReplayerHandle.status
 }
 
 var planReplayerHandleLease atomic.Uint64
@@ -1753,13 +1694,14 @@ func (do *Domain) StartPlanReplayerHandle() {
 	if lease < 1 {
 		return
 	}
-	do.wg.Run(func() {
-		logutil.BgLogger().Info("PlanReplayerTaskCollectHandle started")
+	do.wg.Add(2)
+	go func() {
 		tikcer := time.NewTicker(time.Duration(lease))
 		defer func() {
 			tikcer.Stop()
-			util.Recover(metrics.LabelDomain, "PlanReplayerTaskCollectHandle", nil, false)
+			do.wg.Done()
 			logutil.BgLogger().Info("PlanReplayerTaskCollectHandle exited.")
+			util.Recover(metrics.LabelDomain, "PlanReplayerTaskCollectHandle", nil, false)
 		}()
 		for {
 			select {
@@ -1772,20 +1714,22 @@ func (do *Domain) StartPlanReplayerHandle() {
 				}
 			}
 		}
-	}, "PlanReplayerTaskCollectHandle")
-
-	do.wg.Run(func() {
-		logutil.BgLogger().Info("PlanReplayerTaskDumpHandle started")
+	}()
+	go func() {
 		defer func() {
-			util.Recover(metrics.LabelDomain, "PlanReplayerTaskDumpHandle", nil, false)
+			do.wg.Done()
 			logutil.BgLogger().Info("PlanReplayerTaskDumpHandle exited.")
+			util.Recover(metrics.LabelDomain, "PlanReplayerTaskDumpHandle", nil, false)
 		}()
-		for _, worker := range do.planReplayerHandle.planReplayerTaskDumpHandle.workers {
-			go worker.run()
+		for {
+			select {
+			case <-do.exit:
+				return
+			case task := <-do.planReplayerHandle.planReplayerTaskDumpHandle.taskCH:
+				do.planReplayerHandle.HandlePlanReplayerDumpTask(task)
+			}
 		}
-		<-do.exit
-		do.planReplayerHandle.planReplayerTaskDumpHandle.Close()
-	}, "PlanReplayerTaskDumpHandle")
+	}()
 }
 
 // GetPlanReplayerHandle returns plan replayer handle
@@ -1795,13 +1739,14 @@ func (do *Domain) GetPlanReplayerHandle() *planReplayerHandle {
 
 // DumpFileGcCheckerLoop creates a goroutine that handles `exit` and `gc`.
 func (do *Domain) DumpFileGcCheckerLoop() {
-	do.wg.Run(func() {
-		logutil.BgLogger().Info("dumpFileGcChecker started")
+	do.wg.Add(1)
+	go func() {
 		gcTicker := time.NewTicker(do.dumpFileGcChecker.gcLease)
 		defer func() {
 			gcTicker.Stop()
-			util.Recover(metrics.LabelDomain, "dumpFileGcCheckerLoop", nil, false)
+			do.wg.Done()
 			logutil.BgLogger().Info("dumpFileGcChecker exited.")
+			util.Recover(metrics.LabelDomain, "dumpFileGcCheckerLoop", nil, false)
 		}()
 		for {
 			select {
@@ -1811,7 +1756,7 @@ func (do *Domain) DumpFileGcCheckerLoop() {
 				do.dumpFileGcChecker.gcDumpFiles(time.Hour)
 			}
 		}
-	}, "dumpFileGcChecker")
+	}()
 }
 
 // GetHistoricalStatsWorker gets historical workers
@@ -1827,28 +1772,25 @@ func (do *Domain) StartHistoricalStatsWorker() {
 	if !enableDumpHistoricalStats.Load() {
 		return
 	}
-	do.wg.Run(func() {
-		logutil.BgLogger().Info("HistoricalStatsWorker started")
+	do.wg.Add(1)
+	go func() {
 		defer func() {
-			util.Recover(metrics.LabelDomain, "HistoricalStatsWorkerLoop", nil, false)
+			do.wg.Done()
 			logutil.BgLogger().Info("HistoricalStatsWorker exited.")
+			util.Recover(metrics.LabelDomain, "HistoricalStatsWorkerLoop", nil, false)
 		}()
 		for {
 			select {
 			case <-do.exit:
-				close(do.historicalStatsWorker.tblCH)
 				return
-			case tblID, ok := <-do.historicalStatsWorker.tblCH:
-				if !ok {
-					return
-				}
+			case tblID := <-do.historicalStatsWorker.tblCH:
 				err := do.historicalStatsWorker.DumpHistoricalStats(tblID, do.StatsHandle())
 				if err != nil {
 					logutil.BgLogger().Warn("dump historical stats failed", zap.Error(err), zap.Int64("tableID", tblID))
 				}
 			}
 		}
-	}, "HistoricalStatsWorker")
+	}()
 }
 
 // StatsHandle returns the statistic handle.
@@ -1942,21 +1884,20 @@ func (do *Domain) UpdateTableStatsLoop(ctx, initStatsCtx sessionctx.Context) err
 	do.ddl.RegisterStatsHandle(statsHandle)
 	// Negative stats lease indicates that it is in test, it does not need update.
 	if do.statsLease >= 0 {
-		do.wg.Run(do.loadStatsWorker, "loadStatsWorker")
+		do.wg.Run(do.loadStatsWorker)
 	}
 	owner := do.newOwnerManager(handle.StatsPrompt, handle.StatsOwnerKey)
 	if do.indexUsageSyncLease > 0 {
-		do.wg.Run(func() {
-			do.syncIndexUsageWorker(owner)
-		}, "syncIndexUsageWorker")
+		do.wg.Add(1)
+		go do.syncIndexUsageWorker(owner)
 	}
 	if do.statsLease <= 0 {
 		return nil
 	}
 	do.SetStatsUpdating(true)
-	do.wg.Run(func() { do.updateStatsWorker(ctx, owner) }, "updateStatsWorker")
-	do.wg.Run(func() { do.autoAnalyzeWorker(owner) }, "autoAnalyzeWorker")
-	do.wg.Run(func() { do.gcAnalyzeHistory(owner) }, "gcAnalyzeHistory")
+	do.wg.Run(func() { do.updateStatsWorker(ctx, owner) })
+	do.wg.Run(func() { do.autoAnalyzeWorker(owner) })
+	do.wg.Run(func() { do.gcAnalyzeHistory(owner) })
 	return nil
 }
 
@@ -1966,7 +1907,7 @@ func (do *Domain) StartLoadStatsSubWorkers(ctxList []sessionctx.Context) {
 	for i, ctx := range ctxList {
 		statsHandle.StatsLoad.SubCtxs[i] = ctx
 		do.wg.Add(1)
-		go statsHandle.SubLoadWorker(ctx, do.exit, do.wg)
+		go statsHandle.SubLoadWorker(ctx, do.exit, &do.wg)
 	}
 }
 
@@ -1986,20 +1927,11 @@ func (do *Domain) newOwnerManager(prompt, ownerKey string) owner.Manager {
 	return statsOwner
 }
 
-func (do *Domain) loadStatsWorker() {
-	defer util.Recover(metrics.LabelDomain, "loadStatsWorker", nil, false)
-	lease := do.statsLease
-	if lease == 0 {
-		lease = 3 * time.Second
-	}
-	loadTicker := time.NewTicker(lease)
-	updStatsHealthyTicker := time.NewTicker(20 * lease)
-	defer func() {
-		loadTicker.Stop()
-		updStatsHealthyTicker.Stop()
-		logutil.BgLogger().Info("loadStatsWorker exited.")
-	}()
+func (do *Domain) initStats() {
 	statsHandle := do.StatsHandle()
+	defer func() {
+		close(statsHandle.InitStatsDone)
+	}()
 	t := time.Now()
 	err := statsHandle.InitStats(do.InfoSchema())
 	if err != nil {
@@ -2007,6 +1939,22 @@ func (do *Domain) loadStatsWorker() {
 	} else {
 		logutil.BgLogger().Info("init stats info time", zap.Duration("take time", time.Since(t)))
 	}
+}
+
+func (do *Domain) loadStatsWorker() {
+	defer util.Recover(metrics.LabelDomain, "loadStatsWorker", nil, false)
+	lease := do.statsLease
+	if lease == 0 {
+		lease = 3 * time.Second
+	}
+	loadTicker := time.NewTicker(lease)
+	defer func() {
+		loadTicker.Stop()
+		logutil.BgLogger().Info("loadStatsWorker exited.")
+	}()
+	do.initStats()
+	statsHandle := do.StatsHandle()
+	var err error
 	for {
 		select {
 		case <-loadTicker.C:
@@ -2022,8 +1970,6 @@ func (do *Domain) loadStatsWorker() {
 			if err != nil {
 				logutil.BgLogger().Debug("load histograms failed", zap.Error(err))
 			}
-		case <-updStatsHealthyTicker.C:
-			statsHandle.UpdateStatsHealthyMetrics()
 		case <-do.exit:
 			return
 		}
@@ -2037,6 +1983,7 @@ func (do *Domain) syncIndexUsageWorker(owner owner.Manager) {
 	handle := do.StatsHandle()
 	defer func() {
 		idxUsageSyncTicker.Stop()
+		do.wg.Done()
 		logutil.BgLogger().Info("syncIndexUsageWorker exited.")
 	}()
 	for {
@@ -2059,32 +2006,12 @@ func (do *Domain) syncIndexUsageWorker(owner owner.Manager) {
 	}
 }
 
-func (do *Domain) updateStatsWorkerExitPreprocessing(statsHandle *handle.Handle, owner owner.Manager) {
-	ch := make(chan struct{}, 1)
-	timeout, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	go func() {
-		logutil.BgLogger().Info("updateStatsWorker is going to exit, start to flush stats")
-		statsHandle.FlushStats()
-		logutil.BgLogger().Info("updateStatsWorker ready to release owner")
-		owner.Cancel()
-		ch <- struct{}{}
-	}()
-	select {
-	case <-ch:
-		logutil.BgLogger().Info("updateStatsWorker exit preprocessing finished")
-		return
-	case <-timeout.Done():
-		logutil.BgLogger().Warn("updateStatsWorker exit preprocessing timeout, force exiting")
-		return
-	}
-}
-
 func (do *Domain) updateStatsWorker(ctx sessionctx.Context, owner owner.Manager) {
 	defer util.Recover(metrics.LabelDomain, "updateStatsWorker", nil, false)
-	logutil.BgLogger().Info("updateStatsWorker started.")
 	lease := do.statsLease
-	deltaUpdateTicker := time.NewTicker(20 * lease)
+	// We need to have different nodes trigger tasks at different times to avoid the herd effect.
+	randDuration := time.Duration(rand.Int63n(int64(time.Minute)))
+	deltaUpdateTicker := time.NewTicker(20*lease + randDuration)
 	gcStatsTicker := time.NewTicker(100 * lease)
 	dumpFeedbackTicker := time.NewTicker(200 * lease)
 	loadFeedbackTicker := time.NewTicker(5 * lease)
@@ -2100,13 +2027,13 @@ func (do *Domain) updateStatsWorker(ctx sessionctx.Context, owner owner.Manager)
 		deltaUpdateTicker.Stop()
 		readMemTricker.Stop()
 		do.SetStatsUpdating(false)
-		util.Recover(metrics.LabelDomain, "updateStatsWorker", nil, false)
 		logutil.BgLogger().Info("updateStatsWorker exited.")
 	}()
 	for {
 		select {
 		case <-do.exit:
-			do.updateStatsWorkerExitPreprocessing(statsHandle, owner)
+			statsHandle.FlushStats()
+			owner.Cancel()
 			return
 			// This channel is sent only by ddl owner.
 		case t := <-statsHandle.DDLEventCh():
@@ -2170,7 +2097,7 @@ func (do *Domain) autoAnalyzeWorker(owner owner.Manager) {
 	for {
 		select {
 		case <-analyzeTicker.C:
-			if variable.RunAutoAnalyze.Load() && owner.IsOwner() {
+			if variable.RunAutoAnalyze.Load() && !do.stopAutoAnalyze.Load() && owner.IsOwner() {
 				statsHandle.HandleAutoAnalyze(do.InfoSchema())
 			}
 		case <-do.exit:
@@ -2221,9 +2148,8 @@ func (do *Domain) ServerMemoryLimitHandle() *servermemorylimit.Handle {
 }
 
 const (
-	privilegeKey          = "/tidb/privilege"
-	sysVarCacheKey        = "/tidb/sysvars"
-	tiflashComputeNodeKey = "/tiflash/new_tiflash_compute_nodes"
+	privilegeKey   = "/tidb/privilege"
+	sysVarCacheKey = "/tidb/sysvars"
 )
 
 // NotifyUpdatePrivilege updates privilege key in etcd, TiDB client that watches
@@ -2281,8 +2207,10 @@ func (do *Domain) LoadSigningCertLoop(signingCert, signingKey string) {
 	sessionstates.SetCertPath(signingCert)
 	sessionstates.SetKeyPath(signingKey)
 
-	do.wg.Run(func() {
+	do.wg.Add(1)
+	go func() {
 		defer func() {
+			do.wg.Done()
 			logutil.BgLogger().Debug("loadSigningCertLoop exited.")
 			util.Recover(metrics.LabelDomain, "LoadSigningCertLoop", nil, false)
 		}()
@@ -2294,7 +2222,7 @@ func (do *Domain) LoadSigningCertLoop(signingCert, signingKey string) {
 				return
 			}
 		}
-	}, "loadSigningCertLoop")
+	}()
 }
 
 // ServerID gets serverID.
@@ -2533,12 +2461,8 @@ func (do *Domain) serverIDKeeper() {
 // StartTTLJobManager creates and starts the ttl job manager
 func (do *Domain) StartTTLJobManager() {
 	do.wg.Run(func() {
-		defer func() {
-			logutil.BgLogger().Info("ttlJobManager exited.")
-		}()
-
-		ttlJobManager := ttlworker.NewJobManager(do.ddl.GetID(), do.sysSessionPool, do.store, do.etcdClient)
-		do.ttlJobManager.Store(ttlJobManager)
+		ttlJobManager := ttlworker.NewJobManager(do.ddl.GetID(), do.sysSessionPool, do.store)
+		do.ttlJobManager = ttlJobManager
 		ttlJobManager.Start()
 
 		<-do.exit
@@ -2548,12 +2472,17 @@ func (do *Domain) StartTTLJobManager() {
 		if err != nil {
 			logutil.BgLogger().Warn("fail to wait until the ttl job manager stop", zap.Error(err))
 		}
-	}, "ttlJobManager")
+	})
 }
 
 // TTLJobManager returns the ttl job manager on this domain
 func (do *Domain) TTLJobManager() *ttlworker.JobManager {
-	return do.ttlJobManager.Load()
+	return do.ttlJobManager
+}
+
+// StopAutoAnalyze stops (*Domain).autoAnalyzeWorker to launch new auto analyze jobs.
+func (do *Domain) StopAutoAnalyze() {
+	do.stopAutoAnalyze.Store(true)
 }
 
 func init() {

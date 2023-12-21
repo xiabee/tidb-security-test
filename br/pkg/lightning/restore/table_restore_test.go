@@ -67,6 +67,8 @@ import (
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"github.com/tikv/client-go/v2/testutils"
+	pd "github.com/tikv/pd/client"
 )
 
 type tableRestoreSuiteBase struct {
@@ -129,7 +131,6 @@ func (s *tableRestoreSuiteBase) setupSuite(t *testing.T) {
 				Type:     mydump.SourceTypeSQL,
 				SortKey:  strconv.Itoa(i),
 				FileSize: 37,
-				RealSize: 37,
 			},
 		})
 	}
@@ -145,7 +146,6 @@ func (s *tableRestoreSuiteBase) setupSuite(t *testing.T) {
 			Type:     mydump.SourceTypeCSV,
 			SortKey:  "99",
 			FileSize: 14,
-			RealSize: 14,
 		},
 	})
 
@@ -167,7 +167,7 @@ func (s *tableRestoreSuiteBase) setupSuite(t *testing.T) {
 func (s *tableRestoreSuiteBase) setupTest(t *testing.T) {
 	// Collect into the test TableRestore structure
 	var err error
-	s.tr, err = NewTableRestore("`db`.`table`", s.tableMeta, s.dbInfo, s.tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, log.L())
+	s.tr, err = NewTableRestore("`db`.`table`", s.tableMeta, s.dbInfo, s.tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, nil, log.L())
 	require.NoError(t, err)
 
 	s.cfg = config.NewConfig()
@@ -306,7 +306,6 @@ func (s *tableRestoreSuite) TestPopulateChunks() {
 
 	// set csv header to true, this will cause check columns fail
 	s.cfg.Mydumper.CSV.Header = true
-	s.cfg.Mydumper.CSV.HeaderSchemaMatch = true
 	s.cfg.Mydumper.StrictFormat = true
 	regionSize := s.cfg.Mydumper.MaxRegionSize
 	s.cfg.Mydumper.MaxRegionSize = 5
@@ -430,7 +429,7 @@ func (s *tableRestoreSuite) TestPopulateChunksCSVHeader() {
 		require.NoError(s.T(), err)
 		fakeDataFiles = append(fakeDataFiles, mydump.FileInfo{
 			TableName: filter.Table{Schema: "db", Name: "table"},
-			FileMeta:  mydump.SourceFileMeta{Path: csvName, Type: mydump.SourceTypeCSV, SortKey: fmt.Sprintf("%02d", i), FileSize: int64(len(str)), RealSize: int64(len(str))},
+			FileMeta:  mydump.SourceFileMeta{Path: csvName, Type: mydump.SourceTypeCSV, SortKey: fmt.Sprintf("%02d", i), FileSize: int64(len(str))},
 		})
 		total += len(str)
 	}
@@ -456,11 +455,10 @@ func (s *tableRestoreSuite) TestPopulateChunksCSVHeader() {
 	cfg.Mydumper.MaxRegionSize = 40
 
 	cfg.Mydumper.CSV.Header = true
-	cfg.Mydumper.CSV.HeaderSchemaMatch = true
 	cfg.Mydumper.StrictFormat = true
 	rc := &Controller{cfg: cfg, ioWorkers: worker.NewPool(context.Background(), 1, "io"), store: store}
 
-	tr, err := NewTableRestore("`db`.`table`", tableMeta, s.dbInfo, s.tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, log.L())
+	tr, err := NewTableRestore("`db`.`table`", tableMeta, s.dbInfo, s.tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, nil, log.L())
 	require.NoError(s.T(), err)
 	require.NoError(s.T(), tr.populateChunks(context.Background(), rc, cp))
 
@@ -725,7 +723,7 @@ func (s *tableRestoreSuite) TestInitializeColumnsGenerated() {
 		require.NoError(s.T(), err)
 		core.State = model.StatePublic
 		tableInfo := &checkpoints.TidbTableInfo{Name: "table", DB: "db", Core: core}
-		s.tr, err = NewTableRestore("`db`.`table`", s.tableMeta, s.dbInfo, tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, log.L())
+		s.tr, err = NewTableRestore("`db`.`table`", s.tableMeta, s.dbInfo, tableInfo, &checkpoints.TableCheckpoint{}, nil, nil, nil, log.L())
 		require.NoError(s.T(), err)
 		ccp := &checkpoints.ChunkCheckpoint{}
 
@@ -1103,6 +1101,8 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 	require.NoError(s.T(), err)
 	mockStore, err := storage.NewLocalStorage(dir)
 	require.NoError(s.T(), err)
+	_, _, pdClient, err := testutils.NewMockTiKV("", nil)
+	require.NoError(s.T(), err)
 	for _, ca := range cases {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var err error
@@ -1119,16 +1119,18 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 
 		url := strings.TrimPrefix(server.URL, "https://")
 		cfg := &config.Config{TiDB: config.DBStore{PdAddr: url}}
+		pdCli := &mockPDClient{Client: pdClient, leaderAddr: url}
 		targetInfoGetter := &TargetInfoGetterImpl{
-			cfg: cfg,
-			tls: tls,
+			cfg:   cfg,
+			tls:   tls,
+			pdCli: pdCli,
 		}
 		preInfoGetter := &PreRestoreInfoGetterImpl{
 			cfg:              cfg,
 			targetInfoGetter: targetInfoGetter,
 			srcStorage:       mockStore,
 		}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, []*mydump.MDDatabaseMeta{}, preInfoGetter, nil)
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, []*mydump.MDDatabaseMeta{}, preInfoGetter, nil, nil)
 		rc := &Controller{
 			cfg:                 cfg,
 			tls:                 tls,
@@ -1136,6 +1138,7 @@ func (s *tableRestoreSuite) TestCheckClusterResource() {
 			checkTemplate:       template,
 			preInfoGetter:       preInfoGetter,
 			precheckItemBuilder: theCheckBuilder,
+			pdCli:               pdCli,
 		}
 		var sourceSize int64
 		err = rc.store.WalkDir(ctx, &storage.WalkOption{}, func(path string, size int64) error {
@@ -1172,6 +1175,15 @@ func (mockTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(ta
 	return err
 }
 
+type mockPDClient struct {
+	pd.Client
+	leaderAddr string
+}
+
+func (m *mockPDClient) GetLeaderAddr() string {
+	return m.leaderAddr
+}
+
 func (s *tableRestoreSuite) TestCheckClusterRegion() {
 	type testCase struct {
 		stores         pdtypes.StoresInfo
@@ -1188,6 +1200,8 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 		}
 		return regions
 	}
+	_, _, pdClient, err := testutils.NewMockTiKV("", nil)
+	require.NoError(s.T(), err)
 
 	testCases := []testCase{
 		{
@@ -1267,10 +1281,12 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 
 		url := strings.TrimPrefix(server.URL, "https://")
 		cfg := &config.Config{TiDB: config.DBStore{PdAddr: url}}
+		pdCli := &mockPDClient{Client: pdClient, leaderAddr: url}
 
 		targetInfoGetter := &TargetInfoGetterImpl{
-			cfg: cfg,
-			tls: tls,
+			cfg:   cfg,
+			tls:   tls,
+			pdCli: pdCli,
 		}
 		dbMetas := []*mydump.MDDatabaseMeta{}
 		preInfoGetter := &PreRestoreInfoGetterImpl{
@@ -1278,7 +1294,7 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 			targetInfoGetter: targetInfoGetter,
 			dbMetas:          dbMetas,
 		}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, dbMetas, preInfoGetter, checkpoints.NewNullCheckpointsDB())
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, dbMetas, preInfoGetter, checkpoints.NewNullCheckpointsDB(), nil)
 		rc := &Controller{
 			cfg:                 cfg,
 			tls:                 tls,
@@ -1287,6 +1303,7 @@ func (s *tableRestoreSuite) TestCheckClusterRegion() {
 			preInfoGetter:       preInfoGetter,
 			dbInfos:             make(map[string]*checkpoints.TidbDBInfo),
 			precheckItemBuilder: theCheckBuilder,
+			pdCli:               pdCli,
 		}
 
 		preInfoGetter.dbInfosCache = rc.dbInfos
@@ -1353,7 +1370,6 @@ func (s *tableRestoreSuite) TestCheckHasLargeCSV() {
 								{
 									FileMeta: mydump.SourceFileMeta{
 										FileSize: 1 * units.TiB,
-										RealSize: 1 * units.TiB,
 										Path:     "/testPath",
 									},
 								},
@@ -1374,7 +1390,7 @@ func (s *tableRestoreSuite) TestCheckHasLargeCSV() {
 	for _, ca := range cases {
 		template := NewSimpleTemplate()
 		cfg := &config.Config{Mydumper: config.MydumperRuntime{StrictFormat: ca.strictFormat}}
-		theCheckBuilder := NewPrecheckItemBuilder(cfg, ca.dbMetas, nil, nil)
+		theCheckBuilder := NewPrecheckItemBuilder(cfg, ca.dbMetas, nil, nil, nil)
 		rc := &Controller{
 			cfg:                 cfg,
 			checkTemplate:       template,
@@ -1429,7 +1445,7 @@ func (s *tableRestoreSuite) TestEstimate() {
 		targetInfoGetter: mockTarget,
 	}
 	preInfoGetter.Init()
-	theCheckBuilder := NewPrecheckItemBuilder(s.cfg, dbMetas, preInfoGetter, nil)
+	theCheckBuilder := NewPrecheckItemBuilder(s.cfg, dbMetas, preInfoGetter, nil, nil)
 	rc := &Controller{
 		cfg:                 s.cfg,
 		checkTemplate:       template,
@@ -2137,14 +2153,13 @@ func (s *tableRestoreSuite) TestSchemaIsValid() {
 			Mydumper: config.MydumperRuntime{
 				ReadBlockSize: config.ReadBlockSize,
 				CSV: config.CSVConfig{
-					Separator:         ",",
-					Delimiter:         `"`,
-					Header:            ca.hasHeader,
-					HeaderSchemaMatch: true,
-					NotNull:           false,
-					Null:              `\N`,
-					BackslashEscape:   true,
-					TrimLastSep:       false,
+					Separator:       ",",
+					Delimiter:       `"`,
+					Header:          ca.hasHeader,
+					NotNull:         false,
+					Null:            `\N`,
+					BackslashEscape: true,
+					TrimLastSep:     false,
 				},
 				IgnoreColumns: ca.ignoreColumns,
 			},
@@ -2173,14 +2188,13 @@ func (s *tableRestoreSuite) TestGBKEncodedSchemaIsValid() {
 			DataCharacterSet:       "gb18030",
 			DataInvalidCharReplace: string(utf8.RuneError),
 			CSV: config.CSVConfig{
-				Separator:         "，",
-				Delimiter:         `"`,
-				Header:            true,
-				HeaderSchemaMatch: true,
-				NotNull:           false,
-				Null:              `\N`,
-				BackslashEscape:   true,
-				TrimLastSep:       false,
+				Separator:       "，",
+				Delimiter:       `"`,
+				Header:          true,
+				NotNull:         false,
+				Null:            `\N`,
+				BackslashEscape: true,
+				TrimLastSep:     false,
 			},
 			IgnoreColumns: nil,
 		},

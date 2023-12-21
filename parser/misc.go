@@ -153,7 +153,6 @@ var tokenMap = map[string]int{
 	"ANY":                      any,
 	"APPROX_COUNT_DISTINCT":    approxCountDistinct,
 	"APPROX_PERCENTILE":        approxPercentile,
-	"ARRAY":                    array,
 	"AS":                       as,
 	"ASC":                      asc,
 	"ASCII":                    ascii,
@@ -196,7 +195,6 @@ var tokenMap = map[string]int{
 	"BTREE":                    btree,
 	"BUCKETS":                  buckets,
 	"BUILTINS":                 builtins,
-	"BURSTABLE":                burstable,
 	"BY":                       by,
 	"BYTE":                     byteType,
 	"CACHE":                    cache,
@@ -258,7 +256,6 @@ var tokenMap = map[string]int{
 	"CSV_NULL":                 csvNull,
 	"CSV_SEPARATOR":            csvSeparator,
 	"CSV_TRIM_LAST_SEPARATORS": csvTrimLastSeparators,
-	"CURDATE":                  curDate,
 	"CURRENT_DATE":             currentDate,
 	"CURRENT_ROLE":             currentRole,
 	"CURRENT_TIME":             currentTime,
@@ -412,9 +409,6 @@ var tokenMap = map[string]int{
 	"INVISIBLE":                invisible,
 	"INVOKER":                  invoker,
 	"IO":                       io,
-	"RU_PER_SEC":               ruRate,
-	"IO_READ_BANDWIDTH":        ioReadBandwidth,
-	"IO_WRITE_BANDWIDTH":       ioWriteBandwidth,
 	"IPC":                      ipc,
 	"IS":                       is,
 	"ISOLATION":                isolation,
@@ -476,7 +470,6 @@ var tokenMap = map[string]int{
 	"MEDIUMINT":                mediumIntType,
 	"MEDIUMTEXT":               mediumtextType,
 	"MEMORY":                   memory,
-	"MEMBER":                   member,
 	"MERGE":                    merge,
 	"MICROSECOND":              microsecond,
 	"MIN_ROWS":                 minRows,
@@ -601,7 +594,6 @@ var tokenMap = map[string]int{
 	"REQUIRE":                  require,
 	"REQUIRED":                 required,
 	"RESET":                    reset,
-	"RESOURCE":                 resource,
 	"RESPECT":                  respect,
 	"RESTART":                  restart,
 	"RESTORE":                  restore,
@@ -770,9 +762,9 @@ var tokenMap = map[string]int{
 	"TRUE":                     trueKwd,
 	"TRUNCATE":                 truncate,
 	"TRUE_CARD_COST":           trueCardCost,
+	"TSO":                      tsoType,
 	"TTL":                      ttl,
 	"TTL_ENABLE":               ttlEnable,
-	"TTL_JOB_INTERVAL":         ttlJobInterval,
 	"TYPE":                     tp,
 	"UNBOUNDED":                unbounded,
 	"UNCOMMITTED":              uncommitted,
@@ -945,8 +937,14 @@ var hintTokenMap = map[string]int{
 	"MPP_2PHASE_AGG":          hintMpp2PhaseAgg,
 	"IGNORE_INDEX":            hintIgnoreIndex,
 	"INL_HASH_JOIN":           hintInlHashJoin,
+	"INDEX_HASH_JOIN":         hintIndexHashJoin,
+	"NO_INDEX_HASH_JOIN":      hintNoIndexHashJoin,
 	"INL_JOIN":                hintInlJoin,
+	"INDEX_JOIN":              hintIndexJoin,
+	"NO_INDEX_JOIN":           hintNoIndexJoin,
 	"INL_MERGE_JOIN":          hintInlMergeJoin,
+	"INDEX_MERGE_JOIN":        hintIndexMergeJoin,
+	"NO_INDEX_MERGE_JOIN":     hintNoIndexMergeJoin,
 	"MEMORY_QUOTA":            hintMemoryQuota,
 	"NO_SWAP_JOIN_INPUTS":     hintNoSwapJoinInputs,
 	"QUERY_TYPE":              hintQueryType,
@@ -955,6 +953,7 @@ var hintTokenMap = map[string]int{
 	"BROADCAST_JOIN":          hintBCJoin,
 	"SHUFFLE_JOIN":            hintShuffleJoin,
 	"MERGE_JOIN":              hintSMJoin,
+	"NO_MERGE_JOIN":           hintNoSMJoin,
 	"STREAM_AGG":              hintStreamAgg,
 	"SWAP_JOIN_INPUTS":        hintSwapJoinInputs,
 	"USE_INDEX_MERGE":         hintUseIndexMerge,
@@ -999,9 +998,17 @@ func (s *Scanner) isTokenIdentifier(lit string, offset int) int {
 	if s.r.peek() == '.' {
 		return 0
 	}
-	if offset > 0 && s.r.s[offset-1] == '.' {
-		return 0
+
+	for idx := offset - 1; idx >= 0; idx-- {
+		if s.r.s[idx] == ' ' {
+			continue
+		} else if s.r.s[idx] == '.' {
+			return 0
+		} else {
+			break
+		}
 	}
+
 	buf := &s.buf
 	buf.Reset()
 	buf.Grow(len(lit))

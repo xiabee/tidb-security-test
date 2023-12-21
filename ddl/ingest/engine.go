@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/util/generic"
 	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -105,7 +106,7 @@ func (ei *engineInfo) ImportAndClean() error {
 	if err1 != nil {
 		logutil.BgLogger().Error(LitErrCloseEngineErr, zap.Error(err1),
 			zap.Int64("job ID", ei.jobID), zap.Int64("index ID", ei.indexID))
-		return err1
+		return errors.New(LitErrCloseEngineErr)
 	}
 	ei.openedEngine = nil
 	err := ei.closeWriters()
@@ -130,7 +131,7 @@ func (ei *engineInfo) ImportAndClean() error {
 	if err != nil {
 		logutil.BgLogger().Error(LitErrIngestDataErr, zap.Error(err),
 			zap.Int64("job ID", ei.jobID), zap.Int64("index ID", ei.indexID))
-		return err
+		return errors.New(LitErrIngestDataErr)
 	}
 
 	// Clean up the engine local workspace.
@@ -138,7 +139,7 @@ func (ei *engineInfo) ImportAndClean() error {
 	if err != nil {
 		logutil.BgLogger().Error(LitErrCloseEngineErr, zap.Error(err),
 			zap.Int64("job ID", ei.jobID), zap.Int64("index ID", ei.indexID))
-		return err
+		return errors.New(LitErrCloseEngineErr)
 	}
 	return nil
 }

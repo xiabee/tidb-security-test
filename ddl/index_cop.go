@@ -47,19 +47,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// copReadBatchSize is the batch size of coprocessor read.
-// It multiplies the tidb_ddl_reorg_batch_size by 10 to avoid
-// sending too many cop requests for the same handle range.
-func copReadBatchSize() int {
-	return 10 * int(variable.GetDDLReorgBatchSize())
-}
+// copReadBatchFactor is the factor of batch size of coprocessor read.
+// It multiplies the tidb_ddl_reorg_batch_size to avoid sending too many cop requests for the same handle range.
+const copReadBatchFactor = 10
 
-// copReadChunkPoolSize is the size of chunk pool, which
-// represents the max concurrent ongoing coprocessor requests.
-// It multiplies the tidb_ddl_reorg_worker_cnt by 10.
-func copReadChunkPoolSize() int {
-	return 10 * int(variable.GetDDLReorgWorkerCounter())
-}
+// copReadConcurrencyFactor is the factor of concurrency of coprocessor read.
+const copReadConcurrencyFactor = 10
 
 func (c *copReqSenderPool) fetchRowColValsFromCop(handleRange reorgBackfillTask) ([]*indexRecord, *chunk.Chunk, kv.Key, bool, error) {
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -144,7 +137,8 @@ func (c *copReqSender) run() {
 			p.resultsCh <- idxRecResult{id: task.id, err: err}
 			return
 		}
-		rs, err := p.copCtx.buildTableScan(p.ctx, ver.Ver, task.startKey, task.excludedEndKey())
+		ctx := kv.WithInternalSourceType(p.ctx, task.source)
+		rs, err := p.copCtx.buildTableScan(ctx, ver.Ver, task.startKey, task.excludedEndKey())
 		if err != nil {
 			p.resultsCh <- idxRecResult{id: task.id, err: err}
 			return
@@ -163,6 +157,7 @@ func (c *copReqSender) run() {
 				p.resultsCh <- idxRecResult{id: task.id, err: err}
 				p.recycleIdxRecordsAndChunk(idxRec, srcChk)
 				terror.Call(rs.Close)
+				_ = rs.Close()
 				return
 			}
 			total += len(idxRec)
@@ -173,12 +168,12 @@ func (c *copReqSender) run() {
 }
 
 func newCopReqSenderPool(ctx context.Context, copCtx *copContext, store kv.Storage) *copReqSenderPool {
-	poolSize := copReadChunkPoolSize()
+	poolSize := int(variable.GetDDLReorgWorkerCounter() * copReadConcurrencyFactor)
 	idxBufPool := make(chan []*indexRecord, poolSize)
 	srcChkPool := make(chan *chunk.Chunk, poolSize)
 	for i := 0; i < poolSize; i++ {
-		idxBufPool <- make([]*indexRecord, 0, copReadBatchSize())
-		srcChkPool <- chunk.NewChunkWithCapacity(copCtx.fieldTps, copReadBatchSize())
+		idxBufPool <- make([]*indexRecord, 0, copReadBatchFactor*variable.GetDDLReorgBatchSize())
+		srcChkPool <- chunk.NewChunkWithCapacity(copCtx.fieldTps, int(copReadBatchFactor*variable.GetDDLReorgBatchSize()))
 	}
 	return &copReqSenderPool{
 		tasksCh:    make(chan *reorgBackfillTask, backfillTaskChanSize),
@@ -245,7 +240,7 @@ func (c *copReqSenderPool) drainResults() {
 func (c *copReqSenderPool) getIndexRecordsAndChunks() ([]*indexRecord, *chunk.Chunk) {
 	ir := <-c.idxBufPool
 	chk := <-c.srcChkPool
-	newCap := copReadBatchSize()
+	newCap := int(variable.GetDDLReorgBatchSize()) * copReadBatchFactor
 	if chk.Capacity() != newCap {
 		chk = chunk.NewChunkWithCapacity(c.copCtx.fieldTps, newCap)
 	}
@@ -428,6 +423,12 @@ func (c *copContext) buildTableScan(ctx context.Context, startTS uint64, start, 
 		SetFromInfoSchema(c.sessCtx.GetDomainInfoSchema()).
 		SetConcurrency(1).
 		Build()
+	builder.RequestSource.RequestSourceInternal = true
+	if source := ctx.Value(kv.RequestSourceKey); source != nil {
+		builder.RequestSource.RequestSourceType = source.(kv.RequestSource).RequestSourceType
+	} else {
+		builder.RequestSource.RequestSourceType = kv.InternalTxnDDL
+	}
 	if err != nil {
 		return nil, err
 	}

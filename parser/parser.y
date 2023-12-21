@@ -35,7 +35,6 @@ import (
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/types"
-	"github.com/pingcap/tidb/parser/duration"
 )
 
 %}
@@ -51,11 +50,10 @@ import (
 %token	<ident>
 
 	/*yy:token "%c"     */
-	identifier  "identifier"
-	asof        "AS OF"
-	toTimestamp "TO TIMESTAMP"
-	memberof    "MEMBER OF"
-
+	identifier           "identifier"
+	asof                 "AS OF"
+	toTimestamp          "TO TIMESTAMP"
+	toTSO                "TO TSO"
 	/*yy:token "_%c"    */
 	underscoreCS "UNDERSCORE_CHARSET"
 
@@ -79,7 +77,6 @@ import (
 	alter             "ALTER"
 	analyze           "ANALYZE"
 	and               "AND"
-	array             "ARRAY"
 	as                "AS"
 	asc               "ASC"
 	between           "BETWEEN"
@@ -461,7 +458,6 @@ import (
 	maxUpdatesPerHour     "MAX_UPDATES_PER_HOUR"
 	maxUserConnections    "MAX_USER_CONNECTIONS"
 	mb                    "MB"
-	member                "MEMBER"
 	memory                "MEMORY"
 	merge                 "MERGE"
 	microsecond           "MICROSECOND"
@@ -536,7 +532,6 @@ import (
 	replicas              "REPLICAS"
 	replication           "REPLICATION"
 	required              "REQUIRED"
-	resource              "RESOURCE"
 	respect               "RESPECT"
 	restart               "RESTART"
 	restore               "RESTORE"
@@ -620,9 +615,9 @@ import (
 	transaction           "TRANSACTION"
 	triggers              "TRIGGERS"
 	truncate              "TRUNCATE"
+	tsoType               "TSO"
 	ttl                   "TTL"
 	ttlEnable             "TTL_ENABLE"
-	ttlJobInterval        "TTL_JOB_INTERVAL"
 	unbounded             "UNBOUNDED"
 	uncommitted           "UNCOMMITTED"
 	undefined             "UNDEFINED"
@@ -653,12 +648,10 @@ import (
 	bitXor                "BIT_XOR"
 	bound                 "BOUND"
 	briefType             "BRIEF"
-	burstable             "BURSTABLE"
 	cast                  "CAST"
 	copyKwd               "COPY"
 	constraints           "CONSTRAINTS"
 	curTime               "CURTIME"
-	curDate               "CURDATE"
 	dateAdd               "DATE_ADD"
 	dateSub               "DATE_SUB"
 	dotType               "DOT"
@@ -734,9 +727,6 @@ import (
 	voter                 "VOTER"
 	voterConstraints      "VOTER_CONSTRAINTS"
 	voters                "VOTERS"
-	ruRate                "RU_PER_SEC"
-	ioReadBandwidth       "IO_READ_BANDWIDTH"
-	ioWriteBandwidth      "IO_WRITE_BANDWIDTH"
 
 	/* The following tokens belong to TiDBKeyword. Notice: make sure these tokens are contained in TiDBKeyword. */
 	admin                      "ADMIN"
@@ -883,7 +873,6 @@ import (
 	AlterImportStmt            "ALTER IMPORT statement"
 	AlterInstanceStmt          "Alter instance statement"
 	AlterPolicyStmt            "Alter Placement Policy statement"
-	AlterResourceGroupStmt     "Alter Resource Group statement"
 	AlterSequenceStmt          "Alter sequence statement"
 	AnalyzeTableStmt           "Analyze table statement"
 	BeginTransactionStmt       "BEGIN TRANSACTION statement"
@@ -899,14 +888,12 @@ import (
 	CreateImportStmt           "CREATE IMPORT statement"
 	CreateBindingStmt          "CREATE BINDING  statement"
 	CreatePolicyStmt           "CREATE PLACEMENT POLICY statement"
-	CreateResourceGroupStmt    "CREATE RESOURCE GROUP statement"
 	CreateSequenceStmt         "CREATE SEQUENCE statement"
 	CreateStatisticsStmt       "CREATE STATISTICS statement"
 	DoStmt                     "Do statement"
 	DropDatabaseStmt           "DROP DATABASE statement"
 	DropImportStmt             "DROP IMPORT statement"
 	DropIndexStmt              "DROP INDEX statement"
-	DropResourceGroupStmt      "DROP RESOURCE GROUP statement"
 	DropStatisticsStmt         "DROP STATISTICS statement"
 	DropStatsStmt              "DROP STATS statement"
 	DropTableStmt              "DROP TABLE statement"
@@ -994,7 +981,6 @@ import (
 	AlterTableSpecListOpt                  "Alter table specification list optional"
 	AlterSequenceOption                    "Alter sequence option"
 	AlterSequenceOptionList                "Alter sequence option list"
-	ArrayKwdOpt                            "Array options"
 	AnalyzeOption                          "Analyze option"
 	AnalyzeOptionList                      "Analyze option list"
 	AnalyzeOptionListOpt                   "Optional analyze option list"
@@ -1175,7 +1161,6 @@ import (
 	ReorganizePartitionRuleOpt             "optional reorganize partition partition list and definitions"
 	RequireList                            "require list for tls options"
 	RequireListElement                     "require list element for tls option"
-	ResourceGroupNameOption                "resource group name for user"
 	Rolename                               "Rolename"
 	RolenameComposed                       "Rolename that composed with more than 1 symbol"
 	RolenameList                           "RolenameList"
@@ -1369,8 +1354,6 @@ import (
 	PlacementPolicyOption                  "Anonymous or placement policy option"
 	DirectPlacementOption                  "Subset of anonymous or direct placement option"
 	PlacementOptionList                    "Anomymous or direct placement option list"
-	DirectResourceGroupOption              "Subset of anonymous or direct resource group option"
-	ResourceGroupOptionList                "Anomymous or direct resource group option list"
 	AttributesOpt                          "Attributes options"
 	AllColumnsOrPredicateColumnsOpt        "all columns or predicate columns option"
 	StatsOptionsOpt                        "Stats options"
@@ -1384,7 +1367,6 @@ import (
 	PrimaryOpt        "Optional primary keyword"
 	NowSym            "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP"
 	NowSymFunc        "CURRENT_TIMESTAMP/LOCALTIME/LOCALTIMESTAMP/NOW"
-	CurdateSym        "CURDATE or CURRENT_DATE"
 	DefaultKwdOpt     "optional DEFAULT keyword"
 	DatabaseSym       "DATABASE or SCHEMA"
 	ExplainSym        "EXPLAIN or DESCRIBE or DESC"
@@ -1437,7 +1419,6 @@ import (
 	ColumnFormat                    "Column format"
 	DBName                          "Database Name"
 	PolicyName                      "Placement Policy Name"
-	ResourceGroupName               "Resource Group Name"
 	ExplainFormatType               "explain format type"
 	FieldAsName                     "Field alias name"
 	FieldAsNameOpt                  "Field alias name opt"
@@ -1591,40 +1572,6 @@ AlterTableStmt:
 			ReplicaKind:    ast.CompactReplicaKindTiFlash,
 		}
 	}
-
-ResourceGroupOptionList:
-	DirectResourceGroupOption
-	{
-		$$ = []*ast.ResourceGroupOption{$1.(*ast.ResourceGroupOption)}
-	}
-|	ResourceGroupOptionList DirectResourceGroupOption
-	{
-		if $1.([]*ast.ResourceGroupOption)[0].Tp == $2.(*ast.ResourceGroupOption).Tp ||
-		   (len($1.([]*ast.ResourceGroupOption)) > 1 && $1.([]*ast.ResourceGroupOption)[1].Tp == $2.(*ast.ResourceGroupOption).Tp) {
-			yylex.AppendError(yylex.Errorf("Dupliated options specified"))
-            return 1
-		}
-		$$ = append($1.([]*ast.ResourceGroupOption), $2.(*ast.ResourceGroupOption))
-	}
-|	ResourceGroupOptionList ',' DirectResourceGroupOption
-	{
-		if $1.([]*ast.ResourceGroupOption)[0].Tp == $3.(*ast.ResourceGroupOption).Tp ||
-    	   (len($1.([]*ast.ResourceGroupOption)) > 1 && $1.([]*ast.ResourceGroupOption)[1].Tp == $3.(*ast.ResourceGroupOption).Tp) {
-    		 yylex.AppendError(yylex.Errorf("Dupliated options specified"))
-             return 1
-    	}
-		$$ = append($1.([]*ast.ResourceGroupOption), $3.(*ast.ResourceGroupOption))
-	}
-
-DirectResourceGroupOption:
-	"RU_PER_SEC" EqOpt LengthNum
-	{
-		$$ = &ast.ResourceGroupOption{Tp: ast.ResourceRURate, UintValue: $3.(uint64)}
-	}
-|	"BURSTABLE"
-    {
-    	$$ = &ast.ResourceGroupOption{Tp: ast.ResourceBurstableOpiton, BoolValue: true}
-    }
 
 PlacementOptionList:
 	DirectPlacementOption
@@ -2674,6 +2621,7 @@ FlashbackToTimestampStmt:
 	{
 		$$ = &ast.FlashBackToTimestampStmt{
 			FlashbackTS: ast.NewValueExpr($4, "", ""),
+			FlashbackTSO: 0,
 		}
 	}
 |	"FLASHBACK" "TABLE" TableNameList toTimestamp stringLit
@@ -2681,6 +2629,7 @@ FlashbackToTimestampStmt:
 		$$ = &ast.FlashBackToTimestampStmt{
 			Tables:      $3.([]*ast.TableName),
 			FlashbackTS: ast.NewValueExpr($5, "", ""),
+			FlashbackTSO: 0,
 		}
 	}
 |	"FLASHBACK" DatabaseSym DBName toTimestamp stringLit
@@ -2688,8 +2637,45 @@ FlashbackToTimestampStmt:
 		$$ = &ast.FlashBackToTimestampStmt{
 			DBName:      model.NewCIStr($3),
 			FlashbackTS: ast.NewValueExpr($5, "", ""),
+			FlashbackTSO: 0,
 		}
 	}
+|	"FLASHBACK" "CLUSTER" toTSO LengthNum
+	{
+		if tsoValue, ok := $4.(uint64); ok && tsoValue > 0 {
+			$$ = &ast.FlashBackToTimestampStmt{
+        		FlashbackTSO: tsoValue,
+        	}
+		} else {
+    		yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $4))
+    		return 1
+		}
+	}
+|	"FLASHBACK" "TABLE" TableNameList toTSO LengthNum
+	{
+		if tsoValue, ok := $5.(uint64); ok && tsoValue > 0 {
+			$$ = &ast.FlashBackToTimestampStmt{
+            	Tables:      $3.([]*ast.TableName),
+            	FlashbackTSO: tsoValue,
+            }
+		} else {
+			yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $5))
+			return 1
+		}
+	}
+|	"FLASHBACK" DatabaseSym DBName toTSO LengthNum
+	{
+		if tsoValue, ok := $5.(uint64); ok && tsoValue > 0 {
+			$$ = &ast.FlashBackToTimestampStmt{
+            	DBName:      model.NewCIStr($3),
+            	FlashbackTSO: tsoValue,
+			}
+		} else {
+			yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $5))
+			return 1
+		}
+	}
+
 
 /*******************************************************************
  *
@@ -3627,14 +3613,6 @@ NowSymOptionFraction:
 	{
 		$$ = &ast.FuncCallExpr{FnName: model.NewCIStr("CURRENT_TIMESTAMP"), Args: []ast.ExprNode{ast.NewValueExpr($3, parser.charset, parser.collation)}}
 	}
-|	CurdateSym '(' ')'
-	{
-		$$ = &ast.FuncCallExpr{FnName: model.NewCIStr("CURRENT_DATE")}
-	}
-|	"CURRENT_DATE"
-	{
-		$$ = &ast.FuncCallExpr{FnName: model.NewCIStr("CURRENT_DATE")}
-	}
 
 NextValueForSequence:
 	"NEXT" "VALUE" forKwd TableName
@@ -3672,10 +3650,6 @@ NowSym:
 	"CURRENT_TIMESTAMP"
 |	"LOCALTIME"
 |	"LOCALTIMESTAMP"
-
-CurdateSym:
-	builtinCurDate
-|	"CURRENT_DATE"
 
 SignedLiteral:
 	Literal
@@ -3936,9 +3910,6 @@ DBName:
 	Identifier
 
 PolicyName:
-	Identifier
-
-ResourceGroupName:
 	Identifier
 
 DatabaseOption:
@@ -5838,10 +5809,6 @@ PredicateExpr:
 	{
 		$$ = &ast.PatternRegexpExpr{Expr: $1, Pattern: $3, Not: !$2.(bool)}
 	}
-|	BitExpr memberof '(' SimpleExpr ')'
-	{
-		$$ = &ast.FuncCallExpr{FnName: model.NewCIStr(ast.JSONMemberOf), Args: []ast.ExprNode{$1, $4}}
-	}
 |	BitExpr
 
 RegexpSym:
@@ -5904,22 +5871,19 @@ FieldList:
 	{
 		field := $1.(*ast.SelectField)
 		field.Offset = parser.startOffset(&yyS[yypt])
-		if field.Expr != nil && field.AsName.O == "" {
-			endOffset := parser.yylval.offset
-			field.SetText(parser.lexer.client, strings.TrimSpace(parser.src[field.Offset:endOffset]))
-		}
 		$$ = []*ast.SelectField{field}
 	}
 |	FieldList ',' Field
 	{
 		fl := $1.([]*ast.SelectField)
-		field := $3.(*ast.SelectField)
-		field.Offset = parser.startOffset(&yyS[yypt])
-		if field.Expr != nil && field.AsName.O == "" {
-			endOffset := parser.yylval.offset
-			field.SetText(parser.lexer.client, strings.TrimSpace(parser.src[field.Offset:endOffset]))
+		last := fl[len(fl)-1]
+		if last.Expr != nil && last.AsName.O == "" {
+			lastEnd := parser.endOffset(&yyS[yypt-1])
+			last.SetText(parser.lexer.client, parser.src[last.Offset:lastEnd])
 		}
-		$$ = append(fl, field)
+		newField := $3.(*ast.SelectField)
+		newField.Offset = parser.startOffset(&yyS[yypt])
+		$$ = append(fl, newField)
 	}
 
 GroupByClause:
@@ -6229,7 +6193,6 @@ UnReservedKeyword:
 |	"REBUILD"
 |	"REDUNDANT"
 |	"REORGANIZE"
-|	"RESOURCE"
 |	"RESTART"
 |	"ROLE"
 |	"ROLLBACK"
@@ -6252,6 +6215,7 @@ UnReservedKeyword:
 |	"TRACE"
 |	"TRANSACTION"
 |	"TRUNCATE"
+|	"TSO"
 |	"UNBOUNDED"
 |	"UNKNOWN"
 |	"VALUE" %prec lowerThanValueKeyword
@@ -6364,7 +6328,6 @@ UnReservedKeyword:
 |	"ACCOUNT"
 |	"INCREMENTAL"
 |	"CPU"
-|	"MEMBER"
 |	"MEMORY"
 |	"BLOCK"
 |	"IO"
@@ -6489,7 +6452,6 @@ UnReservedKeyword:
 |	"TOKEN_ISSUER"
 |	"TTL"
 |	"TTL_ENABLE"
-|	"TTL_JOB_INTERVAL"
 |	"FAILED_LOGIN_ATTEMPTS"
 |	"PASSWORD_LOCK_TIME"
 |	"DIGEST"
@@ -6552,7 +6514,6 @@ NotKeywordToken:
 |	"CAST"
 |	"COPY"
 |	"CURTIME"
-|	"CURDATE"
 |	"DATE_ADD"
 |	"DATE_SUB"
 |	"DOT"
@@ -6630,10 +6591,6 @@ NotKeywordToken:
 |	"LEARNER_CONSTRAINTS"
 |	"VOTER_CONSTRAINTS"
 |	"TIDB_JSON"
-|	"IO_READ_BANDWIDTH"
-|	"IO_WRITE_BANDWIDTH"
-|	"RU_PER_SEC"
-|	"BURSTABLE"
 
 /************************************************************************************
  *
@@ -7276,7 +7233,7 @@ SimpleExpr:
 			FunctionType: ast.CastBinaryOperator,
 		}
 	}
-|	builtinCast '(' Expression "AS" CastType ArrayKwdOpt ')'
+|	builtinCast '(' Expression "AS" CastType ')'
 	{
 		/* See https://dev.mysql.com/doc/refman/5.7/en/cast-functions.html#function_cast */
 		tp := $5.(*types.FieldType)
@@ -7287,13 +7244,7 @@ SimpleExpr:
 		if tp.GetDecimal() == types.UnspecifiedLength {
 			tp.SetDecimal(defaultDecimal)
 		}
-		isArray := $6.(bool)
-		tp.SetArray(isArray)
 		explicitCharset := parser.explicitCharset
-		if isArray && !explicitCharset && tp.GetCharset() != charset.CharsetBin {
-			tp.SetCharset(charset.CharsetUTF8MB4)
-			tp.SetCollate(charset.CollationUTF8MB4)
-		}
 		parser.explicitCharset = false
 		$$ = &ast.FuncCastExpr{
 			Expr:            $3,
@@ -7360,15 +7311,6 @@ SimpleExpr:
 		expr := ast.NewValueExpr($3, parser.charset, parser.collation)
 		extract := &ast.FuncCallExpr{FnName: model.NewCIStr(ast.JSONExtract), Args: []ast.ExprNode{$1, expr}}
 		$$ = &ast.FuncCallExpr{FnName: model.NewCIStr(ast.JSONUnquote), Args: []ast.ExprNode{extract}}
-	}
-
-ArrayKwdOpt:
-	{
-		$$ = false
-	}
-|	"ARRAY"
-	{
-		$$ = true
 	}
 
 DistinctKwd:
@@ -8680,6 +8622,30 @@ SelectStmt:
 		st := $1.(*ast.SelectStmt)
 		if $6 != nil {
 			st.LockInfo = $6.(*ast.SelectLockInfo)
+		}
+		lastField := st.Fields.Fields[len(st.Fields.Fields)-1]
+		if lastField.Expr != nil && lastField.AsName.O == "" {
+			src := parser.src
+			var lastEnd int
+			if $2 != nil {
+				lastEnd = yyS[yypt-5].offset - 1
+			} else if $3 != nil {
+				lastEnd = yyS[yypt-4].offset - 1
+			} else if $4 != nil {
+				lastEnd = yyS[yypt-3].offset - 1
+			} else if $5 != nil {
+				lastEnd = yyS[yypt-2].offset - 1
+			} else if st.LockInfo != nil && st.LockInfo.LockType != ast.SelectLockNone {
+				lastEnd = yyS[yypt-1].offset - 1
+			} else if $7 != nil {
+				lastEnd = yyS[yypt].offset - 1
+			} else {
+				lastEnd = len(src)
+				if src[lastEnd-1] == ';' {
+					lastEnd--
+				}
+			}
+			lastField.SetText(parser.lexer.client, src[lastField.Offset:lastEnd])
 		}
 		if $2 != nil {
 			st.Where = $2.(ast.ExprNode)
@@ -10772,13 +10738,6 @@ ShowStmt:
 			DBName: $5,
 		}
 	}
-|	"SHOW" "CREATE" "RESOURCE" "GROUP" ResourceGroupName
-	{
-		$$ = &ast.ShowStmt{
-			Tp:                ast.ShowCreateResourceGroup,
-			ResourceGroupName: $5,
-		}
-	}
 |	"SHOW" "CREATE" "USER" Username
 	{
 		// See https://dev.mysql.com/doc/refman/5.7/en/show-create-user.html
@@ -11455,7 +11414,6 @@ Statement:
 |	AlterInstanceStmt
 |	AlterSequenceStmt
 |	AlterPolicyStmt
-|	AlterResourceGroupStmt
 |	AnalyzeTableStmt
 |	BeginTransactionStmt
 |	BinlogStmt
@@ -11475,7 +11433,6 @@ Statement:
 |	CreateRoleStmt
 |	CreateBindingStmt
 |	CreatePolicyStmt
-|	CreateResourceGroupStmt
 |	CreateSequenceStmt
 |	CreateStatisticsStmt
 |	DoStmt
@@ -11487,7 +11444,6 @@ Statement:
 |	DropSequenceStmt
 |	DropViewStmt
 |	DropUserStmt
-|	DropResourceGroupStmt
 |	DropRoleStmt
 |	DropStatisticsStmt
 |	DropStatsStmt
@@ -11892,15 +11848,6 @@ TableOption:
 			yylex.AppendError(yylex.Errorf("The TTL_ENABLE option has to be set 'ON' or 'OFF'"))
 			return 1
 		}
-	}
-|	"TTL_JOB_INTERVAL" EqOpt stringLit
-	{
-		_, err := duration.ParseDuration($3)
-		if err != nil {
-			yylex.AppendError(yylex.Errorf("The TTL_JOB_INTERVAL option is not a valid duration: %s", err.Error()))
-			return 1
-		}
-		$$ = &ast.TableOption{Tp: ast.TableOptionTTLJobInterval, StrValue: $3}
 	}
 
 ForceOpt:
@@ -12775,7 +12722,7 @@ CommaOpt:
  *  https://dev.mysql.com/doc/refman/5.7/en/account-management-sql.html
  ************************************************************************************/
 CreateUserStmt:
-	"CREATE" "USER" IfNotExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption
+	"CREATE" "USER" IfNotExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption
 	{
 		// See https://dev.mysql.com/doc/refman/8.0/en/create-user.html
 		ret := &ast.CreateUserStmt{
@@ -12788,9 +12735,6 @@ CreateUserStmt:
 		}
 		if $8 != nil {
 			ret.CommentOrAttributeOption = $8.(*ast.CommentOrAttributeOption)
-		}
-		if $9 != nil {
-			ret.ResourceGroupNameOption = $9.(*ast.ResourceGroupNameOption)
 		}
 		$$ = ret
 	}
@@ -12808,7 +12752,7 @@ CreateRoleStmt:
 
 /* See http://dev.mysql.com/doc/refman/8.0/en/alter-user.html */
 AlterUserStmt:
-	"ALTER" "USER" IfExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption ResourceGroupNameOption
+	"ALTER" "USER" IfExists UserSpecList RequireClauseOpt ConnectionOptions PasswordOrLockOptions CommentOrAttributeOption
 	{
 		ret := &ast.AlterUserStmt{
 			IfExists:              $3.(bool),
@@ -12819,9 +12763,6 @@ AlterUserStmt:
 		}
 		if $8 != nil {
 			ret.CommentOrAttributeOption = $8.(*ast.CommentOrAttributeOption)
-		}
-		if $9 != nil {
-			ret.ResourceGroupNameOption = $9.(*ast.ResourceGroupNameOption)
 		}
 		$$ = ret
 	}
@@ -13034,15 +12975,6 @@ CommentOrAttributeOption:
 |	"ATTRIBUTE" stringLit
 	{
 		$$ = &ast.CommentOrAttributeOption{Type: ast.UserAttributeType, Value: $2}
-	}
-
-ResourceGroupNameOption:
-	{
-		$$ = nil
-	}
-|	"RESOURCE" "GROUP" ResourceGroupName
-	{
-		$$ = &ast.ResourceGroupNameOption{Value: $3}
 	}
 
 PasswordOrLockOptions:
@@ -13365,15 +13297,6 @@ SetBindingStmt:
 			BindingStatusType: $3.(ast.BindingStatusType),
 			OriginNode:        originStmt,
 			HintedNode:        hintedStmt,
-		}
-
-		$$ = x
-	}
-|	"SET" "BINDING" BindingStatusType "FOR" "SQL" "DIGEST" stringLit
-	{
-		x := &ast.SetBindingStmt{
-			BindingStatusType: $3.(ast.BindingStatusType),
-			SQLDigest:         $7,
 		}
 
 		$$ = x
@@ -13773,7 +13696,6 @@ LoadDataStmt:
 	"LOAD" "DATA" LocalOpt "INFILE" stringLit DuplicateOpt "INTO" "TABLE" TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt
 	{
 		x := &ast.LoadDataStmt{
-			FileLocRef:         ast.FileLocServerOrRemote,
 			Path:               $5,
 			OnDuplicate:        $6.(ast.OnDuplicateKeyHandlingType),
 			Table:              $9.(*ast.TableName),
@@ -13781,7 +13703,7 @@ LoadDataStmt:
 			IgnoreLines:        $13.(uint64),
 		}
 		if $3 != nil {
-			x.FileLocRef = ast.FileLocClient
+			x.IsLocal = true
 			// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html#load-data-duplicate-key-handling
 			// If you do not specify IGNORE or REPLACE modifier , then we set default behavior to IGNORE when LOCAL modifier is specified
 			if x.OnDuplicate == ast.OnDuplicateKeyHandlingError {
@@ -14179,35 +14101,6 @@ DropPolicyStmt:
 		$$ = &ast.DropPlacementPolicyStmt{
 			IfExists:   $4.(bool),
 			PolicyName: model.NewCIStr($5),
-		}
-	}
-
-CreateResourceGroupStmt:
-	"CREATE" "RESOURCE" "GROUP" IfNotExists ResourceGroupName ResourceGroupOptionList
-	{
-		$$ = &ast.CreateResourceGroupStmt{
-			IfNotExists:             $4.(bool),
-			ResourceGroupName:       model.NewCIStr($5),
-			ResourceGroupOptionList: $6.([]*ast.ResourceGroupOption),
-		}
-	}
-
-AlterResourceGroupStmt:
-	"ALTER" "RESOURCE" "GROUP" IfExists ResourceGroupName ResourceGroupOptionList
-	{
-		$$ = &ast.AlterResourceGroupStmt{
-			IfExists:                $4.(bool),
-			ResourceGroupName:       model.NewCIStr($5),
-			ResourceGroupOptionList: $6.([]*ast.ResourceGroupOption),
-		}
-	}
-
-DropResourceGroupStmt:
-	"DROP" "RESOURCE" "GROUP" IfExists ResourceGroupName
-	{
-		$$ = &ast.DropResourceGroupStmt{
-			IfExists:          $4.(bool),
-			ResourceGroupName: model.NewCIStr($5),
 		}
 	}
 
@@ -14655,21 +14548,6 @@ PlanReplayerStmt:
 			Capture:    true,
 			SQLDigest:  $4,
 			PlanDigest: $5,
-			Where:      nil,
-			OrderBy:    nil,
-			Limit:      nil,
-		}
-
-		$$ = x
-	}
-|	"PLAN" "REPLAYER" "CAPTURE" "REMOVE" stringLit stringLit
-	{
-		x := &ast.PlanReplayerStmt{
-			Stmt:       nil,
-			Analyze:    false,
-			Remove:     true,
-			SQLDigest:  $5,
-			PlanDigest: $6,
 			Where:      nil,
 			OrderBy:    nil,
 			Limit:      nil,

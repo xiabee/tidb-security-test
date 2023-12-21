@@ -15,8 +15,6 @@
 package mydump_test
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"os"
@@ -688,6 +686,23 @@ func TestRouter(t *testing.T) {
 	}
 }
 
+func TestRoutesPanic(t *testing.T) {
+	s := newTestMydumpLoaderSuite(t)
+	s.cfg.Routes = []*router.TableRule{
+		{
+			SchemaPattern: "test1",
+			TargetSchema:  "test",
+		},
+	}
+
+	s.touch(t, "test1.dump_test.001.sql")
+	s.touch(t, "test1.dump_test.002.sql")
+	s.touch(t, "test1.dump_test.003.sql")
+
+	_, err := md.NewMyDumpLoader(context.Background(), s.cfg)
+	require.NoError(t, err)
+}
+
 func TestBadRouterRule(t *testing.T) {
 	s := newTestMydumpLoaderSuite(t)
 
@@ -1054,35 +1069,4 @@ func TestExternalDataRoutes(t *testing.T) {
 		require.Equal(t, expectExtendCols, fileInfo.FileMeta.ExtendData.Columns)
 		require.Equal(t, expectedExtendVals[i], fileInfo.FileMeta.ExtendData.Values)
 	}
-}
-
-func TestSampleFileCompressRatio(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-	store, err := storage.NewLocalStorage(s.sourceDir)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	byteArray := make([]byte, 0, 4096)
-	bf := bytes.NewBuffer(byteArray)
-	compressWriter := gzip.NewWriter(bf)
-	csvData := []byte("aaaa\n")
-	for i := 0; i < 1000; i++ {
-		_, err = compressWriter.Write(csvData)
-		require.NoError(t, err)
-	}
-	err = compressWriter.Flush()
-	require.NoError(t, err)
-
-	fileName := "test_1.t1.csv.gz"
-	err = store.WriteFile(ctx, fileName, bf.Bytes())
-	require.NoError(t, err)
-
-	ratio, err := md.SampleFileCompressRatio(ctx, md.SourceFileMeta{
-		Path:        fileName,
-		Compression: md.CompressionGZ,
-	}, store)
-	require.NoError(t, err)
-	require.InDelta(t, ratio, 5000.0/float64(bf.Len()), 1e-5)
 }

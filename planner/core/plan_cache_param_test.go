@@ -15,7 +15,6 @@
 package core
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -62,7 +61,7 @@ func TestParameterize(t *testing.T) {
 	for _, c := range cases {
 		stmt, err := parser.New().ParseOneStmt(c.sql, "", "")
 		require.Nil(t, err)
-		paramSQL, params, err := ParameterizeAST(context.Background(), sctx, stmt)
+		paramSQL, params, err := ParameterizeAST(sctx, stmt)
 		require.Nil(t, err)
 		require.Equal(t, c.paramSQL, paramSQL)
 		require.Equal(t, len(c.params), len(params))
@@ -70,7 +69,7 @@ func TestParameterize(t *testing.T) {
 			require.Equal(t, c.params[i], params[i].Datum.GetValue())
 		}
 
-		err = RestoreASTWithParams(context.Background(), sctx, stmt, params)
+		err = RestoreASTWithParams(sctx, stmt, params)
 		require.Nil(t, err)
 		var buf strings.Builder
 		rCtx := format.NewRestoreCtx(format.DefaultRestoreFlags, &buf)

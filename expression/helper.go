@@ -27,6 +27,9 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	driver "github.com/pingcap/tidb/types/parser_driver"
+	"github.com/pingcap/tidb/util/logutil"
+	"github.com/tikv/client-go/v2/oracle"
+	"go.uber.org/zap"
 )
 
 func boolToInt64(v bool) int64 {
@@ -74,7 +77,7 @@ func getTimeCurrentTimeStamp(ctx sessionctx.Context, tp byte, fsp int) (t types.
 		return value, err
 	}
 	value.SetCoreTime(types.FromGoTime(defaultTime.Truncate(time.Duration(math.Pow10(9-fsp)) * time.Nanosecond)))
-	if tp == mysql.TypeTimestamp || tp == mysql.TypeDatetime || tp == mysql.TypeDate {
+	if tp == mysql.TypeTimestamp || tp == mysql.TypeDatetime {
 		err = value.ConvertTimeZone(time.Local, ctx.GetSessionVars().Location())
 		if err != nil {
 			return value, err
@@ -90,12 +93,12 @@ func GetTimeValue(ctx sessionctx.Context, v interface{}, tp byte, fsp int, expli
 	sc := ctx.GetSessionVars().StmtCtx
 	switch x := v.(type) {
 	case string:
-		lowerX := strings.ToLower(x)
-		if lowerX == ast.CurrentTimestamp || lowerX == ast.CurrentDate {
+		upperX := strings.ToUpper(x)
+		if upperX == strings.ToUpper(ast.CurrentTimestamp) {
 			if value, err = getTimeCurrentTimeStamp(ctx, tp, fsp); err != nil {
 				return d, err
 			}
-		} else if lowerX == types.ZeroDatetimeStr {
+		} else if upperX == types.ZeroDatetimeStr {
 			value, err = types.ParseTimeFromNum(sc, 0, tp, fsp)
 			terror.Log(err)
 		} else {
@@ -122,8 +125,8 @@ func GetTimeValue(ctx sessionctx.Context, v interface{}, tp byte, fsp int, expli
 			return d, errDefaultValue
 		}
 	case *ast.FuncCallExpr:
-		if x.FnName.L == ast.CurrentTimestamp || x.FnName.L == ast.CurrentDate {
-			d.SetString(strings.ToUpper(x.FnName.L), mysql.DefaultCollationName)
+		if x.FnName.L == ast.CurrentTimestamp {
+			d.SetString(strings.ToUpper(ast.CurrentTimestamp), mysql.DefaultCollationName)
 			return d, nil
 		}
 		return d, errDefaultValue
@@ -157,6 +160,15 @@ func getStmtTimestamp(ctx sessionctx.Context) (time.Time, error) {
 		v := time.Unix(int64(val.(int)), 0)
 		failpoint.Return(v, nil)
 	})
+
+	if ctx != nil {
+		staleTSO, err := ctx.GetSessionVars().StmtCtx.GetStaleTSO()
+		if staleTSO != 0 && err == nil {
+			return oracle.GetTimeFromTS(staleTSO), nil
+		} else if err != nil {
+			logutil.BgLogger().Error("get stale tso failed", zap.Error(err))
+		}
+	}
 
 	now := time.Now()
 

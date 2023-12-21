@@ -26,13 +26,8 @@ import (
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/ingest"
 	"github.com/pingcap/tidb/ddl/testutil"
-	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,58 +131,7 @@ func TestAddIndexIngestWriterCountOnPartitionTable(t *testing.T) {
 	require.True(t, strings.Contains(jobTp, "ingest"), jobTp)
 }
 
-func TestIngestMVIndexOnPartitionTable(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("drop database if exists addindexlit;")
-	tk.MustExec("create database addindexlit;")
-	tk.MustExec("use addindexlit;")
-	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-
-	tk.MustExec("create table t (pk int primary key, a json) partition by hash(pk) partitions 32;")
-	var sb strings.Builder
-	sb.WriteString("insert into t values ")
-	for i := 0; i < 10240; i++ {
-		sb.WriteString(fmt.Sprintf("(%d, '[%d, %d, %d]')", i, i+1, i+2, i+3))
-		if i != 10240-1 {
-			sb.WriteString(",")
-		}
-	}
-	tk.MustExec(sb.String())
-	tk.MustExec("alter table t add index idx((cast(a as signed array)));")
-	rows := tk.MustQuery("admin show ddl jobs 1;").Rows()
-	require.Len(t, rows, 1)
-	jobTp := rows[0][3].(string)
-	require.True(t, strings.Contains(jobTp, "ingest"), jobTp)
-	tk.MustExec("admin check table t")
-
-	tk.MustExec("drop table t")
-	tk.MustExec("create table t (pk int primary key, a json) partition by hash(pk) partitions 32;")
-	tk.MustExec(sb.String())
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		n := 10240
-		internalTK := testkit.NewTestKit(t, store)
-		internalTK.MustExec("use addindexlit;")
-
-		for i := 0; i < 1024; i++ {
-			internalTK.MustExec(fmt.Sprintf("insert into t values (%d, '[%d, %d, %d]')", n, n, n+1, n+2))
-			internalTK.MustExec(fmt.Sprintf("delete from t where pk = %d", n-10))
-			internalTK.MustExec(fmt.Sprintf("update t set a = '[%d, %d, %d]' where pk = %d", n-3, n-2, n+1000, n-5))
-			n++
-		}
-		wg.Done()
-	}()
-	tk.MustExec("alter table t add index idx((cast(a as signed array)));")
-	wg.Wait()
-	tk.MustExec("admin check table t")
-}
-
 func TestAddIndexIngestAdjustBackfillWorker(t *testing.T) {
-	if variable.DDLEnableDistributeReorg.Load() {
-		t.Skip("dist reorg didn't support checkBackfillWorkerNum, skip this test")
-	}
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("drop database if exists addindexlit;")
@@ -407,43 +351,6 @@ func TestAddIndexIngestUniqueKey(t *testing.T) {
 	tk.MustGetErrMsg("alter table t add unique index idx(b, c);", "[kv:1062]Duplicate entry '1-c1' for key 't.idx'")
 }
 
-func TestAddIndexIngestCancel(t *testing.T) {
-	store, dom := realtikvtest.CreateMockStoreAndDomainAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("drop database if exists addindexlit;")
-	tk.MustExec("create database addindexlit;")
-	tk.MustExec("use addindexlit;")
-	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-	tk.MustExec("create table t (a int, b int);")
-	tk.MustExec("insert into t (a, b) values (1, 1), (2, 2), (3, 3);")
-	defHook := dom.DDL().GetHook()
-	customHook := newTestCallBack(t, dom)
-	cancelled := false
-	customHook.OnJobRunBeforeExported = func(job *model.Job) {
-		if cancelled {
-			return
-		}
-		if job.Type == model.ActionAddIndex && job.SchemaState == model.StateWriteReorganization {
-			idx := testutil.FindIdxInfo(dom, "addindexlit", "t", "idx")
-			if idx == nil {
-				return
-			}
-			if idx.BackfillState == model.BackfillStateRunning {
-				tk2 := testkit.NewTestKit(t, store)
-				rs, err := tk2.Exec(fmt.Sprintf("admin cancel ddl jobs %d", job.ID))
-				assert.NoError(t, err)
-				assert.NoError(t, rs.Close())
-				cancelled = true
-			}
-		}
-	}
-	dom.DDL().SetHook(customHook)
-	tk.MustGetErrCode("alter table t add index idx(b);", errno.ErrCancelledDDLJob)
-	require.True(t, cancelled)
-	dom.DDL().SetHook(defHook)
-	require.Empty(t, ingest.LitBackCtxMgr.Keys())
-}
-
 func TestAddIndexSplitTableRanges(t *testing.T) {
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 	tk := testkit.NewTestKit(t, store)
@@ -464,24 +371,36 @@ func TestAddIndexSplitTableRanges(t *testing.T) {
 	ddl.SetBackfillTaskChanSizeForTest(7)
 	tk.MustExec("alter table t add index idx_2(b);")
 	tk.MustExec("admin check table t;")
+
+	tk.MustExec("drop table t;")
+	tk.MustExec("create table t (a int primary key, b int);")
+	for i := 0; i < 8; i++ {
+		tk.MustExec(fmt.Sprintf("insert into t values (%d, %d);", i*10000, i*10000))
+	}
+	tk.MustQuery("split table t by (10000),(20000),(30000),(40000),(50000),(60000);").Check(testkit.Rows("6 1"))
+	ddl.SetBackfillTaskChanSizeForTest(4)
+	tk.MustExec("alter table t add unique index idx(b);")
+	tk.MustExec("admin check table t;")
 	ddl.SetBackfillTaskChanSizeForTest(1024)
 }
 
-type testCallback struct {
-	ddl.Callback
-	OnJobRunBeforeExported func(job *model.Job)
-}
+func TestAddIndexIngestTimezone(t *testing.T) {
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("drop database if exists addindexlit;")
+	tk.MustExec("create database addindexlit;")
+	tk.MustExec("use addindexlit;")
+	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
 
-func newTestCallBack(t *testing.T, dom *domain.Domain) *testCallback {
-	defHookFactory, err := ddl.GetCustomizedHook("default_hook")
-	require.NoError(t, err)
-	return &testCallback{
-		Callback: defHookFactory(dom),
-	}
-}
+	tk.MustExec("SET time_zone = '-06:00';")
+	tk.MustExec("create table t (`src` varchar(48),`t` timestamp,`timezone` varchar(100));")
+	tk.MustExec("insert into t values('2000-07-29 23:15:30','2000-07-29 23:15:30','-6:00');")
+	tk.MustExec("alter table t add index idx(t);")
+	tk.MustExec("admin check table t;")
 
-func (c *testCallback) OnJobRunBefore(job *model.Job) {
-	if c.OnJobRunBeforeExported != nil {
-		c.OnJobRunBeforeExported(job)
-	}
+	tk.MustExec("alter table t drop index idx;")
+	tk.MustExec("SET time_zone = 'Asia/Shanghai';")
+	tk.MustExec("insert into t values('2000-07-29 23:15:30','2000-07-29 23:15:30', '+8:00');")
+	tk.MustExec("alter table t add index idx(t);")
+	tk.MustExec("admin check table t;")
 }

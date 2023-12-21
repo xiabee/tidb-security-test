@@ -99,15 +99,15 @@ and b.pnbrn_cnaps = a.pnbrn_cnaps
 and b.txn_accno = a.new_accno;`
 	rows := [][]interface{}{
 		{"Update_8"},
-		{"└─IndexJoin_14"},
-		{"  ├─TableReader_25(Build)"},
-		{"  │ └─Selection_24"},
-		{"  │   └─TableFullScan_23"},
+		{"└─IndexJoin_13"},
+		{"  ├─TableReader_23(Build)"},
+		{"  │ └─Selection_22"},
+		{"  │   └─TableFullScan_21"},
 		{"  └─IndexReader_12(Probe)"},
 		{"    └─Selection_11"},
 		{"      └─IndexRangeScan_10"},
 	}
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = true
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='ON'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
 	rows = [][]interface{}{
 		{"Update_8"},
@@ -118,10 +118,10 @@ and b.txn_accno = a.new_accno;`
 		{"    └─Selection_13"},
 		{"      └─TableFullScan_12"},
 	}
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = false
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='OFF'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
 
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = true
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='ON'")
 	tk.MustExec(sql)
 	tk.MustQuery("select yn_frz from t2").Check(testkit.Rows("1"))
 }
@@ -177,23 +177,21 @@ txn_dt date default null
 		{"    └─Selection_15"},
 		{"      └─TableFullScan_14"},
 	}
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = false
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='OFF'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
 	rows = [][]interface{}{
-		{"IndexJoin_13"},
-		{"├─TableReader_25(Build)"},
-		{"│ └─Selection_24"},
-		{"│   └─TableRangeScan_23"},
-		{"└─Selection_12(Probe)"},
-		{"  └─IndexLookUp_11"},
-		{"    ├─IndexRangeScan_8(Build)"},
-		{"    └─Selection_10(Probe)"},
-		{"      └─TableRowIDScan_9"},
+		{"IndexJoin_12"},
+		{"├─TableReader_23(Build)"},
+		{"│ └─Selection_22"},
+		{"│   └─TableRangeScan_21"},
+		{"└─IndexLookUp_11(Probe)"},
+		{"  ├─IndexRangeScan_8(Build)"},
+		{"  └─Selection_10(Probe)"},
+		{"    └─TableRowIDScan_9"},
 	}
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = true
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='ON'")
 	tk.MustQuery("explain "+sql).CheckAt([]int{0}, rows)
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = true
 	tk.MustQuery(sql).Check(testkit.Rows("1 2022-12-01 123 1 2022-12-01 123 1 <nil>"))
-	tk.Session().GetSessionVars().EnableIndexJoinInnerSideMultiPattern = false
+	tk.MustExec("set @@session.tidb_enable_inl_join_inner_multi_pattern='OFF'")
 	tk.MustQuery(sql).Check(testkit.Rows("1 2022-12-01 123 1 2022-12-01 123 1 <nil>"))
 }

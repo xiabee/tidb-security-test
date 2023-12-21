@@ -53,7 +53,6 @@ func InitGlobalLightningEnv() {
 			zap.String("storage limitation", "only support TiKV storage"),
 			zap.String("current storage", globalCfg.Store),
 			zap.Bool("lightning is initialized", LitInitialized))
-		return
 	}
 	sPath, err := genLightningDataDir()
 	if err != nil {
@@ -109,6 +108,9 @@ func genLightningDataDir() (string, error) {
 	logutil.BgLogger().Info(LitInfoSortDir, zap.String("data path:", sortPath))
 	return sortPath, nil
 }
+
+// GenRLimitForTest is only used for test.
+var GenRLimitForTest = util.GenRLimit()
 
 // GenLightningDataDirForTest is only used for test.
 var GenLightningDataDirForTest = genLightningDataDir

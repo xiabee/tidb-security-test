@@ -28,6 +28,7 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
 	driver "github.com/pingcap/tidb/types/parser_driver"
@@ -64,23 +65,17 @@ func (e *paramMarkerExtractor) Leave(in ast.Node) (ast.Node, bool) {
 }
 
 // GeneratePlanCacheStmtWithAST generates the PlanCacheStmt structure for this AST.
-// paramSQL is the corresponding parameterized sql like 'select * from t where a<? and b>?'.
-// paramStmt is the Node of paramSQL.
-func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, paramSQL string, paramStmt ast.StmtNode) (*PlanCacheStmt, Plan, int, error) {
-	if v := ctx.Value("____GeneratePlanCacheStmtWithASTErr"); v != nil { // for testing
-		return nil, nil, 0, errors.New("____GeneratePlanCacheStmtWithASTErr")
-	}
-
+func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, stmt ast.StmtNode) (*PlanCacheStmt, Plan, int, error) {
 	vars := sctx.GetSessionVars()
 	var extractor paramMarkerExtractor
-	paramStmt.Accept(&extractor)
+	stmt.Accept(&extractor)
 
 	// DDL Statements can not accept parameters
-	if _, ok := paramStmt.(ast.DDLNode); ok && len(extractor.markers) > 0 {
+	if _, ok := stmt.(ast.DDLNode); ok && len(extractor.markers) > 0 {
 		return nil, nil, 0, ErrPrepareDDL
 	}
 
-	switch paramStmt.(type) {
+	switch stmt.(type) {
 	case *ast.LoadDataStmt, *ast.PrepareStmt, *ast.ExecuteStmt, *ast.DeallocateStmt, *ast.NonTransactionalDMLStmt:
 		return nil, nil, 0, ErrUnsupportedPs
 	}
@@ -92,7 +87,7 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 	}
 
 	ret := &PreprocessorReturn{}
-	err := Preprocess(ctx, sctx, paramStmt, InPrepare, WithPreprocessorReturn(ret))
+	err := Preprocess(ctx, sctx, stmt, InPrepare, WithPreprocessorReturn(ret))
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -109,8 +104,8 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 	}
 
 	prepared := &ast.Prepared{
-		Stmt:          paramStmt,
-		StmtType:      ast.GetStmtLabel(paramStmt),
+		Stmt:          stmt,
+		StmtType:      ast.GetStmtLabel(stmt),
 		Params:        extractor.markers,
 		SchemaVersion: ret.InfoSchema.SchemaMetaVersion(),
 	}
@@ -119,18 +114,16 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 	var (
 		normalizedSQL4PC, digest4PC string
 		selectStmtNode              ast.StmtNode
-		cacheable                   bool
-		reason                      string
 	)
 	if !vars.EnablePreparedPlanCache {
-		cacheable = false
-		reason = "plan cache is disabled"
+		prepared.UseCache = false
 	} else {
-		cacheable, reason = CacheableWithCtx(sctx, paramStmt, ret.InfoSchema)
+		cacheable, reason := CacheableWithCtx(sctx, stmt, ret.InfoSchema)
+		prepared.UseCache = cacheable
 		if !cacheable {
 			sctx.GetSessionVars().StmtCtx.AppendWarning(errors.Errorf("skip plan-cache: " + reason))
 		}
-		selectStmtNode, normalizedSQL4PC, digest4PC, err = ExtractSelectAndNormalizeDigest(paramStmt, vars.CurrentDB)
+		selectStmtNode, normalizedSQL4PC, digest4PC, err = ExtractSelectAndNormalizeDigest(stmt, vars.CurrentDB)
 		if err != nil || selectStmtNode == nil {
 			normalizedSQL4PC = ""
 			digest4PC = ""
@@ -146,7 +139,7 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 
 	var p Plan
 	destBuilder, _ := NewPlanBuilder().Init(sctx, ret.InfoSchema, &hint.BlockHintProcessor{})
-	p, err = destBuilder.Build(ctx, paramStmt)
+	p, err = destBuilder.Build(ctx, stmt)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -154,7 +147,7 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 	preparedObj := &PlanCacheStmt{
 		PreparedAst:         prepared,
 		StmtDB:              vars.CurrentDB,
-		StmtText:            paramSQL,
+		StmtText:            stmt.Text(),
 		VisitInfos:          destBuilder.GetVisitInfo(),
 		NormalizedSQL:       normalizedSQL,
 		SQLDigest:           digest,
@@ -162,13 +155,26 @@ func GeneratePlanCacheStmtWithAST(ctx context.Context, sctx sessionctx.Context, 
 		SnapshotTSEvaluator: ret.SnapshotTSEvaluator,
 		NormalizedSQL4PC:    normalizedSQL4PC,
 		SQLDigest4PC:        digest4PC,
-		StmtCacheable:       cacheable,
-		UncacheableReason:   reason,
 	}
 	if err = CheckPreparedPriv(sctx, preparedObj, ret.InfoSchema); err != nil {
 		return nil, nil, 0, err
 	}
 	return preparedObj, p, ParamCount, nil
+}
+
+func getValidPlanFromCache(sctx sessionctx.Context, isGeneralPlanCache bool, key kvcache.Key, paramTypes []*types.FieldType) (*PlanCacheValue, bool) {
+	cache := sctx.GetPlanCache(isGeneralPlanCache)
+	val, exist := cache.Get(key, paramTypes)
+	if !exist {
+		return nil, exist
+	}
+	candidate := val.(*PlanCacheValue)
+	return candidate, true
+}
+
+func putPlanIntoCache(sctx sessionctx.Context, isGeneralPlanCache bool, key kvcache.Key, plan *PlanCacheValue, paramTypes []*types.FieldType) {
+	cache := sctx.GetPlanCache(isGeneralPlanCache)
+	cache.Put(key, plan, paramTypes)
 }
 
 // planCacheKey is used to access Plan Cache. We put some variables that do not affect the plan into planCacheKey, such as the sql text.
@@ -249,14 +255,6 @@ func (key *planCacheKey) MemoryUsage() (sum int64) {
 		int64(len(key.isolationReadEngines))*size.SizeOfUint8 + int64(cap(key.hash))
 	key.memoryUsage = sum
 	return
-}
-
-type planCacheMatchOpts struct {
-	// paramTypes stores all parameters' FieldType, some different parameters may share same plan
-	paramTypes FieldSlice
-	// limitOffsetAndCount stores all the offset and key parameters extract from limit statement
-	// only used for cache and pick plan with parameters in limit
-	limitOffsetAndCount []uint64
 }
 
 // SetPstmtIDSchemaVersion implements PstmtCacheKeyMutator interface to change pstmtID and schemaVersion of cacheKey.
@@ -349,14 +347,14 @@ type PlanCacheValue struct {
 	Plan              Plan
 	OutPutNames       []*types.FieldName
 	TblInfo2UnionScan map[*model.TableInfo]bool
+	ParamTypes        FieldSlice
 	memoryUsage       int64
-
-	// matchOpts stores some fields help to choose a suitable plan
-	matchOpts planCacheMatchOpts
+	// stmtHints stores the hints which set session variables, because the hints won't be processed using cached plan.
+	stmtHints *stmtctx.StmtHints
 }
 
 func (v *PlanCacheValue) varTypesUnchanged(txtVarTps []*types.FieldType) bool {
-	return v.matchOpts.paramTypes.CheckTypesCompatibility4PC(txtVarTps)
+	return v.ParamTypes.CheckTypesCompatibility4PC(txtVarTps)
 }
 
 // unKnownMemoryUsage represent the memory usage of uncounted structure, maybe need implement later
@@ -385,13 +383,13 @@ func (v *PlanCacheValue) MemoryUsage() (sum int64) {
 		sum = unKnownMemoryUsage
 	}
 
-	sum += size.SizeOfInterface + size.SizeOfSlice*2 + int64(cap(v.OutPutNames)+cap(v.matchOpts.paramTypes))*size.SizeOfPointer +
+	sum += size.SizeOfInterface + size.SizeOfSlice*2 + int64(cap(v.OutPutNames)+cap(v.ParamTypes))*size.SizeOfPointer +
 		size.SizeOfMap + int64(len(v.TblInfo2UnionScan))*(size.SizeOfPointer+size.SizeOfBool) + size.SizeOfInt64*2
 
 	for _, name := range v.OutPutNames {
 		sum += name.MemoryUsage()
 	}
-	for _, ft := range v.matchOpts.paramTypes {
+	for _, ft := range v.ParamTypes {
 		sum += ft.MemoryUsage()
 	}
 	v.memoryUsage = sum
@@ -400,7 +398,7 @@ func (v *PlanCacheValue) MemoryUsage() (sum int64) {
 
 // NewPlanCacheValue creates a SQLCacheValue.
 func NewPlanCacheValue(plan Plan, names []*types.FieldName, srcMap map[*model.TableInfo]bool,
-	paramTypes []*types.FieldType, limitParams []uint64) *PlanCacheValue {
+	paramTypes []*types.FieldType, stmtHints *stmtctx.StmtHints) *PlanCacheValue {
 	dstMap := make(map[*model.TableInfo]bool)
 	for k, v := range srcMap {
 		dstMap[k] = v
@@ -413,10 +411,8 @@ func NewPlanCacheValue(plan Plan, names []*types.FieldName, srcMap map[*model.Ta
 		Plan:              plan,
 		OutPutNames:       names,
 		TblInfo2UnionScan: dstMap,
-		matchOpts: planCacheMatchOpts{
-			paramTypes:          userParamTypes,
-			limitOffsetAndCount: limitParams,
-		},
+		ParamTypes:        userParamTypes,
+		stmtHints:         stmtHints.Clone(),
 	}
 }
 
@@ -429,11 +425,7 @@ type PlanCacheStmt struct {
 	// Executor is only used for point get scene.
 	// Notice that we should only cache the PointGetExecutor that have a snapshot with MaxTS in it.
 	// If the current plan is not PointGet or does not use MaxTS optimization, this value should be nil here.
-	Executor interface{}
-
-	StmtCacheable     bool   // Whether this stmt is cacheable.
-	UncacheableReason string // Why this stmt is uncacheable.
-
+	Executor            interface{}
 	NormalizedSQL       string
 	NormalizedPlan      string
 	SQLDigest           *parser.Digest
@@ -465,70 +457,4 @@ func GetPreparedStmt(stmt *ast.ExecuteStmt, vars *variable.SessionVars) (*PlanCa
 		return prepStmt.(*PlanCacheStmt), nil
 	}
 	return nil, ErrStmtNotFound
-}
-
-type limitExtractor struct {
-	cacheable         bool // For safety considerations, check if limit count less than 10000
-	offsetAndCount    []uint64
-	unCacheableReason string
-	paramTypeErr      error
-}
-
-// Enter implements Visitor interface.
-func (checker *limitExtractor) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
-	switch node := in.(type) {
-	case *ast.Limit:
-		if node.Count != nil {
-			if count, isParamMarker := node.Count.(*driver.ParamMarkerExpr); isParamMarker {
-				typeExpected, val := CheckParamTypeInt64orUint64(count)
-				if typeExpected {
-					if val > 10000 {
-						checker.cacheable = false
-						checker.unCacheableReason = "limit count more than 10000"
-						return in, true
-					}
-					checker.offsetAndCount = append(checker.offsetAndCount, val)
-				} else {
-					checker.paramTypeErr = ErrWrongArguments.GenWithStackByArgs("LIMIT")
-					return in, true
-				}
-			}
-		}
-		if node.Offset != nil {
-			if offset, isParamMarker := node.Offset.(*driver.ParamMarkerExpr); isParamMarker {
-				typeExpected, val := CheckParamTypeInt64orUint64(offset)
-				if typeExpected {
-					checker.offsetAndCount = append(checker.offsetAndCount, val)
-				} else {
-					checker.paramTypeErr = ErrWrongArguments.GenWithStackByArgs("LIMIT")
-					return in, true
-				}
-			}
-		}
-	}
-	return in, false
-}
-
-// Leave implements Visitor interface.
-func (checker *limitExtractor) Leave(in ast.Node) (out ast.Node, ok bool) {
-	return in, checker.cacheable
-}
-
-// ExtractLimitFromAst extract limit offset and count from ast for plan cache key encode
-func ExtractLimitFromAst(node ast.Node, sctx sessionctx.Context) ([]uint64, error) {
-	if node == nil {
-		return nil, nil
-	}
-	checker := limitExtractor{
-		cacheable:      true,
-		offsetAndCount: []uint64{},
-	}
-	node.Accept(&checker)
-	if checker.paramTypeErr != nil {
-		return nil, checker.paramTypeErr
-	}
-	if sctx != nil && !checker.cacheable {
-		sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("skip plan-cache: " + checker.unCacheableReason))
-	}
-	return checker.offsetAndCount, nil
 }

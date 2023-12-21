@@ -110,21 +110,36 @@ func (tp JoinType) String() string {
 }
 
 const (
-	preferLeftAsINLJInner uint = 1 << iota
+	// Hint flag for join
+	preferINLJ uint = 1 << iota
+	preferINLHJ
+	preferINLMJ
+	preferHJBuild
+	preferHJProbe
+	preferHashJoin
+	preferNoHashJoin
+	preferMergeJoin
+	preferNoMergeJoin
+	preferNoIndexJoin
+	preferNoIndexHashJoin
+	preferNoIndexMergeJoin
+	preferBCJoin
+	preferShuffleJoin
+	preferRewriteSemiJoin
+
+	// Hint flag to specify the join with direction
+	preferLeftAsINLJInner
 	preferRightAsINLJInner
 	preferLeftAsINLHJInner
 	preferRightAsINLHJInner
 	preferLeftAsINLMJInner
 	preferRightAsINLMJInner
-	preferHashJoin
 	preferLeftAsHJBuild
 	preferRightAsHJBuild
 	preferLeftAsHJProbe
 	preferRightAsHJProbe
-	preferMergeJoin
-	preferBCJoin
-	preferShuffleJoin
-	preferRewriteSemiJoin
+
+	// Hint flag for Agg
 	preferHashAgg
 	preferStreamAgg
 	preferMPP1PhaseAgg
@@ -146,9 +161,11 @@ type LogicalJoin struct {
 	StraightJoin  bool
 
 	// hintInfo stores the join algorithm hint information specified by client.
-	hintInfo        *tableHintInfo
-	preferJoinType  uint
-	preferJoinOrder bool
+	hintInfo            *tableHintInfo
+	preferJoinType      uint
+	preferJoinOrder     bool
+	leftPreferJoinType  uint
+	rightPreferJoinType uint
 
 	EqualConditions []*expression.ScalarFunction
 	NAEQConditions  []*expression.ScalarFunction
@@ -1196,7 +1213,8 @@ type DataSource struct {
 	// handleCol represents the handle column for the datasource, either the
 	// int primary key column or extra handle column.
 	// handleCol *expression.Column
-	handleCols HandleCols
+	handleCols          HandleCols
+	unMutableHandleCols HandleCols
 	// TblCols contains the original columns of table before being pruned, and it
 	// is used for estimating table scan cost.
 	TblCols []*expression.Column
@@ -1429,15 +1447,14 @@ func (ds *DataSource) deriveTablePathStats(path *util.AccessPath, conds []expres
 	path.CountAfterAccess = float64(ds.statisticTable.Count)
 	path.TableFilters = conds
 	var pkCol *expression.Column
-	columnLen := len(ds.schema.Columns)
 	isUnsigned := false
 	if ds.tableInfo.PKIsHandle {
 		if pkColInfo := ds.tableInfo.GetPkColInfo(); pkColInfo != nil {
 			isUnsigned = mysql.HasUnsignedFlag(pkColInfo.GetFlag())
 			pkCol = expression.ColInfo2Col(ds.schema.Columns, pkColInfo)
 		}
-	} else if columnLen > 0 && ds.schema.Columns[columnLen-1].ID == model.ExtraHandleID {
-		pkCol = ds.schema.Columns[columnLen-1]
+	} else {
+		pkCol = ds.schema.GetExtraHandleColumn()
 	}
 	if pkCol == nil {
 		path.Ranges = ranger.FullIntRange(isUnsigned)
@@ -1878,16 +1895,15 @@ func ExtractCorColumnsBySchema4PhysicalPlan(p PhysicalPlan, schema *expression.S
 
 // ShowContents stores the contents for the `SHOW` statement.
 type ShowContents struct {
-	Tp                ast.ShowStmtType // Databases/Tables/Columns/....
-	DBName            string
-	Table             *ast.TableName  // Used for showing columns.
-	Partition         model.CIStr     // Use for showing partition
-	Column            *ast.ColumnName // Used for `desc table column`.
-	IndexName         model.CIStr
-	ResourceGroupName string               // Used for showing resource group
-	Flag              int                  // Some flag parsed from sql, such as FULL.
-	User              *auth.UserIdentity   // Used for show grants.
-	Roles             []*auth.RoleIdentity // Used for show grants.
+	Tp        ast.ShowStmtType // Databases/Tables/Columns/....
+	DBName    string
+	Table     *ast.TableName  // Used for showing columns.
+	Partition model.CIStr     // Use for showing partition
+	Column    *ast.ColumnName // Used for `desc table column`.
+	IndexName model.CIStr
+	Flag      int                  // Some flag parsed from sql, such as FULL.
+	User      *auth.UserIdentity   // Used for show grants.
+	Roles     []*auth.RoleIdentity // Used for show grants.
 
 	CountWarningsOrErrors bool // Used for showing count(*) warnings | errors
 
@@ -1948,6 +1964,7 @@ type CTEClass struct {
 	// pushDownPredicates may be push-downed by different references.
 	pushDownPredicates []expression.Expression
 	ColumnMap          map[string]*expression.Column
+	isOuterMostCTE     bool
 }
 
 const emptyCTEClassSize = int64(unsafe.Sizeof(CTEClass{}))
@@ -1979,11 +1996,10 @@ func (cc *CTEClass) MemoryUsage() (sum int64) {
 type LogicalCTE struct {
 	logicalSchemaProducer
 
-	cte            *CTEClass
-	cteAsName      model.CIStr
-	cteName        model.CIStr
-	seedStat       *property.StatsInfo
-	isOuterMostCTE bool
+	cte       *CTEClass
+	cteAsName model.CIStr
+	cteName   model.CIStr
+	seedStat  *property.StatsInfo
 }
 
 // LogicalCTETable is for CTE table

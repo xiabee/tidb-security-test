@@ -21,6 +21,7 @@ import (
 	"runtime/trace"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/expression"
@@ -37,7 +38,6 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/pingcap/tidb/util/stringutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"go.uber.org/zap"
 )
 
@@ -117,8 +117,11 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 }
 
 func prefetchUniqueIndices(ctx context.Context, txn kv.Transaction, rows []toBeCheckedRow) (map[string][]byte, error) {
-	r, ctx := tracing.StartRegionEx(ctx, "prefetchUniqueIndices")
-	defer r.End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("prefetchUniqueIndices", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
 
 	nKeys := 0
 	for _, r := range rows {
@@ -146,14 +149,17 @@ func prefetchUniqueIndices(ctx context.Context, txn kv.Transaction, rows []toBeC
 }
 
 func prefetchConflictedOldRows(ctx context.Context, txn kv.Transaction, rows []toBeCheckedRow, values map[string][]byte) error {
-	r, ctx := tracing.StartRegionEx(ctx, "prefetchConflictedOldRows")
-	defer r.End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("prefetchConflictedOldRows", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
 
 	batchKeys := make([]kv.Key, 0, len(rows))
 	for _, r := range rows {
 		for _, uk := range r.uniqueKeys {
 			if val, found := values[string(uk.newKey)]; found {
-				if isTemp, _ := tablecodec.CheckTempIndexKey(uk.newKey); isTemp {
+				if tablecodec.IsTempIndexKey(uk.newKey) {
 					// If it is a temp index, the value cannot be decoded by DecodeHandleInUniqueIndexValue.
 					// Since this function is an optimization, we can skip prefetching the rows referenced by
 					// temp indexes.
@@ -177,7 +183,11 @@ func (e *InsertValues) prefetchDataCache(ctx context.Context, txn kv.Transaction
 		return nil
 	}
 
-	defer tracing.StartRegion(ctx, "prefetchDataCache").End()
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("prefetchDataCache", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
 	values, err := prefetchUniqueIndices(ctx, txn, rows)
 	if err != nil {
 		return err

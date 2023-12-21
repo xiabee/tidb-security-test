@@ -110,7 +110,7 @@ func TestBasic(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	builder, err := infoschema.NewBuilder(dom.Store(), nil).InitWithDBInfos(dbInfos, nil, nil, 1)
+	builder, err := infoschema.NewBuilder(dom, nil).InitWithDBInfos(dbInfos, nil, 1)
 	require.NoError(t, err)
 
 	txn, err := store.Begin()
@@ -256,7 +256,7 @@ func TestInfoTables(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	builder, err := infoschema.NewBuilder(store, nil).InitWithDBInfos(nil, nil, nil, 0)
+	builder, err := infoschema.NewBuilder(mockRequirement{store}, nil).InitWithDBInfos(nil, nil, 0)
 	require.NoError(t, err)
 	is := builder.Build()
 
@@ -296,7 +296,6 @@ func TestInfoTables(t *testing.T) {
 		"DEADLOCKS",
 		"PLACEMENT_POLICIES",
 		"TRX_SUMMARY",
-		"RESOURCE_GROUPS",
 	}
 	for _, tbl := range infoTables {
 		tb, err1 := is.TableByName(util.InformationSchemaName, model.NewCIStr(tbl))
@@ -333,7 +332,7 @@ func TestBuildSchemaWithGlobalTemporaryTable(t *testing.T) {
 		err := kv.RunInNewTxn(ctx, store, true, func(ctx context.Context, txn kv.Transaction) error {
 			m := meta.NewMeta(txn)
 			for _, change := range changes {
-				builder := infoschema.NewBuilder(store, nil).InitWithOldInfoSchema(curIs)
+				builder := infoschema.NewBuilder(dom, nil).InitWithOldInfoSchema(curIs)
 				change(m, builder)
 				curIs = builder.Build()
 			}
@@ -411,7 +410,7 @@ func TestBuildSchemaWithGlobalTemporaryTable(t *testing.T) {
 	// full load
 	newDB, ok := newIS.SchemaByName(model.NewCIStr("test"))
 	require.True(t, ok)
-	builder, err := infoschema.NewBuilder(store, nil).InitWithDBInfos([]*model.DBInfo{newDB}, newIS.AllPlacementPolicies(), newIS.AllResourceGroups(), newIS.SchemaMetaVersion())
+	builder, err := infoschema.NewBuilder(dom, nil).InitWithDBInfos([]*model.DBInfo{newDB}, newIS.AllPlacementPolicies(), newIS.SchemaMetaVersion())
 	require.NoError(t, err)
 	require.True(t, builder.Build().HasTemporaryTable())
 
@@ -464,7 +463,7 @@ func TestBuildSchemaWithGlobalTemporaryTable(t *testing.T) {
 }
 
 func TestBuildBundle(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -536,12 +535,24 @@ func TestBuildBundle(t *testing.T) {
 	assertBundle(is, tbl2.Meta().ID, nil)
 	assertBundle(is, p1.ID, p1Bundle)
 
-	builder, err := infoschema.NewBuilder(store, nil).InitWithDBInfos([]*model.DBInfo{db}, is.AllPlacementPolicies(), is.AllResourceGroups(), is.SchemaMetaVersion())
+	builder, err := infoschema.NewBuilder(dom, nil).InitWithDBInfos([]*model.DBInfo{db}, is.AllPlacementPolicies(), is.SchemaMetaVersion())
 	require.NoError(t, err)
 	is2 := builder.Build()
 	assertBundle(is2, tbl1.Meta().ID, tb1Bundle)
 	assertBundle(is2, tbl2.Meta().ID, nil)
 	assertBundle(is2, p1.ID, p1Bundle)
+}
+
+type mockRequirement struct {
+	kv.Storage
+}
+
+func (r mockRequirement) Store() kv.Storage {
+	return r.Storage
+}
+
+func (r mockRequirement) AutoIDClient() *autoid.ClientDiscover {
+	return nil
 }
 
 func TestLocalTemporaryTables(t *testing.T) {
@@ -585,7 +596,7 @@ func TestLocalTemporaryTables(t *testing.T) {
 			State:   model.StatePublic,
 		}
 
-		allocs := autoid.NewAllocatorsFromTblInfo(store, schemaID, tblInfo)
+		allocs := autoid.NewAllocatorsFromTblInfo(mockRequirement{store}, schemaID, tblInfo)
 		tbl, err := table.TableFromMeta(allocs, tblInfo)
 		require.NoError(t, err)
 
@@ -813,4 +824,32 @@ func TestIndexComment(t *testing.T) {
 	tk.MustExec("DROP TABLE IF EXISTS `t1`;")
 	tk.MustExec("create table t1 (c1 VARCHAR(10) NOT NULL COMMENT 'Abcdefghijabcd', c2 INTEGER COMMENT 'aBcdefghijab',c3 INTEGER COMMENT '01234567890', c4 INTEGER, c5 INTEGER, c6 INTEGER, c7 INTEGER, c8 VARCHAR(100), c9 CHAR(50), c10 DATETIME, c11 DATETIME, c12 DATETIME,c13 DATETIME, INDEX i1 (c1) COMMENT 'i1 comment',INDEX i2(c2) ) COMMENT='ABCDEFGHIJabc';")
 	tk.MustQuery("SELECT index_comment,char_length(index_comment),COLUMN_NAME FROM information_schema.statistics WHERE table_name='t1' ORDER BY index_comment;").Check(testkit.Rows(" 0 c2", "i1 comment 10 c1"))
+}
+
+func TestIssue42400(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustQuery("show create table information_schema.ddl_jobs").CheckContain("`QUERY` text")
+	tk.MustQuery("select length(query) from information_schema.ddl_jobs;") // No error
+}
+
+func TestInfoSchemaRenameTable(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table test.t1 (id int primary key, a text);")
+	tk.MustExec("insert test.t1 values(1,'334'),(4,'3443435'),(5,'fdf43t536653');")
+	tk.MustExec("rename table test.t1 to mysql.t1;")
+	tk.MustQuery("SELECT count(*) FROM information_schema.TABLES WHERE (TABLE_SCHEMA = 'mysql') AND (TABLE_NAME = 't1');").
+		Check(testkit.Rows("1"))
+
+	tk.MustExec("create table test.t2 (id int primary key, a text);")
+	tk.MustExec("insert test.t2 values(1,'334'),(4,'3443435'),(5,'fdf43t536653');")
+	tk.MustExec("create table test.t3 (id int primary key, a text);")
+	tk.MustExec("insert test.t3 values(1,'334'),(4,'3443435'),(5,'fdf43t536653');")
+	tk.MustExec("rename table test.t2 to mysql.t2, test.t3 to mysql.t3;")
+	tk.MustQuery("SELECT count(*) FROM information_schema.TABLES WHERE (TABLE_SCHEMA = 'mysql') AND (TABLE_NAME = 't3');").
+		Check(testkit.Rows("1"))
 }

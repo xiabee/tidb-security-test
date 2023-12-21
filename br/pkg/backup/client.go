@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -36,10 +35,12 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
+	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/distsql"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/codec"
@@ -74,9 +75,11 @@ type Checksum struct {
 // ProgressUnit represents the unit of progress.
 type ProgressUnit string
 
-// Maximum total sleep time(in ms) for kv/cop commands.
 const (
-	backupFineGrainedMaxBackoff = 80000
+	// backupFineGrainedMaxBackoff is 1 hour.
+	// given it begins the fine-grained backup, there must be some problems in the cluster.
+	// We need to be more patient.
+	backupFineGrainedMaxBackoff = 3600000
 	backupRetryTimes            = 5
 	// RangeUnit represents the progress updated counter when a range finished.
 	RangeUnit ProgressUnit = "range"
@@ -489,6 +492,18 @@ func appendRanges(tbl *model.TableInfo, tblID int64) ([]kv.KeyRange, error) {
 	return retRanges, nil
 }
 
+type mockRequirement struct {
+	kv.Storage
+}
+
+func (r mockRequirement) Store() kv.Storage {
+	return r.Storage
+}
+
+func (r mockRequirement) AutoIDClient() *autoid.ClientDiscover {
+	return nil
+}
+
 // BuildBackupRangeAndSchema gets KV range and schema of tables.
 // KV ranges are separated by Table IDs.
 // Also, KV ranges are separated by Index IDs in the same table.
@@ -551,31 +566,64 @@ func BuildBackupRangeAndSchema(
 		}
 
 		for _, tableInfo := range tables {
+			if tableInfo.Version > version.CURRENT_BACKUP_SUPPORT_TABLE_INFO_VERSION {
+				// normally this shouldn't happen in a production env.
+				// because we had a unit test to avoid table info version update silencly.
+				// and had version check before run backup.
+				return nil, nil, nil, errors.Errorf("backup doesn't not support table %s with version %d, maybe try a new version of br",
+					tableInfo.Name.String(),
+					tableInfo.Version,
+				)
+			}
 			if !tableFilter.MatchTable(dbInfo.Name.O, tableInfo.Name.O) {
 				// Skip tables other than the given table.
 				continue
 			}
 
-			logger := log.L().With(
+			logger := log.With(
 				zap.String("db", dbInfo.Name.O),
 				zap.String("table", tableInfo.Name.O),
 			)
 
 			autoIDAccess := m.GetAutoIDAccessors(dbInfo.ID, tableInfo.ID)
+			tblVer := autoid.AllocOptionTableInfoVersion(tableInfo.Version)
+			idAlloc := autoid.NewAllocator(mockRequirement{storage}, dbInfo.ID, tableInfo.ID, false, autoid.RowIDAllocType, tblVer)
+			seqAlloc := autoid.NewAllocator(mockRequirement{storage}, dbInfo.ID, tableInfo.ID, false, autoid.SequenceType, tblVer)
+			randAlloc := autoid.NewAllocator(mockRequirement{storage}, dbInfo.ID, tableInfo.ID, false, autoid.AutoRandomType, tblVer)
 
 			var globalAutoID int64
 			switch {
 			case tableInfo.IsSequence():
-				globalAutoID, err = autoIDAccess.SequenceValue().Get()
+				globalAutoID, err = seqAlloc.NextGlobalAutoID()
 			case tableInfo.IsView() || !utils.NeedAutoID(tableInfo):
 				// no auto ID for views or table without either rowID nor auto_increment ID.
 			default:
-				globalAutoID, err = autoIDAccess.RowID().Get()
+				if tableInfo.SepAutoInc() {
+					globalAutoID, err = autoIDAccess.IncrementID(tableInfo.Version).Get()
+					// For a nonclustered table with auto_increment column, both auto_increment_id and _tidb_rowid are required.
+					// See also https://github.com/pingcap/tidb/issues/46093
+					if rowID, err1 := autoIDAccess.RowID().Get(); err1 == nil {
+						tableInfo.AutoIncIDExtra = rowID + 1
+					} else {
+						// It is possible that the rowid meta key does not exist (i.e. table have auto_increment_id but no _rowid),
+						// so err1 != nil might be expected.
+						if globalAutoID == 0 {
+							// When both auto_increment_id and _rowid are missing, it must be something wrong.
+							return nil, nil, nil, errors.Trace(err1)
+						}
+						// Print a warning in other scenes, should it be a INFO log?
+						log.Warn("get rowid error", zap.Error(err1))
+					}
+					// NextGlobalAutoID = globalAutoID  + 1
+					globalAutoID = globalAutoID + 1
+				} else {
+					globalAutoID, err = idAlloc.NextGlobalAutoID()
+				}
 			}
 			if err != nil {
 				return nil, nil, nil, errors.Trace(err)
 			}
-			tableInfo.AutoIncID = globalAutoID + 1
+			tableInfo.AutoIncID = globalAutoID
 			if !isFullBackup {
 				// according to https://github.com/pingcap/tidb/issues/32290.
 				// ignore placement policy when not in full backup
@@ -588,11 +636,11 @@ func BuildBackupRangeAndSchema(
 			if tableInfo.PKIsHandle && tableInfo.ContainsAutoRandomBits() {
 				// this table has auto_random id, we need backup and rebase in restoration
 				var globalAutoRandID int64
-				globalAutoRandID, err = autoIDAccess.RandomID().Get()
+				globalAutoRandID, err = randAlloc.NextGlobalAutoID()
 				if err != nil {
 					return nil, nil, nil, errors.Trace(err)
 				}
-				tableInfo.AutoRandID = globalAutoRandID + 1
+				tableInfo.AutoRandID = globalAutoRandID
 				logger.Debug("change table AutoRandID",
 					zap.Int64("AutoRandID", globalAutoRandID))
 			}
@@ -759,7 +807,6 @@ func (bc *Client) BackupRanges(
 	ranges []rtree.Range,
 	request backuppb.BackupRequest,
 	concurrency uint,
-	replicaReadLabel map[string]string,
 	metaWriter *metautil.MetaWriter,
 	progressCallBack func(ProgressUnit),
 ) error {
@@ -789,7 +836,7 @@ func (bc *Client) BackupRanges(
 		}
 		workerPool.ApplyOnErrorGroup(eg, func() error {
 			elctx := logutil.ContextWithField(ectx, logutil.RedactAny("range-sn", id))
-			err := bc.BackupRange(elctx, req, replicaReadLabel, pr, metaWriter, progressCallBack)
+			err := bc.BackupRange(elctx, req, pr, metaWriter, progressCallBack)
 			if err != nil {
 				// The error due to context cancel, stack trace is meaningless, the stack shall be suspended (also clear)
 				if errors.Cause(err) == context.Canceled {
@@ -809,7 +856,6 @@ func (bc *Client) BackupRanges(
 func (bc *Client) BackupRange(
 	ctx context.Context,
 	request backuppb.BackupRequest,
-	replicaReadLabel map[string]string,
 	progressRange *rtree.ProgressRange,
 	metaWriter *metautil.MetaWriter,
 	progressCallBack func(ProgressUnit),
@@ -830,26 +876,10 @@ func (bc *Client) BackupRange(
 		zap.Uint64("rateLimit", request.RateLimit),
 		zap.Uint32("concurrency", request.Concurrency))
 
-	allStores, err := conn.GetAllTiKVStoresWithRetry(ctx, bc.mgr.GetPDClient(), connutil.SkipTiFlash)
+	var allStores []*metapb.Store
+	allStores, err = conn.GetAllTiKVStoresWithRetry(ctx, bc.mgr.GetPDClient(), connutil.SkipTiFlash)
 	if err != nil {
 		return errors.Trace(err)
-	}
-	var targetStores []*metapb.Store
-	targetStoreIds := make(map[uint64]struct{})
-	if len(replicaReadLabel) == 0 {
-		targetStores = allStores // send backup push down request to all stores
-	} else {
-		for _, store := range allStores {
-			for _, label := range store.Labels {
-				if val, ok := replicaReadLabel[label.Key]; ok && val == label.Value {
-					targetStores = append(targetStores, store) // send backup push down request to stores that match replica read label
-					targetStoreIds[store.GetId()] = struct{}{} // record store id for fine grained backup
-				}
-			}
-		}
-	}
-	if len(replicaReadLabel) > 0 && len(targetStores) == 0 {
-		return errors.Errorf("no store matches replica read label: %v", replicaReadLabel)
 	}
 
 	logutil.CL(ctx).Info("backup push down started")
@@ -874,8 +904,8 @@ func (bc *Client) BackupRange(
 			req.EndKey = progressRange.Incomplete[0].EndKey
 		}
 
-		push := newPushDown(bc.mgr, len(targetStores))
-		err = push.pushBackup(ctx, req, progressRange, targetStores, bc.checkpointRunner, progressCallBack)
+		push := newPushDown(bc.mgr, len(allStores))
+		err = push.pushBackup(ctx, req, progressRange, allStores, bc.checkpointRunner, progressCallBack)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -884,7 +914,7 @@ func (bc *Client) BackupRange(
 
 	// Find and backup remaining ranges.
 	// TODO: test fine grained backup.
-	if err := bc.fineGrainedBackup(ctx, request, targetStoreIds, progressRange, progressCallBack); err != nil {
+	if err := bc.fineGrainedBackup(ctx, request, progressRange, progressCallBack); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -927,7 +957,7 @@ func (bc *Client) BackupRange(
 	return nil
 }
 
-func (bc *Client) findTargetPeer(ctx context.Context, key []byte, isRawKv bool, targetStoreIds map[uint64]struct{}) (*metapb.Peer, error) {
+func (bc *Client) findRegionLeader(ctx context.Context, key []byte, isRawKv bool) (*metapb.Peer, error) {
 	// Keys are saved in encoded format in TiKV, so the key must be encoded
 	// in order to find the correct region.
 	key = codec.EncodeBytesExt([]byte{}, key, isRawKv)
@@ -935,46 +965,26 @@ func (bc *Client) findTargetPeer(ctx context.Context, key []byte, isRawKv bool, 
 		// better backoff.
 		region, err := bc.mgr.GetPDClient().GetRegion(ctx, key)
 		if err != nil || region == nil {
-			log.Error("find region failed", zap.Error(err), zap.Reflect("region", region))
+			logutil.CL(ctx).Error("find leader failed", zap.Error(err), zap.Reflect("region", region))
 			time.Sleep(time.Millisecond * time.Duration(100*i))
 			continue
 		}
-		if len(targetStoreIds) == 0 {
-			if region.Leader != nil {
-				log.Info("find leader",
-					zap.Reflect("Leader", region.Leader), logutil.Key("key", key))
-				return region.Leader, nil
-			}
-		} else {
-			candidates := make([]*metapb.Peer, 0, len(region.Meta.Peers))
-			for _, peer := range region.Meta.Peers {
-				if _, ok := targetStoreIds[peer.StoreId]; ok {
-					candidates = append(candidates, peer)
-				}
-			}
-			if len(candidates) > 0 {
-				peer := candidates[rand.Intn(len(candidates))]
-				log.Info("find target peer for backup",
-					zap.Reflect("Peer", peer), logutil.Key("key", key))
-				return peer, nil
-			}
+		if region.Leader != nil {
+			logutil.CL(ctx).Info("find leader",
+				zap.Reflect("Leader", region.Leader), logutil.Key("key", key))
+			return region.Leader, nil
 		}
-
-		log.Warn("fail to find a target peer", logutil.Key("key", key))
-		time.Sleep(time.Millisecond * time.Duration(1000*i))
+		logutil.CL(ctx).Warn("no region found", logutil.Key("key", key))
+		time.Sleep(time.Millisecond * time.Duration(100*i))
 		continue
 	}
-	log.Error("can not find a valid target peer", logutil.Key("key", key))
-	if len(targetStoreIds) == 0 {
-		return nil, errors.Annotatef(berrors.ErrBackupNoLeader, "can not find a valid leader for key %s", key)
-	}
-	return nil, errors.Errorf("can not find a valid target peer for key %s", key)
+	logutil.CL(ctx).Error("can not find leader", logutil.Key("key", key))
+	return nil, errors.Annotatef(berrors.ErrBackupNoLeader, "can not find leader")
 }
 
 func (bc *Client) fineGrainedBackup(
 	ctx context.Context,
 	req backuppb.BackupRequest,
-	targetStoreIds map[uint64]struct{},
 	pr *rtree.ProgressRange,
 	progressCallBack func(ProgressUnit),
 ) error {
@@ -999,7 +1009,7 @@ func (bc *Client) fineGrainedBackup(
 		}
 	})
 
-	bo := tikv.NewBackoffer(ctx, backupFineGrainedMaxBackoff)
+	bo := utils.AdaptTiKVBackoffer(ctx, backupFineGrainedMaxBackoff, berrors.ErrUnknown)
 	for {
 		// Step1, check whether there is any incomplete range
 		incomplete := pr.Res.GetIncompleteRange(req.StartKey, req.EndKey)
@@ -1012,30 +1022,22 @@ func (bc *Client) fineGrainedBackup(
 		errCh := make(chan error, 4)
 		retry := make(chan rtree.Range, 4)
 
-		max := &struct {
-			ms int
-			mu sync.Mutex
-		}{}
 		wg := new(sync.WaitGroup)
 		for i := 0; i < 4; i++ {
 			wg.Add(1)
-			fork, _ := bo.Fork()
+			fork, _ := bo.Inner().Fork()
 			go func(boFork *tikv.Backoffer) {
 				defer wg.Done()
 				for rg := range retry {
 					subReq := req
 					subReq.StartKey, subReq.EndKey = rg.StartKey, rg.EndKey
-					backoffMs, err := bc.handleFineGrained(ctx, boFork, subReq, targetStoreIds, respCh)
+					backoffMs, err := bc.handleFineGrained(ctx, boFork, subReq, respCh)
 					if err != nil {
 						errCh <- err
 						return
 					}
 					if backoffMs != 0 {
-						max.mu.Lock()
-						if max.ms < backoffMs {
-							max.ms = backoffMs
-						}
-						max.mu.Unlock()
+						bo.RequestBackOff(backoffMs)
 					}
 				}
 			}(fork)
@@ -1091,15 +1093,11 @@ func (bc *Client) fineGrainedBackup(
 		}
 
 		// Step3. Backoff if needed, then repeat.
-		max.mu.Lock()
-		ms := max.ms
-		max.mu.Unlock()
-		if ms != 0 {
+		if ms := bo.NextSleepInMS(); ms != 0 {
 			log.Info("handle fine grained", zap.Int("backoffMs", ms))
-			// TODO: fill a meaningful error.
-			err := bo.BackoffWithMaxSleepTxnLockFast(ms, berrors.ErrUnknown)
+			err := bo.BackOff()
 			if err != nil {
-				return errors.Trace(err)
+				return errors.Annotatef(err, "at fine-grained backup, remained ranges = %d", pr.Res.Len())
 			}
 		}
 	}
@@ -1177,14 +1175,13 @@ func (bc *Client) handleFineGrained(
 	ctx context.Context,
 	bo *tikv.Backoffer,
 	req backuppb.BackupRequest,
-	targetStoreIds map[uint64]struct{},
 	respCh chan<- *backuppb.BackupResponse,
 ) (int, error) {
-	targetPeer, pderr := bc.findTargetPeer(ctx, req.StartKey, req.IsRawKv, targetStoreIds)
+	leader, pderr := bc.findRegionLeader(ctx, req.StartKey, req.IsRawKv)
 	if pderr != nil {
 		return 0, errors.Trace(pderr)
 	}
-	storeID := targetPeer.GetStoreId()
+	storeID := leader.GetStoreId()
 	lockResolver := bc.mgr.GetLockResolver()
 	client, err := bc.mgr.GetBackupClient(ctx, storeID)
 	if err != nil {

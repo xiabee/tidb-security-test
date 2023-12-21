@@ -19,13 +19,14 @@ import (
 	"testing"
 
 	"github.com/ngaut/pools"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/stretchr/testify/require"
 )
 
 func TestDDLWorkerPool(t *testing.T) {
 	f := func() func() (pools.Resource, error) {
 		return func() (pools.Resource, error) {
-			wk := newWorker(nil, addIdxWorker, nil, nil, nil)
+			wk := newWorker(nil, addIdxWorker, nil, nil, nil, true)
 			return wk, nil
 		}
 	}
@@ -35,56 +36,39 @@ func TestDDLWorkerPool(t *testing.T) {
 }
 
 func TestBackfillWorkerPool(t *testing.T) {
+	reorgInfo := &reorgInfo{Job: &model.Job{ID: 1}}
 	f := func() func() (pools.Resource, error) {
 		return func() (pools.Resource, error) {
-			wk := newBackfillWorker(context.Background(), nil)
+			wk := newBackfillWorker(context.Background(), nil, 1, nil, reorgInfo, typeAddIndexWorker)
 			return wk, nil
 		}
 	}
-	pool := newBackfillContextPool(pools.NewResourcePool(f(), 3, 4, 0))
-	bc, err := pool.get()
+	pool := newBackfillWorkerPool(pools.NewResourcePool(f(), 1, 2, 0))
+	bwp, err := pool.get()
 	require.NoError(t, err)
-	require.NotNil(t, bc)
-	require.Nil(t, bc.backfiller)
-	bcs, err := pool.batchGet(3)
-	require.NoError(t, err)
-	require.Len(t, bcs, 2)
+	require.Equal(t, 1, bwp.id)
 	// test it to reach the capacity
-	bc1, err := pool.get()
+	bwp1, err := pool.get()
 	require.NoError(t, err)
-	require.Nil(t, bc1)
-	bcs1, err := pool.batchGet(1)
-	require.NoError(t, err)
-	require.Nil(t, bcs1)
+	require.Nil(t, bwp1)
 
 	// test setCapacity
-	err = pool.setCapacity(5)
-	require.Equal(t, "capacity 5 is out of range", err.Error())
-	err = pool.setCapacity(4)
+	err = pool.setCapacity(2)
 	require.NoError(t, err)
-	bc1, err = pool.get()
+	bwp1, err = pool.get()
 	require.NoError(t, err)
-	require.NotNil(t, bc)
-	require.Nil(t, bc.backfiller)
-	pool.put(bc)
-	pool.put(bc1)
-	for _, bc := range bcs {
-		pool.put(bc)
-	}
+	require.Equal(t, 1, bwp1.id)
+	pool.put(bwp)
+	pool.put(bwp1)
 
 	// test close
 	pool.close()
 	pool.close()
 	require.Equal(t, true, pool.exit.Load())
-	pool.put(bc1)
+	pool.put(bwp1)
 
-	bc, err = pool.get()
+	bwp, err = pool.get()
 	require.Error(t, err)
 	require.Equal(t, "backfill worker pool is closed", err.Error())
-	require.Nil(t, bc)
-
-	bcs, err = pool.batchGet(1)
-	require.Error(t, err)
-	require.Equal(t, "backfill worker pool is closed", err.Error())
-	require.Nil(t, bcs)
+	require.Nil(t, bwp)
 }

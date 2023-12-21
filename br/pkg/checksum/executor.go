@@ -27,9 +27,6 @@ type ExecutorBuilder struct {
 	oldTable *metautil.Table
 
 	concurrency uint
-
-	oldKeyspace []byte
-	newKeyspace []byte
 }
 
 // NewExecutorBuilder returns a new executor builder.
@@ -54,26 +51,9 @@ func (builder *ExecutorBuilder) SetConcurrency(conc uint) *ExecutorBuilder {
 	return builder
 }
 
-func (builder *ExecutorBuilder) SetOldKeyspace(keyspace []byte) *ExecutorBuilder {
-	builder.oldKeyspace = keyspace
-	return builder
-}
-
-func (builder *ExecutorBuilder) SetNewKeyspace(keyspace []byte) *ExecutorBuilder {
-	builder.newKeyspace = keyspace
-	return builder
-}
-
 // Build builds a checksum executor.
 func (builder *ExecutorBuilder) Build() (*Executor, error) {
-	reqs, err := buildChecksumRequest(
-		builder.table,
-		builder.oldTable,
-		builder.ts,
-		builder.concurrency,
-		builder.oldKeyspace,
-		builder.newKeyspace,
-	)
+	reqs, err := buildChecksumRequest(builder.table, builder.oldTable, builder.ts, builder.concurrency)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -85,8 +65,6 @@ func buildChecksumRequest(
 	oldTable *metautil.Table,
 	startTS uint64,
 	concurrency uint,
-	oldKeyspace []byte,
-	newKeyspace []byte,
 ) ([]*kv.Request, error) {
 	var partDefs []model.PartitionDefinition
 	if part := newTable.Partition; part != nil {
@@ -98,7 +76,7 @@ func buildChecksumRequest(
 	if oldTable != nil {
 		oldTableID = oldTable.Info.ID
 	}
-	rs, err := buildRequest(newTable, newTable.ID, oldTable, oldTableID, startTS, concurrency, oldKeyspace, newKeyspace)
+	rs, err := buildRequest(newTable, newTable.ID, oldTable, oldTableID, startTS, concurrency)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -113,7 +91,7 @@ func buildChecksumRequest(
 				}
 			}
 		}
-		rs, err := buildRequest(newTable, partDef.ID, oldTable, oldPartID, startTS, concurrency, oldKeyspace, newKeyspace)
+		rs, err := buildRequest(newTable, partDef.ID, oldTable, oldPartID, startTS, concurrency)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -130,11 +108,9 @@ func buildRequest(
 	oldTableID int64,
 	startTS uint64,
 	concurrency uint,
-	oldKeyspace []byte,
-	newKeyspace []byte,
 ) ([]*kv.Request, error) {
 	reqs := make([]*kv.Request, 0)
-	req, err := buildTableRequest(tableInfo, tableID, oldTable, oldTableID, startTS, concurrency, oldKeyspace, newKeyspace)
+	req, err := buildTableRequest(tableInfo, tableID, oldTable, oldTableID, startTS, concurrency)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -163,7 +139,7 @@ func buildRequest(
 			}
 		}
 		req, err = buildIndexRequest(
-			tableID, indexInfo, oldTableID, oldIndexInfo, startTS, concurrency, oldKeyspace, newKeyspace)
+			tableID, indexInfo, oldTableID, oldIndexInfo, startTS, concurrency)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -180,14 +156,12 @@ func buildTableRequest(
 	oldTableID int64,
 	startTS uint64,
 	concurrency uint,
-	oldKeyspace []byte,
-	newKeyspace []byte,
 ) (*kv.Request, error) {
 	var rule *tipb.ChecksumRewriteRule
 	if oldTable != nil {
 		rule = &tipb.ChecksumRewriteRule{
-			OldPrefix: append(append([]byte{}, oldKeyspace...), tablecodec.GenTableRecordPrefix(oldTableID)...),
-			NewPrefix: append(append([]byte{}, newKeyspace...), tablecodec.GenTableRecordPrefix(tableID)...),
+			OldPrefix: tablecodec.GenTableRecordPrefix(oldTableID),
+			NewPrefix: tablecodec.GenTableRecordPrefix(tableID),
 		}
 	}
 
@@ -221,14 +195,12 @@ func buildIndexRequest(
 	oldIndexInfo *model.IndexInfo,
 	startTS uint64,
 	concurrency uint,
-	oldKeyspace []byte,
-	newKeyspace []byte,
 ) (*kv.Request, error) {
 	var rule *tipb.ChecksumRewriteRule
 	if oldIndexInfo != nil {
 		rule = &tipb.ChecksumRewriteRule{
-			OldPrefix: append(append([]byte{}, oldKeyspace...), tablecodec.EncodeTableIndexPrefix(oldTableID, oldIndexInfo.ID)...),
-			NewPrefix: append(append([]byte{}, newKeyspace...), tablecodec.EncodeTableIndexPrefix(tableID, indexInfo.ID)...),
+			OldPrefix: tablecodec.EncodeTableIndexPrefix(oldTableID, oldIndexInfo.ID),
+			NewPrefix: tablecodec.EncodeTableIndexPrefix(tableID, indexInfo.ID),
 		}
 	}
 	checksum := &tipb.ChecksumRequest{

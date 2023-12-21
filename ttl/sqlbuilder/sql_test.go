@@ -26,12 +26,10 @@ import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/ttl/cache"
 	"github.com/pingcap/tidb/ttl/sqlbuilder"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/stretchr/testify/require"
 )
@@ -82,17 +80,17 @@ func TestEscape(t *testing.T) {
 		{
 			tp:  "select",
 			ds:  [][]types.Datum{d("key1'\";123`456")},
-			sql: "SELECT LOW_PRIORITY `col1\"';123``456` FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` > 'key1\\'\\\";123`456' AND `time\"';123``456` < FROM_UNIXTIME(0)",
+			sql: "SELECT LOW_PRIORITY `col1\"';123``456` FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` > 'key1\\'\\\";123`456' AND `time\"';123``456` < '1970-01-01 00:00:00'",
 		},
 		{
 			tp:  "delete",
 			ds:  [][]types.Datum{d("key2'\";123`456")},
-			sql: "DELETE LOW_PRIORITY FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` IN ('key2\\'\\\";123`456') AND `time\"';123``456` < FROM_UNIXTIME(0)",
+			sql: "DELETE LOW_PRIORITY FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` IN ('key2\\'\\\";123`456') AND `time\"';123``456` < '1970-01-01 00:00:00'",
 		},
 		{
 			tp:  "delete",
 			ds:  [][]types.Datum{d("key3'\";123`456"), d("key4'`\"")},
-			sql: "DELETE LOW_PRIORITY FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` IN ('key3\\'\\\";123`456', 'key4\\'`\\\"') AND `time\"';123``456` < FROM_UNIXTIME(0)",
+			sql: "DELETE LOW_PRIORITY FROM `testp;\"';123``456`.`tp\"';123``456` PARTITION(`p1\"';123``456`) WHERE `col1\"';123``456` IN ('key3\\'\\\";123`456', 'key4\\'`\\\"') AND `time\"';123``456` < '1970-01-01 00:00:00'",
 		},
 	}
 
@@ -115,8 +113,7 @@ func TestEscape(t *testing.T) {
 		var tbName *ast.TableName
 		var keyColumnName, timeColumnName string
 		var values []string
-		var timeFunc string
-		var timeTS int64
+		var timeString string
 		switch c.tp {
 		case "select":
 			stmt, ok := stmts[0].(*ast.SelectStmt)
@@ -128,8 +125,7 @@ func TestEscape(t *testing.T) {
 			values = []string{cond1.R.(ast.ValueExpr).GetValue().(string)}
 			cond2 := and.R.(*ast.BinaryOperationExpr)
 			timeColumnName = cond2.L.(*ast.ColumnNameExpr).Name.Name.O
-			timeFunc = cond2.R.(*ast.FuncCallExpr).FnName.L
-			timeTS = cond2.R.(*ast.FuncCallExpr).Args[0].(ast.ValueExpr).GetValue().(int64)
+			timeString = cond2.R.(ast.ValueExpr).GetValue().(string)
 		case "delete":
 			stmt, ok := stmts[0].(*ast.DeleteStmt)
 			require.True(t, ok)
@@ -144,8 +140,7 @@ func TestEscape(t *testing.T) {
 			}
 			cond2 := and.R.(*ast.BinaryOperationExpr)
 			timeColumnName = cond2.L.(*ast.ColumnNameExpr).Name.Name.O
-			timeFunc = cond2.R.(*ast.FuncCallExpr).FnName.L
-			timeTS = cond2.R.(*ast.FuncCallExpr).Args[0].(ast.ValueExpr).GetValue().(int64)
+			timeString = cond2.R.(ast.ValueExpr).GetValue().(string)
 		default:
 			require.FailNow(t, "invalid tp: %s", c.tp)
 		}
@@ -159,8 +154,7 @@ func TestEscape(t *testing.T) {
 		for i, row := range c.ds {
 			require.Equal(t, row[0].GetString(), values[i])
 		}
-		require.Equal(t, "from_unixtime", timeFunc)
-		require.Equal(t, int64(0), timeTS)
+		require.Equal(t, "1970-01-01 00:00:00", timeString)
 	}
 }
 
@@ -168,56 +162,40 @@ func TestFormatSQLDatum(t *testing.T) {
 	// invalid pk types contains the types that should not exist in primary keys of a TTL table.
 	// We do not need to check sqlbuilder.FormatSQLDatum for these types
 	invalidPKTypes := []struct {
-		types []string
-		err   *terror.Error
+		types  []string
+		errMsg string
 	}{
 		{
-			types: []string{"json"},
-			err:   dbterror.ErrJSONUsedAsKey,
+			types:  []string{"json"},
+			errMsg: "[ddl:3152]JSON column 'pk0' cannot be used in key specification.",
 		},
 		{
-			types: []string{"blob"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
+			types:  []string{"blob"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk0' used in key specification without a key length",
 		},
 		{
-			types: []string{"blob(8)"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
+			types:  []string{"blob(8)"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk0' used in key specification without a key length",
 		},
 		{
-			types: []string{"text"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
+			types:  []string{"text"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk0' used in key specification without a key length",
 		},
 		{
-			types: []string{"text(8)"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
+			types:  []string{"text(8)"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk0' used in key specification without a key length",
 		},
 		{
-			types: []string{"int", "json"},
-			err:   dbterror.ErrJSONUsedAsKey,
+			types:  []string{"int", "json"},
+			errMsg: "[ddl:3152]JSON column 'pk1' cannot be used in key specification.",
 		},
 		{
-			types: []string{"int", "blob"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
+			types:  []string{"int", "blob"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk1' used in key specification without a key length",
 		},
 		{
-			types: []string{"int", "text"},
-			err:   dbterror.ErrBlobKeyWithoutLength,
-		},
-		{
-			types: []string{"float"},
-			err:   dbterror.ErrUnsupportedPrimaryKeyTypeWithTTL,
-		},
-		{
-			types: []string{"double"},
-			err:   dbterror.ErrUnsupportedPrimaryKeyTypeWithTTL,
-		},
-		{
-			types: []string{"int", "float"},
-			err:   dbterror.ErrUnsupportedPrimaryKeyTypeWithTTL,
-		},
-		{
-			types: []string{"int", "double"},
-			err:   dbterror.ErrUnsupportedPrimaryKeyTypeWithTTL,
+			types:  []string{"int", "text"},
+			errMsg: "[ddl:1170]BLOB/TEXT column 'pk1' used in key specification without a key length",
 		},
 	}
 
@@ -343,7 +321,8 @@ func TestFormatSQLDatum(t *testing.T) {
 		sb.WriteString("primary key (")
 		sb.WriteString(strings.Join(cols, ", "))
 		sb.WriteString(")) TTL=`t` + INTERVAL 1 DAY")
-		tk.MustGetDBError(sb.String(), c.err)
+		err := tk.ExecToErr(sb.String())
+		require.Equal(t, c.errMsg, err.Error(), sb.String())
 	}
 
 	// create a table with n columns
@@ -465,14 +444,14 @@ func TestSQLBuilder(t *testing.T) {
 	shLoc, err := time.LoadLocation("Asia/Shanghai")
 	require.NoError(t, err)
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(shLoc)))
-	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < '1970-01-01 08:00:00'")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteSelect())
 	must(b.WriteCommonCondition(t1.KeyColumns, ">", d("a1")))
 	must(b.WriteCommonCondition(t1.KeyColumns, "<=", d("c3")))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 'a1' AND `id` <= 'c3' AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 'a1' AND `id` <= 'c3' AND `time` < '1970-01-01 00:00:00'")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteSelect())
@@ -502,7 +481,7 @@ func TestSQLBuilder(t *testing.T) {
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
 	must(b.WriteOrderBy(t1.KeyColumns, false))
 	must(b.WriteLimit(128))
-	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 'a1\\';\\'' AND `id` <= 'a2\\\"' AND `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 128")
+	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 'a1\\';\\'' AND `id` <= 'a2\\\"' AND `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 128")
 
 	b = sqlbuilder.NewSQLBuilder(t2)
 	must(b.WriteSelect())
@@ -515,7 +494,7 @@ func TestSQLBuilder(t *testing.T) {
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
 	must(b.WriteOrderBy(t2.KeyColumns, false))
 	must(b.WriteLimit(100))
-	mustBuild(b, "SELECT LOW_PRIORITY `a`, `b` FROM `test2`.`t2` WHERE (`a`, `b`) <= ('x2', 21) AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b` ASC LIMIT 100")
+	mustBuild(b, "SELECT LOW_PRIORITY `a`, `b` FROM `test2`.`t2` WHERE (`a`, `b`) <= ('x2', 21) AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b` ASC LIMIT 100")
 
 	b = sqlbuilder.NewSQLBuilder(t2)
 	must(b.WriteSelect())
@@ -524,7 +503,7 @@ func TestSQLBuilder(t *testing.T) {
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
 	must(b.WriteOrderBy(t2.KeyColumns, false))
 	must(b.WriteLimit(100))
-	mustBuild(b, "SELECT LOW_PRIORITY `a`, `b` FROM `test2`.`t2` WHERE `a` = 'x3' AND `b` > 31 AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b` ASC LIMIT 100")
+	mustBuild(b, "SELECT LOW_PRIORITY `a`, `b` FROM `test2`.`t2` WHERE `a` = 'x3' AND `b` > 31 AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b` ASC LIMIT 100")
 
 	// test build delete queries
 	b = sqlbuilder.NewSQLBuilder(t1)
@@ -536,46 +515,46 @@ func TestSQLBuilder(t *testing.T) {
 	must(b.WriteDelete())
 	must(b.WriteInCondition(t1.KeyColumns, d("a")))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN ('a') AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN ('a') AND `time` < '1970-01-01 00:00:00'")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteDelete())
 	must(b.WriteInCondition(t1.KeyColumns, d("a"), d("b")))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN ('a', 'b') AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN ('a', 'b') AND `time` < '1970-01-01 00:00:00'")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteDelete())
 	must(b.WriteInCondition(t2.KeyColumns, d("a", 1)))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
 	must(b.WriteLimit(100))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1)) AND `time` < FROM_UNIXTIME(0) LIMIT 100")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1)) AND `time` < '1970-01-01 00:00:00' LIMIT 100")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteDelete())
 	must(b.WriteInCondition(t2.KeyColumns, d("a", 1), d("b", 2)))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
 	must(b.WriteLimit(100))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1), ('b', 2)) AND `time` < FROM_UNIXTIME(0) LIMIT 100")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1), ('b', 2)) AND `time` < '1970-01-01 00:00:00' LIMIT 100")
 
 	b = sqlbuilder.NewSQLBuilder(t1)
 	must(b.WriteDelete())
 	must(b.WriteInCondition(t2.KeyColumns, d("a", 1), d("b", 2)))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1), ('b', 2)) AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE (`a`, `b`) IN (('a', 1), ('b', 2)) AND `time` < '1970-01-01 00:00:00'")
 
 	// test select partition table
 	b = sqlbuilder.NewSQLBuilder(tp)
 	must(b.WriteSelect())
 	must(b.WriteCommonCondition(tp.KeyColumns, ">", d("a1")))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `testp`.`tp` PARTITION(`p1`) WHERE `id` > 'a1' AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "SELECT LOW_PRIORITY `id` FROM `testp`.`tp` PARTITION(`p1`) WHERE `id` > 'a1' AND `time` < '1970-01-01 00:00:00'")
 
 	b = sqlbuilder.NewSQLBuilder(tp)
 	must(b.WriteDelete())
 	must(b.WriteInCondition(tp.KeyColumns, d("a"), d("b")))
 	must(b.WriteExpireCondition(time.UnixMilli(0).In(time.UTC)))
-	mustBuild(b, "DELETE LOW_PRIORITY FROM `testp`.`tp` PARTITION(`p1`) WHERE `id` IN ('a', 'b') AND `time` < FROM_UNIXTIME(0)")
+	mustBuild(b, "DELETE LOW_PRIORITY FROM `testp`.`tp` PARTITION(`p1`) WHERE `id` IN ('a', 'b') AND `time` < '1970-01-01 00:00:00'")
 }
 
 func TestScanQueryGenerator(t *testing.T) {
@@ -628,7 +607,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 3,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 3",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 3",
 				},
 				{
 					nil, 5, "",
@@ -641,7 +620,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 3,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 3",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 3",
 				},
 				{
 					[][]types.Datum{}, 5, "",
@@ -656,11 +635,11 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 3,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` >= 1 AND `id` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 3",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` >= 1 AND `id` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 3",
 				},
 				{
 					result(d(10), 3), 5,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 10 AND `id` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 10 AND `id` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 5",
 				},
 				{
 					result(d(15), 4), 5,
@@ -674,15 +653,15 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 3,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 3",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 3",
 				},
 				{
 					result(d(2), 3), 5,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 2 AND `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 2 AND `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 5",
 				},
 				{
 					result(d(4), 5), 6,
-					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 4 AND `time` < FROM_UNIXTIME(0) ORDER BY `id` ASC LIMIT 6",
+					"SELECT LOW_PRIORITY `id` FROM `test`.`t1` WHERE `id` > 4 AND `time` < '1970-01-01 00:00:00' ORDER BY `id` ASC LIMIT 6",
 				},
 				{
 					result(d(7), 5), 5, "",
@@ -695,7 +674,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					nil, 5, "",
@@ -708,7 +687,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					nil, 5, "",
@@ -721,7 +700,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					[][]types.Datum{}, 5, "",
@@ -734,7 +713,7 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0xf0}), 4), 5, "",
@@ -749,39 +728,39 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` >= x'0e' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` >= x'0e' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x1a}), 5), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x20}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "y", []byte{0x0a}), 5), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'y' AND `c` > x'0a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'y' AND `c` > x'0a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "y", []byte{0x11}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'y' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'y' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "z", []byte{0x02}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(3, "a", []byte{0x01}), 5), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 3 AND `b` = 'a' AND `c` > x'01' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 3 AND `b` = 'a' AND `c` > x'01' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(3, "a", []byte{0x11}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 3 AND `b` > 'a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 3 AND `b` > 'a' AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(3, "c", []byte{0x12}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 3 AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 3 AND (`a`, `b`, `c`) < (100, 'z', x'ff') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(5, "e", []byte{0xa1}), 4), 5, "",
@@ -796,19 +775,19 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` >= 1 AND `a` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` >= 1 AND `a` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x1a}), 5), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND `a` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND `a` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x20}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND `a` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND `a` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "y", []byte{0x0a}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND `a` < 100 AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND `a` < 100 AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 			},
 		},
@@ -820,19 +799,19 @@ func TestScanQueryGenerator(t *testing.T) {
 			path: [][]interface{}{
 				{
 					nil, 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` >= 'x' AND (`a`, `b`) < (100, 'z') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` >= 'x' AND (`a`, `b`) < (100, 'z') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x1a}), 5), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND (`a`, `b`) < (100, 'z') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` = 'x' AND `c` > x'1a' AND (`a`, `b`) < (100, 'z') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "x", []byte{0x20}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND (`a`, `b`) < (100, 'z') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` = 1 AND `b` > 'x' AND (`a`, `b`) < (100, 'z') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 				{
 					result(d(1, "y", []byte{0x0a}), 4), 5,
-					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND (`a`, `b`) < (100, 'z') AND `time` < FROM_UNIXTIME(0) ORDER BY `a`, `b`, `c` ASC LIMIT 5",
+					"SELECT LOW_PRIORITY `a`, `b`, `c` FROM `test2`.`t2` WHERE `a` > 1 AND (`a`, `b`) < (100, 'z') AND `time` < '1970-01-01 00:00:00' ORDER BY `a`, `b`, `c` ASC LIMIT 5",
 				},
 			},
 		},
@@ -902,25 +881,25 @@ func TestBuildDeleteSQL(t *testing.T) {
 			tbl:    t1,
 			expire: time.UnixMilli(0).In(time.UTC),
 			rows:   [][]types.Datum{d(1)},
-			sql:    "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN (1) AND `time` < FROM_UNIXTIME(0) LIMIT 1",
+			sql:    "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN (1) AND `time` < '1970-01-01 00:00:00' LIMIT 1",
 		},
 		{
 			tbl:    t1,
 			expire: time.UnixMilli(0).In(time.UTC),
 			rows:   [][]types.Datum{d(2), d(3), d(4)},
-			sql:    "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN (2, 3, 4) AND `time` < FROM_UNIXTIME(0) LIMIT 3",
+			sql:    "DELETE LOW_PRIORITY FROM `test`.`t1` WHERE `id` IN (2, 3, 4) AND `time` < '1970-01-01 00:00:00' LIMIT 3",
 		},
 		{
 			tbl:    t2,
 			expire: time.UnixMilli(0).In(time.UTC),
 			rows:   [][]types.Datum{d(1, "a")},
-			sql:    "DELETE LOW_PRIORITY FROM `test2`.`t2` WHERE (`a`, `b`) IN ((1, 'a')) AND `time` < FROM_UNIXTIME(0) LIMIT 1",
+			sql:    "DELETE LOW_PRIORITY FROM `test2`.`t2` WHERE (`a`, `b`) IN ((1, 'a')) AND `time` < '1970-01-01 00:00:00' LIMIT 1",
 		},
 		{
 			tbl:    t2,
 			expire: time.UnixMilli(0).In(time.UTC),
 			rows:   [][]types.Datum{d(1, "a"), d(2, "b")},
-			sql:    "DELETE LOW_PRIORITY FROM `test2`.`t2` WHERE (`a`, `b`) IN ((1, 'a'), (2, 'b')) AND `time` < FROM_UNIXTIME(0) LIMIT 2",
+			sql:    "DELETE LOW_PRIORITY FROM `test2`.`t2` WHERE (`a`, `b`) IN ((1, 'a'), (2, 'b')) AND `time` < '1970-01-01 00:00:00' LIMIT 2",
 		},
 	}
 

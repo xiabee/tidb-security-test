@@ -381,8 +381,8 @@ func FindFKInfoByName(fks []*FKInfo, name string) *FKInfo {
 }
 
 // FindIndexByColumns find IndexInfo in indices which is cover the specified columns.
-func FindIndexByColumns(tbInfo *TableInfo, indices []*IndexInfo, cols ...CIStr) *IndexInfo {
-	for _, index := range indices {
+func FindIndexByColumns(tbInfo *TableInfo, cols ...CIStr) *IndexInfo {
+	for _, index := range tbInfo.Indices {
 		if IsIndexPrefixCovered(tbInfo, index, cols...) {
 			return index
 		}
@@ -489,14 +489,29 @@ type TableInfo struct {
 	// 1 for the clustered index created > 5.0.0 RC.
 	CommonHandleVersion uint16 `json:"common_handle_version"`
 
-	Comment         string `json:"comment"`
-	AutoIncID       int64  `json:"auto_inc_id"`
-	AutoIdCache     int64  `json:"auto_id_cache"` //nolint:revive
-	AutoRandID      int64  `json:"auto_rand_id"`
-	MaxColumnID     int64  `json:"max_col_id"`
-	MaxIndexID      int64  `json:"max_idx_id"`
-	MaxForeignKeyID int64  `json:"max_fk_id"`
-	MaxConstraintID int64  `json:"max_cst_id"`
+	Comment   string `json:"comment"`
+	AutoIncID int64  `json:"auto_inc_id"`
+
+	// Only used by BR when:
+	// 1. SepAutoInc() is true
+	// 2. The table is nonclustered and has auto_increment column.
+	// In that case, both auto_increment_id and tidb_rowid need to be backup & recover.
+	// See also https://github.com/pingcap/tidb/issues/46093
+	//
+	// It should have been named TiDBRowID, but for historial reasons, we do not use separate meta key for _tidb_rowid and auto_increment_id,
+	// and field `AutoIncID` is used to serve both _tidb_rowid and auto_increment_id.
+	// If we introduce a TiDBRowID here, it could make furthur misunderstanding:
+	//	in most cases, AutoIncID is _tidb_rowid and TiDBRowID is null
+	//      but in some cases, AutoIncID is auto_increment_id and TiDBRowID is _tidb_rowid
+	// So let's just use another name AutoIncIDExtra to avoid misconception.
+	AutoIncIDExtra int64 `json:"auto_inc_id_extra,omitempty"`
+
+	AutoIdCache     int64 `json:"auto_id_cache"` //nolint:revive
+	AutoRandID      int64 `json:"auto_rand_id"`
+	MaxColumnID     int64 `json:"max_col_id"`
+	MaxIndexID      int64 `json:"max_idx_id"`
+	MaxForeignKeyID int64 `json:"max_fk_id"`
+	MaxConstraintID int64 `json:"max_cst_id"`
 	// UpdateTS is used to record the timestamp of updating the table's schema information.
 	// These changing schema operations don't include 'truncate table' and 'rename table'.
 	UpdateTS uint64 `json:"update_timestamp"`
@@ -1170,9 +1185,10 @@ func (p PartitionType) String() string {
 
 // ExchangePartitionInfo provides exchange partition info.
 type ExchangePartitionInfo struct {
-	ExchangePartitionFlag  bool  `json:"exchange_partition_flag"`
 	ExchangePartitionID    int64 `json:"exchange_partition_id"`
 	ExchangePartitionDefID int64 `json:"exchange_partition_def_id"`
+	// Deprecated, not used
+	XXXExchangePartitionFlag bool `json:"exchange_partition_flag"`
 }
 
 // PartitionInfo provides table partition info.
@@ -1327,15 +1343,15 @@ func (ci *PartitionDefinition) MemoryUsage() (sum int64) {
 }
 
 // FindPartitionDefinitionByName finds PartitionDefinition by name.
-func (t *TableInfo) FindPartitionDefinitionByName(partitionDefinitionName string) *PartitionDefinition {
+func (pi *PartitionInfo) FindPartitionDefinitionByName(partitionDefinitionName string) int {
 	lowConstrName := strings.ToLower(partitionDefinitionName)
-	definitions := t.Partition.Definitions
+	definitions := pi.Definitions
 	for i := range definitions {
 		if definitions[i].Name.L == lowConstrName {
-			return &t.Partition.Definitions[i]
+			return i
 		}
 	}
-	return nil
+	return -1
 }
 
 // IndexColumn provides index column info.
@@ -1419,7 +1435,6 @@ type IndexInfo struct {
 	Primary       bool           `json:"is_primary"`   // Whether the index is primary key.
 	Invisible     bool           `json:"is_invisible"` // Whether the index is invisible.
 	Global        bool           `json:"is_global"`    // Whether the index is global.
-	MVIndex       bool           `json:"mv_index"`     // Whether the index is multivalued index.
 }
 
 // Clone clones IndexInfo.
@@ -1761,8 +1776,6 @@ type TTLInfo struct {
 	// `IntervalTimeUnit` is actually ast.TimeUnitType. Use `int` to avoid cycle dependency
 	IntervalTimeUnit int  `json:"interval_time_unit"`
 	Enable           bool `json:"enable"`
-	// JobInterval is the interval between two TTL scan jobs.
-	JobInterval string `json:"job_interval"`
 }
 
 // Clone clones TTLInfo
@@ -1836,71 +1849,6 @@ func (p *PlacementSettings) String() string {
 // Clone clones the placement settings.
 func (p *PlacementSettings) Clone() *PlacementSettings {
 	cloned := *p
-	return &cloned
-}
-
-// ResourceGroupRefInfo is the struct to refer the resource group.
-type ResourceGroupRefInfo struct {
-	ID   int64 `json:"id"`
-	Name CIStr `json:"name"`
-}
-
-// ResourceGroupSettings is the settings of the resource group
-type ResourceGroupSettings struct {
-	RURate           uint64 `json:"ru_per_sec"`
-	CPULimiter       string `json:"cpu_limit"`
-	IOReadBandwidth  string `json:"io_read_bandwidth"`
-	IOWriteBandwidth string `json:"io_write_bandwidth"`
-	BurstLimit       int64  `json:"burst_limit"`
-}
-
-func (p *ResourceGroupSettings) String() string {
-	sb := new(strings.Builder)
-	if p.RURate != 0 {
-		writeSettingIntegerToBuilder(sb, "RU_PER_SEC", p.RURate)
-	}
-	if len(p.CPULimiter) > 0 {
-		writeSettingStringToBuilder(sb, "CPU", p.CPULimiter)
-	}
-	if len(p.IOReadBandwidth) > 0 {
-		writeSettingStringToBuilder(sb, "IO_READ_BANDWIDTH", p.IOReadBandwidth)
-	}
-	if len(p.IOWriteBandwidth) > 0 {
-		writeSettingStringToBuilder(sb, "IO_WRITE_BANDWIDTH", p.IOWriteBandwidth)
-	}
-	// Once burst limit is negative, meaning allow burst with unlimit.
-	if p.BurstLimit < 0 {
-		writeSettingItemToBuilder(sb, "BURSTABLE")
-	}
-	return sb.String()
-}
-
-// Adjust adjusts the resource group settings.
-func (p *ResourceGroupSettings) Adjust() {
-	// Curretly we only support ru_per_sec sytanx, so BurstLimit(capicity) is always same as ru_per_sec.
-	if p.BurstLimit == 0 {
-		p.BurstLimit = int64(p.RURate)
-	}
-}
-
-// Clone clones the resource group settings.
-func (p *ResourceGroupSettings) Clone() *ResourceGroupSettings {
-	cloned := *p
-	return &cloned
-}
-
-// ResourceGroupInfo is the struct to store the resource group.
-type ResourceGroupInfo struct {
-	*ResourceGroupSettings
-	ID    int64       `json:"id"`
-	Name  CIStr       `json:"name"`
-	State SchemaState `json:"state"`
-}
-
-// Clone clones the ResourceGroupInfo.
-func (p *ResourceGroupInfo) Clone() *ResourceGroupInfo {
-	cloned := *p
-	cloned.ResourceGroupSettings = p.ResourceGroupSettings.Clone()
 	return &cloned
 }
 

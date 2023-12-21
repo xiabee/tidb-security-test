@@ -98,6 +98,7 @@ func (s *Scanner) reset(sql string) {
 	s.stmtStartPos = 0
 	s.inBangComment = false
 	s.lastKeyword = 0
+	s.identifierDot = false
 }
 
 func (s *Scanner) stmtText() string {
@@ -252,17 +253,13 @@ func (s *Scanner) Lex(v *yySymType) int {
 	if tok == not && s.sqlMode.HasHighNotPrecedenceMode() {
 		return not2
 	}
-	if (tok == as || tok == member) && s.getNextToken() == of {
+	if tok == as && s.getNextToken() == of {
 		_, pos, lit = s.scan()
 		v.ident = fmt.Sprintf("%s %s", v.ident, lit)
+		s.lastKeyword = asof
 		s.lastScanOffset = pos.Offset
 		v.offset = pos.Offset
-		if tok == as {
-			s.lastKeyword = asof
-			return asof
-		}
-		s.lastKeyword = memberof
-		return memberof
+		return asof
 	}
 	if tok == to {
 		tok1, tok2 := s.getNextTwoTokens()
@@ -273,6 +270,15 @@ func (s *Scanner) Lex(v *yySymType) int {
 			s.lastScanOffset = pos.Offset
 			v.offset = pos.Offset
 			return toTimestamp
+		}
+
+		if tok1 == tsoType && tok2 == intLit {
+			_, pos, lit = s.scan()
+			v.ident = fmt.Sprintf("%s %s", v.ident, lit)
+			s.lastKeyword = toTSO
+			s.lastScanOffset = pos.Offset
+			v.offset = pos.Offset
+			return toTSO
 		}
 	}
 

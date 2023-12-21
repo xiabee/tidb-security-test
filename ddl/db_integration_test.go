@@ -28,7 +28,7 @@ import (
 	"github.com/pingcap/errors"
 	_ "github.com/pingcap/tidb/autoid_service"
 	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/ddl/internal/callback"
+	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/schematracker"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/errno"
@@ -687,7 +687,7 @@ func TestUpdateMultipleTable(t *testing.T) {
 	tk2.MustExec("use test")
 
 	d := dom.DDL()
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	onJobUpdatedExportedFunc := func(job *model.Job) {
 		if job.SchemaState == model.StateWriteOnly {
 			tk2.MustExec("update t1, t2 set t1.c1 = 8, t2.c2 = 10 where t1.c2 = t2.c1")
@@ -2374,49 +2374,11 @@ func TestSqlFunctionsInGeneratedColumns(t *testing.T) {
 	tk.MustExec("create table t (a int, b int as ((a)))")
 }
 
-func TestSchemaNameAndTableNameInGeneratedExpr(t *testing.T) {
-	store := testkit.CreateMockStore(t, mockstore.WithDDLChecker())
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("create database if not exists test")
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-
-	tk.MustExec("create table t(a int, b int as (lower(test.t.a)))")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n" +
-		"  `a` int(11) DEFAULT NULL,\n" +
-		"  `b` int(11) GENERATED ALWAYS AS (lower(`a`)) VIRTUAL\n" +
-		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-
-	tk.MustExec("drop table t")
-	tk.MustExec("create table t(a int)")
-	tk.MustExec("alter table t add column b int as (lower(test.t.a))")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n" +
-		"  `a` int(11) DEFAULT NULL,\n" +
-		"  `b` int(11) GENERATED ALWAYS AS (lower(`a`)) VIRTUAL\n" +
-		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
-
-	tk.MustGetErrCode("alter table t add index idx((lower(test.t1.a)))", errno.ErrBadField)
-
-	tk.MustExec("drop table t")
-	tk.MustGetErrCode("create table t(a int, b int as (lower(test1.t.a)))", errno.ErrWrongDBName)
-
-	tk.MustExec("create table t(a int)")
-	tk.MustGetErrCode("alter table t add column b int as (lower(test.t1.a))", errno.ErrWrongTableName)
-
-	tk.MustExec("alter table t add column c int")
-	tk.MustGetErrCode("alter table t modify column c int as (test.t1.a + 1) stored", errno.ErrWrongTableName)
-
-	tk.MustExec("alter table t add column d int as (lower(test.T.a))")
-	tk.MustExec("alter table t add column e int as (lower(Test.t.a))")
-}
-
 func TestParserIssue284(t *testing.T) {
 	store := testkit.CreateMockStore(t, mockstore.WithDDLChecker())
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
-	tk.MustExec("set @@foreign_key_checks=0")
 	tk.MustExec("create table test.t_parser_issue_284(c1 int not null primary key)")
 	_, err := tk.Exec("create table test.t_parser_issue_284_2(id int not null primary key, c1 int not null, constraint foreign key (c1) references t_parser_issue_284(c1))")
 	require.NoError(t, err)
@@ -3178,7 +3140,7 @@ func TestAutoIncrementForceAutoIDCache(t *testing.T) {
 		"t CREATE TABLE `t` (\n" +
 			"  `a` int(11) NOT NULL AUTO_INCREMENT,\n" +
 			"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */\n" +
-			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![auto_id_cache] AUTO_ID_CACHE=1 */"))
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=201 /*T![auto_id_cache] AUTO_ID_CACHE=1 */"))
 	tk.MustExec("alter table t auto_increment=100;")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 Can't reset AUTO_INCREMENT to 100 without FORCE option, using 201 instead"))
 	tk.MustExec("insert into t values ()")
@@ -3187,7 +3149,7 @@ func TestAutoIncrementForceAutoIDCache(t *testing.T) {
 		"t CREATE TABLE `t` (\n" +
 			"  `a` int(11) NOT NULL AUTO_INCREMENT,\n" +
 			"  PRIMARY KEY (`a`) /*T![clustered_index] CLUSTERED */\n" +
-			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![auto_id_cache] AUTO_ID_CACHE=1 */"))
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin AUTO_INCREMENT=212 /*T![auto_id_cache] AUTO_ID_CACHE=1 */"))
 	tk.MustExec("drop table t")
 }
 

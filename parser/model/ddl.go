@@ -99,11 +99,9 @@ const (
 	ActionFlashbackCluster              ActionType = 62
 	ActionRecoverSchema                 ActionType = 63
 	ActionReorganizePartition           ActionType = 64
-	ActionAlterTTLInfo                  ActionType = 65
-	ActionAlterTTLRemove                ActionType = 67
-	ActionCreateResourceGroup           ActionType = 68
-	ActionAlterResourceGroup            ActionType = 69
-	ActionDropResourceGroup             ActionType = 70
+
+	ActionAlterTTLInfo   ActionType = 65
+	ActionAlterTTLRemove ActionType = 67
 )
 
 var actionMap = map[ActionType]string{
@@ -169,10 +167,6 @@ var actionMap = map[ActionType]string{
 	ActionReorganizePartition:           "alter table reorganize partition",
 	ActionAlterTTLInfo:                  "alter table ttl",
 	ActionAlterTTLRemove:                "alter table no_ttl",
-	ActionCreateResourceGroup:           "create resource group",
-	ActionAlterResourceGroup:            "alter resource group",
-	ActionDropResourceGroup:             "drop resource group",
-
 	// `ActionAlterTableAlterPartition` is removed and will never be used.
 	// Just left a tombstone here for compatibility.
 	__DEPRECATED_ActionAlterTableAlterPartition: "alter partition",
@@ -237,7 +231,6 @@ type DDLReorgMeta struct {
 	WarningsCount map[errors.ErrorID]int64         `json:"warnings_count"`
 	Location      *TimeZoneLocation                `json:"location"`
 	ReorgTp       ReorgType                        `json:"reorg_tp"`
-	IsDistReorg   bool                             `json:"is_dist_reorg"`
 }
 
 // ReorgType indicates which process is used for the data reorganization.
@@ -323,17 +316,10 @@ type MultiSchemaInfo struct {
 	AddIndexes    []CIStr `json:"-"`
 	DropIndexes   []CIStr `json:"-"`
 	AlterIndexes  []CIStr `json:"-"`
-
-	AddForeignKeys []AddForeignKeyInfo `json:"-"`
+	ForeignKeys   []CIStr `json:"-"`
 
 	RelativeColumns []CIStr `json:"-"`
 	PositionColumns []CIStr `json:"-"`
-}
-
-// AddForeignKeyInfo contains foreign key information.
-type AddForeignKeyInfo struct {
-	Name CIStr
-	Cols []CIStr
 }
 
 // NewMultiSchemaInfo new a MultiSchemaInfo.
@@ -357,7 +343,6 @@ type SubJob struct {
 	Warning     *terror.Error   `json:"warning"`
 	CtxVars     []interface{}   `json:"-"`
 	SchemaVer   int64           `json:"schema_version"`
-	ReorgTp     ReorgType       `json:"reorg_tp"`
 }
 
 // IsNormal returns true if the sub-job is normally running.
@@ -407,6 +392,8 @@ func (sub *SubJob) ToProxyJob(parentJob *Job) Job {
 		MultiSchemaInfo: &MultiSchemaInfo{Revertible: sub.Revertible},
 		Priority:        parentJob.Priority,
 		SeqNum:          parentJob.SeqNum,
+		Charset:         parentJob.Charset,
+		Collate:         parentJob.Collate,
 	}
 }
 
@@ -420,49 +407,6 @@ func (sub *SubJob) FromProxyJob(proxyJob *Job, ver int64) {
 	sub.Warning = proxyJob.Warning
 	sub.RowCount = proxyJob.RowCount
 	sub.SchemaVer = ver
-	sub.ReorgTp = proxyJob.ReorgMeta.ReorgTp
-}
-
-// JobMeta is meta info of Job.
-type JobMeta struct {
-	SchemaID int64 `json:"schema_id"`
-	TableID  int64 `json:"table_id"`
-	// Type is the DDL job's type.
-	Type ActionType `json:"job_type"`
-	// Query is the DDL job's SQL string.
-	Query string `json:"query"`
-	// Priority is only used to set the operation priority of adding indices.
-	Priority int `json:"priority"`
-}
-
-// BackfillMeta is meta info of the backfill job.
-type BackfillMeta struct {
-	IsUnique   bool          `json:"is_unique"`
-	EndInclude bool          `json:"end_include"`
-	Error      *terror.Error `json:"err"`
-
-	SQLMode       mysql.SQLMode                    `json:"sql_mode"`
-	Warnings      map[errors.ErrorID]*terror.Error `json:"warnings"`
-	WarningsCount map[errors.ErrorID]int64         `json:"warnings_count"`
-	Location      *TimeZoneLocation                `json:"location"`
-	ReorgTp       ReorgType                        `json:"reorg_tp"`
-	RowCount      int64                            `json:"row_count"`
-	StartKey      []byte                           `json:"start_key"`
-	EndKey        []byte                           `json:"end_key"`
-	CurrKey       []byte                           `json:"curr_key"`
-	*JobMeta      `json:"job_meta"`
-}
-
-// Encode encodes BackfillMeta with json format.
-func (bm *BackfillMeta) Encode() ([]byte, error) {
-	b, err := json.Marshal(bm)
-	return b, errors.Trace(err)
-}
-
-// Decode decodes BackfillMeta from the json buffer.
-func (bm *BackfillMeta) Decode(b []byte) error {
-	err := json.Unmarshal(b, bm)
-	return errors.Trace(err)
 }
 
 // Job is for a DDL operation.
@@ -516,6 +460,11 @@ type Job struct {
 
 	// SeqNum is the total order in all DDLs, it's used to identify the order of DDL.
 	SeqNum uint64 `json:"seq_num"`
+
+	// Charset is the charset when the DDL Job is created.
+	Charset string `json:"charset"`
+	// Collate is the collation the DDL Job is created.
+	Collate string `json:"collate"`
 }
 
 // FinishTableJob is called when a job is finished.
@@ -600,18 +549,13 @@ func (job *Job) GetRowCount() int64 {
 
 // SetWarnings sets the warnings of rows handled.
 func (job *Job) SetWarnings(warnings map[errors.ErrorID]*terror.Error, warningsCount map[errors.ErrorID]int64) {
-	job.Mu.Lock()
 	job.ReorgMeta.Warnings = warnings
 	job.ReorgMeta.WarningsCount = warningsCount
-	job.Mu.Unlock()
 }
 
 // GetWarnings gets the warnings of the rows handled.
 func (job *Job) GetWarnings() (map[errors.ErrorID]*terror.Error, map[errors.ErrorID]int64) {
-	job.Mu.Lock()
-	w, wc := job.ReorgMeta.Warnings, job.ReorgMeta.WarningsCount
-	job.Mu.Unlock()
-	return w, wc
+	return job.ReorgMeta.Warnings, job.ReorgMeta.WarningsCount
 }
 
 // Encode encodes job with json format.
@@ -679,8 +623,7 @@ func (job *Job) String() string {
 	ret := fmt.Sprintf("ID:%d, Type:%s, State:%s, SchemaState:%s, SchemaID:%d, TableID:%d, RowCount:%d, ArgLen:%d, start time: %v, Err:%v, ErrCount:%d, SnapshotVersion:%v",
 		job.ID, job.Type, job.State, job.SchemaState, job.SchemaID, job.TableID, rowCount, len(job.Args), TSConvert2Time(job.StartTS), job.Error, job.ErrorCount, job.SnapshotVer)
 	if job.ReorgMeta != nil {
-		warnings, _ := job.GetWarnings()
-		ret += fmt.Sprintf(", UniqueWarnings:%d", len(warnings))
+		ret += fmt.Sprintf(", UniqueWarnings:%d", len(job.ReorgMeta.Warnings))
 	}
 	if job.Type != ActionMultiSchemaChange && job.MultiSchemaInfo != nil {
 		ret += fmt.Sprintf(", Multi-Schema Change:true, Revertible:%v", job.MultiSchemaInfo.Revertible)
@@ -892,7 +835,7 @@ func (job *Job) IsRollbackable() bool {
 		ActionDropForeignKey, ActionDropTablePartition:
 		return job.SchemaState == StatePublic
 	case ActionRebaseAutoID, ActionShardRowID,
-		ActionTruncateTable, ActionAddForeignKey, ActionRenameTable,
+		ActionTruncateTable, ActionAddForeignKey, ActionRenameTable, ActionRenameTables,
 		ActionModifyTableCharsetAndCollate, ActionTruncateTablePartition,
 		ActionModifySchemaCharsetAndCollate, ActionRepairTable,
 		ActionModifyTableAutoIdCache, ActionModifySchemaDefaultPlacement:
@@ -955,30 +898,6 @@ func (s JobState) String() string {
 	}
 }
 
-// StrToJobState converts string to JobState.
-func StrToJobState(s string) JobState {
-	switch s {
-	case "running":
-		return JobStateRunning
-	case "rollingback":
-		return JobStateRollingback
-	case "rollback done":
-		return JobStateRollbackDone
-	case "done":
-		return JobStateDone
-	case "cancelled":
-		return JobStateCancelled
-	case "cancelling":
-		return JobStateCancelling
-	case "synced":
-		return JobStateSynced
-	case "queueing":
-		return JobStateQueueing
-	default:
-		return JobStateNone
-	}
-}
-
 // SchemaDiff contains the schema modification at a particular schema version.
 // It is used to reduce schema reload cost.
 type SchemaDiff struct {
@@ -991,8 +910,6 @@ type SchemaDiff struct {
 	OldTableID int64 `json:"old_table_id"`
 	// OldSchemaID is the schema ID before rename table, only used by rename table DDL.
 	OldSchemaID int64 `json:"old_schema_id"`
-	// RegenerateSchemaMap means whether to rebuild the schema map when applying to the schema diff.
-	RegenerateSchemaMap bool `json:"regenerate_schema_map"`
 
 	AffectedOpts []*AffectedOption `json:"affected_options"`
 }

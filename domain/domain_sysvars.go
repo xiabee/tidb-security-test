@@ -37,9 +37,6 @@ func (do *Domain) initDomainSysVars() {
 
 	variable.SetExternalTimestamp = do.setExternalTimestamp
 	variable.GetExternalTimestamp = do.getExternalTimestamp
-
-	setGlobalResourceControlFunc := do.setGlobalResourceControl
-	variable.SetGlobalResourceControl.Store(&setGlobalResourceControlFunc)
 }
 
 // setStatsCacheCapacity sets statsCache cap
@@ -67,14 +64,6 @@ func (do *Domain) setPDClientDynamicOption(name, sVal string) {
 			break
 		}
 		variable.EnableTSOFollowerProxy.Store(val)
-	}
-}
-
-func (do *Domain) setGlobalResourceControl(enable bool) {
-	if enable {
-		variable.EnableGlobalResourceControlFunc()
-	} else {
-		variable.DisableGlobalResourceControlFunc()
 	}
 }
 

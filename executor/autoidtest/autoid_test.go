@@ -735,7 +735,8 @@ func TestAlterTableAutoIDCache(t *testing.T) {
 
 	// Note that auto_id_cache=1 use a different implementation, switch between them is not allowed.
 	// TODO: relax this restriction and update the test case.
-	tk.MustExecToErr("alter table t_473 auto_id_cache = 1")
+	_, err = tk.Exec("alter table t_473 auto_id_cache = 1")
+	require.Error(t, err)
 }
 
 func TestMockAutoIDServiceError(t *testing.T) {

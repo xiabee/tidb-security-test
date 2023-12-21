@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -20,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/golang/mock/gomock"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/tidb/br/pkg/mock"
 	. "github.com/pingcap/tidb/br/pkg/storage"
@@ -144,7 +146,6 @@ func TestApplyUpdate(t *testing.T) {
 		if test.setEnv {
 			require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
 			require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
-			require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
 		}
 		u, err := ParseBackend("s3://bucket/prefix/", &BackendOptions{S3: test.options})
 		require.NoError(t, err)
@@ -211,6 +212,7 @@ func TestApplyUpdate(t *testing.T) {
 				ForcePathStyle: true,
 				Bucket:         "bucket",
 				Prefix:         "prefix",
+				Provider:       "ceph",
 			},
 		},
 		{
@@ -225,6 +227,7 @@ func TestApplyUpdate(t *testing.T) {
 				ForcePathStyle: false,
 				Bucket:         "bucket",
 				Prefix:         "prefix",
+				Provider:       "alibaba",
 			},
 		},
 		{
@@ -239,6 +242,7 @@ func TestApplyUpdate(t *testing.T) {
 				ForcePathStyle: false,
 				Bucket:         "bucket",
 				Prefix:         "prefix",
+				Provider:       "netease",
 			},
 		},
 		{
@@ -261,13 +265,11 @@ func TestApplyUpdate(t *testing.T) {
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
-				SessionToken:    "ef",
 			},
 			s3: &backuppb.S3{
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
-				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 			},
@@ -288,6 +290,8 @@ func TestS3Storage(t *testing.T) {
 		sendCredential bool
 	}
 
+	require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
+	require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
 	s := createGetBucketRegionServer("us-west-2", 200, true)
 	defer s.Close()
 
@@ -357,7 +361,6 @@ func TestS3Storage(t *testing.T) {
 				Endpoint:        s.URL,
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
-				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 				ForcePathStyle:  true,
@@ -411,7 +414,15 @@ func TestS3Storage(t *testing.T) {
 }
 
 func TestS3URI(t *testing.T) {
-	backend, err := ParseBackend("s3://bucket/prefix/", nil)
+	accessKey := "ab"
+	secretAccessKey := "cd"
+	options := &BackendOptions{
+		S3: S3BackendOptions{
+			AccessKey:       accessKey,
+			SecretAccessKey: secretAccessKey,
+		},
+	}
+	backend, err := ParseBackend("s3://bucket/prefix/", options)
 	require.NoError(t, err)
 	storage, err := New(context.Background(), backend, &ExternalStorageOptions{})
 	require.NoError(t, err)
@@ -464,6 +475,24 @@ func TestWriteNoError(t *testing.T) {
 
 	err := s.storage.WriteFile(ctx, "file", []byte("test"))
 	require.NoError(t, err)
+}
+
+func TestMultiUploadErrorNotOverwritten(t *testing.T) {
+	s := createS3Suite(t)
+	ctx := aws.BackgroundContext()
+
+	s.s3.EXPECT().
+		CreateMultipartUploadWithContext(ctx, gomock.Any(), gomock.Any()).
+		Return(nil, errors.New("mock error"))
+
+	w, err := s.storage.Create(ctx, "file", &WriterOption{Concurrency: 2})
+	require.NoError(t, err)
+	// data should be larger than 5MB to trigger CreateMultipartUploadWithContext path
+	data := make([]byte, 5*1024*1024+6716)
+	n, err := w.Write(ctx, data)
+	require.NoError(t, err)
+	require.Equal(t, 5*1024*1024+6716, n)
+	require.ErrorContains(t, w.Close(ctx), "mock error")
 }
 
 // TestReadNoError ensures the ReadFile API issues a GetObject request and correctly
@@ -1116,12 +1145,10 @@ func TestWalkDirWithEmptyPrefix(t *testing.T) {
 func TestSendCreds(t *testing.T) {
 	accessKey := "ab"
 	secretAccessKey := "cd"
-	sessionToken := "ef"
 	backendOpt := BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
-			SessionToken:    sessionToken,
 		},
 	}
 	backend, err := ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1134,15 +1161,12 @@ func TestSendCreds(t *testing.T) {
 	sentAccessKey := backend.GetS3().AccessKey
 	require.Equal(t, accessKey, sentAccessKey)
 	sentSecretAccessKey := backend.GetS3().SecretAccessKey
-	require.Equal(t, secretAccessKey, sentSecretAccessKey)
-	sentSessionToken := backend.GetS3().SessionToken
-	require.Equal(t, sessionToken, sentSessionToken)
+	require.Equal(t, sentSecretAccessKey, sentSecretAccessKey)
 
 	backendOpt = BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
-			SessionToken:    sessionToken,
 		},
 	}
 	backend, err = ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1156,8 +1180,6 @@ func TestSendCreds(t *testing.T) {
 	require.Equal(t, "", sentAccessKey)
 	sentSecretAccessKey = backend.GetS3().SecretAccessKey
 	require.Equal(t, "", sentSecretAccessKey)
-	sentSessionToken = backend.GetS3().SessionToken
-	require.Equal(t, "", sentSessionToken)
 }
 
 func TestObjectLock(t *testing.T) {
@@ -1203,4 +1225,121 @@ func TestObjectLock(t *testing.T) {
 		}, nil,
 	)
 	require.Equal(t, true, s.storage.IsObjectLockEnabled())
+}
+
+func TestS3StorageBucketRegion(t *testing.T) {
+	type testcase struct {
+		name         string
+		expectRegion string
+		s3           *backuppb.S3
+	}
+
+	require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
+	require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
+	require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
+
+	cases := []testcase{
+		{
+			"empty region from aws",
+			"us-east-1",
+			&backuppb.S3{
+				Region:   "",
+				Bucket:   "bucket",
+				Prefix:   "prefix",
+				Provider: "aws",
+			},
+		},
+		{
+			"region from different provider",
+			"sdg",
+			&backuppb.S3{
+				Region:   "sdg",
+				Bucket:   "bucket",
+				Prefix:   "prefix",
+				Provider: "ovh",
+			},
+		},
+		{
+			"empty region from different provider",
+			"",
+			&backuppb.S3{
+				Region:   "",
+				Bucket:   "bucket",
+				Prefix:   "prefix",
+				Provider: "ovh",
+			},
+		},
+		{
+			"region from aws",
+			"us-west-2",
+			&backuppb.S3{
+				Region:   "us-west-2",
+				Bucket:   "bucket",
+				Prefix:   "prefix",
+				Provider: "aws",
+			},
+		},
+	}
+	for _, ca := range cases {
+		func(name string, region string, s3 *backuppb.S3) {
+			s := createGetBucketRegionServer(region, 200, true)
+			defer s.Close()
+			s3.ForcePathStyle = true
+			s3.Endpoint = s.URL
+
+			t.Log(name)
+			es, err := New(context.Background(),
+				&backuppb.StorageBackend{Backend: &backuppb.StorageBackend_S3{S3: s3}},
+				&ExternalStorageOptions{})
+			require.NoError(t, err)
+			ss, ok := es.(*S3Storage)
+			require.True(t, ok)
+			require.Equal(t, region, ss.GetOptions().Region)
+		}(ca.name, ca.expectRegion, ca.s3)
+	}
+}
+
+func TestRetryError(t *testing.T) {
+	var count int32 = 0
+	var errString string = "read tcp *.*.*.*:*->*.*.*.*:*: read: connection reset by peer"
+	var lock sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			var curCnt int32
+			t.Log(r.URL)
+			lock.Lock()
+			count += 1
+			curCnt = count
+			lock.Unlock()
+			if curCnt < 2 {
+				// write an cannot-retry error, but we modify the error to specific error, so client would retry.
+				w.WriteHeader(403)
+				return
+			}
+		}
+
+		w.WriteHeader(200)
+	}))
+
+	defer server.Close()
+	t.Log(server.URL)
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/storage/replace-error-to-connection-reset-by-peer", "return(true)"))
+	defer func() {
+		failpoint.Disable("github.com/pingcap/tidb/br/pkg/storage/replace-error-to-connection-reset-by-peer")
+	}()
+
+	ctx := context.Background()
+	s, err := NewS3Storage(&backuppb.S3{
+		Endpoint:        server.URL,
+		Bucket:          "test",
+		Prefix:          "retry",
+		AccessKey:       "none",
+		SecretAccessKey: "none",
+		ForcePathStyle:  true,
+	}, &ExternalStorageOptions{})
+	require.NoError(t, err)
+	err = s.WriteFile(ctx, "reset", []byte(errString))
+	require.NoError(t, err)
+	require.Equal(t, count, int32(2))
 }

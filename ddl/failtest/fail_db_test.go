@@ -135,8 +135,6 @@ func TestHalfwayCancelOperations(t *testing.T) {
 	tk.MustExec("insert into pt values(1), (3), (5)")
 	tk.MustExec("create table nt(a int)")
 	tk.MustExec("insert into nt values(7)")
-	tk.MustExec("set @@tidb_enable_exchange_partition=1")
-	defer tk.MustExec("set @@tidb_enable_exchange_partition=0")
 	err = tk.ExecToErr("alter table pt exchange partition p1 with table nt")
 	require.Error(t, err)
 
@@ -333,10 +331,6 @@ func TestRunDDLJobPanicDisableClusteredIndex(t *testing.T) {
 }
 
 func testAddIndexWorkerNum(t *testing.T, s *failedSuite, test func(*testkit.TestKit)) {
-	if variable.DDLEnableDistributeReorg.Load() {
-		t.Skip("dist reorg didn't support checkBackfillWorkerNum, skip this test")
-	}
-
 	tk := testkit.NewTestKit(t, s.store)
 	tk.MustExec("create database if not exists test_db")
 	tk.MustExec("use test_db")

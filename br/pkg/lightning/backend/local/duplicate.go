@@ -387,7 +387,6 @@ type DuplicateManager struct {
 	tableName   string
 	splitCli    split.SplitClient
 	tikvCli     *tikv.KVStore
-	tikvCodec   tikv.Codec
 	errorMgr    *errormanager.ErrorManager
 	decoder     *kv.TableKVDecoder
 	logger      log.Logger
@@ -402,7 +401,6 @@ func NewDuplicateManager(
 	tableName string,
 	splitCli split.SplitClient,
 	tikvCli *tikv.KVStore,
-	tikvCodec tikv.Codec,
 	errMgr *errormanager.ErrorManager,
 	sessOpts *kv.SessionOptions,
 	concurrency int,
@@ -419,7 +417,6 @@ func NewDuplicateManager(
 		tableName:   tableName,
 		splitCli:    splitCli,
 		tikvCli:     tikvCli,
-		tikvCodec:   tikvCodec,
 		errorMgr:    errMgr,
 		decoder:     decoder,
 		logger:      logger,
@@ -439,10 +436,6 @@ func (m *DuplicateManager) RecordDataConflictError(ctx context.Context, stream D
 		if errors.Cause(err) == io.EOF {
 			break
 		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		key, err = m.tikvCodec.DecodeKey(key)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -508,10 +501,6 @@ func (m *DuplicateManager) RecordIndexConflictError(ctx context.Context, stream 
 		if errors.Cause(err) == io.EOF {
 			break
 		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		key, err = m.tikvCodec.DecodeKey(key)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -591,11 +580,6 @@ func (m *DuplicateManager) buildDupTasks() ([]dupTask, error) {
 		keyRanges.ForEachPartition(func(ranges []tidbkv.KeyRange) {
 			putToTaskFunc(ranges, indexInfo)
 		})
-	}
-
-	// Encode all the tasks
-	for i := range tasks {
-		tasks[i].StartKey, tasks[i].EndKey = m.tikvCodec.EncodeRange(tasks[i].StartKey, tasks[i].EndKey)
 	}
 	return tasks, nil
 }

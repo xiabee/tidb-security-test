@@ -16,7 +16,6 @@ package executor
 
 import (
 	"context"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -40,18 +39,6 @@ func useMPPExecution(ctx sessionctx.Context, tr *plannercore.PhysicalTableReader
 	return ok
 }
 
-func getMPPQueryID(ctx sessionctx.Context) uint64 {
-	mppQueryInfo := &ctx.GetSessionVars().StmtCtx.MPPQueryInfo
-	mppQueryInfo.QueryID.CompareAndSwap(0, plannercore.AllocMPPQueryID())
-	return mppQueryInfo.QueryID.Load()
-}
-
-func getMPPQueryTS(ctx sessionctx.Context) uint64 {
-	mppQueryInfo := &ctx.GetSessionVars().StmtCtx.MPPQueryInfo
-	mppQueryInfo.QueryTS.CompareAndSwap(0, uint64(time.Now().UnixNano()))
-	return mppQueryInfo.QueryTS.Load()
-}
-
 // MPPGather dispatch MPP tasks and read data from root tasks.
 type MPPGather struct {
 	// following fields are construct needed
@@ -59,7 +46,6 @@ type MPPGather struct {
 	is           infoschema.InfoSchema
 	originalPlan plannercore.PhysicalPlan
 	startTS      uint64
-	mppQueryID   kv.MPPQueryID
 
 	mppReqs []*kv.MPPDispatchRequest
 
@@ -84,9 +70,7 @@ func (e *MPPGather) appendMPPDispatchReq(pf *plannercore.Fragment) error {
 	for _, mppTask := range pf.ExchangeSender.Tasks {
 		if mppTask.PartitionTableIDs != nil {
 			err = updateExecutorTableID(context.Background(), dagReq.RootExecutor, true, mppTask.PartitionTableIDs)
-		} else if !mppTask.IsDisaggregatedTiFlashStaticPrune {
-			// If isDisaggregatedTiFlashStaticPrune is true, it means this TableScan is under PartitionUnoin,
-			// tableID in TableScan is already the physical table id of this partition, no need to update again.
+		} else {
 			err = updateExecutorTableID(context.Background(), dagReq.RootExecutor, true, []int64{mppTask.TableID})
 		}
 		if err != nil {
@@ -96,24 +80,18 @@ func (e *MPPGather) appendMPPDispatchReq(pf *plannercore.Fragment) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-
 		logutil.BgLogger().Info("Dispatch mpp task", zap.Uint64("timestamp", mppTask.StartTs),
-			zap.Int64("ID", mppTask.ID), zap.Uint64("QueryTs", mppTask.MppQueryID.QueryTs), zap.Uint64("LocalQueryId", mppTask.MppQueryID.LocalQueryID),
-			zap.Uint64("ServerID", mppTask.MppQueryID.ServerID), zap.String("address", mppTask.Meta.GetAddress()),
-			zap.String("plan", plannercore.ToString(pf.ExchangeSender)),
-			zap.Int64("mpp-version", mppTask.MppVersion.ToInt64()),
-			zap.String("exchange-compression-mode", pf.ExchangeSender.CompressionMode.Name()),
-		)
+			zap.Int64("ID", mppTask.ID), zap.String("address", mppTask.Meta.GetAddress()),
+			zap.String("plan", plannercore.ToString(pf.ExchangeSender)))
 		req := &kv.MPPDispatchRequest{
-			Data:       pbData,
-			Meta:       mppTask.Meta,
-			ID:         mppTask.ID,
-			IsRoot:     pf.IsRoot,
-			Timeout:    10,
-			SchemaVar:  e.is.SchemaMetaVersion(),
-			StartTs:    e.startTS,
-			MppQueryID: mppTask.MppQueryID,
-			State:      kv.MppTaskReady,
+			Data:      pbData,
+			Meta:      mppTask.Meta,
+			ID:        mppTask.ID,
+			IsRoot:    pf.IsRoot,
+			Timeout:   10,
+			SchemaVar: e.is.SchemaMetaVersion(),
+			StartTs:   e.startTS,
+			State:     kv.MppTaskReady,
 		}
 		e.mppReqs = append(e.mppReqs, req)
 	}
@@ -134,7 +112,7 @@ func (e *MPPGather) Open(ctx context.Context) (err error) {
 	// TODO: Move the construct tasks logic to planner, so we can see the explain results.
 	sender := e.originalPlan.(*plannercore.PhysicalExchangeSender)
 	planIDs := collectPlanIDS(e.originalPlan, nil)
-	frags, err := plannercore.GenerateRootMPPTasks(e.ctx, e.startTS, e.mppQueryID, sender, e.is)
+	frags, err := plannercore.GenerateRootMPPTasks(e.ctx, e.startTS, sender, e.is)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -149,7 +127,7 @@ func (e *MPPGather) Open(ctx context.Context) (err error) {
 			failpoint.Return(errors.Errorf("The number of tasks is not right, expect %d tasks but actually there are %d tasks", val.(int), len(e.mppReqs)))
 		}
 	})
-	e.respIter, err = distsql.DispatchMPPTasks(ctx, e.ctx, e.mppReqs, e.retFieldTypes, planIDs, e.id, e.startTS, e.mppQueryID, e.memTracker)
+	e.respIter, err = distsql.DispatchMPPTasks(ctx, e.ctx, e.mppReqs, e.retFieldTypes, planIDs, e.id, e.startTS, e.memTracker)
 	if err != nil {
 		return errors.Trace(err)
 	}

@@ -19,7 +19,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -52,7 +51,6 @@ import (
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
-	"github.com/pingcap/tidb/util/replayer"
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/pingcap/tidb/util/tableutil"
@@ -64,9 +62,6 @@ import (
 	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
-
-// DefaultResourceGroupName is the default resource group name.
-const DefaultResourceGroupName = "default"
 
 var (
 	// PreparedStmtCount is exported for test.
@@ -187,9 +182,6 @@ type TxnCtxNeedToRestore struct {
 
 	// CachedTables is not nil if the transaction write on cached table.
 	CachedTables map[int64]interface{}
-
-	// InsertTTLRowsCount counts how many rows are inserted in this statement
-	InsertTTLRowsCount int
 }
 
 // TxnCtxNoNeedToRestore stores transaction variables which do not need to restored when rolling back to a savepoint.
@@ -204,6 +196,7 @@ type TxnCtxNoNeedToRestore struct {
 	ShardStep    int
 	shardRemain  int
 	currentShard int64
+	shardRand    *rand.Rand
 
 	// unchangedRowKeys is used to store the unchanged rows that needs to lock for pessimistic transaction.
 	unchangedRowKeys map[string]struct{}
@@ -240,14 +233,6 @@ type TxnCtxNoNeedToRestore struct {
 	EnableMDL bool
 	// relatedTableForMDL records the `lock` table for metadata lock. It maps from int64 to int64(version).
 	relatedTableForMDL *sync.Map
-
-	// AggressiveLockingUsed marking whether at least one of the statements in the transaction was executed in
-	// aggressive locking mode.
-	AggressiveLockingUsed bool
-	// AggressiveLockingEffective marking whether at least one of the statements in the transaction was executed in
-	// aggressive locking mode, and it takes effect (which is determined according to whether lock-with-conflict
-	// has occurred during execution of any statement).
-	AggressiveLockingEffective bool
 }
 
 // SavepointRecord indicates a transaction's savepoint record.
@@ -261,22 +246,21 @@ type SavepointRecord struct {
 }
 
 // GetCurrentShard returns the shard for the next `count` IDs.
-func (s *SessionVars) GetCurrentShard(count int) int64 {
-	tc := s.TxnCtx
-	if s.shardRand == nil {
-		s.shardRand = rand.New(rand.NewSource(int64(tc.StartTS))) // #nosec G404
+func (tc *TransactionContext) GetCurrentShard(count int) int64 {
+	if tc.shardRand == nil {
+		tc.shardRand = rand.New(rand.NewSource(int64(tc.StartTS))) // #nosec G404
 	}
 	if tc.shardRemain <= 0 {
-		tc.updateShard(s.shardRand)
+		tc.updateShard()
 		tc.shardRemain = tc.ShardStep
 	}
 	tc.shardRemain -= count
 	return tc.currentShard
 }
 
-func (tc *TransactionContext) updateShard(shardRand *rand.Rand) {
+func (tc *TransactionContext) updateShard() {
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], shardRand.Uint64())
+	binary.LittleEndian.PutUint64(buf[:], tc.shardRand.Uint64())
 	tc.currentShard = int64(murmur3.Sum32(buf[:]))
 }
 
@@ -388,7 +372,6 @@ func (tc *TransactionContext) GetCurrentSavepoint() TxnCtxNeedToRestore {
 		TableDeltaMap:        tableDeltaMap,
 		pessimisticLockCache: pessimisticLockCache,
 		CachedTables:         cachedTables,
-		InsertTTLRowsCount:   tc.InsertTTLRowsCount,
 	}
 }
 
@@ -397,7 +380,6 @@ func (tc *TransactionContext) RestoreBySavepoint(savepoint TxnCtxNeedToRestore) 
 	tc.TableDeltaMap = savepoint.TableDeltaMap
 	tc.pessimisticLockCache = savepoint.pessimisticLockCache
 	tc.CachedTables = savepoint.CachedTables
-	tc.InsertTTLRowsCount = savepoint.InsertTTLRowsCount
 }
 
 // AddSavepoint adds a new savepoint.
@@ -656,8 +638,8 @@ type SessionVars struct {
 	SysWarningCount int
 	// SysErrorCount is the system variable "error_count", because it is on the hot path, so we extract it from the systems
 	SysErrorCount uint16
-	// nonPreparedPlanCacheStmts stores PlanCacheStmts for non-prepared plan cache.
-	nonPreparedPlanCacheStmts *kvcache.SimpleLRUCache
+	// generalPlanCacheStmts stores PlanCacheStmts for general plan cache.
+	generalPlanCacheStmts *kvcache.SimpleLRUCache
 	// PreparedStmts stores prepared statement.
 	PreparedStmts        map[uint32]interface{}
 	PreparedStmtNameToID map[string]uint32
@@ -686,6 +668,13 @@ type SessionVars struct {
 	txnIsolationLevelOneShot struct {
 		state txnIsolationLevelOneShotState
 		value string
+	}
+
+	// mppTaskIDAllocator is used to allocate mpp task id for a session.
+	mppTaskIDAllocator struct {
+		mu     sync.Mutex
+		lastTS uint64
+		taskID int64
 	}
 
 	// Status stands for the session status. e.g. in transaction or not, auto commit is on or off, and so on.
@@ -906,6 +895,9 @@ type SessionVars struct {
 	// EnableOuterJoinWithJoinReorder enables TiDB to involve the outer join into the join reorder.
 	EnableOuterJoinReorder bool
 
+	// DisableHashJoin indicates whether to disable hash join.
+	DisableHashJoin bool
+
 	// OptimizerEnableNAAJ enables TiDB to use null-aware anti join.
 	OptimizerEnableNAAJ bool
 
@@ -1050,10 +1042,6 @@ type SessionVars struct {
 	// IsolationReadEngines is used to isolation read, tidb only read from the stores whose engine type is in the engines.
 	IsolationReadEngines map[kv.StoreType]struct{}
 
-	mppVersion kv.MppVersion
-
-	mppExchangeCompressionMode kv.ExchangeCompressionMode
-
 	PlannerSelectBlockAsName []ast.HintTable
 
 	// LockWaitTimeout is the duration waiting for pessimistic lock in milliseconds
@@ -1115,6 +1103,9 @@ type SessionVars struct {
 
 	// ShardAllocateStep indicates the max size of continuous rowid shard in one transaction.
 	ShardAllocateStep int64
+
+	// EnableAmendPessimisticTxn indicates if schema change amend is enabled for pessimistic transactions.
+	EnableAmendPessimisticTxn bool
 
 	// LastTxnInfo keeps track the info of last committed transaction.
 	LastTxnInfo string
@@ -1267,20 +1258,17 @@ type SessionVars struct {
 	// EnablePreparedPlanCache indicates whether to enable prepared plan cache.
 	EnablePreparedPlanCache bool
 
-	// PreparedPlanCacheSize controls the size of prepared plan cache.
+	// GeneralPlanCacheSize controls the size of general plan cache.
 	PreparedPlanCacheSize uint64
 
 	// PreparedPlanCacheMonitor indicates whether to enable prepared plan cache monitor.
 	EnablePreparedPlanCacheMemoryMonitor bool
 
-	// EnablePlanCacheForParamLimit controls whether the prepare statement with parameterized limit can be cached
-	EnablePlanCacheForParamLimit bool
+	// EnableGeneralPlanCache indicates whether to enable general plan cache.
+	EnableGeneralPlanCache bool
 
-	// EnableNonPreparedPlanCache indicates whether to enable non-prepared plan cache.
-	EnableNonPreparedPlanCache bool
-
-	// NonPreparedPlanCacheSize controls the size of non-prepared plan cache.
-	NonPreparedPlanCacheSize uint64
+	// GeneralPlanCacheSize controls the size of general plan cache.
+	GeneralPlanCacheSize uint64
 
 	// ConstraintCheckInPlacePessimistic controls whether to skip the locking of some keys in pessimistic transactions.
 	// Postpone the conflict check and constraint check to prewrite or later pessimistic locking requests.
@@ -1328,6 +1316,9 @@ type SessionVars struct {
 	// EnableReuseCheck indicates  request chunk whether use chunk alloc
 	EnableReuseCheck bool
 
+	// EnableAdvancedJoinHint indicates whether the join method hint is compatible with join order hint.
+	EnableAdvancedJoinHint bool
+
 	// preuseChunkAlloc indicates whether pre statement use chunk alloc
 	// like select @@last_sql_use_alloc
 	preUseChunkAlloc bool
@@ -1335,63 +1326,37 @@ type SessionVars struct {
 	// EnablePlanReplayerCapture indicates whether enabled plan replayer capture
 	EnablePlanReplayerCapture bool
 
-	// EnablePlanReplayedContinuesCapture indicates whether enabled plan replayer continues capture
-	EnablePlanReplayedContinuesCapture bool
-
-	// PlanReplayerFinishedTaskKey used to record the finished plan replayer task key in order not to record the
-	// duplicate task in plan replayer continues capture
-	PlanReplayerFinishedTaskKey map[replayer.PlanReplayerTaskKey]struct{}
-
 	// StoreBatchSize indicates the batch size limit of store batch, set this field to 0 to disable store batch.
 	StoreBatchSize int
 
-	// shardRand is used by TxnCtx, for the GetCurrentShard() method.
-	shardRand *rand.Rand
+	// EnableINLJoinInnerMultiPattern indicates whether enable multi pattern for index join inner side
+	EnableINLJoinInnerMultiPattern bool
 
-	// Resource group name
-	ResourceGroupName string
-
-	// ProtectedTSList holds a list of timestamps that should delay GC.
-	ProtectedTSList protectedTSList
-
-	// PessimisticTransactionAggressiveLocking controls whether aggressive locking for pessimistic transaction
-	// is enabled.
-	PessimisticTransactionAggressiveLocking bool
-
-	// EnableIndexJoinInnerSideMultiPattern indicates whether enable multi pattern for index join inner side
-	// For now it is not public to user
-	EnableIndexJoinInnerSideMultiPattern bool
+	// OptimizerFixControl control some details of the optimizer behavior through the tidb_opt_fix_control variable.
+	OptimizerFixControl map[uint64]string
 }
 
-// planReplayerSessionFinishedTaskKeyLen is used to control the max size for the finished plan replayer task key in session
-// in order to control the used memory
-const planReplayerSessionFinishedTaskKeyLen = 128
+var (
+	// variables below are for the optimizer fix control.
 
-// AddPlanReplayerFinishedTaskKey record finished task key in session
-func (s *SessionVars) AddPlanReplayerFinishedTaskKey(key replayer.PlanReplayerTaskKey) {
-	if len(s.PlanReplayerFinishedTaskKey) >= planReplayerSessionFinishedTaskKeyLen {
-		s.initializePlanReplayerFinishedTaskKey()
+	// TiDBOptFixControl44262 controls whether to allow to use dynamic-mode to access partitioning tables without global-stats (#44262).
+	TiDBOptFixControl44262 uint64 = 44262
+	// TiDBOptFixControl44389 controls whether to consider non-point ranges of some CNF item when building ranges.
+	TiDBOptFixControl44389 uint64 = 44389
+	// TiDBOptFixControl44855 controls whether to use a more accurate upper bound when estimating row count of index
+	// range scan under inner side of index join.
+	TiDBOptFixControl44855 uint64 = 44855
+	// TiDBOptFixControl46177 controls whether to explore enforced plans for DataSource if it has already found an unenforced plan.
+	TiDBOptFixControl46177 uint64 = 46177
+)
+
+// GetOptimizerFixControlValue returns the specified value of the optimizer fix control.
+func (s *SessionVars) GetOptimizerFixControlValue(key uint64) (value string, exist bool) {
+	if s.OptimizerFixControl == nil {
+		return "", false
 	}
-	s.PlanReplayerFinishedTaskKey[key] = struct{}{}
-}
-
-func (s *SessionVars) initializePlanReplayerFinishedTaskKey() {
-	s.PlanReplayerFinishedTaskKey = make(map[replayer.PlanReplayerTaskKey]struct{}, planReplayerSessionFinishedTaskKeyLen)
-}
-
-// CheckPlanReplayerFinishedTaskKey check whether the key exists
-func (s *SessionVars) CheckPlanReplayerFinishedTaskKey(key replayer.PlanReplayerTaskKey) bool {
-	if s.PlanReplayerFinishedTaskKey == nil {
-		s.initializePlanReplayerFinishedTaskKey()
-		return false
-	}
-	_, ok := s.PlanReplayerFinishedTaskKey[key]
-	return ok
-}
-
-// IsPlanReplayerCaptureEnabled indicates whether capture or continues capture enabled
-func (s *SessionVars) IsPlanReplayerCaptureEnabled() bool {
-	return s.EnablePlanReplayerCapture || s.EnablePlanReplayedContinuesCapture
+	value, exist = s.OptimizerFixControl[key]
+	return
 }
 
 // GetNewChunkWithCapacity Attempt to request memory from the chunk pool
@@ -1425,6 +1390,16 @@ func (s *SessionVars) SetAlloc(alloc chunk.Allocator) {
 		return
 	}
 	s.ChunkPool.Alloc = alloc
+}
+
+// IsAllocValid check if chunk reuse is enable or ChunkPool is inused.
+func (s *SessionVars) IsAllocValid() bool {
+	if !s.EnableReuseCheck {
+		return false
+	}
+	s.ChunkPool.mu.Lock()
+	defer s.ChunkPool.mu.Unlock()
+	return s.ChunkPool.Alloc != nil
 }
 
 // ClearAlloc indicates stop reuse chunk
@@ -1476,6 +1451,20 @@ func (s *SessionVars) InitStatementContext() *stmtctx.StatementContext {
 	return sc
 }
 
+// AllocMPPTaskID allocates task id for mpp tasks. It will reset the task id if the query's
+// startTs is different.
+func (s *SessionVars) AllocMPPTaskID(startTS uint64) int64 {
+	s.mppTaskIDAllocator.mu.Lock()
+	defer s.mppTaskIDAllocator.mu.Unlock()
+	if s.mppTaskIDAllocator.lastTS == startTS {
+		s.mppTaskIDAllocator.taskID++
+		return s.mppTaskIDAllocator.taskID
+	}
+	s.mppTaskIDAllocator.lastTS = startTS
+	s.mppTaskIDAllocator.taskID = 1
+	return 1
+}
+
 // IsMPPAllowed returns whether mpp execution is allowed.
 func (s *SessionVars) IsMPPAllowed() bool {
 	return s.allowMPPExecution
@@ -1486,34 +1475,12 @@ func (s *SessionVars) IsMPPEnforced() bool {
 	return s.allowMPPExecution && s.enforceMPPExecution
 }
 
-// ChooseMppVersion indicates the mpp-version used to build mpp plan, if mpp-version is unspecified, use the latest version.
-func (s *SessionVars) ChooseMppVersion() kv.MppVersion {
-	if s.mppVersion == kv.MppVersionUnspecified {
-		return kv.GetNewestMppVersion()
-	}
-	return s.mppVersion
-}
-
-// ChooseMppExchangeCompressionMode indicates the data compression method in mpp exchange operator
-func (s *SessionVars) ChooseMppExchangeCompressionMode() kv.ExchangeCompressionMode {
-	if s.mppExchangeCompressionMode == kv.ExchangeCompressionModeUnspecified {
-		// If unspecified, use recommended mode
-		return kv.RecommendedExchangeCompressionMode
-	}
-	return s.mppExchangeCompressionMode
-}
-
 // RaiseWarningWhenMPPEnforced will raise a warning when mpp mode is enforced and executing explain statement.
 // TODO: Confirm whether this function will be inlined and
 // omit the overhead of string construction when calling with false condition.
 func (s *SessionVars) RaiseWarningWhenMPPEnforced(warning string) {
-	if !s.IsMPPEnforced() {
-		return
-	}
-	if s.StmtCtx.InExplainStmt {
+	if s.IsMPPEnforced() && s.StmtCtx.InExplainStmt {
 		s.StmtCtx.AppendWarning(errors.New(warning))
-	} else {
-		s.StmtCtx.AppendExtraWarning(errors.New(warning))
 	}
 }
 
@@ -1726,6 +1693,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		EnableClusteredIndex:          DefTiDBEnableClusteredIndex,
 		EnableParallelApply:           DefTiDBEnableParallelApply,
 		ShardAllocateStep:             DefTiDBShardAllocateStep,
+		EnableAmendPessimisticTxn:     DefTiDBEnableAmendPessimisticTxn,
 		PartitionPruneMode:            *atomic2.NewString(DefTiDBPartitionPruneMode),
 		TxnScope:                      kv.NewDefaultTxnScopeVar(),
 		EnabledRateLimitAction:        DefTiDBEnableRateLimitAction,
@@ -1752,8 +1720,6 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		EnableReuseCheck:              DefTiDBEnableReusechunk,
 		preUseChunkAlloc:              DefTiDBUseAlloc,
 		ChunkPool:                     ReuseChunkPool{Alloc: nil},
-		mppExchangeCompressionMode:    DefaultExchangeCompressionMode,
-		mppVersion:                    kv.MppVersionUnspecified,
 	}
 	vars.KVVars = tikvstore.NewVariables(&vars.Killed)
 	vars.Concurrency = Concurrency{
@@ -2110,20 +2076,20 @@ func (k planCacheStmtKey) Hash() []byte {
 	return []byte(k)
 }
 
-// AddNonPreparedPlanCacheStmt adds this PlanCacheStmt into non-preapred plan-cache stmt cache
-func (s *SessionVars) AddNonPreparedPlanCacheStmt(sql string, stmt interface{}) {
-	if s.nonPreparedPlanCacheStmts == nil {
-		s.nonPreparedPlanCacheStmts = kvcache.NewSimpleLRUCache(uint(s.NonPreparedPlanCacheSize), 0, 0)
+// AddGeneralPlanCacheStmt adds this PlanCacheStmt into general-plan-cache-stmt cache
+func (s *SessionVars) AddGeneralPlanCacheStmt(sql string, stmt interface{}) {
+	if s.generalPlanCacheStmts == nil {
+		s.generalPlanCacheStmts = kvcache.NewSimpleLRUCache(uint(s.GeneralPlanCacheSize), 0, 0)
 	}
-	s.nonPreparedPlanCacheStmts.Put(planCacheStmtKey(sql), stmt)
+	s.generalPlanCacheStmts.Put(planCacheStmtKey(sql), stmt)
 }
 
-// GetNonPreparedPlanCacheStmt gets the PlanCacheStmt.
-func (s *SessionVars) GetNonPreparedPlanCacheStmt(sql string) interface{} {
-	if s.nonPreparedPlanCacheStmts == nil {
+// GetGeneralPlanCacheStmt gets the PlanCacheStmt.
+func (s *SessionVars) GetGeneralPlanCacheStmt(sql string) interface{} {
+	if s.generalPlanCacheStmts == nil {
 		return nil
 	}
-	stmt, _ := s.nonPreparedPlanCacheStmts.Get(planCacheStmtKey(sql))
+	stmt, _ := s.generalPlanCacheStmts.Get(planCacheStmtKey(sql))
 	return stmt
 }
 
@@ -2337,16 +2303,16 @@ func (s *SessionVars) GetTemporaryTable(tblInfo *model.TableInfo) tableutil.Temp
 // EncodeSessionStates saves session states into SessionStates.
 func (s *SessionVars) EncodeSessionStates(ctx context.Context, sessionStates *sessionstates.SessionStates) (err error) {
 	// Encode user-defined variables.
-	s.userVars.lock.RLock()
 	sessionStates.UserVars = make(map[string]*types.Datum, len(s.userVars.values))
 	sessionStates.UserVarTypes = make(map[string]*ptypes.FieldType, len(s.userVars.types))
+	s.userVars.lock.RLock()
+	defer s.userVars.lock.RUnlock()
 	for name, userVar := range s.userVars.values {
 		sessionStates.UserVars[name] = userVar.Clone()
 	}
 	for name, userVarType := range s.userVars.types {
 		sessionStates.UserVarTypes[name] = userVarType.Clone()
 	}
-	s.userVars.lock.RUnlock()
 
 	// Encode other session contexts.
 	sessionStates.PreparedStmtID = s.preparedStmtID
@@ -2374,9 +2340,11 @@ func (s *SessionVars) EncodeSessionStates(ctx context.Context, sessionStates *se
 // DecodeSessionStates restores session states from SessionStates.
 func (s *SessionVars) DecodeSessionStates(ctx context.Context, sessionStates *sessionstates.SessionStates) (err error) {
 	// Decode user-defined variables.
+	s.userVars.values = make(map[string]types.Datum, len(sessionStates.UserVars))
 	for name, userVar := range sessionStates.UserVars {
 		s.SetUserVarVal(name, *userVar.Clone())
 	}
+	s.userVars.types = make(map[string]*ptypes.FieldType, len(sessionStates.UserVarTypes))
 	for name, userVarType := range sessionStates.UserVarTypes {
 		s.SetUserVarType(name, userVarType.Clone())
 	}
@@ -2783,9 +2751,6 @@ const (
 	SlowLogBackoffDetail = "Backoff_Detail"
 	// SlowLogResultRows is the row count of the SQL result.
 	SlowLogResultRows = "Result_rows"
-	// SlowLogWarnings is the warnings generated during executing the statement.
-	// Note that some extra warnings would also be printed through slow log.
-	SlowLogWarnings = "Warnings"
 	// SlowLogIsExplicitTxn is used to indicate whether this sql execute in explicit transaction or not.
 	SlowLogIsExplicitTxn = "IsExplicitTxn"
 	// SlowLogIsWriteCacheTable is used to indicate whether writing to the cache table need to wait for the read lock to expire.
@@ -2797,15 +2762,6 @@ const (
 // GenerateBinaryPlan decides whether we should record binary plan in slow log and stmt summary.
 // It's controlled by the global variable `tidb_generate_binary_plan`.
 var GenerateBinaryPlan atomic2.Bool
-
-// JSONSQLWarnForSlowLog helps to print the SQLWarn through the slow log in JSON format.
-type JSONSQLWarnForSlowLog struct {
-	Level   string
-	Message string
-	// IsExtra means this SQL Warn is expected to be recorded only under some conditions (like in EXPLAIN) and should
-	// haven't been recorded as a warning now, but we recorded it anyway to help diagnostics.
-	IsExtra bool `json:",omitempty"`
-}
 
 // SlowQueryLogItems is a collection of items that should be included in the
 // slow query log.
@@ -2846,7 +2802,6 @@ type SlowQueryLogItems struct {
 	// table -> name -> status
 	StatsLoadStatus   map[string]map[string]string
 	IsSyncStatsFailed bool
-	Warnings          []JSONSQLWarnForSlowLog
 }
 
 // SlowLogFormat uses for formatting slow log.
@@ -3012,16 +2967,6 @@ func (s *SessionVars) SlowLogFormat(logItems *SlowQueryLogItems) string {
 	writeSlowLogItem(&buf, SlowLogBackoffTotal, strconv.FormatFloat(logItems.BackoffTotal.Seconds(), 'f', -1, 64))
 	writeSlowLogItem(&buf, SlowLogWriteSQLRespTotal, strconv.FormatFloat(logItems.WriteSQLRespTotal.Seconds(), 'f', -1, 64))
 	writeSlowLogItem(&buf, SlowLogResultRows, strconv.FormatInt(logItems.ResultRows, 10))
-	if len(logItems.Warnings) > 0 {
-		buf.WriteString(SlowLogRowPrefixStr + SlowLogWarnings + SlowLogSpaceMarkStr)
-		jsonEncoder := json.NewEncoder(&buf)
-		jsonEncoder.SetEscapeHTML(false)
-		// Note that the Encode() will append a '\n' so we don't need to add another.
-		err := jsonEncoder.Encode(logItems.Warnings)
-		if err != nil {
-			buf.WriteString(err.Error())
-		}
-	}
 	writeSlowLogItem(&buf, SlowLogSucc, strconv.FormatBool(logItems.Succ))
 	writeSlowLogItem(&buf, SlowLogIsExplicitTxn, strconv.FormatBool(logItems.IsExplicitTxn))
 	writeSlowLogItem(&buf, SlowLogIsSyncStatsFailed, strconv.FormatBool(logItems.IsSyncStatsFailed))
@@ -3236,54 +3181,4 @@ func (s *SessionVars) GetRelatedTableForMDL() *sync.Map {
 // EnableForceInlineCTE returns the session variable enableForceInlineCTE
 func (s *SessionVars) EnableForceInlineCTE() bool {
 	return s.enableForceInlineCTE
-}
-
-// protectedTSList implements util/processinfo#ProtectedTSList
-type protectedTSList struct {
-	sync.Mutex
-	items map[uint64]int
-}
-
-// HoldTS holds the timestamp to prevent its data from being GCed.
-func (lst *protectedTSList) HoldTS(ts uint64) (unhold func()) {
-	lst.Lock()
-	if lst.items == nil {
-		lst.items = map[uint64]int{}
-	}
-	lst.items[ts] += 1
-	lst.Unlock()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			lst.Lock()
-			if lst.items != nil {
-				if lst.items[ts] > 1 {
-					lst.items[ts] -= 1
-				} else {
-					delete(lst.items, ts)
-				}
-			}
-			lst.Unlock()
-		})
-	}
-}
-
-// GetMinProtectedTS returns the minimum protected timestamp that greater than `lowerBound` (0 if no such one).
-func (lst *protectedTSList) GetMinProtectedTS(lowerBound uint64) (ts uint64) {
-	lst.Lock()
-	for k, v := range lst.items {
-		if v > 0 && k > lowerBound && (k < ts || ts == 0) {
-			ts = k
-		}
-	}
-	lst.Unlock()
-	return
-}
-
-// Size returns the number of protected timestamps (exported for test).
-func (lst *protectedTSList) Size() (size int) {
-	lst.Lock()
-	size = len(lst.items)
-	lst.Unlock()
-	return
 }

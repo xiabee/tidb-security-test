@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/testutil"
 	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/stretchr/testify/require"
 )
 
@@ -565,22 +567,26 @@ func TestPessimisticLockOnPartitionForIndexMerge(t *testing.T) {
 		"      ├─IndexReader(Build) 3.00 root  index:IndexFullScan",
 		"      │ └─IndexFullScan 3.00 cop[tikv] table:t2, index:c_datetime(c_datetime) keep order:false",
 		"      └─PartitionUnion(Probe) 5545.21 root  ",
-		"        ├─IndexMerge 5542.21 root  type: union",
-		"        │ ├─IndexRangeScan(Build) 3323.33 cop[tikv] table:t1, partition:p0, index:c1(c1) range:[-inf,10), keep order:false, stats:pseudo",
-		"        │ ├─IndexRangeScan(Build) 3323.33 cop[tikv] table:t1, partition:p0, index:c2(c2) range:[-inf,10), keep order:false, stats:pseudo",
-		"        │ └─TableRowIDScan(Probe) 5542.21 cop[tikv] table:t1, partition:p0 keep order:false, stats:pseudo",
-		"        ├─IndexMerge 1.00 root  type: union",
-		"        │ ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p1, index:c1(c1) range:[-inf,10), keep order:false",
-		"        │ ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p1, index:c2(c2) range:[-inf,10), keep order:false",
-		"        │ └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p1 keep order:false",
-		"        ├─IndexMerge 1.00 root  type: union",
-		"        │ ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p2, index:c1(c1) range:[-inf,10), keep order:false",
-		"        │ ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p2, index:c2(c2) range:[-inf,10), keep order:false",
-		"        │ └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p2 keep order:false",
-		"        └─IndexMerge 1.00 root  type: union",
-		"          ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p3, index:c1(c1) range:[-inf,10), keep order:false",
-		"          ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p3, index:c2(c2) range:[-inf,10), keep order:false",
-		"          └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p3 keep order:false",
+		"        ├─Projection 5542.21 root  test.t1.c_datetime, test.t1.c1, test.t1._tidb_rowid, test.t1._tidb_tid",
+		"        │ └─IndexMerge 5542.21 root  type: union",
+		"        │   ├─IndexRangeScan(Build) 3323.33 cop[tikv] table:t1, partition:p0, index:c1(c1) range:[-inf,10), keep order:false, stats:pseudo",
+		"        │   ├─IndexRangeScan(Build) 3323.33 cop[tikv] table:t1, partition:p0, index:c2(c2) range:[-inf,10), keep order:false, stats:pseudo",
+		"        │   └─TableRowIDScan(Probe) 5542.21 cop[tikv] table:t1, partition:p0 keep order:false, stats:pseudo",
+		"        ├─Projection 1.00 root  test.t1.c_datetime, test.t1.c1, test.t1._tidb_rowid, test.t1._tidb_tid",
+		"        │ └─IndexMerge 1.00 root  type: union",
+		"        │   ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p1, index:c1(c1) range:[-inf,10), keep order:false",
+		"        │   ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p1, index:c2(c2) range:[-inf,10), keep order:false",
+		"        │   └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p1 keep order:false",
+		"        ├─Projection 1.00 root  test.t1.c_datetime, test.t1.c1, test.t1._tidb_rowid, test.t1._tidb_tid",
+		"        │ └─IndexMerge 1.00 root  type: union",
+		"        │   ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p2, index:c1(c1) range:[-inf,10), keep order:false",
+		"        │   ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p2, index:c2(c2) range:[-inf,10), keep order:false",
+		"        │   └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p2 keep order:false",
+		"        └─Projection 1.00 root  test.t1.c_datetime, test.t1.c1, test.t1._tidb_rowid, test.t1._tidb_tid",
+		"          └─IndexMerge 1.00 root  type: union",
+		"            ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p3, index:c1(c1) range:[-inf,10), keep order:false",
+		"            ├─IndexRangeScan(Build) 1.00 cop[tikv] table:t1, partition:p3, index:c2(c2) range:[-inf,10), keep order:false",
+		"            └─TableRowIDScan(Probe) 1.00 cop[tikv] table:t1, partition:p3 keep order:false",
 	))
 	tk.MustQuery(`select /*+ use_index_merge(t1) */ c1 from t1 join t2
 			on t1.c_datetime >= t2.c_datetime
@@ -707,20 +713,23 @@ func TestIntersectionWithDifferentConcurrency(t *testing.T) {
 		for _, concurrency := range execCon {
 			tk.MustExec(fmt.Sprintf("set tidb_executor_concurrency = %d", concurrency))
 			for i := 0; i < 2; i++ {
+				sql := "select /*+ use_index_merge(t1, primary, c2, c3) */ c1 from t1 where c2 < 1024 and c3 > 1024"
 				if i == 0 {
 					// Dynamic mode.
 					tk.MustExec("set tidb_partition_prune_mode = 'dynamic'")
-					res := tk.MustQuery("explain select /*+ use_index_merge(t1, primary, c2, c3) */ c1 from t1 where c2 < 1024 and c3 > 1024")
-					require.Contains(t, res.Rows()[1][0], "IndexMerge")
+					require.True(t, tk.HasPlan(sql, "IndexMerge"))
+					require.True(t, tk.HasNoPlan(sql, "PartitionUnion"))
 				} else {
 					tk.MustExec("set tidb_partition_prune_mode = 'static'")
 					res := tk.MustQuery("explain select /*+ use_index_merge(t1, primary, c2, c3) */ c1 from t1 where c2 < 1024 and c3 > 1024")
 					if tblIdx == 0 {
 						// partition table
-						require.Contains(t, res.Rows()[1][0], "PartitionUnion")
-						require.Contains(t, res.Rows()[2][0], "IndexMerge")
+						require.True(t, tk.HasPlan(sql, "IndexMerge"))
+						require.True(t, tk.HasPlan(sql, "PartitionUnion"))
 					} else {
 						require.Contains(t, res.Rows()[1][0], "IndexMerge")
+						require.True(t, tk.HasPlan(sql, "IndexMerge"))
+						require.True(t, tk.HasNoPlan(sql, "PartitionUnion"))
 					}
 				}
 				for i := 0; i < queryCnt; i++ {
@@ -795,7 +804,50 @@ func TestIntersectionMemQuota(t *testing.T) {
 	defer tk.MustExec("set global tidb_mem_oom_action = DEFAULT")
 	tk.MustExec("set @@tidb_mem_quota_query = 4000")
 	err := tk.QueryToErr("select /*+ use_index_merge(t1, primary, idx1, idx2) */ c1 from t1 where c1 < 1024 and c2 < 1024")
-	require.Contains(t, err.Error(), "Out Of Memory Quota!")
+	require.Contains(t, err.Error(), memory.PanicMemoryExceedWarnMsg+memory.WarnMsgSuffixForSingleQuery)
+}
+
+func setupPartitionTableHelper(tk *testkit.TestKit) {
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec("create table t1(c1 int, c2 bigint, c3 bigint, primary key(c1), key(c2), key(c3));")
+	insertStr := "insert into t1 values(0, 0, 0)"
+	for i := 1; i < 1000; i++ {
+		insertStr += fmt.Sprintf(", (%d, %d, %d)", i, i, i)
+	}
+	tk.MustExec(insertStr)
+	tk.MustExec("analyze table t1;")
+	tk.MustExec("set tidb_partition_prune_mode = 'dynamic'")
+}
+
+func TestIndexMergeProcessWorkerHang(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	setupPartitionTableHelper(tk)
+
+	var err error
+	sql := "select /*+ use_index_merge(t1) */ c1 from t1 where c1 < 900 or c2 < 1000;"
+	res := tk.MustQuery("explain " + sql).Rows()
+	require.Contains(t, res[1][0], "IndexMerge")
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergeMainReturnEarly", "return()"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergeProcessWorkerUnionHang", "return(true)"))
+	err = tk.QueryToErr(sql)
+	require.Contains(t, err.Error(), "testIndexMergeMainReturnEarly")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergeMainReturnEarly"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergeProcessWorkerUnionHang"))
+
+	sql = "select /*+ use_index_merge(t1, c2, c3) */ c1 from t1 where c2 < 900 and c3 < 1000;"
+	res = tk.MustQuery("explain " + sql).Rows()
+	require.Contains(t, res[1][0], "IndexMerge")
+	require.Contains(t, res[1][4], "intersection")
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergeMainReturnEarly", "return()"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergeProcessWorkerIntersectionHang", "return(true)"))
+	err = tk.QueryToErr(sql)
+	require.Contains(t, err.Error(), "testIndexMergeMainReturnEarly")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergeMainReturnEarly"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergeProcessWorkerIntersectionHang"))
 }
 
 func TestIndexMergePanic(t *testing.T) {
@@ -811,16 +863,7 @@ func TestIndexMergePanic(t *testing.T) {
 	tk.MustExec("select /*+ use_index_merge(t1, primary, c2, c3) */ c1 from t1 where c1 < 100 or c2 < 100")
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergeResultChCloseEarly"))
 
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1")
-	tk.MustExec("create table t1(c1 int, c2 bigint, c3 bigint, primary key(c1), key(c2), key(c3)) partition by hash(c1) partitions 10;")
-	insertStr := "insert into t1 values(0, 0, 0)"
-	for i := 1; i < 1000; i++ {
-		insertStr += fmt.Sprintf(", (%d, %d, %d)", i, i, i)
-	}
-	tk.MustExec(insertStr)
-	tk.MustExec("analyze table t1;")
-	tk.MustExec("set tidb_partition_prune_mode = 'dynamic'")
+	setupPartitionTableHelper(tk)
 
 	minV := 200
 	maxV := 1000
@@ -880,4 +923,57 @@ func TestIndexMergePanic(t *testing.T) {
 		}
 		require.NoError(t, failpoint.Disable(fp))
 	}
+}
+
+func TestIndexMergeCoprGoroutinesLeak(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	setupPartitionTableHelper(tk)
+
+	var err error
+	sql := "select /*+ use_index_merge(t1) */ c1 from t1 where c1 < 900 or c2 < 1000;"
+	res := tk.MustQuery("explain " + sql).Rows()
+	require.Contains(t, res[1][0], "IndexMerge")
+
+	// If got goroutines leak in coprocessor, ci will fail.
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergePartialTableWorkerCoprLeak", `panic("testIndexMergePartialTableWorkerCoprLeak")`))
+	err = tk.QueryToErr(sql)
+	require.Contains(t, err.Error(), "testIndexMergePartialTableWorkerCoprLeak")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergePartialTableWorkerCoprLeak"))
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/testIndexMergePartialIndexWorkerCoprLeak", `panic("testIndexMergePartialIndexWorkerCoprLeak")`))
+	err = tk.QueryToErr(sql)
+	require.Contains(t, err.Error(), "testIndexMergePartialIndexWorkerCoprLeak")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergePartialIndexWorkerCoprLeak"))
+}
+
+func TestProcessInfoRaceWithIndexScan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t1;")
+	tk.MustExec("create table t1(c1 int, c2 int, c3 int, c4 int, c5 int, key(c1), key(c2), key(c3), key(c4),key(c5));")
+	insertStr := "insert into t1 values(0, 0, 0, 0 , 0)"
+	for i := 1; i < 100; i++ {
+		insertStr += fmt.Sprintf(", (%d, %d, %d, %d, %d)", i, i, i, i, i)
+	}
+	tk.MustExec(insertStr)
+
+	tk.Session().SetSessionManager(&testkit.MockSessionManager{
+		PS: []*util.ProcessInfo{tk.Session().ShowProcess()},
+	})
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i <= 100; i++ {
+			ps := tk.Session().ShowProcess()
+			util.GenLogFields(233, ps, true)
+		}
+	}()
+	for i := 0; i <= 100; i++ {
+		tk.MustQuery("select /*+ use_index(t1, c1) */ c1 from t1 where c1 = 0 union all select /*+ use_index(t1, c2) */ c2 from t1 where c2 = 0 union all select /*+ use_index(t1, c3) */ c3 from t1 where c3 = 0 ")
+	}
+	wg.Wait()
 }

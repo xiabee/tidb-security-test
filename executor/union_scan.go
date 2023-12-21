@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"runtime/trace"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -29,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/collate"
-	"github.com/pingcap/tidb/util/tracing"
 )
 
 // UnionScanExec merges the rows from dirty table and the rows from distsql request.
@@ -71,9 +71,11 @@ type UnionScanExec struct {
 
 // Open implements the Executor Open interface.
 func (us *UnionScanExec) Open(ctx context.Context) error {
-	r, ctx := tracing.StartRegionEx(ctx, "UnionScanExec.Open")
-	defer r.End()
-
+	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+		span1 := span.Tracer().StartSpan("UnionScanExec.Open", opentracing.ChildOf(span.Context()))
+		defer span1.Finish()
+		ctx = opentracing.ContextWithSpan(ctx, span1)
+	}
 	if err := us.baseExecutor.Open(ctx); err != nil {
 		return err
 	}

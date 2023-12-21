@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/kv"
@@ -49,7 +50,6 @@ import (
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/pingcap/tidb/util/tableutil"
-	"github.com/pingcap/tidb/util/tracing"
 	"github.com/pingcap/tipb/go-binlog"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
@@ -700,9 +700,11 @@ func (t *TableCommon) AddRecord(sctx sessionctx.Context, r []types.Datum, opts .
 	var ctx context.Context
 	if opt.Ctx != nil {
 		ctx = opt.Ctx
-		var r tracing.Region
-		r, ctx = tracing.StartRegionEx(ctx, "table.AddRecord")
-		defer r.End()
+		if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
+			span1 := span.Tracer().StartSpan("table.AddRecord", opentracing.ChildOf(span.Context()))
+			defer span1.Finish()
+			ctx = opentracing.ContextWithSpan(ctx, span1)
+		}
 	} else {
 		ctx = context.Background()
 	}
@@ -880,7 +882,8 @@ func (t *TableCommon) AddRecord(sctx sessionctx.Context, r []types.Datum, opts .
 			}
 		}
 	})
-	if setPresume && !txn.IsPessimistic() {
+	// batch-check guarantees the existence of key itself.
+	if setPresume && !txn.IsPessimistic() || sctx.GetSessionVars().StmtCtx.BatchCheck {
 		err = txn.SetAssertion(key, kv.SetAssertUnknown)
 	} else {
 		err = txn.SetAssertion(key, kv.SetAssertNotExist)
@@ -923,9 +926,6 @@ func (t *TableCommon) AddRecord(sctx sessionctx.Context, r []types.Datum, opts .
 		if err != nil {
 			return nil, err
 		}
-	}
-	if shouldIncreaseTTLMetricCount(t.meta) {
-		sctx.GetSessionVars().TxnCtx.InsertTTLRowsCount += 1
 	}
 	if sessVars.TxnCtx == nil {
 		return recordID, nil
@@ -1522,7 +1522,8 @@ func allocHandleIDs(ctx context.Context, sctx sessionctx.Context, t table.Table,
 			// shard = 0010000000000000000000000000000000000000000000000000000000000000
 			return 0, 0, autoid.ErrAutoincReadFailed
 		}
-		shard := sctx.GetSessionVars().GetCurrentShard(int(n))
+		txnCtx := sctx.GetSessionVars().TxnCtx
+		shard := txnCtx.GetCurrentShard(int(n))
 		base = shardFmt.Compose(shard, base)
 		maxID = shardFmt.Compose(shard, maxID)
 	}
@@ -1593,10 +1594,6 @@ func shouldWriteBinlog(ctx sessionctx.Context, tblInfo *model.TableInfo) bool {
 		return false
 	}
 	return !ctx.GetSessionVars().InRestrictedSQL
-}
-
-func shouldIncreaseTTLMetricCount(tblInfo *model.TableInfo) bool {
-	return tblInfo.TTLInfo != nil
 }
 
 func (t *TableCommon) getMutation(ctx sessionctx.Context) *binlog.TableMutation {
@@ -1953,7 +1950,7 @@ func BuildTableScanFromInfos(tableInfo *model.TableInfo, columnInfos []*model.Co
 	pkColIds := TryGetCommonPkColumnIds(tableInfo)
 	tsExec := &tipb.TableScan{
 		TableId:          tableInfo.ID,
-		Columns:          util.ColumnsToProto(columnInfos, tableInfo.PKIsHandle, false),
+		Columns:          util.ColumnsToProto(columnInfos, tableInfo.PKIsHandle),
 		PrimaryColumnIds: pkColIds,
 	}
 	if tableInfo.IsCommonHandle {
@@ -1967,7 +1964,7 @@ func BuildPartitionTableScanFromInfos(tableInfo *model.TableInfo, columnInfos []
 	pkColIds := TryGetCommonPkColumnIds(tableInfo)
 	tsExec := &tipb.PartitionTableScan{
 		TableId:          tableInfo.ID,
-		Columns:          util.ColumnsToProto(columnInfos, tableInfo.PKIsHandle, false),
+		Columns:          util.ColumnsToProto(columnInfos, tableInfo.PKIsHandle),
 		PrimaryColumnIds: pkColIds,
 		IsFastScan:       &fastScan,
 	}

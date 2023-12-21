@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/kv"
 	"github.com/tikv/client-go/v2/oracle"
@@ -70,7 +70,7 @@ type Mgr struct {
 }
 
 func GetAllTiKVStoresWithRetry(ctx context.Context,
-	pdClient pd.Client,
+	pdClient util.StoreMeta,
 	storeBehavior util.StoreBehavior,
 ) ([]*metapb.Store, error) {
 	stores := make([]*metapb.Store, 0)
@@ -175,8 +175,7 @@ func NewMgr(
 	}
 
 	// Disable GC because TiDB enables GC already.
-	path := fmt.Sprintf("tikv://%s?disableGC=true&keyspaceName=%s", pdAddrs, config.GetGlobalKeyspaceName())
-	storage, err := g.Open(path, securityOption)
+	storage, err := g.Open(fmt.Sprintf("tikv://%s?disableGC=true", pdAddrs), securityOption)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -193,6 +192,7 @@ func NewMgr(
 			return nil, errors.Trace(err)
 		}
 		// we must check tidb(tikv version) any time after concurrent ddl feature implemented in v6.2.
+		// when tidb < 6.2 we need set EnableConcurrentDDL false to make ddl works.
 		// we will keep this check until 7.0, which allow the breaking changes.
 		// NOTE: must call it after domain created!
 		// FIXME: remove this check in v7.0
@@ -242,6 +242,11 @@ func (mgr *Mgr) GetStorage() kv.Storage {
 // GetTLSConfig returns the tls config.
 func (mgr *Mgr) GetTLSConfig() *tls.Config {
 	return mgr.StoreManager.TLSConfig()
+}
+
+// GetStore gets the tikvStore.
+func (mgr *Mgr) GetStore() tikv.Storage {
+	return mgr.tikvStore
 }
 
 // GetLockResolver gets the LockResolver.
@@ -386,7 +391,7 @@ func handleTiKVAddress(store *metapb.Store, httpPrefix string) (*url.URL, error)
 	// but in sometimes we may not get the correct status address from PD.
 	if statusUrl.Hostname() != nodeUrl.Hostname() {
 		// if not matched, we use the address as default, but change the port
-		addr.Host = nodeUrl.Hostname() + ":" + statusUrl.Port()
+		addr.Host = net.JoinHostPort(nodeUrl.Hostname(), statusUrl.Port())
 		log.Warn("store address and status address mismatch the host, we will use the store address as hostname",
 			zap.Uint64("store", store.Id),
 			zap.String("status address", statusAddr),

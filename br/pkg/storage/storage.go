@@ -27,6 +27,8 @@ const (
 	GetObject Permission = "GetObject"
 	// PutObject represents PutObject permission
 	PutObject Permission = "PutObject"
+
+	DefaultRequestConcurrency uint = 128
 )
 
 // WalkOption is the option of storage.WalkDir.
@@ -75,6 +77,10 @@ type Writer interface {
 	Close(ctx context.Context) error
 }
 
+type WriterOption struct {
+	Concurrency int
+}
+
 // ExternalStorage represents a kind of file system storage.
 type ExternalStorage interface {
 	// WriteFile writes a complete file to storage, similar to os.WriteFile, but WriteFile should be atomic
@@ -98,8 +104,8 @@ type ExternalStorage interface {
 	// URI returns the base path as a URI
 	URI() string
 
-	// Create opens a file writer by path. path is relative path to storage base path
-	Create(ctx context.Context, path string) (ExternalFileWriter, error)
+	// Create opens a file writer by path. path is relative path to storage base path. Currently only s3 implemented WriterOption
+	Create(ctx context.Context, path string, option *WriterOption) (ExternalFileWriter, error)
 	// Rename file name from oldFileName to newFileName
 	Rename(ctx context.Context, oldFileName, newFileName string) error
 }
@@ -130,7 +136,9 @@ type ExternalStorageOptions struct {
 	NoCredentials bool
 
 	// HTTPClient to use. The created storage may ignore this field if it is not
-	// directly using HTTP (e.g. the local storage).
+	// directly using HTTP (e.g. the local storage) or use self-design HTTP client
+	// with credential (e.g. the gcs).
+	// NOTICE: the HTTPClient is only used by s3 storage and azure blob storage.
 	HTTPClient *http.Client
 
 	// CheckPermissions check the given permission in New() function.
@@ -158,9 +166,6 @@ func Create(ctx context.Context, backend *backuppb.StorageBackend, sendCreds boo
 
 // New creates an ExternalStorage with options.
 func New(ctx context.Context, backend *backuppb.StorageBackend, opts *ExternalStorageOptions) (ExternalStorage, error) {
-	if opts == nil {
-		opts = &ExternalStorageOptions{}
-	}
 	switch backend := backend.Backend.(type) {
 	case *backuppb.StorageBackend_Local:
 		if backend.Local == nil {
@@ -183,10 +188,29 @@ func New(ctx context.Context, backend *backuppb.StorageBackend, opts *ExternalSt
 		if backend.Gcs == nil {
 			return nil, errors.Annotate(berrors.ErrStorageInvalidConfig, "GCS config not found")
 		}
+		// the HTTPClient should has credential, currently the HTTPClient only has the http.Transport.
+		// Issue: https: //github.com/pingcap/tidb/issues/47022
+		opts.HTTPClient = nil
 		return NewGCSStorage(ctx, backend.Gcs, opts)
 	case *backuppb.StorageBackend_AzureBlobStorage:
 		return newAzureBlobStorage(ctx, backend.AzureBlobStorage, opts)
 	default:
 		return nil, errors.Annotatef(berrors.ErrStorageInvalidConfig, "storage %T is not supported yet", backend)
 	}
+}
+
+// Different from `http.DefaultTransport`, set the `MaxIdleConns` and `MaxIdleConnsPerHost`
+// to the actual request concurrency to reuse tcp connection as much as possible.
+func GetDefaultHttpClient(concurrency uint) *http.Client {
+	transport, _ := CloneDefaultHttpTransport()
+	transport.MaxIdleConns = int(concurrency)
+	transport.MaxIdleConnsPerHost = int(concurrency)
+	return &http.Client{
+		Transport: transport,
+	}
+}
+
+func CloneDefaultHttpTransport() (*http.Transport, bool) {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	return transport.Clone(), ok
 }

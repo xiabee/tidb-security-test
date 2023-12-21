@@ -15,28 +15,21 @@
 package executor
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	backup "github.com/pingcap/kvproto/pkg/brpb"
-	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -48,15 +41,13 @@ import (
 var (
 	null          = []byte("NULL")
 	taskQueueSize = 16 // the maximum number of pending tasks to commit in queue
-	// InTest is a flag that bypass gcs authentication in unit tests.
-	InTest bool
 )
 
 // LoadDataExec represents a load data executor.
 type LoadDataExec struct {
 	baseExecutor
 
-	FileLocRef   ast.FileLocRefTp
+	IsLocal      bool
 	OnDuplicate  ast.OnDuplicateKeyHandlingType
 	loadDataInfo *LoadDataInfo
 }
@@ -64,69 +55,28 @@ type LoadDataExec struct {
 // Next implements the Executor Next interface.
 func (e *LoadDataExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	req.GrowAndReset(e.maxChunkSize)
+	// TODO: support load data without local field.
+	if !e.IsLocal {
+		return errors.New("Load Data: don't support load data without local field")
+	}
+	e.loadDataInfo.OnDuplicate = e.OnDuplicate
 	// TODO: support lines terminated is "".
 	if len(e.loadDataInfo.LinesInfo.Terminated) == 0 {
 		return errors.New("Load Data: don't support load data terminated is nil")
 	}
+
+	sctx := e.loadDataInfo.ctx
+	val := sctx.Value(LoadDataVarKey)
+	if val != nil {
+		sctx.SetValue(LoadDataVarKey, nil)
+		return errors.New("Load Data: previous load data option isn't closed normal")
+	}
 	if e.loadDataInfo.Path == "" {
 		return errors.New("Load Data: infile path is empty")
 	}
-	if !e.loadDataInfo.Table.Meta().IsBaseTable() {
-		return errors.New("can only load data into base tables")
-	}
+	sctx.SetValue(LoadDataVarKey, e.loadDataInfo)
 
-	switch e.FileLocRef {
-	case ast.FileLocServerOrRemote:
-		u, err := storage.ParseRawURL(e.loadDataInfo.Path)
-		if err != nil {
-			return err
-		}
-		var filename string
-		u.Path, filename = filepath.Split(u.Path)
-		b, err := storage.ParseBackendFromURL(u, nil)
-		if err != nil {
-			return err
-		}
-		if b.GetLocal() != nil {
-			return errors.Errorf("Load Data: don't support load data from tidb-server's disk")
-		}
-		return e.loadFromRemote(ctx, b, filename)
-	case ast.FileLocClient:
-		// let caller use handleQuerySpecial to read data in this connection
-		sctx := e.loadDataInfo.ctx
-		val := sctx.Value(LoadDataVarKey)
-		if val != nil {
-			sctx.SetValue(LoadDataVarKey, nil)
-			return errors.New("Load Data: previous load data option wasn't closed normally")
-		}
-		sctx.SetValue(LoadDataVarKey, e.loadDataInfo)
-	}
 	return nil
-}
-
-func (e *LoadDataExec) loadFromRemote(
-	ctx context.Context,
-	b *backup.StorageBackend,
-	filename string,
-) error {
-	opt := &storage.ExternalStorageOptions{}
-	if InTest {
-		opt.NoCredentials = true
-	}
-	s, err := storage.New(ctx, b, opt)
-	if err != nil {
-		return err
-	}
-	fileReader, err := s.Open(ctx, filename)
-	if err != nil {
-		return err
-	}
-	defer fileReader.Close()
-	reader := bufio.NewReader(fileReader)
-
-	return e.loadDataInfo.Load(ctx, func() ([]byte, error) {
-		return reader.ReadBytes('\n')
-	})
 }
 
 // Close implements the Executor Close interface.
@@ -154,7 +104,6 @@ type CommitTask struct {
 }
 
 // LoadDataInfo saves the information of loading data operation.
-// TODO: rename it and remove unnecessary public methods.
 type LoadDataInfo struct {
 	*InsertValues
 
@@ -168,9 +117,18 @@ type LoadDataInfo struct {
 	rows        [][]types.Datum
 	Drained     bool
 
-	ColumnAssignments  []*ast.Assignment
+	ColumnAssignments     []*ast.Assignment
+	ColumnAssignmentExprs []expression.Expression
+	// sessionCtx generate warnings when rewrite AST node into expression.
+	// we should generate such warnings for each row encoded.
+	exprWarnings       []stmtctx.SQLWarn
 	ColumnsAndUserVars []*ast.ColumnNameOrUserVar
 	FieldMappings      []*FieldMapping
+	// Data interpretation is restrictive if the SQL mode is restrictive and neither
+	// the IGNORE nor the LOCAL modifier is specified. Errors terminate the load
+	// operation.
+	// ref https://dev.mysql.com/doc/refman/8.0/en/load-data.html#load-data-column-assignments
+	restrictive bool
 
 	commitTaskQueue chan CommitTask
 	StopCh          chan struct{}
@@ -182,111 +140,6 @@ type LoadDataInfo struct {
 type FieldMapping struct {
 	Column  *table.Column
 	UserVar *ast.VariableExpr
-}
-
-// Load reads from readerFn and do load data job.
-func (e *LoadDataInfo) Load(ctx context.Context, readerFn func() ([]byte, error)) error {
-	e.InitQueues()
-	e.SetMaxRowsInBatch(uint64(e.Ctx.GetSessionVars().DMLBatchSize))
-	e.StartStopWatcher()
-	// let stop watcher goroutine quit
-	defer e.ForceQuit()
-	err := sessiontxn.NewTxn(ctx, e.Ctx)
-	if err != nil {
-		return err
-	}
-	// processStream process input data, enqueue commit task
-	wg := new(sync.WaitGroup)
-	wg.Add(1)
-	go processStream(ctx, readerFn, e, wg)
-	err = e.CommitWork(ctx)
-	wg.Wait()
-	return err
-}
-
-// processStream process input stream from network
-func processStream(ctx context.Context, readerFn func() ([]byte, error), loadDataInfo *LoadDataInfo, wg *sync.WaitGroup) {
-	var err error
-	var shouldBreak bool
-	var prevData, curData []byte
-	defer func() {
-		r := recover()
-		if r != nil {
-			logutil.Logger(ctx).Error("process routine panicked",
-				zap.Reflect("r", r),
-				zap.Stack("stack"))
-		}
-		if err != nil || r != nil {
-			loadDataInfo.ForceQuit()
-		} else {
-			loadDataInfo.CloseTaskQueue()
-		}
-		wg.Done()
-	}()
-	for {
-		curData, err = readerFn()
-		if err != nil {
-			if terror.ErrorNotEqual(err, io.EOF) {
-				logutil.Logger(ctx).Error("read data for LOAD DATA failed", zap.Error(err))
-				break
-			}
-			err = nil
-		}
-		if len(curData) == 0 {
-			loadDataInfo.Drained = true
-			shouldBreak = true
-			if len(prevData) == 0 {
-				break
-			}
-		}
-		select {
-		case <-loadDataInfo.QuitCh:
-			err = errors.New("processStream forced to quit")
-		default:
-		}
-		if err != nil {
-			break
-		}
-		// prepare batch and enqueue task
-		prevData, err = insertDataWithCommit(ctx, prevData, curData, loadDataInfo)
-		if err != nil {
-			break
-		}
-		if shouldBreak {
-			break
-		}
-	}
-	if err != nil {
-		logutil.Logger(ctx).Error("load data process stream error", zap.Error(err))
-		return
-	}
-	if err = loadDataInfo.EnqOneTask(ctx); err != nil {
-		logutil.Logger(ctx).Error("load data process stream error", zap.Error(err))
-		return
-	}
-}
-
-func insertDataWithCommit(ctx context.Context, prevData,
-	curData []byte, loadDataInfo *LoadDataInfo) ([]byte, error) {
-	var err error
-	var reachLimit bool
-	for {
-		prevData, reachLimit, err = loadDataInfo.InsertData(ctx, prevData, curData)
-		if err != nil {
-			return nil, err
-		}
-		if !reachLimit {
-			break
-		}
-		// push into commit task queue
-		err = loadDataInfo.EnqOneTask(ctx)
-		if err != nil {
-			return prevData, err
-		}
-		curData = prevData
-		prevData = nil
-	}
-	return prevData, nil
 }
 
 // reorderColumns reorder the e.insertColumns according to the order of columnNames
@@ -365,6 +218,23 @@ func (e *LoadDataInfo) initLoadColumns(columnNames []string) error {
 		return err
 	}
 
+	return nil
+}
+
+// initColAssignExprs creates the column assignment expressions using session context.
+// RewriteAstExpr will write ast node in place(due to xxNode.Accept), but it doesn't change node content,
+func (e *LoadDataInfo) initColAssignExprs() error {
+	for _, assign := range e.ColumnAssignments {
+		newExpr, err := expression.RewriteAstExpr(e.Ctx, assign.Expr, nil, nil)
+		if err != nil {
+			return err
+		}
+		// col assign expr warnings is static, we should generate it for each row processed.
+		// so we save it and clear it here.
+		e.exprWarnings = append(e.exprWarnings, e.Ctx.GetSessionVars().StmtCtx.GetWarnings()...)
+		e.Ctx.GetSessionVars().StmtCtx.SetWarnings(nil)
+		e.ColumnAssignmentExprs = append(e.ColumnAssignmentExprs, newExpr)
+	}
 	return nil
 }
 
@@ -473,7 +343,7 @@ func (e *LoadDataInfo) CommitOneTask(ctx context.Context, task CommitTask) error
 	var err error
 	defer func() {
 		if err != nil {
-			e.Ctx.StmtRollback(ctx, false)
+			e.Ctx.StmtRollback()
 		}
 	}()
 	err = e.CheckAndInsertOneBatch(ctx, task.rows, task.cnt)
@@ -484,7 +354,7 @@ func (e *LoadDataInfo) CommitOneTask(ctx context.Context, task CommitTask) error
 	failpoint.Inject("commitOneTaskErr", func() error {
 		return errors.New("mock commit one task error")
 	})
-	e.Ctx.StmtCommit(ctx)
+	e.Ctx.StmtCommit()
 	// Make sure process stream routine never use invalid txn
 	e.txnInUse.Lock()
 	defer e.txnInUse.Unlock()
@@ -510,7 +380,7 @@ func (e *LoadDataInfo) CommitWork(ctx context.Context) error {
 			e.ForceQuit()
 		}
 		if err != nil {
-			e.ctx.StmtRollback(ctx, false)
+			e.ctx.StmtRollback()
 		}
 	}()
 	var tasks uint64
@@ -757,16 +627,33 @@ func (e *LoadDataInfo) CheckAndInsertOneBatch(ctx context.Context, rows [][]type
 	}
 	e.ctx.GetSessionVars().StmtCtx.AddRecordRows(cnt)
 
-	replace := false
-	if e.OnDuplicate == ast.OnDuplicateKeyHandlingReplace {
-		replace = true
+	switch e.OnDuplicate {
+	case ast.OnDuplicateKeyHandlingReplace:
+		return e.batchCheckAndInsert(ctx, rows[0:cnt], e.addRecordLD, true)
+	case ast.OnDuplicateKeyHandlingIgnore:
+		return e.batchCheckAndInsert(ctx, rows[0:cnt], e.addRecordLD, false)
+	case ast.OnDuplicateKeyHandlingError:
+		for i, row := range rows[0:cnt] {
+			sizeHintStep := int(e.Ctx.GetSessionVars().ShardAllocateStep)
+			if sizeHintStep > 0 && i%sizeHintStep == 0 {
+				sizeHint := sizeHintStep
+				remain := len(rows[0:cnt]) - i
+				if sizeHint > remain {
+					sizeHint = remain
+				}
+				err = e.addRecordWithAutoIDHint(ctx, row, sizeHint)
+			} else {
+				err = e.addRecord(ctx, row)
+			}
+			if err != nil {
+				return err
+			}
+			e.ctx.GetSessionVars().StmtCtx.AddCopiedRows(1)
+		}
+		return nil
+	default:
+		return errors.Errorf("unknown on duplicate key handling: %v", e.OnDuplicate)
 	}
-
-	err = e.batchCheckAndInsert(ctx, rows[0:cnt], e.addRecordLD, replace)
-	if err != nil {
-		return err
-	}
-	return err
 }
 
 // SetMessage sets info message(ERR_LOAD_INFO) generated by LOAD statement, it is public because of the special way that
@@ -821,14 +708,18 @@ func (e *LoadDataInfo) colsToRow(ctx context.Context, cols []field) []types.Datu
 
 		row = append(row, types.NewDatum(string(cols[i].str)))
 	}
-	for i := 0; i < len(e.ColumnAssignments); i++ {
+
+	for i := 0; i < len(e.ColumnAssignmentExprs); i++ {
 		// eval expression of `SET` clause
-		d, err := expression.EvalAstExpr(e.Ctx, e.ColumnAssignments[i].Expr)
+		d, err := e.ColumnAssignmentExprs[i].Eval(chunk.Row{})
 		if err != nil {
 			e.handleWarning(err)
 			return nil
 		}
 		row = append(row, d)
+	}
+	if len(e.exprWarnings) > 0 {
+		e.Ctx.GetSessionVars().StmtCtx.AppendWarnings(e.exprWarnings)
 	}
 
 	// a new row buffer will be allocated in getRow
@@ -847,8 +738,10 @@ func (e *LoadDataInfo) addRecordLD(ctx context.Context, row []types.Datum) error
 	}
 	err := e.addRecord(ctx, row)
 	if err != nil {
+		if e.restrictive {
+			return err
+		}
 		e.handleWarning(err)
-		return err
 	}
 	return nil
 }

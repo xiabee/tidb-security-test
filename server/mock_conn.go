@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"flag"
 	"math/rand"
 	"testing"
 
@@ -28,7 +29,6 @@ import (
 	tmysql "github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/util/arena"
 	"github.com/pingcap/tidb/util/chunk"
-	"github.com/pingcap/tidb/util/intest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -80,7 +80,7 @@ func (mc *mockConn) ID() uint64 {
 func CreateMockServer(t *testing.T, store kv.Storage) *Server {
 	if !RunInGoTest {
 		// If CreateMockServer is called in another package, RunInGoTest is not initialized.
-		RunInGoTest = intest.InTest
+		RunInGoTest = flag.Lookup("test.v") != nil || flag.Lookup("check.v") != nil
 	}
 	tidbdrv := NewTiDBDriver(store)
 	cfg := config.NewConfig()

@@ -17,6 +17,7 @@ package kv
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -25,7 +26,6 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/parser/terror"
-	"github.com/pingcap/tidb/util/intest"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
@@ -206,7 +206,7 @@ func setRequestSourceForInnerTxn(ctx context.Context, txn Transaction) {
 	}
 	// panic in test mode in case there are requests without source in the future.
 	// log warnings in production mode.
-	if intest.InTest {
+	if flag.Lookup("test.v") != nil || flag.Lookup("check.v") != nil {
 		panic("unexpected no source type context, if you see this error, " +
 			"the `RequestSourceTypeKey` is missing in your context")
 	} else {

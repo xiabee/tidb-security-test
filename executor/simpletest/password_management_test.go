@@ -103,9 +103,9 @@ func TestValidatePassword(t *testing.T) {
 		// "IDENTIFIED AS 'xxx'" is not affected by validation
 		tk.MustExec(fmt.Sprintf("ALTER USER testuser IDENTIFIED WITH '%s' AS ''", authPlugin))
 	}
-	tk.MustContainErrMsg("CREATE USER 'testuser1'@'localhost'", "Your password does not satisfy the current policy requirements")
-	tk.MustContainErrMsg("CREATE USER 'testuser1'@'localhost' IDENTIFIED WITH 'caching_sha2_password'", "Your password does not satisfy the current policy requirements")
-	tk.MustContainErrMsg("CREATE USER 'testuser1'@'localhost' IDENTIFIED WITH 'caching_sha2_password' AS ''", "Your password does not satisfy the current policy requirements")
+	tk.MustGetErrCode("CREATE USER 'testuser1'@'localhost'", errno.ErrNotValidPassword)
+	tk.MustGetErrCode("CREATE USER 'testuser1'@'localhost' IDENTIFIED WITH 'caching_sha2_password'", errno.ErrNotValidPassword)
+	tk.MustGetErrCode("CREATE USER 'testuser1'@'localhost' IDENTIFIED WITH 'caching_sha2_password' AS ''", errno.ErrNotValidPassword)
 
 	// if the username is '', all password can pass the check_user_name
 	subtk.MustQuery("SELECT user(), current_user()").Check(testkit.Rows("@localhost @localhost"))
@@ -787,7 +787,7 @@ func TestFailedLoginTracking(t *testing.T) {
 	tk.MustExec("CREATE USER 'testu5'@'localhost' IDENTIFIED BY 'testu5' FAILED_LOGIN_ATTEMPTS 0 PASSWORD_LOCK_TIME 0")
 	err = tk.Session().Auth(&auth.UserIdentity{Username: "testu5", Hostname: "localhost"}, sha1Password("password"), nil)
 	require.ErrorContains(t, err, "Access denied for user 'testu5'@'localhost' (using password: YES)")
-	tk.MustQuery("select user_attributes from mysql.user where user= 'testu5' and host = 'localhost'").Check(testkit.Rows("{}"))
+	tk.MustQuery("select user_attributes from mysql.user where user= 'testu5' and host = 'localhost'").Check(testkit.Rows("<nil>"))
 
 	tk.MustExec("DROP USER 'testu1'@'localhost', 'testu2'@'localhost', 'testu3'@'localhost', 'testu4'@'localhost', 'testu5'@'localhost'")
 

@@ -52,10 +52,10 @@ type SessionStatesHandler interface {
 	DecodeSessionStates(context.Context, Context, *sessionstates.SessionStates) error
 }
 
-// PlanCache is an interface for prepare and non-prepared plan cache
+// PlanCache is an interface for prepare and general plan cache
 type PlanCache interface {
-	Get(key kvcache.Key, paramTypes []*types.FieldType, limitParams []uint64) (value kvcache.Value, ok bool)
-	Put(key kvcache.Key, value kvcache.Value, paramTypes []*types.FieldType, limitParams []uint64)
+	Get(key kvcache.Key, paramTypes []*types.FieldType) (value kvcache.Value, ok bool)
+	Put(key kvcache.Key, value kvcache.Value, paramTypes []*types.FieldType)
 	Delete(key kvcache.Key)
 	DeleteAll()
 	Size() int
@@ -120,8 +120,8 @@ type Context interface {
 	GetStore() kv.Storage
 
 	// GetPlanCache returns the cache of the physical plan.
-	// isNonPrepared indicates to return the non-prepared plan cache or the prepared plan cache.
-	GetPlanCache(isNonPrepared bool) PlanCache
+	// generalPlanCache indicates to return the general plan cache or the prepared plan cache.
+	GetPlanCache(isGeneralPlanCache bool) PlanCache
 
 	// StoreQueryFeedback stores the query feedback.
 	StoreQueryFeedback(feedback interface{})
@@ -134,10 +134,9 @@ type Context interface {
 	HasDirtyContent(tid int64) bool
 
 	// StmtCommit flush all changes by the statement to the underlying transaction.
-	StmtCommit(ctx context.Context)
-	// StmtRollback provides statement level rollback. The parameter `forPessimisticRetry` should be true iff it's used
-	// for auto-retrying execution of DMLs in pessimistic transactions.
-	StmtRollback(ctx context.Context, isForPessimisticRetry bool)
+	StmtCommit()
+	// StmtRollback provides statement level rollback.
+	StmtRollback()
 	// StmtGetMutation gets the binlog mutation for current statement.
 	StmtGetMutation(int64) *binlog.TableMutation
 	// IsDDLOwner checks whether this session is DDL owner.
@@ -245,7 +244,10 @@ const allowedTimeFromNow = 100 * time.Millisecond
 
 // ValidateStaleReadTS validates that readTS does not exceed the current time not strictly.
 func ValidateStaleReadTS(ctx context.Context, sctx Context, readTS uint64) error {
-	currentTS, err := sctx.GetStore().GetOracle().GetStaleTimestamp(ctx, oracle.GlobalTxnScope, 0)
+	currentTS, err := sctx.GetSessionVars().StmtCtx.GetStaleTSO()
+	if currentTS == 0 || err != nil {
+		currentTS, err = sctx.GetStore().GetOracle().GetStaleTimestamp(ctx, oracle.GlobalTxnScope, 0)
+	}
 	// If we fail to calculate currentTS from local time, fallback to get a timestamp from PD
 	if err != nil {
 		metrics.ValidateReadTSFromPDCount.Inc()

@@ -204,12 +204,6 @@ func (e *DDLExec) Next(ctx context.Context, req *chunk.Chunk) (err error) {
 		err = e.executeDropPlacementPolicy(x)
 	case *ast.AlterPlacementPolicyStmt:
 		err = e.executeAlterPlacementPolicy(x)
-	case *ast.CreateResourceGroupStmt:
-		err = e.executeCreateResourceGroup(x)
-	case *ast.DropResourceGroupStmt:
-		err = e.executeDropResourceGroup(x)
-	case *ast.AlterResourceGroupStmt:
-		err = e.executeAlterResourceGroup(x)
 	}
 	if err != nil {
 		// If the owner return ErrTableNotExists error when running this DDL, it may be caused by schema changed,
@@ -391,10 +385,11 @@ func (e *DDLExec) executeRecoverTable(s *ast.RecoverTableStmt) error {
 	var job *model.Job
 	var err error
 	var tblInfo *model.TableInfo
-	if s.JobID != 0 {
-		job, tblInfo, err = e.getRecoverTableByJobID(s, dom)
-	} else {
+	// Let check table first. Related isssue #46296.
+	if s.Table != nil {
 		job, tblInfo, err = e.getRecoverTableByTableName(s.Table)
+	} else {
+		job, tblInfo, err = e.getRecoverTableByJobID(s, dom)
 	}
 	if err != nil {
 		return err
@@ -537,7 +532,13 @@ func (e *DDLExec) getRecoverTableByTableName(tableName *ast.TableName) (*model.J
 }
 
 func (e *DDLExec) executeFlashBackCluster(s *ast.FlashBackToTimestampStmt) error {
-	flashbackTS, err := staleread.CalculateAsOfTsExpr(e.ctx, s.FlashbackTS)
+	// Check `TO TSO` clause
+	if s.FlashbackTSO > 0 {
+		return domain.GetDomain(e.ctx).DDL().FlashbackCluster(e.ctx, s.FlashbackTSO)
+	}
+
+	// Check `TO TIMESTAMP` clause
+	flashbackTS, err := staleread.CalculateAsOfTsExpr(context.Background(), e.ctx, s.FlashbackTS)
 	if err != nil {
 		return err
 	}
@@ -740,25 +741,4 @@ func (e *DDLExec) executeDropPlacementPolicy(s *ast.DropPlacementPolicyStmt) err
 
 func (e *DDLExec) executeAlterPlacementPolicy(s *ast.AlterPlacementPolicyStmt) error {
 	return domain.GetDomain(e.ctx).DDL().AlterPlacementPolicy(e.ctx, s)
-}
-
-func (e *DDLExec) executeCreateResourceGroup(s *ast.CreateResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().AddResourceGroup(e.ctx, s)
-}
-
-func (e *DDLExec) executeAlterResourceGroup(s *ast.AlterResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().AlterResourceGroup(e.ctx, s)
-}
-
-func (e *DDLExec) executeDropResourceGroup(s *ast.DropResourceGroupStmt) error {
-	if !variable.EnableResourceControl.Load() {
-		return infoschema.ErrResourceGroupSupportDisabled
-	}
-	return domain.GetDomain(e.ctx).DDL().DropResourceGroup(e.ctx, s)
 }

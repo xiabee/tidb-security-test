@@ -62,7 +62,8 @@ func TestCreateSequence(t *testing.T) {
 	// test unsupported table option in sequence.
 	tk.MustGetErrCode("create sequence seq CHARSET=utf8", mysql.ErrSequenceUnsupportedTableOption)
 
-	tk.MustExec("create sequence seq comment=\"test\"")
+	_, err := tk.Exec("create sequence seq comment=\"test\"")
+	require.NoError(t, err)
 
 	sequenceTable := external.GetTableByName(t, tk, "test", "seq")
 

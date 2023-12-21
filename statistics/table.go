@@ -38,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/util/tracing"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
 	"golang.org/x/exp/slices"
 )
 
@@ -93,15 +94,6 @@ type ExtendedStatsColl struct {
 func NewExtendedStatsColl() *ExtendedStatsColl {
 	return &ExtendedStatsColl{Stats: make(map[string]*ExtendedStatsItem)}
 }
-
-const (
-	// ExtendedStatsInited is the status for extended stats which are just registered but have not been analyzed yet.
-	ExtendedStatsInited uint8 = iota
-	// ExtendedStatsAnalyzed is the status for extended stats which have been collected in analyze.
-	ExtendedStatsAnalyzed
-	// ExtendedStatsDeleted is the status for extended stats which were dropped. These "deleted" records would be removed from storage by GCStats().
-	ExtendedStatsDeleted
-)
 
 // HistColl is a collection of histogram. It collects enough information for plan to calculate the selectivity.
 type HistColl struct {
@@ -411,9 +403,7 @@ func (t *Table) GetColRowCount() float64 {
 	slices.Sort(IDs)
 	for _, id := range IDs {
 		col := t.Columns[id]
-		// need to make sure stats on this column is loaded.
-		// TODO: use the new method to check if it's loaded
-		if col != nil && !(col.Histogram.NDV > 0 && col.notNullCount() == 0) && col.TotalRowCount() != 0 {
+		if col != nil && col.IsFullLoad() {
 			return col.TotalRowCount()
 		}
 	}
@@ -427,12 +417,8 @@ func (t *Table) GetStatsHealthy() (int64, bool) {
 		return 0, false
 	}
 	var healthy int64
-	count := float64(t.Count)
-	if histCount := t.GetColRowCount(); histCount > 0 {
-		count = histCount
-	}
-	if float64(t.ModifyCount) < count {
-		healthy = int64((1.0 - float64(t.ModifyCount)/count) * 100.0)
+	if t.ModifyCount < t.Count {
+		healthy = int64((1.0 - float64(t.ModifyCount)/float64(t.Count)) * 100.0)
 	} else if t.ModifyCount == 0 {
 		healthy = 100
 	}
@@ -839,6 +825,18 @@ func GetOrdinalOfRangeCond(sc *stmtctx.StatementContext, ran *ranger.Range) int 
 	return len(ran.LowVal)
 }
 
+// ReleaseAndPutToPool releases data structures of Table and put itself back to pool.
+func (t *Table) ReleaseAndPutToPool() {
+	for _, col := range t.Columns {
+		col.FMSketch.DestroyAndPutToPool()
+	}
+	maps.Clear(t.Columns)
+	for _, idx := range t.Indices {
+		idx.FMSketch.DestroyAndPutToPool()
+	}
+	maps.Clear(t.Indices)
+}
+
 // ID2UniqueID generates a new HistColl whose `Columns` is built from UniqueID of given columns.
 func (coll *HistColl) ID2UniqueID(columns []*expression.Column) *HistColl {
 	cols := make(map[int64]*Column)
@@ -860,18 +858,12 @@ func (coll *HistColl) ID2UniqueID(columns []*expression.Column) *HistColl {
 }
 
 // GenerateHistCollFromColumnInfo generates a new HistColl whose ColID2IdxIDs and IdxID2ColIDs is built from the given parameter.
-func (coll *HistColl) GenerateHistCollFromColumnInfo(infos []*model.ColumnInfo, columns []*expression.Column) *HistColl {
+func (coll *HistColl) GenerateHistCollFromColumnInfo(tblInfo *model.TableInfo, columns []*expression.Column) *HistColl {
 	newColHistMap := make(map[int64]*Column)
 	colInfoID2UniqueID := make(map[int64]int64, len(columns))
-	colNames2UniqueID := make(map[string]int64)
+	idxID2idxInfo := make(map[int64]*model.IndexInfo)
 	for _, col := range columns {
 		colInfoID2UniqueID[col.ID] = col.UniqueID
-	}
-	for _, colInfo := range infos {
-		uniqueID, ok := colInfoID2UniqueID[colInfo.ID]
-		if ok {
-			colNames2UniqueID[colInfo.Name.L] = uniqueID
-		}
 	}
 	for id, colHist := range coll.Columns {
 		uniqueID, ok := colInfoID2UniqueID[id]
@@ -880,13 +872,20 @@ func (coll *HistColl) GenerateHistCollFromColumnInfo(infos []*model.ColumnInfo, 
 			newColHistMap[uniqueID] = colHist
 		}
 	}
+	for _, idxInfo := range tblInfo.Indices {
+		idxID2idxInfo[idxInfo.ID] = idxInfo
+	}
 	newIdxHistMap := make(map[int64]*Index)
 	idx2Columns := make(map[int64][]int64)
 	colID2IdxIDs := make(map[int64][]int64)
-	for _, idxHist := range coll.Indices {
-		ids := make([]int64, 0, len(idxHist.Info.Columns))
-		for _, idxCol := range idxHist.Info.Columns {
-			uniqueID, ok := colNames2UniqueID[idxCol.Name.L]
+	for id, idxHist := range coll.Indices {
+		idxInfo := idxID2idxInfo[id]
+		if idxInfo == nil {
+			continue
+		}
+		ids := make([]int64, 0, len(idxInfo.Columns))
+		for _, idxCol := range idxInfo.Columns {
+			uniqueID, ok := colInfoID2UniqueID[tblInfo.Columns[idxCol.Offset].ID]
 			if !ok {
 				break
 			}
@@ -1388,8 +1387,7 @@ func (coll *HistColl) GetIndexAvgRowSize(ctx sessionctx.Context, cols []*express
 // We use this check to make sure all the statistics of the table are in the same version.
 func CheckAnalyzeVerOnTable(tbl *Table, version *int) bool {
 	for _, col := range tbl.Columns {
-		// Version0 means no statistics is collected currently.
-		if col.StatsVer == Version0 {
+		if !col.IsAnalyzed() {
 			continue
 		}
 		if col.StatsVer != int64(*version) {
@@ -1400,8 +1398,7 @@ func CheckAnalyzeVerOnTable(tbl *Table, version *int) bool {
 		return true
 	}
 	for _, idx := range tbl.Indices {
-		// Version0 means no statistics is collected currently.
-		if idx.StatsVer == Version0 {
+		if !idx.IsAnalyzed() {
 			continue
 		}
 		if idx.StatsVer != int64(*version) {

@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/deadlock"
-	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
 	"github.com/pingcap/tidb/ddl/label"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/domain/infosync"
@@ -70,6 +69,7 @@ import (
 	"github.com/pingcap/tidb/util/servermemorylimit"
 	"github.com/pingcap/tidb/util/set"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/pingcap/tidb/util/stmtsummary"
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	"go.uber.org/zap"
@@ -157,6 +157,9 @@ func (e *memtableRetriever) retrieve(ctx context.Context, sctx sessionctx.Contex
 			e.dataForTableTiFlashReplica(sctx, dbs)
 		case infoschema.TableTiKVStoreStatus:
 			err = e.dataForTiKVStoreStatus(sctx)
+		case infoschema.TableStatementsSummaryEvicted,
+			infoschema.ClusterTableStatementsSummaryEvicted:
+			err = e.setDataForStatementsSummaryEvicted(sctx)
 		case infoschema.TableClientErrorsSummaryGlobal,
 			infoschema.TableClientErrorsSummaryByUser,
 			infoschema.TableClientErrorsSummaryByHost:
@@ -181,8 +184,6 @@ func (e *memtableRetriever) retrieve(ctx context.Context, sctx sessionctx.Contex
 			err = e.setDataForMemoryUsageOpsHistory(sctx)
 		case infoschema.ClusterTableMemoryUsageOpsHistory:
 			err = e.setDataForClusterMemoryUsageOpsHistory(sctx)
-		case infoschema.TableResourceGroups:
-			err = e.setDataFromResourceGroups()
 		}
 		if err != nil {
 			return nil, err
@@ -1676,11 +1677,11 @@ func keyColumnUsageInTable(schema *model.DBInfo, table *model.TableInfo) [][]typ
 		}
 	}
 	for _, fk := range table.ForeignKeys {
+		fkRefCol := ""
+		if len(fk.RefCols) > 0 {
+			fkRefCol = fk.RefCols[0].O
+		}
 		for i, key := range fk.Cols {
-			fkRefCol := ""
-			if len(fk.RefCols) > i {
-				fkRefCol = fk.RefCols[i].O
-			}
 			col := nameToCol[key.L]
 			record := types.MakeDatums(
 				infoschema.CatalogVal, // CONSTRAINT_CATALOG
@@ -2079,25 +2080,37 @@ func (e *tableStorageStatsRetriever) setDataForTableStorageStats(ctx sessionctx.
 	rows := make([][]types.Datum, 0, 1024)
 	count := 0
 	for e.curTable < len(e.initialTables) && count < 1024 {
-		table := e.initialTables[e.curTable]
-		tableID := table.ID
-		err := e.helper.GetPDRegionStats(tableID, &e.stats, false)
-		if err != nil {
-			return nil, err
+		tbl := e.initialTables[e.curTable]
+		tblIDs := make([]int64, 0, 1)
+		tblIDs = append(tblIDs, tbl.ID)
+		if partInfo := tbl.GetPartitionInfo(); partInfo != nil {
+			for _, partDef := range partInfo.Definitions {
+				tblIDs = append(tblIDs, partDef.ID)
+			}
 		}
-		peerCount := len(e.stats.StorePeerCount)
 
-		record := types.MakeDatums(
-			table.db,            // TABLE_SCHEMA
-			table.Name.O,        // TABLE_NAME
-			tableID,             // TABLE_ID
-			peerCount,           // TABLE_PEER_COUNT
-			e.stats.Count,       // TABLE_REGION_COUNT
-			e.stats.EmptyCount,  // TABLE_EMPTY_REGION_COUNT
-			e.stats.StorageSize, // TABLE_SIZE
-			e.stats.StorageKeys, // TABLE_KEYS
-		)
-		rows = append(rows, record)
+		for _, tableID := range tblIDs {
+			err := e.helper.GetPDRegionStats(tableID, &e.stats, false)
+			if err != nil {
+				return nil, err
+			}
+			peerCount := 0
+			for _, cnt := range e.stats.StorePeerCount {
+				peerCount += cnt
+			}
+
+			record := types.MakeDatums(
+				tbl.db,              // TABLE_SCHEMA
+				tbl.Name.O,          // TABLE_NAME
+				tableID,             // TABLE_ID
+				peerCount,           // TABLE_PEER_COUNT
+				e.stats.Count,       // TABLE_REGION_COUNT
+				e.stats.EmptyCount,  // TABLE_EMPTY_REGION_COUNT
+				e.stats.StorageSize, // TABLE_SIZE
+				e.stats.StorageKeys, // TABLE_KEYS
+			)
+			rows = append(rows, record)
+		}
 		count++
 		e.curTable++
 	}
@@ -2261,11 +2274,15 @@ func (e *memtableRetriever) setDataFromSequences(ctx sessionctx.Context, schemas
 
 // dataForTableTiFlashReplica constructs data for table tiflash replica info.
 func (e *memtableRetriever) dataForTableTiFlashReplica(ctx sessionctx.Context, schemas []*model.DBInfo) {
+	checker := privilege.GetPrivilegeManager(ctx)
 	var rows [][]types.Datum
 	var tiFlashStores map[int64]helper.StoreStat
 	for _, schema := range schemas {
 		for _, tbl := range schema.Tables {
 			if tbl.TiFlashReplica == nil {
+				continue
+			}
+			if checker != nil && !checker.RequestVerification(ctx.GetSessionVars().ActiveRoles, schema.Name.L, tbl.Name.L, "", mysql.AllPrivMask) {
 				continue
 			}
 			var progress float64
@@ -2300,6 +2317,22 @@ func (e *memtableRetriever) dataForTableTiFlashReplica(ctx sessionctx.Context, s
 		}
 	}
 	e.rows = rows
+}
+
+func (e *memtableRetriever) setDataForStatementsSummaryEvicted(ctx sessionctx.Context) error {
+	if !hasPriv(ctx, mysql.ProcessPriv) {
+		return plannercore.ErrSpecificAccessDenied.GenWithStackByArgs("PROCESS")
+	}
+	e.rows = stmtsummary.StmtSummaryByDigestMap.ToEvictedCountDatum()
+	switch e.table.Name.O {
+	case infoschema.ClusterTableStatementsSummaryEvicted:
+		rows, err := infoschema.AppendHostInfoToRows(ctx, e.rows)
+		if err != nil {
+			return err
+		}
+		e.rows = rows
+	}
+	return nil
 }
 
 func (e *memtableRetriever) setDataForClientErrorsSummary(ctx sessionctx.Context, tableName string) error {
@@ -2454,6 +2487,50 @@ func (e *memtableRetriever) setDataForClusterMemoryUsageOpsHistory(ctx sessionct
 	}
 	e.rows = rows
 	return nil
+}
+
+type stmtSummaryTableRetriever struct {
+	dummyCloser
+	table     *model.TableInfo
+	columns   []*model.ColumnInfo
+	retrieved bool
+	extractor *plannercore.StatementsSummaryExtractor
+}
+
+// retrieve implements the infoschemaRetriever interface
+func (e *stmtSummaryTableRetriever) retrieve(ctx context.Context, sctx sessionctx.Context) ([][]types.Datum, error) {
+	if e.extractor.SkipRequest || e.retrieved {
+		return nil, nil
+	}
+	e.retrieved = true
+
+	var err error
+	var instanceAddr string
+	switch e.table.Name.O {
+	case infoschema.ClusterTableStatementsSummary,
+		infoschema.ClusterTableStatementsSummaryHistory:
+		instanceAddr, err = infoschema.GetInstanceAddr(sctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	user := sctx.GetSessionVars().User
+	reader := stmtsummary.NewStmtSummaryReader(user, hasPriv(sctx, mysql.ProcessPriv), e.columns, instanceAddr, sctx.GetSessionVars().StmtCtx.TimeZone)
+	if e.extractor.Enable {
+		checker := stmtsummary.NewStmtSummaryChecker(e.extractor.Digests)
+		reader.SetChecker(checker)
+	}
+	var rows [][]types.Datum
+	switch e.table.Name.O {
+	case infoschema.TableStatementsSummary,
+		infoschema.ClusterTableStatementsSummary:
+		rows = reader.GetStmtSummaryCurrentRows()
+	case infoschema.TableStatementsSummaryHistory,
+		infoschema.ClusterTableStatementsSummaryHistory:
+		rows = reader.GetStmtSummaryHistoryRows()
+	}
+
+	return rows, nil
 }
 
 // tidbTrxTableRetriever is the memtable retriever for the TIDB_TRX and CLUSTER_TIDB_TRX table.
@@ -2954,6 +3031,9 @@ func (e *hugeMemTableRetriever) retrieve(ctx context.Context, sctx sessionctx.Co
 }
 
 func adjustColumns(input [][]types.Datum, outColumns []*model.ColumnInfo, table *model.TableInfo) [][]types.Datum {
+	if table.Name.O == infoschema.TableStatementsSummary {
+		return input
+	}
 	if len(outColumns) == len(table.Columns) {
 		return input
 	}
@@ -3317,40 +3397,6 @@ func (e *memtableRetriever) setDataFromPlacementPolicies(sctx sessionctx.Context
 			policy.PlacementSettings.Learners,
 		)
 		rows = append(rows, row)
-	}
-	e.rows = rows
-	return nil
-}
-
-func (e *memtableRetriever) setDataFromResourceGroups() error {
-	resourceGroups, err := infosync.ListResourceGroups(context.TODO())
-	if err != nil {
-		return errors.Errorf("failed to access resource group manager, error message is %s", err.Error())
-	}
-	rows := make([][]types.Datum, 0, len(resourceGroups))
-	for _, group := range resourceGroups {
-		//mode := ""
-		burstable := "NO"
-		switch group.Mode {
-		case rmpb.GroupMode_RUMode:
-			if group.RUSettings.RU.Settings.BurstLimit < 0 {
-				burstable = "YES"
-			}
-			row := types.MakeDatums(
-				group.Name,
-				group.RUSettings.RU.Settings.FillRate,
-				burstable,
-			)
-			rows = append(rows, row)
-		default:
-			//mode = "UNKNOWN_MODE"
-			row := types.MakeDatums(
-				group.Name,
-				nil,
-				nil,
-			)
-			rows = append(rows, row)
-		}
 	}
 	e.rows = rows
 	return nil

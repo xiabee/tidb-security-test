@@ -39,7 +39,6 @@ import (
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/table"
-	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
@@ -271,8 +270,9 @@ func (e *IndexReaderExecutor) Open(ctx context.Context) error {
 	}
 
 	sc := e.ctx.GetSessionVars().StmtCtx
-	var kvRanges []kv.KeyRange
+	var kvRanges *kv.KeyRanges
 	if len(e.partitions) > 0 {
+		keyRanges := make([][]kv.KeyRange, 0, len(e.partitions))
 		for _, p := range e.partitions {
 			partRange := e.ranges
 			if pRange, ok := e.partRangeMap[p.GetPhysicalID()]; ok {
@@ -282,10 +282,15 @@ func (e *IndexReaderExecutor) Open(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			kvRanges = append(kvRanges, kvRange...)
+			keyRanges = append(keyRanges, kvRange)
+			e.kvRanges = append(e.kvRanges, kvRange...)
 		}
+		kvRanges = kv.NewPartitionedKeyRanges(keyRanges)
 	} else {
-		kvRanges, err = e.buildKeyRanges(sc, e.ranges, e.physicalTableID)
+		var keyRanges []kv.KeyRange
+		keyRanges, err = e.buildKeyRanges(sc, e.ranges, e.physicalTableID)
+		kvRanges = kv.NewNonParitionedKeyRanges(keyRanges)
+		e.kvRanges = keyRanges
 	}
 	if err != nil {
 		return err
@@ -294,7 +299,7 @@ func (e *IndexReaderExecutor) Open(ctx context.Context) error {
 	return e.open(ctx, kvRanges)
 }
 
-func (e *IndexReaderExecutor) open(ctx context.Context, kvRanges []kv.KeyRange) error {
+func (e *IndexReaderExecutor) open(ctx context.Context, kvRanges *kv.KeyRanges) error {
 	var err error
 	if e.corColInFilter {
 		e.dagPB.Executors, err = constructDistExec(e.ctx, e.plans)
@@ -307,7 +312,6 @@ func (e *IndexReaderExecutor) open(ctx context.Context, kvRanges []kv.KeyRange) 
 		collExec := true
 		e.dagPB.CollectExecutionSummaries = &collExec
 	}
-	e.kvRanges = kvRanges
 	// Treat temporary table as dummy table, avoid sending distsql request to TiKV.
 	// In a test case IndexReaderExecutor is mocked and e.table is nil.
 	// Avoid sending distsql request to TIKV.
@@ -315,13 +319,17 @@ func (e *IndexReaderExecutor) open(ctx context.Context, kvRanges []kv.KeyRange) 
 		return nil
 	}
 
-	e.memTracker = memory.NewTracker(e.id, -1)
+	if e.memTracker != nil {
+		e.memTracker.Reset()
+	} else {
+		e.memTracker = memory.NewTracker(e.id, -1)
+	}
 	e.memTracker.AttachTo(e.ctx.GetSessionVars().StmtCtx.MemTracker)
-	slices.SortFunc(kvRanges, func(i, j kv.KeyRange) bool {
+	kvRanges.SortByFunc(func(i, j kv.KeyRange) bool {
 		return bytes.Compare(i.StartKey, j.StartKey) < 0
 	})
 	var builder distsql.RequestBuilder
-	builder.SetKeyRanges(kvRanges).
+	builder.SetWrappedKeyRanges(kvRanges).
 		SetDAGRequest(e.dagPB).
 		SetStartTS(e.startTS).
 		SetDesc(e.desc).
@@ -1140,6 +1148,7 @@ type IndexLookUpRunTimeStats struct {
 	TableRowScan        int64
 	TableTaskNum        int64
 	Concurrency         int
+
 	// Record the `Next` call affected wait duration details.
 	NextWaitIndexScan        time.Duration
 	NextWaitTableLookUpBuild time.Duration
@@ -1167,6 +1176,7 @@ func (e *IndexLookUpRunTimeStats) String() string {
 		}
 		buf.WriteString(fmt.Sprintf(" table_task: {total_time: %v, num: %d, concurrency: %d}", execdetails.FormatDuration(time.Duration(tableScan)), tableTaskNum, concurrency))
 	}
+
 	if e.NextWaitIndexScan > 0 || e.NextWaitTableLookUpBuild > 0 || e.NextWaitTableLookUpResp > 0 {
 		if buf.Len() > 0 {
 			buf.WriteByte(',')
@@ -1292,27 +1302,36 @@ func (w *tableWorker) compareData(ctx context.Context, task *lookupTableTask, ta
 			sctx := w.idxLookup.ctx.GetSessionVars().StmtCtx
 			for i := range vals {
 				col := w.idxTblCols[i]
-				idxVal := idxRow.GetDatum(i, w.idxColTps[i])
+				tp := &col.FieldType
+				idxVal := idxRow.GetDatum(i, tp)
 				tablecodec.TruncateIndexValue(&idxVal, w.idxLookup.index.Columns[i], col.ColumnInfo)
-				cmpRes, err := tables.CompareIndexAndVal(sctx, vals[i], idxVal, collators[i], col.FieldType.IsArray() && vals[i].Kind() == types.KindMysqlJSON)
+				cmpRes, err := idxVal.Compare(sctx, &vals[i], collators[i])
 				if err != nil {
+					fts := make([]*types.FieldType, 0, len(w.idxTblCols))
+					for _, c := range w.idxTblCols {
+						fts = append(fts, &c.FieldType)
+					}
 					return ir().ReportAdminCheckInconsistentWithColInfo(ctx,
 						handle,
 						col.Name.O,
-						idxVal,
+						idxRow.GetDatum(i, tp),
 						vals[i],
 						err,
-						&consistency.RecordData{Handle: handle, Values: getDatumRow(&idxRow, w.idxColTps)},
+						&consistency.RecordData{Handle: handle, Values: getDatumRow(&idxRow, fts)},
 					)
 				}
 				if cmpRes != 0 {
+					fts := make([]*types.FieldType, 0, len(w.idxTblCols))
+					for _, c := range w.idxTblCols {
+						fts = append(fts, &c.FieldType)
+					}
 					return ir().ReportAdminCheckInconsistentWithColInfo(ctx,
 						handle,
 						col.Name.O,
-						idxRow.GetDatum(i, w.idxColTps[i]),
+						idxRow.GetDatum(i, tp),
 						vals[i],
 						err,
-						&consistency.RecordData{Handle: handle, Values: getDatumRow(&idxRow, w.idxColTps)},
+						&consistency.RecordData{Handle: handle, Values: getDatumRow(&idxRow, fts)},
 					)
 				}
 			}

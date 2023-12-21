@@ -234,9 +234,6 @@ func (s *SessionStatsCollector) UpdateColStatsUsage(colMap colStatsUsageMap) {
 
 // NewSessionStatsCollector allocates a stats collector for a session.
 func (h *Handle) NewSessionStatsCollector() *SessionStatsCollector {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	h.listHead.Lock()
 	defer h.listHead.Unlock()
 	newCollector := &SessionStatsCollector{
@@ -315,8 +312,6 @@ func (s *SessionIndexUsageCollector) Delete() {
 // idxUsageListHead always points to an empty SessionIndexUsageCollector as a sentinel node. So we let idxUsageListHead.next
 // points to new item. It's helpful to sweepIdxUsageList.
 func (h *Handle) NewSessionIndexUsageCollector() *SessionIndexUsageCollector {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.idxUsageListHead.Lock()
 	defer h.idxUsageListHead.Unlock()
 	newCollector := &SessionIndexUsageCollector{
@@ -408,35 +403,22 @@ var (
 	dumpStatsMaxDuration = time.Hour
 )
 
-// needDumpStatsDelta checks whether to dump stats delta.
-// 1. If the table doesn't exist or is a mem table or system table, then return false.
-// 2. If the mode is DumpAll, then return true.
-// 3. If the stats delta haven't been dumped in the past hour, then return true.
-// 4. If the table stats is pseudo or empty or `Modify Count / Table Count` exceeds the threshold.
-func (h *Handle) needDumpStatsDelta(is infoschema.InfoSchema, mode dumpMode, id int64, item variable.TableDelta, currentTime time.Time) bool {
-	tbl, ok := h.getTableByPhysicalID(is, id)
-	if !ok {
-		return false
-	}
-	dbInfo, ok := is.SchemaByTable(tbl.Meta())
-	if !ok {
-		return false
-	}
-	if util.IsMemOrSysDB(dbInfo.Name.L) {
-		return false
-	}
-	if mode == DumpAll {
-		return true
-	}
+// needDumpStatsDelta returns true when only updates a small portion of the table and the time since last update
+// do not exceed one hour.
+func needDumpStatsDelta(h *Handle, id int64, item variable.TableDelta, currentTime time.Time) bool {
 	if item.InitTime.IsZero() {
 		item.InitTime = currentTime
+	}
+	tbl, ok := h.statsCache.Load().(statsCache).Get(id)
+	if !ok {
+		// No need to dump if the stats is invalid.
+		return false
 	}
 	if currentTime.Sub(item.InitTime) > dumpStatsMaxDuration {
 		// Dump the stats to kv at least once an hour.
 		return true
 	}
-	statsTbl := h.GetPartitionStats(tbl.Meta(), id)
-	if statsTbl.Pseudo || statsTbl.Count == 0 || float64(item.Count)/float64(statsTbl.Count) > DumpStatsDeltaRatio {
+	if tbl.Count == 0 || float64(item.Count)/float64(tbl.Count) > DumpStatsDeltaRatio {
 		// Dump the stats when there are many modifications.
 		return true
 	}
@@ -505,15 +487,9 @@ func (h *Handle) DumpStatsDeltaToKV(mode dumpMode) error {
 		h.globalMap.data = deltaMap
 		h.globalMap.Unlock()
 	}()
-	// TODO: pass in do.InfoSchema() to DumpStatsDeltaToKV.
-	is := func() infoschema.InfoSchema {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.mu.ctx.GetDomainInfoSchema().(infoschema.InfoSchema)
-	}()
 	currentTime := time.Now()
 	for id, item := range deltaMap {
-		if !h.needDumpStatsDelta(is, mode, id, item, currentTime) {
+		if mode == DumpDelta && !needDumpStatsDelta(h, id, item, currentTime) {
 			continue
 		}
 		updated, err := h.dumpTableStatCountToKV(id, item)
@@ -543,7 +519,7 @@ func (h *Handle) dumpTableStatCountToKV(id int64, delta variable.TableDelta) (up
 	statsVer := uint64(0)
 	defer func() {
 		if err == nil && statsVer != 0 {
-			h.recordHistoricalStatsMeta(id, statsVer, StatsMetaHistorySourceFlushStats)
+			err = h.recordHistoricalStatsMeta(id, statsVer)
 		}
 	}()
 	if delta.Count == 0 {
@@ -568,8 +544,7 @@ func (h *Handle) dumpTableStatCountToKV(id int64, delta variable.TableDelta) (up
 	startTS := txn.StartTS()
 	updateStatsMeta := func(id int64) error {
 		var err error
-		// This lock is already locked on it so it use isTableLocked without lock.
-		if h.isTableLocked(id) {
+		if h.IsTableLocked(id) {
 			if delta.Delta < 0 {
 				_, err = exec.ExecuteInternal(ctx, "update mysql.stats_table_locked set version = %?, count = count - %?, modify_count = modify_count + %? where table_id = %? and count >= %?", startTS, -delta.Delta, delta.Count, id, -delta.Delta)
 			} else {
@@ -703,7 +678,9 @@ func (h *Handle) UpdateStatsByLocalFeedback(is infoschema.InfoSchema) {
 OUTER:
 	for _, fbs := range feedback.Feedbacks {
 		for _, fb := range fbs {
+			h.mu.Lock()
 			table, ok := h.getTableByPhysicalID(is, fb.PhysicalID)
+			h.mu.Unlock()
 			if !ok {
 				continue
 			}
@@ -846,7 +823,9 @@ func (h *Handle) handleSingleHistogramUpdate(is infoschema.InfoSchema, rows []ch
 			err = errors.Trace(h.deleteOutdatedFeedback(physicalTableID, histID, isIndex))
 		}
 	}()
+	h.mu.Lock()
 	table, ok := h.getTableByPhysicalID(is, physicalTableID)
+	h.mu.Unlock()
 	// The table has been deleted.
 	if !ok {
 		return nil
@@ -924,7 +903,7 @@ func (h *Handle) deleteOutdatedFeedback(tableID, histID, isIndex int64) error {
 func (h *Handle) dumpStatsUpdateToKV(tableID, isIndex int64, q *statistics.QueryFeedback, hist *statistics.Histogram, cms *statistics.CMSketch, topN *statistics.TopN, statsVersion int64) error {
 	hist = statistics.UpdateHistogram(hist, q, int(statsVersion))
 	// feedback for partition is not ready.
-	err := h.SaveStatsToStorage(tableID, -1, 0, int(isIndex), hist, cms, topN, int(statsVersion), 0, false, StatsMetaHistorySourceFeedBack)
+	err := h.SaveStatsToStorage(tableID, -1, 0, int(isIndex), hist, cms, topN, int(statsVersion), 0, false)
 	metrics.UpdateStatsCounter.WithLabelValues(metrics.RetLabel(err)).Inc()
 	return errors.Trace(err)
 }
@@ -998,12 +977,12 @@ var AutoAnalyzeMinCnt int64 = 1000
 // TableAnalyzed checks if the table is analyzed.
 func TableAnalyzed(tbl *statistics.Table) bool {
 	for _, col := range tbl.Columns {
-		if col.Count > 0 {
+		if col.IsAnalyzed() {
 			return true
 		}
 	}
 	for _, idx := range tbl.Indices {
-		if idx.Histogram.Len() > 0 {
+		if idx.IsAnalyzed() {
 			return true
 		}
 	}
@@ -1230,14 +1209,11 @@ func (h *Handle) autoAnalyzePartitionTableInDynamicMode(tblInfo *model.TableInfo
 		sqlBuilder.WriteString(suffix)
 		return sqlBuilder.String()
 	}
-	if len(partitionNames) < 1 {
-		return false
-	}
-	logutil.BgLogger().Info("[stats] start to auto analyze",
-		zap.String("table", tblInfo.Name.String()),
-		zap.Any("partitions", partitionNames),
-		zap.Int("analyze partition batch size", analyzePartitionBatchSize))
 	if len(partitionNames) > 0 {
+		logutil.BgLogger().Info("[stats] start to auto analyze",
+			zap.String("table", tblInfo.Name.String()),
+			zap.Any("partitions", partitionNames),
+			zap.Int("analyze partition batch size", analyzePartitionBatchSize))
 		statsTbl := h.GetTableStats(tblInfo)
 		statistics.CheckAnalyzeVerOnTable(statsTbl, &tableStatsVer)
 		for i := 0; i < len(partitionNames); i += analyzePartitionBatchSize {

@@ -13,6 +13,8 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/version/build"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
 )
@@ -320,40 +322,50 @@ func TestCheckClusterVersion(t *testing.T) {
 		mock.getAllStores = func() []*metapb.Store {
 			return []*metapb.Store{{Version: "v6.4.0"}}
 		}
+		originVal := variable.EnableConcurrentDDL.Load()
 		err := CheckClusterVersion(context.Background(), &mock, CheckVersionForDDL)
 		require.NoError(t, err)
+		require.Equal(t, originVal, variable.EnableConcurrentDDL.Load())
 	}
 
 	{
 		mock.getAllStores = func() []*metapb.Store {
 			return []*metapb.Store{{Version: "v6.2.0"}}
 		}
+		originVal := variable.EnableConcurrentDDL.Load()
 		err := CheckClusterVersion(context.Background(), &mock, CheckVersionForDDL)
 		require.NoError(t, err)
+		require.Equal(t, originVal, variable.EnableConcurrentDDL.Load())
 	}
 
 	{
 		mock.getAllStores = func() []*metapb.Store {
 			return []*metapb.Store{{Version: "v6.2.0-alpha"}}
 		}
+		originVal := variable.EnableConcurrentDDL.Load()
 		err := CheckClusterVersion(context.Background(), &mock, CheckVersionForDDL)
 		require.NoError(t, err)
+		require.Equal(t, originVal, variable.EnableConcurrentDDL.Load())
 	}
 
 	{
 		mock.getAllStores = func() []*metapb.Store {
 			return []*metapb.Store{{Version: "v6.1.0"}}
 		}
+		variable.EnableConcurrentDDL.Store(true)
 		err := CheckClusterVersion(context.Background(), &mock, CheckVersionForDDL)
-		require.Error(t, err)
+		require.NoError(t, err)
+		require.False(t, variable.EnableConcurrentDDL.Load())
 	}
 
 	{
 		mock.getAllStores = func() []*metapb.Store {
 			return []*metapb.Store{{Version: "v5.4.0"}}
 		}
+		variable.EnableConcurrentDDL.Store(true)
 		err := CheckClusterVersion(context.Background(), &mock, CheckVersionForDDL)
-		require.Error(t, err)
+		require.NoError(t, err)
+		require.False(t, variable.EnableConcurrentDDL.Load())
 	}
 }
 
@@ -621,4 +633,12 @@ Check Table Before Drop: false`
 	versionStr, err = FetchVersion(ctx, db)
 	require.NoError(t, err)
 	require.Equal(t, "5.7.25", versionStr)
+}
+
+func TestEnsureSupportVersion(t *testing.T) {
+	// Once this test failed. please check the compatibility carefully.
+	// *** Don't change this test simply. ***
+	require.Equal(t,
+		CURRENT_BACKUP_SUPPORT_TABLE_INFO_VERSION,
+		model.CurrLatestTableInfoVersion)
 }

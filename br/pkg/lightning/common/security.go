@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/httputil"
@@ -28,7 +29,6 @@ import (
 	pd "github.com/tikv/pd/client"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type TLS struct {
@@ -87,8 +87,15 @@ func NewTLSFromMockServer(server *httptest.Server) *TLS {
 	}
 }
 
+// GetMockTLSUrl returns tls's host for mock test
+func GetMockTLSUrl(tls *TLS) string {
+	return tls.url
+}
+
 // WithHost creates a new TLS instance with the host replaced.
 func (tc *TLS) WithHost(host string) *TLS {
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimPrefix(host, "https://")
 	var url string
 	if tc.inner != nil {
 		url = "https://" + host
@@ -105,7 +112,7 @@ func (tc *TLS) ToGRPCDialOption() grpc.DialOption {
 	if tc.inner != nil {
 		return grpc.WithTransportCredentials(credentials.NewTLS(tc.inner))
 	}
-	return grpc.WithTransportCredentials(insecure.NewCredentials())
+	return grpc.WithInsecure()
 }
 
 // WrapListener places a TLS layer on top of the existing listener.

@@ -42,7 +42,6 @@ type InfoSchema interface {
 	SchemaByID(id int64) (*model.DBInfo, bool)
 	SchemaByTable(tableInfo *model.TableInfo) (*model.DBInfo, bool)
 	PolicyByName(name model.CIStr) (*model.PolicyInfo, bool)
-	ResourceGroupByName(name model.CIStr) (*model.ResourceGroupInfo, bool)
 	TableByID(id int64) (table.Table, bool)
 	AllocByID(id int64) (autoid.Allocators, bool)
 	AllSchemaNames() []string
@@ -61,8 +60,6 @@ type InfoSchema interface {
 	AllPlacementBundles() []*placement.Bundle
 	// AllPlacementPolicies returns all placement policies
 	AllPlacementPolicies() []*model.PolicyInfo
-	// AllResourceGroups returns all resource groups
-	AllResourceGroups() []*model.ResourceGroupInfo
 	// HasTemporaryTable returns whether information schema has temporary table
 	HasTemporaryTable() bool
 	// GetTableReferredForeignKeys gets the table's ReferredFKInfo by lowercase schema and table name.
@@ -96,10 +93,6 @@ type infoSchema struct {
 	policyMutex sync.RWMutex
 	policyMap   map[string]*model.PolicyInfo
 
-	// resourceGroupMap stores all resource groups.
-	resourceGroupMutex sync.RWMutex
-	resourceGroupMap   map[string]*model.ResourceGroupInfo
-
 	schemaMap map[string]*schemaTables
 
 	// sortedTablesBuckets is a slice of sortedTables, a table's bucket index is (tableID % bucketCount).
@@ -127,7 +120,6 @@ func MockInfoSchema(tbList []*model.TableInfo) InfoSchema {
 	result := &infoSchema{}
 	result.schemaMap = make(map[string]*schemaTables)
 	result.policyMap = make(map[string]*model.PolicyInfo)
-	result.resourceGroupMap = make(map[string]*model.ResourceGroupInfo)
 	result.ruleBundleMap = make(map[int64]*placement.Bundle)
 	result.sortedTablesBuckets = make([]sortedTables, bucketCount)
 	dbInfo := &model.DBInfo{ID: 0, Name: model.NewCIStr("test"), Tables: tbList}
@@ -155,7 +147,6 @@ func MockInfoSchemaWithSchemaVer(tbList []*model.TableInfo, schemaVer int64) Inf
 	result := &infoSchema{}
 	result.schemaMap = make(map[string]*schemaTables)
 	result.policyMap = make(map[string]*model.PolicyInfo)
-	result.resourceGroupMap = make(map[string]*model.ResourceGroupInfo)
 	result.ruleBundleMap = make(map[int64]*placement.Bundle)
 	result.sortedTablesBuckets = make([]sortedTables, bucketCount)
 	dbInfo := &model.DBInfo{ID: 0, Name: model.NewCIStr("test"), Tables: tbList}
@@ -237,17 +228,6 @@ func (is *infoSchema) TableExists(schema, table model.CIStr) bool {
 func (is *infoSchema) PolicyByID(id int64) (val *model.PolicyInfo, ok bool) {
 	// TODO: use another hash map to avoid traveling on the policy map
 	for _, v := range is.policyMap {
-		if v.ID == id {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-func (is *infoSchema) ResourceGroupByID(id int64) (val *model.ResourceGroupInfo, ok bool) {
-	is.resourceGroupMutex.RLock()
-	defer is.resourceGroupMutex.RUnlock()
-	for _, v := range is.resourceGroupMap {
 		if v.ID == id {
 			return v, true
 		}
@@ -413,25 +393,6 @@ func (is *infoSchema) PolicyByName(name model.CIStr) (*model.PolicyInfo, bool) {
 	return t, r
 }
 
-// ResourceGroupByName is used to find the resource group.
-func (is *infoSchema) ResourceGroupByName(name model.CIStr) (*model.ResourceGroupInfo, bool) {
-	is.resourceGroupMutex.RLock()
-	defer is.resourceGroupMutex.RUnlock()
-	t, r := is.resourceGroupMap[name.L]
-	return t, r
-}
-
-// AllResourceGroups returns all resource groups.
-func (is *infoSchema) AllResourceGroups() []*model.ResourceGroupInfo {
-	is.resourceGroupMutex.RLock()
-	defer is.resourceGroupMutex.RUnlock()
-	groups := make([]*model.ResourceGroupInfo, 0, len(is.resourceGroupMap))
-	for _, group := range is.resourceGroupMap {
-		groups = append(groups, group)
-	}
-	return groups
-}
-
 // AllPlacementPolicies returns all placement policies
 func (is *infoSchema) AllPlacementPolicies() []*model.PolicyInfo {
 	is.policyMutex.RLock()
@@ -454,18 +415,6 @@ func (is *infoSchema) AllPlacementBundles() []*placement.Bundle {
 		bundles = append(bundles, bundle)
 	}
 	return bundles
-}
-
-func (is *infoSchema) setResourceGroup(resourceGroup *model.ResourceGroupInfo) {
-	is.resourceGroupMutex.Lock()
-	defer is.resourceGroupMutex.Unlock()
-	is.resourceGroupMap[resourceGroup.Name.L] = resourceGroup
-}
-
-func (is *infoSchema) deleteResourceGroup(name string) {
-	is.resourceGroupMutex.Lock()
-	defer is.resourceGroupMutex.Unlock()
-	delete(is.resourceGroupMap, name)
 }
 
 func (is *infoSchema) setPolicy(policy *model.PolicyInfo) {
@@ -751,15 +700,10 @@ func (ts *SessionExtendedInfoSchema) HasTemporaryTable() bool {
 	return ts.LocalTemporaryTables != nil && ts.LocalTemporaryTables.Count() > 0 || ts.InfoSchema.HasTemporaryTable()
 }
 
-// AttachMDLTableInfoSchema attach MDL related table information schema to is
-func AttachMDLTableInfoSchema(is InfoSchema) InfoSchema {
-	mdlTables := NewSessionTables()
-	if iss, ok := is.(*SessionExtendedInfoSchema); ok {
-		iss.MdlTables = mdlTables
-		return iss
-	}
+// DetachTemporaryTableInfoSchema returns a new SessionExtendedInfoSchema without temporary tables
+func (ts *SessionExtendedInfoSchema) DetachTemporaryTableInfoSchema() *SessionExtendedInfoSchema {
 	return &SessionExtendedInfoSchema{
-		InfoSchema: is,
-		MdlTables:  mdlTables,
+		InfoSchema: ts.InfoSchema,
+		MdlTables:  ts.MdlTables,
 	}
 }

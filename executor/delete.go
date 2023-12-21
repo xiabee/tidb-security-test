@@ -153,7 +153,7 @@ func (e *DeleteExec) doBatchDelete(ctx context.Context) error {
 		return ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
 	}
 	e.memTracker.Consume(-int64(txn.Size()))
-	e.ctx.StmtCommit(ctx)
+	e.ctx.StmtCommit()
 	if err := sessiontxn.NewTxnInStmt(ctx, e.ctx); err != nil {
 		// We should return a special error for batch insert.
 		return ErrBatchInsertFail.GenWithStack("BatchDelete failed with error: %v", err)
@@ -245,8 +245,7 @@ func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handl
 	if err != nil {
 		return err
 	}
-	tid := t.Meta().ID
-	err = onRemoveRowForFK(ctx, data, e.fkChecks[tid], e.fkCascades[tid])
+	err = e.onRemoveRowForFK(ctx, t, data)
 	if err != nil {
 		return err
 	}
@@ -254,7 +253,8 @@ func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handl
 	return nil
 }
 
-func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FKCheckExec, fkCascades []*FKCascadeExec) error {
+func (e *DeleteExec) onRemoveRowForFK(ctx sessionctx.Context, t table.Table, data []types.Datum) error {
+	fkChecks := e.fkChecks[t.Meta().ID]
 	sc := ctx.GetSessionVars().StmtCtx
 	for _, fkc := range fkChecks {
 		err := fkc.deleteRowNeedToCheck(sc, data)
@@ -262,6 +262,7 @@ func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FK
 			return err
 		}
 	}
+	fkCascades := e.fkCascades[t.Meta().ID]
 	for _, fkc := range fkCascades {
 		err := fkc.onDeleteRow(sc, data)
 		if err != nil {

@@ -48,9 +48,6 @@ var (
 
 	RunningJobsCnt    = metrics.TTLJobStatus.With(prometheus.Labels{metrics.LblType: "running"})
 	CancellingJobsCnt = metrics.TTLJobStatus.With(prometheus.Labels{metrics.LblType: "cancelling"})
-
-	ScanningTaskCnt = metrics.TTLTaskStatus.With(prometheus.Labels{metrics.LblType: "scanning"})
-	DeletingTaskCnt = metrics.TTLTaskStatus.With(prometheus.Labels{metrics.LblType: "deleting"})
 )
 
 func initWorkerPhases(workerType string) map[string]prometheus.Counter {
@@ -136,16 +133,16 @@ func (t *PhaseTracer) EndPhase() {
 	t.EnterPhase("")
 }
 
-type ttlPhaseTraceKey struct{}
+const ttlPhaseTraceKey = "ttlPhaseTraceKey"
 
 // CtxWithPhaseTracer create a new context with tracer
 func CtxWithPhaseTracer(ctx context.Context, tracer *PhaseTracer) context.Context {
-	return context.WithValue(ctx, ttlPhaseTraceKey{}, tracer)
+	return context.WithValue(ctx, ttlPhaseTraceKey, tracer)
 }
 
 // PhaseTracerFromCtx returns a tracer from a given context
 func PhaseTracerFromCtx(ctx context.Context) *PhaseTracer {
-	if tracer, ok := ctx.Value(ttlPhaseTraceKey{}).(*PhaseTracer); ok {
+	if tracer, ok := ctx.Value(ttlPhaseTraceKey).(*PhaseTracer); ok {
 		return tracer
 	}
 	return nil

@@ -30,15 +30,13 @@ const (
 	// JobStatusWaiting means the job hasn't started
 	JobStatusWaiting JobStatus = "waiting"
 	// JobStatusRunning means this job is running
-	JobStatusRunning JobStatus = "running"
+	JobStatusRunning = "running"
 	// JobStatusCancelling means this job is being canceled, but not canceled yet
-	JobStatusCancelling JobStatus = "cancelling"
+	JobStatusCancelling = "cancelling"
 	// JobStatusCancelled means this job has been canceled successfully
-	JobStatusCancelled JobStatus = "cancelled"
+	JobStatusCancelled = "cancelled"
 	// JobStatusTimeout means this job has timeout
-	JobStatusTimeout JobStatus = "timeout"
-	// JobStatusFinished means job has been finished
-	JobStatusFinished JobStatus = "finished"
+	JobStatusTimeout = "timeout"
 )
 
 const selectFromTTLTableStatus = "SELECT LOW_PRIORITY table_id,parent_table_id,table_statistics,last_job_id,last_job_start_time,last_job_finish_time,last_job_ttl_expire,last_job_summary,current_job_id,current_job_owner_id,current_job_owner_addr,current_job_owner_hb_time,current_job_start_time,current_job_ttl_expire,current_job_state,current_job_status,current_job_status_update_time FROM mysql.tidb_ttl_table_status"
@@ -84,7 +82,6 @@ type TableStatusCache struct {
 func NewTableStatusCache(updateInterval time.Duration) *TableStatusCache {
 	return &TableStatusCache{
 		baseCache: newBaseCache(updateInterval),
-		Tables:    make(map[int64]*TableStatus),
 	}
 }
 

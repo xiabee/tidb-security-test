@@ -149,7 +149,6 @@ func assertTableEqual(t *testing.T, a *statistics.Table, b *statistics.Table) {
 	require.Equal(t, b.ModifyCount, a.ModifyCount)
 	require.Len(t, a.Columns, len(b.Columns))
 	for i := range a.Columns {
-		require.Equal(t, b.Columns[i].Count, a.Columns[i].Count)
 		require.True(t, statistics.HistogramEqual(&a.Columns[i].Histogram, &b.Columns[i].Histogram, false))
 		if a.Columns[i].CMSketch == nil {
 			require.Nil(t, b.Columns[i].CMSketch)
@@ -463,7 +462,6 @@ func TestLoadHist(t *testing.T) {
 		hist.TotColSize = temp
 
 		require.True(t, hist.CMSketch.Equal(newStatsTbl.Columns[id].CMSketch))
-		require.Equal(t, newStatsTbl.Columns[id].Count, hist.Count)
 		require.Equal(t, newStatsTbl.Columns[id].Info, hist.Info)
 	}
 	// Add column c3, we only update c3.
@@ -544,6 +542,23 @@ func TestInitStatsVer2(t *testing.T) {
 	h.SetLease(0)
 }
 
+func TestInitStatsIssue41938(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set @@global.tidb_analyze_version=1")
+	tk.MustExec("set @@session.tidb_analyze_version=1")
+	tk.MustExec("create table t1 (a timestamp primary key)")
+	tk.MustExec("insert into t1 values ('2023-03-07 14:24:30'), ('2023-03-07 14:24:31'), ('2023-03-07 14:24:32'), ('2023-03-07 14:24:33')")
+	tk.MustExec("analyze table t1 with 0 topn")
+	h := dom.StatsHandle()
+	// `InitStats` is only called when `Lease` is not 0, so here we just change it.
+	h.SetLease(time.Millisecond)
+	h.Clear()
+	require.NoError(t, h.InitStats(dom.InfoSchema()))
+	h.SetLease(0)
+}
+
 func TestReloadExtStatsLockRelease(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -553,10 +568,10 @@ func TestReloadExtStatsLockRelease(t *testing.T) {
 	tk.MustExec("insert into t values(1,1),(2,2),(3,3)")
 	tk.MustExec("alter table t add stats_extended s1 correlation(a,b)")
 	tk.MustExec("analyze table t")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/injectExtStatsLoadErr", `return("")`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/handle/injectExtStatsLoadErr", `return("")`))
 	err := tk.ExecToErr("admin reload stats_extended")
 	require.Equal(t, "gofail extendedStatsFromStorage error", err.Error())
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/injectExtStatsLoadErr"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/handle/injectExtStatsLoadErr"))
 	// Check the lock is released by `admin reload stats_extended` if error happens.
 	tk.MustExec("analyze table t")
 }
@@ -622,16 +637,16 @@ func TestLoadStats(t *testing.T) {
 	require.True(t, idx.IsFullLoad())
 
 	// Following test tests whether the LoadNeededHistograms would panic.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/mockGetStatsReaderFail", `return(true)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/handle/mockGetStatsReaderFail", `return(true)`))
 	err = h.LoadNeededHistograms()
 	require.Error(t, err)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/mockGetStatsReaderFail"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/handle/mockGetStatsReaderFail"))
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/mockGetStatsReaderPanic", "panic"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/statistics/handle/mockGetStatsReaderPanic", "panic"))
 	err = h.LoadNeededHistograms()
 	require.Error(t, err)
 	require.Regexp(t, ".*getStatsReader panic.*", err.Error())
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/mockGetStatsReaderPanic"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/statistics/handle/mockGetStatsReaderPanic"))
 	err = h.LoadNeededHistograms()
 	require.NoError(t, err)
 }
@@ -987,7 +1002,7 @@ func TestAnalyzeGlobalStatsWithOpts1(t *testing.T) {
 		{77, 219, false},
 		{-31, 222, true},
 		{10, -77, true},
-		{10000, 47, true},
+		{100000, 47, true},
 		{77, 47000, true},
 	}
 	for _, ca := range cases {
@@ -1096,7 +1111,7 @@ partition by range (a) (
 	require.NoError(t, dom.StatsHandle().DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, dom.StatsHandle().Update(dom.InfoSchema()))
 	checkModifyAndCount(4, 10, 2, 4, 2, 6)
-	checkHealthy(33, 0, 50)
+	checkHealthy(60, 50, 66)
 }
 
 func TestGlobalStatsData(t *testing.T) {
@@ -3181,31 +3196,6 @@ func TestIssues27147(t *testing.T) {
 	require.Equal(t, nil, err)
 }
 
-func TestColumnCountFromStorage(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	testKit := testkit.NewTestKit(t, store)
-	do := dom
-	h := do.StatsHandle()
-	originLease := h.Lease()
-	defer h.SetLease(originLease)
-	// `Update` will not use load by need strategy when `Lease` is 0, and `InitStats` is only called when
-	// `Lease` is not 0, so here we just change it.
-	h.SetLease(time.Millisecond)
-	testKit.MustExec("use test")
-	testKit.MustExec("set tidb_analyze_version = 2")
-	testKit.MustExec("create table tt (c int)")
-	testKit.MustExec("insert into tt values(1), (2)")
-	testKit.MustExec("analyze table tt")
-	is := do.InfoSchema()
-	h = do.StatsHandle()
-	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("tt"))
-	require.NoError(t, err)
-	tblInfo := tbl.Meta()
-	h.TableStatsFromStorage(tblInfo, tblInfo.ID, false, 0)
-	statsTbl := h.GetTableStats(tblInfo)
-	require.Equal(t, int64(2), statsTbl.Columns[tblInfo.Columns[0].ID].Count)
-}
-
 func testIncrementalModifyCountUpdateHelper(analyzeSnapshot bool) func(*testing.T) {
 	return func(t *testing.T) {
 		store, dom := testkit.CreateMockStoreAndDomain(t)
@@ -3300,7 +3290,7 @@ func TestRecordHistoricalStatsToStorage(t *testing.T) {
 
 	tableInfo, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
-	version, err := dom.StatsHandle().RecordHistoricalStatsToStorage("t", tableInfo.Meta(), tableInfo.Meta().ID, false)
+	version, err := dom.StatsHandle().RecordHistoricalStatsToStorage("t", tableInfo.Meta())
 	require.NoError(t, err)
 
 	rows := tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_history where version = '%d'", version)).Rows()

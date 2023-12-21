@@ -23,7 +23,6 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/ddl/internal/callback"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -122,7 +121,7 @@ func TestColumnTypeChangeStateBetweenInteger(t *testing.T) {
 	require.Equal(t, 2, len(tbl.Cols()))
 	require.NotNil(t, external.GetModifyColumn(t, tk, "test", "t", "c2", false))
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var checkErr error
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr != nil {
@@ -186,7 +185,7 @@ func TestRollbackColumnTypeChangeBetweenInteger(t *testing.T) {
 	require.Equal(t, 2, len(tbl.Cols()))
 	require.NotNil(t, external.GetModifyColumn(t, tk, "test", "t", "c2", false))
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	// Mock roll back at model.StateNone.
 	customizeHookRollbackAtState(hook, tbl, model.StateNone)
 	dom.DDL().SetHook(hook)
@@ -218,7 +217,7 @@ func TestRollbackColumnTypeChangeBetweenInteger(t *testing.T) {
 	assertRollBackedColUnchanged(t, tk)
 }
 
-func customizeHookRollbackAtState(hook *callback.TestDDLCallback, tbl table.Table, state model.SchemaState) {
+func customizeHookRollbackAtState(hook *ddl.TestDDLCallback, tbl table.Table, state model.SchemaState) {
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if tbl.Meta().ID != job.TableID {
 			return
@@ -935,7 +934,7 @@ func TestColumnTypeChangeIgnoreDisplayLength(t *testing.T) {
 	assertHasAlterWriteReorg := func(tbl table.Table) {
 		// Restore assertResult to false.
 		assertResult = false
-		hook := &callback.TestDDLCallback{Do: dom}
+		hook := &ddl.TestDDLCallback{Do: dom}
 		hook.OnJobRunBeforeExported = func(job *model.Job) {
 			if tbl.Meta().ID != job.TableID {
 				return
@@ -1601,7 +1600,7 @@ func TestChangingColOriginDefaultValue(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var (
 		once     bool
 		checkErr error
@@ -1680,7 +1679,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastSucc(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var (
 		once     bool
 		checkErr error
@@ -1765,7 +1764,7 @@ func TestChangingColOriginDefaultValueAfterAddColAndCastFail(t *testing.T) {
 
 	tbl := external.GetTableByName(t, tk, "test", "t")
 	originalHook := dom.DDL().GetHook()
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var checkErr error
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr != nil {
@@ -1813,7 +1812,8 @@ func TestChangingAttributeOfColumnWithFK(t *testing.T) {
 	tk.MustExec("use test")
 
 	prepare := func() {
-		tk.MustExec("drop table if exists users, orders")
+		tk.MustExec("drop table if exists users")
+		tk.MustExec("drop table if exists orders")
 		tk.MustExec("CREATE TABLE users (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, doc JSON);")
 		tk.MustExec("CREATE TABLE orders (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, user_id INT NOT NULL, doc JSON, FOREIGN KEY fk_user_id (user_id) REFERENCES users(id));")
 	}
@@ -1894,7 +1894,7 @@ func TestDDLExitWhenCancelMeetPanic(t *testing.T) {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/mockExceedErrorLimit"))
 	}()
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var jobID int64
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if jobID != 0 {
@@ -1969,7 +1969,7 @@ func TestCancelCTCInReorgStateWillCauseGoroutineLeak(t *testing.T) {
 	tk.MustExec("insert into ctc_goroutine_leak values(1),(2),(3)")
 	tbl := external.GetTableByName(t, tk, "test", "ctc_goroutine_leak")
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	var jobID int64
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if jobID != 0 {
@@ -2211,7 +2211,7 @@ func TestCastDateToTimestampInReorgAttribute(t *testing.T) {
 	var checkErr1 error
 	var checkErr2 error
 
-	hook := &callback.TestDDLCallback{Do: dom}
+	hook := &ddl.TestDDLCallback{Do: dom}
 	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr1 != nil || checkErr2 != nil || tbl.Meta().ID != job.TableID {
 			return
@@ -2321,11 +2321,15 @@ func TestColumnTypeChangeBetweenFloatAndDouble(t *testing.T) {
 	prepare := func(createTableStmt string) {
 		tk.MustExec("drop table if exists t;")
 		tk.MustExec(createTableStmt)
-		tk.MustExec("insert into t values (36.4), (24.1);")
+		tk.MustExec("insert into t values (36.43), (24.1);")
 	}
 
 	prepare("create table t (a float(6,2));")
 	tk.MustExec("alter table t modify a double(6,2)")
+	tk.MustQuery("select a from t;").Check(testkit.Rows("36.43", "24.1"))
+
+	prepare("create table t (a float(6,2));")
+	tk.MustExec("alter table t modify a float(6,1)")
 	tk.MustQuery("select a from t;").Check(testkit.Rows("36.4", "24.1"))
 
 	prepare("create table t (a double(6,2));")
@@ -2423,6 +2427,27 @@ func TestColumnTypeChangeTimestampToInt(t *testing.T) {
 	tk.MustExec("admin check table t")
 }
 
+func TestFixDDLTxnWillConflictWithReorgTxnNotConcurrent(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk0 := testkit.NewTestKit(t, store)
+	tk0.MustExec("set @@global.tidb_enable_metadata_lock=0")
+	defer tk0.MustExec("set @@global.tidb_enable_metadata_lock = default")
+	tk0.MustExec("set @@global.tidb_enable_concurrent_ddl = off")
+	defer tk0.MustExec("set @@global.tidb_enable_concurrent_ddl = default")
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("create table t (a int)")
+	tk.MustExec("set global tidb_ddl_enable_fast_reorg = OFF")
+	defer tk.MustExec("set global tidb_ddl_enable_fast_reorg = default")
+	tk.MustExec("alter table t add index(a)")
+	tk.MustExec("set @@sql_mode=''")
+	tk.MustExec("insert into t values(128),(129)")
+	tk.MustExec("alter table t modify column a tinyint")
+
+	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1690 2 warnings with this error code, first warning: constant 128 overflows tinyint"))
+}
+
 func TestFixDDLTxnWillConflictWithReorgTxn(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -2430,6 +2455,7 @@ func TestFixDDLTxnWillConflictWithReorgTxn(t *testing.T) {
 
 	tk.MustExec("create table t (a int)")
 	tk.MustExec("set global tidb_ddl_enable_fast_reorg = OFF")
+	defer tk.MustExec("set global tidb_ddl_enable_fast_reorg = default")
 	tk.MustExec("alter table t add index(a)")
 	tk.MustExec("set @@sql_mode=''")
 	tk.MustExec("insert into t values(128),(129)")

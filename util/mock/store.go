@@ -80,8 +80,3 @@ func (*Store) GetMinSafeTS(_ string) uint64 {
 func (*Store) GetLockWaits() ([]*deadlockpb.WaitForEntry, error) {
 	return nil, nil
 }
-
-// GetCodec implements kv.Storage interface.
-func (*Store) GetCodec() tikv.Codec {
-	return nil
-}

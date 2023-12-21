@@ -863,7 +863,7 @@ func TestValidate(t *testing.T) {
 			err: ErrUnknownColumn,
 		},
 		{
-			sql: "select * from t t1 use index(x)",
+			sql: "select * from t t1 use index(e)",
 			err: ErrKeyDoesNotExist,
 		},
 		{

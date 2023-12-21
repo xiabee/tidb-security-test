@@ -1019,13 +1019,6 @@ func deletePasswordLockingAttribute(ctx context.Context, sqlExecutor sqlexec.SQL
 	return err
 }
 
-func (e *SimpleExec) authUsingCleartextPwd(authOpt *ast.AuthOption, authPlugin string) bool {
-	if authOpt == nil || !authOpt.ByAuthString {
-		return false
-	}
-	return mysql.IsAuthPluginClearText(authPlugin)
-}
-
 func (e *SimpleExec) isValidatePasswordEnabled() bool {
 	validatePwdEnable, err := e.ctx.GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.ValidatePasswordEnable)
 	if err != nil {
@@ -1090,29 +1083,15 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 			userAttributes = append(userAttributes, fmt.Sprintf("\"metadata\": %s", s.CommentOrAttributeOption.Value))
 		}
 	}
-
-	if s.ResourceGroupNameOption != nil {
-		if !variable.EnableResourceControl.Load() {
-			return infoschema.ErrResourceGroupSupportDisabled
-		}
-
-		resourceGroupName := strings.ToLower(s.ResourceGroupNameOption.Value)
-
-		// check if specified resource group exists
-		if resourceGroupName != "default" && resourceGroupName != "" {
-			_, exists := e.is.ResourceGroupByName(model.NewCIStr(resourceGroupName))
-			if !exists {
-				return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(resourceGroupName)
-			}
-		}
-		userAttributes = append(userAttributes, fmt.Sprintf("\"resource_group\": \"%s\"", resourceGroupName))
-	}
 	// If FAILED_LOGIN_ATTEMPTS and PASSWORD_LOCK_TIME are both specified to 0, a string of 0 length is generated.
 	// When inserting the attempts into json, an error occurs. This requires special handling.
 	if PasswordLocking != "" {
 		userAttributes = append(userAttributes, PasswordLocking)
 	}
-	userAttributesStr := fmt.Sprintf("{%s}", strings.Join(userAttributes, ","))
+	var userAttributesStr any = nil
+	if len(userAttributes) > 0 {
+		userAttributesStr = fmt.Sprintf("{%s}", strings.Join(userAttributes, ","))
+	}
 
 	tokenIssuer := ""
 	for _, authTokenOption := range s.AuthTokenOrTLSOptions {
@@ -1127,7 +1106,7 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 	passwordInit := true
 	// Get changed user password reuse info.
 	savePasswdHistory := whetherSavePasswordHistory(plOptions)
-	sqlTemplate := "INSERT INTO %n.%n (Host, User, authentication_string, plugin, user_attributes, Account_locked, Token_issuer, Password_expired, Password_lifetime,  Password_reuse_time, Password_reuse_history) VALUES "
+	sqlTemplate := "INSERT INTO %n.%n (Host, User, authentication_string, plugin, user_attributes, Account_locked, Token_issuer, Password_expired, Password_lifetime, Password_reuse_time, Password_reuse_history) VALUES "
 	valueTemplate := "(%?, %?, %?, %?, %?, %?, %?, %?, %?"
 
 	sqlexec.MustFormatSQL(sql, sqlTemplate, mysql.SystemDB, mysql.UserTable)
@@ -1169,14 +1148,14 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 		if spec.AuthOpt != nil && spec.AuthOpt.AuthPlugin != "" {
 			authPlugin = spec.AuthOpt.AuthPlugin
 		}
-		if e.isValidatePasswordEnabled() && !s.IsCreateRole {
-			if spec.AuthOpt == nil || !spec.AuthOpt.ByAuthString && spec.AuthOpt.HashString == "" {
-				return variable.ErrNotValidPassword.GenWithStackByArgs()
+		// Validate the strength of the password if necessary
+		if e.isValidatePasswordEnabled() && !s.IsCreateRole && mysql.IsAuthPluginClearText(authPlugin) {
+			pwd := ""
+			if spec.AuthOpt != nil {
+				pwd = spec.AuthOpt.AuthString
 			}
-			if e.authUsingCleartextPwd(spec.AuthOpt, authPlugin) {
-				if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), spec.AuthOpt.AuthString); err != nil {
-					return err
-				}
+			if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), pwd); err != nil {
+				return err
 			}
 		}
 		pwd, ok := spec.EncodedPassword()
@@ -1823,7 +1802,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 					break
 				}
 			}
-			if e.isValidatePasswordEnabled() && e.authUsingCleartextPwd(spec.AuthOpt, spec.AuthOpt.AuthPlugin) {
+			if e.isValidatePasswordEnabled() && spec.AuthOpt.ByAuthString && mysql.IsAuthPluginClearText(spec.AuthOpt.AuthPlugin) {
 				if err := pwdValidator.ValidatePassword(e.ctx.GetSessionVars(), spec.AuthOpt.AuthString); err != nil {
 					return err
 				}
@@ -1902,22 +1881,6 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			} else {
 				newAttributes = append(newAttributes, fmt.Sprintf(`"metadata": %s`, s.CommentOrAttributeOption.Value))
 			}
-		}
-		if s.ResourceGroupNameOption != nil {
-			if !variable.EnableResourceControl.Load() {
-				return infoschema.ErrResourceGroupSupportDisabled
-			}
-
-			// check if specified resource group exists
-			resourceGroupName := strings.ToLower(s.ResourceGroupNameOption.Value)
-			if resourceGroupName != "default" && s.ResourceGroupNameOption.Value != "" {
-				_, exists := e.is.ResourceGroupByName(model.NewCIStr(resourceGroupName))
-				if !exists {
-					return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(resourceGroupName)
-				}
-			}
-
-			newAttributes = append(newAttributes, fmt.Sprintf(`"resource_group": "%s"`, resourceGroupName))
 		}
 		if passwordLockingStr != "" {
 			newAttributes = append(newAttributes, passwordLockingStr)
@@ -2630,6 +2593,7 @@ func killRemoteConn(ctx context.Context, sctx sessionctx.Context, connID *util.G
 		SetFromInfoSchema(sctx.GetInfoSchema()).
 		SetStoreType(kv.TiDB).
 		SetTiDBServerID(connID.ServerID).
+		SetStartTS(math.MaxUint64). // To make check visibility success.
 		Build()
 	if err != nil {
 		return err
@@ -2638,6 +2602,14 @@ func killRemoteConn(ctx context.Context, sctx sessionctx.Context, connID *util.G
 	if resp == nil {
 		err := errors.New("client returns nil response")
 		return err
+	}
+
+	// Must consume & close the response, otherwise coprocessor task will leak.
+	defer func() {
+		_ = resp.Close()
+	}()
+	if _, err := resp.Next(ctx); err != nil {
+		return errors.Trace(err)
 	}
 
 	logutil.BgLogger().Info("Killed remote connection", zap.Uint64("serverID", connID.ServerID),

@@ -18,7 +18,6 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/terror"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,24 +49,5 @@ func TestJobSize(t *testing.T) {
 - SubJob.ToProxyJob()
 `
 	job := model.Job{}
-	require.Equal(t, 288, int(unsafe.Sizeof(job)), msg)
-}
-
-func TestBackfillMetaCodec(t *testing.T) {
-	jm := &model.JobMeta{
-		SchemaID: 1,
-		TableID:  2,
-		Query:    "alter table t add index idx(a)",
-		Priority: 1,
-	}
-	bm := &model.BackfillMeta{
-		EndInclude: true,
-		Error:      terror.ErrResultUndetermined,
-		JobMeta:    jm,
-	}
-	bmBytes, err := bm.Encode()
-	require.NoError(t, err)
-	bmRet := &model.BackfillMeta{}
-	bmRet.Decode(bmBytes)
-	require.Equal(t, bm, bmRet)
+	require.Equal(t, 320, int(unsafe.Sizeof(job)), msg)
 }

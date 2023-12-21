@@ -36,7 +36,6 @@ type InfoSchemaCache struct {
 func NewInfoSchemaCache(updateInterval time.Duration) *InfoSchemaCache {
 	return &InfoSchemaCache{
 		baseCache: newBaseCache(updateInterval),
-		Tables:    make(map[int64]*PhysicalTable),
 	}
 }
 

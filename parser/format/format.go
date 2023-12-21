@@ -235,9 +235,6 @@ const (
 
 	RestoreTiDBSpecialComment
 	SkipPlacementRuleForRestore
-	RestoreWithTTLEnableOff
-	RestoreWithoutSchemaName
-	RestoreWithoutTableName
 )
 
 const (
@@ -247,16 +244,6 @@ const (
 
 func (rf RestoreFlags) has(flag RestoreFlags) bool {
 	return rf&flag != 0
-}
-
-// HasWithoutSchemaNameFlag returns a boolean indicating when `rf` has `RestoreWithoutSchemaName` flag.
-func (rf RestoreFlags) HasWithoutSchemaNameFlag() bool {
-	return rf.has(RestoreWithoutSchemaName)
-}
-
-// HasWithoutTableNameFlag returns a boolean indicating when `rf` has `RestoreWithoutTableName` flag.
-func (rf RestoreFlags) HasWithoutTableNameFlag() bool {
-	return rf.has(RestoreWithoutTableName)
 }
 
 // HasStringSingleQuotesFlag returns a boolean indicating when `rf` has `RestoreStringSingleQuotes` flag.
@@ -332,11 +319,6 @@ func (rf RestoreFlags) HasTiDBSpecialCommentFlag() bool {
 // HasSkipPlacementRuleForRestoreFlag returns a boolean indicating whether `rf` has `SkipPlacementRuleForRestore` flag.
 func (rf RestoreFlags) HasSkipPlacementRuleForRestoreFlag() bool {
 	return rf.has(SkipPlacementRuleForRestore)
-}
-
-// HasRestoreWithTTLEnableOff returns a boolean indicating whether to force set TTL_ENABLE='OFF' when restoring a TTL table
-func (rf RestoreFlags) HasRestoreWithTTLEnableOff() bool {
-	return rf.has(RestoreWithTTLEnableOff)
 }
 
 // RestoreCtx is `Restore` context to hold flags and writer.

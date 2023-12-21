@@ -34,7 +34,6 @@ go_library(
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//credentials",
-        "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//status",
         "@org_uber_go_zap//:zap",
     ] + select({
@@ -96,6 +95,7 @@ go_test(
     ],
     embed = [":common"],
     flaky = True,
+    shard_count = 21,
     deps = [
         "//br/pkg/errors",
         "//br/pkg/lightning/log",

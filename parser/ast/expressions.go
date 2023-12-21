@@ -512,11 +512,11 @@ type ColumnName struct {
 
 // Restore implements Node interface.
 func (n *ColumnName) Restore(ctx *format.RestoreCtx) error {
-	if n.Schema.O != "" && !ctx.IsCTETableName(n.Table.L) && !ctx.Flags.HasWithoutSchemaNameFlag() {
+	if n.Schema.O != "" && !ctx.IsCTETableName(n.Table.L) {
 		ctx.WriteName(n.Schema.O)
 		ctx.WritePlain(".")
 	}
-	if n.Table.O != "" && !ctx.Flags.HasWithoutTableNameFlag() {
+	if n.Table.O != "" {
 		ctx.WriteName(n.Table.O)
 		ctx.WritePlain(".")
 	}

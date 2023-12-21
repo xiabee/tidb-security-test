@@ -1149,7 +1149,7 @@ func TestRangeColumnsMultiColumn(t *testing.T) {
 
 	tk.MustGetErrCode(`create table t (a int, b datetime, c varchar(255)) partition by range columns (a,b,c)`+
 		`(partition p0 values less than (NULL,NULL,NULL))`,
-		errno.ErrWrongTypeColumnValue)
+		errno.ErrParse)
 	tk.MustGetErrCode(`create table t (a int, b datetime, c varchar(255)) partition by range columns (a,b,c)`+
 		`(partition p1 values less than (`+strconv.FormatInt(math.MinInt32-1, 10)+`,'0000-00-00',""))`,
 		errno.ErrWrongTypeColumnValue)
@@ -1656,42 +1656,20 @@ func TestPartitionProcessorWithUninitializedTable(t *testing.T) {
 	tk.MustQuery("explain format=brief select * from q1,q2").CheckAt([]int{0}, rows)
 }
 
-func TestEstimationForTopNPushToDynamicPartition(t *testing.T) {
+func TestIssue42323(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("set tidb_cost_model_version=2")
-	tk.MustExec("drop table if exists tlist")
-	tk.MustExec(`set tidb_enable_list_partition = 1`)
-	tk.MustExec(`create table trange (a int, b int, c int, index ia(a), primary key (b) clustered)
-    partition by range(b) (
-    partition p1 values less than(100),
-    partition p2 values less than(200),
-    partition p3 values less than maxvalue);`)
-	tk.MustExec(`create table tlist (a int, b int, c int, index ia(a), primary key (b) clustered)
-    partition by list (b) (
-    partition p0 values in (0, 1, 2),
-    partition p1 values in (3, 4, 5));`)
-	tk.MustExec(`create table thash (a int, b int, c int, index ia(a), primary key (b) clustered)
-    partition by hash(b) partitions 4;`)
-	tk.MustExec(`create table t (a int, b int, c int, index ia(a), primary key (b) clustered);`)
-	tk.MustExec(`analyze table trange;`)
-	tk.MustExec(`analyze table tlist;`)
-	tk.MustExec(`analyze table thash;`)
-	tk.MustExec(`analyze table t;`)
+	tk.MustExec("create database issue42323")
+	defer tk.MustExec("drop database issue42323")
 
-	var input []string
-	var output []struct {
-		SQL  string
-		Plan []string
-	}
-	integrationPartitionSuiteData := core.GetIntegrationPartitionSuiteData()
-	integrationPartitionSuiteData.LoadTestCases(t, &input, &output)
-	for i, tt := range input {
-		testdata.OnRecord(func() {
-			output[i].SQL = tt
-			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
-		})
-		tk.MustQuery(tt).Check(testkit.Rows(output[i].Plan...))
-	}
+	tk.MustExec("use issue42323")
+	tk.MustExec("set @@session.tidb_partition_prune_mode = 'dynamic';")
+	tk.MustExec(`CREATE TABLE t(col1 int(11) NOT NULL DEFAULT '0' ) PARTITION BY RANGE (FLOOR(col1))(
+			PARTITION p2021 VALUES LESS THAN (202200),
+			PARTITION p2022 VALUES LESS THAN (202300),
+			PARTITION p2023 VALUES LESS THAN (202400))`)
+	tk.MustExec("insert into t values(202303)")
+	tk.MustExec("analyze table t")
+	tk.MustQuery(`select * from t where col1 = 202303`).Check(testkit.Rows("202303"))
+	tk.MustQuery(`select * from t where col1 = floor(202303)`).Check(testkit.Rows("202303"))
 }

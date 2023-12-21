@@ -16,6 +16,7 @@ package analyzetest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"runtime"
 	"strconv"
@@ -46,6 +47,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
@@ -2164,6 +2166,107 @@ func TestAnalyzeColumnsErrorAndWarning(t *testing.T) {
 	}
 }
 
+func TestRecordHistoryStatsAfterAnalyze(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set @@tidb_analyze_version = 2")
+	tk.MustExec("set global tidb_enable_historical_stats = 0")
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int, b varchar(10))")
+
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+
+	// 1. switch off the tidb_enable_historical_stats, and there is no records in table `mysql.stats_history`
+	rows := tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_history where table_id = '%d'", tableInfo.Meta().ID)).Rows()
+	num, _ := strconv.Atoi(rows[0][0].(string))
+	require.Equal(t, num, 0)
+
+	tk.MustExec("analyze table t with 2 topn")
+	rows = tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_history where table_id = '%d'", tableInfo.Meta().ID)).Rows()
+	num, _ = strconv.Atoi(rows[0][0].(string))
+	require.Equal(t, num, 0)
+
+	// 2. switch on the tidb_enable_historical_stats and do analyze
+	tk.MustExec("set global tidb_enable_historical_stats = 1")
+	defer tk.MustExec("set global tidb_enable_historical_stats = 0")
+	tk.MustExec("analyze table t with 2 topn")
+	// dump historical stats
+	hsWorker := dom.GetHistoricalStatsWorker()
+	tblID := hsWorker.GetOneHistoricalStatsTable()
+	err = hsWorker.DumpHistoricalStats(tblID, h)
+	require.Nil(t, err)
+	rows = tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_history where table_id = '%d'", tableInfo.Meta().ID)).Rows()
+	num, _ = strconv.Atoi(rows[0][0].(string))
+	require.GreaterOrEqual(t, num, 1)
+
+	// 3. dump current stats json
+	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
+	require.NoError(t, err)
+	jsOrigin, _ := json.Marshal(dumpJSONTable)
+
+	// 4. get the historical stats json
+	rows = tk.MustQuery(fmt.Sprintf("select * from mysql.stats_history where table_id = '%d' and create_time = ("+
+		"select create_time from mysql.stats_history where table_id = '%d' order by create_time desc limit 1) "+
+		"order by seq_no", tableInfo.Meta().ID, tableInfo.Meta().ID)).Rows()
+	num = len(rows)
+	require.GreaterOrEqual(t, num, 1)
+	data := make([][]byte, num)
+	for i, row := range rows {
+		data[i] = []byte(row[1].(string))
+	}
+	jsonTbl, err := handle.BlocksToJSONTable(data)
+	require.NoError(t, err)
+	jsCur, err := json.Marshal(jsonTbl)
+	require.NoError(t, err)
+	// 5. historical stats must be equal to the current stats
+	require.JSONEq(t, string(jsOrigin), string(jsCur))
+}
+
+func TestRecordHistoryStatsMetaAfterAnalyze(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set @@tidb_analyze_version = 2")
+	tk.MustExec("set global tidb_enable_historical_stats = 0")
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int, b int)")
+	tk.MustExec("analyze table test.t")
+
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+
+	// 1. switch off the tidb_enable_historical_stats, and there is no record in table `mysql.stats_meta_history`
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_meta_history where table_id = '%d'", tableInfo.Meta().ID)).Check(testkit.Rows("0"))
+	// insert demo tuples, and there is no record either.
+	insertNums := 5
+	for i := 0; i < insertNums; i++ {
+		tk.MustExec("insert into test.t (a,b) values (1,1), (2,2), (3,3)")
+		err := h.DumpStatsDeltaToKV(handle.DumpDelta)
+		require.NoError(t, err)
+	}
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.stats_meta_history where table_id = '%d'", tableInfo.Meta().ID)).Check(testkit.Rows("0"))
+
+	// 2. switch on the tidb_enable_historical_stats and insert tuples to produce count/modifyCount delta change.
+	tk.MustExec("set global tidb_enable_historical_stats = 1")
+	defer tk.MustExec("set global tidb_enable_historical_stats = 0")
+
+	for i := 0; i < insertNums; i++ {
+		tk.MustExec("insert into test.t (a,b) values (1,1), (2,2), (3,3)")
+		err := h.DumpStatsDeltaToKV(handle.DumpDelta)
+		require.NoError(t, err)
+	}
+	tk.MustQuery(fmt.Sprintf("select modify_count, count from mysql.stats_meta_history where table_id = '%d' order by create_time", tableInfo.Meta().ID)).Sort().Check(
+		testkit.Rows("18 18", "21 21", "24 24", "27 27", "30 30"))
+}
+
 func checkAnalyzeStatus(t *testing.T, tk *testkit.TestKit, jobInfo, status, failReason, comment string, timeLimit int64) {
 	rows := tk.MustQuery("show analyze status where table_schema = 'test' and table_name = 't' and partition_name = ''").Rows()
 	require.Equal(t, 1, len(rows), comment)
@@ -2830,17 +2933,16 @@ PARTITION BY RANGE ( a ) (
 		"Warning 1105 Ignore columns and options when analyze partition in dynamic mode",
 		"Warning 8244 Build global-level stats failed due to missing partition-level column stats: table `t` partition `p0` column `d`, please run analyze table to refresh columns of all partitions",
 	))
-	// flaky test, fix it later
-	//tk.MustQuery("select * from t where a > 1 and b > 1 and c > 1 and d > 1")
-	//require.NoError(t, h.LoadNeededHistograms())
-	//tbl := h.GetTableStats(tableInfo)
-	//require.Equal(t, 0, len(tbl.Columns))
+	tk.MustQuery("select * from t where a > 1 and b > 1 and c > 1 and d > 1")
+	require.NoError(t, h.LoadNeededHistograms())
+	tbl := h.GetTableStats(tableInfo)
+	require.Equal(t, 0, len(tbl.Columns))
 
 	// ignore both p0's 3 buckets, persisted-partition-options' 1 bucket, just use table-level 2 buckets
 	tk.MustExec("analyze table t partition p0")
 	tk.MustQuery("select * from t where a > 1 and b > 1 and c > 1 and d > 1")
 	require.NoError(t, h.LoadNeededHistograms())
-	tbl := h.GetTableStats(tableInfo)
+	tbl = h.GetTableStats(tableInfo)
 	require.Equal(t, 2, len(tbl.Columns[tableInfo.Columns[2].ID].Buckets))
 }
 
@@ -3087,13 +3189,54 @@ func TestGlobalMemoryControlForAnalyze(t *testing.T) {
 	sql := "analyze table t with 1.0 samplerate;" // Need about 100MB
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/util/memory/ReadMemStats", `return(536870912)`))
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/mockAnalyzeMergeWorkerSlowConsume", `return(100)`))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/util/memory/ReadMemStats"))
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/mockAnalyzeMergeWorkerSlowConsume"))
-	}()
 	_, err := tk0.Exec(sql)
-	require.True(t, strings.Contains(err.Error(), "Out Of Memory Quota!"))
+	require.True(t, strings.Contains(err.Error(), memory.PanicMemoryExceedWarnMsg+memory.WarnMsgSuffixForInstance))
 	runtime.GC()
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/util/memory/ReadMemStats"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/mockAnalyzeMergeWorkerSlowConsume"))
+	tk0.MustExec(sql)
+}
+
+func TestGlobalMemoryControlForPrepareAnalyze(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+
+	tk0 := testkit.NewTestKit(t, store)
+	tk0.MustExec("set global tidb_mem_oom_action = 'cancel'")
+	tk0.MustExec("set global tidb_mem_quota_query = 209715200 ") // 200MB
+	tk0.MustExec("set global tidb_server_memory_limit = 5GB")
+	tk0.MustExec("set global tidb_server_memory_limit_sess_min_size = 128")
+
+	sm := &testkit.MockSessionManager{
+		PS: []*util.ProcessInfo{tk0.Session().ShowProcess()},
+	}
+	dom.ServerMemoryLimitHandle().SetSessionManager(sm)
+	go dom.ServerMemoryLimitHandle().Run()
+
+	tk0.MustExec("use test")
+	tk0.MustExec("create table t(a int)")
+	tk0.MustExec("insert into t select 1")
+	for i := 1; i <= 8; i++ {
+		tk0.MustExec("insert into t select * from t") // 256 Lines
+	}
+	sqlPrepare := "prepare stmt from 'analyze table t with 1.0 samplerate';"
+	sqlExecute := "execute stmt;"                                                                                 // Need about 100MB
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/util/memory/ReadMemStats", `return(536870912)`)) // 512MB
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/mockAnalyzeMergeWorkerSlowConsume", `return(100)`))
+	// won't be killed by tidb_mem_quota_query
+	tk0.MustExec(sqlPrepare)
+	tk0.MustExec(sqlExecute)
+	runtime.GC()
+	// killed by tidb_server_memory_limit
+	tk0.MustExec("set global tidb_server_memory_limit = 512MB")
+	_, err0 := tk0.Exec(sqlPrepare)
+	require.NoError(t, err0)
+	_, err1 := tk0.Exec(sqlExecute)
+	require.True(t, strings.Contains(err1.Error(), "Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory."))
+	runtime.GC()
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/util/memory/ReadMemStats"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/mockAnalyzeMergeWorkerSlowConsume"))
+	tk0.MustExec(sqlPrepare)
+	tk0.MustExec(sqlExecute)
 }
 
 func TestGlobalMemoryControlForAutoAnalyze(t *testing.T) {
@@ -3170,7 +3313,7 @@ func TestGlobalMemoryControlForAutoAnalyze(t *testing.T) {
 	h.HandleAutoAnalyze(dom.InfoSchema())
 	rs := tk.MustQuery("select fail_reason from mysql.analyze_jobs where table_name=? and state=? limit 1", "t", "failed")
 	failReason := rs.Rows()[0][0].(string)
-	require.True(t, strings.Contains(failReason, "Out Of Memory Quota!"))
+	require.True(t, strings.Contains(failReason, memory.PanicMemoryExceedWarnMsg+memory.WarnMsgSuffixForInstance))
 
 	childTrackers = executor.GlobalAnalyzeMemoryTracker.GetChildrenForTest()
 	require.Len(t, childTrackers, 0)

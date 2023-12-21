@@ -74,9 +74,9 @@ func (s *ttlStatistics) String() string {
 type ttlScanTask struct {
 	ctx context.Context
 
-	*cache.TTLTask
-
 	tbl        *cache.PhysicalTable
+	expire     time.Time
+	scanRange  cache.ScanRange
 	statistics *ttlStatistics
 }
 
@@ -121,8 +121,8 @@ func (t *ttlScanTask) doScan(ctx context.Context, delCh chan<- *ttlDeleteTask, s
 		terror.Log(err)
 	}()
 
-	sess := newTableSession(rawSess, t.tbl, t.ExpireTime)
-	generator, err := sqlbuilder.NewScanQueryGenerator(t.tbl, t.ExpireTime, t.ScanRangeStart, t.ScanRangeEnd)
+	sess := newTableSession(rawSess, t.tbl, t.expire)
+	generator, err := sqlbuilder.NewScanQueryGenerator(t.tbl, t.expire, t.scanRange.Start, t.scanRange.End)
 	if err != nil {
 		return t.result(err)
 	}
@@ -195,7 +195,7 @@ func (t *ttlScanTask) doScan(ctx context.Context, delCh chan<- *ttlDeleteTask, s
 
 		delTask := &ttlDeleteTask{
 			tbl:        t.tbl,
-			expire:     t.ExpireTime,
+			expire:     t.expire,
 			rows:       lastResult,
 			statistics: t.statistics,
 		}
@@ -234,11 +234,10 @@ func newScanWorker(delCh chan<- *ttlDeleteTask, notifyStateCh chan<- interface{}
 	return w
 }
 
-func (w *ttlScanWorker) CouldSchedule() bool {
+func (w *ttlScanWorker) Idle() bool {
 	w.Lock()
 	defer w.Unlock()
-	// see `Schedule`. If a `worker.CouldSchedule()` is true, `worker.Schedule` must success
-	return w.status == workerStatusRunning && w.curTask == nil && w.curTaskResult == nil
+	return w.status == workerStatusRunning && w.curTask == nil
 }
 
 func (w *ttlScanWorker) Schedule(task *ttlScanTask) error {
@@ -285,10 +284,7 @@ func (w *ttlScanWorker) PollTaskResult() *ttlScanTaskExecResult {
 func (w *ttlScanWorker) loop() error {
 	ctx := w.baseWorker.ctx
 	tracer := metrics.NewScanWorkerPhaseTracer()
-	defer func() {
-		tracer.EndPhase()
-		logutil.BgLogger().Info("ttlScanWorker loop exited.")
-	}()
+	defer tracer.EndPhase()
 
 	ticker := time.Tick(time.Second * 5)
 	for w.Status() == workerStatusRunning {
@@ -336,7 +332,7 @@ func (w *ttlScanWorker) handleScanTask(tracer *metrics.PhaseTracer, task *ttlSca
 type scanWorker interface {
 	worker
 
-	CouldSchedule() bool
+	Idle() bool
 	Schedule(*ttlScanTask) error
 	PollTaskResult() *ttlScanTaskExecResult
 	CurrentTask() *ttlScanTask

@@ -17,7 +17,7 @@ package core_test
 import (
 	"encoding/base64"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"os"
 	"regexp"
 	"strings"
@@ -77,6 +77,13 @@ func simplifyAndCheckBinaryOperator(t *testing.T, pb *tipb.ExplainOperator, with
 }
 
 func TestBinaryPlanInExplainAndSlowLog(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
+	// If we don't set this, it will be false sometimes and the cost in the result will be different.
+	tk.MustExec("set @@tidb_enable_chunk_rpc=true")
+
 	// Prepare the slow log
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
@@ -90,12 +97,6 @@ func TestBinaryPlanInExplainAndSlowLog(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("set tidb_cost_model_version=2")
-	// If we don't set this, it will be false sometimes and the cost in the result will be different.
-	tk.MustExec("set @@tidb_enable_chunk_rpc=true")
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 	tk.MustExec("set tidb_slow_log_threshold=0;")
 	defer func() {
@@ -148,6 +149,10 @@ func TestBinaryPlanInExplainAndSlowLog(t *testing.T) {
 }
 
 func TestBinaryPlanSwitch(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
 	f, err := os.CreateTemp("", "tidb-slow-*.log")
@@ -160,9 +165,6 @@ func TestBinaryPlanSwitch(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 
 	tk.MustExec("use test")
@@ -217,6 +219,10 @@ func TestBinaryPlanSwitch(t *testing.T) {
 
 // TestTooLongBinaryPlan asserts that if the binary plan is larger than 1024*1024 bytes, it should be output to slow query but not to stmt summary.
 func TestTooLongBinaryPlan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
 	f, err := os.CreateTemp("", "tidb-slow-*.log")
@@ -229,9 +235,6 @@ func TestTooLongBinaryPlan(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 
 	tk.MustExec("use test")
@@ -278,6 +281,10 @@ func TestTooLongBinaryPlan(t *testing.T) {
 // TestLongBinaryPlan asserts that if the binary plan is smaller than 1024*1024 bytes, it should be output to both slow query and stmt summary.
 // The size of the binary plan in this test case is designed to be larger than 1024*1024*0.85 bytes but smaller than 1024*1024 bytes.
 func TestLongBinaryPlan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
 	f, err := os.CreateTemp("", "tidb-slow-*.log")
@@ -290,10 +297,6 @@ func TestLongBinaryPlan(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
-
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 
 	tk.MustExec("use test")
@@ -333,6 +336,10 @@ func TestLongBinaryPlan(t *testing.T) {
 }
 
 func TestBinaryPlanOfPreparedStmt(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
 	f, err := os.CreateTemp("", "tidb-slow-*.log")
@@ -345,9 +352,6 @@ func TestBinaryPlanOfPreparedStmt(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 
 	tk.MustExec("use test")
@@ -385,6 +389,10 @@ func TestBinaryPlanOfPreparedStmt(t *testing.T) {
 
 // TestDecodeBinaryPlan asserts that the result of EXPLAIN ANALYZE FORMAT = 'verbose' is the same as tidb_decode_binary_plan().
 func TestDecodeBinaryPlan(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
 	// Prepare the slow log
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
@@ -398,9 +406,6 @@ func TestDecodeBinaryPlan(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 	tk.MustExec("set tidb_slow_log_threshold=0;")
 	defer func() {
@@ -494,6 +499,10 @@ func TestInvalidDecodeBinaryPlan(t *testing.T) {
 }
 
 func TestUnnecessaryBinaryPlanInSlowLog(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
 	originCfg := config.GetGlobalConfig()
 	newCfg := *originCfg
 	f, err := os.CreateTemp("", "tidb-slow-*.log")
@@ -506,16 +515,13 @@ func TestUnnecessaryBinaryPlanInSlowLog(t *testing.T) {
 		require.NoError(t, os.Remove(newCfg.Log.SlowQueryFile))
 	}()
 	require.NoError(t, logutil.InitLogger(newCfg.Log.ToLogConfig()))
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	tk.MustExec(fmt.Sprintf("set @@tidb_slow_query_file='%v'", f.Name()))
 
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists th")
 	tk.MustExec("set global tidb_slow_log_threshold = 1;")
 	tk.MustExec("create table th (i int, a int,b int, c int, index (a)) partition by hash (a) partitions 100;")
-	slowLogBytes, err := io.ReadAll(f)
+	slowLogBytes, err := ioutil.ReadAll(f)
 	require.NoError(t, err)
 	require.NotContains(t, string(slowLogBytes), `tidb_decode_binary_plan('')`)
 }

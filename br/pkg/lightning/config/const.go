@@ -15,11 +15,7 @@
 package config
 
 import (
-	"time"
-
 	"github.com/docker/go-units"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
 )
 
 const (
@@ -37,12 +33,4 @@ const (
 	defaultMaxAllowedPacket = 64 * units.MiB
 
 	DefaultBatchSize ByteSize = 100 * units.GiB
-)
-
-var (
-	DefaultGrpcKeepaliveParams = grpc.WithKeepaliveParams(keepalive.ClientParameters{
-		Time:                1 * time.Minute,
-		Timeout:             2 * time.Minute,
-		PermitWithoutStream: false,
-	})
 )

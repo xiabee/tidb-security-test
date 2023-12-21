@@ -58,23 +58,18 @@ func (r *KeyRanges) Len() int {
 	return l
 }
 
-// RefAt returns the reference at the ith position without copy.
-func (r *KeyRanges) RefAt(i int) *kv.KeyRange {
+// At returns the range at the ith position.
+func (r *KeyRanges) At(i int) kv.KeyRange {
 	if r.first != nil {
 		if i == 0 {
-			return r.first
+			return *r.first
 		}
 		i--
 	}
 	if i < len(r.mid) {
-		return &r.mid[i]
+		return r.mid[i]
 	}
-	return r.last
-}
-
-// At returns the range at the ith position.
-func (r *KeyRanges) At(i int) kv.KeyRange {
-	return *r.RefAt(i)
+	return *r.last
 }
 
 // Slice returns the sub ranges [from, to).

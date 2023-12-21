@@ -41,9 +41,12 @@ import (
 	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/util/mathutil"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type TableRestore struct {
@@ -56,6 +59,8 @@ type TableRestore struct {
 	alloc     autoid.Allocators
 	logger    log.Logger
 	kvStore   tidbkv.Storage
+	etcdCli   *clientv3.Client
+	autoidCli *autoid.ClientDiscover
 
 	ignoreColumns map[string]struct{}
 }
@@ -68,6 +73,7 @@ func NewTableRestore(
 	cp *checkpoints.TableCheckpoint,
 	ignoreColumns map[string]struct{},
 	kvStore tidbkv.Storage,
+	etcdCli *clientv3.Client,
 	logger log.Logger,
 ) (*TableRestore, error) {
 	idAlloc := kv.NewPanickingAllocators(cp.AllocBase)
@@ -75,6 +81,7 @@ func NewTableRestore(
 	if err != nil {
 		return nil, errors.Annotatef(err, "failed to tables.TableFromMeta %s", tableName)
 	}
+	autoidCli := autoid.NewClientDiscover(etcdCli)
 
 	return &TableRestore{
 		tableName:     tableName,
@@ -84,9 +91,19 @@ func NewTableRestore(
 		encTable:      tbl,
 		alloc:         idAlloc,
 		kvStore:       kvStore,
+		etcdCli:       etcdCli,
+		autoidCli:     autoidCli,
 		logger:        logger.With(zap.String("table", tableName)),
 		ignoreColumns: ignoreColumns,
 	}, nil
+}
+
+func (tr *TableRestore) Store() tidbkv.Storage {
+	return tr.kvStore
+}
+
+func (tr *TableRestore) AutoIDClient() *autoid.ClientDiscover {
+	return tr.autoidCli
 }
 
 func (tr *TableRestore) Close() {
@@ -144,6 +161,7 @@ func (tr *TableRestore) populateChunks(ctx context.Context, rc *Controller, cp *
 	return err
 }
 
+// RebaseChunkRowIDs rebase the row id of the chunks.
 func (tr *TableRestore) RebaseChunkRowIDs(cp *checkpoints.TableCheckpoint, rowIDBase int64) {
 	if rowIDBase == 0 {
 		return
@@ -250,7 +268,7 @@ func (tr *TableRestore) restoreEngines(pCtx context.Context, rc *Controller, cp 
 			if !common.TableHasAutoRowID(tr.tableInfo.Core) {
 				idxCnt--
 			}
-			threshold := estimateCompactionThreshold(tr.tableMeta.DataFiles, cp, int64(idxCnt))
+			threshold := estimateCompactionThreshold(cp, int64(idxCnt))
 			idxEngineCfg.Local = &backend.LocalEngineConfig{
 				Compact:            threshold > 0,
 				CompactConcurrency: 4,
@@ -743,8 +761,21 @@ func (tr *TableRestore) postProcess(
 			maxCap := shardFmt.IncrementalBitsCapacity()
 			err = AlterAutoRandom(ctx, rc.tidbGlue.GetSQLExecutor(), tr.tableName, uint64(tr.alloc.Get(autoid.AutoRandomType).Base())+1, maxCap)
 		} else if common.TableHasAutoRowID(tblInfo) || tblInfo.GetAutoIncrementColInfo() != nil {
-			// only alter auto increment id iff table contains auto-increment column or generated handle
-			err = AlterAutoIncrement(ctx, rc.tidbGlue.GetSQLExecutor(), tr.tableName, uint64(tr.alloc.Get(autoid.RowIDAllocType).Base())+1)
+			// only alter auto increment id iff table contains auto-increment column or generated handle.
+			// ALTER TABLE xxx AUTO_INCREMENT = yyy has a bad naming.
+			// if a table has implicit _tidb_rowid column & tbl.SepAutoID=false, then it works on _tidb_rowid
+			// allocator, even if the table has NO auto-increment column.
+			newBase := uint64(tr.alloc.Get(autoid.RowIDAllocType).Base()) + 1
+			err = AlterAutoIncrement(ctx, rc.tidbGlue.GetSQLExecutor(), tr.tableName, newBase)
+
+			if err == nil && isLocalBackend(rc.cfg) {
+				// for TiDB version >= 6.5.0, a table might have separate allocators for auto_increment column and _tidb_rowid,
+				// especially when a table has auto_increment non-clustered PK, it will use both allocators.
+				// And in this case, ALTER TABLE xxx AUTO_INCREMENT = xxx only works on the allocator of auto_increment column,
+				// not for allocator of _tidb_rowid.
+				// So we need to rebase IDs for those 2 allocators explicitly.
+				err = rebaseGlobalAutoID(ctx, adjustIDBase(newBase), tr, tr.dbInfo.ID, tr.tableInfo.Core)
+			}
 		}
 		rc.alterTableLock.Unlock()
 		saveCpErr := rc.saveStatusCheckpoint(ctx, tr.tableName, checkpoints.WholeTableEngineID, err, checkpoints.CheckpointStatusAlteredAutoInc)
@@ -843,15 +874,26 @@ func (tr *TableRestore) postProcess(
 
 			var remoteChecksum *RemoteChecksum
 			remoteChecksum, err = DoChecksum(ctx, tr.tableInfo)
+			failpoint.Inject("checksum-error", func() {
+				tr.logger.Info("failpoint checksum-error injected.")
+				remoteChecksum = nil
+				err = status.Error(codes.Unknown, "Checksum meets error.")
+			})
 			if err != nil {
-				return false, err
+				if rc.cfg.PostRestore.Checksum != config.OpLevelOptional {
+					return false, err
+				}
+				tr.logger.Warn("do checksum failed, will skip this error and go on", log.ShortError(err))
+				err = nil
 			}
-			err = tr.compareChecksum(remoteChecksum, localChecksum)
-			// with post restore level 'optional', we will skip checksum error
-			if rc.cfg.PostRestore.Checksum == config.OpLevelOptional {
-				if err != nil {
-					tr.logger.Warn("compare checksum failed, will skip this error and go on", log.ShortError(err))
-					err = nil
+			if remoteChecksum != nil {
+				err = tr.compareChecksum(remoteChecksum, localChecksum)
+				// with post restore level 'optional', we will skip checksum error
+				if rc.cfg.PostRestore.Checksum == config.OpLevelOptional {
+					if err != nil {
+						tr.logger.Warn("compare checksum failed, will skip this error and go on", log.ShortError(err))
+						err = nil
+					}
 				}
 			}
 		} else {
@@ -893,11 +935,12 @@ func (tr *TableRestore) postProcess(
 		case forcePostProcess || !rc.cfg.PostRestore.PostProcessAtLast:
 			err := tr.analyzeTable(ctx, rc.tidbGlue.GetSQLExecutor())
 			// witch post restore level 'optional', we will skip analyze error
-			if rc.cfg.PostRestore.Analyze == config.OpLevelOptional {
-				if err != nil {
-					tr.logger.Warn("analyze table failed, will skip this error and go on", log.ShortError(err))
-					err = nil
+			if err != nil {
+				if rc.cfg.PostRestore.Analyze != config.OpLevelOptional {
+					return false, err
 				}
+				tr.logger.Warn("analyze table failed, will skip this error and go on", log.ShortError(err))
+				err = nil
 			}
 			saveCpErr := rc.saveStatusCheckpoint(ctx, tr.tableName, checkpoints.WholeTableEngineID, err, checkpoints.CheckpointStatusAnalyzed)
 			if err = firstErr(err, saveCpErr); err != nil {
@@ -1060,23 +1103,15 @@ func (tr *TableRestore) analyzeTable(ctx context.Context, g glue.SQLExecutor) er
 // Try to limit the total SST files number under 500. But size compress 32GB SST files cost about 20min,
 // we set the upper bound to 32GB to avoid too long compression time.
 // factor is the non-clustered(1 for data engine and number of non-clustered index count for index engine).
-func estimateCompactionThreshold(files []mydump.FileInfo, cp *checkpoints.TableCheckpoint, factor int64) int64 {
+func estimateCompactionThreshold(cp *checkpoints.TableCheckpoint, factor int64) int64 {
 	totalRawFileSize := int64(0)
 	var lastFile string
-	fileSizeMap := make(map[string]int64, len(files))
-	for _, file := range files {
-		fileSizeMap[file.FileMeta.Path] = file.FileMeta.RealSize
-	}
-
 	for _, engineCp := range cp.Engines {
 		for _, chunk := range engineCp.Chunks {
 			if chunk.FileMeta.Path == lastFile {
 				continue
 			}
-			size, ok := fileSizeMap[chunk.FileMeta.Path]
-			if !ok {
-				size = chunk.FileMeta.FileSize
-			}
+			size := chunk.FileMeta.FileSize
 			if chunk.FileMeta.Type == mydump.SourceTypeParquet {
 				// parquet file is compressed, thus estimates with a factor of 2
 				size *= 2

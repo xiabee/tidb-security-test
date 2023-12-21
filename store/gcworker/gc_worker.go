@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/ddl/label"
 	"github.com/pingcap/tidb/ddl/placement"
@@ -65,21 +64,16 @@ import (
 
 // GCWorker periodically triggers GC process on tikv server.
 type GCWorker struct {
-	uuid         string
-	desc         string
-	store        kv.Storage
-	tikvStore    tikv.Storage
-	pdClient     pd.Client
-	gcIsRunning  bool
-	lastFinish   time.Time
-	cancel       context.CancelFunc
-	done         chan error
-	testingKnobs struct {
-		scanLocks         func(key []byte, regionID uint64, maxVersion uint64) []*txnlock.Lock
-		batchResolveLocks func(locks []*txnlock.Lock, regionID tikv.RegionVerID, safepoint uint64) (ok bool, err error)
-		resolveLocks      func(locks []*txnlock.Lock, lowResolutionTS uint64) (int64, error)
-	}
-	logBackupEnabled bool // check log-backup task existed.
+	uuid               string
+	desc               string
+	store              kv.Storage
+	tikvStore          tikv.Storage
+	pdClient           pd.Client
+	gcIsRunning        bool
+	lastFinish         time.Time
+	cancel             context.CancelFunc
+	done               chan error
+	regionLockResolver tikv.RegionLockResolver
 }
 
 // NewGCWorker creates a GCWorker instance.
@@ -96,15 +90,18 @@ func NewGCWorker(store kv.Storage, pdClient pd.Client) (*GCWorker, error) {
 	if !ok {
 		return nil, errors.New("GC should run against TiKV storage")
 	}
+	uuid := strconv.FormatUint(ver.Ver, 16)
+	resolverIdentifier := fmt.Sprintf("gc-worker-%s", uuid)
 	worker := &GCWorker{
-		uuid:        strconv.FormatUint(ver.Ver, 16),
-		desc:        fmt.Sprintf("host:%s, pid:%d, start at %s", hostName, os.Getpid(), time.Now()),
-		store:       store,
-		tikvStore:   tikvStore,
-		pdClient:    pdClient,
-		gcIsRunning: false,
-		lastFinish:  time.Now(),
-		done:        make(chan error),
+		uuid:               uuid,
+		desc:               fmt.Sprintf("host:%s, pid:%d, start at %s", hostName, os.Getpid(), time.Now()),
+		store:              store,
+		tikvStore:          tikvStore,
+		pdClient:           pdClient,
+		gcIsRunning:        false,
+		lastFinish:         time.Now(),
+		regionLockResolver: tikv.NewRegionLockResolver(resolverIdentifier, tikvStore),
+		done:               make(chan error),
 	}
 	variable.RegisterStatistics(worker)
 	return worker, nil
@@ -150,11 +147,6 @@ const (
 	gcDefaultConcurrency = 2
 	gcMinConcurrency     = 1
 	gcMaxConcurrency     = 128
-
-	gcTryResolveLocksIntervalFromNow = time.Minute * 5
-
-	// We don't want gc to sweep out the cached info belong to other processes, like coprocessor.
-	gcScanLockLimit = txnlock.ResolvedCacheSize / 2
 
 	gcEnableKey          = "tikv_gc_enable"
 	gcDefaultEnableValue = true
@@ -301,85 +293,6 @@ func (w *GCWorker) tick(ctx context.Context) {
 	}
 }
 
-// getGCSafePoint returns the current gc safe point.
-func getGCSafePoint(ctx context.Context, pdClient pd.Client) (uint64, error) {
-	// If there is try to set gc safepoint is 0, the interface will not set gc safepoint to 0,
-	// it will return current gc safepoint.
-	safePoint, err := pdClient.UpdateGCSafePoint(ctx, 0)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	return safePoint, nil
-}
-
-func (w *GCWorker) logIsGCSafePointTooEarly(ctx context.Context, safePoint uint64) error {
-	now, err := w.getOracleTime()
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	checkTs := oracle.GoTimeToTS(now.Add(-gcDefaultLifeTime * 2))
-	if checkTs > safePoint {
-		logutil.Logger(ctx).Info("[gc worker] gc safepoint is too early. " +
-			"Maybe there is a bit BR/Lightning/CDC task, " +
-			"or a long transaction is running" +
-			"or need a tidb without setting keyspace-name to calculate and update gc safe point.")
-	}
-	return nil
-}
-
-func (w *GCWorker) runKeyspaceDeleteRange(ctx context.Context, concurrency int) error {
-	// Get safe point from PD.
-	// The GC safe point is updated only after the global GC have done resolveLocks phase globally.
-	// So, in the following code, resolveLocks must have been done by the global GC on the ranges to be deleted,
-	// so its safe to delete the ranges.
-	safePoint, err := getGCSafePoint(ctx, w.pdClient)
-	if err != nil {
-		logutil.Logger(ctx).Info("[gc worker] get gc safe point error", zap.Error(errors.Trace(err)))
-		return nil
-	}
-
-	if safePoint == 0 {
-		logutil.Logger(ctx).Info("[gc worker] skip keyspace delete range, because gc safe point is 0")
-		return nil
-	}
-
-	err = w.logIsGCSafePointTooEarly(ctx, safePoint)
-	if err != nil {
-		logutil.Logger(ctx).Info("[gc worker] log is gc safe point is too early error", zap.Error(errors.Trace(err)))
-		return nil
-	}
-
-	keyspaceID := w.store.GetCodec().GetKeyspaceID()
-	logutil.Logger(ctx).Info("[gc worker] start keyspace delete range",
-		zap.String("uuid", w.uuid),
-		zap.Int("concurrency", concurrency),
-		zap.Uint32("keyspaceID", uint32(keyspaceID)),
-		zap.Uint64("GCSafepoint", safePoint))
-
-	// Do deleteRanges.
-	err = w.deleteRanges(ctx, safePoint, concurrency)
-	if err != nil {
-		logutil.Logger(ctx).Error("[gc worker] delete range returns an error",
-			zap.String("uuid", w.uuid),
-			zap.Error(err))
-		metrics.GCJobFailureCounter.WithLabelValues("delete_range").Inc()
-		return errors.Trace(err)
-	}
-
-	// Do redoDeleteRanges.
-	err = w.redoDeleteRanges(ctx, safePoint, concurrency)
-	if err != nil {
-		logutil.Logger(ctx).Error("[gc worker] redo-delete range returns an error",
-			zap.String("uuid", w.uuid),
-			zap.Error(err))
-		metrics.GCJobFailureCounter.WithLabelValues("redo_delete_range").Inc()
-		return errors.Trace(err)
-	}
-
-	return nil
-}
-
 // leaderTick of GC worker checks if it should start a GC job every tick.
 func (w *GCWorker) leaderTick(ctx context.Context) error {
 	if w.gcIsRunning {
@@ -396,35 +309,11 @@ func (w *GCWorker) leaderTick(ctx context.Context) error {
 		return errors.Trace(err)
 	}
 
-	// Gc safe point is not separated by keyspace now. The whole cluster has only one global gc safe point.
-	// So at least one TiDB with `keyspace-name` not set is required in the whole cluster to calculate and update gc safe point.
-	// If `keyspace-name` is set, the TiDB node will only do its own delete range, and will not calculate gc safe point and resolve locks.
-	// Note that when `keyspace-name` is set, `checkLeader` will be done within the key space.
-	// Therefore only one TiDB node in each key space will be responsible to do delete range.
-	if w.store.GetCodec().GetKeyspace() != nil {
-		err = w.runKeyspaceGCJob(ctx, concurrency)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		return nil
-	}
-
 	ok, safePoint, err := w.prepare(ctx)
 	if err != nil {
 		metrics.GCJobFailureCounter.WithLabelValues("prepare").Inc()
 		return errors.Trace(err)
 	} else if !ok {
-		// If skip gc, it still needs to resolve locks with expired TTL, in order not to block log backup.
-		if w.logBackupEnabled {
-			tryResolveLocksTS, err := w.getTryResolveLocksTS()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			// Set 0 to safepoint, which means resolving locks with expired TTL only.
-			if err = w.legacyResolveLocks(ctx, 0, tryResolveLocksTS, concurrency); err != nil {
-				return errors.Trace(err)
-			}
-		}
 		return nil
 	}
 	// When the worker is just started, or an old GC job has just finished,
@@ -443,36 +332,6 @@ func (w *GCWorker) leaderTick(ctx context.Context) error {
 	go func() {
 		w.done <- w.runGCJob(ctx, safePoint, concurrency)
 	}()
-	return nil
-}
-
-func (w *GCWorker) runKeyspaceGCJob(ctx context.Context, concurrency int) error {
-	// When the worker is just started, or an old GC job has just finished,
-	// wait a while before starting a new job.
-	if time.Since(w.lastFinish) < gcWaitTime {
-		logutil.Logger(ctx).Info("[gc worker] another keyspace gc job has just finished, skipped.",
-			zap.String("leaderTick on ", w.uuid))
-		return nil
-	}
-
-	now, err := w.getOracleTime()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ok, err := w.checkGCInterval(now)
-	if err != nil || !ok {
-		return errors.Trace(err)
-	}
-
-	go func() {
-		w.done <- w.runKeyspaceDeleteRange(ctx, concurrency)
-	}()
-
-	err = w.saveTime(gcLastRunTimeKey, now)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
 	return nil
 }
 
@@ -1034,10 +893,6 @@ func needsGCOperationForStore(store *metapb.Store) (bool, error) {
 		// skip physical resolve locks for it.
 		return false, nil
 
-	case placement.EngineLabelTiFlashCompute:
-		logutil.BgLogger().Debug("[gc worker] will ignore gc tiflash_compute node")
-		return false, nil
-
 	case placement.EngineLabelTiKV, "":
 		// If no engine label is set, it should be a TiKV node.
 		return true, nil
@@ -1157,25 +1012,12 @@ func (w *GCWorker) checkUsePhysicalScanLock() (bool, error) {
 }
 
 func (w *GCWorker) resolveLocks(ctx context.Context, safePoint uint64, concurrency int, usePhysical bool) (bool, error) {
-	// tryResolveLocksTS is defined as `now() - gcTryResolveLocksIntervalFromNow`,
-	// it used for trying resolve locks, ts of which is smaller than tryResolveLocksTS and expired.
-	tryResolveLocksTS, err := w.getTryResolveLocksTS()
-	if err != nil {
-		return false, err
-	}
-
-	if tryResolveLocksTS < safePoint {
-		tryResolveLocksTS = safePoint
-	} else if !w.logBackupEnabled {
-		tryResolveLocksTS = safePoint
-	}
-
 	if !usePhysical {
-		return false, w.legacyResolveLocks(ctx, safePoint, tryResolveLocksTS, concurrency)
+		return false, w.legacyResolveLocks(ctx, safePoint, concurrency)
 	}
 
 	// First try resolve locks with physical scan
-	err = w.resolveLocksPhysical(ctx, safePoint)
+	err := w.resolveLocksPhysical(ctx, safePoint)
 	if err == nil {
 		return true, nil
 	}
@@ -1183,28 +1025,29 @@ func (w *GCWorker) resolveLocks(ctx context.Context, safePoint uint64, concurren
 	logutil.Logger(ctx).Error("[gc worker] resolve locks with physical scan failed, trying fallback to legacy resolve lock",
 		zap.String("uuid", w.uuid),
 		zap.Uint64("safePoint", safePoint),
-		zap.Uint64("try-resolve-locks-ts", tryResolveLocksTS),
 		zap.Error(err))
 
-	return false, w.legacyResolveLocks(ctx, safePoint, tryResolveLocksTS, concurrency)
+	return false, w.legacyResolveLocks(ctx, safePoint, concurrency)
 }
 
 func (w *GCWorker) legacyResolveLocks(
 	ctx context.Context,
 	safePoint uint64,
-	tryResolveLocksTS uint64,
 	concurrency int,
 ) error {
 	metrics.GCWorkerCounter.WithLabelValues("resolve_locks").Inc()
 	logutil.Logger(ctx).Info("[gc worker] start resolve locks",
 		zap.String("uuid", w.uuid),
 		zap.Uint64("safePoint", safePoint),
-		zap.Uint64("try-resolve-locks-ts", tryResolveLocksTS),
 		zap.Int("concurrency", concurrency))
 	startTime := time.Now()
 
 	handler := func(ctx context.Context, r tikvstore.KeyRange) (rangetask.TaskStat, error) {
-		return w.resolveLocksForRange(ctx, safePoint, tryResolveLocksTS, r.StartKey, r.EndKey)
+		scanLimit := uint32(tikv.GCScanLockLimit)
+		failpoint.Inject("lowScanLockLimit", func() {
+			scanLimit = 3
+		})
+		return tikv.ResolveLocksForRange(ctx, w.regionLockResolver, safePoint, r.StartKey, r.EndKey, tikv.NewGcResolveLockMaxBackoffer, scanLimit)
 	}
 
 	runner := rangetask.NewRangeTaskRunner("resolve-locks-runner", w.tikvStore, concurrency, handler)
@@ -1221,210 +1064,9 @@ func (w *GCWorker) legacyResolveLocks(
 	logutil.Logger(ctx).Info("[gc worker] finish resolve locks",
 		zap.String("uuid", w.uuid),
 		zap.Uint64("safePoint", safePoint),
-		zap.Uint64("try-resolve-locks-ts", tryResolveLocksTS),
 		zap.Int("regions", runner.CompletedRegions()))
 	metrics.GCHistogram.WithLabelValues("resolve_locks").Observe(time.Since(startTime).Seconds())
 	return nil
-}
-
-// getTryResolveLocksTS gets the TryResolveLocksTS
-// that is defined as `now() - gcTryResolveLocksIntervalFromNow`.
-func (w *GCWorker) getTryResolveLocksTS() (uint64, error) {
-	now, err := w.tikvStore.CurrentTimestamp(kv.GlobalTxnScope)
-	if err != nil {
-		return 0, err
-	}
-
-	gcTryResolveLockTS := oracle.ComposeTS(oracle.ExtractPhysical(now)-gcTryResolveLocksIntervalFromNow.Milliseconds(), oracle.ExtractLogical(now))
-	return gcTryResolveLockTS, nil
-}
-
-// batchResolveExpiredLocks tries to resolve expired locks with batch method.
-// Travesal the given locks and check that:
-// 1. If the ts of lock is equal with or smaller than forceResolveLocksTS(acually equals safepoint),
-// it will rollback the txn, no matter the lock is expired of not.
-// 2. If the ts of lock is larger than forceResolveLocksTS, it will check status of the txn.
-// Resolve the lock if txn is expired, Or do nothing.
-func (w *GCWorker) batchResolveExpiredLocks(
-	bo *tikv.Backoffer,
-	locks []*txnlock.Lock,
-	loc tikv.RegionVerID,
-	forceResolveLocksTS uint64,
-	tryResolveLocksTS uint64,
-) (bool, error) {
-	if len(locks) == 0 {
-		return true, nil
-	}
-
-	forceResolveLocks := make([]*txnlock.Lock, 0, len(locks))
-	tryResolveLocks := make([]*txnlock.Lock, 0, len(locks))
-	for _, l := range locks {
-		if l.TxnID <= forceResolveLocksTS {
-			forceResolveLocks = append(forceResolveLocks, l)
-		} else {
-			tryResolveLocks = append(tryResolveLocks, l)
-		}
-	}
-
-	logutil.BgLogger().Debug("batchResolveExpiredLocks",
-		zap.Uint64("force-resolve-locks-ts", forceResolveLocksTS),
-		zap.Uint64("try-resolve-locks-ts", tryResolveLocksTS),
-		zap.Int("force-resolve-locks-count", len(forceResolveLocks)),
-		zap.Int("try-resolve-locks-count", len(tryResolveLocks)))
-
-	var (
-		ok  bool
-		err error
-	)
-	if w.testingKnobs.batchResolveLocks != nil {
-		ok, err = w.testingKnobs.batchResolveLocks(forceResolveLocks, loc, forceResolveLocksTS)
-	} else {
-		ok, err = w.tikvStore.GetLockResolver().BatchResolveLocks(bo, forceResolveLocks, loc)
-	}
-	if err != nil || !ok {
-		return ok, err
-	}
-
-	if w.testingKnobs.resolveLocks != nil {
-		_, err = w.testingKnobs.resolveLocks(tryResolveLocks, tryResolveLocksTS)
-	} else {
-		_, err = w.tikvStore.GetLockResolver().ResolveLocks(bo, 0, tryResolveLocks)
-	}
-	return err == nil, errors.Trace(err)
-}
-
-func (w *GCWorker) resolveLocksForRange(
-	ctx context.Context,
-	forceResolveLocksTS uint64,
-	tryResolveLocksTS uint64,
-	startKey []byte,
-	endKey []byte,
-) (rangetask.TaskStat, error) {
-	// for scan lock request, we must return all locks even if they are generated
-	// by the same transaction. because gc worker need to make sure all locks have been
-	// cleaned.
-	req := tikvrpc.NewRequest(tikvrpc.CmdScanLock, &kvrpcpb.ScanLockRequest{
-		MaxVersion: tryResolveLocksTS,
-		Limit:      gcScanLockLimit,
-	}, kvrpcpb.Context{
-		RequestSource: tikvutil.RequestSourceFromCtx(ctx),
-	})
-
-	failpoint.Inject("lowScanLockLimit", func() {
-		req.ScanLock().Limit = 3
-	})
-
-	var stat rangetask.TaskStat
-	key := startKey
-	bo := tikv.NewGcResolveLockMaxBackoffer(ctx)
-	failpoint.Inject("setGcResolveMaxBackoff", func(v failpoint.Value) {
-		sleep := v.(int)
-		// cooperate with github.com/tikv/client-go/v2/locate/invalidCacheAndRetry
-		//nolint: SA1029
-		ctx = context.WithValue(ctx, "injectedBackoff", struct{}{})
-		bo = tikv.NewBackofferWithVars(ctx, sleep, nil)
-	})
-retryScanAndResolve:
-	for {
-		select {
-		case <-ctx.Done():
-			return stat, errors.New("[gc worker] gc job canceled")
-		default:
-		}
-
-		req.ScanLock().StartKey = key
-		loc, err := w.tikvStore.GetRegionCache().LocateKey(bo, key)
-		if err != nil {
-			return stat, errors.Trace(err)
-		}
-		req.ScanLock().EndKey = loc.EndKey
-		resp, err := w.tikvStore.SendReq(bo, req, loc.Region, tikv.ReadTimeoutMedium)
-		if err != nil {
-			return stat, errors.Trace(err)
-		}
-		regionErr, err := resp.GetRegionError()
-		if err != nil {
-			return stat, errors.Trace(err)
-		}
-		if regionErr != nil {
-			err = bo.Backoff(tikv.BoRegionMiss(), errors.New(regionErr.String()))
-			if err != nil {
-				return stat, errors.Trace(err)
-			}
-			continue
-		}
-		if resp.Resp == nil {
-			return stat, errors.Trace(tikverr.ErrBodyMissing)
-		}
-		locksResp := resp.Resp.(*kvrpcpb.ScanLockResponse)
-		if locksResp.GetError() != nil {
-			return stat, errors.Errorf("unexpected scanlock error: %s", locksResp)
-		}
-		locksInfo := locksResp.GetLocks()
-		locks := make([]*txnlock.Lock, 0, len(locksInfo))
-		for _, li := range locksInfo {
-			locks = append(locks, txnlock.NewLock(li))
-		}
-		if w.testingKnobs.scanLocks != nil {
-			locks = append(locks, w.testingKnobs.scanLocks(key, loc.Region.GetID(), tryResolveLocksTS)...)
-		}
-		locForResolve := loc
-		for {
-			ok, err1 := w.batchResolveExpiredLocks(bo, locks, locForResolve.Region, forceResolveLocksTS, tryResolveLocksTS)
-			if err1 != nil {
-				return stat, errors.Trace(err1)
-			}
-			if !ok {
-				err = bo.Backoff(tikv.BoTxnLock(), errors.Errorf("remain locks: %d", len(locks)))
-				if err != nil {
-					return stat, errors.Trace(err)
-				}
-				stillInSame, refreshedLoc, err := w.tryRelocateLocksRegion(bo, locks)
-				if err != nil {
-					return stat, errors.Trace(err)
-				}
-				if stillInSame {
-					locForResolve = refreshedLoc
-					continue
-				}
-				continue retryScanAndResolve
-			}
-			break
-		}
-		if len(locks) < gcScanLockLimit {
-			stat.CompletedRegions++
-			key = loc.EndKey
-		} else {
-			logutil.Logger(ctx).Info("[gc worker] region has more than limit locks",
-				zap.String("uuid", w.uuid),
-				zap.Uint64("region", locForResolve.Region.GetID()),
-				zap.Int("scan lock limit", gcScanLockLimit))
-			metrics.GCRegionTooManyLocksCounter.Inc()
-			key = locks[len(locks)-1].Key
-		}
-
-		if len(key) == 0 || (len(endKey) != 0 && bytes.Compare(key, endKey) >= 0) {
-			break
-		}
-		bo = tikv.NewGcResolveLockMaxBackoffer(ctx)
-		failpoint.Inject("setGcResolveMaxBackoff", func(v failpoint.Value) {
-			sleep := v.(int)
-			bo = tikv.NewBackofferWithVars(ctx, sleep, nil)
-		})
-	}
-	return stat, nil
-}
-
-func (w *GCWorker) tryRelocateLocksRegion(bo *tikv.Backoffer, locks []*txnlock.Lock) (stillInSameRegion bool, refreshedLoc *tikv.KeyLocation, err error) {
-	if len(locks) == 0 {
-		return
-	}
-	refreshedLoc, err = w.tikvStore.GetRegionCache().LocateKey(bo, locks[0].Key)
-	if err != nil {
-		return
-	}
-	stillInSameRegion = refreshedLoc.Contains(locks[len(locks)-1].Key)
-	return
 }
 
 // resolveLocksPhysical uses TiKV's `PhysicalScanLock` to scan stale locks in the cluster and resolve them. It tries to
@@ -1917,7 +1559,6 @@ func (w *GCWorker) checkLeader(ctx context.Context) (bool, error) {
 	se := createSession(w.store)
 	defer se.Close()
 
-	w.logBackupEnabled = utils.IsLogBackupInUse(se)
 	_, err := se.ExecuteInternal(ctx, "BEGIN")
 	if err != nil {
 		return false, errors.Trace(err)
@@ -2096,11 +1737,6 @@ func (w *GCWorker) saveValueToSysTable(key, value string) error {
 // Placement rules cannot be removed immediately after drop table / truncate table,
 // because the tables can be flashed back or recovered.
 func (w *GCWorker) doGCPlacementRules(se session.Session, safePoint uint64, dr util.DelRangeTask, gcPlacementRuleCache map[int64]interface{}) (err error) {
-	if w.store.GetCodec().GetKeyspace() != nil {
-		logutil.BgLogger().Info("[gc worker] skip doGCPlacementRules when keyspace_name is set.", zap.String("uuid", w.uuid))
-		return nil
-	}
-
 	// Get the job from the job history
 	var historyJob *model.Job
 	failpoint.Inject("mockHistoryJobForGC", func(v failpoint.Value) {
@@ -2140,20 +1776,20 @@ func (w *GCWorker) doGCPlacementRules(se session.Session, safePoint uint64, dr u
 		}
 	}
 
+	// Skip table ids that's already successfully handled.
+	tmp := physicalTableIDs[:0]
+	for _, id := range physicalTableIDs {
+		if _, ok := gcPlacementRuleCache[id]; !ok {
+			tmp = append(tmp, id)
+		}
+	}
+	physicalTableIDs = tmp
+
 	if len(physicalTableIDs) == 0 {
 		return
 	}
 
-	bundles := make([]*placement.Bundle, 0, len(physicalTableIDs))
 	for _, id := range physicalTableIDs {
-		bundles = append(bundles, placement.NewBundle(id))
-	}
-
-	for _, id := range physicalTableIDs {
-		// Skip table ids that's already successfully deleted.
-		if _, ok := gcPlacementRuleCache[id]; ok {
-			continue
-		}
 		// Delete pd rule
 		failpoint.Inject("gcDeletePlacementRuleCounter", func() {})
 		logutil.BgLogger().Info("try delete TiFlash pd rule",
@@ -2162,12 +1798,22 @@ func (w *GCWorker) doGCPlacementRules(se session.Session, safePoint uint64, dr u
 		if err := infosync.DeleteTiFlashPlacementRule(context.Background(), "tiflash", ruleID); err != nil {
 			logutil.BgLogger().Error("delete TiFlash pd rule failed when gc",
 				zap.Error(err), zap.String("ruleID", ruleID), zap.Uint64("safePoint", safePoint))
-		} else {
-			// Cache the table id if its related rule are deleted successfully.
-			gcPlacementRuleCache[id] = struct{}{}
 		}
 	}
-	return infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
+	bundles := make([]*placement.Bundle, 0, len(physicalTableIDs))
+	for _, id := range physicalTableIDs {
+		bundles = append(bundles, placement.NewBundle(id))
+	}
+	err = infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
+	if err != nil {
+		return
+	}
+
+	// Cache the table id if its related rule are deleted successfully.
+	for _, id := range physicalTableIDs {
+		gcPlacementRuleCache[id] = struct{}{}
+	}
+	return nil
 }
 
 func (w *GCWorker) doGCLabelRules(dr util.DelRangeTask) (err error) {
@@ -2247,11 +1893,13 @@ func getGCRules(ids []int64, rules map[string]*label.Rule) []string {
 }
 
 // RunGCJob sends GC command to KV. It is exported for kv api, do not use it with GCWorker at the same time.
-func RunGCJob(ctx context.Context, s tikv.Storage, pd pd.Client, safePoint uint64, identifier string, concurrency int) error {
+// only use for test
+func RunGCJob(ctx context.Context, regionLockResolver tikv.RegionLockResolver, s tikv.Storage, pd pd.Client, safePoint uint64, identifier string, concurrency int) error {
 	gcWorker := &GCWorker{
-		tikvStore: s,
-		uuid:      identifier,
-		pdClient:  pd,
+		tikvStore:          s,
+		uuid:               identifier,
+		pdClient:           pd,
+		regionLockResolver: regionLockResolver,
 	}
 
 	if concurrency <= 0 {
@@ -2284,11 +1932,12 @@ func RunGCJob(ctx context.Context, s tikv.Storage, pd pd.Client, safePoint uint6
 // RunDistributedGCJob notifies TiKVs to do GC. It is exported for kv api, do not use it with GCWorker at the same time.
 // This function may not finish immediately because it may take some time to do resolveLocks.
 // Param concurrency specifies the concurrency of resolveLocks phase.
-func RunDistributedGCJob(ctx context.Context, s tikv.Storage, pd pd.Client, safePoint uint64, identifier string, concurrency int) error {
+func RunDistributedGCJob(ctx context.Context, regionLockResolver tikv.RegionLockResolver, s tikv.Storage, pd pd.Client, safePoint uint64, identifier string, concurrency int) error {
 	gcWorker := &GCWorker{
-		tikvStore: s,
-		uuid:      identifier,
-		pdClient:  pd,
+		tikvStore:          s,
+		uuid:               identifier,
+		pdClient:           pd,
+		regionLockResolver: regionLockResolver,
 	}
 
 	safePoint, err := gcWorker.setGCWorkerServiceSafePoint(ctx, safePoint)
@@ -2320,9 +1969,10 @@ func RunDistributedGCJob(ctx context.Context, s tikv.Storage, pd pd.Client, safe
 // It is exported only for test, do not use it in the production environment.
 func RunResolveLocks(ctx context.Context, s tikv.Storage, pd pd.Client, safePoint uint64, identifier string, concurrency int, usePhysical bool) (bool, error) {
 	gcWorker := &GCWorker{
-		tikvStore: s,
-		uuid:      identifier,
-		pdClient:  pd,
+		tikvStore:          s,
+		uuid:               identifier,
+		pdClient:           pd,
+		regionLockResolver: tikv.NewRegionLockResolver("test-resolver", s),
 	}
 	return gcWorker.resolveLocks(ctx, safePoint, concurrency, usePhysical)
 }
@@ -2449,7 +2099,7 @@ func newMergeLockScanner(safePoint uint64, client tikv.Client, stores map[uint64
 		safePoint:     safePoint,
 		client:        client,
 		stores:        stores,
-		scanLockLimit: gcScanLockLimit,
+		scanLockLimit: tikv.GCScanLockLimit,
 	}
 	failpoint.Inject("lowPhysicalScanLockLimit", func() {
 		scanner.scanLockLimit = 3

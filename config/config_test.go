@@ -736,6 +736,7 @@ tidb-max-reuse-column = 20
 txn-total-size-limit=2000
 tcp-no-delay = false
 enable-load-fmsketch = true
+force-init-stats = true
 [tikv-client]
 commit-timeout="41s"
 max-batch-size=128
@@ -827,6 +828,7 @@ max_connections = 200
 	require.Equal(t, 10240, conf.Status.GRPCInitialWindowSize)
 	require.Equal(t, 40960, conf.Status.GRPCMaxSendMsgSize)
 	require.True(t, conf.Performance.EnableLoadFMSketch)
+	require.True(t, conf.Performance.ForceInitStats)
 
 	err = f.Truncate(0)
 	require.NoError(t, err)
@@ -1287,19 +1289,4 @@ func TestStatsLoadLimit(t *testing.T) {
 	checkQueueSizeValid(DefStatsLoadQueueSizeLimit-1, false)
 	checkQueueSizeValid(DefMaxOfStatsLoadQueueSizeLimit, true)
 	checkQueueSizeValid(DefMaxOfStatsLoadQueueSizeLimit+1, false)
-}
-
-func TestGetGlobalKeyspaceName(t *testing.T) {
-	conf := NewConfig()
-	require.Empty(t, conf.KeyspaceName)
-
-	UpdateGlobal(func(conf *Config) {
-		conf.KeyspaceName = "test"
-	})
-
-	require.Equal(t, "test", GetGlobalKeyspaceName())
-
-	UpdateGlobal(func(conf *Config) {
-		conf.KeyspaceName = ""
-	})
 }

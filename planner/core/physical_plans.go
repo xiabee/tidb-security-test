@@ -265,9 +265,8 @@ func (p *PhysicalTableReader) Clone() (PhysicalPlan, error) {
 	if cloned.tablePlan, err = p.tablePlan.Clone(); err != nil {
 		return nil, err
 	}
-	if cloned.TablePlans, err = clonePhysicalPlan(p.TablePlans); err != nil {
-		return nil, err
-	}
+	// TablePlans are actually the flattened plans in tablePlan, so can't copy them, just need to extract from tablePlan
+	cloned.TablePlans = flattenPushDownPlan(cloned.tablePlan)
 	return cloned, nil
 }
 
@@ -551,8 +550,6 @@ type PhysicalIndexMergeReader struct {
 	// IsIntersectionType means whether it's intersection type or union type.
 	// Intersection type is for expressions connected by `AND` and union type is for `OR`.
 	IsIntersectionType bool
-	// AccessMVIndex indicates whether this IndexMergeReader access a MVIndex.
-	AccessMVIndex bool
 
 	// PartialPlans flats the partialPlans to construct executor pb.
 	PartialPlans [][]PhysicalPlan
@@ -1503,8 +1500,7 @@ type PhysicalExchangeSender struct {
 	ExchangeType tipb.ExchangeType
 	HashCols     []*property.MPPPartitionColumn
 	// Tasks is the mpp task for current PhysicalExchangeSender.
-	Tasks           []*kv.MPPTask
-	CompressionMode kv.ExchangeCompressionMode
+	Tasks []*kv.MPPTask
 }
 
 // Clone implment PhysicalPlan interface.
@@ -1517,7 +1513,6 @@ func (p *PhysicalExchangeSender) Clone() (PhysicalPlan, error) {
 	np.basePhysicalPlan = *base
 	np.ExchangeType = p.ExchangeType
 	np.HashCols = p.HashCols
-	np.CompressionMode = p.CompressionMode
 	return np, nil
 }
 
@@ -1783,10 +1778,20 @@ func (p *PhysicalHashAgg) MemoryUsage() (sum int64) {
 
 // NewPhysicalHashAgg creates a new PhysicalHashAgg from a LogicalAggregation.
 func NewPhysicalHashAgg(la *LogicalAggregation, newStats *property.StatsInfo, prop *property.PhysicalProperty) *PhysicalHashAgg {
+	newGbyItems := make([]expression.Expression, len(la.GroupByItems))
+	copy(newGbyItems, la.GroupByItems)
+	newAggFuncs := make([]*aggregation.AggFuncDesc, len(la.AggFuncs))
+	// There's some places that rewrites the aggFunc in-place.
+	// I clone it first.
+	// It needs a well refactor to make sure that the physical optimize should not change the things of logical plan.
+	// It's bad for cascades
+	for i, aggFunc := range la.AggFuncs {
+		newAggFuncs[i] = aggFunc.Clone()
+	}
 	agg := basePhysicalAgg{
-		GroupByItems: la.GroupByItems,
-		AggFuncs:     la.AggFuncs,
-	}.initForHash(la.ctx, newStats, la.blockOffset, prop)
+		GroupByItems: newGbyItems,
+		AggFuncs:     newAggFuncs,
+	}.initForHash(la.SCtx(), newStats, la.SelectBlockOffset(), prop)
 	return agg
 }
 

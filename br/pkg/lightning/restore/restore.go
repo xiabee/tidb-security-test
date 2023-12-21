@@ -54,7 +54,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/br/pkg/version/build"
-	"github.com/pingcap/tidb/keyspace"
+	tidbconfig "github.com/pingcap/tidb/config"
 	tidbkv "github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
@@ -64,7 +64,9 @@ import (
 	"github.com/pingcap/tidb/util/mathutil"
 	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
 	"github.com/pingcap/tidb/util/set"
+	tikvconfig "github.com/tikv/client-go/v2/config"
 	pd "github.com/tikv/pd/client"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -205,6 +207,7 @@ type Controller struct {
 	pauser        *common.Pauser
 	backend       backend.Backend
 	tidbGlue      glue.Glue
+	pdCli         pd.Client
 
 	alterTableLock sync.Mutex
 	sysVars        map[string]string
@@ -232,8 +235,6 @@ type Controller struct {
 
 	preInfoGetter       PreRestoreInfoGetter
 	precheckItemBuilder *PrecheckItemBuilder
-
-	keyspaceName string
 }
 
 // LightningStatus provides the finished bytes and total bytes of the current task.
@@ -269,8 +270,6 @@ type ControllerParam struct {
 	CheckpointName string
 	// DupIndicator can expose the duplicate detection result to the caller
 	DupIndicator *atomic.Bool
-	// Keyspace name
-	KeyspaceName string
 }
 
 func NewRestoreController(
@@ -332,6 +331,7 @@ func NewRestoreControllerWithPauser(
 	}
 
 	var backend backend.Backend
+	var pdCli pd.Client
 	switch cfg.TikvImporter.Backend {
 	case config.BackendTiDB:
 		backend = tidb.NewTiDBBackend(ctx, db, cfg.TikvImporter.OnDuplicate, errorMgr)
@@ -346,9 +346,13 @@ func NewRestoreControllerWithPauser(
 		if maxOpenFiles < 0 {
 			maxOpenFiles = math.MaxInt32
 		}
+		pdCli, err = pd.NewClientWithContext(ctx, []string{cfg.TiDB.PdAddr}, tls.ToPDSecurityOption())
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
 
 		if cfg.TikvImporter.DuplicateResolution != config.DupeResAlgNone {
-			if err := tikv.CheckTiKVVersion(ctx, tls, cfg.TiDB.PdAddr, minTiKVVersionForDuplicateResolution, maxTiKVVersionForDuplicateResolution); err != nil {
+			if err := tikv.CheckTiKVVersion(ctx, tls, pdCli.GetLeaderAddr(), minTiKVVersionForDuplicateResolution, maxTiKVVersionForDuplicateResolution); err != nil {
 				if berrors.Is(err, berrors.ErrVersionMismatch) {
 					log.FromContext(ctx).Warn("TiKV version doesn't support duplicate resolution. The resolution algorithm will fall back to 'none'", zap.Error(err))
 					cfg.TikvImporter.DuplicateResolution = config.DupeResAlgNone
@@ -358,7 +362,8 @@ func NewRestoreControllerWithPauser(
 			}
 		}
 
-		backend, err = local.NewLocalBackend(ctx, tls, cfg, p.Glue, maxOpenFiles, errorMgr, p.KeyspaceName)
+		initGlobalConfig(tls.ToTiKVSecurityConfig())
+		backend, err = local.NewLocalBackend(ctx, tls, cfg, p.Glue, maxOpenFiles, errorMgr)
 		if err != nil {
 			return nil, common.NormalizeOrWrapErr(common.ErrUnknown, err)
 		}
@@ -394,6 +399,7 @@ func NewRestoreControllerWithPauser(
 		targetDBGlue: p.Glue,
 		tls:          tls,
 		backend:      backend,
+		pdCli:        pdCli,
 	}
 	preInfoGetter, err := NewPreRestoreInfoGetter(
 		cfg,
@@ -408,7 +414,7 @@ func NewRestoreControllerWithPauser(
 	}
 
 	preCheckBuilder := NewPrecheckItemBuilder(
-		cfg, p.DBMetas, preInfoGetter, cpdb,
+		cfg, p.DBMetas, preInfoGetter, cpdb, pdCli,
 	)
 
 	rc := &Controller{
@@ -422,6 +428,7 @@ func NewRestoreControllerWithPauser(
 		checksumWorks: worker.NewPool(ctx, cfg.TiDB.ChecksumTableConcurrency, "checksum"),
 		pauser:        p.Pauser,
 		backend:       backend,
+		pdCli:         pdCli,
 		tidbGlue:      p.Glue,
 		sysVars:       defaultImportantVariables,
 		tls:           tls,
@@ -442,8 +449,6 @@ func NewRestoreControllerWithPauser(
 
 		preInfoGetter:       preInfoGetter,
 		precheckItemBuilder: preCheckBuilder,
-
-		keyspaceName: p.KeyspaceName,
 	}
 
 	return rc, nil
@@ -452,9 +457,14 @@ func NewRestoreControllerWithPauser(
 func (rc *Controller) Close() {
 	rc.backend.Close()
 	rc.tidbGlue.GetSQLExecutor().Close()
+	if rc.pdCli != nil {
+		rc.pdCli.Close()
+	}
 }
 
 func (rc *Controller) Run(ctx context.Context) error {
+	failpoint.Inject("beforeRun", func() {})
+
 	opts := []func(context.Context) error{
 		rc.setGlobalVariables,
 		rc.restoreSchema,
@@ -960,8 +970,7 @@ func (rc *Controller) estimateChunkCountIntoMetrics(ctx context.Context) error {
 				}
 				if fileMeta.FileMeta.Type == mydump.SourceTypeCSV {
 					cfg := rc.cfg.Mydumper
-					if fileMeta.FileMeta.FileSize > int64(cfg.MaxRegionSize) && cfg.StrictFormat &&
-						!cfg.CSV.Header && fileMeta.FileMeta.Compression == mydump.CompressionNone {
+					if fileMeta.FileMeta.FileSize > int64(cfg.MaxRegionSize) && cfg.StrictFormat && !cfg.CSV.Header {
 						estimatedChunkCount += math.Round(float64(fileMeta.FileMeta.FileSize) / float64(cfg.MaxRegionSize))
 					} else {
 						estimatedChunkCount++
@@ -1345,7 +1354,7 @@ const (
 
 func (rc *Controller) keepPauseGCForDupeRes(ctx context.Context) (<-chan struct{}, error) {
 	tlsOpt := rc.tls.ToPDSecurityOption()
-	pdCli, err := pd.NewClientWithContext(ctx, []string{rc.cfg.TiDB.PdAddr}, tlsOpt)
+	pdCli, err := pd.NewClientWithContext(ctx, []string{rc.pdCli.GetLeaderAddr()}, tlsOpt)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1465,6 +1474,7 @@ func (rc *Controller) restoreTables(ctx context.Context) (finalErr error) {
 	cleanup := false
 	postProgress := func() error { return nil }
 	var kvStore tidbkv.Storage
+	var etcdCli *clientv3.Client
 
 	if isLocalBackend(rc.cfg) {
 		var (
@@ -1506,8 +1516,13 @@ func (rc *Controller) restoreTables(ctx context.Context) (finalErr error) {
 		}
 
 		// Disable GC because TiDB enables GC already.
+
+		currentLeaderAddr := rc.pdCli.GetLeaderAddr()
+		// remove URL scheme
+		currentLeaderAddr = strings.TrimPrefix(currentLeaderAddr, "http://")
+		currentLeaderAddr = strings.TrimPrefix(currentLeaderAddr, "https://")
 		kvStore, err = driver.TiKVDriver{}.OpenWithOptions(
-			fmt.Sprintf("tikv://%s?disableGC=true&keyspaceName=%s", rc.cfg.TiDB.PdAddr, rc.keyspaceName),
+			fmt.Sprintf("tikv://%s?disableGC=true", currentLeaderAddr),
 			driver.WithSecurity(rc.tls.ToTiKVSecurityConfig()),
 		)
 		if err != nil {
@@ -1567,6 +1582,11 @@ func (rc *Controller) restoreTables(ctx context.Context) (finalErr error) {
 				logTask.Warn("failed to close kv store", zap.Error(err))
 			}
 		}
+		if etcdCli != nil {
+			if err := etcdCli.Close(); err != nil {
+				logTask.Warn("failed to close etcd client", zap.Error(err))
+			}
+		}
 	}()
 
 	taskCh := make(chan task, rc.cfg.App.IndexConcurrency)
@@ -1579,6 +1599,9 @@ func (rc *Controller) restoreTables(ctx context.Context) (finalErr error) {
 				web.BroadcastTableCheckpoint(task.tr.tableName, task.cp)
 
 				needPostProcess, err := task.tr.restoreTable(ctx, rc, task.cp)
+				if err != nil && !common.IsContextCanceledError(err) {
+					task.tr.logger.Error("failed to import table", zap.Error(err))
+				}
 
 				err = common.NormalizeOrWrapErr(common.ErrRestoreTable, err, task.tr.tableName)
 				tableLogTask.End(zap.ErrorLevel, err)
@@ -1613,7 +1636,7 @@ func (rc *Controller) restoreTables(ctx context.Context) (finalErr error) {
 			if err != nil {
 				return errors.Trace(err)
 			}
-			tr, err := NewTableRestore(tableName, tableMeta, dbInfo, tableInfo, cp, igCols.ColumnsMap(), kvStore, log.FromContext(ctx))
+			tr, err := NewTableRestore(tableName, tableMeta, dbInfo, tableInfo, cp, igCols.ColumnsMap(), kvStore, etcdCli, log.FromContext(ctx))
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -1862,7 +1885,7 @@ func (rc *Controller) fullCompact(ctx context.Context) error {
 }
 
 func (rc *Controller) doCompact(ctx context.Context, level int32) error {
-	tls := rc.tls.WithHost(rc.cfg.TiDB.PdAddr)
+	tls := rc.tls.WithHost(rc.pdCli.GetLeaderAddr())
 	return tikv.ForAllStores(
 		ctx,
 		tls,
@@ -2105,7 +2128,7 @@ func (rc *Controller) preCheckRequirements(ctx context.Context) error {
 		rc.status.TotalFileSize.Store(estimatedSizeResult.SizeWithoutIndex)
 	}
 	if isLocalBackend(rc.cfg) {
-		pdController, err := pdutil.NewPdController(ctx, rc.cfg.TiDB.PdAddr,
+		pdController, err := pdutil.NewPdController(ctx, rc.pdCli.GetLeaderAddr(),
 			rc.tls.TLSConfig(), rc.tls.ToPDSecurityOption())
 		if err != nil {
 			return common.NormalizeOrWrapErr(common.ErrCreatePDClient, err)
@@ -2340,14 +2363,7 @@ func (cr *chunkRestore) deliverLoop(
 	var startRealOffset, currRealOffset int64 // save to 0 at first
 
 	for hasMoreKVs {
-		c := keyspace.CodecV1
-		if t.kvStore != nil {
-			c = t.kvStore.GetCodec()
-		}
-		var (
-			dataChecksum  = verify.NewKVChecksumWithKeyspace(c)
-			indexChecksum = verify.NewKVChecksumWithKeyspace(c)
-		)
+		var dataChecksum, indexChecksum verify.KVChecksum
 		var columns []string
 		var kvPacket []deliveredKVs
 		// init these two field as checkpoint current value, so even if there are no kv pairs delivered,
@@ -2374,7 +2390,7 @@ func (cr *chunkRestore) deliverLoop(
 						hasMoreKVs = false
 						break populate
 					}
-					p.kvs.ClassifyAndAppend(&dataKVs, dataChecksum, &indexKVs, indexChecksum)
+					p.kvs.ClassifyAndAppend(&dataKVs, &dataChecksum, &indexKVs, &indexChecksum)
 					columns = p.columns
 					currOffset = p.offset
 					currRealOffset = p.realOffset
@@ -2441,8 +2457,8 @@ func (cr *chunkRestore) deliverLoop(
 		// No need to apply a lock since this is the only thread updating `cr.chunk.**`.
 		// In local mode, we should write these checkpoints after engine flushed.
 		lastOffset := cr.chunk.Chunk.Offset
-		cr.chunk.Checksum.Add(dataChecksum)
-		cr.chunk.Checksum.Add(indexChecksum)
+		cr.chunk.Checksum.Add(&dataChecksum)
+		cr.chunk.Checksum.Add(&indexChecksum)
 		cr.chunk.Chunk.Offset = currOffset
 		cr.chunk.Chunk.RealOffset = currRealOffset
 		cr.chunk.Chunk.PrevRowIDMax = rowID
@@ -2836,4 +2852,19 @@ func openReader(ctx context.Context, fileMeta mydump.SourceFileMeta, store stora
 		reader, err = store.Open(ctx, fileMeta.Path)
 	}
 	return
+}
+
+// check store liveness of tikv client-go requires GlobalConfig to work correctly, so we need to init it,
+// else tikv will report SSL error when tls is enabled.
+// and the SSL error seems affects normal logic of newer TiKV version, and cause the error "tikv: region is unavailable"
+// during checksum.
+// todo: DM relay on lightning physical mode too, but client-go doesn't support passing TLS data as bytes,
+func initGlobalConfig(secCfg tikvconfig.Security) {
+	if secCfg.ClusterSSLCA != "" || secCfg.ClusterSSLCert != "" {
+		conf := tidbconfig.GetGlobalConfig()
+		conf.Security.ClusterSSLCA = secCfg.ClusterSSLCA
+		conf.Security.ClusterSSLCert = secCfg.ClusterSSLCert
+		conf.Security.ClusterSSLKey = secCfg.ClusterSSLKey
+		tidbconfig.StoreGlobalConfig(conf)
+	}
 }

@@ -31,7 +31,6 @@ go_test(
     deps = [
         "//parser/charset",
         "//parser/mysql",
-        "//parser/terror",
         "//parser/types",
         "@com_github_stretchr_testify//require",
     ],

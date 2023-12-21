@@ -7,8 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/metrics"
-	"github.com/pingcap/tidb/pkg/owner"
+	"github.com/pingcap/tidb/metrics"
+	"github.com/pingcap/tidb/owner"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -26,18 +26,14 @@ func (c *CheckpointAdvancer) OnTick(ctx context.Context) (err error) {
 	return c.tick(ctx)
 }
 
-// OnStart implements daemon.Interface, which will be called when log backup service starts.
+// OnStart implements daemon.Interface.
 func (c *CheckpointAdvancer) OnStart(ctx context.Context) {
-	c.StartTaskListener(ctx)
-}
-
-// OnBecomeOwner implements daemon.Interface. If the tidb-server become owner, this function will be called.
-func (c *CheckpointAdvancer) OnBecomeOwner(ctx context.Context) {
 	metrics.AdvancerOwner.Set(1.0)
-	c.SpawnSubscriptionHandler(ctx)
+	c.StartTaskListener(ctx)
+	c.spawnSubscriptionHandler(ctx)
 	go func() {
 		<-ctx.Done()
-		c.OnStop()
+		c.onStop()
 	}()
 }
 
@@ -46,7 +42,7 @@ func (c *CheckpointAdvancer) Name() string {
 	return "LogBackup::Advancer"
 }
 
-func (c *CheckpointAdvancer) OnStop() {
+func (c *CheckpointAdvancer) onStop() {
 	metrics.AdvancerOwner.Set(0.0)
 	c.stopSubscriber()
 }

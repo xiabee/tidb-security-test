@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -30,16 +29,17 @@ import (
 	"github.com/pingcap/tidb/dumpling/cli"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"github.com/pingcap/tidb/dumpling/log"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/format"
-	"github.com/pingcap/tidb/pkg/store/helper"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/format"
+	"github.com/pingcap/tidb/store/helper"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/codec"
 	pd "github.com/tikv/pd/client"
 	gatomic "go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -887,10 +887,11 @@ func (d *Dumper) concurrentDumpTiDBTables(tctx *tcontext.Context, conn *BaseConn
 			partitions, err = GetPartitionNames(tctx, conn, db, tbl)
 		}
 		if err == nil {
-			if len(partitions) != 0 {
+			if len(partitions) == 0 {
+				handleColNames, handleVals, err = d.selectTiDBTableRegionFunc(tctx, conn, meta)
+			} else {
 				return d.concurrentDumpTiDBPartitionTables(tctx, conn, meta, taskChan, partitions)
 			}
-			handleColNames, handleVals, err = d.selectTiDBTableRegionFunc(tctx, conn, meta)
 		}
 	}
 	if err != nil {
@@ -1145,7 +1146,7 @@ func getListTableTypeByConf(conf *Config) listTableType {
 }
 
 func prepareTableListToDump(tctx *tcontext.Context, conf *Config, db *sql.Conn) error {
-	if conf.SpecifiedTables || conf.SQL != "" {
+	if conf.specifiedTables {
 		return nil
 	}
 	databases, err := prepareDumpingDatabases(tctx, conf, db)
@@ -1574,7 +1575,7 @@ func setSessionParam(d *Dumper) error {
 				d.L().Info("cannot check whether TiDB has TiKV, will apply tidb_snapshot by default. This won't affect dump process", log.ShortError(err))
 			}
 			if conf.ServerInfo.HasTiKV {
-				sessionParam[snapshotVar] = snapshot
+				sessionParam["tidb_snapshot"] = snapshot
 			}
 		}
 	}

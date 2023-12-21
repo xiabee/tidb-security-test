@@ -12,10 +12,9 @@ import (
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/bindinfo"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 )
@@ -27,16 +26,13 @@ const (
 )
 
 var statsTables = map[string]struct{}{
-	"stats_buckets":      {},
-	"stats_extended":     {},
-	"stats_feedback":     {},
-	"stats_fm_sketch":    {},
-	"stats_histograms":   {},
-	"stats_history":      {},
-	"stats_meta":         {},
-	"stats_meta_history": {},
-	"stats_table_locked": {},
-	"stats_top_n":        {},
+	"stats_buckets":    {},
+	"stats_extended":   {},
+	"stats_feedback":   {},
+	"stats_fm_sketch":  {},
+	"stats_histograms": {},
+	"stats_meta":       {},
+	"stats_top_n":      {},
 }
 
 var unRecoverableTable = map[string]struct{}{
@@ -52,9 +48,6 @@ var unRecoverableTable = map[string]struct{}{
 
 	// schema_index_usage has table id need to be rewrite.
 	"schema_index_usage": {},
-
-	// replace into view is not supported now
-	"tidb_mdl_view": {},
 }
 
 // tables in this map is restored when fullClusterRestore=true
@@ -93,16 +86,17 @@ func generateResetSQLs(db *database, resetUsers []string) []string {
 		if sysPrivilegeTableMap[tableName] != "" {
 			for _, name := range resetUsers {
 				if strings.ToLower(name) == rootUser {
-					if rootReset {
+					if !rootReset {
+						updateSQL := fmt.Sprintf("UPDATE %s.%s SET authentication_string='',"+
+							" Shutdown_priv='Y',"+
+							" Config_priv='Y'"+
+							" WHERE USER='root' AND Host='%%';",
+							db.Name.L, sysUserTableName)
+						sqls = append(sqls, updateSQL)
+						rootReset = true
+					} else {
 						continue
 					}
-					updateSQL := fmt.Sprintf("UPDATE %s.%s SET authentication_string='',"+
-						" Shutdown_priv='Y',"+
-						" Config_priv='Y'"+
-						" WHERE USER='root' AND Host='%%';",
-						db.Name.L, sysUserTableName)
-					sqls = append(sqls, updateSQL)
-					rootReset = true
 				} else {
 					/* #nosec G202: SQL string concatenation */
 					whereClause := fmt.Sprintf("WHERE "+sysPrivilegeTableMap[tableName], name)
@@ -155,31 +149,26 @@ func (rc *Client) ClearSystemUsers(ctx context.Context, resetUsers []string) err
 
 // RestoreSystemSchemas restores the system schema(i.e. the `mysql` schema).
 // Detail see https://github.com/pingcap/br/issues/679#issuecomment-762592254.
-func (rc *Client) RestoreSystemSchemas(ctx context.Context, f filter.Filter) (rerr error) {
+func (rc *Client) RestoreSystemSchemas(ctx context.Context, f filter.Filter) {
 	sysDB := mysql.SystemDB
 
 	temporaryDB := utils.TemporaryDBName(sysDB)
-	defer func() {
-		// Don't clean the temporary database for next restore with checkpoint.
-		if rerr == nil {
-			rc.cleanTemporaryDatabase(ctx, sysDB)
-		}
-	}()
+	defer rc.cleanTemporaryDatabase(ctx, sysDB)
 
 	if !f.MatchSchema(sysDB) || !rc.withSysTable {
 		log.Debug("system database filtered out", zap.String("database", sysDB))
-		return nil
+		return
 	}
 	originDatabase, ok := rc.databases[temporaryDB.O]
 	if !ok {
 		log.Info("system database not backed up, skipping", zap.String("database", sysDB))
-		return nil
+		return
 	}
 	db, ok := rc.getDatabaseByName(sysDB)
 	if !ok {
 		// Or should we create the database here?
 		log.Warn("target database not exist, aborting", zap.String("database", sysDB))
-		return nil
+		return
 	}
 
 	tablesRestored := make([]string, 0, len(originDatabase.Tables))
@@ -191,15 +180,15 @@ func (rc *Client) RestoreSystemSchemas(ctx context.Context, f filter.Filter) (re
 					logutil.ShortError(err),
 					zap.Stringer("table", tableName),
 				)
-				return errors.Annotatef(err, "error during merging temporary tables into system tables, table: %s", tableName)
 			}
 			tablesRestored = append(tablesRestored, tableName.L)
 		}
 	}
-	if err := rc.afterSystemTablesReplaced(ctx, tablesRestored); err != nil {
-		return errors.Annotate(err, "error during extra works after system tables replaced")
+	if err := rc.afterSystemTablesReplaced(tablesRestored); err != nil {
+		for _, e := range multierr.Errors(err) {
+			log.Warn("error during reconfigurating the system tables", zap.String("database", sysDB), logutil.ShortError(e))
+		}
 	}
-	return nil
 }
 
 // database is a record of a database.
@@ -230,23 +219,20 @@ func (rc *Client) getDatabaseByName(name string) (*database, bool) {
 
 // afterSystemTablesReplaced do some extra work for special system tables.
 // e.g. after inserting to the table mysql.user, we must execute `FLUSH PRIVILEGES` to allow it take effect.
-func (rc *Client) afterSystemTablesReplaced(ctx context.Context, tables []string) error {
+func (rc *Client) afterSystemTablesReplaced(tables []string) error {
 	var err error
 	for _, table := range tables {
-		if table == "user" {
-			if serr := rc.dom.NotifyUpdatePrivilege(); serr != nil {
-				log.Warn("failed to flush privileges, please manually execute `FLUSH PRIVILEGES`")
-				err = multierr.Append(err, berrors.ErrUnknown.Wrap(serr).GenWithStack("failed to flush privileges"))
-			} else {
+		switch {
+		case table == "user":
+			if rc.fullClusterRestore {
 				log.Info("privilege system table restored, please reconnect to make it effective")
-			}
-		} else if table == "bind_info" {
-			if serr := rc.db.se.Execute(ctx, bindinfo.StmtRemoveDuplicatedPseudoBinding); serr != nil {
-				log.Warn("failed to delete duplicated pseudo binding", zap.Error(serr))
-				err = multierr.Append(err,
-					berrors.ErrUnknown.Wrap(serr).GenWithStack("failed to delete duplicated pseudo binding %s", bindinfo.StmtRemoveDuplicatedPseudoBinding))
+				err = rc.dom.NotifyUpdatePrivilege()
 			} else {
-				log.Info("success to remove duplicated pseudo binding")
+				// to make it compatible with older version
+				// todo: should we allow restore system table in non-fresh cluster in later br version?
+				// if we don't, we can check it at first place.
+				err = multierr.Append(err, errors.Annotatef(berrors.ErrUnsupportedSystemTable,
+					"restored user info may not take effect, until you should execute `FLUSH PRIVILEGES` manually"))
 			}
 		}
 	}
@@ -284,27 +270,12 @@ func (rc *Client) replaceTemporaryTableToSystable(ctx context.Context, ti *model
 	//  1.5 ) (Optional) The UPDATE statement sometimes costs, the whole system tables restore step can be place into the restore pipeline.
 	//  2   ) Deprecate the origin interface for backing up statistics.
 	if isStatsTable(tableName) {
-		return nil
+		return berrors.ErrUnsupportedSystemTable.GenWithStack("restoring stats via `mysql` schema isn't support yet: " +
+			"the table ID is out-of-date and may corrupt existing statistics")
 	}
 
 	if isUnrecoverableTable(tableName) {
-		return nil
-	}
-
-	// Currently, we don't support restore resource group metadata, so we need to
-	// remove the resource group related metadata in mysql.user.
-	// TODO: this function should be removed when we support backup and restore
-	// resource group.
-	if tableName == sysUserTableName {
-		sql := fmt.Sprintf("UPDATE %s SET User_attributes = JSON_REMOVE(User_attributes, '$.resource_group');",
-			utils.EncloseDBAndTable(db.TemporaryName.L, sysUserTableName))
-		if err := execSQL(sql); err != nil {
-			// FIXME: find a better way to check the error or we should check the version here instead.
-			if !strings.Contains(err.Error(), "Unknown column 'User_attributes' in 'field list'") {
-				return err
-			}
-			log.Warn("remove resource group meta failed, please ensure target cluster is newer than v6.6.0", logutil.ShortError(err))
-		}
+		return berrors.ErrUnsupportedSystemTable.GenWithStack("restoring unsupported `mysql` schema table")
 	}
 
 	if db.ExistingTables[tableName] != nil {

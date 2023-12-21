@@ -8,19 +8,12 @@ import (
 
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/util/engine"
-	"github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/txnkv/txnlock"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/util/engine"
 	pd "github.com/tikv/pd/client"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-)
-
-const (
-	logBackupServiceID    = "log-backup-coordinator"
-	logBackupSafePointTTL = 24 * time.Hour
 )
 
 // Env is the interface required by the advancer.
@@ -31,8 +24,6 @@ type Env interface {
 	LogBackupService
 	// StreamMeta connects to the metadata service (normally PD).
 	StreamMeta
-	// GCLockResolver try to resolve locks when region checkpoint stopped.
-	tikv.RegionLockResolver
 }
 
 // PDRegionScanner is a simple wrapper over PD
@@ -41,16 +32,9 @@ type PDRegionScanner struct {
 	pd.Client
 }
 
-// Updates the service GC safe point for the cluster.
-// Returns the minimal service GC safe point across all services.
-// If the arguments is `0`, this would remove the service safe point.
-func (c PDRegionScanner) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
-	return c.UpdateServiceGCSafePoint(ctx, logBackupServiceID, int64(logBackupSafePointTTL.Seconds()), at)
-}
-
 // RegionScan gets a list of regions, starts from the region that contains key.
 // Limit limits the maximum number of regions returned.
-func (c PDRegionScanner) RegionScan(ctx context.Context, key, endKey []byte, limit int) ([]RegionWithLeader, error) {
+func (c PDRegionScanner) RegionScan(ctx context.Context, key []byte, endKey []byte, limit int) ([]RegionWithLeader, error) {
 	rs, err := c.Client.ScanRegions(ctx, key, endKey, limit)
 	if err != nil {
 		return nil, err
@@ -87,10 +71,7 @@ type clusterEnv struct {
 	clis *utils.StoreManager
 	*AdvancerExt
 	PDRegionScanner
-	*AdvancerLockResolver
 }
-
-var _ Env = &clusterEnv{}
 
 // GetLogBackupClient gets the log backup client.
 func (t clusterEnv) GetLogBackupClient(ctx context.Context, storeID uint64) (logbackup.LogBackupClient, error) {
@@ -105,17 +86,16 @@ func (t clusterEnv) GetLogBackupClient(ctx context.Context, storeID uint64) (log
 }
 
 // CliEnv creates the Env for CLI usage.
-func CliEnv(cli *utils.StoreManager, tikvStore tikv.Storage, etcdCli *clientv3.Client) Env {
+func CliEnv(cli *utils.StoreManager, etcdCli *clientv3.Client) Env {
 	return clusterEnv{
-		clis:                 cli,
-		AdvancerExt:          &AdvancerExt{MetaDataClient: *NewMetaDataClient(etcdCli)},
-		PDRegionScanner:      PDRegionScanner{cli.PDClient()},
-		AdvancerLockResolver: newAdvancerLockResolver(tikvStore),
+		clis:            cli,
+		AdvancerExt:     &AdvancerExt{MetaDataClient: *NewMetaDataClient(etcdCli)},
+		PDRegionScanner: PDRegionScanner{cli.PDClient()},
 	}
 }
 
 // TiDBEnv creates the Env by TiDB config.
-func TiDBEnv(tikvStore tikv.Storage, pdCli pd.Client, etcdCli *clientv3.Client, conf *config.Config) (Env, error) {
+func TiDBEnv(pdCli pd.Client, etcdCli *clientv3.Client, conf *config.Config) (Env, error) {
 	tconf, err := conf.GetTiKVConfig().Security.ToTLSConfig()
 	if err != nil {
 		return nil, err
@@ -125,9 +105,8 @@ func TiDBEnv(tikvStore tikv.Storage, pdCli pd.Client, etcdCli *clientv3.Client, 
 			Time:    time.Duration(conf.TiKVClient.GrpcKeepAliveTime) * time.Second,
 			Timeout: time.Duration(conf.TiKVClient.GrpcKeepAliveTimeout) * time.Second,
 		}, tconf),
-		AdvancerExt:          &AdvancerExt{MetaDataClient: *NewMetaDataClient(etcdCli)},
-		PDRegionScanner:      PDRegionScanner{Client: pdCli},
-		AdvancerLockResolver: newAdvancerLockResolver(tikvStore),
+		AdvancerExt:     &AdvancerExt{MetaDataClient: *NewMetaDataClient(etcdCli)},
+		PDRegionScanner: PDRegionScanner{Client: pdCli},
 	}, nil
 }
 
@@ -145,32 +124,4 @@ type StreamMeta interface {
 	UploadV3GlobalCheckpointForTask(ctx context.Context, taskName string, checkpoint uint64) error
 	// ClearV3GlobalCheckpointForTask clears the global checkpoint to the meta store.
 	ClearV3GlobalCheckpointForTask(ctx context.Context, taskName string) error
-}
-
-var _ tikv.RegionLockResolver = &AdvancerLockResolver{}
-
-type AdvancerLockResolver struct {
-	*tikv.BaseRegionLockResolver
-}
-
-func newAdvancerLockResolver(store tikv.Storage) *AdvancerLockResolver {
-	return &AdvancerLockResolver{
-		BaseRegionLockResolver: tikv.NewRegionLockResolver("log backup advancer", store),
-	}
-}
-
-// ResolveLocksInOneRegion tries to resolve expired locks with this method.
-// It will check status of the txn. Resolve the lock if txn is expired, Or do nothing.
-func (l *AdvancerLockResolver) ResolveLocksInOneRegion(
-	bo *tikv.Backoffer, locks []*txnlock.Lock, loc *tikv.KeyLocation) (*tikv.KeyLocation, error) {
-	_, err := l.GetStore().GetLockResolver().ResolveLocks(bo, 0, locks)
-	if err != nil {
-		return nil, err
-	}
-	return loc, nil
-}
-
-// If we don't implement GetStore here, it won't complie.
-func (l *AdvancerLockResolver) GetStore() tikv.Storage {
-	return l.BaseRegionLockResolver.GetStore()
 }

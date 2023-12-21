@@ -15,7 +15,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/rtree"
-	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -49,7 +49,7 @@ func (sender *drySender) Close() {
 }
 
 func waitForSend() {
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 }
 
 func (sender *drySender) Ranges() []rtree.Range {
@@ -199,7 +199,7 @@ func TestBasic(t *testing.T) {
 	errCh := make(chan error, 8)
 	sender := newDrySender()
 	manager := newMockManager()
-	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh, nil)
+	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh)
 	batcher.SetThreshold(2)
 
 	tableRanges := [][]rtree.Range{
@@ -232,7 +232,7 @@ func TestAutoSend(t *testing.T) {
 	errCh := make(chan error, 8)
 	sender := newDrySender()
 	manager := newMockManager()
-	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh, nil)
+	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh)
 	batcher.SetThreshold(1024)
 
 	simpleTable := fakeTableWithRange(1, []rtree.Range{fakeRange("caa", "cab"), fakeRange("cac", "cad")})
@@ -263,7 +263,7 @@ func TestSplitRangeOnSameTable(t *testing.T) {
 	errCh := make(chan error, 8)
 	sender := newDrySender()
 	manager := newMockManager()
-	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh, nil)
+	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh)
 	batcher.SetThreshold(2)
 
 	simpleTable := fakeTableWithRange(1, []rtree.Range{
@@ -314,7 +314,7 @@ func TestRewriteRules(t *testing.T) {
 	errCh := make(chan error, 8)
 	sender := newDrySender()
 	manager := newMockManager()
-	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh, nil)
+	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh)
 	batcher.SetThreshold(2)
 
 	batcher.Add(tables[0])
@@ -345,7 +345,7 @@ func TestBatcherLen(t *testing.T) {
 	errCh := make(chan error, 8)
 	sender := newDrySender()
 	manager := newMockManager()
-	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh, nil)
+	batcher, _ := restore.NewBatcher(ctx, sender, manager, errCh)
 	batcher.SetThreshold(15)
 
 	simpleTable := fakeTableWithRange(1, []rtree.Range{

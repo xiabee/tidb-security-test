@@ -15,11 +15,10 @@
 # limitations under the License.
 
 set -eu
-CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DB="$TEST_NAME"
 TABLE="usertable"
 ROW_COUNT=100
-PATH="$CUR:bin:$PATH"
+PATH="tests/$TEST_NAME:bin:$PATH"
 
 echo "load data..."
 # create database

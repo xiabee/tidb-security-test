@@ -1,6 +1,5 @@
 [lightning]
 table-concurrency = 1
-index-concurrency = 1
 
 [checkpoint]
 enable = true

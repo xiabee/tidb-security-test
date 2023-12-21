@@ -50,9 +50,7 @@ func main() {
 			return errors.Trace(err)
 		}
 
-		dsn := fmt.Sprintf(
-			"%s:%s@tcp(%s)/%s?charset=utf8mb4",
-			"root", "", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), database)
+		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4", "root", "", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), database)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
 			return errors.Trace(err)

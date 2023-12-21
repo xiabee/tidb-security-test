@@ -23,6 +23,5 @@ import (
 var Analyzer = analyzer.NewAnalyzer()
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }

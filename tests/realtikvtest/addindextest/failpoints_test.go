@@ -16,9 +16,13 @@ package addindextest
 
 import (
 	"testing"
-
-	"github.com/pingcap/tidb/tests/realtikvtest/addindextestutil"
 )
+
+func initTestFailpoint(t *testing.T) *suiteContext {
+	ctx := initTest(t)
+	ctx.isFailpointsTest = true
+	return ctx
+}
 
 func TestFailpointsCreateNonUniqueIndex(t *testing.T) {
 	if !*FullMode {
@@ -29,8 +33,8 @@ func TestFailpointsCreateNonUniqueIndex(t *testing.T) {
 		{2, 5, 8, 11, 14, 17, 20, 23, 26},
 		{3, 6, 9, 12, 15, 18, 21, 24, 27},
 	}
-	ctx := addindextestutil.InitTestFailpoint(t)
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexNonUnique)
+	ctx := initTestFailpoint(t)
+	testOneColFrame(ctx, colIDs, addIndexNonUnique)
 }
 
 func TestFailpointsCreateUniqueIndex(t *testing.T) {
@@ -42,24 +46,24 @@ func TestFailpointsCreateUniqueIndex(t *testing.T) {
 		{2, 9, 11, 17},
 		{3, 12, 25},
 	}
-	ctx := addindextestutil.InitTestFailpoint(t)
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexUnique)
+	ctx := initTestFailpoint(t)
+	testOneColFrame(ctx, colIDs, addIndexUnique)
 }
 
 func TestFailpointsCreatePrimaryKeyFailpoints(t *testing.T) {
 	if !*FullMode {
 		t.Skip()
 	}
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestOneIndexFrame(ctx, 0, addindextestutil.AddIndexPK)
+	ctx := initTest(t)
+	testOneIndexFrame(ctx, 0, addIndexPK)
 }
 
 func TestFailpointsCreateGenColIndex(t *testing.T) {
 	if !*FullMode {
 		t.Skip()
 	}
-	ctx := addindextestutil.InitTestFailpoint(t)
-	addindextestutil.TestOneIndexFrame(ctx, 29, addindextestutil.AddIndexGenCol)
+	ctx := initTestFailpoint(t)
+	testOneIndexFrame(ctx, 29, addIndexGenCol)
 }
 
 func TestFailpointsCreateMultiColsIndex(t *testing.T) {
@@ -76,6 +80,6 @@ func TestFailpointsCreateMultiColsIndex(t *testing.T) {
 		{14, 17, 20},
 		{18, 21, 24},
 	}
-	ctx := addindextestutil.InitTestFailpoint(t)
-	addindextestutil.TestTwoColsFrame(ctx, coliIDs, coljIDs, addindextestutil.AddIndexMultiCols)
+	ctx := initTestFailpoint(t)
+	testTwoColsFrame(ctx, coliIDs, coljIDs, addIndexMultiCols)
 }

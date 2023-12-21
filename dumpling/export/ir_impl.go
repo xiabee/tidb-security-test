@@ -232,8 +232,6 @@ func (td *tableData) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 }
 
 func (td *tableData) Rows() SQLRowIter {
-	// should be initialized lazily since it calls rows.Next() which might close the rows when
-	// there's nothing to read, causes code which relies on rows not closed to fail.
 	if td.SQLRowIter == nil {
 		td.SQLRowIter = newRowIter(td.rows, td.colLen)
 	}
@@ -241,13 +239,7 @@ func (td *tableData) Rows() SQLRowIter {
 }
 
 func (td *tableData) Close() error {
-	if td.SQLRowIter != nil {
-		// will close td.rows internally
-		return td.SQLRowIter.Close()
-	} else if td.rows != nil {
-		return td.rows.Close()
-	}
-	return nil
+	return td.SQLRowIter.Close()
 }
 
 func (td *tableData) RawRows() *sql.Rows {
@@ -362,7 +354,6 @@ func newMultiQueriesChunk(queries []string, colLength int) *multiQueriesChunk {
 func (td *multiQueriesChunk) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 	td.tctx = tctx
 	td.conn = conn
-	td.SQLRowIter = nil
 	return nil
 }
 
@@ -374,10 +365,7 @@ func (td *multiQueriesChunk) Rows() SQLRowIter {
 }
 
 func (td *multiQueriesChunk) Close() error {
-	if td.SQLRowIter != nil {
-		return td.SQLRowIter.Close()
-	}
-	return nil
+	return td.SQLRowIter.Close()
 }
 
 func (*multiQueriesChunk) RawRows() *sql.Rows {

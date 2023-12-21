@@ -77,7 +77,7 @@ func TestKVMemBufInterweaveAllocAndRecycle(t *testing.T) {
 			},
 		},
 	} {
-		testKVMemBuf := &MemBuf{}
+		testKVMemBuf := &kvMemBuf{}
 		for _, allocSize := range tc.AllocSizes {
 			testKVMemBuf.AllocateBuf(allocSize)
 			testKVMemBuf.Recycle(testKVMemBuf.buf)
@@ -94,8 +94,8 @@ func TestKVMemBufBatchAllocAndRecycle(t *testing.T) {
 		AllocSizes                []int
 		FinalAvailableByteBufCaps []int
 	}
-	testKVMemBuf := &MemBuf{}
-	bBufs := []*BytesBuf{}
+	testKVMemBuf := &kvMemBuf{}
+	bBufs := []*bytesBuf{}
 	for i := 0; i < maxAvailableBufSize; i++ {
 		testKVMemBuf.AllocateBuf(1 * units.MiB)
 		bBufs = append(bBufs, testKVMemBuf.buf)

@@ -13,7 +13,6 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/version/build"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
 )
@@ -622,12 +621,4 @@ Check Table Before Drop: false`
 	versionStr, err = FetchVersion(ctx, db)
 	require.NoError(t, err)
 	require.Equal(t, "5.7.25", versionStr)
-}
-
-func TestEnsureSupportVersion(t *testing.T) {
-	// Once this test failed. please check the compatibility carefully.
-	// *** Don't change this test simply. ***
-	require.Equal(t,
-		CURRENT_BACKUP_SUPPORT_TABLE_INFO_VERSION,
-		model.CurrLatestTableInfoVersion)
 }

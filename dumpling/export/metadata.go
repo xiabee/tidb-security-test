@@ -28,7 +28,7 @@ type globalMetadata struct {
 
 const (
 	metadataPath       = "metadata"
-	metadataTimeLayout = time.DateTime
+	metadataTimeLayout = "2006-01-02 15:04:05"
 
 	fileFieldIndex    = 0
 	posFieldIndex     = 1
@@ -219,12 +219,9 @@ func (m *globalMetadata) writeGlobalMetaData() error {
 	if err != nil {
 		return err
 	}
-	err = write(m.tctx, fileWriter, m.String())
-	tearDownErr := tearDown(m.tctx)
-	if err == nil {
-		return tearDownErr
-	}
-	return err
+	defer tearDown(m.tctx)
+
+	return write(m.tctx, fileWriter, m.String())
 }
 
 func getValidStr(str []string, idx int) string {

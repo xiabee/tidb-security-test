@@ -64,10 +64,6 @@ func (v *ValueSortedFull) TraverseValuesLessThan(n Value, action func(Valued) bo
 	})
 }
 
-func (v *ValueSortedFull) Min() Valued {
-	return Valued(v.valueIdx.Min().(sortedByValueThenStartKey))
-}
-
 func (v *ValueSortedFull) MinValue() Value {
 	return v.valueIdx.Min().(sortedByValueThenStartKey).Value
 }

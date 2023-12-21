@@ -17,7 +17,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	goerrors "errors"
 	"io"
 	"net"
 	"os"
@@ -26,8 +25,8 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	tmysql "github.com/pingcap/tidb/pkg/errno"
-	drivererr "github.com/pingcap/tidb/pkg/store/driver/error"
+	tmysql "github.com/pingcap/tidb/errno"
+	drivererr "github.com/pingcap/tidb/store/driver/error"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -36,6 +35,7 @@ import (
 // so we need to check by error message,
 // such as distsql.Checksum which transforms tikv other-error into its own error
 var retryableErrorMsgList = []string{
+	"is not fully replicated",
 	// for cluster >= 4.x, lightning calls distsql.Checksum to do checksum
 	// this error happens on when distsql.Checksum calls TiKV
 	// see https://github.com/pingcap/tidb/blob/2c3d4f1ae418881a95686e8b93d4237f2e76eec6/store/copr/coprocessor.go#L941
@@ -70,7 +70,6 @@ func IsRetryableError(err error) bool {
 var retryableErrorIDs = map[errors.ErrorID]struct{}{
 	ErrKVEpochNotMatch.ID():  {},
 	ErrKVNotLeader.ID():      {},
-	ErrNoLeader.ID():         {},
 	ErrKVRegionNotFound.ID(): {},
 	// common.ErrKVServerIsBusy is a little duplication with tmysql.ErrTiKVServerBusy
 	// it's because the response of sst.ingest gives us a sst.IngestResponse which doesn't contain error code,
@@ -79,8 +78,6 @@ var retryableErrorIDs = map[errors.ErrorID]struct{}{
 	ErrKVReadIndexNotReady.ID():   {},
 	ErrKVIngestFailed.ID():        {},
 	ErrKVRaftProposalDropped.ID(): {},
-	// litBackendCtxMgr.Register may return the error.
-	ErrCreatePDClient.ID(): {},
 	// during checksum coprocessor will transform error into driver error in handleCopResponse using ToTiDBErr
 	// met ErrRegionUnavailable on free-tier import during checksum, others hasn't met yet
 	drivererr.ErrRegionUnavailable.ID(): {},
@@ -90,19 +87,13 @@ var retryableErrorIDs = map[errors.ErrorID]struct{}{
 	drivererr.ErrUnknown.ID():           {},
 }
 
-// ErrWriteTooSlow is used to get rid of the gRPC blocking issue.
-// there are some strange blocking issues of gRPC like
-// https://github.com/pingcap/tidb/issues/48352
-// https://github.com/pingcap/tidb/issues/46321 and I don't know why 😭
-var ErrWriteTooSlow = errors.New("write too slow, maybe gRPC is blocked forever")
-
 func isSingleRetryableError(err error) bool {
 	err = errors.Cause(err)
 
 	switch err {
 	case nil, context.Canceled, context.DeadlineExceeded, io.EOF, sql.ErrNoRows:
 		return false
-	case mysql.ErrInvalidConn, driver.ErrBadConn, ErrWriteTooSlow:
+	case mysql.ErrInvalidConn, driver.ErrBadConn:
 		return true
 	}
 
@@ -111,10 +102,12 @@ func isSingleRetryableError(err error) bool {
 		if nerr.Timeout() {
 			return true
 		}
-		// the error might be nested, such as *url.Error -> *net.OpError -> *os.SyscallError
-		var syscallErr *os.SyscallError
-		if goerrors.As(nerr, &syscallErr) {
-			return syscallErr.Err == syscall.ECONNREFUSED || syscallErr.Err == syscall.ECONNRESET
+		switch cause := nerr.(type) {
+		case *net.OpError:
+			syscallErr, ok := cause.Unwrap().(*os.SyscallError)
+			if ok {
+				return syscallErr.Err == syscall.ECONNREFUSED || syscallErr.Err == syscall.ECONNRESET
+			}
 		}
 		return false
 	case *mysql.MySQLError:
@@ -133,26 +126,11 @@ func isSingleRetryableError(err error) bool {
 		}
 		return false
 	default:
-		rpcStatus, ok := status.FromError(err)
-		if !ok {
-			// non RPC error
-			return isRetryableFromErrorMessage(err)
-		}
-		switch rpcStatus.Code() {
-		case codes.DeadlineExceeded, codes.NotFound, codes.AlreadyExists, codes.PermissionDenied,
-			codes.ResourceExhausted, codes.Aborted, codes.OutOfRange, codes.Unavailable, codes.DataLoss:
-			return true
-		case codes.Unknown:
-			// cases we have met during import:
-			// 1. in scatter region: rpc error: code = Unknown desc = region 31946583 is not fully replicated
-			// 2. in write TiKV: rpc error: code = Unknown desc = EngineTraits(Engine(Status { code: IoError, sub_code:
-			//    None, sev: NoError, state: \"IO error: No such file or directory: while stat a file for size:
-			//    /...../63992d9c-fbc8-4708-b963-32495b299027_32279707_325_5280_write.sst: No such file or directory\"
-			// 3. in write TiKV: rpc error: code = Unknown desc = Engine("request region 26 is staler than local region,
-			//    local epoch conf_ver: 5 version: 65, request epoch conf_ver: 5 version: 64, please rescan region later")
+		switch status.Code(err) {
+		case codes.DeadlineExceeded, codes.NotFound, codes.AlreadyExists, codes.PermissionDenied, codes.ResourceExhausted, codes.Aborted, codes.OutOfRange, codes.Unavailable, codes.DataLoss:
 			return true
 		default:
-			return false
+			return isRetryableFromErrorMessage(err)
 		}
 	}
 }

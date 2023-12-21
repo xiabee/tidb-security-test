@@ -14,7 +14,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
-	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/kv"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,13 +72,6 @@ func (c constantRegions) RegionScan(ctx context.Context, key []byte, endKey []by
 // Stores returns the store metadata from the cluster.
 func (c constantRegions) Stores(ctx context.Context) ([]streamhelper.Store, error) {
 	return nil, status.Error(codes.Unimplemented, "Unsupported operation")
-}
-
-// Updates the service GC safe point for the cluster.
-// Returns the latest service GC safe point.
-// If the arguments is `0`, this would remove the service safe point.
-func (c constantRegions) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
-	return 0, status.Error(codes.Unimplemented, "Unsupported operation")
 }
 
 func makeSubrangeRegions(keys ...string) constantRegions {

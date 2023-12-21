@@ -93,16 +93,10 @@ const (
 )
 
 type tableInfo struct {
-	TotalWritten int64           `json:"w"`
-	TotalSize    int64           `json:"z"`
-	Status       taskStatus      `json:"s"`
-	Message      string          `json:"m,omitempty"`
-	Progresses   []tableProgress `json:"progresses,omitempty"`
-}
-
-type tableProgress struct {
-	Step     string  `json:"step"`
-	Progress float64 `json:"progress"`
+	TotalWritten int64      `json:"w"`
+	TotalSize    int64      `json:"z"`
+	Status       taskStatus `json:"s"`
+	Message      string     `json:"m,omitempty"`
 }
 
 type taskProgress struct {
@@ -130,7 +124,6 @@ func EnableCurrentProgress() {
 	progressEnabled.Store(true)
 }
 
-// BroadcastStartTask sets the current task status to running.
 func BroadcastStartTask() {
 	if !progressEnabled.Load() {
 		return
@@ -142,7 +135,6 @@ func BroadcastStartTask() {
 	currentProgress.checkpoints.clear()
 }
 
-// BroadcastEndTask sets the current task status to completed.
 func BroadcastEndTask(err error) {
 	if !progressEnabled.Load() {
 		return
@@ -155,7 +147,6 @@ func BroadcastEndTask(err error) {
 	currentProgress.mu.Unlock()
 }
 
-// BroadcastInitProgress sets the total size of each table.
 func BroadcastInitProgress(databases []*mydump.MDDatabaseMeta) {
 	if !progressEnabled.Load() {
 		return
@@ -174,7 +165,6 @@ func BroadcastInitProgress(databases []*mydump.MDDatabaseMeta) {
 	currentProgress.mu.Unlock()
 }
 
-// BroadcastTableCheckpoint updates the checkpoint of a table.
 func BroadcastTableCheckpoint(tableName string, cp *checkpoints.TableCheckpoint) {
 	if !progressEnabled.Load() {
 		return
@@ -187,28 +177,6 @@ func BroadcastTableCheckpoint(tableName string, cp *checkpoints.TableCheckpoint)
 	currentProgress.checkpoints.insert(tableName, cp.DeepCopy())
 }
 
-// BroadcastTableProgress updates the progress of a table.
-func BroadcastTableProgress(tableName string, step string, progress float64) {
-	if !progressEnabled.Load() {
-		return
-	}
-	currentProgress.mu.Lock()
-	progresses := currentProgress.Tables[tableName].Progresses
-	var present bool
-	for i, p := range progresses {
-		if p.Step == step {
-			progresses[i].Progress = progress
-			present = true
-		}
-	}
-	if !present {
-		progresses = append(progresses, tableProgress{Step: step, Progress: progress})
-	}
-	currentProgress.Tables[tableName].Progresses = progresses
-	currentProgress.mu.Unlock()
-}
-
-// BroadcastCheckpointDiff updates the total written size of each table.
 func BroadcastCheckpointDiff(diffs map[string]*checkpoints.TableCheckpointDiff) {
 	if !progressEnabled.Load() {
 		return
@@ -222,7 +190,6 @@ func BroadcastCheckpointDiff(diffs map[string]*checkpoints.TableCheckpointDiff) 
 	currentProgress.mu.Unlock()
 }
 
-// BroadcastError sets the error message of a table.
 func BroadcastError(tableName string, err error) {
 	if !progressEnabled.Load() {
 		return
@@ -237,7 +204,6 @@ func BroadcastError(tableName string, err error) {
 	currentProgress.mu.Unlock()
 }
 
-// MarshalTaskProgress returns the current progress in JSON format.
 func MarshalTaskProgress() ([]byte, error) {
 	if !progressEnabled.Load() {
 		return nil, errors.New("progress is not enabled")
@@ -247,7 +213,6 @@ func MarshalTaskProgress() ([]byte, error) {
 	return json.Marshal(&currentProgress)
 }
 
-// MarshalTableCheckpoints returns the checkpoint of a table in JSON format.
 func MarshalTableCheckpoints(tableName string) ([]byte, error) {
 	if !progressEnabled.Load() {
 		return nil, errors.New("progress is not enabled")

@@ -20,10 +20,6 @@ TABLE="usertable"
 
 # start log task
 run_br log start --task-name 1234 -s "local://$TEST_DIR/$DB/log" --pd $PD_ADDR
-if ! grep -i "inc log backup task" "$TEST_DIR/tidb.log"; then
-    echo "TEST: [$TEST_NAME] log start failed!"
-    exit 1
-fi
 
 run_sql "CREATE DATABASE $DB;"
 run_sql "CREATE TABLE $DB.$TABLE (id int);"
@@ -51,12 +47,7 @@ run_br restore full -s "local://$TEST_DIR/$DB/full" --pd $PD_ADDR && exit 1
 run_br restore point -s "local://$TEST_DIR/$DB/log" --pd $PD_ADDR && exit 1
 
 # stop log task
-unset BR_LOG_TO_TERM
-run_br log stop --task-name 1234 --pd $PD_ADDR 
-if ! grep -i "dec log backup task" "$TEST_DIR/tidb.log"; then
-    echo "TEST: [$TEST_NAME] log stop failed!"
-    exit 1
-fi
+run_br log stop --task-name 1234 --pd $PD_ADDR
 
 # restore full (should be success)
 run_br restore full -s "local://$TEST_DIR/$DB/full" --pd $PD_ADDR

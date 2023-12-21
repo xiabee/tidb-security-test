@@ -37,7 +37,6 @@ type ConnPool struct {
 	logger  log.Logger
 }
 
-// TakeConns takes all connections from the pool.
 func (p *ConnPool) TakeConns() (conns []*grpc.ClientConn) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -74,8 +73,7 @@ func (p *ConnPool) get(ctx context.Context) (*grpc.ClientConn, error) {
 }
 
 // NewConnPool creates a new connPool by the specified conn factory function and capacity.
-func NewConnPool(capacity int, newConn func(ctx context.Context) (*grpc.ClientConn, error),
-	logger log.Logger) *ConnPool {
+func NewConnPool(capacity int, newConn func(ctx context.Context) (*grpc.ClientConn, error), logger log.Logger) *ConnPool {
 	return &ConnPool{
 		cap:     capacity,
 		conns:   make([]*grpc.ClientConn, 0, capacity),
@@ -84,13 +82,11 @@ func NewConnPool(capacity int, newConn func(ctx context.Context) (*grpc.ClientCo
 	}
 }
 
-// GRPCConns is a pool of gRPC connections.
 type GRPCConns struct {
 	mu    sync.Mutex
 	conns map[uint64]*ConnPool
 }
 
-// Close closes all gRPC connections in the pool.
 func (conns *GRPCConns) Close() {
 	conns.mu.Lock()
 	defer conns.mu.Unlock()
@@ -100,9 +96,7 @@ func (conns *GRPCConns) Close() {
 	}
 }
 
-// GetGrpcConn gets a gRPC connection from the pool.
-func (conns *GRPCConns) GetGrpcConn(ctx context.Context, storeID uint64,
-	tcpConcurrency int, newConn func(ctx context.Context) (*grpc.ClientConn, error)) (*grpc.ClientConn, error) {
+func (conns *GRPCConns) GetGrpcConn(ctx context.Context, storeID uint64, tcpConcurrency int, newConn func(ctx context.Context) (*grpc.ClientConn, error)) (*grpc.ClientConn, error) {
 	conns.mu.Lock()
 	defer conns.mu.Unlock()
 	if _, ok := conns.conns[storeID]; !ok {
@@ -111,7 +105,6 @@ func (conns *GRPCConns) GetGrpcConn(ctx context.Context, storeID uint64,
 	return conns.conns[storeID].get(ctx)
 }
 
-// NewGRPCConns creates a new GRPCConns.
 func NewGRPCConns() *GRPCConns {
 	conns := &GRPCConns{conns: make(map[uint64]*ConnPool)}
 	return conns

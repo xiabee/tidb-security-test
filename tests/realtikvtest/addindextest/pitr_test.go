@@ -14,11 +14,7 @@
 
 package addindextest
 
-import (
-	"testing"
-
-	"github.com/pingcap/tidb/tests/realtikvtest/addindextestutil"
-)
+import "testing"
 
 func TestPiTRCreateNonUniqueIndex(t *testing.T) {
 	var colIDs = [][]int{
@@ -26,9 +22,9 @@ func TestPiTRCreateNonUniqueIndex(t *testing.T) {
 		{2, 5, 8},
 		{3, 6, 9},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsPiTR = true
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexNonUnique)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isPiTR = true
+	testOneColFrame(ctx, colIDs, addIndexNonUnique)
 }
 
 func TestPiTRCreateUniqueIndex(t *testing.T) {
@@ -37,21 +33,21 @@ func TestPiTRCreateUniqueIndex(t *testing.T) {
 		{11},
 		{19},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsPiTR = true
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexUnique)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isPiTR = true
+	testOneColFrame(ctx, colIDs, addIndexUnique)
 }
 
 func TestPiTRCreatePrimaryKey(t *testing.T) {
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsPiTR = true
-	addindextestutil.TestOneIndexFrame(ctx, 0, addindextestutil.AddIndexPK)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isPiTR = true
+	testOneIndexFrame(ctx, 0, addIndexPK)
 }
 
 func TestPiTRCreateGenColIndex(t *testing.T) {
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsPiTR = true
-	addindextestutil.TestOneIndexFrame(ctx, 29, addindextestutil.AddIndexGenCol)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isPiTR = true
+	testOneIndexFrame(ctx, 29, addIndexGenCol)
 }
 
 func TestPiTRCreateMultiColsIndex(t *testing.T) {
@@ -65,7 +61,7 @@ func TestPiTRCreateMultiColsIndex(t *testing.T) {
 		{23},
 		{27},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsPiTR = true
-	addindextestutil.TestTwoColsFrame(ctx, coliIDs, coljIDs, addindextestutil.AddIndexMultiCols)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isPiTR = true
+	testTwoColsFrame(ctx, coliIDs, coljIDs, addIndexMultiCols)
 }

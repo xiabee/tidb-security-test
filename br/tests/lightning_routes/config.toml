@@ -8,6 +8,3 @@ schema-pattern = "routes_a*"
 table-pattern = "t*"
 target-schema = "routes_b"
 target-table = "u"
-
-[post-restore]
-checksum = "optional"

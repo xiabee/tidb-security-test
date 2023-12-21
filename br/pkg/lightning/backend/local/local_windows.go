@@ -22,8 +22,7 @@ import (
 	"github.com/pingcap/errors"
 )
 
-// RlimT is the type of rlimit values.
-type RlimT = uint64
+type Rlim_t = uint64
 
 // return a big value as unlimited, since rlimit verify is skipped in windows.
 func GetSystemRLimit() (uint64, error) {

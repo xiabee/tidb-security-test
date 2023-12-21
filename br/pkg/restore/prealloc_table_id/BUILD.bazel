@@ -7,20 +7,19 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//br/pkg/metautil",
-        "//pkg/parser/model",
+        "//parser/model",
     ],
 )
 
 go_test(
     name = "prealloc_table_id_test",
-    timeout = "short",
     srcs = ["alloc_test.go"],
     flaky = True,
     race = "on",
     deps = [
         ":prealloc_table_id",
         "//br/pkg/metautil",
-        "//pkg/parser/model",
+        "//parser/model",
         "@com_github_stretchr_testify//require",
     ],
 )

@@ -309,11 +309,9 @@ func WriteInsertInCsv(
 
 	wp := newWriterPipe(w, cfg.FileSize, UnspecifiedSize, metrics, cfg.Labels)
 	opt := &csvOption{
-		nullValue:      cfg.CsvNullValue,
-		separator:      []byte(cfg.CsvSeparator),
-		delimiter:      []byte(cfg.CsvDelimiter),
-		lineTerminator: []byte(cfg.CsvLineTerminator),
-		binaryFormat:   DialectBinaryFormatMap[cfg.CsvOutputDialect],
+		nullValue: cfg.CsvNullValue,
+		separator: []byte(cfg.CsvSeparator),
+		delimiter: []byte(cfg.CsvDelimiter),
 	}
 
 	// use context.Background here to make sure writerPipe can deplete all the chunks in pipeline
@@ -367,7 +365,8 @@ func WriteInsertInCsv(
 				bf.Write(opt.separator)
 			}
 		}
-		bf.Write(opt.lineTerminator)
+		bf.WriteByte('\r')
+		bf.WriteByte('\n')
 	}
 	wp.currentFileSize += uint64(bf.Len())
 
@@ -382,7 +381,8 @@ func WriteInsertInCsv(
 		counter++
 		wp.currentFileSize += uint64(bf.Len()-lastBfSize) + 1 // 1 is for "\n"
 
-		bf.Write(opt.lineTerminator)
+		bf.WriteByte('\r')
+		bf.WriteByte('\n')
 		if bf.Len() >= lengthLimit {
 			select {
 			case <-pCtx.Done():
@@ -451,10 +451,10 @@ func writeBytes(tctx *tcontext.Context, writer storage.ExternalFileWriter, p []b
 	return errors.Trace(err)
 }
 
-func buildFileWriter(tctx *tcontext.Context, s storage.ExternalStorage, fileName string, compressType storage.CompressType) (storage.ExternalFileWriter, func(ctx context.Context) error, error) {
+func buildFileWriter(tctx *tcontext.Context, s storage.ExternalStorage, fileName string, compressType storage.CompressType) (storage.ExternalFileWriter, func(ctx context.Context), error) {
 	fileName += compressFileSuffix(compressType)
 	fullPath := s.URI() + "/" + fileName
-	writer, err := storage.WithCompression(s, compressType, storage.DecompressConfig{}).Create(tctx, fileName, nil)
+	writer, err := storage.WithCompression(s, compressType).Create(tctx, fileName)
 	if err != nil {
 		tctx.L().Warn("fail to open file",
 			zap.String("path", fullPath),
@@ -462,24 +462,20 @@ func buildFileWriter(tctx *tcontext.Context, s storage.ExternalStorage, fileName
 		return nil, nil, errors.Trace(err)
 	}
 	tctx.L().Debug("opened file", zap.String("path", fullPath))
-	tearDownRoutine := func(ctx context.Context) error {
+	tearDownRoutine := func(ctx context.Context) {
 		err := writer.Close(ctx)
-		failpoint.Inject("FailToCloseMetaFile", func(_ failpoint.Value) {
-			err = errors.New("injected error: fail to close meta file")
-		})
 		if err == nil {
-			return nil
+			return
 		}
 		err = errors.Trace(err)
 		tctx.L().Warn("fail to close file",
 			zap.String("path", fullPath),
 			zap.Error(err))
-		return err
 	}
 	return writer, tearDownRoutine, nil
 }
 
-func buildInterceptFileWriter(pCtx *tcontext.Context, s storage.ExternalStorage, fileName string, compressType storage.CompressType) (storage.ExternalFileWriter, func(context.Context) error) {
+func buildInterceptFileWriter(pCtx *tcontext.Context, s storage.ExternalStorage, fileName string, compressType storage.CompressType) (storage.ExternalFileWriter, func(context.Context)) {
 	fileName += compressFileSuffix(compressType)
 	var writer storage.ExternalFileWriter
 	fullPath := s.URI() + "/" + fileName
@@ -487,7 +483,7 @@ func buildInterceptFileWriter(pCtx *tcontext.Context, s storage.ExternalStorage,
 	initRoutine := func() error {
 		// use separated context pCtx here to make sure context used in ExternalFile won't be canceled before close,
 		// which will cause a context canceled error when closing gcs's Writer
-		w, err := storage.WithCompression(s, compressType, storage.DecompressConfig{}).Create(pCtx, fileName, nil)
+		w, err := storage.WithCompression(s, compressType).Create(pCtx, fileName)
 		if err != nil {
 			pCtx.L().Warn("fail to open file",
 				zap.String("path", fullPath),
@@ -501,21 +497,17 @@ func buildInterceptFileWriter(pCtx *tcontext.Context, s storage.ExternalStorage,
 	}
 	fileWriter.initRoutine = initRoutine
 
-	tearDownRoutine := func(ctx context.Context) error {
+	tearDownRoutine := func(ctx context.Context) {
 		if writer == nil {
-			return nil
+			return
 		}
 		pCtx.L().Debug("tear down lazy file writer...", zap.String("path", fullPath))
 		err := writer.Close(ctx)
-		failpoint.Inject("FailToCloseDataFile", func(_ failpoint.Value) {
-			err = errors.New("injected error: fail to close data file")
-		})
 		if err != nil {
 			pCtx.L().Warn("fail to close file",
 				zap.String("path", fullPath),
 				zap.Error(err))
 		}
-		return err
 	}
 	return fileWriter, tearDownRoutine
 }

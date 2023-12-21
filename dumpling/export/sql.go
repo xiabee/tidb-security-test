@@ -17,19 +17,18 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/version"
+	dbconfig "github.com/pingcap/tidb/config"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"github.com/pingcap/tidb/dumpling/log"
-	dbconfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	pd "github.com/tikv/pd/client/http"
+	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/store/helper"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 )
 
 const (
 	orderByTiDBRowID = "ORDER BY `_tidb_rowid`"
-	snapshotVar      = "tidb_snapshot"
 )
 
 type listTableType int
@@ -852,9 +851,7 @@ func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Con
 		s := fmt.Sprintf("SET SESSION %s = ?", k)
 		_, err := db.ExecContext(tctx, s, pv)
 		if err != nil {
-			if k == snapshotVar {
-				err = errors.Annotate(err, "fail to set snapshot for tidb, please set --consistency=none/--consistency=lock or fix snapshot problem")
-			} else if isUnknownSystemVariableErr(err) {
+			if isUnknownSystemVariableErr(err) {
 				tctx.L().Info("session variable is not supported by db", zap.String("variable", k), zap.Reflect("value", v))
 				continue
 			}
@@ -879,9 +876,6 @@ func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Con
 		}
 		cfg.Params[k] = s
 	}
-	failpoint.Inject("SkipResetDB", func(_ failpoint.Value) {
-		failpoint.Return(db, nil)
-	})
 
 	db.Close()
 	c, err := mysql.NewConnector(cfg)
@@ -1465,19 +1459,19 @@ func GetDBInfo(db *sql.Conn, tables map[string]map[string]struct{}) ([]*model.DB
 
 // GetRegionInfos get region info including regionID, start key, end key from database sql interface.
 // start key, end key includes information to help split table
-func GetRegionInfos(db *sql.Conn) (*pd.RegionsInfo, error) {
+func GetRegionInfos(db *sql.Conn) (*helper.RegionsInfo, error) {
 	const tableRegionSQL = "SELECT REGION_ID,START_KEY,END_KEY FROM INFORMATION_SCHEMA.TIKV_REGION_STATUS ORDER BY START_KEY;"
 	var (
 		regionID         int64
 		startKey, endKey string
 	)
-	regionsInfo := &pd.RegionsInfo{Regions: make([]pd.RegionInfo, 0)}
+	regionsInfo := &helper.RegionsInfo{Regions: make([]helper.RegionInfo, 0)}
 	err := simpleQuery(db, tableRegionSQL, func(rows *sql.Rows) error {
 		err := rows.Scan(&regionID, &startKey, &endKey)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		regionsInfo.Regions = append(regionsInfo.Regions, pd.RegionInfo{
+		regionsInfo.Regions = append(regionsInfo.Regions, helper.RegionInfo{
 			ID:       regionID,
 			StartKey: startKey,
 			EndKey:   endKey,

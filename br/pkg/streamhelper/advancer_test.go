@@ -16,7 +16,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/config"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
-	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -186,6 +186,29 @@ func TestOneStoreFailure(t *testing.T) {
 	c.flushAll()
 	require.NoError(t, adv.OnTick(ctx))
 	require.Equal(t, cp, env.checkpoint)
+}
+
+func TestGCServiceSafePoint(t *testing.T) {
+	req := require.New(t)
+	c := createFakeCluster(t, 4, true)
+	ctx := context.Background()
+	c.splitAndScatter("01", "02", "022", "023", "033", "04", "043")
+	env := &testEnv{fakeCluster: c, testCtx: t}
+
+	adv := streamhelper.NewCheckpointAdvancer(env)
+	adv.StartTaskListener(ctx)
+	cp := c.advanceCheckpoints()
+	c.flushAll()
+
+	req.NoError(adv.OnTick(ctx))
+	req.Equal(env.serviceGCSafePoint, cp-1)
+
+	env.unregisterTask()
+	req.Eventually(func() bool {
+		env.fakeCluster.mu.Lock()
+		defer env.fakeCluster.mu.Unlock()
+		return env.serviceGCSafePoint == 0
+	}, 3*time.Second, 100*time.Millisecond)
 }
 
 func TestTaskRanges(t *testing.T) {

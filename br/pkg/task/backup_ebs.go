@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -130,7 +129,7 @@ func RunBackupEBS(c context.Context, g glue.Glue, cfg *BackupConfig) error {
 		return errors.Trace(err)
 	}
 
-	backupStartTs, err = client.GetCurerntTS(c)
+	backupStartTs, err = client.GetCurrentTS(c)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -346,7 +345,7 @@ func isRegionsHasHole(allRegions []*metapb.Region) bool {
 }
 
 func waitUntilAllScheduleStopped(ctx context.Context, cfg Config, allStores []*metapb.Store, mgr *conn.Mgr) ([]*metapb.Region, error) {
-	concurrency := mathutil.Min(len(allStores), common.MaxStoreConcurrency)
+	concurrency := min(len(allStores), common.MaxStoreConcurrency)
 	workerPool := utils.NewWorkerPool(uint(concurrency), "collect schedule info")
 	eg, ectx := errgroup.WithContext(ctx)
 

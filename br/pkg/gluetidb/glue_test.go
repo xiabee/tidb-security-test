@@ -21,13 +21,13 @@ import (
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/glue"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/meta"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,8 +62,10 @@ func TestSplitBatchCreateTableWithTableId(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'table_id_resued1'").Check(testkit.Rows("124"))
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'table_id_resued2'").Check(testkit.Rows("125"))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'table_id_resued1'").
+		Check(testkit.Rows("124"))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'table_id_resued2'").
+		Check(testkit.Rows("125"))
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
 
 	// allocate new table id verification
@@ -90,7 +92,9 @@ func TestSplitBatchCreateTableWithTableId(t *testing.T) {
 	}))
 	require.NoError(t, err)
 
-	idGen, ok := tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'table_id_new'").Rows()[0][0].(string)
+	idGen, ok := tk.MustQuery(
+		"select tidb_table_id from information_schema.tables where table_name = 'table_id_new'").
+		Rows()[0][0].(string)
 	require.True(t, ok)
 	idGenNum, err := strconv.ParseInt(idGen, 10, 64)
 	require.NoError(t, err)
@@ -135,7 +139,7 @@ func TestSplitBatchCreateTable(t *testing.T) {
 
 	// keep/reused table id verification
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/RestoreBatchCreateTableEntryTooLarge", "return(1)"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/RestoreBatchCreateTableEntryTooLarge", "return(1)"))
 	err := se.SplitBatchCreateTable(model.NewCIStr("test"), infos, ddl.AllocTableIDIf(func(ti *model.TableInfo) bool {
 		return false
 	}))
@@ -166,11 +170,14 @@ func TestSplitBatchCreateTable(t *testing.T) {
 	require.Equal(t, "public", job3[4])
 
 	// check reused table id
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_1'").Check(testkit.Rows("1234"))
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_2'").Check(testkit.Rows("1235"))
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_3'").Check(testkit.Rows("1236"))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_1'").
+		Check(testkit.Rows("1234"))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_2'").
+		Check(testkit.Rows("1235"))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tables_3'").
+		Check(testkit.Rows("1236"))
 
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/RestoreBatchCreateTableEntryTooLarge"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/RestoreBatchCreateTableEntryTooLarge"))
 }
 
 // batch create table with table id reused
@@ -199,19 +206,19 @@ func TestSplitBatchCreateTableFailWithEntryTooLarge(t *testing.T) {
 	se := &tidbSession{se: tk.Session()}
 
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/RestoreBatchCreateTableEntryTooLarge", "return(0)"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/RestoreBatchCreateTableEntryTooLarge", "return(0)"))
 	err := se.SplitBatchCreateTable(model.NewCIStr("test"), infos, ddl.AllocTableIDIf(func(ti *model.TableInfo) bool {
 		return true
 	}))
 
 	require.True(t, kv.ErrEntryTooLarge.Equal(err))
 
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/RestoreBatchCreateTableEntryTooLarge"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/RestoreBatchCreateTableEntryTooLarge"))
 }
 
 func TestTheSessionIsoation(t *testing.T) {
 	req := require.New(t)
-	store, _ := testkit.CreateMockStoreAndDomain(t)
+	store := testkit.CreateMockStore(t)
 	ctx := context.Background()
 
 	g := Glue{}

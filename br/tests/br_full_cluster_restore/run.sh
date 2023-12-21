@@ -3,11 +3,12 @@
 set -eu
 
 # we need to keep backup data after restart service
+CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 backup_dir=$TEST_DIR/keep_${TEST_NAME}
 incr_backup_dir=${backup_dir}_inc
 res_file="$TEST_DIR/sql_res.$TEST_NAME.txt"
 br_log_file=$TEST_DIR/br.log
-source tests/_utils/run_services
+source $CUR/../_utils/run_services
 
 function run_sql_as() {
 	user=$1
@@ -25,8 +26,11 @@ function run_sql_as() {
 restart_services
 
 unset BR_LOG_TO_TERM
-run_sql_file tests/${TEST_NAME}/full_data.sql
+run_sql_file $CUR/full_data.sql
 run_br backup full --log-file $br_log_file -s "local://$backup_dir"
+
+run_sql "SELECT user FROM mysql.user WHERE JSON_EXTRACT(user_attributes, '$.resource_group') != '';"
+check_contains 'user: user1'
 
 # br.test will add coverage output, so we use head here
 LAST_BACKUP_TS=$(run_br validate decode --log-file $br_log_file --field="end-version" -s "local://$backup_dir" 2>/dev/null | head -n1)
@@ -57,6 +61,9 @@ run_sql "alter table mysql.user add column xx int;"
 run_br restore full --with-sys-table --log-file $br_log_file -s "local://$backup_dir" > $res_file 2>&1 || true
 run_sql "select count(*) from mysql.user"
 check_contains "count(*): 6"
+# check resource group user_attributes is cleaned.
+run_sql "SELECT user FROM mysql.user WHERE JSON_EXTRACT(user_attributes, '$.resource_group') != '';"
+check_not_contains 'user: user1'
 
 echo "--> incompatible system table: less column on target cluster"
 restart_services
@@ -154,6 +161,15 @@ run_sql "select count(*) from mysql.role_edges where from_user='cloud_admin'"
 check_contains "count(*): 0"
 run_sql "select count(*) from mysql.role_edges where to_user='cloud_admin'"
 check_contains "count(*): 0"
+
+echo "--> full cluster restore with --filter, need to flush privileges"
+restart_services
+run_br restore full --filter "*.*" --filter "!__TiDB_BR_Temporary*.*" --filter "!mysql.*" --filter "mysql.bind_info" --filter "mysql.user" --filter "mysql.db" --filter "mysql.tables_priv" --filter "mysql.columns_priv" --filter "mysql.global_priv" --filter "mysql.global_grants" --filter "mysql.default_roles" --filter "mysql.role_edges" --filter "!sys.*" --filter "!INFORMATION_SCHEMA.*" --filter "!PERFORMANCE_SCHEMA.*" --filter "!METRICS_SCHEMA.*" --filter "!INSPECTION_SCHEMA.*" --with-sys-table --log-file $br_log_file -s "local://$backup_dir"
+# BR executes `FLUSH PRIVILEGES` already
+run_sql_as user1 "123456" "select count(*) from db1.t1"
+check_contains "count(*): 2"
+run_sql_as user1 "123456" "select count(*) from db2.t1"
+check_contains "count(*): 2"
 
 echo "clean up kept backup"
 rm -rf $backup_dir $incr_backup_dir

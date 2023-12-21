@@ -18,13 +18,12 @@ import (
 	"github.com/pingcap/tidb/br/pkg/mock"
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/meta/autoid"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
-	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/ttl/ttlworker"
+	"github.com/pingcap/tidb/pkg/infoschema"
+	"github.com/pingcap/tidb/pkg/meta/autoid"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -369,12 +368,9 @@ func TestFilterDDLJobByRules(t *testing.T) {
 }
 
 func TestGetExistedUserDBs(t *testing.T) {
-	ttlworker.SkipTTLJobManager4Test = true
-
 	m, err := mock.NewCluster()
 	require.Nil(t, err)
 	defer m.Stop()
-
 	dom := m.Domain
 
 	dbs := restore.GetExistedUserDBs(dom)
@@ -385,7 +381,7 @@ func TestGetExistedUserDBs(t *testing.T) {
 			{Name: model.NewCIStr("mysql")},
 			{Name: model.NewCIStr("test")},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)
@@ -397,7 +393,7 @@ func TestGetExistedUserDBs(t *testing.T) {
 			{Name: model.NewCIStr("test")},
 			{Name: model.NewCIStr("d1")},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)
@@ -413,9 +409,23 @@ func TestGetExistedUserDBs(t *testing.T) {
 				State:  model.StatePublic,
 			},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)
 	require.Equal(t, 2, len(dbs))
+}
+
+// NOTICE: Once there is a new system table, BR needs to ensure that it is correctly classified:
+//
+// - IF it is an unrecoverable table, please add the table name into `unRecoverableTable`.
+// - IF it is an system privilege table, please add the table name into `sysPrivilegeTableMap`.
+// - IF it is an statistics table, please add the table name into `statsTables`.
+//
+// The above variables are in the file br/pkg/restore/systable_restore.go
+func TestMonitorTheSystemTableIncremental(t *testing.T) {
+	s := createRestoreSchemaSuite(t)
+	tk := testkit.NewTestKit(t, s.mock.Storage)
+	ret := tk.MustQuery("SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'mysql'")
+	ret.Equal([][]interface{}{{55}})
 }

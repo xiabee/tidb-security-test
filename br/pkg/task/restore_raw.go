@@ -87,7 +87,13 @@ func RunRestoreRaw(c context.Context, g glue.Glue, cmdName string, cfg *RestoreR
 	// sometimes we have pooled the connections.
 	// sending heartbeats in idle times is useful.
 	keepaliveCfg.PermitWithoutStream = true
-	client := restore.NewRestoreClient(mgr.GetPDClient(), mgr.GetTLSConfig(), keepaliveCfg, true)
+	client := restore.NewRestoreClient(
+		mgr.GetPDClient(),
+		mgr.GetPDHTTPClient(),
+		mgr.GetTLSConfig(),
+		keepaliveCfg,
+		true,
+	)
 	client.SetRateLimit(cfg.RateLimit)
 	client.SetCrypter(&cfg.CipherInfo)
 	client.SetConcurrency(uint(cfg.Concurrency))
@@ -148,7 +154,7 @@ func RunRestoreRaw(c context.Context, g glue.Glue, cmdName string, cfg *RestoreR
 		return errors.Trace(err)
 	}
 
-	restoreSchedulers, err := restorePreWork(ctx, client, mgr, true)
+	restoreSchedulers, _, err := restorePreWork(ctx, client, mgr, true)
 	if err != nil {
 		return errors.Trace(err)
 	}

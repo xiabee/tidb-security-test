@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/stretchr/testify/require"
@@ -19,7 +18,7 @@ import (
 
 func TestBackoffWithSuccess(t *testing.T) {
 	var counter int
-	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond, utils.NewDefaultContext())
+	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond)
 	err := utils.WithRetry(context.Background(), func() error {
 		defer func() { counter++ }()
 		switch counter {
@@ -36,26 +35,9 @@ func TestBackoffWithSuccess(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestBackoffWithUnknowneErrorSuccess(t *testing.T) {
-	var counter int
-	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond, utils.NewDefaultContext())
-	err := utils.WithRetry(context.Background(), func() error {
-		defer func() { counter++ }()
-		switch counter {
-		case 0:
-			return errors.New("unknown error: not in the allow list")
-		case 1:
-			return berrors.ErrKVEpochNotMatch
-		}
-		return nil
-	}, backoffer)
-	require.Equal(t, 3, counter)
-	require.NoError(t, err)
-}
-
 func TestBackoffWithFatalError(t *testing.T) {
 	var counter int
-	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond, utils.NewDefaultContext())
+	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond)
 	gRPCError := status.Error(codes.Unavailable, "transport is closing")
 	err := utils.WithRetry(context.Background(), func() error {
 		defer func() { counter++ }()
@@ -83,7 +65,7 @@ func TestBackoffWithFatalError(t *testing.T) {
 func TestBackoffWithFatalRawGRPCError(t *testing.T) {
 	var counter int
 	canceledError := status.Error(codes.Canceled, "context canceled")
-	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond, utils.NewDefaultContext())
+	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond)
 	err := utils.WithRetry(context.Background(), func() error {
 		defer func() { counter++ }()
 		return canceledError // nolint:wrapcheck
@@ -94,7 +76,7 @@ func TestBackoffWithFatalRawGRPCError(t *testing.T) {
 
 func TestBackoffWithRetryableError(t *testing.T) {
 	var counter int
-	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond, utils.NewDefaultContext())
+	backoffer := utils.NewBackoffer(10, time.Nanosecond, time.Nanosecond)
 	err := utils.WithRetry(context.Background(), func() error {
 		defer func() { counter++ }()
 		return berrors.ErrKVEpochNotMatch
@@ -151,12 +133,12 @@ func TestNewImportSSTBackofferWithSucess(t *testing.T) {
 	backoffer := utils.NewImportSSTBackoffer()
 	err := utils.WithRetry(context.Background(), func() error {
 		defer func() { counter++ }()
-		if counter == 5 {
+		if counter == 15 {
 			return nil
 		}
 		return berrors.ErrKVDownloadFailed
 	}, backoffer)
-	require.Equal(t, 6, counter)
+	require.Equal(t, 16, counter)
 	require.NoError(t, err)
 }
 

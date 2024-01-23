@@ -20,7 +20,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/pingcap/tidb/pkg/meta/autoid"
+	"github.com/pingcap/tidb/meta/autoid"
 )
 
 // panickingAllocator is an ID allocator which panics on all operations except Rebase
@@ -34,7 +34,6 @@ type panickingAllocator struct {
 // we use this to collect the max id(either _tidb_rowid or auto_increment id or auto_random) used
 // during import, and we will use this info to do ALTER TABLE xxx AUTO_RANDOM_BASE or AUTO_INCREMENT
 // on post-process phase.
-// we share the same base among all allocators, so the AllocatorType doesn't matter here.
 func NewPanickingAllocators(base int64) autoid.Allocators {
 	sharedBase := &base
 	return autoid.NewAllocators(
@@ -46,7 +45,7 @@ func NewPanickingAllocators(base int64) autoid.Allocators {
 }
 
 // Rebase implements the autoid.Allocator interface
-func (alloc *panickingAllocator) Rebase(_ context.Context, newBase int64, _ bool) error {
+func (alloc *panickingAllocator) Rebase(ctx context.Context, newBase int64, allocIDs bool) error {
 	// CAS
 	for {
 		oldBase := atomic.LoadInt64(alloc.base)

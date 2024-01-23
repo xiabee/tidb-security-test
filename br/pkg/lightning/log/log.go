@@ -16,14 +16,11 @@ package log
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/pingcap/errors"
 	pclog "github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc/codes"
@@ -48,8 +45,6 @@ type Config struct {
 	FileMaxDays int `toml:"max-days" json:"max-days"`
 	// Maximum number of old log files to retain.
 	FileMaxBackups int `toml:"max-backups" json:"max-backups"`
-	// EnableDiagnoseLogs, when enabled, we will output logs from all packages and enable GRPC debug log.
-	EnableDiagnoseLogs bool `toml:"enable-diagnose-logs" json:"enable-diagnose-logs"`
 }
 
 // Adjust adjusts some fields in the config to a proper value.
@@ -82,24 +77,10 @@ var (
 
 // InitLogger initializes Lightning's and also the TiDB library's loggers.
 func InitLogger(cfg *Config, _ string) error {
-	loggerOptions := []zap.Option{}
-	if cfg.EnableDiagnoseLogs {
-		// the value doesn't matter, logutil.InitLogger only checks whether it's empty.
-		if err := os.Setenv(logutil.GRPCDebugEnvName, "true"); err != nil {
-			fmt.Println("Failed to set environment variable to enable GRPC debug log", err)
-		}
-	} else {
-		// Only output logs of br package and main package.
-		loggerOptions = append(loggerOptions, zap.WrapCore(func(core zapcore.Core) zapcore.Core {
-			return NewFilterCore(core, "github.com/pingcap/tidb/br/", "main.main")
-		}))
-	}
 	tidbLogCfg := logutil.LogConfig{}
 	// Disable annoying TiDB Log.
 	// TODO: some error logs outputs randomly, we need to fix them in TiDB.
-	// this LEVEL only affects SlowQueryLogger, later ReplaceGlobals will overwrite it.
 	tidbLogCfg.Level = "fatal"
-	// this also init GRPCLogger, controlled by GRPC_DEBUG env.
 	err := logutil.InitLogger(&tidbLogCfg)
 	if err != nil {
 		return errors.Trace(err)
@@ -109,6 +90,10 @@ func InitLogger(cfg *Config, _ string) error {
 		Level:         cfg.Level,
 		DisableCaller: false, // FilterCore requires zap.AddCaller.
 	}
+	filterTiDBLog := zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		// Filter logs from TiDB and PD.
+		return NewFilterCore(core, "github.com/pingcap/tidb/br/", "main.main")
+	})
 	// "-" is a special config for log to stdout.
 	if len(cfg.File) > 0 && cfg.File != "-" {
 		logCfg.File = pclog.FileLogConfig{
@@ -118,7 +103,7 @@ func InitLogger(cfg *Config, _ string) error {
 			MaxBackups: cfg.FileMaxBackups,
 		}
 	}
-	logger, props, err := pclog.InitLogger(logCfg, loggerOptions...)
+	logger, props, err := pclog.InitLogger(logCfg, filterTiDBLog)
 	if err != nil {
 		return err
 	}
@@ -178,35 +163,13 @@ func With(fields ...zap.Field) Logger {
 // IsContextCanceledError returns whether the error is caused by context
 // cancellation.
 func IsContextCanceledError(err error) bool {
-	if err == nil {
-		return false
-	}
 	err = errors.Cause(err)
-	if err == context.Canceled || status.Code(err) == codes.Canceled {
-		return true
-	}
-
-	// see https://github.com/aws/aws-sdk-go/blob/9d1f49ba/aws/credentials/credentials.go#L246-L249
-	// 2 cases that have meet:
-	// 	awserr.New("RequestCanceled", "request context canceled", err) and the nested err is context.Canceled
-	// 	awserr.New( "MultipartUpload", "upload multipart failed", err) and the nested err is the upper one
-	if v, ok := err.(awserr.BatchedErrors); ok {
-		for _, origErr := range v.OrigErrs() {
-			if IsContextCanceledError(origErr) {
-				return true
-			}
-		}
-	}
-	return false
+	return err == context.Canceled || status.Code(err) == codes.Canceled
 }
 
 // Begin marks the beginning of a task.
 func (logger Logger) Begin(level zapcore.Level, name string) *Task {
-	return logger.begin(level, name, 2)
-}
-
-func (logger Logger) begin(level zapcore.Level, name string, skip int) *Task {
-	if ce := logger.WithOptions(zap.AddCallerSkip(skip)).Check(level, name+" start"); ce != nil {
+	if ce := logger.WithOptions(zap.AddCallerSkip(1)).Check(level, name+" start"); ce != nil {
 		ce.Write()
 	}
 	return &Task{
@@ -235,11 +198,6 @@ type Task struct {
 	level zapcore.Level
 	name  string
 	since time.Time
-}
-
-// BeginTask marks the beginning of a task.
-func BeginTask(logger *zap.Logger, name string) *Task {
-	return Logger{logger}.begin(zap.InfoLevel, name, 2)
 }
 
 // End marks the end of a task.

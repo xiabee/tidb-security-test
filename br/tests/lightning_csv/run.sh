@@ -2,12 +2,8 @@
 
 set -eu
 
-CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-
-function run_with() {
-	backend=$1
-	config_file=$2
-  if [ "$backend" = 'local' ]; then
+for BACKEND in tidb local; do
+  if [ "$BACKEND" = 'local' ]; then
     check_cluster_version 4 0 0 'local backend' || continue
   fi
 
@@ -15,7 +11,7 @@ function run_with() {
   run_sql 'DROP DATABASE IF EXISTS auto_incr_id'
   run_sql 'DROP DATABASE IF EXISTS no_auto_incr_id'
 
-  run_lightning --backend $backend --config $config_file
+  run_lightning --backend $BACKEND
 
   run_sql 'SELECT count(*), sum(PROCESSLIST_TIME), sum(THREAD_OS_ID), count(PROCESSLIST_STATE) FROM csv.threads'
   check_contains 'count(*): 43'
@@ -63,26 +59,11 @@ function run_with() {
     run_sql "select count(*) from no_auto_incr_id.$table"
     check_contains 'count(*): 4'
   done
-}
 
-rm -rf $TEST_DIR/lightning.log
-run_with "local" "$CUR/config-pause-global.toml"
-check_contains 'pause pd scheduler of global scope' $TEST_DIR/lightning.log
-check_not_contains 'pause pd scheduler of table scope' $TEST_DIR/lightning.log
-
-rm -rf $TEST_DIR/lightning.log
-run_with "local" "$CUR/config.toml"
-check_contains 'pause pd scheduler of table scope' $TEST_DIR/lightning.log
-check_not_contains 'pause pd scheduler of global scope' $TEST_DIR/lightning.log
-check_contains 'switch tikv mode"] [mode=Import' $TEST_DIR/lightning.log
-check_contains 'switch tikv mode"] [mode=Normal' $TEST_DIR/lightning.log
-
-rm -rf $TEST_DIR/lightning.log
-run_with "tidb" "$CUR/config.toml"
-check_not_contains 'switch tikv mode' $TEST_DIR/lightning.log
+done
 
 set +e
-run_lightning --backend local -d "$CUR/errData" --log-file "$TEST_DIR/lightning-err.log" 2>/dev/null
+run_lightning --backend local -d "tests/$TEST_NAME/errData" --log-file "$TEST_DIR/lightning-err.log" 2>/dev/null
 set -e
 # err content presented
 grep ",7,8" "$TEST_DIR/lightning-err.log"

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"text/tabwriter"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"sourcegraph.com/sourcegraph/appdash"
 	traceImpl "sourcegraph.com/sourcegraph/appdash/opentracing"
 )
@@ -88,7 +88,7 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, tub *tabby.Tabby) {
 	tub.AddLine(prefix+suffix+t.Span.Name(), start.Format("15:04:05.000000"), duration.String())
 
 	// Sort events by their start time
-	slices.SortFunc(t.Sub, func(i, j *appdash.Trace) int {
+	slices.SortFunc(t.Sub, func(i, j *appdash.Trace) bool {
 		var istart, jstart time.Time
 		if ievent, err := i.TimespanEvent(); err == nil {
 			istart = ievent.Start()
@@ -96,7 +96,7 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, tub *tabby.Tabby) {
 		if jevent, err := j.TimespanEvent(); err == nil {
 			jstart = jevent.Start()
 		}
-		return istart.Compare(jstart)
+		return istart.Before(jstart)
 	})
 
 	for i, sp := range t.Sub {

@@ -17,10 +17,9 @@ package addindextest
 import (
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
-	"github.com/pingcap/tidb/tests/realtikvtest/addindextestutil"
 )
 
 func init() {
@@ -29,14 +28,29 @@ func init() {
 	})
 }
 
+func initTest(t *testing.T) *suiteContext {
+	store := realtikvtest.CreateMockStoreAndSetup(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("drop database if exists addindex;")
+	tk.MustExec("create database addindex;")
+	tk.MustExec("use addindex;")
+	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
+
+	ctx := newSuiteContext(t, tk, store)
+	createTable(tk)
+	insertRows(tk)
+	initWorkloadParams(ctx)
+	return ctx
+}
+
 func TestCreateNonUniqueIndex(t *testing.T) {
 	var colIDs = [][]int{
 		{1, 4, 7, 10, 13, 16, 19, 22, 25},
 		{2, 5, 8, 11, 14, 17, 20, 23, 26},
 		{3, 6, 9, 12, 15, 18, 21, 24, 27},
 	}
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexNonUnique)
+	ctx := initTest(t)
+	testOneColFrame(ctx, colIDs, addIndexNonUnique)
 }
 
 func TestCreateUniqueIndex(t *testing.T) {
@@ -45,18 +59,18 @@ func TestCreateUniqueIndex(t *testing.T) {
 		{2, 9, 11, 17},
 		{3, 12, 25},
 	}
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexUnique)
+	ctx := initTest(t)
+	testOneColFrame(ctx, colIDs, addIndexUnique)
 }
 
 func TestCreatePrimaryKey(t *testing.T) {
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestOneIndexFrame(ctx, 0, addindextestutil.AddIndexPK)
+	ctx := initTest(t)
+	testOneIndexFrame(ctx, 0, addIndexPK)
 }
 
 func TestCreateGenColIndex(t *testing.T) {
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestOneIndexFrame(ctx, 29, addindextestutil.AddIndexGenCol)
+	ctx := initTest(t)
+	testOneIndexFrame(ctx, 29, addIndexGenCol)
 }
 
 func TestCreateMultiColsIndex(t *testing.T) {
@@ -83,32 +97,6 @@ func TestCreateMultiColsIndex(t *testing.T) {
 			{18, 21, 24, 27},
 		}
 	}
-	ctx := addindextestutil.InitTest(t)
-	addindextestutil.TestTwoColsFrame(ctx, coliIDs, coljIDs, addindextestutil.AddIndexMultiCols)
-}
-
-func TestAddForeignKeyWithAutoCreateIndex(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("drop database if exists fk_index;")
-	tk.MustExec("create database fk_index;")
-	tk.MustExec("use fk_index;")
-	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=1;`)
-	tk.MustExec("create table employee (id bigint auto_increment key, pid bigint)")
-	tk.MustExec("insert into employee (id) values (1),(2),(3),(4),(5),(6),(7),(8)")
-	for i := 0; i < 14; i++ {
-		tk.MustExec("insert into employee (pid) select pid from employee")
-	}
-	tk.MustExec("update employee set pid=id-1 where id>1")
-	tk.MustQuery("select count(*) from employee").Check(testkit.Rows("131072"))
-	tk.MustExec("alter table employee add foreign key fk_1(pid) references employee(id)")
-	tk.MustExec("alter table employee drop foreign key fk_1")
-	tk.MustExec("alter table employee drop index fk_1")
-	tk.MustExec("update employee set pid=0 where id=1")
-	tk.MustGetErrMsg("alter table employee add foreign key fk_1(pid) references employee(id)",
-		"[ddl:1452]Cannot add or update a child row: a foreign key constraint fails (`fk_index`.`employee`, CONSTRAINT `fk_1` FOREIGN KEY (`pid`) REFERENCES `employee` (`id`))")
-	tk.MustExec("update employee set pid=null where id=1")
-	tk.MustExec("insert into employee (pid) select pid from employee")
-	tk.MustExec("update employee set pid=id-1 where id>1 and pid is null")
-	tk.MustExec("alter table employee add foreign key fk_1(pid) references employee(id)")
+	ctx := initTest(t)
+	testTwoColsFrame(ctx, coliIDs, coljIDs, addIndexMultiCols)
 }

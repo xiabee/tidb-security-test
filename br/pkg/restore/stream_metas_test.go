@@ -19,7 +19,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/stream"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -303,7 +302,6 @@ func TestTruncateSafepoint(t *testing.T) {
 }
 
 func TestTruncateSafepointForGCS(t *testing.T) {
-	require.True(t, intest.InTest)
 	ctx := context.Background()
 	opts := fakestorage.Options{
 		NoListener: true,

@@ -94,7 +94,6 @@ func m2(files ...*backuppb.DataFileInfo) *backuppb.Metadata {
 		MetaVersion: backuppb.MetaVersion_V2,
 	}
 	fileGroups := &backuppb.DataFileGroup{
-		Path:  fmt.Sprintf("default-%06d", meta.StoreId),
 		MinTs: uint64(math.MaxUint64),
 	}
 	for _, file := range files {
@@ -468,19 +467,10 @@ func testFileManagerWithMeta(t *testing.T, m metaMaker) {
 		})
 		req.NoError(err)
 
-		var r []*backuppb.DataFileInfo
+		var datas LogIter
 		if !c.SearchMeta {
-			datas, err := fm.LoadDMLFiles(ctx)
+			datas, err = fm.LoadDMLFiles(ctx)
 			req.NoError(err)
-			r = iter.CollectAll(
-				ctx,
-				iter.Map(
-					datas,
-					func(d *LogDataFileInfo) *backuppb.DataFileInfo {
-						return d.DataFileInfo
-					},
-				),
-			).Item
 		} else {
 			var counter *int
 			if c.DMLFileCount != nil {
@@ -491,9 +481,10 @@ func testFileManagerWithMeta(t *testing.T, m metaMaker) {
 			if counter != nil {
 				req.Equal(*c.DMLFileCount, *counter)
 			}
-			r = data
+			datas = iter.FromSlice(data)
 		}
-		dataFileInfoMatches(t, r, c.Requires...)
+		r := iter.CollectAll(ctx, datas)
+		dataFileInfoMatches(t, r.Item, c.Requires...)
 	}
 
 	for i, c := range cases {
@@ -504,35 +495,4 @@ func testFileManagerWithMeta(t *testing.T, m metaMaker) {
 func TestFileManger(t *testing.T) {
 	t.Run("MetaV1", func(t *testing.T) { testFileManagerWithMeta(t, m) })
 	t.Run("MetaV2", func(t *testing.T) { testFileManagerWithMeta(t, m2) })
-}
-
-func TestFilterDataFiles(t *testing.T) {
-	req := require.New(t)
-	ctx := context.Background()
-	fm := logFileManager{
-		startTS:   0,
-		restoreTS: 10,
-	}
-	metas := []*backuppb.Metadata{
-		m2(wr(1, 1, 1), wr(2, 2, 2), wr(3, 3, 3), wr(4, 4, 4)),
-		m2(wr(1, 1, 1), wr(2, 2, 2), wr(3, 3, 3), wr(4, 4, 4), wr(5, 5, 5)),
-		m2(wr(1, 1, 1), wr(2, 2, 2)),
-	}
-	metaIter := iter.FromSlice(metas)
-	files := iter.CollectAll(ctx, fm.FilterDataFiles(metaIter)).Item
-	check := func(file *LogDataFileInfo, metaKey string, goff, foff int) {
-		req.Equal(file.MetaDataGroupName, metaKey)
-		req.Equal(file.OffsetInMetaGroup, goff)
-		req.Equal(file.OffsetInMergedGroup, foff)
-	}
-
-	idx := 0
-	for _, meta := range metas {
-		for gi, group := range meta.FileGroups {
-			for fi := range group.DataFilesInfo {
-				check(files[idx], meta.FileGroups[0].Path, gi, fi)
-				idx += 1
-			}
-		}
-	}
 }

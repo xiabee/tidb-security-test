@@ -16,7 +16,6 @@ package common_test
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +26,6 @@ import (
 
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/stretchr/testify/require"
-	pd "github.com/tikv/pd/client/http"
 )
 
 func respondPathHandler(w http.ResponseWriter, req *http.Request) {
@@ -94,8 +92,8 @@ func TestWithHost(t *testing.T) {
 			false,
 		},
 		{
-			fmt.Sprintf("http://127.0.0.1:2379%s", pd.Stores),
-			fmt.Sprintf("127.0.0.1:2379%s", pd.Stores),
+			"http://127.0.0.1:2379/pd/api/v1/stores",
+			"127.0.0.1:2379/pd/api/v1/stores",
 			false,
 		},
 		{

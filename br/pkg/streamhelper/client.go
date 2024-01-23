@@ -14,7 +14,8 @@ import (
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/redact"
-	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/util/mathutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
@@ -367,7 +368,7 @@ func (t *Task) GetStorageCheckpoint(ctx context.Context) (uint64, error) {
 				redact.Key(kv.Value))
 		}
 		ts := binary.BigEndian.Uint64(kv.Value)
-		storageCheckpoint = max(storageCheckpoint, ts)
+		storageCheckpoint = mathutil.Max(storageCheckpoint, ts)
 	}
 
 	return storageCheckpoint, nil
@@ -398,7 +399,7 @@ func (t *Task) GetGlobalCheckPointTS(ctx context.Context) (uint64, error) {
 		return 0, errors.Trace(err)
 	}
 
-	return max(checkpoint, ts), nil
+	return mathutil.Max(checkpoint, ts), nil
 }
 
 func (t *Task) UploadGlobalCheckpoint(ctx context.Context, ts uint64) error {

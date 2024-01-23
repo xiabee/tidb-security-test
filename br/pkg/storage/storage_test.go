@@ -3,7 +3,6 @@
 package storage_test
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
@@ -24,11 +23,4 @@ func TestDefaultHttpClient(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int(concurrency), transport.MaxIdleConnsPerHost)
 	require.Equal(t, int(concurrency), transport.MaxIdleConns)
-}
-
-func TestNewMemStorage(t *testing.T) {
-	url := "memstore://"
-	s, err := storage.NewFromURL(context.Background(), url)
-	require.NoError(t, err)
-	require.IsType(t, (*storage.MemStorage)(nil), s)
 }

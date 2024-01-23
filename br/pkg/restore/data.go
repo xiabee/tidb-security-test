@@ -16,7 +16,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/storewatch"
-	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/util/mathutil"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/rangetask"
@@ -139,10 +140,6 @@ func doRecoveryData(ctx context.Context, resolveTS uint64, allStores []*metapb.S
 		return totalRegions, recoveryError{error: err, atStage: StageRecovering}
 	}
 
-	if err := recovery.WaitApply(ctx); err != nil {
-		return totalRegions, recoveryError{error: err, atStage: StageRecovering}
-	}
-
 	if err := recovery.PrepareFlashbackToVersion(ctx, resolveTS, restoreTS-1); err != nil {
 		return totalRegions, recoveryError{error: err, atStage: StageFlashback}
 	}
@@ -225,9 +222,9 @@ func getStoreAddress(allStores []*metapb.Store, storeId uint64) string {
 func (recovery *Recovery) ReadRegionMeta(ctx context.Context) error {
 	eg, ectx := errgroup.WithContext(ctx)
 	totalStores := len(recovery.allStores)
-	workers := utils.NewWorkerPool(uint(min(totalStores, common.MaxStoreConcurrency)), "Collect Region Meta") // TODO: int overflow?
+	workers := utils.NewWorkerPool(uint(mathutil.Min(totalStores, common.MaxStoreConcurrency)), "Collect Region Meta") // TODO: int overflow?
 
-	// TODO: optimize the ErroGroup when TiKV is panic
+	// TODO: optimize the ErrorGroup when TiKV is panic
 	metaChan := make(chan StoreMeta, 1024)
 	defer close(metaChan)
 
@@ -338,7 +335,7 @@ func (recovery *Recovery) RecoverRegionOfStore(ctx context.Context, storeID uint
 func (recovery *Recovery) RecoverRegions(ctx context.Context) (err error) {
 	eg, ectx := errgroup.WithContext(ctx)
 	totalRecoveredStores := len(recovery.RecoveryPlan)
-	workers := utils.NewWorkerPool(uint(min(totalRecoveredStores, common.MaxStoreConcurrency)), "Recover Regions")
+	workers := utils.NewWorkerPool(uint(mathutil.Min(totalRecoveredStores, common.MaxStoreConcurrency)), "Recover Regions")
 
 	for storeId, plan := range recovery.RecoveryPlan {
 		if err := ectx.Err(); err != nil {
@@ -398,53 +395,13 @@ func (recovery *Recovery) SpawnTiKVShutDownWatchers(ctx context.Context) {
 	go mainLoop()
 }
 
-// WaitApply send wait apply to all tikv ensure all region peer apply log into the last
-func (recovery *Recovery) WaitApply(ctx context.Context) (err error) {
-	eg, ectx := errgroup.WithContext(ctx)
-	totalStores := len(recovery.allStores)
-	workers := utils.NewWorkerPool(uint(min(totalStores, common.MaxStoreConcurrency)), "wait apply")
-
-	for _, store := range recovery.allStores {
-		if err := ectx.Err(); err != nil {
-			break
-		}
-		storeAddr := getStoreAddress(recovery.allStores, store.Id)
-		storeId := store.Id
-
-		workers.ApplyOnErrorGroup(eg, func() error {
-			recoveryClient, conn, err := recovery.newRecoveryClient(ectx, storeAddr)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			defer conn.Close()
-			log.Info("send wait apply to tikv", zap.String("tikv address", storeAddr), zap.Uint64("store id", storeId))
-			req := &recovpb.WaitApplyRequest{StoreId: storeId}
-			_, err = recoveryClient.WaitApply(ectx, req)
-			if err != nil {
-				log.Error("wait apply failed", zap.Uint64("store id", storeId))
-				return errors.Trace(err)
-			}
-
-			recovery.progress.Inc()
-			log.Info("wait apply execution success", zap.Uint64("store id", storeId))
-			return nil
-		})
-	}
-	// Wait for all TiKV instances force leader and wait apply to last log.
-	return eg.Wait()
-}
-
 // prepare the region for flashback the data, the purpose is to stop region service, put region in flashback state
 func (recovery *Recovery) PrepareFlashbackToVersion(ctx context.Context, resolveTS uint64, startTS uint64) (err error) {
-	retryState := utils.InitialRetryState(utils.FlashbackRetryTime, utils.FlashbackWaitInterval, utils.FlashbackMaxWaitInterval)
 	retryErr := utils.WithRetry(
 		ctx,
 		func() error {
 			handler := func(ctx context.Context, r tikvstore.KeyRange) (rangetask.TaskStat, error) {
 				stats, err := ddl.SendPrepareFlashbackToVersionRPC(ctx, recovery.mgr.GetStorage().(tikv.Storage), resolveTS, startTS, r)
-				if err != nil {
-					log.Warn("region may not ready to serve, retry it...", zap.Error(err))
-				}
 				return stats, err
 			}
 
@@ -457,7 +414,9 @@ func (recovery *Recovery) PrepareFlashbackToVersion(ctx context.Context, resolve
 			}
 			log.Info("region flashback prepare complete", zap.Int("regions", runner.CompletedRegions()))
 			return nil
-		}, &retryState)
+		},
+		utils.NewFlashBackBackoffer(),
+	)
 
 	recovery.progress.Inc()
 	return retryErr
@@ -512,9 +471,9 @@ func (recovery *Recovery) MakeRecoveryPlan() error {
 				regions[m.RegionId] = make([]*RecoverRegion, 0, len(recovery.allStores))
 			}
 			regions[m.RegionId] = append(regions[m.RegionId], &RecoverRegion{m, storeId})
-			maxId = max(maxId, max(m.RegionId, m.PeerId))
+			maxId = mathutil.Max(maxId, mathutil.Max(m.RegionId, m.PeerId))
 		}
-		recovery.MaxAllocID = max(recovery.MaxAllocID, maxId)
+		recovery.MaxAllocID = mathutil.Max(recovery.MaxAllocID, maxId)
 	}
 
 	regionInfos := SortRecoverRegions(regions)

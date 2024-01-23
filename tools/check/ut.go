@@ -29,7 +29,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -77,10 +76,7 @@ ut build xxx
 ut run --junitfile xxx
 
 // test with race flag
-ut run --race
-
-// test with test.short flag
-ut run --short`
+ut run --race`
 
 	fmt.Println(msg)
 	return true
@@ -98,7 +94,6 @@ func (t *task) String() string {
 }
 
 var p int
-var buildParallel int
 var workDir string
 
 func cmdList(args ...string) bool {
@@ -311,7 +306,7 @@ func cmdRun(args ...string) bool {
 		tasks = tmp
 	}
 
-	fmt.Printf("building task finish, parallelism=%d, count=%d, takes=%v\n", buildParallel, len(tasks), time.Since(start))
+	fmt.Printf("building task finish, maxproc=%d, count=%d, takes=%v\n", p, len(tasks), time.Since(start))
 
 	taskCh := make(chan task, 100)
 	works := make([]numa, p)
@@ -407,10 +402,10 @@ func handleFlags(flag string) string {
 	return res
 }
 
-func handleFlag(f string) (found bool) {
+func handleRaceFlag() (found bool) {
 	tmp := os.Args[:0]
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == f {
+		if os.Args[i] == "--race" {
 			found = true
 			continue
 		}
@@ -424,7 +419,6 @@ var junitfile string
 var coverprofile string
 var coverFileTempDir string
 var race bool
-var short bool
 
 var except string
 var only string
@@ -435,8 +429,7 @@ func main() {
 	coverprofile = handleFlags("--coverprofile")
 	except = handleFlags("--except")
 	only = handleFlags("--only")
-	race = handleFlag("--race")
-	short = handleFlag("--short")
+	race = handleRaceFlag()
 
 	if coverprofile != "" {
 		var err error
@@ -450,8 +443,7 @@ func main() {
 
 	// Get the correct count of CPU if it's in docker.
 	p = runtime.GOMAXPROCS(0)
-	// We use 2 * p for `go build` to make it faster.
-	buildParallel = p * 2
+	rand.Seed(time.Now().Unix())
 	var err error
 	workDir, err = os.Getwd()
 	if err != nil {
@@ -834,7 +826,7 @@ func (n *numa) testCommand(pkg string, fn string) *exec.Cmd {
 }
 
 func skipDIR(pkg string) bool {
-	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check", "build"}
+	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check"}
 	for _, ignore := range skipDir {
 		if strings.HasPrefix(pkg, ignore) {
 			return true
@@ -845,15 +837,12 @@ func skipDIR(pkg string) bool {
 
 func buildTestBinary(pkg string) error {
 	// go test -c
-	cmd := exec.Command("go", "test", "-c", "-vet", "off", "--tags=intest", "-o", testFileName(pkg))
+	cmd := exec.Command("go", "test", "-c", "-vet", "off", "-o", testFileName(pkg))
 	if coverprofile != "" {
 		cmd.Args = append(cmd.Args, "-cover")
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
-	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Dir = path.Join(workDir, pkg)
 	cmd.Stdout = os.Stdout
@@ -874,15 +863,12 @@ func buildTestBinaryMulti(pkgs []string) error {
 	}
 
 	var cmd *exec.Cmd
-	cmd = exec.Command("go", "test", "--tags=intest", "-p", strconv.Itoa(buildParallel), "--exec", xprogPath, "-vet", "off", "-count", "0")
+	cmd = exec.Command("go", "test", "--exec", xprogPath, "-vet", "off", "-count", "0")
 	if coverprofile != "" {
 		cmd.Args = append(cmd.Args, "-cover")
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
-	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Args = append(cmd.Args, packages...)
 	cmd.Dir = workDir
@@ -956,6 +942,7 @@ func filter(input []string, f func(string) bool) []string {
 }
 
 func shuffle(tasks []task) {
+	rand.Seed(time.Now().UnixNano())
 	for i := 0; i < len(tasks); i++ {
 		pos := rand.Intn(len(tasks))
 		tasks[i], tasks[pos] = tasks[pos], tasks[i]

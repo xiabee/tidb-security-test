@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/ioutil"
 	"sync"
 	"testing"
 	"time"
@@ -65,11 +66,11 @@ func TestMemStoreBasic(t *testing.T) {
 	require.True(t, bytes.Equal([]byte("hello world 3"), fileContent))
 
 	// simultaneously create two readers on the same file
-	r, err := store.Open(ctx, "/hello.txt", nil)
+	r, err := store.Open(ctx, "/hello.txt")
 	require.Nil(t, err)
-	r2, err := store.Open(ctx, "/hello.txt", nil)
+	r2, err := store.Open(ctx, "/hello.txt")
 	require.Nil(t, err)
-	fileContent, err = io.ReadAll(r)
+	fileContent, err = ioutil.ReadAll(r)
 	require.Nil(t, err)
 	require.True(t, bytes.Equal([]byte("hello world 3"), fileContent))
 	require.Nil(t, r.Close())
@@ -82,7 +83,7 @@ func TestMemStoreBasic(t *testing.T) {
 
 	_, err = r2.Seek(5, io.SeekStart)
 	require.Nil(t, err)
-	fileContent, err = io.ReadAll(r2)
+	fileContent, err = ioutil.ReadAll(r2)
 	require.Nil(t, err)
 	require.True(t, bytes.Equal([]byte(" world 3"), fileContent))
 
@@ -195,13 +196,13 @@ func TestMemStoreManipulateBytes(t *testing.T) {
 	testBytes := []byte(testStr)
 	require.Nil(t, store.WriteFile(ctx, "/aaa.txt", testBytes))
 	testBytes[3] = '2'
-	require.Equal(t, testStr, string(*store.dataStore["/aaa.txt"].Data.Load()))
+	require.Equal(t, testStr, string(store.dataStore["/aaa.txt"].Data.Load().([]byte)))
 
 	readBytes, err := store.ReadFile(ctx, "/aaa.txt")
 	require.Nil(t, err)
 	require.Equal(t, testStr, string(readBytes))
 	readBytes[3] = '2'
-	require.Equal(t, testStr, string(*store.dataStore["/aaa.txt"].Data.Load()))
+	require.Equal(t, testStr, string(store.dataStore["/aaa.txt"].Data.Load().([]byte)))
 }
 
 func TestMemStoreWriteDuringWalkDir(t *testing.T) {

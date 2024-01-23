@@ -16,7 +16,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/parser/model"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -164,12 +164,6 @@ type TableWithRange struct {
 	Range []rtree.Range
 }
 
-type TableIDWithFiles struct {
-	TableID int64
-
-	Files []*backuppb.File
-}
-
 // Exhaust drains all remaining errors in the channel, into a slice of errors.
 func Exhaust(ec <-chan error) []error {
 	out := make([]error, 0, len(ec))
@@ -208,7 +202,7 @@ type TiKVRestorer interface {
 		isRawKv bool) error
 	// RestoreSSTFiles import the files to the TiKV.
 	RestoreSSTFiles(ctx context.Context,
-		tableIDWithFiles []TableIDWithFiles,
+		files []*backuppb.File,
 		rewriteRules *RewriteRules,
 		updateCh glue.Progress) error
 }
@@ -243,7 +237,6 @@ func NewTiKVSender(
 	cli TiKVRestorer,
 	updateCh glue.Progress,
 	splitConcurrency uint,
-	granularity string,
 ) (BatchSender, error) {
 	inCh := make(chan DrainResult, defaultChannelSize)
 	midCh := make(chan drainResultAndDone, defaultChannelSize)
@@ -258,13 +251,7 @@ func NewTiKVSender(
 
 	sender.wg.Add(2)
 	go sender.splitWorker(ctx, inCh, midCh, splitConcurrency)
-	if granularity == string(CoarseGrained) {
-		outCh := make(chan drainResultAndDone, defaultChannelSize)
-		go sender.blockPipelineWorker(ctx, midCh, outCh)
-		go sender.restoreWorker(ctx, outCh)
-	} else {
-		go sender.restoreWorker(ctx, midCh)
-	}
+	go sender.restoreWorker(ctx, midCh)
 	return sender, nil
 }
 
@@ -277,26 +264,6 @@ func (b *tikvSender) Close() {
 type drainResultAndDone struct {
 	result DrainResult
 	done   func()
-}
-
-func (b *tikvSender) blockPipelineWorker(ctx context.Context,
-	inCh <-chan drainResultAndDone,
-	outCh chan<- drainResultAndDone,
-) {
-	defer close(outCh)
-	res := make([]drainResultAndDone, 0, defaultChannelSize)
-	for dr := range inCh {
-		res = append(res, dr)
-	}
-
-	for _, dr := range res {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			outCh <- dr
-		}
-	}
 }
 
 func (b *tikvSender) splitWorker(ctx context.Context,
@@ -412,14 +379,13 @@ func (b *tikvSender) restoreWorker(ctx context.Context, ranges <-chan drainResul
 			if !ok {
 				return
 			}
-
 			files := r.result.Files()
 			// There has been a worker in the `RestoreSSTFiles` procedure.
 			// Spawning a raw goroutine won't make too many requests to TiKV.
 			eg.Go(func() error {
 				e := b.client.RestoreSSTFiles(ectx, files, r.result.RewriteRules, b.updateCh)
 				if e != nil {
-					log.Error("restore batch meet error", logutil.ShortError(e), zapTableIDWithFiles(files))
+					log.Error("restore batch meet error", logutil.ShortError(e), logutil.Files(files))
 					r.done()
 					return e
 				}

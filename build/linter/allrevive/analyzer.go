@@ -37,7 +37,6 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
@@ -107,7 +106,7 @@ var allRules = append([]lint.Rule{
 	//&rule.CognitiveComplexityRule{},
 	&rule.StringOfIntRule{},
 	&rule.StringFormatRule{},
-	&rule.EarlyReturnRule{},
+	//&rule.EarlyReturnRule{},
 	&rule.UnconditionalRecursionRule{},
 	&rule.IdenticalBranchesRule{},
 	&rule.DeferRule{},

@@ -26,8 +26,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -99,7 +99,8 @@ type fakeCluster struct {
 	regions   []*region
 	testCtx   *testing.T
 
-	onGetClient func(uint64) error
+	onGetClient        func(uint64) error
+	serviceGCSafePoint uint64
 }
 
 func (r *region) splitAt(newID uint64, k string) *region {
@@ -168,6 +169,10 @@ func (t trivialFlushStream) SendMsg(m interface{}) error {
 
 func (t trivialFlushStream) RecvMsg(m interface{}) error {
 	return nil
+}
+
+func (f *fakeStore) GetID() uint64 {
+	return f.id
 }
 
 func (f *fakeStore) SubscribeFlushEvent(ctx context.Context, in *logbackup.SubscribeFlushEventRequest, opts ...grpc.CallOption) (logbackup.LogBackup_SubscribeFlushEventClient, error) {
@@ -250,6 +255,23 @@ func (f *fakeStore) GetLastFlushTSOfRegion(ctx context.Context, in *logbackup.Ge
 	return resp, nil
 }
 
+// Updates the service GC safe point for the cluster.
+// Returns the latest service GC safe point.
+// If the arguments is `0`, this would remove the service safe point.
+func (f *fakeCluster) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if at == 0 {
+		f.serviceGCSafePoint = at
+		return at, nil
+	}
+	if f.serviceGCSafePoint > at {
+		return f.serviceGCSafePoint, nil
+	}
+	f.serviceGCSafePoint = at
+	return at, nil
+}
+
 // RegionScan gets a list of regions, starts from the region that contains key.
 // Limit limits the maximum number of regions returned.
 func (f *fakeCluster) RegionScan(ctx context.Context, key []byte, endKey []byte, limit int) ([]streamhelper.RegionWithLeader, error) {
@@ -295,6 +317,17 @@ func (f *fakeCluster) GetLogBackupClient(ctx context.Context, storeID uint64) (l
 		f.testCtx.Fatalf("the store %d doesn't exist", storeID)
 	}
 	return cli, nil
+}
+
+func (f *fakeCluster) ClearCache(ctx context.Context, storeID uint64) error {
+	if f.onGetClient != nil {
+		err := f.onGetClient(storeID)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	return nil
 }
 
 // Stores returns the store metadata from the cluster.
@@ -575,6 +608,7 @@ type testEnv struct {
 	checkpoint uint64
 	testCtx    *testing.T
 	ranges     []kv.KeyRange
+	taskCh     chan<- streamhelper.TaskEvent
 
 	resolveLocks func([]*txnlock.Lock, *tikv.KeyLocation) (*tikv.KeyLocation, error)
 
@@ -596,6 +630,7 @@ func (t *testEnv) Begin(ctx context.Context, ch chan<- streamhelper.TaskEvent) e
 		Ranges: rngs,
 	}
 	ch <- tsk
+	t.taskCh = ch
 	return nil
 }
 
@@ -623,6 +658,13 @@ func (t *testEnv) getCheckpoint() uint64 {
 	defer t.mu.Unlock()
 
 	return t.checkpoint
+}
+
+func (t *testEnv) unregisterTask() {
+	t.taskCh <- streamhelper.TaskEvent{
+		Type: streamhelper.EventDel,
+		Name: "whole",
+	}
 }
 
 func (t *testEnv) ScanLocksInOneRegion(bo *tikv.Backoffer, key []byte, maxVersion uint64, limit uint32) ([]*txnlock.Lock, *tikv.KeyLocation, error) {
@@ -685,7 +727,7 @@ type mockPDClient struct {
 	fakeRegions []*region
 }
 
-func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
+func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
 	sort.Slice(p.fakeRegions, func(i, j int) bool {
 		return bytes.Compare(p.fakeRegions[i].rng.StartKey, p.fakeRegions[j].rng.StartKey) < 0
 	})

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -26,13 +27,13 @@ import (
 	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
-	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/tablecodec"
+	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
-	"golang.org/x/exp/slices"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -46,7 +47,7 @@ var defaultKeepaliveCfg = keepalive.ClientParameters{
 func TestCreateTables(t *testing.T) {
 	m := mc
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(m.PDClient, m.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, m.Storage)
 	require.NoError(t, err)
 
@@ -105,7 +106,7 @@ func TestCreateTables(t *testing.T) {
 func TestIsOnline(t *testing.T) {
 	m := mc
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(m.PDClient, m.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, m.Storage)
 	require.NoError(t, err)
 
@@ -129,7 +130,7 @@ func TestCheckTargetClusterFresh(t *testing.T) {
 	defer cluster.Stop()
 
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(cluster.PDClient, cluster.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, cluster.Storage)
 	require.NoError(t, err)
 
@@ -146,7 +147,7 @@ func TestCheckTargetClusterFreshWithTable(t *testing.T) {
 	defer cluster.Stop()
 
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(cluster.PDClient, cluster.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, cluster.Storage)
 	require.NoError(t, err)
 
@@ -181,7 +182,7 @@ func TestCheckTargetClusterFreshWithTable(t *testing.T) {
 func TestCheckSysTableCompatibility(t *testing.T) {
 	cluster := mc
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(cluster.PDClient, cluster.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, cluster.Storage)
 	require.NoError(t, err)
 
@@ -257,7 +258,7 @@ func TestCheckSysTableCompatibility(t *testing.T) {
 func TestInitFullClusterRestore(t *testing.T) {
 	cluster := mc
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(cluster.PDClient, cluster.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, cluster.Storage)
 	require.NoError(t, err)
 
@@ -282,7 +283,7 @@ func TestInitFullClusterRestore(t *testing.T) {
 func TestPreCheckTableClusterIndex(t *testing.T) {
 	m := mc
 	g := gluetidb.New()
-	client := restore.NewRestoreClient(m.PDClient, nil, defaultKeepaliveCfg, false)
+	client := restore.NewRestoreClient(m.PDClient, m.PDHTTPCli, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, m.Storage)
 	require.NoError(t, err)
 
@@ -371,7 +372,7 @@ func TestGetTSWithRetry(t *testing.T) {
 	t.Run("PD leader is healthy:", func(t *testing.T) {
 		retryTimes := -1000
 		pDClient := fakePDClient{notLeader: false, retryTimes: &retryTimes}
-		client := restore.NewRestoreClient(pDClient, nil, defaultKeepaliveCfg, false)
+		client := restore.NewRestoreClient(pDClient, nil, nil, defaultKeepaliveCfg, false)
 		_, err := client.GetTSWithRetry(context.Background())
 		require.NoError(t, err)
 	})
@@ -379,7 +380,7 @@ func TestGetTSWithRetry(t *testing.T) {
 	t.Run("PD leader failure:", func(t *testing.T) {
 		retryTimes := -1000
 		pDClient := fakePDClient{notLeader: true, retryTimes: &retryTimes}
-		client := restore.NewRestoreClient(pDClient, nil, defaultKeepaliveCfg, false)
+		client := restore.NewRestoreClient(pDClient, nil, nil, defaultKeepaliveCfg, false)
 		_, err := client.GetTSWithRetry(context.Background())
 		require.Error(t, err)
 	})
@@ -387,7 +388,7 @@ func TestGetTSWithRetry(t *testing.T) {
 	t.Run("PD leader switch successfully", func(t *testing.T) {
 		retryTimes := 0
 		pDClient := fakePDClient{notLeader: true, retryTimes: &retryTimes}
-		client := restore.NewRestoreClient(pDClient, nil, defaultKeepaliveCfg, false)
+		client := restore.NewRestoreClient(pDClient, nil, nil, defaultKeepaliveCfg, false)
 		_, err := client.GetTSWithRetry(context.Background())
 		require.NoError(t, err)
 	})
@@ -419,7 +420,7 @@ func TestPreCheckTableTiFlashReplicas(t *testing.T) {
 	g := gluetidb.New()
 	client := restore.NewRestoreClient(fakePDClient{
 		stores: mockStores,
-	}, nil, defaultKeepaliveCfg, false)
+	}, nil, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, m.Storage)
 	require.NoError(t, err)
 
@@ -433,7 +434,7 @@ func TestPreCheckTableTiFlashReplicas(t *testing.T) {
 		}
 
 		tables[i] = &metautil.Table{
-			DB: &model.DBInfo{},
+			DB: &model.DBInfo{Name: model.NewCIStr("test")},
 			Info: &model.TableInfo{
 				ID:             int64(i),
 				Name:           model.NewCIStr("test" + strconv.Itoa(i)),
@@ -543,7 +544,7 @@ func TestSetSpeedLimit(t *testing.T) {
 	// 1. The cost of concurrent communication is expected to be less than the cost of serial communication.
 	client := restore.NewRestoreClient(fakePDClient{
 		stores: mockStores,
-	}, nil, defaultKeepaliveCfg, false)
+	}, nil, nil, defaultKeepaliveCfg, false)
 	ctx := context.Background()
 
 	recordStores = NewRecordStores()
@@ -569,7 +570,7 @@ func TestSetSpeedLimit(t *testing.T) {
 	mockStores[5].Id = SET_SPEED_LIMIT_ERROR // setting a fault store
 	client = restore.NewRestoreClient(fakePDClient{
 		stores: mockStores,
-	}, nil, defaultKeepaliveCfg, false)
+	}, nil, nil, defaultKeepaliveCfg, false)
 
 	// Concurrency needs to be less than the number of stores
 	err = restore.MockCallSetSpeedLimit(ctx, FakeImporterClient{}, client, 2)
@@ -583,6 +584,43 @@ func TestSetSpeedLimit(t *testing.T) {
 	for i := 0; i < recordStores.len(); i++ {
 		require.Equal(t, mockStores[i].Id, recordStores.get(i))
 	}
+}
+
+var deleteRangeQueryList = []*stream.PreDelRangeQuery{
+	{
+		Sql: "INSERT IGNORE INTO mysql.gc_delete_range VALUES (%?, %?, %?, %?, %?), (%?, %?, %?, %?, %?)",
+		ParamsList: []stream.DelRangeParams{
+			{
+				JobID:    1,
+				ElemID:   1,
+				StartKey: "a",
+				EndKey:   "b",
+			},
+			{
+				JobID:    1,
+				ElemID:   2,
+				StartKey: "b",
+				EndKey:   "c",
+			},
+		},
+	},
+	{
+		// When the last table id has no rewrite rule
+		Sql: "INSERT IGNORE INTO mysql.gc_delete_range VALUES (%?, %?, %?, %?, %?),",
+		ParamsList: []stream.DelRangeParams{
+			{
+				JobID:    2,
+				ElemID:   1,
+				StartKey: "a",
+				EndKey:   "b",
+			},
+		},
+	},
+	{
+		// When all the tables have no rewrite rule
+		Sql:        "INSERT IGNORE INTO mysql.gc_delete_range VALUES ",
+		ParamsList: nil,
+	},
 }
 
 func TestDeleteRangeQuery(t *testing.T) {
@@ -612,24 +650,81 @@ func TestDeleteRangeQuery(t *testing.T) {
 	g := gluetidb.New()
 	client := restore.NewRestoreClient(fakePDClient{
 		stores: mockStores,
-	}, nil, defaultKeepaliveCfg, false)
+	}, nil, nil, defaultKeepaliveCfg, false)
 	err := client.Init(g, m.Storage)
 	require.NoError(t, err)
 
 	client.RunGCRowsLoader(ctx)
 
-	client.InsertDeleteRangeForTable(2, []int64{3})
-	client.InsertDeleteRangeForTable(4, []int64{5, 6})
-
-	elementID := int64(1)
-	client.InsertDeleteRangeForIndex(7, &elementID, 8, []int64{1})
-	client.InsertDeleteRangeForIndex(9, &elementID, 10, []int64{1, 2})
-
+	for _, query := range deleteRangeQueryList {
+		client.RecordDeleteRange(query)
+	}
 	querys := client.GetGCRows()
-	require.Equal(t, querys[0], "INSERT IGNORE INTO mysql.gc_delete_range VALUES (2, 1, '748000000000000003', '748000000000000004', %[1]d)")
-	require.Equal(t, querys[1], "INSERT IGNORE INTO mysql.gc_delete_range VALUES (4, 1, '748000000000000005', '748000000000000006', %[1]d),(4, 2, '748000000000000006', '748000000000000007', %[1]d)")
-	require.Equal(t, querys[2], "INSERT IGNORE INTO mysql.gc_delete_range VALUES (7, 1, '7480000000000000085f698000000000000001', '7480000000000000085f698000000000000002', %[1]d)")
-	require.Equal(t, querys[3], "INSERT IGNORE INTO mysql.gc_delete_range VALUES (9, 2, '74800000000000000a5f698000000000000001', '74800000000000000a5f698000000000000002', %[1]d),(9, 3, '74800000000000000a5f698000000000000002', '74800000000000000a5f698000000000000003', %[1]d)")
+	require.Equal(t, len(querys), len(deleteRangeQueryList))
+	for i, query := range querys {
+		expected_query := deleteRangeQueryList[i]
+		require.Equal(t, expected_query.Sql, query.Sql)
+		require.Equal(t, len(expected_query.ParamsList), len(query.ParamsList))
+		for j := range expected_query.ParamsList {
+			require.Equal(t, expected_query.ParamsList[j], query.ParamsList[j])
+		}
+	}
+}
+
+func TestDeleteRangeQueryExec(t *testing.T) {
+	ctx := context.Background()
+	m := mc
+	mockStores := []*metapb.Store{
+		{
+			Id: 1,
+			Labels: []*metapb.StoreLabel{
+				{
+					Key:   "engine",
+					Value: "tiflash",
+				},
+			},
+		},
+		{
+			Id: 2,
+			Labels: []*metapb.StoreLabel{
+				{
+					Key:   "engine",
+					Value: "tiflash",
+				},
+			},
+		},
+	}
+
+	g := gluetidb.New()
+	retryCnt := 1
+	client := restore.NewRestoreClient(fakePDClient{
+		stores:     mockStores,
+		retryTimes: &retryCnt,
+	}, nil, nil, defaultKeepaliveCfg, false)
+	err := client.Init(g, m.Storage)
+	require.NoError(t, err)
+
+	client.RunGCRowsLoader(ctx)
+
+	for _, query := range deleteRangeQueryList {
+		client.RecordDeleteRange(query)
+	}
+
+	require.NoError(t, client.InsertGCRows(ctx))
+}
+
+func MockEmptySchemasReplace() *stream.SchemasReplace {
+	dbMap := make(map[stream.UpstreamID]*stream.DBReplace)
+	return stream.NewSchemasReplace(
+		dbMap,
+		true,
+		nil,
+		9527,
+		filter.All(),
+		nil,
+		nil,
+		nil,
+	)
 }
 
 func TestRestoreBatchMetaKVFiles(t *testing.T) {
@@ -647,11 +742,12 @@ func TestRestoreMetaKVFilesWithBatchMethod1(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -686,11 +782,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_default_empty(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -732,11 +829,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_write_empty_1(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -786,11 +884,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_write_empty_2(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -852,11 +951,12 @@ func TestRestoreMetaKVFilesWithBatchMethod_with_entries(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -959,11 +1059,12 @@ func TestRestoreMetaKVFilesWithBatchMethod3(t *testing.T) {
 	resultKV := make(map[int]int)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1045,11 +1146,12 @@ func TestRestoreMetaKVFilesWithBatchMethod4(t *testing.T) {
 	result := make(map[int][]*backuppb.DataFileInfo)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1125,11 +1227,12 @@ func TestRestoreMetaKVFilesWithBatchMethod5(t *testing.T) {
 	result := make(map[int][]*backuppb.DataFileInfo)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1222,11 +1325,12 @@ func TestRestoreMetaKVFilesWithBatchMethod6(t *testing.T) {
 	resultKV := make(map[int]int)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1305,6 +1409,14 @@ func TestSortMetaKVFiles(t *testing.T) {
 	require.Equal(t, files[4].Path, "f5")
 }
 
+func toLogDataFileInfoIter(logIter iter.TryNextor[*backuppb.DataFileInfo]) restore.LogIter {
+	return iter.Map(logIter, func(d *backuppb.DataFileInfo) *restore.LogDataFileInfo {
+		return &restore.LogDataFileInfo{
+			DataFileInfo: d,
+		}
+	})
+}
+
 func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 	var (
 		totalKVCount int64  = 0
@@ -1335,7 +1447,7 @@ func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1348,7 +1460,7 @@ func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 
 	restore.ApplyKVFilesWithSingelMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		applyFunc,
 		&applyWg,
 	)
@@ -1407,7 +1519,7 @@ func TestApplyKVFilesWithBatchMethod1(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1422,7 +1534,7 @@ func TestApplyKVFilesWithBatchMethod1(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1497,7 +1609,7 @@ func TestApplyKVFilesWithBatchMethod2(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1512,7 +1624,7 @@ func TestApplyKVFilesWithBatchMethod2(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1581,7 +1693,7 @@ func TestApplyKVFilesWithBatchMethod3(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1596,7 +1708,7 @@ func TestApplyKVFilesWithBatchMethod3(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1663,7 +1775,7 @@ func TestApplyKVFilesWithBatchMethod4(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1678,7 +1790,7 @@ func TestApplyKVFilesWithBatchMethod4(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1741,7 +1853,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1762,7 +1874,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		2,
 		1500,
 		applyFunc,
@@ -1775,7 +1887,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 	types = make([]backuppb.FileType, 0)
 	restore.ApplyKVFilesWithSingelMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		applyFunc,
 		&applyWg,
 	)
@@ -1839,19 +1951,25 @@ func TestCheckNewCollationEnable(t *testing.T) {
 			CheckRequirements:           true,
 			isErr:                       true,
 		},
+		{
+			backupMeta:                  &backuppb.BackupMeta{NewCollationsEnabled: ""},
+			newCollationEnableInCluster: "False",
+			CheckRequirements:           false,
+			isErr:                       false,
+		},
 	}
 
 	for i, ca := range caseList {
 		g := &gluetidb.MockGlue{
 			GlobalVars: map[string]string{"new_collation_enabled": ca.newCollationEnableInCluster},
 		}
-		err := restore.CheckNewCollationEnable(ca.backupMeta.GetNewCollationsEnabled(), g, nil, ca.CheckRequirements)
-
+		enabled, err := restore.CheckNewCollationEnable(ca.backupMeta.GetNewCollationsEnabled(), g, nil, ca.CheckRequirements)
 		t.Logf("[%d] Got Error: %v\n", i, err)
 		if ca.isErr {
 			require.Error(t, err)
 		} else {
 			require.NoError(t, err)
 		}
+		require.Equal(t, ca.newCollationEnableInCluster == "True", enabled)
 	}
 }

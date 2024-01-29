@@ -215,7 +215,6 @@ func pauseGCKeeper(cx *AdaptEnvForSnapshotBackupContext) (err error) {
 			ID:  sp.ID,
 			TTL: 0,
 		}
-		//nolint: all_revive,revive // There is a false positive on returning in `defer`.
 		return utils.UpdateServiceSafePoint(ctx, cx.pdMgr.GetPDClient(), cancelSP)
 	})
 	// Note: in fact we can directly return here.

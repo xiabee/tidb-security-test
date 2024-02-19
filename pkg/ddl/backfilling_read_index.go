@@ -26,7 +26,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/external"
 	"github.com/pingcap/tidb/pkg/ddl/ingest"
 	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
-	"github.com/pingcap/tidb/pkg/disttask/framework/taskexecutor/execute"
+	"github.com/pingcap/tidb/pkg/disttask/framework/scheduler/execute"
 	"github.com/pingcap/tidb/pkg/disttask/operator"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/metrics"
@@ -194,6 +194,12 @@ func (r *readIndexExecutor) OnFinished(ctx context.Context, subtask *proto.Subta
 	return nil
 }
 
+func (r *readIndexExecutor) Rollback(ctx context.Context) error {
+	logutil.Logger(ctx).Info("read index executor rollback backfill add index task",
+		zap.String("category", "ddl"), zap.Int64("jobID", r.job.ID))
+	return nil
+}
+
 func (r *readIndexExecutor) getTableStartEndKey(sm *BackfillSubTaskMeta) (
 	start, end kv.Key, tbl table.PhysicalTable, err error) {
 	currentVer, err1 := getValidCurrentVersion(r.d.store)
@@ -267,19 +273,6 @@ func (r *readIndexExecutor) buildExternalStorePipeline(
 	counter := metrics.BackfillTotalCounter.WithLabelValues(
 		metrics.GenerateReorgLabel("add_idx_rate", r.job.SchemaName, tbl.Meta().Name.O))
 	return NewWriteIndexToExternalStoragePipeline(
-		opCtx,
-		d.store,
-		r.cloudStorageURI,
-		r.d.sessPool,
-		sessCtx,
-		r.job.ID,
-		subtaskID,
-		tbl,
-		r.indexes,
-		start,
-		end,
-		totalRowCount,
-		counter,
-		onClose,
-		r.job.ReorgMeta)
+		opCtx, d.store, r.cloudStorageURI, r.d.sessPool, sessCtx, r.job.ID, subtaskID,
+		tbl, r.indexes, start, end, totalRowCount, counter, onClose, r.job.ReorgMeta)
 }

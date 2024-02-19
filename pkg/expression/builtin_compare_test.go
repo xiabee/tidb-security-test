@@ -143,7 +143,7 @@ func TestCompare(t *testing.T) {
 		args := bf.getArgs()
 		require.Equal(t, test.tp, args[0].GetType().GetType())
 		require.Equal(t, test.tp, args[1].GetType().GetType())
-		res, isNil, err := bf.evalInt(ctx, chunk.Row{})
+		res, isNil, err := bf.evalInt(chunk.Row{})
 		require.NoError(t, err)
 		require.False(t, isNil)
 		require.Equal(t, test.expected, res)
@@ -207,7 +207,7 @@ func TestCoalesce(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Coalesce, primitiveValsToConstants(ctx, test.args)...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 
 		if test.getErr {
 			require.Error(t, err)
@@ -233,11 +233,11 @@ func TestIntervalFunc(t *testing.T) {
 	ctx := createContext(t)
 
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
+	sc.IgnoreTruncate.Store(true)
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	for _, test := range []struct {
 		args   []types.Datum
@@ -274,12 +274,12 @@ func TestIntervalFunc(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(test.args))
 		require.NoError(t, err)
 		if test.getErr {
-			v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+			v, err := evalBuiltinFunc(f, chunk.Row{})
 			require.Error(t, err)
 			require.Equal(t, test.ret, v.GetInt64())
 			continue
 		}
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.ret, v.GetInt64())
 	}
@@ -289,14 +289,13 @@ func TestIntervalFunc(t *testing.T) {
 func TestGreatestLeastFunc(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
-	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
-	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
-
+	originIgnoreTruncate := sc.IgnoreTruncate.Load()
+	sc.IgnoreTruncate.Store(true)
 	decG := &types.MyDecimal{}
 	decL := &types.MyDecimal{}
+	defer func() {
+		sc.IgnoreTruncate.Store(originIgnoreTruncate)
+	}()
 
 	for _, test := range []struct {
 		args             []interface{}
@@ -376,7 +375,7 @@ func TestGreatestLeastFunc(t *testing.T) {
 	} {
 		f0, err := newFunctionForTest(ctx, ast.Greatest, primitiveValsToConstants(ctx, test.args)...)
 		require.NoError(t, err)
-		d, err := f0.Eval(ctx, chunk.Row{})
+		d, err := f0.Eval(chunk.Row{})
 		if test.getErr {
 			require.Error(t, err)
 		} else {
@@ -390,7 +389,7 @@ func TestGreatestLeastFunc(t *testing.T) {
 
 		f1, err := newFunctionForTest(ctx, ast.Least, primitiveValsToConstants(ctx, test.args)...)
 		require.NoError(t, err)
-		d, err = f1.Eval(ctx, chunk.Row{})
+		d, err = f1.Eval(chunk.Row{})
 		if test.getErr {
 			require.Error(t, err)
 		} else {

@@ -38,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -225,7 +226,7 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 	apiVersion := local.tikvCodec.GetAPIVersion()
 	clientFactory := local.importClientFactory
 	kvBatchSize := local.KVWriteBatchSize
-	bufferPool := local.engineMgr.getBufferPool()
+	bufferPool := local.bufferPool
 	writeLimiter := local.writeLimiter
 
 	begin := time.Now()
@@ -325,6 +326,8 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 		},
 	}
 
+	bytesBuf := bufferPool.NewBuffer()
+	defer bytesBuf.Destroy()
 	pairs := make([]*sst.Pair, 0, defaultKVBatchCount)
 	count := 0
 	size := int64(0)
@@ -365,22 +368,21 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 		return nil
 	}
 
-	iter := j.ingestData.NewIter(ctx, j.keyRange.Start, j.keyRange.End, bufferPool)
+	iter := j.ingestData.NewIter(ctx, j.keyRange.Start, j.keyRange.End)
 	//nolint: errcheck
 	defer iter.Close()
 
 	var remainingStartKey []byte
 	for iter.First(); iter.Valid(); iter.Next() {
-		k, v := iter.Key(), iter.Value()
-		kvSize := int64(len(k) + len(v))
+		kvSize := int64(len(iter.Key()) + len(iter.Value()))
 		// here we reuse the `*sst.Pair`s to optimize object allocation
 		if count < len(pairs) {
-			pairs[count].Key = k
-			pairs[count].Value = v
+			pairs[count].Key = bytesBuf.AddBytes(iter.Key())
+			pairs[count].Value = bytesBuf.AddBytes(iter.Value())
 		} else {
 			pair := &sst.Pair{
-				Key:   k,
-				Value: v,
+				Key:   bytesBuf.AddBytes(iter.Key()),
+				Value: bytesBuf.AddBytes(iter.Value()),
 			}
 			pairs = append(pairs, pair)
 		}
@@ -395,7 +397,7 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 			}
 			count = 0
 			size = 0
-			iter.ReleaseBuf()
+			bytesBuf.Reset()
 		}
 		if totalSize >= regionMaxSize || totalCount >= j.regionSplitKeys {
 			// we will shrink the key range of this job to real written range
@@ -425,7 +427,7 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 		}
 		count = 0
 		size = 0
-		iter.ReleaseBuf()
+		bytesBuf.Reset()
 	}
 
 	var leaderPeerMetas []*sst.SSTMeta
@@ -462,6 +464,7 @@ func (local *Backend) doWrite(ctx context.Context, j *regionJob) error {
 	log.FromContext(ctx).Debug("write to kv", zap.Reflect("region", j.region), zap.Uint64("leader", leaderID),
 		zap.Reflect("meta", meta), zap.Reflect("return metas", leaderPeerMetas),
 		zap.Int64("kv_pairs", totalCount), zap.Int64("total_bytes", totalSize),
+		zap.Int64("buf_size", bytesBuf.TotalSize()),
 		zap.Stringer("takeTime", takeTime))
 	if m, ok := metric.FromContext(ctx); ok {
 		m.SSTSecondsHistogram.WithLabelValues(metric.SSTProcessWrite).Observe(takeTime.Seconds())
@@ -591,7 +594,7 @@ func (local *Backend) doIngest(ctx context.Context, j *regionJob) (*sst.IngestRe
 
 	var resp *sst.IngestResponse
 	for start := 0; start < len(j.writeResult.sstMeta); start += batch {
-		end := min(start+batch, len(j.writeResult.sstMeta))
+		end := mathutil.Min(start+batch, len(j.writeResult.sstMeta))
 		ingestMetas := j.writeResult.sstMeta[start:end]
 
 		log.FromContext(ctx).Debug("ingest meta", zap.Reflect("meta", ingestMetas))

@@ -31,17 +31,17 @@ var (
 	QueryDurationHistogram *prometheus.HistogramVec
 	QueryTotalCounter      *prometheus.CounterVec
 	AffectedRowsCounter    *prometheus.CounterVec
-	ConnGauge              *prometheus.GaugeVec
+	ConnGauge              prometheus.Gauge
 	DisconnectionCounter   *prometheus.CounterVec
 	PreparedStmtGauge      prometheus.Gauge
 	ExecuteErrorCounter    *prometheus.CounterVec
 	CriticalErrorCounter   prometheus.Counter
 
-	ServerStart = "server-start"
-	ServerStop  = "server-stop"
-
+	EventStart        = "start"
+	EventGracefulDown = "graceful_shutdown"
 	// Eventkill occurs when the server.Kill() function is called.
-	EventKill = "kill"
+	EventKill  = "kill"
+	EventClose = "close"
 
 	ServerEventCounter              *prometheus.CounterVec
 	TimeJumpBackCounter             prometheus.Counter
@@ -97,7 +97,7 @@ func InitServerMetrics() {
 			Subsystem: "server",
 			Name:      "query_total",
 			Help:      "Counter of queries.",
-		}, []string{LblType, LblResult, LblResourceGroup})
+		}, []string{LblType, LblResult})
 
 	AffectedRowsCounter = NewCounterVec(
 		prometheus.CounterOpts{
@@ -107,13 +107,13 @@ func InitServerMetrics() {
 			Help:      "Counters of server affected rows.",
 		}, []string{LblSQLType})
 
-	ConnGauge = NewGaugeVec(
+	ConnGauge = NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: "tidb",
 			Subsystem: "server",
 			Name:      "connections",
 			Help:      "Number of connections.",
-		}, []string{LblResourceGroup})
+		})
 
 	DisconnectionCounter = NewCounterVec(
 		prometheus.CounterOpts{
@@ -136,7 +136,7 @@ func InitServerMetrics() {
 			Subsystem: "server",
 			Name:      "execute_error_total",
 			Help:      "Counter of execute errors.",
-		}, []string{LblType, LblDb, LblResourceGroup})
+		}, []string{LblType, LblDb})
 
 	CriticalErrorCounter = NewCounter(
 		prometheus.CounterOpts{

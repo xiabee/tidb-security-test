@@ -431,9 +431,6 @@ func TestIsNoop(t *testing.T) {
 
 	sv = GetSysVar(ReadOnly)
 	require.True(t, sv.IsNoop)
-
-	sv = GetSysVar(DefaultPasswordLifetime)
-	require.False(t, sv.IsNoop)
 }
 
 // TestDefaultValuesAreSettable that sysvars defaults are logically valid. i.e.

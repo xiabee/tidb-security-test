@@ -186,12 +186,13 @@ func (d SchemaTracker) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStm
 		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(ident.Schema)
 	}
 	// suppress ErrTooLongKey
-	ctx.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	strictSQLModeBackup := ctx.GetSessionVars().StrictSQLMode
+	ctx.GetSessionVars().StrictSQLMode = false
 	// support drop PK
 	enableClusteredIndexBackup := ctx.GetSessionVars().EnableClusteredIndex
 	ctx.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
 	defer func() {
-		ctx.ClearValue(ddl.SuppressErrorTooLongKeyKey)
+		ctx.GetSessionVars().StrictSQLMode = strictSQLModeBackup
 		ctx.GetSessionVars().EnableClusteredIndex = enableClusteredIndexBackup
 	}()
 
@@ -612,7 +613,7 @@ func (d SchemaTracker) renameColumn(_ sessionctx.Context, ident ast.Ident, spec 
 		if col.GeneratedExpr == nil {
 			continue
 		}
-		dependedColNames := ddl.FindColumnNamesInExpr(col.GeneratedExpr.Internal())
+		dependedColNames := ddl.FindColumnNamesInExpr(col.GeneratedExpr)
 		for _, name := range dependedColNames {
 			if name.Name.L == oldColName.L {
 				if col.Hidden {
@@ -713,7 +714,7 @@ func (d SchemaTracker) handleModifyColumn(
 	job, err := ddl.GetModifiableColumnJob(ctx, sctx, nil, ident, originalColName, schema, t, spec)
 	if err != nil {
 		if infoschema.ErrColumnNotExists.Equal(err) && spec.IfExists {
-			sctx.GetSessionVars().StmtCtx.AppendNote(infoschema.ErrColumnNotExists.FastGenByArgs(originalColName, ident.Name))
+			sctx.GetSessionVars().StmtCtx.AppendNote(infoschema.ErrColumnNotExists.GenWithStackByArgs(originalColName, ident.Name))
 			return nil
 		}
 		return errors.Trace(err)

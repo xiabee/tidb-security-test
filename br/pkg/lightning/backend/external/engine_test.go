@@ -26,7 +26,6 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/pingcap/tidb/br/pkg/membuf"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/stretchr/testify/require"
@@ -132,17 +131,20 @@ func testNewIter(
 	data common.IngestData,
 	lowerBound, upperBound []byte,
 	expectedKeys, expectedValues [][]byte,
-	bufPool *membuf.Pool,
 ) {
 	ctx := context.Background()
-	iter := data.NewIter(ctx, lowerBound, upperBound, bufPool)
+	iter := data.NewIter(ctx, lowerBound, upperBound)
 	var (
 		keys, values [][]byte
 	)
 	for iter.First(); iter.Valid(); iter.Next() {
 		require.NoError(t, iter.Error())
-		keys = append(keys, iter.Key())
-		values = append(values, iter.Value())
+		key := make([]byte, len(iter.Key()))
+		copy(key, iter.Key())
+		keys = append(keys, key)
+		value := make([]byte, len(iter.Value()))
+		copy(value, iter.Value())
+		values = append(values, value)
 	}
 	require.NoError(t, iter.Error())
 	require.NoError(t, iter.Close())
@@ -201,14 +203,13 @@ func TestMemoryIngestData(t *testing.T) {
 	testGetFirstAndLastKey(t, data, []byte("key0"), []byte("key1"), nil, nil)
 	testGetFirstAndLastKey(t, data, []byte("key6"), []byte("key9"), nil, nil)
 
-	// MemoryIngestData without duplicate detection feature does not need pool
-	testNewIter(t, data, nil, nil, keys, values, nil)
-	testNewIter(t, data, []byte("key1"), []byte("key6"), keys, values, nil)
-	testNewIter(t, data, []byte("key2"), []byte("key5"), keys[1:4], values[1:4], nil)
-	testNewIter(t, data, []byte("key25"), []byte("key35"), keys[2:3], values[2:3], nil)
-	testNewIter(t, data, []byte("key25"), []byte("key26"), nil, nil, nil)
-	testNewIter(t, data, []byte("key0"), []byte("key1"), nil, nil, nil)
-	testNewIter(t, data, []byte("key6"), []byte("key9"), nil, nil, nil)
+	testNewIter(t, data, nil, nil, keys, values)
+	testNewIter(t, data, []byte("key1"), []byte("key6"), keys, values)
+	testNewIter(t, data, []byte("key2"), []byte("key5"), keys[1:4], values[1:4])
+	testNewIter(t, data, []byte("key25"), []byte("key35"), keys[2:3], values[2:3])
+	testNewIter(t, data, []byte("key25"), []byte("key26"), nil, nil)
+	testNewIter(t, data, []byte("key0"), []byte("key1"), nil, nil)
+	testNewIter(t, data, []byte("key6"), []byte("key9"), nil, nil)
 
 	dir := t.TempDir()
 	db, err := pebble.Open(path.Join(dir, "duplicate"), nil)
@@ -260,23 +261,21 @@ func TestMemoryIngestData(t *testing.T) {
 	testGetFirstAndLastKey(t, data, []byte("key0"), []byte("key1"), nil, nil)
 	testGetFirstAndLastKey(t, data, []byte("key6"), []byte("key9"), nil, nil)
 
-	pool := membuf.NewPool()
-	defer pool.Destroy()
-	testNewIter(t, data, nil, nil, keys, values, pool)
+	testNewIter(t, data, nil, nil, keys, values)
 	checkDupDB(t, db, duplicatedKeys, duplicatedValues)
-	testNewIter(t, data, []byte("key1"), []byte("key6"), keys, values, pool)
+	testNewIter(t, data, []byte("key1"), []byte("key6"), keys, values)
 	checkDupDB(t, db, duplicatedKeys, duplicatedValues)
-	testNewIter(t, data, []byte("key1"), []byte("key3"), keys[:2], values[:2], pool)
+	testNewIter(t, data, []byte("key1"), []byte("key3"), keys[:2], values[:2])
 	checkDupDB(t, db, duplicatedKeys[:2], duplicatedValues[:2])
-	testNewIter(t, data, []byte("key2"), []byte("key5"), keys[1:4], values[1:4], pool)
+	testNewIter(t, data, []byte("key2"), []byte("key5"), keys[1:4], values[1:4])
 	checkDupDB(t, db, duplicatedKeys, duplicatedValues)
-	testNewIter(t, data, []byte("key25"), []byte("key35"), keys[2:3], values[2:3], pool)
+	testNewIter(t, data, []byte("key25"), []byte("key35"), keys[2:3], values[2:3])
 	checkDupDB(t, db, nil, nil)
-	testNewIter(t, data, []byte("key25"), []byte("key26"), nil, nil, pool)
+	testNewIter(t, data, []byte("key25"), []byte("key26"), nil, nil)
 	checkDupDB(t, db, nil, nil)
-	testNewIter(t, data, []byte("key0"), []byte("key1"), nil, nil, pool)
+	testNewIter(t, data, []byte("key0"), []byte("key1"), nil, nil)
 	checkDupDB(t, db, nil, nil)
-	testNewIter(t, data, []byte("key6"), []byte("key9"), nil, nil, pool)
+	testNewIter(t, data, []byte("key6"), []byte("key9"), nil, nil)
 	checkDupDB(t, db, nil, nil)
 }
 
@@ -342,10 +341,10 @@ func TestGetAdjustedConcurrency(t *testing.T) {
 	require.Equal(t, 1, e.getAdjustedConcurrency())
 
 	e.checkHotspot = false
-	e.dataFiles = genFiles(10)
-	require.Equal(t, 32, e.getAdjustedConcurrency())
 	e.dataFiles = genFiles(100)
-	require.Equal(t, 10, e.getAdjustedConcurrency())
+	require.Equal(t, 32, e.getAdjustedConcurrency())
+	e.dataFiles = genFiles(1000)
+	require.Equal(t, 8, e.getAdjustedConcurrency())
 	e.dataFiles = genFiles(10000)
 	require.Equal(t, 1, e.getAdjustedConcurrency())
 }

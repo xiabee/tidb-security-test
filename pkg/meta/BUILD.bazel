@@ -19,7 +19,6 @@ go_library(
         "//pkg/util/dbterror",
         "@com_github_pingcap_errors//:errors",
         "@com_github_pingcap_kvproto//pkg/kvrpcpb",
-        "@com_github_pingcap_kvproto//pkg/resource_manager",
     ],
 )
 
@@ -35,7 +34,6 @@ go_test(
     shard_count = 12,
     deps = [
         "//pkg/kv",
-        "//pkg/parser/ast",
         "//pkg/parser/model",
         "//pkg/store/mockstore",
         "//pkg/testkit/testsetup",

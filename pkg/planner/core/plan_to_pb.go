@@ -38,8 +38,9 @@ func (p *PhysicalExpand) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*
 	if len(p.LevelExprs) > 0 {
 		return p.toPBV2(ctx, storeType)
 	}
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	groupingSetsPB, err := p.GroupingSets.ToPB(ctx, client)
+	groupingSetsPB, err := p.GroupingSets.ToPB(sc, client)
 	if err != nil {
 		return nil, err
 	}
@@ -59,10 +60,11 @@ func (p *PhysicalExpand) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*
 }
 
 func (p *PhysicalExpand) toPBV2(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	projExprsPB := make([]*tipb.ExprSlice, 0, len(p.LevelExprs))
 	for _, exprs := range p.LevelExprs {
-		expressionsPB, err := expression.ExpressionsToPBList(ctx, exprs, client)
+		expressionsPB, err := expression.ExpressionsToPBList(sc, exprs, client)
 		if err != nil {
 			return nil, err
 		}
@@ -86,8 +88,9 @@ func (p *PhysicalExpand) toPBV2(ctx sessionctx.Context, storeType kv.StoreType) 
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalHashAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	groupByExprs, err := expression.ExpressionsToPBList(ctx, p.GroupByItems, client)
+	groupByExprs, err := expression.ExpressionsToPBList(sc, p.GroupByItems, client)
 	if err != nil {
 		return nil, err
 	}
@@ -121,8 +124,9 @@ func (p *PhysicalHashAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalStreamAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	groupByExprs, err := expression.ExpressionsToPBList(ctx, p.GroupByItems, client)
+	groupByExprs, err := expression.ExpressionsToPBList(sc, p.GroupByItems, client)
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +154,9 @@ func (p *PhysicalStreamAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType)
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalSelection) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	conditions, err := expression.ExpressionsToPBList(ctx, p.Conditions, client)
+	conditions, err := expression.ExpressionsToPBList(sc, p.Conditions, client)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +177,9 @@ func (p *PhysicalSelection) ToPB(ctx sessionctx.Context, storeType kv.StoreType)
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalProjection) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	exprs, err := expression.ExpressionsToPBList(ctx, p.Exprs, client)
+	exprs, err := expression.ExpressionsToPBList(sc, p.Exprs, client)
 	if err != nil {
 		return nil, err
 	}
@@ -194,15 +200,16 @@ func (p *PhysicalProjection) ToPB(ctx sessionctx.Context, storeType kv.StoreType
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalTopN) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	topNExec := &tipb.TopN{
 		Limit: p.Count,
 	}
 	for _, item := range p.ByItems {
-		topNExec.OrderBy = append(topNExec.OrderBy, expression.SortByItemToPB(ctx, client, item.Expr, item.Desc))
+		topNExec.OrderBy = append(topNExec.OrderBy, expression.SortByItemToPB(sc, client, item.Expr, item.Desc))
 	}
 	for _, item := range p.PartitionBy {
-		topNExec.PartitionBy = append(topNExec.PartitionBy, expression.SortByItemToPB(ctx, client, item.Col.Clone(), item.Desc))
+		topNExec.PartitionBy = append(topNExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	executorID := ""
 	if storeType == kv.TiFlash {
@@ -218,13 +225,14 @@ func (p *PhysicalTopN) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*ti
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalLimit) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	limitExec := &tipb.Limit{
 		Limit: p.Count,
 	}
 	executorID := ""
 	for _, item := range p.PartitionBy {
-		limitExec.PartitionBy = append(limitExec.PartitionBy, expression.SortByItemToPB(ctx, client, item.Col.Clone(), item.Desc))
+		limitExec.PartitionBy = append(limitExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	if storeType == kv.TiFlash {
 		var err error
@@ -249,8 +257,9 @@ func (p *PhysicalTableScan) ToPB(ctx sessionctx.Context, storeType kv.StoreType)
 	tsExec.IsFastScan = &(ctx.GetSessionVars().TiFlashFastScan)
 
 	if len(p.LateMaterializationFilterCondition) > 0 {
+		sc := ctx.GetSessionVars().StmtCtx
 		client := ctx.GetClient()
-		conditions, err := expression.ExpressionsToPBList(ctx, p.LateMaterializationFilterCondition, client)
+		conditions, err := expression.ExpressionsToPBList(sc, p.LateMaterializationFilterCondition, client)
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +267,7 @@ func (p *PhysicalTableScan) ToPB(ctx sessionctx.Context, storeType kv.StoreType)
 	}
 
 	var err error
-	tsExec.RuntimeFilterList, err = RuntimeFilterListToPB(ctx, p.runtimeFilterList, ctx.GetClient())
+	tsExec.RuntimeFilterList, err = RuntimeFilterListToPB(p.runtimeFilterList, ctx.GetSessionVars().StmtCtx, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -288,8 +297,9 @@ func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx sessionctx.Contex
 	}
 
 	if len(p.LateMaterializationFilterCondition) > 0 {
+		sc := ctx.GetSessionVars().StmtCtx
 		client := ctx.GetClient()
-		conditions, err := expression.ExpressionsToPBList(ctx, p.LateMaterializationFilterCondition, client)
+		conditions, err := expression.ExpressionsToPBList(sc, p.LateMaterializationFilterCondition, client)
 		if err != nil {
 			return nil, err
 		}
@@ -298,7 +308,7 @@ func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx sessionctx.Contex
 
 	// set runtime filter
 	var err error
-	ptsExec.RuntimeFilterList, err = RuntimeFilterListToPB(ctx, p.runtimeFilterList, ctx.GetClient())
+	ptsExec.RuntimeFilterList, err = RuntimeFilterListToPB(p.runtimeFilterList, ctx.GetSessionVars().StmtCtx, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -398,7 +408,7 @@ func (e *PhysicalExchangeSender) ToPB(ctx sessionctx.Context, storeType kv.Store
 		}
 		allFieldTypes = append(allFieldTypes, pbType)
 	}
-	hashColPb, err := expression.ExpressionsToPBList(ctx, hashCols, ctx.GetClient())
+	hashColPb, err := expression.ExpressionsToPBList(ctx.GetSessionVars().StmtCtx, hashCols, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -497,6 +507,7 @@ func (p *PhysicalIndexScan) ToPB(_ sessionctx.Context, _ kv.StoreType) (*tipb.Ex
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalHashJoin) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	if len(p.LeftJoinKeys) > 0 && len(p.LeftNAJoinKeys) > 0 {
@@ -531,20 +542,20 @@ func (p *PhysicalHashJoin) ToPB(ctx sessionctx.Context, storeType kv.StoreType) 
 		return nil, errors.Trace(err)
 	}
 
-	left, err := expression.ExpressionsToPBList(ctx, leftKeys, client)
+	left, err := expression.ExpressionsToPBList(sc, leftKeys, client)
 	if err != nil {
 		return nil, err
 	}
-	right, err := expression.ExpressionsToPBList(ctx, rightKeys, client)
+	right, err := expression.ExpressionsToPBList(sc, rightKeys, client)
 	if err != nil {
 		return nil, err
 	}
 
-	leftConditions, err := expression.ExpressionsToPBList(ctx, p.LeftConditions, client)
+	leftConditions, err := expression.ExpressionsToPBList(sc, p.LeftConditions, client)
 	if err != nil {
 		return nil, err
 	}
-	rightConditions, err := expression.ExpressionsToPBList(ctx, p.RightConditions, client)
+	rightConditions, err := expression.ExpressionsToPBList(sc, p.RightConditions, client)
 	if err != nil {
 		return nil, err
 	}
@@ -564,11 +575,11 @@ func (p *PhysicalHashJoin) ToPB(ctx sessionctx.Context, storeType kv.StoreType) 
 	} else {
 		otherConditionsInJoin = p.OtherConditions
 	}
-	otherConditions, err := expression.ExpressionsToPBList(ctx, otherConditionsInJoin, client)
+	otherConditions, err := expression.ExpressionsToPBList(sc, otherConditionsInJoin, client)
 	if err != nil {
 		return nil, err
 	}
-	otherEqConditions, err := expression.ExpressionsToPBList(ctx, otherEqConditionsFromIn, client)
+	otherEqConditions, err := expression.ExpressionsToPBList(sc, otherEqConditionsFromIn, client)
 	if err != nil {
 		return nil, err
 	}
@@ -611,7 +622,7 @@ func (p *PhysicalHashJoin) ToPB(ctx sessionctx.Context, storeType kv.StoreType) 
 	}
 
 	// runtime filter
-	rfListPB, err := RuntimeFilterListToPB(ctx, p.runtimeFilterList, client)
+	rfListPB, err := RuntimeFilterListToPB(p.runtimeFilterList, sc, client)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -652,7 +663,7 @@ func (fb *FrameBound) ToPB(ctx sessionctx.Context) (*tipb.WindowFrameBound, erro
 	pbBound.Offset = &offset
 
 	if fb.IsExplicitRange {
-		rangeFrame, err := expression.ExpressionsToPBList(ctx, fb.CalcFuncs, ctx.GetClient())
+		rangeFrame, err := expression.ExpressionsToPBList(ctx.GetSessionVars().StmtCtx, fb.CalcFuncs, ctx.GetClient())
 		if err != nil {
 			return nil, err
 		}
@@ -666,6 +677,7 @@ func (fb *FrameBound) ToPB(ctx sessionctx.Context) (*tipb.WindowFrameBound, erro
 
 // ToPB implements PhysicalPlan ToPB interface.
 func (p *PhysicalWindow) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	windowExec := &tipb.Window{}
@@ -675,10 +687,10 @@ func (p *PhysicalWindow) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*
 		windowExec.FuncDesc = append(windowExec.FuncDesc, aggregation.WindowFuncToPBExpr(ctx, client, desc))
 	}
 	for _, item := range p.PartitionBy {
-		windowExec.PartitionBy = append(windowExec.PartitionBy, expression.SortByItemToPB(ctx, client, item.Col.Clone(), item.Desc))
+		windowExec.PartitionBy = append(windowExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	for _, item := range p.OrderBy {
-		windowExec.OrderBy = append(windowExec.OrderBy, expression.SortByItemToPB(ctx, client, item.Col.Clone(), item.Desc))
+		windowExec.OrderBy = append(windowExec.OrderBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 
 	if p.Frame != nil {
@@ -722,11 +734,12 @@ func (p *PhysicalSort) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*ti
 		return nil, errors.Errorf("sort %s can't convert to pb, because it isn't a partial sort", p.Plan.ExplainID())
 	}
 
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	sortExec := &tipb.Sort{}
 	for _, item := range p.ByItems {
-		sortExec.ByItems = append(sortExec.ByItems, expression.SortByItemToPB(ctx, client, item.Expr, item.Desc))
+		sortExec.ByItems = append(sortExec.ByItems, expression.SortByItemToPB(sc, client, item.Expr, item.Desc))
 	}
 	isPartialSort := p.IsPartialSort
 	sortExec.IsPartialSort = &isPartialSort

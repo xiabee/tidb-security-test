@@ -59,38 +59,41 @@ func newConcurrentFileReader(
 }
 
 // read loads the file content concurrently into the buffer.
-func (r *concurrentFileReader) read(bufs [][]byte) ([][]byte, error) {
+func (r *concurrentFileReader) read(buf []byte) (int64, error) {
 	if r.offset >= r.fileSize {
-		return nil, io.EOF
+		return 0, io.EOF
 	}
 
-	ret := make([][]byte, 0, r.concurrency)
+	bufSize := len(buf)
+	fileSizeRemain := r.fileSize - r.offset
+	readBatchTotal := r.readBufferSize * r.concurrency
+	bytesRead := min(bufSize, int(fileSizeRemain), readBatchTotal)
 	eg := errgroup.Group{}
 	for i := 0; i < r.concurrency; i++ {
-		if r.offset >= r.fileSize {
-			break
-		}
-		end := r.readBufferSize
-		if r.offset+int64(end) > r.fileSize {
-			end = int(r.fileSize - r.offset)
-		}
-		buf := bufs[i][:end]
-		ret = append(ret, buf)
-		offset := r.offset
-		r.offset += int64(end)
+		i := i
 		eg.Go(func() error {
+			bufStart := i * r.readBufferSize
+			bufEnd := bufStart + r.readBufferSize
+			if bufEnd > bytesRead {
+				bufEnd = bytesRead
+			}
+			if bufStart >= bufEnd {
+				return nil
+			}
+
+			fileStart := r.offset + int64(bufStart)
 			_, err := storage.ReadDataInRange(
 				r.ctx,
 				r.storage,
 				r.name,
-				offset,
-				buf,
+				fileStart,
+				buf[bufStart:bufEnd],
 			)
 			if err != nil {
 				log.FromContext(r.ctx).Error(
 					"concurrent read meet error",
-					zap.Int64("offset", offset),
-					zap.Int("readSize", len(buf)),
+					zap.Int64("fileStart", fileStart),
+					zap.Int("readSize", bufEnd-bufStart),
 					zap.Error(err),
 				)
 				return err
@@ -100,8 +103,9 @@ func (r *concurrentFileReader) read(bufs [][]byte) ([][]byte, error) {
 	}
 	err := eg.Wait()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
-	return ret, nil
+	r.offset += int64(bytesRead)
+	return int64(bytesRead), nil
 }

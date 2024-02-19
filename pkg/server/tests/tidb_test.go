@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,7 +112,7 @@ func createTidbTestSuiteWithCfg(t *testing.T, cfg *config.Config) *tidbTestSuite
 	ts.server.SetDomain(ts.domain)
 	ts.domain.InfoSyncer().SetSessionManager(ts.server)
 	go func() {
-		err := ts.server.Run()
+		err := ts.server.Run(nil)
 		require.NoError(t, err)
 	}()
 	ts.WaitUntilServerOnline()
@@ -280,7 +279,7 @@ func TestStatusAPIWithTLS(t *testing.T) {
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	cli.StatusPort = testutil.GetPortFromTCPAddr(server.StatusListenerAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -338,7 +337,7 @@ func TestStatusAPIWithTLSCNCheck(t *testing.T) {
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	cli.StatusPort = testutil.GetPortFromTCPAddr(server.StatusListenerAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	defer server.Close()
@@ -402,7 +401,7 @@ func TestSocketForwarding(t *testing.T) {
 	server.SetDomain(ts.domain)
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -434,7 +433,7 @@ func TestSocket(t *testing.T) {
 	require.NoError(t, err)
 	server.SetDomain(ts.domain)
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -470,7 +469,7 @@ func TestSocketAndIp(t *testing.T) {
 	server.SetDomain(ts.domain)
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	cli.WaitUntilServerCanConnect()
@@ -634,7 +633,7 @@ func TestOnlySocket(t *testing.T) {
 	require.NoError(t, err)
 	server.SetDomain(ts.domain)
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -1244,7 +1243,7 @@ func TestGracefulShutdown(t *testing.T) {
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	cli.StatusPort = testutil.GetPortFromTCPAddr(server.StatusListenerAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -2521,7 +2520,7 @@ func TestLocalhostClientMapping(t *testing.T) {
 	server.SetDomain(ts.domain)
 	cli.Port = testutil.GetPortFromTCPAddr(server.ListenAddr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	defer server.Close()
@@ -2908,228 +2907,6 @@ func TestChunkReuseCorruptSysVarString(t *testing.T) {
 	require.Equal(t, "Asia/Shanghai", rows[0])
 }
 
-func TestTiDBIdleTransactionTimeout(t *testing.T) {
-	ts := createTidbTestTopSQLSuite(t)
-	cases := []func(dbt *testkit.DBTestKit){}
-	// Test simple txn.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t1 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		tx, err := dbt.GetDB().Begin()
-		require.NoError(t, err)
-		rows, err := tx.Query("select * from t1;")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "")
-		time.Sleep(1500 * time.Millisecond)
-		_, err = tx.Query("select * from t1;")
-		require.Error(t, err)
-		require.Equal(t, "invalid connection", err.Error())
-	})
-	// Test raw conn.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		ctx := context.Background()
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t2 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		conn, err := dbt.GetDB().Conn(ctx)
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "begin")
-		require.NoError(t, err)
-		rows, err := conn.QueryContext(ctx, "select * from t2;")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "")
-		time.Sleep(1500 * time.Millisecond)
-		_, err = conn.QueryContext(ctx, "select * from t2;")
-		require.Error(t, err)
-		require.Equal(t, "invalid connection", err.Error())
-	})
-	// Test txn write.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t3 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		tx, err := dbt.GetDB().Begin()
-		require.NoError(t, err)
-		_, err = tx.Exec("insert into t3 values (1)")
-		require.NoError(t, err)
-		time.Sleep(1500 * time.Millisecond)
-		_, err = tx.Exec("commit")
-		require.Error(t, err)
-		require.Equal(t, "invalid connection", err.Error())
-		rows := dbt.MustQuery("select * from t3;")
-		ts.CheckRows(t, rows, "")
-	})
-	// Test autocommit=0.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t4 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		ctx := context.Background()
-		conn, err := dbt.GetDB().Conn(ctx)
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "set @@autocommit=0")
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "insert into t4 values (1)")
-		require.NoError(t, err)
-		time.Sleep(1500 * time.Millisecond)
-		_, err = conn.ExecContext(ctx, "commit")
-		require.Error(t, err)
-		require.Equal(t, "invalid connection", err.Error())
-		rows := dbt.MustQuery("select * from t4;")
-		ts.CheckRows(t, rows, "")
-	})
-	// Test autocommit=1.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t5 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		ctx := context.Background()
-		conn, err := dbt.GetDB().Conn(ctx)
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "set @@autocommit=1")
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "insert into t5 values (1)")
-		require.NoError(t, err)
-		time.Sleep(1500 * time.Millisecond)
-		_, err = conn.ExecContext(ctx, "insert into t5 values (2)")
-		require.NoError(t, err)
-		rows := dbt.MustQuery("select * from t5;")
-		ts.CheckRows(t, rows, "1\n2")
-	})
-	// Test sleep stmt in txn.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t6 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		tx, err := dbt.GetDB().Begin()
-		require.NoError(t, err)
-		_, err = tx.Exec("insert into t6 values (1)")
-		require.NoError(t, err)
-		rows, err := tx.Query("select sleep(1.5)")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "0")
-		_, err = tx.Exec("commit")
-		require.NoError(t, err)
-		rows = dbt.MustQuery("select * from t6;")
-		ts.CheckRows(t, rows, "1")
-	})
-	// Test sleep stmt in raw conn.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t7 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		ctx := context.Background()
-		conn, err := dbt.GetDB().Conn(ctx)
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "begin")
-		require.NoError(t, err)
-		_, err = conn.ExecContext(ctx, "insert into t7 values (1)")
-		require.NoError(t, err)
-		rows, err := conn.QueryContext(ctx, "select sleep(1.5)")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "0")
-		_, err = conn.ExecContext(ctx, "commit")
-		require.NoError(t, err)
-		rows = dbt.MustQuery("select * from t7;")
-		ts.CheckRows(t, rows, "1")
-	})
-	// Test many sleep stmts in txn.
-	cases = append(cases, func(dbt *testkit.DBTestKit) {
-		dbt.MustExec("use test;")
-		dbt.MustExec("create table t8 (id int key);")
-		dbt.MustExec("set @@tidb_idle_transaction_timeout = 1")
-		tx, err := dbt.GetDB().Begin()
-		require.NoError(t, err)
-		_, err = tx.Exec("insert into t8 values (1)")
-		require.NoError(t, err)
-		rows, err := tx.Query("select sleep(0.5)")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "0")
-		_, err = tx.Exec("insert into t8 values (2)")
-		require.NoError(t, err)
-		rows, err = tx.Query("select sleep(0.5)")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "0")
-		_, err = tx.Exec("insert into t8 values (3)")
-		require.NoError(t, err)
-		rows, err = tx.Query("select sleep(0.5)")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "0")
-		_, err = tx.Exec("commit")
-		require.NoError(t, err)
-		rows = dbt.MustQuery("select * from t8;")
-		ts.CheckRows(t, rows, "1\n2\n3")
-	})
-
-	var wg sync.WaitGroup
-	for _, ca := range cases {
-		wg.Add(1)
-		go func(fn func(dbt *testkit.DBTestKit)) {
-			defer wg.Done()
-			ts.RunTests(t, nil, fn)
-		}(ca)
-	}
-	// Test release lock.
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		db1, err := sql.Open("mysql", ts.GetDSN(nil))
-		require.NoError(t, err)
-		db2, err := sql.Open("mysql", ts.GetDSN(nil))
-		require.NoError(t, err)
-		defer func() {
-			err := db1.Close()
-			require.NoError(t, err)
-			err = db2.Close()
-			require.NoError(t, err)
-		}()
-		ctx := context.Background()
-		conn1, err := db1.Conn(ctx)
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "create table t (id int key);")
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "set @@tidb_idle_transaction_timeout = 1")
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "insert into t values (1)")
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "begin")
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "select * from t for update")
-		require.NoError(t, err)
-		_, err = conn1.ExecContext(ctx, "insert into t values (2)")
-		require.NoError(t, err)
-		go func() {
-			defer wg.Done()
-			conn2, err := db2.Conn(ctx)
-			require.NoError(t, err)
-			_, err = conn2.ExecContext(ctx, "set @@tidb_idle_transaction_timeout = 1")
-			require.NoError(t, err)
-			_, err = conn2.ExecContext(ctx, "begin")
-			require.NoError(t, err)
-			_, err = conn2.ExecContext(ctx, "select * from t for update")
-			require.NoError(t, err)
-			_, err = conn2.ExecContext(ctx, "insert into t values (3)")
-			require.NoError(t, err)
-			_, err = conn2.ExecContext(ctx, "commit")
-			require.NoError(t, err)
-			rows, err := db2.QueryContext(ctx, "select * from t")
-			require.NoError(t, err)
-			ts.CheckRows(t, rows, "1\n3")
-		}()
-		time.Sleep(1500 * time.Millisecond)
-		_, err = conn1.ExecContext(ctx, "commit")
-		require.Error(t, err)
-		require.Equal(t, "invalid connection", err.Error())
-		rows, err := db1.QueryContext(ctx, "select * from t where id=2")
-		require.NoError(t, err)
-		ts.CheckRows(t, rows, "")
-	}()
-
-	// wait all test case finished.
-	wg.Wait()
-}
-
 type mockProxyProtocolProxy struct {
 	frontend      string
 	backend       string
@@ -3262,7 +3039,7 @@ func TestProxyProtocolWithIpFallbackable(t *testing.T) {
 	require.NoError(t, err)
 	server.SetDomain(ts.domain)
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 100)
@@ -3327,7 +3104,7 @@ func TestProxyProtocolWithIpNoFallbackable(t *testing.T) {
 	require.NoError(t, err)
 	server.SetDomain(ts.domain)
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
 	time.Sleep(time.Millisecond * 1000)
@@ -3349,194 +3126,4 @@ func TestProxyProtocolWithIpNoFallbackable(t *testing.T) {
 	err = db.Ping()
 	require.NotNil(t, err)
 	db.Close()
-}
-
-func TestConnectionWillNotLeak(t *testing.T) {
-	cfg := util2.NewTestConfig()
-	cfg.Port = 0
-	cfg.Status.ReportStatus = false
-	// Setup proxy protocol config
-	cfg.ProxyProtocol.Networks = "*"
-	cfg.ProxyProtocol.Fallbackable = false
-
-	ts := createTidbTestSuite(t)
-
-	cli := testserverclient.NewTestServerClient()
-	cli.Port = testutil.GetPortFromTCPAddr(ts.server.ListenAddr())
-	dsn := cli.GetDSN(func(config *mysql.Config) {
-		config.User = "root"
-		config.DBName = "test"
-	})
-	db, err := sql.Open("mysql", dsn)
-	require.Nil(t, err)
-	db.SetMaxOpenConns(100)
-	db.SetMaxIdleConns(0)
-
-	// create 100 connections
-	conns := make([]*sql.Conn, 0, 100)
-	for len(conns) < 100 {
-		conn, err := db.Conn(context.Background())
-		require.NoError(t, err)
-		conns = append(conns, conn)
-	}
-	require.Eventually(t, func() bool {
-		runtime.GC()
-		return server2.ConnectionInMemCounterForTest.Load() == int64(100)
-	}, time.Minute, time.Millisecond*100)
-
-	// run a simple query on each connection and close it
-	// this cannot ensure the connection will not leak for any kinds of requests
-	var wg sync.WaitGroup
-	for _, conn := range conns {
-		wg.Add(1)
-		conn := conn
-		go func() {
-			rows, err := conn.QueryContext(context.Background(), "SELECT 2023")
-			require.NoError(t, err)
-			var result int
-			require.True(t, rows.Next())
-			require.NoError(t, rows.Scan(&result))
-			require.Equal(t, result, 2023)
-			require.NoError(t, rows.Close())
-			// `db.Close` will not close already grabbed connection, so it's still needed to close the connection here.
-			require.NoError(t, conn.Close())
-			wg.Done()
-		}()
-	}
-	wg.Wait()
-
-	require.NoError(t, db.Close())
-	require.Eventually(t, func() bool {
-		runtime.GC()
-		count := server2.ConnectionInMemCounterForTest.Load()
-		return count == 0
-	}, time.Minute, time.Millisecond*100)
-}
-
-func TestCursorFetchErrorInFetch(t *testing.T) {
-	tmpStoragePath := t.TempDir()
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.TempStoragePath = tmpStoragePath
-	})
-
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	srv := server2.CreateMockServer(t, store)
-	srv.SetDomain(dom)
-	defer srv.Close()
-
-	appendUint32 := binary.LittleEndian.AppendUint32
-	ctx := context.Background()
-	c := server2.CreateMockConn(t, srv)
-
-	tk := testkit.NewTestKitWithSession(t, store, c.Context().Session)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(id int, payload BLOB)")
-	payload := make([]byte, 512)
-	for i := 0; i < 2048; i++ {
-		rand.Read(payload)
-		tk.MustExec("insert into t values (?, ?)", i, payload)
-	}
-
-	tk.MustExec("set global tidb_enable_tmp_storage_on_oom = ON")
-	tk.MustExec("set global tidb_mem_oom_action = 'CANCEL'")
-	defer tk.MustExec("set global tidb_mem_oom_action= DEFAULT")
-	require.Len(t, tk.Session().GetSessionVars().MemTracker.GetChildrenForTest(), 1)
-
-	// execute a normal statement, it'll spill to disk
-	stmt, _, _, err := c.Context().Prepare("select * from t")
-	require.NoError(t, err)
-
-	tk.MustExec(fmt.Sprintf("set tidb_mem_quota_query=%d", 1))
-
-	require.NoError(t, c.Dispatch(ctx, append(
-		appendUint32([]byte{tmysql.ComStmtExecute}, uint32(stmt.ID())),
-		tmysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
-	)))
-
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/util/chunk/get-chunk-error", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/util/chunk/get-chunk-error"))
-	}()
-	require.ErrorContains(t, c.Dispatch(ctx, appendUint32(appendUint32([]byte{tmysql.ComStmtFetch}, uint32(stmt.ID())), 1024)), "fail to get chunk for test")
-	// after getting a failed FETCH, the cursor should have been reseted
-	require.False(t, stmt.GetCursorActive())
-	require.Len(t, tk.Session().GetSessionVars().MemTracker.GetChildrenForTest(), 0)
-	require.Len(t, tk.Session().GetSessionVars().DiskTracker.GetChildrenForTest(), 0)
-}
-
-func TestCursorFetchShouldSpill(t *testing.T) {
-	restore := config.RestoreFunc()
-	defer restore()
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.TempStoragePath = t.TempDir()
-	})
-
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	srv := server2.CreateMockServer(t, store)
-	srv.SetDomain(dom)
-	defer srv.Close()
-
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/server/testCursorFetchSpill", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/server/testCursorFetchSpill"))
-	}()
-
-	appendUint32 := binary.LittleEndian.AppendUint32
-	ctx := context.Background()
-	c := server2.CreateMockConn(t, srv)
-
-	tk := testkit.NewTestKitWithSession(t, store, c.Context().Session)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(id_1 int, id_2 int)")
-	tk.MustExec("insert into t values (1, 1), (1, 2)")
-	tk.MustExec("set global tidb_enable_tmp_storage_on_oom = ON")
-	tk.MustExec("set global tidb_mem_oom_action = 'CANCEL'")
-	defer tk.MustExec("set global tidb_mem_oom_action= DEFAULT")
-	require.Len(t, tk.Session().GetSessionVars().MemTracker.GetChildrenForTest(), 1)
-
-	// execute a normal statement, it'll spill to disk
-	stmt, _, _, err := c.Context().Prepare("select * from t")
-	require.NoError(t, err)
-
-	tk.MustExec(fmt.Sprintf("set tidb_mem_quota_query=%d", 1))
-
-	require.NoError(t, c.Dispatch(ctx, append(
-		appendUint32([]byte{tmysql.ComStmtExecute}, uint32(stmt.ID())),
-		tmysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
-	)))
-}
-
-func TestCursorFetchExecuteCheck(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	srv := server2.CreateMockServer(t, store)
-	srv.SetDomain(dom)
-	defer srv.Close()
-
-	appendUint32 := binary.LittleEndian.AppendUint32
-	ctx := context.Background()
-	c := server2.CreateMockConn(t, srv)
-
-	stmt, _, _, err := c.Context().Prepare("select 1")
-	require.NoError(t, err)
-
-	// execute with wrong ID
-	require.Error(t, c.Dispatch(ctx, append(
-		appendUint32([]byte{tmysql.ComStmtExecute}, uint32(stmt.ID()+1)),
-		tmysql.CursorTypeReadOnly, 0x1, 0x0, 0x0, 0x0,
-	)))
-
-	// execute with wrong flag
-	require.Error(t, c.Dispatch(ctx, append(
-		appendUint32([]byte{tmysql.ComStmtExecute}, uint32(stmt.ID())),
-		tmysql.CursorTypeReadOnly|tmysql.CursorTypeForUpdate, 0x1, 0x0, 0x0, 0x0,
-	)))
-
-	require.Error(t, c.Dispatch(ctx, append(
-		appendUint32([]byte{tmysql.ComStmtExecute}, uint32(stmt.ID())),
-		tmysql.CursorTypeReadOnly|tmysql.CursorTypeScrollable, 0x1, 0x0, 0x0, 0x0,
-	)))
 }

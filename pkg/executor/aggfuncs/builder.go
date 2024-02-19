@@ -92,9 +92,9 @@ func BuildWindowFunctions(ctx sessionctx.Context, windowFuncDesc *aggregation.Ag
 	case ast.WindowFuncCumeDist:
 		return buildCumeDist(ordinal, orderByCols)
 	case ast.WindowFuncNthValue:
-		return buildNthValue(ctx, windowFuncDesc, ordinal)
+		return buildNthValue(windowFuncDesc, ordinal)
 	case ast.WindowFuncNtile:
-		return buildNtile(ctx, windowFuncDesc, ordinal)
+		return buildNtile(windowFuncDesc, ordinal)
 	case ast.WindowFuncPercentRank:
 		return buildPercentRank(ordinal, orderByCols)
 	case ast.WindowFuncLead:
@@ -469,7 +469,7 @@ func buildGroupConcat(ctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDe
 	default:
 		// The last arg is promised to be a not-null string constant, so the error can be ignored.
 		c, _ := aggFuncDesc.Args[len(aggFuncDesc.Args)-1].(*expression.Constant)
-		sep, _, err := c.EvalString(ctx, chunk.Row{})
+		sep, _, err := c.EvalString(nil, chunk.Row{})
 		// This err should never happen.
 		if err != nil {
 			panic(fmt.Sprintf("Error happened when buildGroupConcat: %s", err.Error()))
@@ -680,22 +680,22 @@ func buildCumeDist(ordinal int, orderByCols []*expression.Column) AggFunc {
 	return r
 }
 
-func buildNthValue(ctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDesc, ordinal int) AggFunc {
+func buildNthValue(aggFuncDesc *aggregation.AggFuncDesc, ordinal int) AggFunc {
 	base := baseAggFunc{
 		args:    aggFuncDesc.Args,
 		ordinal: ordinal,
 	}
 	// Already checked when building the function description.
-	nth, _, _ := expression.GetUint64FromConstant(ctx, aggFuncDesc.Args[1])
+	nth, _, _ := expression.GetUint64FromConstant(aggFuncDesc.Args[1])
 	return &nthValue{baseAggFunc: base, tp: aggFuncDesc.RetTp, nth: nth}
 }
 
-func buildNtile(ctx sessionctx.Context, aggFuncDes *aggregation.AggFuncDesc, ordinal int) AggFunc {
+func buildNtile(aggFuncDes *aggregation.AggFuncDesc, ordinal int) AggFunc {
 	base := baseAggFunc{
 		args:    aggFuncDes.Args,
 		ordinal: ordinal,
 	}
-	n, _, _ := expression.GetUint64FromConstant(ctx, aggFuncDes.Args[0])
+	n, _, _ := expression.GetUint64FromConstant(aggFuncDes.Args[0])
 	return &ntile{baseAggFunc: base, n: n}
 }
 
@@ -709,14 +709,14 @@ func buildPercentRank(ordinal int, orderByCols []*expression.Column) AggFunc {
 func buildLeadLag(ctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDesc, ordinal int) baseLeadLag {
 	offset := uint64(1)
 	if len(aggFuncDesc.Args) >= 2 {
-		offset, _, _ = expression.GetUint64FromConstant(ctx, aggFuncDesc.Args[1])
+		offset, _, _ = expression.GetUint64FromConstant(aggFuncDesc.Args[1])
 	}
 	var defaultExpr expression.Expression
 	defaultExpr = expression.NewNull()
 	if len(aggFuncDesc.Args) == 3 {
 		defaultExpr = aggFuncDesc.Args[2]
 		if et, ok := defaultExpr.(*expression.Constant); ok {
-			res, err1 := et.Value.ConvertTo(ctx.GetSessionVars().StmtCtx.TypeCtx(), aggFuncDesc.RetTp)
+			res, err1 := et.Value.ConvertTo(ctx.GetSessionVars().StmtCtx, aggFuncDesc.RetTp)
 			if err1 == nil {
 				defaultExpr = &expression.Constant{Value: res, RetType: aggFuncDesc.RetTp}
 			}

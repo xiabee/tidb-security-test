@@ -28,9 +28,6 @@ import (
 
 func TestCheckRequirementsTiFlash(t *testing.T) {
 	db, mock, err := sqlmock.New()
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
 	require.NoError(t, err)
 	ctx := context.Background()
 
@@ -72,7 +69,6 @@ func TestCheckRequirementsTiFlash(t *testing.T) {
 		AddRow("db", "tbl").
 		AddRow("test", "t1").
 		AddRow("test1", "tbl"))
-	mock.ExpectClose()
 
 	err = local.CheckTiFlashVersionForTest(ctx, db, checkCtx, *semver.New("4.0.2"))
 	require.Regexp(t, "^lightning local backend doesn't support TiFlash in this TiDB version. conflict tables: \\[`test`.`t1`, `test1`.`tbl`\\]", err.Error())

@@ -37,7 +37,6 @@ import (
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.uber.org/atomic"
 )
 
@@ -53,7 +52,7 @@ const UnCommitIndexKVFlag byte = '1'
 // Those limits is enforced to make sure the transaction can be well handled by TiKV.
 var (
 	// TxnEntrySizeLimit is limit of single entry size (len(key) + len(value)).
-	TxnEntrySizeLimit = atomic.NewUint64(config.DefTxnEntrySizeLimit)
+	TxnEntrySizeLimit uint64 = config.DefTxnEntrySizeLimit
 	// TxnTotalSizeLimit is limit of the sum of all entry size.
 	TxnTotalSizeLimit = atomic.NewUint64(config.DefTxnTotalSizeLimit)
 )
@@ -592,8 +591,6 @@ type Request struct {
 
 	// ConnID stores the session connection id.
 	ConnID uint64
-	// ConnAlias stores the session connection alias.
-	ConnAlias string
 }
 
 // CoprRequestAdjuster is used to check and adjust a copr request according to specific rules.
@@ -716,7 +713,6 @@ type EtcdBackend interface {
 // StorageWithPD is used to get pd client.
 type StorageWithPD interface {
 	GetPDClient() pd.Client
-	GetPDHTTPClient() pdhttp.Client
 }
 
 // FnKeyCmp is the function for iterator the keys

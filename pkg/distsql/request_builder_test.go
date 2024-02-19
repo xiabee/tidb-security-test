@@ -579,7 +579,7 @@ func TestRequestBuilder7(t *testing.T) {
 
 func TestRequestBuilder8(t *testing.T) {
 	sv := variable.NewSessionVars(nil)
-	sv.StmtCtx.ResourceGroupName = "test"
+	sv.ResourceGroupName = "test"
 	actual, err := (&RequestBuilder{}).
 		SetFromSessionVars(sv).
 		Build()

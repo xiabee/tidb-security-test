@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,10 +45,8 @@ import (
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
@@ -187,7 +186,7 @@ func TestTiFlashNoRedundantPDRules(t *testing.T) {
 	s, teardown := createTiFlashContext(t)
 	defer teardown()
 
-	rpcClient, pdClient, cluster, err := unistore.New("", nil)
+	rpcClient, pdClient, cluster, err := unistore.New("")
 	require.NoError(t, err)
 	defer func() {
 		rpcClient.Close()
@@ -472,8 +471,8 @@ func TestTiFlashFlashbackCluster(t *testing.T) {
 	}()
 
 	errorMsg := fmt.Sprintf("[ddl:-1]Detected unsupported DDL job type(%s) during [%s, now), can't do flashback",
-		model.ActionSetTiFlashReplica.String(), oracle.GetTimeFromTS(ts).Format(types.TimeFSPFormat))
-	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(ts).Format(types.TimeFSPFormat)), errorMsg)
+		model.ActionSetTiFlashReplica.String(), oracle.GetTimeFromTS(ts).String())
+	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(ts)), errorMsg)
 
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockFlashbackTest"))
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/injectSafeTS"))
@@ -583,7 +582,7 @@ func TestSetPlacementRuleWithGCWorker(t *testing.T) {
 	s, teardown := createTiFlashContext(t)
 	defer teardown()
 
-	rpcClient, pdClient, cluster, err := unistore.New("", nil)
+	rpcClient, pdClient, cluster, err := unistore.New("")
 	defer func() {
 		rpcClient.Close()
 		pdClient.Close()
@@ -921,7 +920,7 @@ func TestTiFlashBatchKill(t *testing.T) {
 	wg.Run(func() {
 		time.Sleep(time.Millisecond * 100)
 		sessVars := tk.Session().GetSessionVars()
-		sessVars.SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
+		atomic.StoreUint32(&sessVars.Killed, 1)
 	})
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/FastFailCheckTiFlashPendingTables", `return(2)`))

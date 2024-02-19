@@ -58,9 +58,8 @@ var (
 )
 
 const (
-	waitToStartup    = 500 * time.Millisecond
-	msgErrConnectPD  = "connect PD err: %v. Establish a cluster with PD & TiKV, and provide PD client path by `--pd=<ip:port>[,<ip:port>]"
-	timeoutConnectDB = 20 * time.Second
+	waitToStartup   = 500 * time.Millisecond
+	msgErrConnectPD = "connect PD err: %v. Establish a cluster with PD & TiKV, and provide PD client path by `--pd=<ip:port>[,<ip:port>]"
 )
 
 // GlobalKillSuite is used for automated test of "Global Kill" feature.
@@ -171,7 +170,8 @@ func (s *GlobalKillSuite) startTiKV(dataDir string) (err error) {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	return errors.Trace(checkTiKVStatus())
+	time.Sleep(500 * time.Millisecond)
+	return nil
 }
 
 func (s *GlobalKillSuite) startPD(dataDir string) (err error) {
@@ -185,7 +185,8 @@ func (s *GlobalKillSuite) startPD(dataDir string) (err error) {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	return errors.Trace(checkPDHealth(*pdClientPath))
+	time.Sleep(500 * time.Millisecond)
+	return nil
 }
 
 func (s *GlobalKillSuite) startCluster() (err error) {
@@ -198,6 +199,7 @@ func (s *GlobalKillSuite) startCluster() (err error) {
 	if err != nil {
 		return errors.Trace(err)
 	}
+	time.Sleep(10 * time.Second)
 	return nil
 }
 
@@ -264,7 +266,8 @@ func (s *GlobalKillSuite) startTiDBWithoutPD(port int, statusPort int) (cmd *exe
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return cmd, errors.Trace(checkTiDBStatus(statusPort))
+	time.Sleep(500 * time.Millisecond)
+	return cmd, nil
 }
 
 func (s *GlobalKillSuite) startTiDBWithPD(port int, statusPort int, pdPath string) (cmd *exec.Cmd, err error) {
@@ -282,7 +285,8 @@ func (s *GlobalKillSuite) startTiDBWithPD(port int, statusPort int, pdPath strin
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return cmd, errors.Trace(checkTiDBStatus(statusPort))
+	time.Sleep(500 * time.Millisecond)
+	return cmd, nil
 }
 
 func (s *GlobalKillSuite) mustStartTiDBWithPD(t *testing.T, port int, statusPort int, pdPath string) *exec.Cmd {
@@ -331,8 +335,9 @@ func (s *GlobalKillSuite) connectTiDB(port int) (db *sql.DB, err error) {
 	dsn := fmt.Sprintf("root@(%s)/test", addr)
 	sleepTime := 250 * time.Millisecond
 	sleepTimeLimit := 1 * time.Second
+	maxRetryDuration := 20 * time.Second
 	startTime := time.Now()
-	for i := 0; time.Since(startTime) < timeoutConnectDB; i++ {
+	for i := 0; time.Since(startTime) < maxRetryDuration; i++ {
 		db, err = sql.Open("mysql", dsn)
 		if err != nil {
 			log.Warn("open addr failed",

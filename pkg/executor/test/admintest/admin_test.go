@@ -30,7 +30,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
@@ -44,6 +44,53 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+func TestAdminCheckIndexRange(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec(`drop table if exists check_index_test;`)
+	tk.MustExec(`create table check_index_test (a int, b varchar(10), index a_b (a, b), index b (b))`)
+	tk.MustExec(`insert check_index_test values (3, "ab"),(2, "cd"),(1, "ef"),(-1, "hi")`)
+	result := tk.MustQuery("admin check index check_index_test a_b (2, 4);")
+	result.Check(testkit.Rows("1 ef 3", "2 cd 2"))
+
+	result = tk.MustQuery("admin check index check_index_test a_b (3, 5);")
+	result.Check(testkit.Rows("-1 hi 4", "1 ef 3"))
+
+	tk.MustExec("use mysql")
+	result = tk.MustQuery("admin check index test.check_index_test a_b (2, 3), (4, 5);")
+	result.Check(testkit.Rows("-1 hi 4", "2 cd 2"))
+}
+
+func TestAdminCheckIndex(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	check := func() {
+		tk.MustExec("insert admin_test (c1, c2) values (1, 1), (2, 2), (5, 5), (10, 10), (11, 11), (NULL, NULL)")
+		tk.MustExec("admin check index admin_test c1")
+		tk.MustExec("admin check index admin_test c2")
+	}
+	tk.MustExec("drop table if exists admin_test")
+	tk.MustExec("create table admin_test (c1 int, c2 int, c3 int default 1, index (c1), unique key(c2))")
+	check()
+
+	// Test for hash partition table.
+	tk.MustExec("drop table if exists admin_test")
+	tk.MustExec("create table admin_test (c1 int, c2 int, c3 int default 1, index (c1), unique key(c2)) partition by hash(c2) partitions 5;")
+	check()
+
+	// Test for range partition table.
+	tk.MustExec("drop table if exists admin_test")
+	tk.MustExec(`create table admin_test (c1 int, c2 int, c3 int default 1, index (c1), unique key(c2)) PARTITION BY RANGE ( c2 ) (
+		PARTITION p0 VALUES LESS THAN (5),
+		PARTITION p1 VALUES LESS THAN (10),
+		PARTITION p2 VALUES LESS THAN (MAXVALUE))`)
+	check()
+}
 
 func TestAdminRecoverIndex(t *testing.T) {
 	store, domain := testkit.CreateMockStoreAndDomain(t)
@@ -87,9 +134,10 @@ func TestAdminRecoverIndex(t *testing.T) {
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.FindIndexByName("c2")
 	indexOpr := tables.NewIndex(tblInfo.ID, tblInfo, idxInfo)
+	sc := ctx.GetSessionVars().StmtCtx
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(1), kv.IntHandle(1))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(1), kv.IntHandle(1))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -112,7 +160,7 @@ func TestAdminRecoverIndex(t *testing.T) {
 
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(10), kv.IntHandle(10))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(10), kv.IntHandle(10))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -126,15 +174,15 @@ func TestAdminRecoverIndex(t *testing.T) {
 
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(1), kv.IntHandle(1))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(1), kv.IntHandle(1))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(2), kv.IntHandle(2))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(2), kv.IntHandle(2))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(3), kv.IntHandle(3))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(3), kv.IntHandle(3))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(10), kv.IntHandle(10))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(10), kv.IntHandle(10))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(20), kv.IntHandle(20))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(20), kv.IntHandle(20))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -176,9 +224,10 @@ func TestAdminRecoverIndex(t *testing.T) {
 	tblInfo = tbl.Meta()
 	idxInfo = tblInfo.FindIndexByName("i1")
 	indexOpr = tables.NewIndex(tblInfo.ID, tblInfo, idxInfo)
+	sc = ctx.GetSessionVars().StmtCtx
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(2), kv.IntHandle(1))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(2), kv.IntHandle(1))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -228,7 +277,7 @@ func TestAdminRecoverMVIndex(t *testing.T) {
 
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(2), kv.IntHandle(1))
+	err = indexOpr.Delete(ctx.GetSessionVars().StmtCtx, txn, types.MakeDatums(2), kv.IntHandle(1))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -296,7 +345,7 @@ func TestClusteredIndexAdminRecoverIndex(t *testing.T) {
 	tblName := model.NewCIStr("t")
 
 	// Test no corruption case.
-	tk.MustExec("create table t (a varchar(255), b int, c char(10), primary key(a, c), index idx(b), index idx1(c));")
+	tk.MustExec("create table t (a varchar(255), b int, c char(10), primary key(a, c), index idx(b));")
 	tk.MustExec("insert into t values ('1', 2, '3'), ('1', 2, '4'), ('1', 2, '5');")
 	tk.MustQuery("admin recover index t `primary`;").Check(testkit.Rows("0 0"))
 	tk.MustQuery("admin recover index t `idx`;").Check(testkit.Rows("0 3"))
@@ -310,13 +359,13 @@ func TestClusteredIndexAdminRecoverIndex(t *testing.T) {
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.FindIndexByName("idx")
 	indexOpr := tables.NewIndex(tblInfo.ID, tblInfo, idxInfo)
+	sc := ctx.GetSessionVars().StmtCtx
 
 	// Some index entries are missed.
-	// Recover an index don't covered by clustered index.
 	txn, err := store.Begin()
 	require.NoError(t, err)
 	cHandle := testutil.MustNewCommonHandle(t, "1", "3")
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(2), cHandle)
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(2), cHandle)
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -326,23 +375,6 @@ func TestClusteredIndexAdminRecoverIndex(t *testing.T) {
 	tk.MustQuery("SELECT COUNT(*) FROM t USE INDEX(idx)").Check(testkit.Rows("2"))
 	tk.MustQuery("admin recover index t idx").Check(testkit.Rows("1 3"))
 	tk.MustQuery("SELECT COUNT(*) FROM t USE INDEX(idx)").Check(testkit.Rows("3"))
-	tk.MustExec("admin check table t;")
-
-	// Recover an index covered by clustered index.
-	idx1Info := tblInfo.FindIndexByName("idx1")
-	indexOpr1 := tables.NewIndex(tblInfo.ID, tblInfo, idx1Info)
-	txn, err = store.Begin()
-	require.NoError(t, err)
-	err = indexOpr1.Delete(ctx, txn, types.MakeDatums("3"), cHandle)
-	require.NoError(t, err)
-	err = txn.Commit(context.Background())
-	require.NoError(t, err)
-	tk.MustGetErrCode("admin check table t", mysql.ErrDataInconsistent)
-	tk.MustGetErrCode("admin check index t idx1", mysql.ErrDataInconsistent)
-
-	tk.MustQuery("SELECT COUNT(*) FROM t USE INDEX(idx1)").Check(testkit.Rows("2"))
-	tk.MustQuery("admin recover index t idx1").Check(testkit.Rows("1 3"))
-	tk.MustQuery("SELECT COUNT(*) FROM t USE INDEX(idx1)").Check(testkit.Rows("3"))
 	tk.MustExec("admin check table t;")
 }
 
@@ -366,9 +398,10 @@ func TestAdminRecoverPartitionTableIndex(t *testing.T) {
 		idxInfo := tbl.Meta().FindIndexByName("c2")
 		indexOpr := tables.NewIndex(pid, tbl.Meta(), idxInfo)
 		ctx := mock.NewContext()
+		sc := ctx.GetSessionVars().StmtCtx
 		txn, err := store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(idxValue), kv.IntHandle(idxValue))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(idxValue), kv.IntHandle(idxValue))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -425,6 +458,7 @@ func TestAdminRecoverIndex1(t *testing.T) {
 	ctx.Store = store
 	dbName := model.NewCIStr("test")
 	tblName := model.NewCIStr("admin_test")
+	sc := ctx.GetSessionVars().StmtCtx
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists admin_test")
 	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeIntOnly
@@ -445,13 +479,13 @@ func TestAdminRecoverIndex1(t *testing.T) {
 
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums("1"), kv.IntHandle(1))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums("1"), kv.IntHandle(1))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums("2"), kv.IntHandle(2))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums("2"), kv.IntHandle(2))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums("3"), kv.IntHandle(3))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums("3"), kv.IntHandle(3))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums("10"), kv.IntHandle(4))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums("10"), kv.IntHandle(4))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -851,6 +885,7 @@ func TestAdminCheckTableWithMultiValuedIndex(t *testing.T) {
 	require.NoError(t, err)
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.Indices[0]
+	sc := ctx.GetSessionVars().StmtCtx
 	tk.Session().GetSessionVars().IndexLookupSize = 3
 	tk.Session().GetSessionVars().MaxChunkSize = 3
 
@@ -859,7 +894,7 @@ func TestAdminCheckTableWithMultiValuedIndex(t *testing.T) {
 	indexOpr := tables.NewIndex(tblInfo.ID, tblInfo, cpIdx)
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(0), kv.IntHandle(0))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(0), kv.IntHandle(0))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -905,6 +940,7 @@ func TestAdminCheckPartitionTableFailed(t *testing.T) {
 	require.NoError(t, err)
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.Indices[0]
+	sc := ctx.GetSessionVars().StmtCtx
 	tk.Session().GetSessionVars().IndexLookupSize = 3
 	tk.Session().GetSessionVars().MaxChunkSize = 3
 
@@ -915,7 +951,7 @@ func TestAdminCheckPartitionTableFailed(t *testing.T) {
 		indexOpr := tables.NewIndex(tblInfo.GetPartitionInfo().Definitions[partitionIdx].ID, tblInfo, idxInfo)
 		txn, err := store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(i), kv.IntHandle(i))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(i), kv.IntHandle(i))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -954,7 +990,7 @@ func TestAdminCheckPartitionTableFailed(t *testing.T) {
 		// TODO: fix admin recover for partition table.
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(i+8), kv.IntHandle(i+8))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(i+8), kv.IntHandle(i+8))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -977,7 +1013,7 @@ func TestAdminCheckPartitionTableFailed(t *testing.T) {
 		// TODO: fix admin recover for partition table.
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(i+8), kv.IntHandle(i))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(i+8), kv.IntHandle(i))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -992,7 +1028,7 @@ type inconsistencyTestKit struct {
 	uniqueIndex table.Index
 	plainIndex  table.Index
 	ctx         context.Context
-	sctx        sessionctx.Context
+	sctx        *stmtctx.StatementContext
 	t           *testing.T
 }
 
@@ -1017,7 +1053,7 @@ func newInconsistencyKit(t *testing.T, tk *testkit.AsyncTestKit, opt *kitOpt) *i
 	i := &inconsistencyTestKit{
 		AsyncTestKit: tk,
 		ctx:          ctx,
-		sctx:         se,
+		sctx:         se.GetSessionVars().StmtCtx,
 		t:            t,
 	}
 	tk.MustExec(i.ctx, "drop table if exists "+tblName)
@@ -1236,7 +1272,7 @@ func TestCheckFailReport(t *testing.T) {
 
 		txn, err := store.Begin()
 		require.NoError(t, err)
-		encoded, err := codec.EncodeKey(time.UTC, nil, types.NewBytesDatum([]byte{1, 0, 1, 0, 0, 1, 1}))
+		encoded, err := codec.EncodeKey(stmtctx.NewStmtCtx(), nil, types.NewBytesDatum([]byte{1, 0, 1, 0, 0, 1, 1}))
 		require.NoError(t, err)
 		hd, err := kv.NewCommonHandle(encoded)
 		require.NoError(t, err)
@@ -1346,6 +1382,7 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.Indices[1]
 	indexOpr := tables.NewIndex(tblInfo.ID, tblInfo, idxInfo)
+	sc := ctx.GetSessionVars().StmtCtx
 	tk.Session().GetSessionVars().IndexLookupSize = 3
 	tk.Session().GetSessionVars().MaxChunkSize = 3
 
@@ -1354,7 +1391,7 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	// Index c2 is missing 11.
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(-10), kv.IntHandle(-1))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(-10), kv.IntHandle(-1))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -1394,7 +1431,7 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	// Index c2 has two more values than table data: 10, 13, and these handles have correlative record.
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(0), kv.IntHandle(0))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(0), kv.IntHandle(0))
 	require.NoError(t, err)
 	// Make sure the index value "19" is smaller "21". Then we scan to "19" before "21".
 	_, err = indexOpr.Create(ctx, txn, types.MakeDatums(19), kv.IntHandle(10), nil)
@@ -1416,9 +1453,9 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	// Two indices have the same handle.
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(13), kv.IntHandle(2))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(13), kv.IntHandle(2))
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(12), kv.IntHandle(2))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(12), kv.IntHandle(2))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -1437,7 +1474,7 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	require.NoError(t, err)
 	_, err = indexOpr.Create(ctx, txn, types.MakeDatums(12), kv.IntHandle(2), nil)
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(20), kv.IntHandle(10))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(20), kv.IntHandle(10))
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
@@ -1453,7 +1490,7 @@ func TestAdminCheckTableFailed(t *testing.T) {
 	// Recover records.
 	txn, err = store.Begin()
 	require.NoError(t, err)
-	err = indexOpr.Delete(ctx, txn, types.MakeDatums(19), kv.IntHandle(10))
+	err = indexOpr.Delete(sc, txn, types.MakeDatums(19), kv.IntHandle(10))
 	require.NoError(t, err)
 	_, err = indexOpr.Create(ctx, txn, types.MakeDatums(20), kv.IntHandle(10), nil)
 	require.NoError(t, err)
@@ -1489,6 +1526,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.Indices[0]
 	indexOpr := tables.NewIndex(tblInfo.ID, tblInfo, idxInfo)
+	sc := ctx.GetSessionVars().StmtCtx
 
 	pattern := "handle:\\s(\\d+)"
 	r := regexp.MustCompile(pattern)
@@ -1498,7 +1536,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 		txn, err := store.Begin()
 		require.NoError(t, err)
 		randomRow := rand.Intn(10000) + 1
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow), kv.IntHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow), kv.IntHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -1533,7 +1571,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 		require.Equalf(t, randomRow, handle, "i :%d", i)
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		tk.MustExec("admin check table admin_test")
@@ -1557,7 +1595,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 		require.Equalf(t, randomRow, handle, "i :%d", i)
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		tk.MustExec("admin check table admin_test")
@@ -1568,7 +1606,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 		txn, err := store.Begin()
 		require.NoError(t, err)
 		randomRow := rand.Intn(10000) + 1
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow), kv.IntHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow), kv.IntHandle(randomRow))
 		require.NoError(t, err)
 		_, err = indexOpr.Create(ctx, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow), nil)
 		require.NoError(t, err)
@@ -1584,7 +1622,7 @@ func TestAdminCheckTableErrorLocate(t *testing.T) {
 
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), kv.IntHandle(randomRow))
 		require.NoError(t, err)
 		_, err = indexOpr.Create(ctx, txn, types.MakeDatums(randomRow), kv.IntHandle(randomRow), nil)
 		require.NoError(t, err)
@@ -1626,7 +1664,7 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 	r := regexp.MustCompile(pattern)
 
 	getCommonHandle := func(randomRow int) *kv.CommonHandle {
-		h, err := codec.EncodeKey(sc.TimeZone(), nil, types.MakeDatums(randomRow)...)
+		h, err := codec.EncodeKey(sc, nil, types.MakeDatums(randomRow)...)
 		require.NoError(t, err)
 		ch, err := kv.NewCommonHandle(h)
 		require.NoError(t, err)
@@ -1638,7 +1676,7 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 		txn, err := store.Begin()
 		require.NoError(t, err)
 		randomRow := rand.Intn(10000) + 1
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow), getCommonHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow), getCommonHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		require.NoError(t, err)
@@ -1673,7 +1711,7 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 		require.Equalf(t, randomRow, handle, "i :%d", i)
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		tk.MustExec("admin check table admin_test")
@@ -1697,7 +1735,7 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 		require.Equalf(t, randomRow, handle, "i :%d", i)
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		tk.MustExec("admin check table admin_test")
@@ -1708,7 +1746,7 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 		txn, err := store.Begin()
 		require.NoError(t, err)
 		randomRow := rand.Intn(10000) + 1
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow), getCommonHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow), getCommonHandle(randomRow))
 		require.NoError(t, err)
 		_, err = indexOpr.Create(ctx, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow), nil)
 		require.NoError(t, err)
@@ -1724,11 +1762,24 @@ func TestAdminCheckTableErrorLocateForClusterIndex(t *testing.T) {
 
 		txn, err = store.Begin()
 		require.NoError(t, err)
-		err = indexOpr.Delete(ctx, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
+		err = indexOpr.Delete(sc, txn, types.MakeDatums(randomRow+1), getCommonHandle(randomRow))
 		require.NoError(t, err)
 		_, err = indexOpr.Create(ctx, txn, types.MakeDatums(randomRow), getCommonHandle(randomRow), nil)
 		require.NoError(t, err)
 		err = txn.Commit(context.Background())
 		tk.MustExec("admin check table admin_test")
 	}
+}
+
+func TestAdminCheckTableErrorLocateBigTable(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists admin_test")
+	tk.MustExec("create table admin_test (c1 int, c2 int, primary key(c1), key(c2))")
+	tk.MustExec("set cte_max_recursion_depth=100000;")
+	tk.MustExec("insert into admin_test with recursive cte(a, b) as (select 1, 1 union select a+1, b+1 from cte where cte.a< 100000) select * from cte;")
+	tk.MustQuery("select /*+ read_from_storage(tikv[`test`.`admin_test`]) */ bit_xor(crc32(md5(concat_ws(0x2, `c1`, `c2`)))), ((cast(crc32(md5(concat_ws(0x2, `c1`))) as signed) - 9223372036854775807) div 1 % 1024), count(*) from `test`.`admin_test` use index() where 0 = 0 group by ((cast(crc32(md5(concat_ws(0x2, `c1`))) as signed) - 9223372036854775807) div 1 % 1024)")
+	tk.MustQuery("select bit_xor(crc32(md5(concat_ws(0x2, `c1`, `c2`)))), ((cast(crc32(md5(concat_ws(0x2, `c1`))) as signed) - 9223372036854775807) div 1 % 1024), count(*) from `test`.`admin_test` use index(`c2`) where 0 = 0 group by ((cast(crc32(md5(concat_ws(0x2, `c1`))) as signed) - 9223372036854775807) div 1 % 1024)")
 }

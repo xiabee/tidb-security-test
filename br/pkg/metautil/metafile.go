@@ -146,15 +146,14 @@ func walkLeafMetaFile(
 
 // Table wraps the schema and files of a table.
 type Table struct {
-	DB               *model.DBInfo
-	Info             *model.TableInfo
-	Crc64Xor         uint64
-	TotalKvs         uint64
-	TotalBytes       uint64
-	Files            []*backuppb.File
-	TiFlashReplicas  int
-	Stats            *util.JSONTable
-	StatsFileIndexes []*backuppb.StatsFileIndex
+	DB              *model.DBInfo
+	Info            *model.TableInfo
+	Crc64Xor        uint64
+	TotalKvs        uint64
+	TotalBytes      uint64
+	Files           []*backuppb.File
+	TiFlashReplicas int
+	Stats           *util.JSONTable
 }
 
 // NoChecksum checks whether the table has a calculated checksum.
@@ -352,20 +351,15 @@ func (reader *MetaReader) ReadSchemasFiles(ctx context.Context, output chan<- *T
 					return errors.Trace(err)
 				}
 			}
-			var statsFileIndexes []*backuppb.StatsFileIndex
-			if len(s.StatsIndex) > 0 {
-				statsFileIndexes = s.StatsIndex
-			}
 
 			table := &Table{
-				DB:               dbInfo,
-				Info:             tableInfo,
-				Crc64Xor:         s.Crc64Xor,
-				TotalKvs:         s.TotalKvs,
-				TotalBytes:       s.TotalBytes,
-				TiFlashReplicas:  int(s.TiflashReplicas),
-				Stats:            stats,
-				StatsFileIndexes: statsFileIndexes,
+				DB:              dbInfo,
+				Info:            tableInfo,
+				Crc64Xor:        s.Crc64Xor,
+				TotalKvs:        s.TotalKvs,
+				TotalBytes:      s.TotalBytes,
+				TiFlashReplicas: int(s.TiflashReplicas),
+				Stats:           stats,
 			}
 			if tableInfo != nil {
 				if fileMap != nil {
@@ -553,7 +547,7 @@ type MetaWriter struct {
 	totalDataFileSize int
 
 	// records the total metafile size for backupmeta v2
-	totalMetaFileSize uint64
+	totalMetaFileSize int
 }
 
 // NewMetaWriter creates MetaWriter.
@@ -718,12 +712,6 @@ func (writer *MetaWriter) fillMetasV1(_ context.Context, op AppendOp) {
 		writer.backupMeta.Files = writer.metafiles.root.DataFiles
 	case AppendSchema:
 		writer.backupMeta.Schemas = writer.metafiles.root.Schemas
-		// calculate the stats file size
-		for _, schema := range writer.metafiles.root.Schemas {
-			for _, statsIndex := range schema.StatsIndex {
-				writer.totalMetaFileSize += statsIndex.SizeEnc
-			}
-		}
 	case AppendDDL:
 		writer.backupMeta.Ddls = mergeDDLs(writer.metafiles.root.Ddls)
 	default:
@@ -738,12 +726,6 @@ func (writer *MetaWriter) flushMetasV2(ctx context.Context, op AppendOp) error {
 	case AppendSchema:
 		if len(writer.metafiles.root.Schemas) == 0 {
 			return nil
-		}
-		// calculate the stats file size
-		for _, schema := range writer.metafiles.root.Schemas {
-			for _, statsIndex := range schema.StatsIndex {
-				writer.totalMetaFileSize += statsIndex.SizeEnc
-			}
 		}
 		// Add the metafile to backupmeta and reset metafiles.
 		if writer.backupMeta.SchemaIndex == nil {
@@ -786,7 +768,7 @@ func (writer *MetaWriter) flushMetasV2(ctx context.Context, op AppendOp) error {
 		return errors.Trace(err)
 	}
 
-	writer.totalMetaFileSize += uint64(len(encyptedContent))
+	writer.totalMetaFileSize += len(encyptedContent)
 	if err = writer.storage.WriteFile(ctx, fname, encyptedContent); err != nil {
 		return errors.Trace(err)
 	}
@@ -817,18 +799,13 @@ func (writer *MetaWriter) ArchiveSize() uint64 {
 // MetaFilesSize represents the size of meta files from backupmeta v2,
 // must be called after everything finishes by `FinishWriteMetas`.
 func (writer *MetaWriter) MetaFilesSize() uint64 {
-	return writer.totalMetaFileSize
+	return uint64(writer.totalMetaFileSize)
 }
 
 // Backupmeta clones a backupmeta.
 func (writer *MetaWriter) Backupmeta() *backuppb.BackupMeta {
 	clone := proto.Clone(writer.backupMeta)
 	return clone.(*backuppb.BackupMeta)
-}
-
-// NewStatsWriter wraps the new function of stats writer
-func (writer *MetaWriter) NewStatsWriter() *StatsWriter {
-	return newStatsWriter(writer.storage, writer.cipher)
 }
 
 func mergeDDLs(ddls [][]byte) []byte {

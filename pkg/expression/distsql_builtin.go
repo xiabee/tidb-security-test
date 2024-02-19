@@ -17,16 +17,19 @@ package expression
 import (
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
+	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
@@ -40,7 +43,7 @@ func PbTypeToFieldType(tp *tipb.FieldType) *types.FieldType {
 
 func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (f builtinFunc, e error) {
 	fieldTp := PbTypeToFieldType(tp)
-	base, err := newBaseBuiltinFuncWithFieldType(fieldTp, args)
+	base, err := newBaseBuiltinFuncWithFieldType(ctx, fieldTp, args)
 	if err != nil {
 		return nil, err
 	}
@@ -658,21 +661,21 @@ func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *ti
 	case tipb.ScalarFuncSig_UUID:
 		f = &builtinUUIDSig{base}
 	case tipb.ScalarFuncSig_LikeSig:
-		f = &builtinLikeSig{baseBuiltinFunc: base}
+		f = &builtinLikeSig{base, nil, false, sync.Once{}}
 	case tipb.ScalarFuncSig_IlikeSig:
-		f = &builtinIlikeSig{baseBuiltinFunc: base}
+		f = &builtinIlikeSig{base, nil, false, sync.Once{}}
 	case tipb.ScalarFuncSig_RegexpSig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpUTF8Sig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpLikeSig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpSubstrSig:
-		f = &builtinRegexpSubstrFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpSubstrFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpInStrSig:
-		f = &builtinRegexpInStrFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpInStrFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpReplaceSig:
-		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig: regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}, make([]Instruction, 0), nil, sync.Once{}, false}
 	case tipb.ScalarFuncSig_JsonExtractSig:
 		f = &builtinJSONExtractSig{base}
 	case tipb.ScalarFuncSig_JsonUnquoteSig:
@@ -1090,7 +1093,9 @@ func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *ti
 	return f, nil
 }
 
-func newDistSQLFunctionBySig(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (Expression, error) {
+func newDistSQLFunctionBySig(sc *stmtctx.StatementContext, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (Expression, error) {
+	ctx := mock.NewContext()
+	ctx.GetSessionVars().StmtCtx = sc
 	f, err := getSignatureByPB(ctx, sigCode, tp, args)
 	if err != nil {
 		return nil, err
@@ -1103,10 +1108,10 @@ func newDistSQLFunctionBySig(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig,
 }
 
 // PBToExprs converts pb structures to expressions.
-func PBToExprs(ctx sessionctx.Context, pbExprs []*tipb.Expr, fieldTps []*types.FieldType) ([]Expression, error) {
+func PBToExprs(pbExprs []*tipb.Expr, fieldTps []*types.FieldType, sc *stmtctx.StatementContext) ([]Expression, error) {
 	exprs := make([]Expression, 0, len(pbExprs))
 	for _, expr := range pbExprs {
-		e, err := PBToExpr(ctx, expr, fieldTps)
+		e, err := PBToExpr(expr, fieldTps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1119,8 +1124,7 @@ func PBToExprs(ctx sessionctx.Context, pbExprs []*tipb.Expr, fieldTps []*types.F
 }
 
 // PBToExpr converts pb structure to expression.
-func PBToExpr(ctx sessionctx.Context, expr *tipb.Expr, tps []*types.FieldType) (Expression, error) {
-	sc := ctx.GetSessionVars().StmtCtx
+func PBToExpr(expr *tipb.Expr, tps []*types.FieldType, sc *stmtctx.StatementContext) (Expression, error) {
 	switch expr.Tp {
 	case tipb.ExprType_ColumnRef:
 		_, offset, err := codec.DecodeInt(expr.Val)
@@ -1145,7 +1149,7 @@ func PBToExpr(ctx sessionctx.Context, expr *tipb.Expr, tps []*types.FieldType) (
 	case tipb.ExprType_Float64:
 		return convertFloat(expr.Val, false)
 	case tipb.ExprType_MysqlDecimal:
-		return convertDecimal(expr.Val, expr.FieldType)
+		return convertDecimal(expr.Val)
 	case tipb.ExprType_MysqlDuration:
 		return convertDuration(expr.Val)
 	case tipb.ExprType_MysqlTime:
@@ -1172,13 +1176,13 @@ func PBToExpr(ctx sessionctx.Context, expr *tipb.Expr, tps []*types.FieldType) (
 			args = append(args, results...)
 			continue
 		}
-		arg, err := PBToExpr(ctx, child, tps)
+		arg, err := PBToExpr(child, tps, sc)
 		if err != nil {
 			return nil, err
 		}
 		args = append(args, arg)
 	}
-	sf, err := newDistSQLFunctionBySig(ctx, expr.Sig, expr.FieldType, args)
+	sf, err := newDistSQLFunctionBySig(sc, expr.Sig, expr.FieldType, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1263,8 +1267,7 @@ func convertFloat(val []byte, f32 bool) (*Constant, error) {
 	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeDouble)}, nil
 }
 
-func convertDecimal(val []byte, ftPB *tipb.FieldType) (*Constant, error) {
-	ft := PbTypeToFieldType(ftPB)
+func convertDecimal(val []byte) (*Constant, error) {
 	_, dec, precision, frac, err := codec.DecodeDecimal(val)
 	var d types.Datum
 	d.SetMysqlDecimal(dec)
@@ -1273,7 +1276,7 @@ func convertDecimal(val []byte, ftPB *tipb.FieldType) (*Constant, error) {
 	if err != nil {
 		return nil, errors.Errorf("invalid decimal % x", val)
 	}
-	return &Constant{Value: d, RetType: ft}, nil
+	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeNewDecimal)}, nil
 }
 
 func convertDuration(val []byte) (*Constant, error) {

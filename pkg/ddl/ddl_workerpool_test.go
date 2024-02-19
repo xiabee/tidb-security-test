@@ -27,7 +27,7 @@ func TestDDLWorkerPool(t *testing.T) {
 			return wk, nil
 		}
 	}
-	pool := newDDLWorkerPool(pools.NewResourcePool(f(), 1, 2, 0), jobTypeReorg)
+	pool := newDDLWorkerPool(pools.NewResourcePool(f(), 1, 2, 0), reorg)
 	pool.close()
 	pool.put(nil)
 }

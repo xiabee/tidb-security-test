@@ -69,7 +69,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/fastrand"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/pingcap/tidb/pkg/util/sys/linux"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	uatomic "go.uber.org/atomic"
@@ -117,9 +116,8 @@ type Server struct {
 	socket            net.Listener
 	concurrentLimiter *TokenLimiter
 
-	rwlock                 sync.RWMutex
-	clients                map[uint64]*clientConn
-	ConnNumByResourceGroup map[string]int
+	rwlock  sync.RWMutex
+	clients map[uint64]*clientConn
 
 	capability uint32
 	dom        *domain.Domain
@@ -237,15 +235,14 @@ func (s *Server) newConn(conn net.Conn) *clientConn {
 // NewServer creates a new Server.
 func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 	s := &Server{
-		cfg:                    cfg,
-		driver:                 driver,
-		concurrentLimiter:      NewTokenLimiter(cfg.TokenLimit),
-		clients:                make(map[uint64]*clientConn),
-		ConnNumByResourceGroup: make(map[string]int),
-		internalSessions:       make(map[interface{}]struct{}, 100),
-		health:                 uatomic.NewBool(true),
-		inShutdownMode:         uatomic.NewBool(false),
-		printMDLLogTime:        time.Now(),
+		cfg:               cfg,
+		driver:            driver,
+		concurrentLimiter: NewTokenLimiter(cfg.TokenLimit),
+		clients:           make(map[uint64]*clientConn),
+		internalSessions:  make(map[interface{}]struct{}, 100),
+		health:            uatomic.NewBool(true),
+		inShutdownMode:    uatomic.NewBool(false),
+		printMDLLogTime:   time.Now(),
 	}
 	s.capability = defaultCapability
 	setTxnScope()
@@ -420,13 +417,16 @@ func (s *Server) reportConfig() {
 }
 
 // Run runs the server.
-func (s *Server) Run() error {
-	metrics.ServerEventCounter.WithLabelValues(metrics.ServerStart).Inc()
+func (s *Server) Run(dom *domain.Domain) error {
+	metrics.ServerEventCounter.WithLabelValues(metrics.EventStart).Inc()
 	s.reportConfig()
 
 	// Start HTTP API to report tidb info such as TPS.
 	if s.cfg.Status.ReportStatus {
 		s.startStatusHTTP()
+	}
+	if config.GetGlobalConfig().Performance.ForceInitStats && dom != nil {
+		<-dom.StatsHandle().InitStatsDone
 	}
 	// If error should be reported and exit the server it can be sent on this
 	// channel. Otherwise, end with sending a nil error to signal "done"
@@ -581,7 +581,7 @@ func (s *Server) closeListener() {
 		s.authTokenCancelFunc()
 	}
 	s.wg.Wait()
-	metrics.ServerEventCounter.WithLabelValues(metrics.ServerStop).Inc()
+	metrics.ServerEventCounter.WithLabelValues(metrics.EventClose).Inc()
 }
 
 // Close closes the server.
@@ -596,27 +596,17 @@ func (s *Server) Close() {
 func (s *Server) registerConn(conn *clientConn) bool {
 	s.rwlock.Lock()
 	defer s.rwlock.Unlock()
-	connections := make(map[string]int, 0)
-	for _, conn := range s.clients {
-		resourceGroup := conn.getCtx().GetSessionVars().ResourceGroupName
-		connections[resourceGroup]++
-	}
+	connections := len(s.clients)
 
 	logger := logutil.BgLogger()
 	if s.inShutdownMode.Load() {
 		logger.Info("close connection directly when shutting down")
-		for resourceGroupName, count := range s.ConnNumByResourceGroup {
-			metrics.ConnGauge.WithLabelValues(resourceGroupName).Set(float64(count))
-		}
-		terror.Log(closeConn(conn, "", 0))
+		terror.Log(closeConn(conn, connections))
 		return false
 	}
 	s.clients[conn.connectionID] = conn
-	s.ConnNumByResourceGroup[conn.getCtx().GetSessionVars().ResourceGroupName]++
-
-	for name, count := range s.ConnNumByResourceGroup {
-		metrics.ConnGauge.WithLabelValues(name).Set(float64(count))
-	}
+	connections = len(s.clients)
+	metrics.ConnGauge.Set(float64(connections))
 	return true
 }
 
@@ -737,6 +727,10 @@ func (cc *clientConn) connectInfo() *variable.ConnectionInfo {
 		connType = variable.ConnTypeTLS
 		sslVersionNum := cc.tlsConn.ConnectionState().Version
 		switch sslVersionNum {
+		case tls.VersionTLS10:
+			sslVersion = "TLSv1.0"
+		case tls.VersionTLS11:
+			sslVersion = "TLSv1.1"
 		case tls.VersionTLS12:
 			sslVersion = "TLSv1.2"
 		case tls.VersionTLS13:
@@ -898,9 +892,9 @@ func (s *Server) GetTLSConfig() *tls.Config {
 func killQuery(conn *clientConn, maxExecutionTime bool) {
 	sessVars := conn.ctx.GetSessionVars()
 	if maxExecutionTime {
-		sessVars.SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
+		atomic.StoreUint32(&sessVars.Killed, 2)
 	} else {
-		sessVars.SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
+		atomic.StoreUint32(&sessVars.Killed, 1)
 	}
 	conn.mu.RLock()
 	cancelFunc := conn.mu.cancelFunc

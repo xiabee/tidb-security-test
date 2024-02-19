@@ -4,6 +4,7 @@ go_library(
     name = "util",
     srcs = [
         "dead_table_lock_checker.go",
+        "event.go",
         "mock.go",
         "util.go",
     ],

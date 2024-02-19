@@ -45,9 +45,9 @@ func (*concatFunction) writeValue(evalCtx *AggEvaluateContext, val types.Datum) 
 	}
 }
 
-func (cf *concatFunction) initSeparator(ctx expression.EvalContext, row chunk.Row) error {
+func (cf *concatFunction) initSeparator(_ *stmtctx.StatementContext, row chunk.Row) error {
 	sepArg := cf.Args[len(cf.Args)-1]
-	sepDatum, err := sepArg.Eval(ctx, row)
+	sepDatum, err := sepArg.Eval(row)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func (cf *concatFunction) initSeparator(ctx expression.EvalContext, row chunk.Ro
 func (cf *concatFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.StatementContext, row chunk.Row) error {
 	datumBuf := make([]types.Datum, 0, len(cf.Args))
 	if !cf.sepInited {
-		err := cf.initSeparator(evalCtx.Ctx, row)
+		err := cf.initSeparator(sc, row)
 		if err != nil {
 			return err
 		}
@@ -71,7 +71,7 @@ func (cf *concatFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.Statem
 
 	// The last parameter is the concat separator, we only concat the first "len(cf.Args)-1" parameters.
 	for i, length := 0, len(cf.Args)-1; i < length; i++ {
-		value, err := cf.Args[i].Eval(evalCtx.Ctx, row)
+		value, err := cf.Args[i].Eval(row)
 		if err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func (cf *concatFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.Statem
 		}
 		evalCtx.Buffer.Truncate(i)
 		if !cf.truncated {
-			sc.AppendWarning(expression.ErrCutValueGroupConcat.FastGenByArgs(cf.Args[0].String()))
+			sc.AppendWarning(expression.ErrCutValueGroupConcat.GenWithStackByArgs(cf.Args[0].String()))
 		}
 		cf.truncated = true
 	}
@@ -121,11 +121,10 @@ func (cf *concatFunction) GetResult(evalCtx *AggEvaluateContext) (d types.Datum)
 	return d
 }
 
-func (cf *concatFunction) ResetContext(ctx expression.EvalContext, evalCtx *AggEvaluateContext) {
+func (cf *concatFunction) ResetContext(sc *stmtctx.StatementContext, evalCtx *AggEvaluateContext) {
 	if cf.HasDistinct {
-		evalCtx.DistinctChecker = createDistinctChecker(ctx.GetSessionVars().StmtCtx)
+		evalCtx.DistinctChecker = createDistinctChecker(sc)
 	}
-	evalCtx.Ctx = ctx
 	evalCtx.Buffer = nil
 }
 

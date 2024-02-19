@@ -112,7 +112,7 @@ func (tne *tableNameExtractor) getTablesAndViews() map[tableNamePair]struct{} {
 	return r
 }
 
-func (*tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
+func (tne *tableNameExtractor) Enter(in ast.Node) (ast.Node, bool) {
 	if _, ok := in.(*ast.TableName); ok {
 		return in, true
 	}
@@ -593,14 +593,14 @@ func dumpVariables(sctx sessionctx.Context, sessionVars *variable.SessionVars, z
 	return nil
 }
 
-func dumpSessionBindRecords(records []bindinfo.Bindings, zw *zip.Writer) error {
+func dumpSessionBindRecords(records []*bindinfo.BindRecord, zw *zip.Writer) error {
 	sRows := make([][]string, 0)
 	for _, bindData := range records {
-		for _, hint := range bindData {
+		for _, hint := range bindData.Bindings {
 			sRows = append(sRows, []string{
-				hint.OriginalSQL,
+				bindData.OriginalSQL,
 				hint.BindSQL,
-				hint.Db,
+				bindData.Db,
 				hint.Status,
 				hint.CreateTime.String(),
 				hint.UpdateTime.String(),
@@ -755,7 +755,7 @@ func dumpPlanReplayerExplain(ctx sessionctx.Context, zw *zip.Writer, task *PlanR
 }
 
 func extractTableNames(ctx context.Context, sctx sessionctx.Context,
-	execStmts []ast.StmtNode, curDB model.CIStr) (map[tableNamePair]struct{}, error) {
+	ExecStmts []ast.StmtNode, curDB model.CIStr) (map[tableNamePair]struct{}, error) {
 	tableExtractor := &tableNameExtractor{
 		ctx:      ctx,
 		executor: sctx.(sqlexec.RestrictedSQLExecutor),
@@ -764,7 +764,7 @@ func extractTableNames(ctx context.Context, sctx sessionctx.Context,
 		names:    make(map[tableNamePair]struct{}),
 		cteNames: make(map[string]struct{}),
 	}
-	for _, execStmt := range execStmts {
+	for _, execStmt := range ExecStmts {
 		execStmt.Accept(tableExtractor)
 	}
 	if tableExtractor.err != nil {

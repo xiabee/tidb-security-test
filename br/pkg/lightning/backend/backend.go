@@ -99,9 +99,6 @@ type LocalEngineConfig struct {
 	CompactThreshold int64
 	// compact routine concurrency
 	CompactConcurrency int
-
-	// blocksize
-	BlockSize int
 }
 
 // ExternalEngineConfig is the configuration used for local backend external engine.

@@ -321,11 +321,11 @@ func (e *InsertValues) handleErr(col *table.Column, val *types.Datum, rowIdx int
 		err = completeInsertErr(c, val, rowIdx, err)
 	}
 
-	// TODO: should not filter all types of errors here.
-	if err != nil {
-		ec := e.Ctx().GetSessionVars().StmtCtx.ErrCtx()
-		return ec.HandleErrorWithAlias(kv.ErrKeyExists, err, err)
+	if !e.Ctx().GetSessionVars().StmtCtx.DupKeyAsWarning {
+		return err
 	}
+	// TODO: should not filter all types of errors here.
+	e.handleWarning(err)
 	return nil
 }
 
@@ -347,15 +347,14 @@ func (e *InsertValues) evalRow(ctx context.Context, list []expression.Expression
 	}
 
 	e.evalBuffer.SetDatums(row...)
-	sctx := e.Ctx()
-	sc := sctx.GetSessionVars().StmtCtx
+	sc := e.Ctx().GetSessionVars().StmtCtx
 	warnCnt := int(sc.WarningCount())
 	for i, expr := range list {
-		val, err := expr.Eval(sctx, e.evalBuffer.ToRow())
+		val, err := expr.Eval(e.evalBuffer.ToRow())
 		if err != nil {
 			return nil, err
 		}
-		val1, err := table.CastValue(sctx, val, e.insertColumns[i].ToInfo(), false, false)
+		val1, err := table.CastValue(e.Ctx(), val, e.insertColumns[i].ToInfo(), false, false)
 		if err = e.handleErr(e.insertColumns[i], &val, rowIdx, err); err != nil {
 			return nil, err
 		}
@@ -387,16 +386,15 @@ func (e *InsertValues) fastEvalRow(ctx context.Context, list []expression.Expres
 	}
 	row := make([]types.Datum, rowLen)
 	hasValue := make([]bool, rowLen)
-	sctx := e.Ctx()
-	sc := sctx.GetSessionVars().StmtCtx
+	sc := e.Ctx().GetSessionVars().StmtCtx
 	warnCnt := int(sc.WarningCount())
 	for i, expr := range list {
 		con := expr.(*expression.Constant)
-		val, err := con.Eval(sctx, emptyRow)
+		val, err := con.Eval(emptyRow)
 		if err = e.handleErr(e.insertColumns[i], &val, rowIdx, err); err != nil {
 			return nil, err
 		}
-		val1, err := table.CastValue(sctx, val, e.insertColumns[i].ToInfo(), false, false)
+		val1, err := table.CastValue(e.Ctx(), val, e.insertColumns[i].ToInfo(), false, false)
 		if err = e.handleErr(e.insertColumns[i], &val, rowIdx, err); err != nil {
 			return nil, err
 		}
@@ -607,7 +605,7 @@ func (e *InsertValues) fillColValue(
 		if !hasValue && mysql.HasNoDefaultValueFlag(column.ToInfo().GetFlag()) {
 			vars := e.Ctx().GetSessionVars()
 			sc := vars.StmtCtx
-			if vars.SQLMode.HasStrictMode() {
+			if vars.StrictSQLMode {
 				return datum, table.ErrNoDefaultValue.FastGenByArgs(column.ToInfo().Name)
 			}
 			sc.AppendWarning(table.ErrNoDefaultValue.FastGenByArgs(column.ToInfo().Name))
@@ -685,7 +683,7 @@ func (e *InsertValues) fillRow(ctx context.Context, row []types.Datum, hasValue 
 				return nil, err
 			}
 			if !e.lazyFillAutoID || (e.lazyFillAutoID && !mysql.HasAutoIncrementFlag(c.GetFlag())) {
-				if err = c.HandleBadNull(e.Ctx().GetSessionVars().StmtCtx.ErrCtx(), &row[i], rowCntInLoadData); err != nil {
+				if err = c.HandleBadNull(&row[i], e.Ctx().GetSessionVars().StmtCtx, rowCntInLoadData); err != nil {
 					return nil, err
 				}
 			}
@@ -700,12 +698,11 @@ func (e *InsertValues) fillRow(ctx context.Context, row []types.Datum, hasValue 
 		}
 	}
 
-	sctx := e.Ctx()
-	sc := sctx.GetSessionVars().StmtCtx
+	sc := e.Ctx().GetSessionVars().StmtCtx
 	warnCnt := int(sc.WarningCount())
 	for i, gCol := range gCols {
 		colIdx := gCol.ColumnInfo.Offset
-		val, err := e.GenExprs[i].Eval(sctx, chunk.MutRowFromDatums(row).ToRow())
+		val, err := e.GenExprs[i].Eval(chunk.MutRowFromDatums(row).ToRow())
 		if err != nil && gCol.FieldType.IsArray() {
 			return nil, completeError(tbl, gCol.Offset, rowIdx, err)
 		}
@@ -724,7 +721,7 @@ func (e *InsertValues) fillRow(ctx context.Context, row []types.Datum, hasValue 
 			warnCnt += len(newWarnings)
 		}
 		// Handle the bad null error.
-		if err = gCol.HandleBadNull(sc.ErrCtx(), &row[colIdx], rowCntInLoadData); err != nil {
+		if err = gCol.HandleBadNull(&row[colIdx], e.Ctx().GetSessionVars().StmtCtx, rowCntInLoadData); err != nil {
 			return nil, err
 		}
 	}
@@ -794,7 +791,7 @@ func setDatumAutoIDAndCast(ctx sessionctx.Context, d *types.Datum, id int64, col
 		// Auto ID is out of range.
 		sc := ctx.GetSessionVars().StmtCtx
 		insertPlan, ok := sc.GetPlan().(*core.Insert)
-		if ok && sc.TypeFlags().TruncateAsWarning() && len(insertPlan.OnDuplicate) > 0 {
+		if ok && sc.TruncateAsWarning && len(insertPlan.OnDuplicate) > 0 {
 			// Fix issue #38950: AUTO_INCREMENT is incompatible with mysql
 			// An auto id out of range error occurs in `insert ignore into ... on duplicate ...`.
 			// We should allow the SQL to be executed successfully.
@@ -1371,7 +1368,7 @@ func (e *InsertValues) equalDatumsAsBinary(a []types.Datum, b []types.Datum) (bo
 		return false, nil
 	}
 	for i, ai := range a {
-		v, err := ai.Compare(e.Ctx().GetSessionVars().StmtCtx.TypeCtx(), &b[i], collate.GetBinaryCollator())
+		v, err := ai.Compare(e.Ctx().GetSessionVars().StmtCtx, &b[i], collate.GetBinaryCollator())
 		if err != nil {
 			return false, errors.Trace(err)
 		}

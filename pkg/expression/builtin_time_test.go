@@ -105,7 +105,7 @@ func TestDate(t *testing.T) {
 		fc := funcs[ast.Date]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Expect"][0], v)
 	}
@@ -135,42 +135,42 @@ func TestDate(t *testing.T) {
 		fc := funcs[ast.Year]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfYear"][0], v)
 
@@ -178,41 +178,40 @@ func TestDate(t *testing.T) {
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Week"][0], v, fmt.Sprintf("no.%d", ith))
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["YearWeek"][0], v, fmt.Sprintf("no.%d", ith))
 	}
 
 	// test nil
-	ctx.GetSessionVars().SQLMode = mysql.DelSQLMode(ctx.GetSessionVars().SQLMode, mysql.ModeNoZeroDate)
 	tblNil := []struct {
 		Input      interface{}
 		Year       interface{}
@@ -239,42 +238,42 @@ func TestDate(t *testing.T) {
 		fc := funcs[ast.Year]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfYear"][0], v)
 
@@ -282,35 +281,35 @@ func TestDate(t *testing.T) {
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Week"][0], v)
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["YearWeek"][0], v)
 	}
@@ -342,42 +341,42 @@ func TestDate(t *testing.T) {
 		fc := funcs[ast.Year]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Year"][0], v)
 
 		fc = funcs[ast.Month]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Month"][0], v)
 
 		fc = funcs[ast.MonthName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["MonthName"][0], v)
 
 		fc = funcs[ast.DayOfMonth]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfMonth"][0], v)
 
 		fc = funcs[ast.DayOfWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfWeek"][0], v)
 
 		fc = funcs[ast.DayOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayOfYear"][0], v)
 
@@ -385,35 +384,35 @@ func TestDate(t *testing.T) {
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekDay"][0], v)
 
 		fc = funcs[ast.DayName]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["DayName"][0], v)
 
 		fc = funcs[ast.Week]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Week"][0], v)
 
 		fc = funcs[ast.WeekOfYear]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["WeekOfYear"][0], v)
 
 		fc = funcs[ast.YearWeek]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["YearWeek"][0], v)
 	}
@@ -422,7 +421,7 @@ func TestDate(t *testing.T) {
 func TestMonthName(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	cases := []struct {
 		args     interface{}
 		expected string
@@ -438,7 +437,7 @@ func TestMonthName(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.MonthName, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -458,7 +457,7 @@ func TestMonthName(t *testing.T) {
 func TestDayName(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	cases := []struct {
 		args     interface{}
 		expected string
@@ -476,7 +475,7 @@ func TestDayName(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.DayName, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -496,7 +495,7 @@ func TestDayName(t *testing.T) {
 func TestDayOfWeek(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	cases := []struct {
 		args     interface{}
 		expected int64
@@ -512,7 +511,7 @@ func TestDayOfWeek(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.DayOfWeek, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -532,7 +531,7 @@ func TestDayOfWeek(t *testing.T) {
 func TestDayOfMonth(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	cases := []struct {
 		args     interface{}
 		expected int64
@@ -548,7 +547,7 @@ func TestDayOfMonth(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.DayOfMonth, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -568,7 +567,7 @@ func TestDayOfMonth(t *testing.T) {
 func TestDayOfYear(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	cases := []struct {
 		args     interface{}
 		expected int64
@@ -584,7 +583,7 @@ func TestDayOfYear(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.DayOfYear, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -609,7 +608,7 @@ func TestDateFormat(t *testing.T) {
 	fc := funcs[ast.DateFormat]
 	f, err := fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, true, v.IsNull())
 
@@ -640,7 +639,7 @@ func TestDateFormat(t *testing.T) {
 		fc := funcs[ast.DateFormat]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		comment := fmt.Sprintf("no.%d\nobtain:%v\nexpect:%v\n", i, v.GetValue(), c["Expect"][0].GetValue())
 		testutil.DatumEqual(t, c["Expect"][0], v, comment)
@@ -669,35 +668,35 @@ func TestClock(t *testing.T) {
 		fc := funcs[ast.Hour]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Hour"][0], v)
 
 		fc = funcs[ast.Minute]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Minute"][0], v)
 
 		fc = funcs[ast.Second]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Second"][0], v)
 
 		fc = funcs[ast.MicroSecond]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["MicroSecond"][0], v)
 
 		fc = funcs[ast.Time]
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Time"][0], v)
 	}
@@ -706,35 +705,35 @@ func TestClock(t *testing.T) {
 	fc := funcs[ast.Hour]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	fc = funcs[ast.Minute]
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	fc = funcs[ast.Second]
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	fc = funcs[ast.MicroSecond]
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	fc = funcs[ast.Time]
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
@@ -748,32 +747,32 @@ func TestClock(t *testing.T) {
 		fc := funcs[ast.Hour]
 		f, err := fc.getFunction(ctx, datumsToConstants(td))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 
 		fc = funcs[ast.Minute]
 		f, err = fc.getFunction(ctx, datumsToConstants(td))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 
 		fc = funcs[ast.Second]
 		f, err = fc.getFunction(ctx, datumsToConstants(td))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 
 		fc = funcs[ast.MicroSecond]
 		f, err = fc.getFunction(ctx, datumsToConstants(td))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 
 		fc = funcs[ast.Time]
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
 		f, err = fc.getFunction(ctx, datumsToConstants(td))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
 	}
@@ -804,7 +803,7 @@ func TestTime(t *testing.T) {
 		require.Equal(t, charset.CollationBin, tp.GetCollate())
 		require.Equal(t, mysql.BinaryFlag, tp.GetFlag()&mysql.BinaryFlag)
 		require.Equal(t, c.flen, tp.GetFlen())
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -843,7 +842,7 @@ func TestNowAndUTCTimestamp(t *testing.T) {
 		f, err := x.fc.getFunction(ctx, datumsToConstants(nil))
 		require.NoError(t, err)
 		resetStmtContext(ctx)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		ts := x.now()
 		require.NoError(t, err)
 		mt := v.GetMysqlTime()
@@ -855,7 +854,7 @@ func TestNowAndUTCTimestamp(t *testing.T) {
 		f, err = x.fc.getFunction(ctx, datumsToConstants(types.MakeDatums(6)))
 		require.NoError(t, err)
 		resetStmtContext(ctx)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		ts = x.now()
 		require.NoError(t, err)
 		mt = v.GetMysqlTime()
@@ -880,7 +879,7 @@ func TestNowAndUTCTimestamp(t *testing.T) {
 	resetStmtContext(ctx)
 	f, err := fc.getFunction(ctx, datumsToConstants(nil))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	result, err := v.ToString()
 	require.NoError(t, err)
@@ -938,7 +937,7 @@ func TestAddTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewStringDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -965,13 +964,13 @@ func TestAddTimeSig(t *testing.T) {
 		{"-110:00:00", "1 02:00:00", "-84:00:00"},
 	}
 	for _, c := range tbl {
-		dur, _, err := types.ParseDuration(ctx.GetSessionVars().StmtCtx.TypeCtx(), c.Input, types.GetFsp(c.Input))
+		dur, _, err := types.ParseDuration(ctx.GetSessionVars().StmtCtx, c.Input, types.GetFsp(c.Input))
 		require.NoError(t, err)
 		tmpInput := types.NewDurationDatum(dur)
 		tmpInputDuration := types.NewStringDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -990,7 +989,7 @@ func TestAddTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewIntDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -1017,7 +1016,7 @@ func TestAddTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, "", result)
@@ -1050,7 +1049,7 @@ func TestSubTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewStringDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -1066,13 +1065,13 @@ func TestSubTimeSig(t *testing.T) {
 		{"235959", "00:00:01", "23:59:58"},
 	}
 	for _, c := range tbl {
-		dur, _, err := types.ParseDuration(ctx.GetSessionVars().StmtCtx.TypeCtx(), c.Input, types.GetFsp(c.Input))
+		dur, _, err := types.ParseDuration(ctx.GetSessionVars().StmtCtx, c.Input, types.GetFsp(c.Input))
 		require.NoError(t, err)
 		tmpInput := types.NewDurationDatum(dur)
 		tmpInputDuration := types.NewStringDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -1090,7 +1089,7 @@ func TestSubTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewIntDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, c.expect, result)
@@ -1117,7 +1116,7 @@ func TestSubTimeSig(t *testing.T) {
 		tmpInputDuration := types.NewDatum(c.InputDuration)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{tmpInput, tmpInputDuration}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, "", result)
@@ -1140,7 +1139,7 @@ func TestSysDate(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(nil))
 		require.NoError(t, err)
 		resetStmtContext(ctx)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		last := time.Now()
 		require.NoError(t, err)
 		n := v.GetMysqlTime()
@@ -1148,7 +1147,7 @@ func TestSysDate(t *testing.T) {
 
 		baseFunc, _, input, output := genVecBuiltinFuncBenchCase(ctx, ast.Sysdate, vecExprBenchCase{retEvalType: types.ETDatetime})
 		resetStmtContext(ctx)
-		err = baseFunc.vecEvalTime(ctx, input, output)
+		err = baseFunc.vecEvalTime(input, output)
 		require.NoError(t, err)
 		last = time.Now()
 		times := output.Times()
@@ -1163,9 +1162,9 @@ func TestSysDate(t *testing.T) {
 				geners:        []dataGenerator{newRangeInt64Gener(0, 7)},
 			})
 		resetStmtContext(ctx)
-		loc := location(ctx)
+		loc := ctx.GetSessionVars().Location()
 		startTm := time.Now().In(loc)
-		err = baseFunc.vecEvalTime(ctx, input, output)
+		err = baseFunc.vecEvalTime(input, output)
 		require.NoError(t, err)
 		for i := 0; i < 1024; i++ {
 			require.GreaterOrEqual(t, times[i].String(), startTm.Format(types.TimeFormat))
@@ -1176,7 +1175,7 @@ func TestSysDate(t *testing.T) {
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(6)))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetMysqlTime()
 	require.GreaterOrEqual(t, n.String(), last.Format(types.TimeFormat))
@@ -1193,7 +1192,7 @@ func convertToTimeWithFsp(sc *stmtctx.StatementContext, arg types.Datum, tp byte
 	f := types.NewFieldType(tp)
 	f.SetDecimal(fsp)
 
-	d, err = arg.ConvertTo(sc.TypeCtx(), f)
+	d, err = arg.ConvertTo(sc, f)
 	if err != nil {
 		d.SetNull()
 		return d, err
@@ -1278,7 +1277,7 @@ func TestFromUnixTime(t *testing.T) {
 			f, err := fc.getFunction(ctx, constants)
 			require.NoError(t, err)
 
-			v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+			v, err := evalBuiltinFunc(f, chunk.Row{})
 			require.NoError(t, err)
 			ans := v.GetMysqlTime()
 			require.Equalf(t, c.expect, ans.String(), "%+v", t)
@@ -1290,7 +1289,7 @@ func TestFromUnixTime(t *testing.T) {
 			}
 			f, err := fc.getFunction(ctx, constants)
 			require.NoError(t, err)
-			v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+			v, err := evalBuiltinFunc(f, chunk.Row{})
 			require.NoError(t, err)
 			result, err := builtinDateFormat(ctx, []types.Datum{types.NewStringDatum(c.expect), format})
 			require.NoError(t, err)
@@ -1300,14 +1299,14 @@ func TestFromUnixTime(t *testing.T) {
 
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(-12345)))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	// TestIssue22206
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(32536771200)))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 }
@@ -1319,7 +1318,7 @@ func TestCurrentDate(t *testing.T) {
 	f, err := fc.getFunction(mock.NewContext(), datumsToConstants(nil))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetMysqlTime()
 	require.GreaterOrEqual(t, n.String(), last.Format(types.DateFormat))
@@ -1334,7 +1333,7 @@ func TestCurrentTime(t *testing.T) {
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetMysqlDuration()
 	require.Len(t, n.String(), 8)
@@ -1343,7 +1342,7 @@ func TestCurrentTime(t *testing.T) {
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(3)))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n = v.GetMysqlDuration()
 	require.Len(t, n.String(), 12)
@@ -1352,7 +1351,7 @@ func TestCurrentTime(t *testing.T) {
 	f, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(6)))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n = v.GetMysqlDuration()
 	require.Len(t, n.String(), 15)
@@ -1385,7 +1384,7 @@ func TestUTCTime(t *testing.T) {
 		}
 		require.NoError(t, err)
 		resetStmtContext(ctx)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		if test.expect > 0 {
 			require.NoError(t, err)
 			n := v.GetMysqlDuration()
@@ -1399,7 +1398,7 @@ func TestUTCTime(t *testing.T) {
 	f, err := fc.getFunction(ctx, make([]Expression, 0))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetMysqlDuration()
 	require.Len(t, n.String(), 8)
@@ -1411,9 +1410,8 @@ func TestUTCDate(t *testing.T) {
 	fc := funcs[ast.UTCDate]
 	f, err := fc.getFunction(mock.NewContext(), datumsToConstants(nil))
 	require.NoError(t, err)
-	ctx := mock.NewContext()
-	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	resetStmtContext(mock.NewContext())
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetMysqlTime()
 	require.GreaterOrEqual(t, n.String(), last.Format(types.DateFormat))
@@ -1470,7 +1468,7 @@ func TestStrToDate(t *testing.T) {
 		t.Logf("input: %s, format: %s", test.Date, test.Format)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{date, format}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if !test.Success {
 			require.NoError(t, err)
@@ -1494,11 +1492,11 @@ func TestStrToDate(t *testing.T) {
 func TestFromDays(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 	tests := []struct {
 		day    int64
 		expect string
@@ -1528,7 +1526,7 @@ func TestFromDays(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{t1}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 
 		require.NoError(t, err)
 		if test.isNil {
@@ -1552,7 +1550,7 @@ func TestFromDays(t *testing.T) {
 
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{t1}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetMysqlTime().String())
@@ -1581,7 +1579,7 @@ func TestDateDiff(t *testing.T) {
 
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{t1, t2}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetInt64())
@@ -1606,7 +1604,7 @@ func TestDateDiff(t *testing.T) {
 
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{t1, t2}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull())
 	}
@@ -1615,7 +1613,7 @@ func TestDateDiff(t *testing.T) {
 func TestTimeDiff(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	// Test cases from https://dev.mysql.com/doc/refman/5.7/en/date-and-time-functions.html#function_timediff
 	tests := []struct {
 		args       []interface{}
@@ -1644,7 +1642,7 @@ func TestTimeDiff(t *testing.T) {
 		require.Equal(t, charset.CollationBin, tp.GetCollate())
 		require.Equal(t, mysql.BinaryFlag, tp.GetFlag())
 		require.Equal(t, c.flen, tp.GetFlen())
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -1680,7 +1678,7 @@ func TestWeek(t *testing.T) {
 		arg2 := types.NewIntDatum(test.mode)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg1, arg2}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetInt64())
 	}
@@ -1704,7 +1702,7 @@ func TestWeekWithoutModeSig(t *testing.T) {
 		arg1 := types.NewStringDatum(test.t)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg1}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetInt64())
 		if i == 1 {
@@ -1719,7 +1717,7 @@ func TestWeekWithoutModeSig(t *testing.T) {
 func TestYearWeek(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	// Test cases from https://dev.mysql.com/doc/refman/5.7/en/date-and-time-functions.html#function_yearweek
 	tests := []struct {
 		t      string
@@ -1735,14 +1733,14 @@ func TestYearWeek(t *testing.T) {
 		arg2 := types.NewIntDatum(test.mode)
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg1, arg2}))
 		require.NoError(t, err)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetInt64())
 	}
 
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums("2016-00-05")))
 	require.NoError(t, err)
-	result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	result, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, result.IsNull())
 }
@@ -1773,7 +1771,7 @@ func TestTimestampDiff(t *testing.T) {
 		resetStmtContext(ctx)
 		f, err := fc.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.isNull {
 			require.True(t, d.IsNull())
@@ -1783,13 +1781,14 @@ func TestTimestampDiff(t *testing.T) {
 	}
 
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreTruncateErr(true).WithIgnoreZeroInDate(true))
+	sc.IgnoreTruncate.Store(true)
+	sc.IgnoreZeroInDate = true
 	resetStmtContext(ctx)
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewStringDatum("DAY"),
 		types.NewStringDatum("2017-01-00"),
 		types.NewStringDatum("2017-01-01")}))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, d.Kind())
 
@@ -1797,7 +1796,7 @@ func TestTimestampDiff(t *testing.T) {
 	f, err = fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewStringDatum("DAY"),
 		{}, types.NewStringDatum("2017-01-01")}))
 	require.NoError(t, err)
-	d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, d.IsNull())
 }
@@ -1809,7 +1808,7 @@ func TestUnixTimestamp(t *testing.T) {
 	f, err := fc.getFunction(ctx, nil)
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, d.GetInt64()-time.Now().Unix(), int64(-1))
 	require.LessOrEqual(t, d.GetInt64()-time.Now().Unix(), int64(1))
@@ -1826,7 +1825,7 @@ func TestUnixTimestamp(t *testing.T) {
 	f, err = fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	val, _ := d.GetMysqlDecimal().ToInt()
 	require.GreaterOrEqual(t, val-time.Now().Unix(), int64(-1))
@@ -1838,13 +1837,13 @@ func TestUnixTimestamp(t *testing.T) {
 	resetStmtContext(ctx)
 	f, err = fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
-	d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, true, d.IsNull())
 
 	// Set the time_zone variable, because UnixTimestamp() result depends on it.
 	ctx.GetSessionVars().TimeZone = time.UTC
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(ctx.GetSessionVars().StmtCtx.TypeFlags().WithIgnoreZeroInDate(true))
+	ctx.GetSessionVars().StmtCtx.IgnoreZeroInDate = true
 	tests := []struct {
 		inputDecimal int
 		input        types.Datum
@@ -1883,7 +1882,7 @@ func TestUnixTimestamp(t *testing.T) {
 		resetStmtContext(ctx)
 		f, err := fc.getFunction(ctx, expr)
 		require.NoErrorf(t, err, "%+v", test)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoErrorf(t, err, "%+v", test)
 		require.Equalf(t, test.expectKind, d.Kind(), "%+v", test)
 		str, err := d.ToString()
@@ -1925,7 +1924,7 @@ func TestDateArithFuncs(t *testing.T) {
 		f, err := test.fc.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		s, _ := v.ToString()
 		require.Equal(t, test.expect, s)
@@ -1935,7 +1934,7 @@ func TestDateArithFuncs(t *testing.T) {
 	f, err := fcAdd.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
 	require.NotNil(t, f)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, v.IsNull())
 
@@ -1943,7 +1942,7 @@ func TestDateArithFuncs(t *testing.T) {
 	f, err = fcSub.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
 	require.NotNil(t, f)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, v.IsNull())
 
@@ -1970,7 +1969,7 @@ func TestDateArithFuncs(t *testing.T) {
 		f, err := fcAdd.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.isNull {
 			require.True(t, v.IsNull())
@@ -2000,7 +1999,7 @@ func TestDateArithFuncs(t *testing.T) {
 		f, err = fcAdd.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expected, v.GetString())
 	}
@@ -2023,7 +2022,7 @@ func TestDateArithFuncs(t *testing.T) {
 		f, err = fcAdd.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expected, v.GetString())
 	}
@@ -2047,7 +2046,7 @@ func TestDateArithFuncs(t *testing.T) {
 			f, err = fc.getFunction(ctx, datumsToConstants(args))
 			require.NoError(t, err)
 			require.NotNil(t, f)
-			v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+			v, err = evalBuiltinFunc(f, chunk.Row{})
 			require.NoError(t, err)
 			require.True(t, v.IsNull())
 		}
@@ -2162,14 +2161,14 @@ func TestDateArithFuncs(t *testing.T) {
 		},
 	}
 	for _, tt := range testDurations {
-		dur, _, ok, err := types.StrToDuration(types.DefaultStmtNoWarningContext, tt.dur, tt.fsp)
+		dur, _, ok, err := types.StrToDuration(nil, tt.dur, tt.fsp)
 		require.NoError(t, err)
 		require.True(t, ok)
 		args = types.MakeDatums(dur, tt.format, tt.unit)
 		f, err = tt.fc.getFunction(ctx, datumsToConstants(args))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if tt.checkHmsOnly {
 			s := v.GetMysqlTime().String()
@@ -2225,7 +2224,7 @@ func TestTimestamp(t *testing.T) {
 		resetStmtContext(ctx)
 		f, err := fc.getFunction(ctx, datumsToConstants(test.t))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
@@ -2235,7 +2234,7 @@ func TestTimestamp(t *testing.T) {
 	resetStmtContext(ctx)
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{nilDatum}))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, d.Kind())
 }
@@ -2277,7 +2276,7 @@ func TestMakeDate(t *testing.T) {
 		require.Equal(t, charset.CollationBin, tp.GetCollate())
 		require.Equal(t, mysql.BinaryFlag, tp.GetFlag())
 		require.Equal(t, mysql.MaxDateWidth, tp.GetFlen())
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -2356,7 +2355,7 @@ func TestMakeTime(t *testing.T) {
 	for idx, c := range Dtbl {
 		f, err := maketime.getFunction(ctx, datumsToConstants(c["Args"]))
 		require.NoError(t, err)
-		got, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		got, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if c["Want"][0].Kind() == types.KindNull {
 			require.Equalf(t, types.KindNull, got.Kind(), "[%v] - args:%v", idx, c["Args"])
@@ -2370,11 +2369,11 @@ func TestMakeTime(t *testing.T) {
 	// MAKETIME(CAST(-1 AS UNSIGNED),0,0);
 	tp1 := types.NewFieldTypeBuilder().SetType(mysql.TypeLonglong).SetFlag(mysql.UnsignedFlag).SetFlen(mysql.MaxIntWidth).SetCharset(charset.CharsetBin).SetCollate(charset.CollationBin).BuildP()
 	f := BuildCastFunction(ctx, &Constant{Value: types.NewDatum("-1"), RetType: types.NewFieldType(mysql.TypeString)}, tp1)
-	res, err := f.Eval(ctx, chunk.Row{})
+	res, err := f.Eval(chunk.Row{})
 	require.NoError(t, err)
 	f1, err := maketime.getFunction(ctx, datumsToConstants([]types.Datum{res, makeDatums(0)[0], makeDatums(0)[0]}))
 	require.NoError(t, err)
-	got, err := evalBuiltinFunc(f1, ctx, chunk.Row{})
+	got, err := evalBuiltinFunc(f1, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, "838:59:59", got.GetMysqlDuration().String())
 
@@ -2390,7 +2389,7 @@ func TestMakeTime(t *testing.T) {
 	for idx, c := range Dtbl {
 		f, err := maketime.getFunction(ctx, datumsToConstants(c["Args"]))
 		require.NoError(t, err)
-		got, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		got, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		want, err := c["Want"][0].ToString()
 		require.NoError(t, err)
@@ -2401,7 +2400,7 @@ func TestMakeTime(t *testing.T) {
 func TestQuarter(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	tests := []struct {
 		t      string
 		expect int64
@@ -2425,7 +2424,7 @@ func TestQuarter(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{arg}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, result.GetInt64())
 	}
@@ -2434,7 +2433,7 @@ func TestQuarter(t *testing.T) {
 	argInvalid := types.NewStringDatum("2008-13-01")
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{argInvalid}))
 	require.NoError(t, err)
-	result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	result, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, result.IsNull())
 }
@@ -2470,7 +2469,7 @@ func TestGetFormat(t *testing.T) {
 		dat := []types.Datum{types.NewStringDatum(test.unit), types.NewStringDatum(test.location)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
@@ -2480,7 +2479,7 @@ func TestGetFormat(t *testing.T) {
 func TestToSeconds(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	tests := []struct {
 		param  interface{}
 		expect int64
@@ -2497,7 +2496,7 @@ func TestToSeconds(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, d.GetInt64())
 	}
@@ -2514,7 +2513,7 @@ func TestToSeconds(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(i)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull())
 	}
@@ -2523,7 +2522,7 @@ func TestToSeconds(t *testing.T) {
 func TestToDays(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+	sc.IgnoreZeroInDate = true
 	tests := []struct {
 		param  interface{}
 		expect int64
@@ -2541,7 +2540,7 @@ func TestToDays(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, test.expect, d.GetInt64())
 	}
@@ -2557,7 +2556,7 @@ func TestToDays(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(i)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull())
 	}
@@ -2593,7 +2592,7 @@ func TestTimestampAdd(t *testing.T) {
 		dat := []types.Datum{types.NewStringDatum(test.unit), types.NewFloat64Datum(test.interval), types.NewDatum(test.date)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
@@ -2624,7 +2623,7 @@ func TestPeriodAdd(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{period, months}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		if !test.Success {
 			require.True(t, result.IsNull())
 			continue
@@ -2643,7 +2642,7 @@ func TestTimeFormat(t *testing.T) {
 	fc := funcs[ast.TimeFormat]
 	f, err := fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, true, v.IsNull())
 
@@ -2667,7 +2666,7 @@ func TestTimeFormat(t *testing.T) {
 		fc := funcs[ast.TimeFormat]
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		comment := fmt.Sprintf("no.%d\nobtain:%v\nexpect:%v\n", i, v.GetValue(), c["Expect"][0].GetValue())
 		testutil.DatumEqual(t, c["Expect"][0], v, comment)
@@ -2682,7 +2681,7 @@ func TestTimeToSec(t *testing.T) {
 	nilDatum := types.NewDatum(nil)
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{nilDatum}))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, d.Kind())
 
@@ -2713,7 +2712,7 @@ func TestTimeToSec(t *testing.T) {
 		expr := datumsToConstants([]types.Datum{test.input})
 		f, err := fc.getFunction(ctx, expr)
 		require.NoError(t, err, comment)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err, comment)
 		require.Equal(t, test.expect, result.GetInt64(), comment)
 	}
@@ -2722,11 +2721,11 @@ func TestTimeToSec(t *testing.T) {
 func TestSecToTime(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	fc := funcs[ast.SecToTime]
 
@@ -2734,7 +2733,7 @@ func TestSecToTime(t *testing.T) {
 	nilDatum := types.NewDatum(nil)
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{nilDatum}))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, d.Kind())
 
@@ -2766,7 +2765,7 @@ func TestSecToTime(t *testing.T) {
 		expr[0].GetType().SetDecimal(test.inputDecimal)
 		f, err := fc.getFunction(ctx, expr)
 		require.NoError(t, err, comment)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err, comment)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result, comment)
@@ -2844,7 +2843,7 @@ func TestConvertTz(t *testing.T) {
 					types.NewDatum(test.fromTz),
 					types.NewDatum(test.toTz)}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		if test.Success {
 			require.NoError(t, err)
 			result, _ := d.ToString()
@@ -2890,7 +2889,7 @@ func TestPeriodDiff(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{period1, period2}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		if !test.Success {
 			require.True(t, result.IsNull())
 			continue
@@ -2907,7 +2906,7 @@ func TestPeriodDiff(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{period1, period2}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		require.Error(t, err)
 		require.Equal(t, "[expression:1210]Incorrect arguments to period_diff", err.Error())
 	}
@@ -2916,14 +2915,14 @@ func TestPeriodDiff(t *testing.T) {
 	args := []types.Datum{types.NewDatum(nil), types.NewIntDatum(0)}
 	f, err := fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 
 	args = []types.Datum{types.NewIntDatum(0), types.NewDatum(nil)}
 	f, err = fc.getFunction(ctx, datumsToConstants(args))
 	require.NoError(t, err)
-	v, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, v.Kind())
 }
@@ -2945,14 +2944,14 @@ func TestLastDay(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
 	}
 
 	var timeData types.Time
-	timeData.StrToDate(ctx.GetSessionVars().StmtCtx.TypeCtx(), "202010", "%Y%m")
+	timeData.StrToDate(ctx.GetSessionVars().StmtCtx, "202010", "%Y%m")
 	testsNull := []struct {
 		param           interface{}
 		isNilNoZeroDate bool
@@ -2972,11 +2971,11 @@ func TestLastDay(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(i.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull() == i.isNilNoZeroDate)
 		ctx.GetSessionVars().SQLMode &= ^mysql.ModeNoZeroDate
-		d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull() == i.isNil)
 		ctx.GetSessionVars().SQLMode |= mysql.ModeNoZeroDate
@@ -2997,7 +2996,7 @@ func TestWithTimeZone(t *testing.T) {
 		return result
 	}
 	durationToGoTime := func(d types.Datum, loc *time.Location) time.Time {
-		t, _ := d.GetMysqlDuration().ConvertToTime(sv.StmtCtx.TypeCtx(), mysql.TypeDatetime)
+		t, _ := d.GetMysqlDuration().ConvertToTime(sv.StmtCtx, mysql.TypeDatetime)
 		result, _ := t.GoTime(sv.TimeZone)
 		return result
 	}
@@ -3020,7 +3019,7 @@ func TestWithTimeZone(t *testing.T) {
 		f, err := funcs[c.method].getFunction(ctx, datumsToConstants(c.Input))
 		require.NoError(t, err)
 		resetStmtContext(ctx)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result := c.convertToTime(d, sv.TimeZone)
 		require.LessOrEqual(t, result.Sub(now), 2*time.Second)
@@ -3044,7 +3043,7 @@ func TestTidbParseTso(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
@@ -3059,7 +3058,7 @@ func TestTidbParseTso(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(i)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull())
 	}
@@ -3081,7 +3080,7 @@ func TestTidbParseTsoLogical(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(test.param)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		result, _ := d.ToString()
 		require.Equal(t, test.expect, result)
@@ -3096,7 +3095,7 @@ func TestTidbParseTsoLogical(t *testing.T) {
 		dat := []types.Datum{types.NewDatum(i)}
 		f, err := fc.getFunction(ctx, datumsToConstants(dat))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.True(t, d.IsNull())
 	}
@@ -3159,7 +3158,7 @@ func TestTiDBBoundedStaleness(t *testing.T) {
 		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/expression/injectSafeTS", fmt.Sprintf("return(%v)", test.injectSafeTS)))
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewDatum(test.leftTime), types.NewDatum(test.rightTime)}))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.isNull {
 			require.True(t, d.IsNull())
@@ -3177,7 +3176,7 @@ func TestTiDBBoundedStaleness(t *testing.T) {
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/expression/injectSafeTS", fmt.Sprintf("return(%v)", safeTS1)))
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewDatum(t1Str), types.NewDatum(t2Str)}))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	goTime, err := d.GetMysqlTime().GoTime(timeZone)
 	require.NoError(t, err)
@@ -3189,7 +3188,7 @@ func TestTiDBBoundedStaleness(t *testing.T) {
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/expression/injectSafeTS", fmt.Sprintf("return(%v)", safeTS2)))
 	f, err = fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewDatum(t1Str), types.NewDatum(t2Str)}))
 	require.NoError(t, err)
-	d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	// Still safeTime1
 	require.Equal(t, safeTime1.Format(types.TimeFormat), resultTime)
@@ -3231,7 +3230,7 @@ func TestCurrentTso(t *testing.T) {
 	f, err := fc.getFunction(mock.NewContext(), datumsToConstants(nil))
 	require.NoError(t, err)
 	resetStmtContext(ctx)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	n := v.GetInt64()
 	tso, _ := ctx.GetSessionVars().GetSessionOrGlobalSystemVar(context.Background(), "tidb_current_ts")

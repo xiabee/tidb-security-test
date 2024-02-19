@@ -74,9 +74,6 @@ func (a *AnalyzeResult) DestroyAndPutToPool() {
 	for _, f := range a.Fms {
 		f.DestroyAndPutToPool()
 	}
-	for _, h := range a.Hist {
-		h.DestroyAndPutToPool()
-	}
 }
 
 // AnalyzeResults represents the analyze results of a task.

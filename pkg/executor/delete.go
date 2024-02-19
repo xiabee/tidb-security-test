@@ -276,7 +276,7 @@ func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FK
 // Close implements the Executor Close interface.
 func (e *DeleteExec) Close() error {
 	defer e.memTracker.ReplaceBytesUsed(0)
-	return exec.Close(e.Children(0))
+	return e.Children(0).Close()
 }
 
 // Open implements the Executor Open interface.
@@ -284,7 +284,7 @@ func (e *DeleteExec) Open(ctx context.Context) error {
 	e.memTracker = memory.NewTracker(e.ID(), -1)
 	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
 
-	return exec.Open(ctx, e.Children(0))
+	return e.Children(0).Open(ctx)
 }
 
 // GetFKChecks implements WithForeignKeyTrigger interface.

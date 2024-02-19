@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/zap"
 )
 
@@ -109,7 +110,7 @@ func RequestLoadStats(ctx sessionctx.Context, neededHistItems []model.TableItemI
 	if sessMaxExecutionTime <= 0 {
 		sessMaxExecutionTime = maxDuration
 	}
-	waitTime := min(syncWait, hintMaxExecutionTime, sessMaxExecutionTime)
+	waitTime := mathutil.Min(syncWait, hintMaxExecutionTime, sessMaxExecutionTime)
 	var timeout = time.Duration(waitTime)
 	err := domain.GetDomain(ctx).StatsHandle().SendLoadRequests(stmtCtx, neededHistItems, timeout)
 	if err != nil {

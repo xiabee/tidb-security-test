@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/copr"
 	"github.com/pingcap/tidb/pkg/ddl/ingest"
 	sess "github.com/pingcap/tidb/pkg/ddl/internal/session"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/model"
@@ -34,11 +33,11 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	decoder "github.com/pingcap/tidb/pkg/util/rowDecoder"
 	"go.uber.org/zap"
@@ -164,22 +163,14 @@ func initSessCtx(
 	if err := setSessCtxLocation(sessCtx, tzLocation); err != nil {
 		return errors.Trace(err)
 	}
-	sessCtx.GetSessionVars().StmtCtx.SetTimeZone(sessCtx.GetSessionVars().Location())
-
-	errLevels := sessCtx.GetSessionVars().StmtCtx.ErrLevels()
-	errLevels[errctx.ErrGroupBadNull] = errctx.ResolveErrLevel(false, !sqlMode.HasStrictMode())
-	errLevels[errctx.ErrGroupDividedByZero] =
-		errctx.ResolveErrLevel(!sqlMode.HasErrorForDivisionByZeroMode(), !sqlMode.HasStrictMode())
-	sessCtx.GetSessionVars().StmtCtx.SetErrLevels(errLevels)
-
-	typeFlags := types.StrictFlags.
-		WithTruncateAsWarning(!sqlMode.HasStrictMode()).
-		WithIgnoreInvalidDateErr(sqlMode.HasAllowInvalidDatesMode()).
-		WithIgnoreZeroInDate(!sqlMode.HasStrictMode() || sqlMode.HasAllowInvalidDatesMode()).
-		WithCastTimeToYearThroughConcat(true)
-	sessCtx.GetSessionVars().StmtCtx.SetTypeFlags(typeFlags)
-	sessCtx.GetSessionVars().StmtCtx.ResourceGroupName = resGroupName
-
+	sessCtx.GetSessionVars().StmtCtx.BadNullAsWarning = !sqlMode.HasStrictMode()
+	sessCtx.GetSessionVars().StmtCtx.TruncateAsWarning = !sqlMode.HasStrictMode()
+	sessCtx.GetSessionVars().StmtCtx.OverflowAsWarning = !sqlMode.HasStrictMode()
+	sessCtx.GetSessionVars().StmtCtx.AllowInvalidDate = sqlMode.HasAllowInvalidDatesMode()
+	sessCtx.GetSessionVars().StmtCtx.DividedByZeroAsWarning = !sqlMode.HasStrictMode()
+	sessCtx.GetSessionVars().StmtCtx.IgnoreZeroInDate = !sqlMode.HasStrictMode() || sqlMode.HasAllowInvalidDatesMode()
+	sessCtx.GetSessionVars().StmtCtx.NoZeroDate = sqlMode.HasStrictMode()
+	sessCtx.GetSessionVars().ResourceGroupName = resGroupName
 	// Prevent initializing the mock context in the workers concurrently.
 	// For details, see https://github.com/pingcap/tidb/issues/40879.
 	if _, ok := sessCtx.(*mock.Context); ok {
@@ -198,23 +189,29 @@ func restoreSessCtx(sessCtx sessionctx.Context) func(sessCtx sessionctx.Context)
 		tz := *sv.TimeZone
 		timezone = &tz
 	}
-	typeFlags := sv.StmtCtx.TypeFlags()
-	errLevels := sv.StmtCtx.ErrLevels()
-	resGroupName := sv.StmtCtx.ResourceGroupName
+	badNullAsWarn := sv.StmtCtx.BadNullAsWarning
+	overflowAsWarn := sv.StmtCtx.OverflowAsWarning
+	dividedZeroAsWarn := sv.StmtCtx.DividedByZeroAsWarning
+	ignoreZeroInDate := sv.StmtCtx.IgnoreZeroInDate
+	noZeroDate := sv.StmtCtx.NoZeroDate
+	resGroupName := sv.ResourceGroupName
 	return func(usedSessCtx sessionctx.Context) {
 		uv := usedSessCtx.GetSessionVars()
 		uv.RowEncoder.Enable = rowEncoder
 		uv.SQLMode = sqlMode
 		uv.TimeZone = timezone
-		uv.StmtCtx.SetTypeFlags(typeFlags)
-		uv.StmtCtx.SetErrLevels(errLevels)
-		uv.StmtCtx.ResourceGroupName = resGroupName
+		uv.StmtCtx.BadNullAsWarning = badNullAsWarn
+		uv.StmtCtx.OverflowAsWarning = overflowAsWarn
+		uv.StmtCtx.DividedByZeroAsWarning = dividedZeroAsWarn
+		uv.StmtCtx.IgnoreZeroInDate = ignoreZeroInDate
+		uv.StmtCtx.NoZeroDate = noZeroDate
+		uv.ResourceGroupName = resGroupName
 	}
 }
 
 func (*txnBackfillScheduler) expectedWorkerSize() (size int) {
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
-	return min(workerCnt, maxBackfillWorkerSize)
+	return mathutil.Min(workerCnt, maxBackfillWorkerSize)
 }
 
 func (b *txnBackfillScheduler) currentWorkerSize() int {
@@ -257,9 +254,6 @@ func (b *txnBackfillScheduler) adjustWorkerSize() error {
 		case typeUpdateColumnWorker:
 			// Setting InCreateOrAlterStmt tells the difference between SELECT casting and ALTER COLUMN casting.
 			sessCtx.GetSessionVars().StmtCtx.InCreateOrAlterStmt = true
-			sessCtx.GetSessionVars().StmtCtx.SetTypeFlags(
-				sessCtx.GetSessionVars().StmtCtx.TypeFlags().
-					WithIgnoreZeroDateErr(!reorgInfo.ReorgMeta.SQLMode.HasStrictMode()))
 			updateWorker := newUpdateColumnWorker(sessCtx, i, b.tbl, b.decodeColMap, reorgInfo, jc)
 			runner = newBackfillWorker(jc.ddlJobCtx, updateWorker)
 			worker = updateWorker
@@ -507,9 +501,9 @@ func (*ingestBackfillScheduler) expectedWorkerSize() (readerSize int, writerSize
 
 func expectedIngestWorkerCnt() (readerCnt, writerCnt int) {
 	workerCnt := int(variable.GetDDLReorgWorkerCounter())
-	readerCnt = min(workerCnt/2, maxBackfillWorkerSize)
-	readerCnt = max(readerCnt, 1)
-	writerCnt = min(workerCnt/2+2, maxBackfillWorkerSize)
+	readerCnt = mathutil.Min(workerCnt/2, maxBackfillWorkerSize)
+	readerCnt = mathutil.Max(readerCnt, 1)
+	writerCnt = mathutil.Min(workerCnt/2+2, maxBackfillWorkerSize)
 	return readerCnt, writerCnt
 }
 

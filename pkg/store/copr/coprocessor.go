@@ -45,9 +45,9 @@ import (
 	"github.com/pingcap/tidb/pkg/store/driver/backoff"
 	derr "github.com/pingcap/tidb/pkg/store/driver/error"
 	"github.com/pingcap/tidb/pkg/store/driver/options"
-	util2 "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/paging"
 	"github.com/pingcap/tidb/pkg/util/tracing"
@@ -376,7 +376,7 @@ func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*c
 			pagingSize = req.Paging.MinPagingSize
 		}
 		for i := 0; i < rLen; {
-			nextI := min(i+rangesPerTaskLimit, rLen)
+			nextI := mathutil.Min(i+rangesPerTaskLimit, rLen)
 			hint := -1
 			// calculate the row count hint
 			if hints != nil {
@@ -937,12 +937,7 @@ func (it *copIterator) recvFromRespCh(ctx context.Context, respCh <-chan *copRes
 			exit = true
 			return
 		case <-ticker.C:
-			killed := atomic.LoadUint32(it.vars.Killed)
-			if killed != 0 {
-				logutil.Logger(ctx).Info(
-					"a killed signal is received",
-					zap.Uint32("signal", killed),
-				)
+			if atomic.LoadUint32(it.vars.Killed) == 1 {
 				resp = &copResponse{err: derr.ErrQueryInterrupted}
 				ok = true
 				return
@@ -1122,7 +1117,7 @@ func (worker *copIteratorWorker) handleTask(ctx context.Context, task *copTask, 
 			logutil.BgLogger().Error("copIteratorWork meet panic",
 				zap.Any("r", r),
 				zap.Stack("stack trace"))
-			resp := &copResponse{err: util2.GetRecoverError(r)}
+			resp := &copResponse{err: errors.Errorf("%v", r)}
 			// if panic has happened, set checkOOM to false to avoid another panic.
 			worker.sendToRespCh(resp, respCh, false)
 		}
@@ -1163,15 +1158,13 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask, ch
 	}
 
 	copReq := coprocessor.Request{
-		Tp:              worker.req.Tp,
-		StartTs:         worker.req.StartTs,
-		Data:            worker.req.Data,
-		Ranges:          task.ranges.ToPBRanges(),
-		SchemaVer:       worker.req.SchemaVar,
-		PagingSize:      task.pagingSize,
-		Tasks:           task.ToPBBatchTasks(),
-		ConnectionId:    worker.req.ConnID,
-		ConnectionAlias: worker.req.ConnAlias,
+		Tp:         worker.req.Tp,
+		StartTs:    worker.req.StartTs,
+		Data:       worker.req.Data,
+		Ranges:     task.ranges.ToPBRanges(),
+		SchemaVer:  worker.req.SchemaVar,
+		PagingSize: task.pagingSize,
+		Tasks:      task.ToPBBatchTasks(),
 	}
 
 	cacheKey, cacheValue := worker.buildCacheKey(task, &copReq)
@@ -1867,15 +1860,8 @@ func (worker *copIteratorWorker) calculateRemain(ranges *KeyRanges, split *copro
 
 // finished checks the flags and finished channel, it tells whether the worker is finished.
 func (worker *copIteratorWorker) finished() bool {
-	if worker.vars != nil && worker.vars.Killed != nil {
-		killed := atomic.LoadUint32(worker.vars.Killed)
-		if killed != 0 {
-			logutil.BgLogger().Info(
-				"a killed signal is received in copIteratorWorker",
-				zap.Uint32("signal", killed),
-			)
-			return true
-		}
+	if worker.vars != nil && worker.vars.Killed != nil && atomic.LoadUint32(worker.vars.Killed) == 1 {
+		return true
 	}
 	select {
 	case <-worker.finishCh:

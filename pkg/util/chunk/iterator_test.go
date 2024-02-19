@@ -114,8 +114,7 @@ func TestIterator(t *testing.T) {
 		ptrs2 = append(ptrs2, ptr2)
 	}
 
-	var it Iterator
-	it = NewIterator4Slice(rows)
+	it := NewIterator4Slice(rows)
 	checkEqual(it, expected, t)
 	it.Begin()
 	for i := 0; i < 5; i++ {

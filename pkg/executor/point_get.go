@@ -63,8 +63,8 @@ func (b *executorBuilder) buildPointGet(p *plannercore.PointGetPlan) exec.Execut
 		isStaleness:      b.isStaleness,
 	}
 
-	e.SetInitCap(1)
-	e.SetMaxChunkSize(1)
+	e.Base().SetInitCap(1)
+	e.Base().SetMaxChunkSize(1)
 	e.Init(p)
 
 	e.snapshot, err = b.getSnapshot()
@@ -120,7 +120,7 @@ type PointGetExecutor struct {
 	tblInfo          *model.TableInfo
 	handle           kv.Handle
 	idxInfo          *model.IndexInfo
-	partitionDef     *model.PartitionDefinition
+	partInfo         *model.PartitionDefinition
 	idxKey           kv.Key
 	handleVal        []byte
 	idxVals          []types.Datum
@@ -162,7 +162,7 @@ func (e *PointGetExecutor) Init(p *plannercore.PointGetPlan) {
 		e.lockWaitTime = 0
 	}
 	e.rowDecoder = decoder
-	e.partitionDef = p.PartitionDef
+	e.partInfo = p.PartitionInfo
 	e.columns = p.Columns
 	e.buildVirtualColumnInfo()
 }
@@ -200,6 +200,13 @@ func (e *PointGetExecutor) Close() error {
 	if e.RuntimeStats() != nil && e.snapshot != nil {
 		e.snapshot.SetOption(kv.CollectRuntimeStats, nil)
 	}
+	if e.idxInfo != nil && e.tblInfo != nil {
+		actRows := int64(0)
+		if e.RuntimeStats() != nil {
+			actRows = e.RuntimeStats().GetActRows()
+		}
+		e.Ctx().StoreIndexUsage(e.tblInfo.ID, e.idxInfo.ID, actRows)
+	}
 	e.done = false
 	return nil
 }
@@ -214,8 +221,8 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 
 	var tblID int64
 	var err error
-	if e.partitionDef != nil {
-		tblID = e.partitionDef.ID
+	if e.partInfo != nil {
+		tblID = e.partInfo.ID
 	} else {
 		tblID = e.tblInfo.ID
 	}
@@ -296,14 +303,6 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 				// Wait `UPDATE` finished
 				failpoint.InjectContext(ctx, "pointGetRepeatableReadTest-step2", nil)
 			})
-			if e.idxInfo.Global {
-				segs := tablecodec.SplitIndexValue(e.handleVal)
-				_, pid, err := codec.DecodeInt(segs.PartitionID)
-				if err != nil {
-					return err
-				}
-				tblID = pid
-			}
 		}
 	}
 
@@ -334,7 +333,7 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 		return nil
 	}
-	err = DecodeRowValToChunk(e.BaseExecutor.Ctx(), e.Schema(), e.tblInfo, e.handle, val, req, e.rowDecoder)
+	err = DecodeRowValToChunk(e.Base().Ctx(), e.Schema(), e.tblInfo, e.handle, val, req, e.rowDecoder)
 	if err != nil {
 		return err
 	}
@@ -503,8 +502,8 @@ func (e *PointGetExecutor) verifyTxnScope() error {
 	var tblName string
 	var partName string
 	is := e.Ctx().GetInfoSchema().(infoschema.InfoSchema)
-	if e.partitionDef != nil {
-		tblID = e.partitionDef.ID
+	if e.partInfo != nil {
+		tblID = e.partInfo.ID
 		tblInfo, _, partInfo := is.FindTableByPartitionID(tblID)
 		tblName = tblInfo.Meta().Name.String()
 		partName = partInfo.Name.String()
@@ -541,13 +540,11 @@ func EncodeUniqueIndexValuesForKey(ctx sessionctx.Context, tblInfo *model.TableI
 		colInfo := tblInfo.Columns[idxInfo.Columns[i].Offset]
 		// table.CastValue will append 0x0 if the string value's length is smaller than the BINARY column's length.
 		// So we don't use CastValue for string value for now.
-		// TODO: The first if branch should have been removed, because the functionality of set the collation of the datum
-		// have been moved to util/ranger (normal path) and getNameValuePairs/getPointGetValue (fast path). But this change
-		// will be cherry-picked to a hotfix, so we choose to be a bit conservative and keep this for now.
+		// TODO: merge two if branch.
 		if colInfo.GetType() == mysql.TypeString || colInfo.GetType() == mysql.TypeVarString || colInfo.GetType() == mysql.TypeVarchar {
 			var str string
 			str, err = idxVals[i].ToString()
-			idxVals[i].SetString(str, idxVals[i].Collation())
+			idxVals[i].SetString(str, colInfo.FieldType.GetCollate())
 		} else if colInfo.GetType() == mysql.TypeEnum && (idxVals[i].Kind() == types.KindString || idxVals[i].Kind() == types.KindBytes || idxVals[i].Kind() == types.KindBinaryLiteral) {
 			var str string
 			var e types.Enum
@@ -574,8 +571,7 @@ func EncodeUniqueIndexValuesForKey(ctx sessionctx.Context, tblInfo *model.TableI
 		}
 	}
 
-	encodedIdxVals, err := codec.EncodeKey(sc.TimeZone(), nil, idxVals...)
-	err = sc.HandleError(err)
+	encodedIdxVals, err := codec.EncodeKey(sc, nil, idxVals...)
 	if err != nil {
 		return nil, err
 	}

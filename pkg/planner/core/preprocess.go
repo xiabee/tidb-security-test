@@ -45,7 +45,6 @@ import (
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/domainutil"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	utilparser "github.com/pingcap/tidb/pkg/util/parser"
@@ -477,7 +476,7 @@ func (p *preprocessor) tableByName(tn *ast.TableName) (table.Table, error) {
 		currentDB = tn.Schema.L
 	}
 	if currentDB == "" {
-		return nil, errors.Trace(plannererrors.ErrNoDB)
+		return nil, errors.Trace(ErrNoDB)
 	}
 	sName := model.NewCIStr(currentDB)
 	is := p.ensureInfoSchema()
@@ -489,7 +488,7 @@ func (p *preprocessor) tableByName(tn *ast.TableName) (table.Table, error) {
 
 	tbl, err := is.TableByName(sName, tn.Name)
 	if err != nil {
-		// We should never leak that the table doesn't exist (i.e. attachplannererrors.ErrTableNotExists)
+		// We should never leak that the table doesn't exist (i.e. attach ErrTableNotExists)
 		// unless we know that the user has permissions to it, should it exist.
 		// By checking here, this makes all SELECT/SHOW/INSERT/UPDATE/DELETE statements safe.
 		currentUser, activeRoles := p.sctx.GetSessionVars().User, p.sctx.GetSessionVars().ActiveRoles
@@ -501,7 +500,7 @@ func (p *preprocessor) tableByName(tn *ast.TableName) (table.Table, error) {
 					u = currentUser.AuthUsername
 					h = currentUser.AuthHostname
 				}
-				return nil, plannererrors.ErrTableaccessDenied.GenWithStackByArgs(p.stmtType(), u, h, tn.Name.O)
+				return nil, ErrTableaccessDenied.GenWithStackByArgs(p.stmtType(), u, h, tn.Name.O)
 			}
 		}
 		return nil, err
@@ -585,7 +584,7 @@ func (p *preprocessor) Leave(in ast.Node) (out ast.Node, ok bool) {
 			}
 		}
 		if !valid {
-			p.err = plannererrors.ErrUnknownExplainFormat.GenWithStackByArgs(x.Format)
+			p.err = ErrUnknownExplainFormat.GenWithStackByArgs(x.Format)
 		}
 	case *ast.TableName:
 		p.handleTableName(x)
@@ -608,7 +607,7 @@ func (p *preprocessor) Leave(in ast.Node) (out ast.Node, ok bool) {
 				}
 
 				if !isValueExpr1 || !isValueExpr2 {
-					p.err = plannererrors.ErrWrongArguments.GenWithStackByArgs("NAME_CONST")
+					p.err = ErrWrongArguments.GenWithStackByArgs("NAME_CONST")
 				}
 			}
 			break
@@ -636,7 +635,7 @@ func (p *preprocessor) Leave(in ast.Node) (out ast.Node, ok bool) {
 		with := p.preprocessWith
 		lenWithCteBeforeOffset := len(with.cteBeforeOffset)
 		if lenWithCteBeforeOffset < 1 {
-			p.err = plannererrors.ErrInternal.GenWithStack("len(cteBeforeOffset) is less than one.Maybe it was deleted in somewhere.Should match in Enter and Leave")
+			p.err = ErrInternal.GenWithStack("len(cteBeforeOffset) is less than one.Maybe it was deleted in somewhere.Should match in Enter and Leave")
 			break
 		}
 		beforeOffset := with.cteBeforeOffset[lenWithCteBeforeOffset-1]
@@ -775,18 +774,18 @@ func (p *preprocessor) checkSetOprSelectList(stmt *ast.SetOprSelectList) {
 		switch s := sel.(type) {
 		case *ast.SelectStmt:
 			if s.SelectIntoOpt != nil {
-				p.err = plannererrors.ErrWrongUsage.GenWithStackByArgs("UNION", "INTO")
+				p.err = ErrWrongUsage.GenWithStackByArgs("UNION", "INTO")
 				return
 			}
 			if s.IsInBraces {
 				continue
 			}
 			if s.Limit != nil {
-				p.err = plannererrors.ErrWrongUsage.GenWithStackByArgs("UNION", "LIMIT")
+				p.err = ErrWrongUsage.GenWithStackByArgs("UNION", "LIMIT")
 				return
 			}
 			if s.OrderBy != nil {
-				p.err = plannererrors.ErrWrongUsage.GenWithStackByArgs("UNION", "ORDER BY")
+				p.err = ErrWrongUsage.GenWithStackByArgs("UNION", "ORDER BY")
 				return
 			}
 		case *ast.SetOprSelectList:
@@ -836,11 +835,11 @@ func (p *preprocessor) checkAdminCheckTableGrammar(stmt *ast.AdminStmt) {
 		tempTableType := tableInfo.Meta().TempTableType
 		if (stmt.Tp == ast.AdminCheckTable || stmt.Tp == ast.AdminChecksumTable || stmt.Tp == ast.AdminCheckIndex) && tempTableType != model.TempTableNone {
 			if stmt.Tp == ast.AdminChecksumTable {
-				p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("admin checksum table")
+				p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("admin checksum table")
 			} else if stmt.Tp == ast.AdminCheckTable {
-				p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("admin check table")
+				p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("admin check table")
 			} else {
-				p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("admin check index")
+				p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("admin check index")
 			}
 			return
 		}
@@ -861,7 +860,7 @@ func (p *preprocessor) checkCreateTableGrammar(stmt *ast.CreateTableStmt) {
 		}
 		tableMetaInfo := tableInfo.Meta()
 		if tableMetaInfo.TempTableType != model.TempTableNone {
-			p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("create table like")
+			p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("create table like")
 			return
 		}
 		if stmt.TemporaryKeyword != ast.TemporaryNone {
@@ -876,10 +875,10 @@ func (p *preprocessor) checkCreateTableGrammar(stmt *ast.CreateTableStmt) {
 		for _, opt := range stmt.Options {
 			switch opt.Tp {
 			case ast.TableOptionShardRowID:
-				p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("shard_row_id_bits")
+				p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("shard_row_id_bits")
 				return
 			case ast.TableOptionPlacementPolicy:
-				p.err = plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("PLACEMENT")
+				p.err = ErrOptOnTemporaryTable.GenWithStackByArgs("PLACEMENT")
 				return
 			}
 		}
@@ -1048,7 +1047,7 @@ func (p *preprocessor) checkDropTemporaryTableGrammar(stmt *ast.DropTableStmt) {
 
 		tblInfo := tbl.Meta()
 		if stmt.TemporaryKeyword == ast.TemporaryGlobal && tblInfo.TempTableType != model.TempTableGlobal {
-			p.err = plannererrors.ErrDropTableOnTemporaryTable
+			p.err = ErrDropTableOnTemporaryTable
 			return
 		}
 	}
@@ -1096,7 +1095,7 @@ func isTableAliasDuplicate(node ast.ResultSetNode, tableAliases map[string]inter
 		}
 		_, exists := tableAliases[tabName.L]
 		if len(tabName.L) != 0 && exists {
-			return plannererrors.ErrNonUniqTable.GenWithStackByArgs(tabName)
+			return ErrNonUniqTable.GenWithStackByArgs(tabName)
 		}
 		tableAliases[tabName.L] = nil
 	}
@@ -1115,13 +1114,13 @@ func checkColumnOptions(isTempTable bool, ops []*ast.ColumnOption) (int, error) 
 			isStored = op.Stored
 		case ast.ColumnOptionAutoRandom:
 			if isTempTable {
-				return isPrimary, plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("auto_random")
+				return isPrimary, ErrOptOnTemporaryTable.GenWithStackByArgs("auto_random")
 			}
 		}
 	}
 
 	if isPrimary > 0 && isGenerated > 0 && !isStored {
-		return isPrimary, plannererrors.ErrUnsupportedOnGeneratedColumn.GenWithStackByArgs("Defining a virtual generated column as primary key")
+		return isPrimary, ErrUnsupportedOnGeneratedColumn.GenWithStackByArgs("Defining a virtual generated column as primary key")
 	}
 
 	return isPrimary, nil
@@ -1230,7 +1229,7 @@ func (p *preprocessor) checkAlterTableGrammar(stmt *ast.AlterTableStmt) {
 			statsName := spec.Statistics.StatsName
 			if util.IsInCorrectIdentifierName(statsName) {
 				msg := fmt.Sprintf("Incorrect statistics name: %s", statsName)
-				p.err = plannererrors.ErrInternal.GenWithStack(msg)
+				p.err = ErrInternal.GenWithStack(msg)
 				return
 			}
 		case ast.AlterTableAddPartitions:
@@ -1273,7 +1272,7 @@ func checkIndexInfo(indexName string, indexPartSpecifications []*ast.IndexPartSp
 	for _, idxSpec := range indexPartSpecifications {
 		// -1 => unspecified/full, > 0 OK, 0 => error
 		if idxSpec.Expr == nil && idxSpec.Length == 0 {
-			return plannererrors.ErrKeyPart0.GenWithStackByArgs(idxSpec.Column.Name.O)
+			return ErrKeyPart0.GenWithStackByArgs(idxSpec.Column.Name.O)
 		}
 	}
 	return checkDuplicateColumnName(indexPartSpecifications)
@@ -1322,19 +1321,19 @@ func checkTableEngine(engineName string) error {
 
 func checkReferInfoForTemporaryTable(tableMetaInfo *model.TableInfo) error {
 	if tableMetaInfo.AutoRandomBits != 0 {
-		return plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("auto_random")
+		return ErrOptOnTemporaryTable.GenWithStackByArgs("auto_random")
 	}
 	if tableMetaInfo.PreSplitRegions != 0 {
-		return plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("pre split regions")
+		return ErrOptOnTemporaryTable.GenWithStackByArgs("pre split regions")
 	}
 	if tableMetaInfo.Partition != nil {
-		return plannererrors.ErrPartitionNoTemporary
+		return ErrPartitionNoTemporary
 	}
 	if tableMetaInfo.ShardRowIDBits != 0 {
-		return plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("shard_row_id_bits")
+		return ErrOptOnTemporaryTable.GenWithStackByArgs("shard_row_id_bits")
 	}
 	if tableMetaInfo.PlacementPolicyRef != nil {
-		return plannererrors.ErrOptOnTemporaryTable.GenWithStackByArgs("placement")
+		return ErrOptOnTemporaryTable.GenWithStackByArgs("placement")
 	}
 
 	return nil
@@ -1525,7 +1524,7 @@ func (p *preprocessor) handleTableName(tn *ast.TableName) {
 
 		currentDB := p.sctx.GetSessionVars().CurrentDB
 		if currentDB == "" {
-			p.err = errors.Trace(plannererrors.ErrNoDB)
+			p.err = errors.Trace(ErrNoDB)
 			return
 		}
 
@@ -1775,9 +1774,9 @@ func (p *preprocessor) hasAutoConvertWarning(colDef *ast.ColumnDef) bool {
 	if !sessVars.SQLMode.HasStrictMode() && colDef.Tp.GetType() == mysql.TypeVarchar {
 		colDef.Tp.SetType(mysql.TypeBlob)
 		if colDef.Tp.GetCharset() == charset.CharsetBin {
-			sessVars.StmtCtx.AppendWarning(dbterror.ErrAutoConvert.FastGenByArgs(colDef.Name.Name.O, "VARBINARY", "BLOB"))
+			sessVars.StmtCtx.AppendWarning(dbterror.ErrAutoConvert.GenWithStackByArgs(colDef.Name.Name.O, "VARBINARY", "BLOB"))
 		} else {
-			sessVars.StmtCtx.AppendWarning(dbterror.ErrAutoConvert.FastGenByArgs(colDef.Name.Name.O, "VARCHAR", "TEXT"))
+			sessVars.StmtCtx.AppendWarning(dbterror.ErrAutoConvert.GenWithStackByArgs(colDef.Name.Name.O, "VARCHAR", "TEXT"))
 		}
 		return true
 	}

@@ -15,7 +15,6 @@
 package aggregation
 
 import (
-	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -25,21 +24,20 @@ type bitOrFunction struct {
 	aggFunction
 }
 
-func (bf *bitOrFunction) CreateContext(ctx expression.EvalContext) *AggEvaluateContext {
-	evalCtx := bf.aggFunction.CreateContext(ctx)
+func (bf *bitOrFunction) CreateContext(sc *stmtctx.StatementContext) *AggEvaluateContext {
+	evalCtx := bf.aggFunction.CreateContext(sc)
 	evalCtx.Value.SetUint64(0)
 	return evalCtx
 }
 
-func (*bitOrFunction) ResetContext(ctx expression.EvalContext, evalCtx *AggEvaluateContext) {
-	evalCtx.Ctx = ctx
+func (*bitOrFunction) ResetContext(_ *stmtctx.StatementContext, evalCtx *AggEvaluateContext) {
 	evalCtx.Value.SetUint64(0)
 }
 
 // Update implements Aggregation interface.
 func (bf *bitOrFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.StatementContext, row chunk.Row) error {
 	a := bf.Args[0]
-	value, err := a.Eval(evalCtx.Ctx, row)
+	value, err := a.Eval(row)
 	if err != nil {
 		return err
 	}
@@ -47,7 +45,7 @@ func (bf *bitOrFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.Stateme
 		if value.Kind() == types.KindUint64 {
 			evalCtx.Value.SetUint64(evalCtx.Value.GetUint64() | value.GetUint64())
 		} else {
-			int64Value, err := value.ToInt64(sc.TypeCtx())
+			int64Value, err := value.ToInt64(sc)
 			if err != nil {
 				return err
 			}

@@ -19,12 +19,10 @@ import (
 	"math"
 	"sort"
 	"sync/atomic"
-	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/ddl/placement"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -309,7 +307,7 @@ func (builder *RequestBuilder) SetFromSessionVars(sv *variable.SessionVars) *Req
 	builder.RequestSource.RequestSourceType = sv.RequestSourceType
 	builder.RequestSource.ExplicitRequestSourceType = sv.ExplicitRequestSourceType
 	builder.StoreBatchSize = sv.StoreBatchSize
-	builder.Request.ResourceGroupName = sv.StmtCtx.ResourceGroupName
+	builder.Request.ResourceGroupName = sv.ResourceGroupName
 	builder.Request.StoreBusyThreshold = sv.LoadBasedReplicaReadThreshold
 	builder.Request.RunawayChecker = sv.StmtCtx.RunawayChecker
 	builder.Request.TiKVClientReadTimeout = sv.GetTiKVClientReadTimeout()
@@ -429,10 +427,9 @@ func (builder *RequestBuilder) SetClosestReplicaReadAdjuster(chkFn kv.CoprReques
 	return builder
 }
 
-// SetConnIDAndConnAlias sets connection id for the builder.
-func (builder *RequestBuilder) SetConnIDAndConnAlias(connID uint64, connAlias string) *RequestBuilder {
+// SetConnID sets connection id for the builder.
+func (builder *RequestBuilder) SetConnID(connID uint64) *RequestBuilder {
 	builder.ConnID = connID
-	builder.ConnAlias = connAlias
 	return builder
 }
 
@@ -745,23 +742,14 @@ func indexRangesToKVWithoutSplit(sc *stmtctx.StatementContext, tids []int64, idx
 
 // EncodeIndexKey gets encoded keys containing low and high
 func EncodeIndexKey(sc *stmtctx.StatementContext, ran *ranger.Range) ([]byte, []byte, error) {
-	tz := time.UTC
-	errCtx := errctx.StrictNoWarningContext
-	if sc != nil {
-		tz = sc.TimeZone()
-		errCtx = sc.ErrCtx()
-	}
-
-	low, err := codec.EncodeKey(tz, nil, ran.LowVal...)
-	err = errCtx.HandleError(err)
+	low, err := codec.EncodeKey(sc, nil, ran.LowVal...)
 	if err != nil {
 		return nil, nil, err
 	}
 	if ran.LowExclude {
 		low = kv.Key(low).PrefixNext()
 	}
-	high, err := codec.EncodeKey(tz, nil, ran.HighVal...)
-	err = errCtx.HandleError(err)
+	high, err := codec.EncodeKey(sc, nil, ran.HighVal...)
 	if err != nil {
 		return nil, nil, err
 	}

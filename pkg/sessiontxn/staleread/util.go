@@ -16,6 +16,7 @@ package staleread
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/pingcap/failpoint"
@@ -26,11 +27,11 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/tikv/client-go/v2/oracle"
 )
 
 // CalculateAsOfTsExpr calculates the TsExpr of AsOfClause to get a StartTS.
+// tsExpr could be an expression of TSO or a timestamp
 func CalculateAsOfTsExpr(ctx context.Context, sctx sessionctx.Context, tsExpr ast.ExprNode) (uint64, error) {
 	sctx.GetSessionVars().StmtCtx.SetStaleTSOProvider(func() (uint64, error) {
 		failpoint.Inject("mockStaleReadTSO", func(val failpoint.Value) (uint64, error) {
@@ -41,19 +42,24 @@ func CalculateAsOfTsExpr(ctx context.Context, sctx sessionctx.Context, tsExpr as
 		// this can be more accurate than `time.Now() - staleness`, because TiDB's local time can drift.
 		return sctx.GetStore().GetOracle().GetStaleTimestamp(ctx, oracle.GlobalTxnScope, 0)
 	})
-	tsVal, err := expression.EvalAstExprWithPlanCtx(sctx, tsExpr)
+	tsVal, err := expression.EvalAstExpr(sctx, tsExpr)
 	if err != nil {
 		return 0, err
 	}
 
 	if tsVal.IsNull() {
-		return 0, plannererrors.ErrAsOf.FastGenWithCause("as of timestamp cannot be NULL")
+		return 0, errAsOf.FastGenWithCause("as of timestamp cannot be NULL")
+	}
+
+	// if tsVal is TSO already, return it directly.
+	if tso, err := strconv.ParseUint(tsVal.GetString(), 10, 64); err == nil {
+		return tso, nil
 	}
 
 	toTypeTimestamp := types.NewFieldType(mysql.TypeTimestamp)
 	// We need at least the millionsecond here, so set fsp to 3.
 	toTypeTimestamp.SetDecimal(3)
-	tsTimestamp, err := tsVal.ConvertTo(sctx.GetSessionVars().StmtCtx.TypeCtx(), toTypeTimestamp)
+	tsTimestamp, err := tsVal.ConvertTo(sctx.GetSessionVars().StmtCtx, toTypeTimestamp)
 	if err != nil {
 		return 0, err
 	}
@@ -89,7 +95,7 @@ func GetExternalTimestamp(ctx context.Context, sctx sessionctx.Context) (uint64,
 	})
 
 	if err != nil {
-		return 0, plannererrors.ErrAsOf.FastGenWithCause(err.Error())
+		return 0, errAsOf.FastGenWithCause(err.Error())
 	}
 	return externalTimestamp.(uint64), nil
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/tracing"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	tikvutil "github.com/tikv/client-go/v2/util"
@@ -259,7 +260,7 @@ type allocator struct {
 	base  int64
 	end   int64
 	store kv.Storage
-	// dbID is database ID where it was created.
+	// dbID is current database's ID.
 	dbID          int64
 	tbID          int64
 	tbVersion     uint16
@@ -349,8 +350,8 @@ func (alloc *allocator) rebase4Unsigned(ctx context.Context, requiredBase uint64
 		}
 		uCurrentEnd := uint64(currentEnd)
 		if allocIDs {
-			newBase = max(uCurrentEnd, requiredBase)
-			newEnd = min(math.MaxUint64-uint64(alloc.step), newBase) + uint64(alloc.step)
+			newBase = mathutil.Max(uCurrentEnd, requiredBase)
+			newEnd = mathutil.Min(math.MaxUint64-uint64(alloc.step), newBase) + uint64(alloc.step)
 		} else {
 			if uCurrentEnd >= requiredBase {
 				newBase = uCurrentEnd
@@ -408,8 +409,8 @@ func (alloc *allocator) rebase4Signed(ctx context.Context, requiredBase int64, a
 			return err1
 		}
 		if allocIDs {
-			newBase = max(currentEnd, requiredBase)
-			newEnd = min(math.MaxInt64-alloc.step, newBase) + alloc.step
+			newBase = mathutil.Max(currentEnd, requiredBase)
+			newEnd = mathutil.Min(math.MaxInt64-alloc.step, newBase) + alloc.step
 		} else {
 			if currentEnd >= requiredBase {
 				newBase = currentEnd
@@ -653,7 +654,7 @@ func NewSequenceAllocator(store kv.Storage, dbID, tbID int64, info *model.Sequen
 // NewAllocatorsFromTblInfo creates an array of allocators of different types with the information of model.TableInfo.
 func NewAllocatorsFromTblInfo(r Requirement, schemaID int64, tblInfo *model.TableInfo) Allocators {
 	var allocs []Allocator
-	dbID := tblInfo.GetAutoIDSchemaID(schemaID)
+	dbID := tblInfo.GetDBID(schemaID)
 	idCacheOpt := CustomAutoIncCacheOption(tblInfo.AutoIdCache)
 	tblVer := AllocOptionTableInfoVersion(tblInfo.Version)
 
@@ -857,7 +858,7 @@ func SeekToFirstAutoIDUnSigned(base, increment, offset uint64) uint64 {
 	return nr
 }
 
-func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, offset int64) (mini int64, max int64, err error) {
+func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, offset int64) (min int64, max int64, err error) {
 	// Check offset rebase if necessary.
 	if offset-1 > alloc.base {
 		if err := alloc.rebase4Signed(ctx, offset-1, true); err != nil {
@@ -911,7 +912,7 @@ func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, o
 			if nextStep < n1 {
 				nextStep = n1
 			}
-			tmpStep := min(math.MaxInt64-newBase, nextStep)
+			tmpStep := mathutil.Min(math.MaxInt64-newBase, nextStep)
 			// The global rest is not enough for alloc.
 			if tmpStep < n1 {
 				return ErrAutoincReadFailed
@@ -938,12 +939,12 @@ func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, o
 		zap.Uint64("to ID", uint64(alloc.base+n1)),
 		zap.Int64("table ID", alloc.tbID),
 		zap.Int64("database ID", alloc.dbID))
-	mini = alloc.base
+	min = alloc.base
 	alloc.base += n1
-	return mini, alloc.base, nil
+	return min, alloc.base, nil
 }
 
-func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment, offset int64) (mini int64, max int64, err error) {
+func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment, offset int64) (min int64, max int64, err error) {
 	// Check offset rebase if necessary.
 	if uint64(offset-1) > uint64(alloc.base) {
 		if err := alloc.rebase4Unsigned(ctx, uint64(offset-1), true); err != nil {
@@ -1002,7 +1003,7 @@ func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment,
 			if nextStep < n1 {
 				nextStep = n1
 			}
-			tmpStep := int64(min(math.MaxUint64-uint64(newBase), uint64(nextStep)))
+			tmpStep := int64(mathutil.Min(math.MaxUint64-uint64(newBase), uint64(nextStep)))
 			// The global rest is not enough for alloc.
 			if tmpStep < n1 {
 				return ErrAutoincReadFailed
@@ -1029,10 +1030,10 @@ func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment,
 		zap.Uint64("to ID", uint64(alloc.base+n1)),
 		zap.Int64("table ID", alloc.tbID),
 		zap.Int64("database ID", alloc.dbID))
-	mini = alloc.base
+	min = alloc.base
 	// Use uint64 n directly.
 	alloc.base = int64(uint64(alloc.base) + uint64(n1))
-	return mini, alloc.base, nil
+	return min, alloc.base, nil
 }
 
 func getAllocatorStatsFromCtx(ctx context.Context) (context.Context, *AllocatorRuntimeStats, **tikvutil.CommitDetails) {

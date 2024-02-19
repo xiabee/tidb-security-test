@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/stretchr/testify/require"
 )
@@ -145,10 +146,11 @@ func TestCompare(t *testing.T) {
 }
 
 func compareForTest(a, b interface{}) (int, error) {
-	ctx := DefaultStmtNoWarningContext.WithFlags(DefaultStmtFlags.WithIgnoreTruncateErr(true))
+	sc := stmtctx.NewStmtCtx()
+	sc.IgnoreTruncate.Store(true)
 	aDatum := NewDatum(a)
 	bDatum := NewDatum(b)
-	return aDatum.Compare(ctx, &bDatum, collate.GetBinaryCollator())
+	return aDatum.Compare(sc, &bDatum, collate.GetBinaryCollator())
 }
 
 func TestCompareDatum(t *testing.T) {
@@ -166,13 +168,14 @@ func TestCompareDatum(t *testing.T) {
 		{Datum{}, MinNotNullDatum(), -1},
 		{MinNotNullDatum(), MaxValueDatum(), -1},
 	}
-	ctx := DefaultStmtNoWarningContext.WithFlags(DefaultStmtFlags.WithIgnoreTruncateErr(true))
+	sc := stmtctx.NewStmtCtx()
+	sc.IgnoreTruncate.Store(true)
 	for i, tt := range cmpTbl {
-		ret, err := tt.lhs.Compare(ctx, &tt.rhs, collate.GetBinaryCollator())
+		ret, err := tt.lhs.Compare(sc, &tt.rhs, collate.GetBinaryCollator())
 		require.NoError(t, err)
 		require.Equal(t, tt.ret, ret, "%d %v %v", i, tt.lhs, tt.rhs)
 
-		ret, err = tt.rhs.Compare(ctx, &tt.lhs, collate.GetBinaryCollator())
+		ret, err = tt.rhs.Compare(sc, &tt.lhs, collate.GetBinaryCollator())
 		require.NoError(t, err)
 		require.Equal(t, -tt.ret, ret, "%d %v %v", i, tt.lhs, tt.rhs)
 	}

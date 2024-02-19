@@ -194,7 +194,7 @@ func (d *ddl) checkHistoryJobInTest(ctx sessionctx.Context, historyJob *model.Jo
 	}
 
 	// Check delete range.
-	if JobNeedGC(historyJob) {
+	if jobNeedGC(historyJob) {
 		d.checkDeleteRangeCnt(historyJob)
 	}
 

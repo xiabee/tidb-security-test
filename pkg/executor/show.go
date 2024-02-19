@@ -70,12 +70,12 @@ import (
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/etcd"
 	"github.com/pingcap/tidb/pkg/util/filter"
 	"github.com/pingcap/tidb/pkg/util/format"
 	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/pingcap/tidb/pkg/util/hint"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/sem"
 	"github.com/pingcap/tidb/pkg/util/set"
@@ -148,7 +148,7 @@ func (e *ShowExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if e.cursor >= e.result.NumRows() {
 		return nil
 	}
-	numCurBatch := min(req.Capacity(), e.result.NumRows()-e.cursor)
+	numCurBatch := mathutil.Min(req.Capacity(), e.result.NumRows()-e.cursor)
 	req.Append(e.result, e.cursor, e.cursor+numCurBatch)
 	e.cursor += numCurBatch
 	return nil
@@ -254,7 +254,7 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 		return e.fetchShowPlugins()
 	case ast.ShowProfiles:
 		// empty result
-	case ast.ShowMasterStatus, ast.ShowBinlogStatus:
+	case ast.ShowMasterStatus:
 		return e.fetchShowMasterStatus()
 	case ast.ShowPrivileges:
 		return e.fetchShowPrivileges()
@@ -322,53 +322,78 @@ func (*visibleChecker) Leave(in ast.Node) (out ast.Node, ok bool) {
 }
 
 func (e *ShowExec) fetchShowBind() error {
-	var bindings []bindinfo.Binding
+	var tmp []*bindinfo.BindRecord
 	if !e.GlobalScope {
-		handle := e.Ctx().Value(bindinfo.SessionBindInfoKeyType).(bindinfo.SessionBindingHandle)
-		bindings = handle.GetAllSessionBindings()
+		handle := e.Ctx().Value(bindinfo.SessionBindInfoKeyType).(*bindinfo.SessionHandle)
+		tmp = handle.GetAllBindRecord()
 	} else {
-		bindings = domain.GetDomain(e.Ctx()).BindHandle().GetAllGlobalBindings()
+		tmp = domain.GetDomain(e.Ctx()).BindHandle().GetAllBindRecord()
 	}
-	// Remove the invalid bindings.
+	bindRecords := make([]*bindinfo.BindRecord, 0)
+	for _, bindRecord := range tmp {
+		bindRecords = append(bindRecords, bindRecord.Copy())
+	}
+	// Remove the invalid bindRecord.
+	ind := 0
+	for _, bindData := range bindRecords {
+		if len(bindData.Bindings) > 0 {
+			bindRecords[ind] = bindData
+			ind++
+		}
+	}
+	bindRecords = bindRecords[:ind]
 	parser := parser.New()
-	// For the different origin_sql, sort the bindings according to their max update time.
-	sort.Slice(bindings, func(i int, j int) bool {
-		cmpResult := bindings[i].UpdateTime.Compare(bindings[j].UpdateTime)
+	for _, bindData := range bindRecords {
+		// For the same origin_sql, sort the bindings according to their update time.
+		sort.Slice(bindData.Bindings, func(i int, j int) bool {
+			cmpResult := bindData.Bindings[i].UpdateTime.Compare(bindData.Bindings[j].UpdateTime)
+			if cmpResult == 0 {
+				// Because the create time must be different, the result of sorting is stable.
+				cmpResult = bindData.Bindings[i].CreateTime.Compare(bindData.Bindings[j].CreateTime)
+			}
+			return cmpResult > 0
+		})
+	}
+	// For the different origin_sql, sort the bindRecords according to their max update time.
+	sort.Slice(bindRecords, func(i int, j int) bool {
+		cmpResult := bindRecords[i].Bindings[0].UpdateTime.Compare(bindRecords[j].Bindings[0].UpdateTime)
 		if cmpResult == 0 {
 			// Because the create time must be different, the result of sorting is stable.
-			cmpResult = bindings[i].CreateTime.Compare(bindings[j].CreateTime)
+			cmpResult = bindRecords[i].Bindings[0].CreateTime.Compare(bindRecords[j].Bindings[0].CreateTime)
 		}
 		return cmpResult > 0
 	})
-	for _, hint := range bindings {
-		stmt, err := parser.ParseOneStmt(hint.BindSQL, hint.Charset, hint.Collation)
-		if err != nil {
-			return err
+	for _, bindData := range bindRecords {
+		for _, hint := range bindData.Bindings {
+			stmt, err := parser.ParseOneStmt(hint.BindSQL, hint.Charset, hint.Collation)
+			if err != nil {
+				return err
+			}
+			checker := visibleChecker{
+				defaultDB: bindData.Db,
+				ctx:       e.Ctx(),
+				is:        e.is,
+				manager:   privilege.GetPrivilegeManager(e.Ctx()),
+				ok:        true,
+			}
+			stmt.Accept(&checker)
+			if !checker.ok {
+				continue
+			}
+			e.appendRow([]any{
+				bindData.OriginalSQL,
+				hint.BindSQL,
+				bindData.Db,
+				hint.Status,
+				hint.CreateTime,
+				hint.UpdateTime,
+				hint.Charset,
+				hint.Collation,
+				hint.Source,
+				hint.SQLDigest,
+				hint.PlanDigest,
+			})
 		}
-		checker := visibleChecker{
-			defaultDB: hint.Db,
-			ctx:       e.Ctx(),
-			is:        e.is,
-			manager:   privilege.GetPrivilegeManager(e.Ctx()),
-			ok:        true,
-		}
-		stmt.Accept(&checker)
-		if !checker.ok {
-			continue
-		}
-		e.appendRow([]any{
-			hint.OriginalSQL,
-			hint.BindSQL,
-			hint.Db,
-			hint.Status,
-			hint.CreateTime,
-			hint.UpdateTime,
-			hint.Charset,
-			hint.Collation,
-			hint.Source,
-			hint.SQLDigest,
-			hint.PlanDigest,
-		})
 	}
 	return nil
 }
@@ -384,11 +409,13 @@ func (e *ShowExec) fetchShowBindingCacheStatus(ctx context.Context) error {
 
 	handle := domain.GetDomain(e.Ctx()).BindHandle()
 
-	bindings := handle.GetAllGlobalBindings()
+	bindRecords := handle.GetAllBindRecord()
 	numBindings := 0
-	for _, binding := range bindings {
-		if binding.IsBindingEnabled() {
-			numBindings++
+	for _, bindRecord := range bindRecords {
+		for _, binding := range bindRecord.Bindings {
+			if binding.IsBindingEnabled() {
+				numBindings++
+			}
 		}
 	}
 
@@ -1268,10 +1295,6 @@ func constructResultOfShowCreateTable(ctx sessionctx.Context, dbName *model.CISt
 		buf.WriteString("*/")
 	}
 
-	if tableInfo.AutoRandomBits > 0 && tableInfo.PreSplitRegions > 0 {
-		fmt.Fprintf(buf, " /*T! PRE_SPLIT_REGIONS=%d */", tableInfo.PreSplitRegions)
-	}
-
 	if len(tableInfo.Comment) > 0 {
 		fmt.Fprintf(buf, " COMMENT='%s'", format.OutputFormat(tableInfo.Comment))
 	}
@@ -2042,7 +2065,7 @@ func (e *ShowExec) fetchShowTableRegions(ctx context.Context) error {
 		}
 	} else {
 		if len(e.Table.PartitionNames) != 0 {
-			return plannererrors.ErrPartitionClauseOnNonpartitioned
+			return plannercore.ErrPartitionClauseOnNonpartitioned
 		}
 		physicalIDs = append(physicalIDs, tb.Meta().ID)
 	}
@@ -2053,7 +2076,7 @@ func (e *ShowExec) fetchShowTableRegions(ctx context.Context) error {
 		// show table * index * region
 		indexInfo := tb.Meta().FindIndexByName(e.IndexName.L)
 		if indexInfo == nil {
-			return plannererrors.ErrKeyDoesNotExist.GenWithStackByArgs(e.IndexName, tb.Meta().Name)
+			return plannercore.ErrKeyDoesNotExist.GenWithStackByArgs(e.IndexName, tb.Meta().Name)
 		}
 		if indexInfo.Global {
 			regions, err = getTableIndexRegions(indexInfo, []int64{tb.Meta().ID}, tikvStore, splitStore)
@@ -2232,7 +2255,6 @@ func (e *ShowExec) fetchShowSessionStates(ctx context.Context) error {
 	e.appendRow([]interface{}{stateJSON, tokenJSON})
 	return nil
 }
-
 func fillOneImportJobInfo(info *importer.JobInfo, result *chunk.Chunk, importedRowCount int64) {
 	fullTableName := utils.EncloseDBAndTable(info.TableSchema, info.TableName)
 	result.AppendInt64(0, info.ID)
@@ -2288,14 +2310,14 @@ func (e *ShowExec) fetchShowImportJobs(ctx context.Context) error {
 		hasSuperPriv = pm.RequestVerification(e.Ctx().GetSessionVars().ActiveRoles, "", "", "", mysql.SuperPriv)
 	}
 	// we use sessionCtx from GetTaskManager, user ctx might not have system table privileges.
-	taskManager, err := fstorage.GetTaskManager()
+	globalTaskManager, err := fstorage.GetTaskManager()
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalDistTask)
 	if err != nil {
 		return err
 	}
 	if e.ImportJobID != nil {
 		var info *importer.JobInfo
-		if err = taskManager.WithNewSession(func(se sessionctx.Context) error {
+		if err = globalTaskManager.WithNewSession(func(se sessionctx.Context) error {
 			exec := se.(sqlexec.SQLExecutor)
 			var err2 error
 			info, err2 = importer.GetJob(ctx, exec, *e.ImportJobID, e.Ctx().GetSessionVars().User.String(), hasSuperPriv)
@@ -2306,7 +2328,7 @@ func (e *ShowExec) fetchShowImportJobs(ctx context.Context) error {
 		return handleImportJobInfo(ctx, info, e.result)
 	}
 	var infos []*importer.JobInfo
-	if err = taskManager.WithNewSession(func(se sessionctx.Context) error {
+	if err = globalTaskManager.WithNewSession(func(se sessionctx.Context) error {
 		exec := se.(sqlexec.SQLExecutor)
 		var err2 error
 		infos, err2 = importer.GetAllViewableJobs(ctx, exec, e.Ctx().GetSessionVars().User.String(), hasSuperPriv)
@@ -2337,7 +2359,7 @@ func tryFillViewColumnType(ctx context.Context, sctx sessionctx.Context, is info
 	return runWithSystemSession(ctx, sctx, func(s sessionctx.Context) error {
 		// Retrieve view columns info.
 		planBuilder, _ := plannercore.NewPlanBuilder(
-			plannercore.PlanBuilderOptNoExecution{}).Init(s, is, hint.NewQBHintHandler(nil))
+			plannercore.PlanBuilderOptNoExecution{}).Init(s, is, &hint.BlockHintProcessor{})
 		viewLogicalPlan, err := planBuilder.BuildDataSourceFromView(ctx, dbName, tbl, nil, nil)
 		if err != nil {
 			return err

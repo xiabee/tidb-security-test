@@ -12,6 +12,7 @@ go_library(
     importpath = "github.com/pingcap/tidb/pkg/util/ranger",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/errno",
         "//pkg/expression",
         "//pkg/kv",
         "//pkg/parser/ast",
@@ -28,8 +29,8 @@ go_library(
         "//pkg/util/chunk",
         "//pkg/util/codec",
         "//pkg/util/collate",
-        "//pkg/util/dbterror/plannererrors",
-        "//pkg/util/hack",
+        "//pkg/util/dbterror",
+        "//pkg/util/mathutil",
         "@com_github_pingcap_errors//:errors",
     ],
 )

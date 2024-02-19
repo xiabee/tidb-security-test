@@ -15,6 +15,7 @@
 package metrics
 
 import (
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -401,7 +402,7 @@ func (c TablePartitionUsageCounter) Cal(rhs TablePartitionUsageCounter) TablePar
 		TablePartitionRangeColumnsGt2Cnt:          c.TablePartitionRangeColumnsGt2Cnt - rhs.TablePartitionRangeColumnsGt2Cnt,
 		TablePartitionRangeColumnsGt3Cnt:          c.TablePartitionRangeColumnsGt3Cnt - rhs.TablePartitionRangeColumnsGt3Cnt,
 		TablePartitionListColumnsCnt:              c.TablePartitionListColumnsCnt - rhs.TablePartitionListColumnsCnt,
-		TablePartitionMaxPartitionsCnt:            max(c.TablePartitionMaxPartitionsCnt-rhs.TablePartitionMaxPartitionsCnt, rhs.TablePartitionMaxPartitionsCnt),
+		TablePartitionMaxPartitionsCnt:            mathutil.Max(c.TablePartitionMaxPartitionsCnt-rhs.TablePartitionMaxPartitionsCnt, rhs.TablePartitionMaxPartitionsCnt),
 		TablePartitionCreateIntervalPartitionsCnt: c.TablePartitionCreateIntervalPartitionsCnt - rhs.TablePartitionCreateIntervalPartitionsCnt,
 		TablePartitionAddIntervalPartitionsCnt:    c.TablePartitionAddIntervalPartitionsCnt - rhs.TablePartitionAddIntervalPartitionsCnt,
 		TablePartitionDropIntervalPartitionsCnt:   c.TablePartitionDropIntervalPartitionsCnt - rhs.TablePartitionDropIntervalPartitionsCnt,
@@ -422,7 +423,7 @@ func ResetTablePartitionCounter(pre TablePartitionUsageCounter) TablePartitionUs
 		TablePartitionRangeColumnsGt2Cnt:     readCounter(TelemetryTablePartitionRangeColumnsGt2Cnt),
 		TablePartitionRangeColumnsGt3Cnt:     readCounter(TelemetryTablePartitionRangeColumnsGt3Cnt),
 		TablePartitionListColumnsCnt:         readCounter(TelemetryTablePartitionListColumnsCnt),
-		TablePartitionMaxPartitionsCnt:       max(readCounter(TelemetryTablePartitionMaxPartitionsCnt)-pre.TablePartitionMaxPartitionsCnt, pre.TablePartitionMaxPartitionsCnt),
+		TablePartitionMaxPartitionsCnt:       mathutil.Max(readCounter(TelemetryTablePartitionMaxPartitionsCnt)-pre.TablePartitionMaxPartitionsCnt, pre.TablePartitionMaxPartitionsCnt),
 		TablePartitionReorganizePartitionCnt: readCounter(TelemetryReorganizePartitionCnt),
 	}
 }
@@ -475,7 +476,7 @@ func GetNonTransactionalStmtCounter() NonTransactionalStmtCounter {
 
 // GetSavepointStmtCounter gets the savepoint statement executed counter.
 func GetSavepointStmtCounter() int64 {
-	return readCounter(StmtNodeCounter.WithLabelValues("Savepoint", "", "default"))
+	return readCounter(StmtNodeCounter.With(prometheus.Labels{LblType: "Savepoint", LblDb: ""}))
 }
 
 // GetLazyPessimisticUniqueCheckSetCounter returns the counter of setting tidb_constraint_check_in_place_pessimistic to false.

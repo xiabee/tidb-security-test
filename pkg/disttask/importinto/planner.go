@@ -30,7 +30,6 @@ import (
 	verify "github.com/pingcap/tidb/br/pkg/lightning/verification"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/disttask/framework/planner"
-	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/executor/importer"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
@@ -109,28 +108,28 @@ func (p *LogicalPlan) ToPhysicalPlan(planCtx planner.PlanCtx) (*planner.Physical
 	// However, our current implementation requires generating it for each step.
 	// we only generate needed plans for the next step.
 	switch planCtx.NextTaskStep {
-	case proto.ImportStepImport, proto.ImportStepEncodeAndSort:
+	case StepImport, StepEncodeAndSort:
 		specs, err := generateImportSpecs(planCtx, p)
 		if err != nil {
 			return nil, err
 		}
 
 		addSpecs(specs)
-	case proto.ImportStepMergeSort:
+	case StepMergeSort:
 		specs, err := generateMergeSortSpecs(planCtx)
 		if err != nil {
 			return nil, err
 		}
 
 		addSpecs(specs)
-	case proto.ImportStepWriteAndIngest:
+	case StepWriteAndIngest:
 		specs, err := generateWriteIngestSpecs(planCtx, p)
 		if err != nil {
 			return nil, err
 		}
 
 		addSpecs(specs)
-	case proto.ImportStepPostProcess:
+	case StepPostProcess:
 		physicalPlan.AddProcessor(planner.ProcessorSpec{
 			ID: len(inputLinks),
 			Input: planner.InputSpec{
@@ -298,7 +297,7 @@ func skipMergeSort(kvGroup string, stats []external.MultipleFilesStat) bool {
 func generateMergeSortSpecs(planCtx planner.PlanCtx) ([]planner.PipelineSpec, error) {
 	step := external.MergeSortFileCountStep
 	result := make([]planner.PipelineSpec, 0, 16)
-	kvMetas, err := getSortedKVMetasOfEncodeStep(planCtx.PreviousSubtaskMetas[proto.ImportStepEncodeAndSort])
+	kvMetas, err := getSortedKVMetasOfEncodeStep(planCtx.PreviousSubtaskMetas[StepEncodeAndSort])
 	if err != nil {
 		return nil, err
 	}
@@ -466,11 +465,11 @@ func getSortedKVMetasOfMergeStep(subTaskMetas [][]byte) (map[string]*external.So
 }
 
 func getSortedKVMetasForIngest(planCtx planner.PlanCtx) (map[string]*external.SortedKVMeta, error) {
-	kvMetasOfMergeSort, err := getSortedKVMetasOfMergeStep(planCtx.PreviousSubtaskMetas[proto.ImportStepMergeSort])
+	kvMetasOfMergeSort, err := getSortedKVMetasOfMergeStep(planCtx.PreviousSubtaskMetas[StepMergeSort])
 	if err != nil {
 		return nil, err
 	}
-	kvMetasOfEncodeStep, err := getSortedKVMetasOfEncodeStep(planCtx.PreviousSubtaskMetas[proto.ImportStepEncodeAndSort])
+	kvMetasOfEncodeStep, err := getSortedKVMetasOfEncodeStep(planCtx.PreviousSubtaskMetas[StepEncodeAndSort])
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +503,8 @@ func getRangeSplitter(ctx context.Context, store storage.ExternalStorage, kvMeta
 
 	return external.NewRangeSplitter(
 		ctx,
-		kvMeta.MultipleFilesStats,
+		kvMeta.GetDataFiles(),
+		kvMeta.GetStatFiles(),
 		store,
 		int64(config.DefaultBatchSize),
 		int64(math.MaxInt64),

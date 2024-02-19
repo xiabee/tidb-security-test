@@ -4,33 +4,20 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/size"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 // MergeOverlappingFiles reads from given files whose key range may overlap
 // and writes to new sorted, nonoverlapping files.
-func MergeOverlappingFiles(
-	ctx context.Context,
-	paths []string,
-	store storage.ExternalStorage,
-	partSize int64,
-	readBufferSize int,
-	newFilePrefix string,
-	blockSize int,
-	memSizeLimit uint64,
-	writeBatchCount uint64,
-	propSizeDist uint64,
-	propKeysDist uint64,
-	onClose OnCloseFunc,
-	concurrency int,
-	checkHotspot bool,
-) error {
+func MergeOverlappingFiles(ctx context.Context, paths []string, store storage.ExternalStorage, readBufferSize int,
+	newFilePrefix string, blockSize int, writeBatchCount uint64, propSizeDist uint64, propKeysDist uint64,
+	onClose OnCloseFunc, concurrency int, checkHotspot bool) error {
 	var dataFilesSlice [][]string
 	batchCount := 1
 	if len(paths) > concurrency {
@@ -50,19 +37,17 @@ func MergeOverlappingFiles(
 		zap.Int("concurrency", concurrency))
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(concurrency)
-	partSize = max(int64(5*size.MB), partSize+int64(1*size.MB))
 	for _, files := range dataFilesSlice {
 		files := files
 		eg.Go(func() error {
-			return mergeOverlappingFilesInternal(
+			return mergeOverlappingFilesImpl(
 				egCtx,
 				files,
 				store,
-				partSize,
 				readBufferSize,
 				newFilePrefix,
 				uuid.New().String(),
-				memSizeLimit,
+				DefaultMemSizeLimit,
 				blockSize,
 				writeBatchCount,
 				propSizeDist,
@@ -75,13 +60,9 @@ func MergeOverlappingFiles(
 	return eg.Wait()
 }
 
-// mergeOverlappingFilesInternal reads from given files whose key range may overlap
-// and writes to one new sorted, nonoverlapping files.
-func mergeOverlappingFilesInternal(
-	ctx context.Context,
+func mergeOverlappingFilesImpl(ctx context.Context,
 	paths []string,
 	store storage.ExternalStorage,
-	partSize int64,
 	readBufferSize int,
 	newFilePrefix string,
 	writerID string,
@@ -100,9 +81,19 @@ func mergeOverlappingFilesInternal(
 	defer func() {
 		task.End(zap.ErrorLevel, err)
 	}()
+	failpoint.Inject("mergeOverlappingFilesImpl", func(val failpoint.Value) {
+		if val.(string) == paths[0] {
+			failpoint.Return(errors.New("injected error"))
+		} else {
+			select {
+			case <-ctx.Done():
+				failpoint.Return(ctx.Err())
+			}
+		}
+	})
 
 	zeroOffsets := make([]uint64, len(paths))
-	iter, err := NewMergeKVIter(ctx, paths, zeroOffsets, store, readBufferSize, checkHotspot, 0)
+	iter, err := NewMergeKVIter(ctx, paths, zeroOffsets, store, readBufferSize, checkHotspot)
 	if err != nil {
 		return err
 	}
@@ -116,23 +107,16 @@ func mergeOverlappingFilesInternal(
 	writer := NewWriterBuilder().
 		SetMemorySizeLimit(memSizeLimit).
 		SetBlockSize(blockSize).
+		SetOnCloseFunc(onClose).
 		SetWriterBatchCount(writeBatchCount).
-		SetPropKeysDistance(propKeysDist).
 		SetPropSizeDistance(propSizeDist).
-		BuildOneFile(store, newFilePrefix, writerID)
-	err = writer.Init(ctx, partSize)
-	if err != nil {
-		return nil
-	}
-	var minKey, maxKey tidbkv.Key
+		SetPropKeysDistance(propKeysDist).
+		Build(store, newFilePrefix, writerID)
 
 	// currently use same goroutine to do read and write. The main advantage is
 	// there's no KV copy and iter can reuse the buffer.
 	for iter.Next() {
-		if len(minKey) == 0 {
-			minKey = tidbkv.Key(iter.Key()).Clone()
-		}
-		err = writer.WriteRow(ctx, iter.Key(), iter.Value())
+		err = writer.WriteRow(ctx, iter.Key(), iter.Value(), nil)
 		if err != nil {
 			return err
 		}
@@ -141,22 +125,5 @@ func mergeOverlappingFilesInternal(
 	if err != nil {
 		return err
 	}
-	maxKey = tidbkv.Key(iter.Key()).Clone()
-
-	var stat MultipleFilesStat
-	stat.Filenames = append(stat.Filenames,
-		[2]string{writer.dataFile, writer.statFile})
-	stat.build([]tidbkv.Key{minKey}, []tidbkv.Key{maxKey})
-	if onClose != nil {
-		onClose(&WriterSummary{
-			WriterID:           writer.writerID,
-			Seq:                0,
-			Min:                minKey,
-			Max:                maxKey,
-			TotalSize:          writer.totalSize,
-			MultipleFilesStats: []MultipleFilesStat{stat},
-		})
-	}
-
 	return writer.Close(ctx)
 }

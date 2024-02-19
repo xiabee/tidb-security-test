@@ -43,6 +43,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessiontxn/staleread"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/tikv/client-go/v2/oracle"
 	resourceControlClient "github.com/tikv/pd/client/resource_group/controller"
@@ -364,11 +365,11 @@ func (e *Executor) getTiDBQuota(
 		// If one of the two cpu usage is greater than the `valuableUsageThreshold`, we can accept it.
 		// And if both are greater than the `lowUsageThreshold`, we can also accept it.
 		if tikvQuota > valuableUsageThreshold || tidbQuota > valuableUsageThreshold {
-			quotas = append(quotas, rus.getValue()/max(tikvQuota, tidbQuota))
+			quotas = append(quotas, rus.getValue()/mathutil.Max(tikvQuota, tidbQuota))
 		} else if tikvQuota < lowUsageThreshold || tidbQuota < lowUsageThreshold {
 			lowCount++
 		} else {
-			quotas = append(quotas, rus.getValue()/max(tikvQuota, tidbQuota))
+			quotas = append(quotas, rus.getValue()/mathutil.Max(tikvQuota, tidbQuota))
 		}
 		rus.next()
 		tidbCPUs.next()
@@ -593,6 +594,18 @@ func getRUPerSec(ctx context.Context, sctx sessionctx.Context, exec sqlexec.Rest
 func getComponentCPUUsagePerSec(ctx context.Context, sctx sessionctx.Context, exec sqlexec.RestrictedSQLExecutor, component, startTime, endTime string) (*timeSeriesValues, error) {
 	query := fmt.Sprintf("SELECT time, sum(value) FROM METRICS_SCHEMA.process_cpu_usage where time >= '%s' and time <= '%s' and job like '%%%s' GROUP BY time ORDER BY time asc", startTime, endTime, component)
 	return getValuesFromMetrics(ctx, sctx, exec, query)
+}
+
+func getNumberFromMetrics(ctx context.Context, exec sqlexec.RestrictedSQLExecutor, query, metrics string) (float64, error) {
+	rows, _, err := exec.ExecRestrictedSQL(ctx, []sqlexec.OptionFuncAlias{sqlexec.ExecOptionUseCurSession}, query)
+	if err != nil {
+		return 0.0, errors.Trace(err)
+	}
+	if len(rows) == 0 {
+		return 0.0, errors.Errorf("metrics '%s' is empty", metrics)
+	}
+
+	return rows[0].GetFloat64(0), nil
 }
 
 func getValuesFromMetrics(ctx context.Context, sctx sessionctx.Context, exec sqlexec.RestrictedSQLExecutor, query string) (*timeSeriesValues, error) {

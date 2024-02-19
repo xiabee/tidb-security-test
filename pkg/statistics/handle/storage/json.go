@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
@@ -110,18 +111,17 @@ func GenJSONTableFromStats(sctx sessionctx.Context, dbName string, tableInfo *mo
 		}
 		proto := dumpJSONCol(hist, col.CMSketch, col.TopN, col.FMSketch, &col.StatsVer)
 		tracker.Consume(proto.TotalMemoryUsage())
-		if err := sctx.GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			return nil, err
+		if atomic.LoadUint32(&sctx.GetSessionVars().Killed) == 1 {
+			return nil, errors.Trace(statistics.ErrQueryInterrupted)
 		}
 		jsonTbl.Columns[col.Info.Name.L] = proto
 		col.FMSketch.DestroyAndPutToPool()
-		hist.DestroyAndPutToPool()
 	}
 	for _, idx := range tbl.Indices {
 		proto := dumpJSONCol(&idx.Histogram, idx.CMSketch, idx.TopN, nil, &idx.StatsVer)
 		tracker.Consume(proto.TotalMemoryUsage())
-		if err := sctx.GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			return nil, err
+		if atomic.LoadUint32(&sctx.GetSessionVars().Killed) == 1 {
+			return nil, errors.Trace(statistics.ErrQueryInterrupted)
 		}
 		jsonTbl.Indices[idx.Info.Name.L] = proto
 	}

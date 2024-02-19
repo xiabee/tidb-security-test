@@ -21,6 +21,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 // pushDownTopNOptimizer pushes down the topN or limit. In the future we will remove the limit from `requiredProperty` in CBO phase.
@@ -60,17 +61,17 @@ func (lt *LogicalTopN) setChild(p LogicalPlan, opt *logicalOptimizeOp) LogicalPl
 			dual.RowCount = 0
 			return dual
 		}
-		dual.RowCount = int(min(numDualRows-lt.Offset, lt.Count))
+		dual.RowCount = int(mathutil.Min(numDualRows-lt.Offset, lt.Count))
 		return dual
 	}
 
 	if lt.isLimit() {
 		limit := LogicalLimit{
-			Count:            lt.Count,
-			Offset:           lt.Offset,
-			PreferLimitToCop: lt.PreferLimitToCop,
-			PartitionBy:      lt.GetPartitionBy(),
-		}.Init(lt.SCtx(), lt.QueryBlockOffset())
+			Count:       lt.Count,
+			Offset:      lt.Offset,
+			limitHints:  lt.limitHints,
+			PartitionBy: lt.GetPartitionBy(),
+		}.Init(lt.SCtx(), lt.SelectBlockOffset())
 		limit.SetChildren(p)
 		appendTopNPushDownTraceStep(limit, p, opt)
 		return limit
@@ -94,7 +95,7 @@ func (ls *LogicalSort) pushDownTopN(topN *LogicalTopN, opt *logicalOptimizeOp) L
 }
 
 func (p *LogicalLimit) convertToTopN(opt *logicalOptimizeOp) *LogicalTopN {
-	topn := LogicalTopN{Offset: p.Offset, Count: p.Count, PreferLimitToCop: p.PreferLimitToCop}.Init(p.SCtx(), p.QueryBlockOffset())
+	topn := LogicalTopN{Offset: p.Offset, Count: p.Count, limitHints: p.limitHints}.Init(p.SCtx(), p.SelectBlockOffset())
 	appendConvertTopNTraceStep(p, topn, opt)
 	return topn
 }
@@ -111,7 +112,7 @@ func (p *LogicalUnionAll) pushDownTopN(topN *LogicalTopN, opt *logicalOptimizeOp
 	for i, child := range p.children {
 		var newTopN *LogicalTopN
 		if topN != nil {
-			newTopN = LogicalTopN{Count: topN.Count + topN.Offset, PreferLimitToCop: topN.PreferLimitToCop}.Init(p.SCtx(), topN.QueryBlockOffset())
+			newTopN = LogicalTopN{Count: topN.Count + topN.Offset, limitHints: topN.limitHints}.Init(p.SCtx(), topN.SelectBlockOffset())
 			for _, by := range topN.ByItems {
 				newTopN.ByItems = append(newTopN.ByItems, &util.ByItems{Expr: by.Expr, Desc: by.Desc})
 			}
@@ -133,9 +134,8 @@ func (p *LogicalProjection) pushDownTopN(topN *LogicalTopN, opt *logicalOptimize
 		}
 	}
 	if topN != nil {
-		ctx := p.SCtx()
 		for _, by := range topN.ByItems {
-			by.Expr = expression.FoldConstant(ctx, expression.ColumnSubstitute(ctx, by.Expr, p.schema, p.Exprs))
+			by.Expr = expression.FoldConstant(expression.ColumnSubstitute(by.Expr, p.schema, p.Exprs))
 		}
 
 		// remove meaningless constant sort items.
@@ -187,10 +187,10 @@ func (p *LogicalJoin) pushDownTopNToChild(topN *LogicalTopN, idx int, opt *logic
 	}
 
 	newTopN := LogicalTopN{
-		Count:            topN.Count + topN.Offset,
-		ByItems:          make([]*util.ByItems, len(topN.ByItems)),
-		PreferLimitToCop: topN.PreferLimitToCop,
-	}.Init(topN.SCtx(), topN.QueryBlockOffset())
+		Count:      topN.Count + topN.Offset,
+		ByItems:    make([]*util.ByItems, len(topN.ByItems)),
+		limitHints: topN.limitHints,
+	}.Init(topN.SCtx(), topN.SelectBlockOffset())
 	for i := range topN.ByItems {
 		newTopN.ByItems[i] = topN.ByItems[i].Clone()
 	}

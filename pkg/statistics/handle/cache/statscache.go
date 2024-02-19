@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tidb/pkg/statistics/handle/cache/internal/metrics"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
 	handle_metrics "github.com/pingcap/tidb/pkg/statistics/handle/metrics"
-	"github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -36,11 +35,11 @@ import (
 type StatsCacheImpl struct {
 	atomic.Pointer[StatsCache]
 
-	statsHandle types.StatsHandle
+	statsHandle util.StatsHandle
 }
 
 // NewStatsCacheImpl creates a new StatsCache.
-func NewStatsCacheImpl(statsHandle types.StatsHandle) (types.StatsCache, error) {
+func NewStatsCacheImpl(statsHandle util.StatsHandle) (util.StatsCache, error) {
 	newCache, err := NewStatsCache()
 	if err != nil {
 		return nil, err
@@ -53,7 +52,7 @@ func NewStatsCacheImpl(statsHandle types.StatsHandle) (types.StatsCache, error) 
 }
 
 // NewStatsCacheImplForTest creates a new StatsCache for test.
-func NewStatsCacheImplForTest() (types.StatsCache, error) {
+func NewStatsCacheImplForTest() (util.StatsCache, error) {
 	return NewStatsCacheImpl(nil)
 }
 
@@ -120,7 +119,7 @@ func (s *StatsCacheImpl) Update(is infoschema.InfoSchema) error {
 }
 
 // Replace replaces this cache.
-func (s *StatsCacheImpl) Replace(cache types.StatsCache) {
+func (s *StatsCacheImpl) Replace(cache util.StatsCache) {
 	x := cache.(*StatsCacheImpl)
 	s.replace(x.Load())
 }

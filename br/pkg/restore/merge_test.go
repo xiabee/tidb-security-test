@@ -47,13 +47,11 @@ func (fb *fileBulder) build(tableID, indexID, num, bytes, kv int) (files []*back
 		lowVal := types.NewIntDatum(fb.startKeyOffset - 10)
 		highVal := types.NewIntDatum(fb.startKeyOffset)
 		sc := stmtctx.NewStmtCtxWithTimeZone(time.UTC)
-		lowValue, err := codec.EncodeKey(sc.TimeZone(), nil, lowVal)
-		err = sc.HandleError(err)
+		lowValue, err := codec.EncodeKey(sc, nil, lowVal)
 		if err != nil {
 			panic(err)
 		}
-		highValue, err := codec.EncodeKey(sc.TimeZone(), nil, highVal)
-		err = sc.HandleError(err)
+		highValue, err := codec.EncodeKey(sc, nil, highVal)
 		if err != nil {
 			panic(err)
 		}

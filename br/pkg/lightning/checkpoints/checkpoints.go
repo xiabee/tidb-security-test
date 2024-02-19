@@ -39,6 +39,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version/build"
 	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/zap"
 )
 
@@ -79,6 +80,7 @@ const (
 const (
 	// Some frequently used table name or constants.
 	allTables       = "all"
+	stringLitAll    = "'all'"
 	columnTableName = "table_name"
 )
 
@@ -542,7 +544,7 @@ type RebaseCheckpointMerger struct {
 // MergeInto implements TableCheckpointMerger.MergeInto.
 func (merger *RebaseCheckpointMerger) MergeInto(cpd *TableCheckpointDiff) {
 	cpd.hasRebase = true
-	cpd.allocBase = max(cpd.allocBase, merger.AllocBase)
+	cpd.allocBase = mathutil.Max(cpd.allocBase, merger.AllocBase)
 }
 
 // DestroyedTableCheckpoint is the checkpoint for a table that has been
@@ -729,39 +731,40 @@ type MySQLCheckpointsDB struct {
 
 // NewMySQLCheckpointsDB creates a new MySQLCheckpointsDB.
 func NewMySQLCheckpointsDB(ctx context.Context, db *sql.DB, schemaName string) (*MySQLCheckpointsDB, error) {
+	schema := common.EscapeIdentifier(schemaName)
 	sql := common.SQLWithRetry{
 		DB:           db,
 		Logger:       log.FromContext(ctx).With(zap.String("schema", schemaName)),
 		HideQueryLog: true,
 	}
-	err := sql.Exec(ctx, "create checkpoints database", common.SprintfWithIdentifiers(CreateDBTemplate, schemaName))
+	err := sql.Exec(ctx, "create checkpoints database", fmt.Sprintf(CreateDBTemplate, schema))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	err = sql.Exec(ctx, "create task checkpoints table", common.SprintfWithIdentifiers(CreateTaskTableTemplate, schemaName, CheckpointTableNameTask))
+	err = sql.Exec(ctx, "create task checkpoints table", fmt.Sprintf(CreateTaskTableTemplate, schema, CheckpointTableNameTask))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	err = sql.Exec(ctx, "create table checkpoints table", common.SprintfWithIdentifiers(CreateTableTableTemplate, schemaName, CheckpointTableNameTable))
+	err = sql.Exec(ctx, "create table checkpoints table", fmt.Sprintf(CreateTableTableTemplate, schema, CheckpointTableNameTable))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	err = sql.Exec(ctx, "create engine checkpoints table", common.SprintfWithIdentifiers(CreateEngineTableTemplate, schemaName, CheckpointTableNameEngine))
+	err = sql.Exec(ctx, "create engine checkpoints table", fmt.Sprintf(CreateEngineTableTemplate, schema, CheckpointTableNameEngine))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	err = sql.Exec(ctx, "create chunks checkpoints table", common.SprintfWithIdentifiers(CreateChunkTableTemplate, schemaName, CheckpointTableNameChunk))
+	err = sql.Exec(ctx, "create chunks checkpoints table", fmt.Sprintf(CreateChunkTableTemplate, schema, CheckpointTableNameChunk))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	return &MySQLCheckpointsDB{
 		db:     db,
-		schema: schemaName,
+		schema: schema,
 	}, nil
 }
 
@@ -771,7 +774,7 @@ func (cpdb *MySQLCheckpointsDB) Initialize(ctx context.Context, cfg *config.Conf
 	// Since this step is not performance critical, we just insert the rows one-by-one.
 	s := common.SQLWithRetry{DB: cpdb.db, Logger: log.FromContext(ctx)}
 	err := s.Transact(ctx, "insert checkpoints", func(c context.Context, tx *sql.Tx) error {
-		taskStmt, err := tx.PrepareContext(c, common.SprintfWithIdentifiers(InitTaskTemplate, cpdb.schema, CheckpointTableNameTask))
+		taskStmt, err := tx.PrepareContext(c, fmt.Sprintf(InitTaskTemplate, cpdb.schema, CheckpointTableNameTask))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -790,7 +793,7 @@ func (cpdb *MySQLCheckpointsDB) Initialize(ctx context.Context, cfg *config.Conf
 		// statement to fail with an irrecoverable error.
 		// We do need to capture the error is display a user friendly message
 		// (multiple nodes cannot import the same table) though.
-		stmt, err := tx.PrepareContext(c, common.SprintfWithIdentifiers(InitTableTemplate, cpdb.schema, CheckpointTableNameTable))
+		stmt, err := tx.PrepareContext(c, fmt.Sprintf(InitTableTemplate, cpdb.schema, CheckpointTableNameTable))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -827,7 +830,7 @@ func (cpdb *MySQLCheckpointsDB) TaskCheckpoint(ctx context.Context) (*TaskCheckp
 		Logger: log.FromContext(ctx),
 	}
 
-	taskQuery := common.SprintfWithIdentifiers(ReadTaskTemplate, cpdb.schema, CheckpointTableNameTask)
+	taskQuery := fmt.Sprintf(ReadTaskTemplate, cpdb.schema, CheckpointTableNameTask)
 	taskCp := &TaskCheckpoint{}
 	err := s.QueryRow(ctx, "fetch task checkpoint", taskQuery, &taskCp.TaskID, &taskCp.SourceDir, &taskCp.Backend,
 		&taskCp.ImporterAddr, &taskCp.TiDBHost, &taskCp.TiDBPort, &taskCp.PdAddr, &taskCp.SortedKVDir, &taskCp.LightningVer)
@@ -860,7 +863,7 @@ func (cpdb *MySQLCheckpointsDB) Get(ctx context.Context, tableName string) (*Tab
 	err := s.Transact(ctx, "read checkpoint", func(c context.Context, tx *sql.Tx) error {
 		// 1. Populate the engines.
 
-		engineQuery := common.SprintfWithIdentifiers(ReadEngineTemplate, cpdb.schema, CheckpointTableNameEngine)
+		engineQuery := fmt.Sprintf(ReadEngineTemplate, cpdb.schema, CheckpointTableNameEngine)
 		engineRows, err := tx.QueryContext(c, engineQuery, tableName)
 		if err != nil {
 			return errors.Trace(err)
@@ -885,7 +888,7 @@ func (cpdb *MySQLCheckpointsDB) Get(ctx context.Context, tableName string) (*Tab
 
 		// 2. Populate the chunks.
 
-		chunkQuery := common.SprintfWithIdentifiers(ReadChunkTemplate, cpdb.schema, CheckpointTableNameChunk)
+		chunkQuery := fmt.Sprintf(ReadChunkTemplate, cpdb.schema, CheckpointTableNameChunk)
 		chunkRows, err := tx.QueryContext(c, chunkQuery, tableName)
 		if err != nil {
 			return errors.Trace(err)
@@ -922,7 +925,7 @@ func (cpdb *MySQLCheckpointsDB) Get(ctx context.Context, tableName string) (*Tab
 
 		// 3. Fill in the remaining table info
 
-		tableQuery := common.SprintfWithIdentifiers(ReadTableRemainTemplate, cpdb.schema, CheckpointTableNameTable)
+		tableQuery := fmt.Sprintf(ReadTableRemainTemplate, cpdb.schema, CheckpointTableNameTable)
 		tableRow := tx.QueryRowContext(c, tableQuery, tableName)
 
 		var status uint8
@@ -954,14 +957,14 @@ func (cpdb *MySQLCheckpointsDB) InsertEngineCheckpoints(ctx context.Context, tab
 		Logger: log.FromContext(ctx).With(zap.String("table", tableName)),
 	}
 	err := s.Transact(ctx, "update engine checkpoints", func(c context.Context, tx *sql.Tx) error {
-		engineStmt, err := tx.PrepareContext(c, common.SprintfWithIdentifiers(ReplaceEngineTemplate, cpdb.schema, CheckpointTableNameEngine))
+		engineStmt, err := tx.PrepareContext(c, fmt.Sprintf(ReplaceEngineTemplate, cpdb.schema, CheckpointTableNameEngine))
 		if err != nil {
 			return errors.Trace(err)
 		}
 		//nolint: errcheck
 		defer engineStmt.Close()
 
-		chunkStmt, err := tx.PrepareContext(c, common.SprintfWithIdentifiers(ReplaceChunkTemplate, cpdb.schema, CheckpointTableNameChunk))
+		chunkStmt, err := tx.PrepareContext(c, fmt.Sprintf(ReplaceChunkTemplate, cpdb.schema, CheckpointTableNameChunk))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1001,11 +1004,11 @@ func (cpdb *MySQLCheckpointsDB) InsertEngineCheckpoints(ctx context.Context, tab
 
 // Update implements the DB interface.
 func (cpdb *MySQLCheckpointsDB) Update(taskCtx context.Context, checkpointDiffs map[string]*TableCheckpointDiff) error {
-	chunkQuery := common.SprintfWithIdentifiers(UpdateChunkTemplate, cpdb.schema, CheckpointTableNameChunk)
-	rebaseQuery := common.SprintfWithIdentifiers(UpdateTableRebaseTemplate, cpdb.schema, CheckpointTableNameTable)
-	tableStatusQuery := common.SprintfWithIdentifiers(UpdateTableStatusTemplate, cpdb.schema, CheckpointTableNameTable)
-	tableChecksumQuery := common.SprintfWithIdentifiers(UpdateTableChecksumTemplate, cpdb.schema, CheckpointTableNameTable)
-	engineStatusQuery := common.SprintfWithIdentifiers(UpdateEngineTemplate, cpdb.schema, CheckpointTableNameEngine)
+	chunkQuery := fmt.Sprintf(UpdateChunkTemplate, cpdb.schema, CheckpointTableNameChunk)
+	rebaseQuery := fmt.Sprintf(UpdateTableRebaseTemplate, cpdb.schema, CheckpointTableNameTable)
+	tableStatusQuery := fmt.Sprintf(UpdateTableStatusTemplate, cpdb.schema, CheckpointTableNameTable)
+	tableChecksumQuery := fmt.Sprintf(UpdateTableChecksumTemplate, cpdb.schema, CheckpointTableNameTable)
+	engineStatusQuery := fmt.Sprintf(UpdateEngineTemplate, cpdb.schema, CheckpointTableNameEngine)
 
 	s := common.SQLWithRetry{DB: cpdb.db, Logger: log.FromContext(taskCtx)}
 	return s.Transact(taskCtx, "update checkpoints", func(c context.Context, tx *sql.Tx) error {
@@ -1497,12 +1500,12 @@ func (cpdb *MySQLCheckpointsDB) RemoveCheckpoint(ctx context.Context, tableName 
 	}
 
 	if tableName == allTables {
-		return s.Exec(ctx, "remove all checkpoints", common.SprintfWithIdentifiers("DROP SCHEMA %s", cpdb.schema))
+		return s.Exec(ctx, "remove all checkpoints", "DROP SCHEMA "+cpdb.schema)
 	}
 
-	deleteChunkQuery := common.SprintfWithIdentifiers(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameChunk)
-	deleteEngineQuery := common.SprintfWithIdentifiers(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameEngine)
-	deleteTableQuery := common.SprintfWithIdentifiers(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameTable)
+	deleteChunkQuery := fmt.Sprintf(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameChunk)
+	deleteEngineQuery := fmt.Sprintf(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameEngine)
+	deleteTableQuery := fmt.Sprintf(DeleteCheckpointRecordTemplate, cpdb.schema, CheckpointTableNameTable)
 
 	return s.Transact(ctx, "remove checkpoints", func(c context.Context, tx *sql.Tx) error {
 		if _, e := tx.ExecContext(c, deleteChunkQuery, tableName); e != nil {
@@ -1520,13 +1523,16 @@ func (cpdb *MySQLCheckpointsDB) RemoveCheckpoint(ctx context.Context, tableName 
 
 // MoveCheckpoints implements CheckpointsDB.MoveCheckpoints.
 func (cpdb *MySQLCheckpointsDB) MoveCheckpoints(ctx context.Context, taskID int64) error {
-	newSchema := fmt.Sprintf("%s.%d.bak", cpdb.schema, taskID)
+	// The "cpdb.schema" is an escaped schema name of the form "`foo`".
+	// We use "x[1:len(x)-1]" instead of unescaping it to keep the
+	// double-backquotes (if any) intact.
+	newSchema := fmt.Sprintf("`%s.%d.bak`", cpdb.schema[1:len(cpdb.schema)-1], taskID)
 	s := common.SQLWithRetry{
 		DB:     cpdb.db,
 		Logger: log.FromContext(ctx).With(zap.Int64("taskID", taskID)),
 	}
 
-	createSchemaQuery := common.SprintfWithIdentifiers("CREATE SCHEMA IF NOT EXISTS %s", newSchema)
+	createSchemaQuery := "CREATE SCHEMA IF NOT EXISTS " + newSchema
 	if e := s.Exec(ctx, "create backup checkpoints schema", createSchemaQuery); e != nil {
 		return e
 	}
@@ -1534,7 +1540,7 @@ func (cpdb *MySQLCheckpointsDB) MoveCheckpoints(ctx context.Context, taskID int6
 		CheckpointTableNameChunk, CheckpointTableNameEngine,
 		CheckpointTableNameTable, CheckpointTableNameTask,
 	} {
-		query := common.SprintfWithIdentifiers("RENAME TABLE %[1]s.%[3]s TO %[2]s.%[3]s", cpdb.schema, newSchema, tbl)
+		query := fmt.Sprintf("RENAME TABLE %[1]s.%[3]s TO %[2]s.%[3]s", cpdb.schema, newSchema, tbl)
 		if e := s.Exec(ctx, fmt.Sprintf("move %s checkpoints table", tbl), query); e != nil {
 			return e
 		}
@@ -1553,20 +1559,20 @@ func (cpdb *MySQLCheckpointsDB) GetLocalStoringTables(ctx context.Context) (map[
 	// 2. engine status is earlier than CheckpointStatusImported, and
 	// 3. chunk has been read
 
-	query := common.SprintfWithIdentifiers(`
+	query := fmt.Sprintf(`
 		SELECT DISTINCT t.table_name, c.engine_id
 		FROM %s.%s t, %s.%s c, %s.%s e
 		WHERE t.table_name = c.table_name AND t.table_name = e.table_name AND c.engine_id = e.engine_id
-			AND ? < t.status AND t.status < ?
-			AND ? < e.status AND e.status < ?
+			AND %d < t.status AND t.status < %d
+			AND %d < e.status AND e.status < %d
 			AND c.pos > c.offset;`,
-		cpdb.schema, CheckpointTableNameTable, cpdb.schema, CheckpointTableNameChunk, cpdb.schema, CheckpointTableNameEngine)
+		cpdb.schema, CheckpointTableNameTable, cpdb.schema, CheckpointTableNameChunk, cpdb.schema, CheckpointTableNameEngine,
+		CheckpointStatusMaxInvalid, CheckpointStatusIndexImported,
+		CheckpointStatusMaxInvalid, CheckpointStatusImported)
 
 	err := common.Retry("get local storing tables", log.FromContext(ctx), func() error {
 		targetTables = make(map[string][]int32)
-		rows, err := cpdb.db.QueryContext(ctx, query,
-			CheckpointStatusMaxInvalid, CheckpointStatusIndexImported,
-			CheckpointStatusMaxInvalid, CheckpointStatusImported)
+		rows, err := cpdb.db.QueryContext(ctx, query) // #nosec G201
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1596,29 +1602,34 @@ func (cpdb *MySQLCheckpointsDB) GetLocalStoringTables(ctx context.Context) (map[
 
 // IgnoreErrorCheckpoint implements CheckpointsDB.IgnoreErrorCheckpoint.
 func (cpdb *MySQLCheckpointsDB) IgnoreErrorCheckpoint(ctx context.Context, tableName string) error {
-	var (
-		query, query2 string
-		args          []any
-	)
+	var colName string
 	if tableName == allTables {
-		query = common.SprintfWithIdentifiers("UPDATE %s.%s SET status = ? WHERE status <= ?", cpdb.schema, CheckpointTableNameEngine)
-		query2 = common.SprintfWithIdentifiers("UPDATE %s.%s SET status = ? WHERE status <= ?", cpdb.schema, CheckpointTableNameTable)
-		args = []any{CheckpointStatusLoaded, CheckpointStatusMaxInvalid}
+		// This will expand to `WHERE 'all' = 'all'` and effectively allowing
+		// all tables to be included.
+		colName = stringLitAll
 	} else {
-		query = common.SprintfWithIdentifiers("UPDATE %s.%s SET status = ? WHERE table_name = ? AND status <= ?", cpdb.schema, CheckpointTableNameEngine)
-		query2 = common.SprintfWithIdentifiers("UPDATE %s.%s SET status = ? WHERE table_name = ? AND status <= ?", cpdb.schema, CheckpointTableNameTable)
-		args = []any{CheckpointStatusLoaded, tableName, CheckpointStatusMaxInvalid}
+		colName = columnTableName
 	}
+
+	// nolint:gosec
+	engineQuery := fmt.Sprintf(`
+		UPDATE %s.%s SET status = %d WHERE %s = ? AND status <= %d;
+	`, cpdb.schema, CheckpointTableNameEngine, CheckpointStatusLoaded, colName, CheckpointStatusMaxInvalid)
+
+	// nolint:gosec
+	tableQuery := fmt.Sprintf(`
+		UPDATE %s.%s SET status = %d WHERE %s = ? AND status <= %d;
+	`, cpdb.schema, CheckpointTableNameTable, CheckpointStatusLoaded, colName, CheckpointStatusMaxInvalid)
 
 	s := common.SQLWithRetry{
 		DB:     cpdb.db,
 		Logger: log.FromContext(ctx).With(zap.String("table", tableName)),
 	}
 	err := s.Transact(ctx, "ignore error checkpoints", func(c context.Context, tx *sql.Tx) error {
-		if _, e := tx.ExecContext(c, query, args...); e != nil {
+		if _, e := tx.ExecContext(c, engineQuery, tableName); e != nil {
 			return errors.Trace(e)
 		}
-		if _, e := tx.ExecContext(c, query2, args...); e != nil {
+		if _, e := tx.ExecContext(c, tableQuery, tableName); e != nil {
 			return errors.Trace(e)
 		}
 		return nil
@@ -1628,53 +1639,43 @@ func (cpdb *MySQLCheckpointsDB) IgnoreErrorCheckpoint(ctx context.Context, table
 
 // DestroyErrorCheckpoint implements CheckpointsDB.DestroyErrorCheckpoint.
 func (cpdb *MySQLCheckpointsDB) DestroyErrorCheckpoint(ctx context.Context, tableName string) ([]DestroyedTableCheckpoint, error) {
-	var (
-		selectQuery, deleteChunkQuery, deleteEngineQuery, deleteTableQuery string
-		args                                                               []any
-	)
+	var colName, aliasedColName string
+
 	if tableName == allTables {
-		selectQuery = common.SprintfWithIdentifiers(`
-			SELECT
-				t.table_name,
-				COALESCE(MIN(e.engine_id), 0),
-				COALESCE(MAX(e.engine_id), -1)
-			FROM %[1]s.%[2]s t
-			LEFT JOIN %[1]s.%[3]s e ON t.table_name = e.table_name
-			WHERE t.status <= ?
-			GROUP BY t.table_name;
-		`, cpdb.schema, CheckpointTableNameTable, CheckpointTableNameEngine)
-		deleteChunkQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %[1]s.%[2]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[3]s WHERE status <= ?)
-		`, cpdb.schema, CheckpointTableNameChunk, CheckpointTableNameTable)
-		deleteEngineQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %[1]s.%[2]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[3]s WHERE status <= ?)
-		`, cpdb.schema, CheckpointTableNameEngine, CheckpointTableNameTable)
-		deleteTableQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %s.%s WHERE status <= ?
-		`, cpdb.schema, CheckpointTableNameTable)
-		args = []any{CheckpointStatusMaxInvalid}
+		// These will expand to `WHERE 'all' = 'all'` and effectively allowing
+		// all tables to be included.
+		colName = stringLitAll
+		aliasedColName = stringLitAll
 	} else {
-		selectQuery = common.SprintfWithIdentifiers(`
-			SELECT
-				t.table_name,
-				COALESCE(MIN(e.engine_id), 0),
-				COALESCE(MAX(e.engine_id), -1)
-			FROM %[1]s.%[2]s t
-			LEFT JOIN %[1]s.%[3]s e ON t.table_name = e.table_name
-			WHERE t.table_name = ? AND t.status <= ?
-			GROUP BY t.table_name;
-		`, cpdb.schema, CheckpointTableNameTable, CheckpointTableNameEngine)
-		deleteChunkQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %[1]s.%[2]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[3]s WHERE table_name = ? AND status <= ?)
-		`, cpdb.schema, CheckpointTableNameChunk, CheckpointTableNameTable)
-		deleteEngineQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %[1]s.%[2]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[3]s WHERE table_name = ? AND status <= ?)
-		`, cpdb.schema, CheckpointTableNameEngine, CheckpointTableNameTable)
-		deleteTableQuery = common.SprintfWithIdentifiers(`
-			DELETE FROM %s.%s WHERE table_name = ? AND status <= ?
-		`, cpdb.schema, CheckpointTableNameTable)
-		args = []any{tableName, CheckpointStatusMaxInvalid}
+		colName = columnTableName
+		aliasedColName = "t.table_name"
 	}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT
+			t.table_name,
+			COALESCE(MIN(e.engine_id), 0),
+			COALESCE(MAX(e.engine_id), -1)
+		FROM %[1]s.%[4]s t
+		LEFT JOIN %[1]s.%[5]s e ON t.table_name = e.table_name
+		WHERE %[2]s = ? AND t.status <= %[3]d
+		GROUP BY t.table_name;
+	`, cpdb.schema, aliasedColName, CheckpointStatusMaxInvalid, CheckpointTableNameTable, CheckpointTableNameEngine)
+
+	// nolint:gosec
+	deleteChunkQuery := fmt.Sprintf(`
+		DELETE FROM %[1]s.%[4]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[5]s WHERE %[2]s = ? AND status <= %[3]d)
+	`, cpdb.schema, colName, CheckpointStatusMaxInvalid, CheckpointTableNameChunk, CheckpointTableNameTable)
+
+	// nolint:gosec
+	deleteEngineQuery := fmt.Sprintf(`
+		DELETE FROM %[1]s.%[4]s WHERE table_name IN (SELECT table_name FROM %[1]s.%[5]s WHERE %[2]s = ? AND status <= %[3]d)
+	`, cpdb.schema, colName, CheckpointStatusMaxInvalid, CheckpointTableNameEngine, CheckpointTableNameTable)
+
+	// nolint:gosec
+	deleteTableQuery := fmt.Sprintf(`
+		DELETE FROM %s.%s WHERE %s = ? AND status <= %d
+	`, cpdb.schema, CheckpointTableNameTable, colName, CheckpointStatusMaxInvalid)
 
 	var targetTables []DestroyedTableCheckpoint
 
@@ -1685,7 +1686,7 @@ func (cpdb *MySQLCheckpointsDB) DestroyErrorCheckpoint(ctx context.Context, tabl
 	err := s.Transact(ctx, "destroy error checkpoints", func(c context.Context, tx *sql.Tx) error {
 		// Obtain the list of tables
 		targetTables = nil
-		rows, e := tx.QueryContext(c, selectQuery, args...)
+		rows, e := tx.QueryContext(c, selectQuery, tableName) // #nosec G201
 		if e != nil {
 			return errors.Trace(e)
 		}
@@ -1703,13 +1704,13 @@ func (cpdb *MySQLCheckpointsDB) DestroyErrorCheckpoint(ctx context.Context, tabl
 		}
 
 		// Delete the checkpoints
-		if _, e := tx.ExecContext(c, deleteChunkQuery, args...); e != nil {
+		if _, e := tx.ExecContext(c, deleteChunkQuery, tableName); e != nil {
 			return errors.Trace(e)
 		}
-		if _, e := tx.ExecContext(c, deleteEngineQuery, args...); e != nil {
+		if _, e := tx.ExecContext(c, deleteEngineQuery, tableName); e != nil {
 			return errors.Trace(e)
 		}
-		if _, e := tx.ExecContext(c, deleteTableQuery, args...); e != nil {
+		if _, e := tx.ExecContext(c, deleteTableQuery, tableName); e != nil {
 			return errors.Trace(e)
 		}
 		return nil
@@ -1726,7 +1727,7 @@ func (cpdb *MySQLCheckpointsDB) DestroyErrorCheckpoint(ctx context.Context, tabl
 //nolint:rowserrcheck // sqltocsv.Write will check this.
 func (cpdb *MySQLCheckpointsDB) DumpTables(ctx context.Context, writer io.Writer) error {
 	//nolint: rowserrcheck
-	rows, err := cpdb.db.QueryContext(ctx, common.SprintfWithIdentifiers(`
+	rows, err := cpdb.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			task_id,
 			table_name,
@@ -1751,7 +1752,7 @@ func (cpdb *MySQLCheckpointsDB) DumpTables(ctx context.Context, writer io.Writer
 //nolint:rowserrcheck // sqltocsv.Write will check this.
 func (cpdb *MySQLCheckpointsDB) DumpEngines(ctx context.Context, writer io.Writer) error {
 	//nolint: rowserrcheck
-	rows, err := cpdb.db.QueryContext(ctx, common.SprintfWithIdentifiers(`
+	rows, err := cpdb.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			table_name,
 			engine_id,
@@ -1774,7 +1775,7 @@ func (cpdb *MySQLCheckpointsDB) DumpEngines(ctx context.Context, writer io.Write
 //nolint:rowserrcheck // sqltocsv.Write will check this.
 func (cpdb *MySQLCheckpointsDB) DumpChunks(ctx context.Context, writer io.Writer) error {
 	//nolint: rowserrcheck
-	rows, err := cpdb.db.QueryContext(ctx, common.SprintfWithIdentifiers(`
+	rows, err := cpdb.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			table_name,
 			path,

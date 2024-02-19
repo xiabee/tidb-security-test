@@ -19,7 +19,6 @@ import (
 
 	mysql "github.com/pingcap/tidb/pkg/errno"
 	parser_mysql "github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/terror"
 )
 
 var (
@@ -35,8 +34,6 @@ var (
 	ErrCancelledDDLJob = ClassDDL.NewStd(mysql.ErrCancelledDDLJob)
 	// ErrPausedDDLJob returns when the DDL job cannot be paused.
 	ErrPausedDDLJob = ClassDDL.NewStd(mysql.ErrPausedDDLJob)
-	// ErrBDRRestrictedDDL means the DDL is restricted in BDR mode.
-	ErrBDRRestrictedDDL = ClassDDL.NewStd(mysql.ErrBDRRestrictedDDL)
 	// ErrRunMultiSchemaChanges means we run multi schema changes.
 	ErrRunMultiSchemaChanges = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation, parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw, "multi schema change for %s"), nil))
 	// ErrOperateSameColumn means we change the same columns multiple times in a DDL.
@@ -487,8 +484,6 @@ var (
 			" Use the LPAD function to zero-pad numbers, or store the formatted numbers in a CHAR column.",
 		), nil),
 	)
-	// ErrCheckConstraintDupName is for duplicate check constraint names
-	ErrCheckConstraintDupName = ClassDDL.NewStd(mysql.ErrCheckConstraintDupName)
 	// ErrUnsupportedDistTask is for `tidb_enable_dist_task enabled` but `tidb_ddl_enable_fast_reorg` disabled.
 	ErrUnsupportedDistTask = ClassDDL.NewStdErr(mysql.ErrUnsupportedDDLOperation,
 		parser_mysql.Message(fmt.Sprintf(mysql.MySQLErrName[mysql.ErrUnsupportedDDLOperation].Raw,
@@ -514,7 +509,4 @@ var ReorgRetryableErrCodes = map[uint16]struct{}{
 	mysql.ErrWriteConflictInTiDB:       {},
 	mysql.ErrTxnRetryable:              {},
 	mysql.ErrNotOwner:                  {},
-
-	// Temporary network partitioning may cause pk commit failure.
-	uint16(terror.CodeResultUndetermined): {},
 }

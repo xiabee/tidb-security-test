@@ -29,65 +29,43 @@ import (
 
 var (
 	checkTaskFinishInterval = 300 * time.Millisecond
-
-	// TaskChangedCh used to speed up task schedule, such as when task is submitted
-	// in the same node as the scheduler manager.
-	// put it here to avoid cyclic import.
-	TaskChangedCh = make(chan struct{}, 1)
 )
 
-// NotifyTaskChange is used to notify the scheduler manager that the task is changed,
-// either a new task is submitted or a task is finished.
-func NotifyTaskChange() {
-	select {
-	case TaskChangedCh <- struct{}{}:
-	default:
+// SubmitGlobalTask submits a global task.
+func SubmitGlobalTask(ctx context.Context, taskKey string, taskType proto.TaskType, concurrency int, taskMeta []byte) (*proto.Task, error) {
+	globalTaskManager, err := storage.GetTaskManager()
+	if err != nil {
+		return nil, err
 	}
+	globalTask, err := globalTaskManager.GetGlobalTaskByKey(ctx, taskKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if globalTask == nil {
+		taskID, err := globalTaskManager.AddNewGlobalTask(ctx, taskKey, taskType, concurrency, taskMeta)
+		if err != nil {
+			return nil, err
+		}
+
+		globalTask, err = globalTaskManager.GetGlobalTaskByID(ctx, taskID)
+		if err != nil {
+			return nil, err
+		}
+
+		if globalTask == nil {
+			return nil, errors.Errorf("cannot find global task with ID %d", taskID)
+		}
+		metrics.UpdateMetricsForAddTask(globalTask)
+	}
+	return globalTask, nil
 }
 
-// GetCPUCountOfManagedNode gets the CPU count of the managed node.
-func GetCPUCountOfManagedNode(ctx context.Context) (int, error) {
-	manager, err := storage.GetTaskManager()
-	if err != nil {
-		return 0, err
-	}
-	return manager.GetCPUCountOfManagedNode(ctx)
-}
-
-// SubmitTask submits a task.
-func SubmitTask(ctx context.Context, taskKey string, taskType proto.TaskType, concurrency int, taskMeta []byte) (*proto.Task, error) {
-	taskManager, err := storage.GetTaskManager()
-	if err != nil {
-		return nil, err
-	}
-	task, err := taskManager.GetTaskByKeyWithHistory(ctx, taskKey)
-	if err != nil && err != storage.ErrTaskNotFound {
-		return nil, err
-	}
-	if task != nil {
-		return nil, storage.ErrTaskAlreadyExists
-	}
-
-	taskID, err := taskManager.CreateTask(ctx, taskKey, taskType, concurrency, taskMeta)
-	if err != nil {
-		return nil, err
-	}
-
-	task, err = taskManager.GetTaskByID(ctx, taskID)
-	if err != nil {
-		return nil, err
-	}
-	metrics.UpdateMetricsForAddTask(task)
-
-	NotifyTaskChange()
-	return task, nil
-}
-
-// WaitTaskDoneOrPaused waits for a task done or paused.
+// WaitGlobalTask waits for a global task done or paused.
 // this API returns error if task failed or cancelled.
-func WaitTaskDoneOrPaused(ctx context.Context, id int64) error {
+func WaitGlobalTask(ctx context.Context, id int64) error {
 	logger := logutil.Logger(ctx).With(zap.Int64("task-id", id))
-	found, err := WaitTask(ctx, id, func(t *proto.Task) bool {
+	found, err := waitTask(ctx, id, func(t *proto.Task) bool {
 		return t.IsDone() || t.State == proto.TaskStatePaused
 	})
 	if err != nil {
@@ -98,10 +76,10 @@ func WaitTaskDoneOrPaused(ctx context.Context, id int64) error {
 	case proto.TaskStateSucceed:
 		return nil
 	case proto.TaskStateReverted:
-		logger.Error("task reverted", zap.Error(found.Error))
+		logger.Error("global task reverted", zap.Error(found.Error))
 		return found.Error
 	case proto.TaskStatePaused:
-		logger.Error("task paused")
+		logger.Error("global task paused")
 		return nil
 	case proto.TaskStateFailed:
 		return errors.Errorf("task stopped with state %s, err %v", found.State, found.Error)
@@ -109,25 +87,27 @@ func WaitTaskDoneOrPaused(ctx context.Context, id int64) error {
 	return nil
 }
 
-// WaitTaskDoneByKey waits for a task done by task key.
+// WaitTaskDoneByKey waits for a global task done by task key.
 func WaitTaskDoneByKey(ctx context.Context, taskKey string) error {
-	taskManager, err := storage.GetTaskManager()
+	globalTaskManager, err := storage.GetTaskManager()
 	if err != nil {
 		return err
 	}
-	task, err := taskManager.GetTaskByKeyWithHistory(ctx, taskKey)
+	task, err := globalTaskManager.GetGlobalTaskByKeyWithHistory(ctx, taskKey)
 	if err != nil {
 		return err
 	}
-	_, err = WaitTask(ctx, task.ID, func(t *proto.Task) bool {
+	if task == nil {
+		return errors.Errorf("cannot find global task with key %s", taskKey)
+	}
+	_, err = waitTask(ctx, task.ID, func(t *proto.Task) bool {
 		return t.IsDone()
 	})
 	return err
 }
 
-// WaitTask waits for a task until it meets the matchFn.
-func WaitTask(ctx context.Context, id int64, matchFn func(*proto.Task) bool) (*proto.Task, error) {
-	taskManager, err := storage.GetTaskManager()
+func waitTask(ctx context.Context, id int64, matchFn func(*proto.Task) bool) (*proto.Task, error) {
+	globalTaskManager, err := storage.GetTaskManager()
 	if err != nil {
 		return nil, err
 	}
@@ -140,34 +120,47 @@ func WaitTask(ctx context.Context, id int64, matchFn func(*proto.Task) bool) (*p
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-ticker.C:
-			task, err := taskManager.GetTaskByIDWithHistory(ctx, id)
+			found, err := globalTaskManager.GetTaskByIDWithHistory(ctx, id)
 			if err != nil {
-				logger.Error("cannot get task during waiting", zap.Error(err))
+				logger.Error("cannot get global task during waiting", zap.Error(err))
 				continue
 			}
+			if found == nil {
+				return nil, errors.Errorf("cannot find global task with ID %d", id)
+			}
 
-			if matchFn(task) {
-				return task, nil
+			if matchFn(found) {
+				return found, nil
 			}
 		}
 	}
 }
 
-// CancelTask cancels a task.
-func CancelTask(ctx context.Context, taskKey string) error {
+// SubmitAndRunGlobalTask submits a global task and wait for it to finish.
+func SubmitAndRunGlobalTask(ctx context.Context, taskKey string, taskType proto.TaskType, concurrency int, taskMeta []byte) error {
+	globalTask, err := SubmitGlobalTask(ctx, taskKey, taskType, concurrency, taskMeta)
+	if err != nil {
+		return err
+	}
+	return WaitGlobalTask(ctx, globalTask.ID)
+}
+
+// CancelGlobalTask cancels a global task.
+func CancelGlobalTask(ctx context.Context, taskKey string) error {
 	taskManager, err := storage.GetTaskManager()
 	if err != nil {
 		return err
 	}
-	task, err := taskManager.GetTaskByKey(ctx, taskKey)
+	task, err := taskManager.GetGlobalTaskByKey(ctx, taskKey)
 	if err != nil {
-		if err == storage.ErrTaskNotFound {
-			logutil.BgLogger().Info("task not exist", zap.String("taskKey", taskKey))
-			return nil
-		}
 		return err
 	}
-	return taskManager.CancelTask(ctx, task.ID)
+	if task == nil {
+		logutil.BgLogger().Info("task not exist", zap.String("taskKey", taskKey))
+
+		return nil
+	}
+	return taskManager.CancelGlobalTask(ctx, task.ID)
 }
 
 // PauseTask pauses a task.

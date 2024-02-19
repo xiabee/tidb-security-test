@@ -20,10 +20,9 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
@@ -202,10 +201,10 @@ func (rf *RuntimeFilter) Clone() *RuntimeFilter {
 }
 
 // RuntimeFilterListToPB convert runtime filter list to PB list
-func RuntimeFilterListToPB(ctx sessionctx.Context, runtimeFilterList []*RuntimeFilter, client kv.Client) ([]*tipb.RuntimeFilter, error) {
+func RuntimeFilterListToPB(runtimeFilterList []*RuntimeFilter, sc *stmtctx.StatementContext, client kv.Client) ([]*tipb.RuntimeFilter, error) {
 	result := make([]*tipb.RuntimeFilter, 0, len(runtimeFilterList))
 	for _, runtimeFilter := range runtimeFilterList {
-		rfPB, err := runtimeFilter.ToPB(ctx, client)
+		rfPB, err := runtimeFilter.ToPB(sc, client)
 		if err != nil {
 			return nil, err
 		}
@@ -215,13 +214,13 @@ func RuntimeFilterListToPB(ctx sessionctx.Context, runtimeFilterList []*RuntimeF
 }
 
 // ToPB convert runtime filter to PB
-func (rf *RuntimeFilter) ToPB(ctx sessionctx.Context, client kv.Client) (*tipb.RuntimeFilter, error) {
-	pc := expression.NewPBConverter(client, ctx)
+func (rf *RuntimeFilter) ToPB(sc *stmtctx.StatementContext, client kv.Client) (*tipb.RuntimeFilter, error) {
+	pc := expression.NewPBConverter(client, sc)
 	srcExprListPB := make([]*tipb.Expr, 0, len(rf.srcExprList))
 	for _, srcExpr := range rf.srcExprList {
 		srcExprPB := pc.ExprToPB(srcExpr)
 		if srcExprPB == nil {
-			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform src expr %s to pb in runtime filter", srcExpr.String())
+			return nil, ErrInternal.GenWithStack("failed to transform src expr %s to pb in runtime filter", srcExpr.String())
 		}
 		srcExprListPB = append(srcExprListPB, srcExprPB)
 	}
@@ -229,7 +228,7 @@ func (rf *RuntimeFilter) ToPB(ctx sessionctx.Context, client kv.Client) (*tipb.R
 	for _, targetExpr := range rf.targetExprList {
 		targetExprPB := pc.ExprToPB(targetExpr)
 		if targetExprPB == nil {
-			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform target expr %s to pb in runtime filter", targetExpr.String())
+			return nil, ErrInternal.GenWithStack("failed to transform target expr %s to pb in runtime filter", targetExpr.String())
 		}
 		targetExprListPB = append(targetExprListPB, targetExprPB)
 	}

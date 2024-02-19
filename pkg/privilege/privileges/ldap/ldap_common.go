@@ -123,7 +123,6 @@ func (impl *ldapAuthImpl) tryConnectLDAPThroughStartTLS(address string) (*ldap.C
 	err = ldapConnection.StartTLS(&tls.Config{
 		RootCAs:    impl.caPool,
 		ServerName: impl.ldapServerHost,
-		MinVersion: tls.VersionTLS12,
 	})
 	if err != nil {
 		ldapConnection.Close()
@@ -137,7 +136,6 @@ func (impl *ldapAuthImpl) tryConnectLDAPThroughTLS(address string) (*ldap.Conn, 
 	ldapConnection, err := ldap.DialTLS("tcp", address, &tls.Config{
 		RootCAs:    impl.caPool,
 		ServerName: impl.ldapServerHost,
-		MinVersion: tls.VersionTLS12,
 	})
 	if err != nil {
 		return nil, err

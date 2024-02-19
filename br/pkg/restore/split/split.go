@@ -27,7 +27,7 @@ var (
 const (
 	SplitRetryTimes       = 32
 	SplitRetryInterval    = 50 * time.Millisecond
-	SplitMaxRetryInterval = 4 * time.Second
+	SplitMaxRetryInterval = time.Second
 
 	SplitCheckMaxRetryTimes = 64
 	SplitCheckInterval      = 8 * time.Millisecond

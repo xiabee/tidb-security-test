@@ -244,9 +244,7 @@ func (h *restoreEBSMetaHelper) restoreVolumes(progress glue.Progress) (map[strin
 
 		if h.cfg.UseFSR {
 			err = ec2Session.DisableDataFSR(snapshotsIDsMap)
-			if err != nil {
-				log.Error("disable fsr failed", zap.Error(err))
-			}
+			log.Error("disable fsr failed", zap.Error(err))
 		}
 	}()
 
@@ -263,7 +261,7 @@ func (h *restoreEBSMetaHelper) restoreVolumes(progress glue.Progress) (map[strin
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
-	totalSize, err = ec2Session.WaitVolumesCreated(volumeIDMap, progress, h.cfg.UseFSR)
+	totalSize, err = ec2Session.WaitVolumesCreated(volumeIDMap, progress)
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}

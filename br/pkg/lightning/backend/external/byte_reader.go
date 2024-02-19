@@ -18,19 +18,19 @@ import (
 	"context"
 	"io"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/membuf"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/size"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/zap"
 )
 
 var (
 	// ConcurrentReaderBufferSizePerConc is the buffer size for concurrent reader per
 	// concurrency.
-	ConcurrentReaderBufferSizePerConc = int(4 * size.MB)
-	readAllDataConcThreshold          = uint64(16)
+	ConcurrentReaderBufferSizePerConc = 4 * 1024 * 1024
+	// ConcurrentReaderConcurrency is the concurrency for concurrent reader.
+	ConcurrentReaderConcurrency = 8
 )
 
 // byteReader provides structured reading on a byte stream of external storage.
@@ -41,10 +41,11 @@ type byteReader struct {
 	storageReader storage.ExternalFileReader
 
 	// curBuf is either smallBuf or concurrentReader.largeBuf.
-	curBuf       [][]byte
-	curBufIdx    int // invariant: 0 <= curBufIdx < len(curBuf) when curBuf contains unread data
-	curBufOffset int // invariant: 0 <= curBufOffset < len(curBuf[curBufIdx]) if curBufIdx < len(curBuf)
+	curBuf       []byte
+	curBufOffset int
 	smallBuf     []byte
+
+	retPointers []*[]byte
 
 	concurrentReader struct {
 		largeBufferPool *membuf.Buffer
@@ -55,7 +56,7 @@ type byteReader struct {
 
 		now       bool
 		expected  bool
-		largeBuf  [][]byte
+		largeBuf  []byte
 		reader    *concurrentFileReader
 		reloadCnt int
 	}
@@ -68,9 +69,8 @@ func openStoreReaderAndSeek(
 	store storage.ExternalStorage,
 	name string,
 	initFileOffset uint64,
-	prefetchSize int,
 ) (storage.ExternalFileReader, error) {
-	storageReader, err := store.Open(ctx, name, &storage.ReaderOption{PrefetchSize: prefetchSize})
+	storageReader, err := store.Open(ctx, name, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func newByteReader(
 		smallBuf:      make([]byte, bufSize),
 		curBufOffset:  0,
 	}
-	r.curBuf = [][]byte{r.smallBuf}
+	r.curBuf = r.smallBuf
 	r.logger = logutil.Logger(r.ctx)
 	return r, r.reload()
 }
@@ -148,7 +148,6 @@ func (r *byteReader) switchConcurrentMode(useConcurrent bool) error {
 	// and no further switchConcurrentMode should be called.
 	largeBufSize := readerFields.bufSizePerConc * readerFields.concurrency
 	delta := int64(offsetInOldBuf + (reloadCnt-1)*largeBufSize)
-
 	if _, err := r.storageReader.Seek(delta, io.SeekCurrent); err != nil {
 		return err
 	}
@@ -186,91 +185,72 @@ func (r *byteReader) switchToConcurrentReader() error {
 		return err
 	}
 
-	readerFields.largeBuf = make([][]byte, readerFields.concurrency)
-	for i := range readerFields.largeBuf {
-		readerFields.largeBuf[i] = readerFields.largeBufferPool.AllocBytes(readerFields.bufSizePerConc)
-		if readerFields.largeBuf[i] == nil {
-			return errors.Errorf("alloc large buffer failed, size %d", readerFields.bufSizePerConc)
-		}
-	}
-
+	totalSize := readerFields.concurrency * readerFields.bufSizePerConc
+	readerFields.largeBuf = readerFields.largeBufferPool.AllocBytes(totalSize)
 	r.curBuf = readerFields.largeBuf
 	r.curBufOffset = 0
 	readerFields.now = true
 	return nil
 }
 
-// readNBytes reads the next n bytes from the reader and returns a buffer slice
-// containing those bytes. The content of returned slice may be changed after
-// next call.
-func (r *byteReader) readNBytes(n int) ([]byte, error) {
-	readLen, bs := r.next(n)
-	if readLen == n && len(bs) == 1 {
-		return bs[0], nil
+// readNBytes reads the next n bytes from the reader and returns a buffer slice containing those bytes.
+// The returned slice (pointer) can not be used after r.reset. In the same interval of r.reset,
+// byteReader guarantees that the returned slice (pointer) will point to the same content
+// though the slice may be changed.
+func (r *byteReader) readNBytes(n int) (*[]byte, error) {
+	b := r.next(n)
+	readLen := len(b)
+	if readLen == n {
+		ret := &b
+		r.retPointers = append(r.retPointers, ret)
+		return ret, nil
 	}
-	// need to flatten bs
-	if n <= 0 {
-		return nil, errors.Errorf("illegal n (%d) when reading from external storage", n)
-	}
-	if n > int(size.GB) {
-		return nil, errors.Errorf("read %d bytes from external storage, exceed max limit %d", n, size.GB)
-	}
-	if n <= 0 {
-		return nil, errors.Errorf("illegal n (%d) when reading from external storage", n)
-	}
+	// If the reader has fewer than n bytes remaining in current buffer,
+	// `auxBuf` is used as a container instead.
 	auxBuf := make([]byte, n)
-	for _, b := range bs {
-		copy(auxBuf[len(auxBuf)-n:], b)
-		n -= len(b)
-	}
-	hasRead := readLen > 0
-	for n > 0 {
+	copy(auxBuf, b)
+	for readLen < n {
+		r.cloneSlices()
 		err := r.reload()
 		switch err {
 		case nil:
 		case io.EOF:
-			// EOF is only allowed when we have not read any data
-			if hasRead {
+			if readLen > 0 {
 				return nil, io.ErrUnexpectedEOF
 			}
 			return nil, err
 		default:
 			return nil, err
 		}
-		readLen, bs = r.next(n)
-		hasRead = hasRead || readLen > 0
-		for _, b := range bs {
-			copy(auxBuf[len(auxBuf)-n:], b)
-			n -= len(b)
-		}
+		b = r.next(n - readLen)
+		copy(auxBuf[readLen:], b)
+		readLen += len(b)
 	}
-	return auxBuf, nil
+	return &auxBuf, nil
 }
 
-func (r *byteReader) next(n int) (int, [][]byte) {
-	retCnt := 0
-	// TODO(lance6716): heap escape performance?
-	ret := make([][]byte, 0, len(r.curBuf)-r.curBufIdx+1)
-	for r.curBufIdx < len(r.curBuf) && n > 0 {
-		cur := r.curBuf[r.curBufIdx]
-		if r.curBufOffset+n <= len(cur) {
-			ret = append(ret, cur[r.curBufOffset:r.curBufOffset+n])
-			retCnt += n
-			r.curBufOffset += n
-			if r.curBufOffset == len(cur) {
-				r.curBufIdx++
-				r.curBufOffset = 0
-			}
-			break
-		}
-		ret = append(ret, cur[r.curBufOffset:])
-		retCnt += len(cur) - r.curBufOffset
-		n -= len(cur) - r.curBufOffset
-		r.curBufIdx++
-		r.curBufOffset = 0
+func (r *byteReader) reset() {
+	for i := range r.retPointers {
+		r.retPointers[i] = nil
 	}
+	r.retPointers = r.retPointers[:0]
+}
 
-	return retCnt, ret
+func (r *byteReader) cloneSlices() {
+	for i := range r.retPointers {
+		copied := make([]byte, len(*r.retPointers[i]))
+		copy(copied, *r.retPointers[i])
+		*r.retPointers[i] = copied
+		r.retPointers[i] = nil
+	}
+	r.retPointers = r.retPointers[:0]
+}
+
+func (r *byteReader) next(n int) []byte {
+	end := mathutil.Min(r.curBufOffset+n, len(r.curBuf))
+	ret := r.curBuf[r.curBufOffset:end]
+	r.curBufOffset += len(ret)
+	return ret
 }
 
 func (r *byteReader) reload() error {
@@ -287,32 +267,29 @@ func (r *byteReader) reload() error {
 
 	if r.concurrentReader.now {
 		r.concurrentReader.reloadCnt++
-		buffers, err := r.concurrentReader.reader.read(r.concurrentReader.largeBuf)
+		n, err := r.concurrentReader.reader.read(r.concurrentReader.largeBuf)
 		if err != nil {
 			return err
 		}
-		r.curBuf = buffers
-		r.curBufIdx = 0
+		r.curBuf = r.curBuf[:n]
 		r.curBufOffset = 0
 		return nil
 	}
-	// when not using concurrentReader, len(curBuf) == 1
-	n, err := io.ReadFull(r.storageReader, r.curBuf[0][0:])
+	n, err := io.ReadFull(r.storageReader, r.curBuf[0:])
 	if err != nil {
 		switch err {
 		case io.EOF:
-			// move curBufIdx so following read will also find EOF
-			r.curBufIdx = len(r.curBuf)
+			// move curBufOffset so following read will also find EOF
+			r.curBufOffset = len(r.curBuf)
 			return err
 		case io.ErrUnexpectedEOF:
 			// The last batch.
-			r.curBuf[0] = r.curBuf[0][:n]
+			r.curBuf = r.curBuf[:n]
 		default:
 			r.logger.Warn("other error during read", zap.Error(err))
 			return err
 		}
 	}
-	r.curBufIdx = 0
 	r.curBufOffset = 0
 	return nil
 }
@@ -320,16 +297,15 @@ func (r *byteReader) reload() error {
 func (r *byteReader) closeConcurrentReader() (reloadCnt, offsetInOldBuffer int) {
 	r.logger.Info("drop data in closeConcurrentReader",
 		zap.Int("reloadCnt", r.concurrentReader.reloadCnt),
-		zap.Int("dropBytes", r.concurrentReader.bufSizePerConc*(len(r.curBuf)-r.curBufIdx)-r.curBufOffset),
-		zap.Int("curBufIdx", r.curBufIdx),
+		zap.Int("dropBytes", len(r.curBuf)-r.curBufOffset),
 	)
 	r.concurrentReader.largeBufferPool.Destroy()
 	r.concurrentReader.largeBuf = nil
 	r.concurrentReader.now = false
 	reloadCnt = r.concurrentReader.reloadCnt
 	r.concurrentReader.reloadCnt = 0
-	r.curBuf = [][]byte{r.smallBuf}
-	offsetInOldBuffer = r.curBufOffset + r.curBufIdx*r.concurrentReader.bufSizePerConc
+	r.curBuf = r.smallBuf
+	offsetInOldBuffer = r.curBufOffset
 	r.curBufOffset = 0
 	return
 }

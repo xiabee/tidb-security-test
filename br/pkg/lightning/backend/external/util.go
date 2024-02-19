@@ -20,10 +20,8 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/docker/go-units"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -35,27 +33,20 @@ import (
 
 // seekPropsOffsets seeks the statistic files to find the largest offset of
 // sorted data file offsets such that the key at offset is less than or equal to
-// the given start keys. Caller can specify multiple ascending keys and
-// seekPropsOffsets will return the offsets list for each key.
+// the given start key.
 func seekPropsOffsets(
 	ctx context.Context,
-	starts []kv.Key,
+	start kv.Key,
 	paths []string,
 	exStorage storage.ExternalStorage,
 	checkHotSpot bool,
-) (_ [][]uint64, err error) {
+) (_ []uint64, err error) {
 	logger := logutil.Logger(ctx)
 	task := log.BeginTask(logger, "seek props offsets")
 	defer func() {
 		task.End(zapcore.ErrorLevel, err)
 	}()
-
-	// adapt the NewMergePropIter argument types
-	multiFileStat := MultipleFilesStat{Filenames: make([][2]string, 0, len(paths))}
-	for _, path := range paths {
-		multiFileStat.Filenames = append(multiFileStat.Filenames, [2]string{"", path})
-	}
-	iter, err := NewMergePropIter(ctx, []MultipleFilesStat{multiFileStat}, exStorage, checkHotSpot)
+	iter, err := NewMergePropIter(ctx, paths, exStorage, checkHotSpot)
 	if err != nil {
 		return nil, err
 	}
@@ -64,46 +55,27 @@ func seekPropsOffsets(
 			logger.Warn("failed to close merge prop iterator", zap.Error(err))
 		}
 	}()
-	offsets4AllKey := make([][]uint64, 0, len(starts))
 	offsets := make([]uint64, len(paths))
-	offsets4AllKey = append(offsets4AllKey, offsets)
 	moved := false
-
-	keyIdx := 0
-	curKey := starts[keyIdx]
 	for iter.Next() {
 		p := iter.prop()
 		propKey := kv.Key(p.firstKey)
-		for propKey.Cmp(curKey) > 0 {
+		if propKey.Cmp(start) > 0 {
 			if !moved {
-				return nil, fmt.Errorf("start key %s is too small for stat files %v, propKey %s",
-					curKey.String(),
+				return nil, fmt.Errorf("start key %s is too small for stat files %v",
+					start.String(),
 					paths,
-					propKey.String(),
 				)
 			}
-			keyIdx++
-			if keyIdx >= len(starts) {
-				return offsets4AllKey, nil
-			}
-			curKey = starts[keyIdx]
-			newOffsets := slices.Clone(offsets)
-			offsets4AllKey = append(offsets4AllKey, newOffsets)
-			offsets = newOffsets
+			return offsets, nil
 		}
 		moved = true
-		_, idx := iter.readerIndex()
-		offsets[idx] = p.offset
+		offsets[iter.readerIndex()] = p.offset
 	}
 	if iter.Error() != nil {
 		return nil, iter.Error()
 	}
-	for len(offsets4AllKey) < len(starts) {
-		newOffsets := slices.Clone(offsets)
-		offsets4AllKey = append(offsets4AllKey, newOffsets)
-		offsets = newOffsets
-	}
-	return offsets4AllKey, nil
+	return offsets, nil
 }
 
 // GetAllFileNames returns data file paths and stat file paths. Both paths are
@@ -319,14 +291,4 @@ func BytesMax(a, b []byte) []byte {
 		return a
 	}
 	return b
-}
-
-func getSpeed(n uint64, dur float64, isBytes bool) string {
-	if dur == 0 {
-		return "-"
-	}
-	if isBytes {
-		return units.BytesSize(float64(n) / dur)
-	}
-	return strconv.FormatFloat(float64(n)/dur, 'f', 4, 64)
 }

@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/memo"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 )
 
 // DefaultOptimizer is the optimizer which contains all of the default
@@ -117,7 +116,7 @@ func (opt *Optimizer) FindBestPlan(sctx sessionctx.Context, logical plannercore.
 }
 
 func (*Optimizer) onPhasePreprocessing(_ sessionctx.Context, plan plannercore.LogicalPlan) (plannercore.LogicalPlan, error) {
-	err := plan.PruneColumns(plan.Schema().Columns, nil, plan)
+	err := plan.PruneColumns(plan.Schema().Columns, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +251,7 @@ func (opt *Optimizer) onPhaseImplementation(_ sessionctx.Context, g *memo.Group)
 		return nil, 0, err
 	}
 	if impl == nil {
-		return nil, 0, plannererrors.ErrInternal.GenWithStackByArgs("Can't find a proper physical plan for this query")
+		return nil, 0, plannercore.ErrInternal.GenWithStackByArgs("Can't find a proper physical plan for this query")
 	}
 	return impl.GetPlan(), impl.GetCost(), nil
 }

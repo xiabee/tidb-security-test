@@ -42,8 +42,7 @@ func createDistinctChecker(sc *stmtctx.StatementContext) *distinctChecker {
 func (d *distinctChecker) Check(values []types.Datum) (bool, error) {
 	d.key = d.key[:0]
 	var err error
-	d.key, err = codec.EncodeValue(d.sc.TimeZone(), d.key, values...)
-	err = d.sc.HandleError(err)
+	d.key, err = codec.EncodeValue(d.sc, d.key, values...)
 	if err != nil {
 		return false, err
 	}
@@ -56,7 +55,7 @@ func (d *distinctChecker) Check(values []types.Datum) (bool, error) {
 }
 
 // calculateSum adds v to sum.
-func calculateSum(ctx types.Context, sum, v types.Datum) (data types.Datum, err error) {
+func calculateSum(sc *stmtctx.StatementContext, sum, v types.Datum) (data types.Datum, err error) {
 	// for avg and sum calculation
 	// avg and sum use decimal for integer and decimal type, use float for others
 	// see https://dev.mysql.com/doc/refman/5.7/en/group-by-functions.html
@@ -65,7 +64,7 @@ func calculateSum(ctx types.Context, sum, v types.Datum) (data types.Datum, err 
 	case types.KindNull:
 	case types.KindInt64, types.KindUint64:
 		var d *types.MyDecimal
-		d, err = v.ToDecimal(ctx)
+		d, err = v.ToDecimal(sc)
 		if err == nil {
 			data = types.NewDecimalDatum(d)
 		}
@@ -73,7 +72,7 @@ func calculateSum(ctx types.Context, sum, v types.Datum) (data types.Datum, err 
 		v.Copy(&data)
 	default:
 		var f float64
-		f, err = v.ToFloat64(ctx)
+		f, err = v.ToFloat64(sc)
 		if err == nil {
 			data = types.NewFloat64Datum(f)
 		}

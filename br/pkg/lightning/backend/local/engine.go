@@ -642,7 +642,7 @@ func (e *Engine) ingestSSTLoop() {
 					}
 					ingestMetas := metas.metas
 					if e.config.Compact {
-						newMeta, err := e.sstIngester.mergeSSTs(metas.metas, e.sstDir, e.config.BlockSize)
+						newMeta, err := e.sstIngester.mergeSSTs(metas.metas, e.sstDir)
 						if err != nil {
 							e.setError(err)
 							return
@@ -975,28 +975,20 @@ func (e *Engine) loadEngineMeta() error {
 	return nil
 }
 
-func (e *Engine) newKVIter(ctx context.Context, opts *pebble.IterOptions, buf *membuf.Buffer) IngestLocalEngineIter {
+func (e *Engine) newKVIter(ctx context.Context, opts *pebble.IterOptions) Iter {
 	if bytes.Compare(opts.LowerBound, normalIterStartKey) < 0 {
 		newOpts := *opts
 		newOpts.LowerBound = normalIterStartKey
 		opts = &newOpts
 	}
 	if !e.duplicateDetection {
-		return &pebbleIter{Iterator: e.getDB().NewIter(opts), buf: buf}
+		return pebbleIter{Iterator: e.getDB().NewIter(opts)}
 	}
 	logger := log.FromContext(ctx).With(
 		zap.String("table", common.UniqueTable(e.tableInfo.DB, e.tableInfo.Name)),
 		zap.Int64("tableID", e.tableInfo.ID),
 		zap.Stringer("engineUUID", e.UUID))
-	return newDupDetectIter(
-		e.getDB(),
-		e.keyAdapter,
-		opts,
-		e.duplicateDB,
-		logger,
-		e.dupDetectOpt,
-		buf,
-	)
+	return newDupDetectIter(e.getDB(), e.keyAdapter, opts, e.duplicateDB, logger, e.dupDetectOpt)
 }
 
 var _ common.IngestData = (*Engine)(nil)
@@ -1017,7 +1009,7 @@ func (e *Engine) GetFirstAndLastKey(lowerBound, upperBound []byte) ([]byte, []by
 		failpoint.Return(lowerBound, upperBound, nil)
 	})
 
-	iter := e.newKVIter(context.Background(), opt, nil)
+	iter := e.newKVIter(context.Background(), opt)
 	//nolint: errcheck
 	defer iter.Close()
 	// Needs seek to first because NewIter returns an iterator that is unpositioned
@@ -1038,16 +1030,8 @@ func (e *Engine) GetFirstAndLastKey(lowerBound, upperBound []byte) ([]byte, []by
 }
 
 // NewIter implements IngestData interface.
-func (e *Engine) NewIter(
-	ctx context.Context,
-	lowerBound, upperBound []byte,
-	bufPool *membuf.Pool,
-) common.ForwardIter {
-	return e.newKVIter(
-		ctx,
-		&pebble.IterOptions{LowerBound: lowerBound, UpperBound: upperBound},
-		bufPool.NewBuffer(),
-	)
+func (e *Engine) NewIter(ctx context.Context, lowerBound, upperBound []byte) common.ForwardIter {
+	return e.newKVIter(ctx, &pebble.IterOptions{LowerBound: lowerBound, UpperBound: upperBound})
 }
 
 // GetTS implements IngestData interface.
@@ -1349,7 +1333,7 @@ func (w *Writer) addSST(ctx context.Context, meta *sstMeta) error {
 
 func (w *Writer) createSSTWriter() (*sstWriter, error) {
 	path := filepath.Join(w.engine.sstDir, uuid.New().String()+".sst")
-	writer, err := newSSTWriter(path, w.engine.config.BlockSize)
+	writer, err := newSSTWriter(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,7 +1349,7 @@ type sstWriter struct {
 	logger log.Logger
 }
 
-func newSSTWriter(path string, blockSize int) (*sstable.Writer, error) {
+func newSSTWriter(path string) (*sstable.Writer, error) {
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -1374,7 +1358,7 @@ func newSSTWriter(path string, blockSize int) (*sstable.Writer, error) {
 		TablePropertyCollectors: []func() pebble.TablePropertyCollector{
 			newRangePropertiesCollector,
 		},
-		BlockSize: blockSize,
+		BlockSize: 16 * 1024,
 	})
 	return writer, nil
 }
@@ -1504,7 +1488,7 @@ func (h *sstIterHeap) Next() ([]byte, []byte, error) {
 // sstIngester is a interface used to merge and ingest SST files.
 // it's a interface mainly used for test convenience
 type sstIngester interface {
-	mergeSSTs(metas []*sstMeta, dir string, blockSize int) (*sstMeta, error)
+	mergeSSTs(metas []*sstMeta, dir string) (*sstMeta, error)
 	ingest([]*sstMeta) error
 }
 
@@ -1512,7 +1496,7 @@ type dbSSTIngester struct {
 	e *Engine
 }
 
-func (i dbSSTIngester) mergeSSTs(metas []*sstMeta, dir string, blockSize int) (*sstMeta, error) {
+func (i dbSSTIngester) mergeSSTs(metas []*sstMeta, dir string) (*sstMeta, error) {
 	if len(metas) == 0 {
 		return nil, errors.New("sst metas is empty")
 	} else if len(metas) == 1 {
@@ -1561,7 +1545,7 @@ func (i dbSSTIngester) mergeSSTs(metas []*sstMeta, dir string, blockSize int) (*
 	heap.Init(mergeIter)
 
 	name := filepath.Join(dir, fmt.Sprintf("%s.sst", uuid.New()))
-	writer, err := newSSTWriter(name, blockSize)
+	writer, err := newSSTWriter(name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

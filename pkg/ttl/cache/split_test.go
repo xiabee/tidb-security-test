@@ -20,7 +20,6 @@ import (
 	"math"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/infoschema"
@@ -62,7 +61,7 @@ type mockPDClient struct {
 	regionsSorted bool
 }
 
-func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	if len(c.regions) == 0 {
 		return []*pd.Region{newMockRegion(1, []byte{}, []byte{0xFF, 0xFF})}, nil
 	}
@@ -206,7 +205,7 @@ func (s *mockTiKVStore) GetRegionCache() *tikv.RegionCache {
 }
 
 func bytesHandle(t *testing.T, data []byte) kv.Handle {
-	encoded, err := codec.EncodeKey(time.UTC, nil, types.NewBytesDatum(data))
+	encoded, err := codec.EncodeKey(nil, nil, types.NewBytesDatum(data))
 	require.NoError(t, err)
 	h, err := kv.NewCommonHandle(encoded)
 	require.NoError(t, err)
@@ -500,7 +499,7 @@ func TestNoTTLSplitSupportTables(t *testing.T) {
 func TestGetNextBytesHandleDatum(t *testing.T) {
 	tblID := int64(7)
 	buildHandleBytes := func(data []byte) []byte {
-		handleBytes, err := codec.EncodeKey(time.UTC, nil, types.NewBytesDatum(data))
+		handleBytes, err := codec.EncodeKey(nil, nil, types.NewBytesDatum(data))
 		require.NoError(t, err)
 		return handleBytes
 	}

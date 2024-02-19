@@ -124,9 +124,6 @@ func (tc *TestDDLCallback) OnJobUpdated(job *model.Job) {
 		(*onJobUpdatedExportedFunc)(job)
 		return
 	}
-	if job.State == model.JobStateSynced {
-		return
-	}
 	if tc.onJobUpdated != nil {
 		tc.onJobUpdated(job)
 		return

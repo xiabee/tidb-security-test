@@ -15,23 +15,26 @@
 package handle
 
 import (
+	"math"
 	"time"
 
+	"github.com/pingcap/tidb/pkg/config"
+	ddlUtil "github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze"
 	"github.com/pingcap/tidb/pkg/statistics/handle/cache"
-	"github.com/pingcap/tidb/pkg/statistics/handle/ddl"
 	"github.com/pingcap/tidb/pkg/statistics/handle/globalstats"
 	"github.com/pingcap/tidb/pkg/statistics/handle/history"
 	"github.com/pingcap/tidb/pkg/statistics/handle/lockstats"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
 	"github.com/pingcap/tidb/pkg/statistics/handle/storage"
-	"github.com/pingcap/tidb/pkg/statistics/handle/syncload"
-	"github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/usage"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
+	"github.com/tiancaiamao/gp"
+	atomic2 "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -44,103 +47,110 @@ const (
 
 // Handle can update stats info periodically.
 type Handle struct {
-	// Pool is used to get a session or a goroutine to execute stats updating.
-	util.Pool
+	pool util.SessionPool
 
-	// AutoAnalyzeProcIDGenerator is used to generate auto analyze proc ID.
-	util.AutoAnalyzeProcIDGenerator
-
-	// LeaseGetter is used to get stats lease.
-	util.LeaseGetter
-
-	// initStatsCtx is a context specifically used for initStats.
-	// It's not designed for concurrent use, so avoid using it in such scenarios.
-	// Currently, it's only utilized within initStats, which is exclusively used during bootstrap.
-	// Since bootstrap is a one-time operation, using this context remains safe.
+	// initStatsCtx is the ctx only used for initStats
 	initStatsCtx sessionctx.Context
+
+	// sysProcTracker is used to track sys process like analyze
+	sysProcTracker sessionctx.SysProcTracker
 
 	// TableInfoGetter is used to fetch table meta info.
 	util.TableInfoGetter
 
 	// StatsGC is used to GC stats.
-	types.StatsGC
+	util.StatsGC
 
 	// StatsUsage is used to track the usage of column / index statistics.
-	types.StatsUsage
+	util.StatsUsage
 
 	// StatsHistory is used to manage historical stats.
-	types.StatsHistory
+	util.StatsHistory
 
 	// StatsAnalyze is used to handle auto-analyze and manage analyze jobs.
-	types.StatsAnalyze
-
-	// StatsSyncLoad is used to load stats syncly.
-	types.StatsSyncLoad
+	util.StatsAnalyze
 
 	// StatsReadWriter is used to read/write stats from/to storage.
-	types.StatsReadWriter
+	util.StatsReadWriter
 
 	// StatsLock is used to manage locked stats.
-	types.StatsLock
+	util.StatsLock
 
 	// StatsGlobal is used to manage global stats.
-	types.StatsGlobal
+	util.StatsGlobal
 
-	// DDL is used to handle ddl events.
-	types.DDL
+	// This gpool is used to reuse goroutine in the mergeGlobalStatsTopN.
+	gpool *gp.Pool
+
+	// autoAnalyzeProcIDGetter is used to generate auto analyze ID.
+	autoAnalyzeProcIDGetter func() uint64
 
 	InitStatsDone chan struct{}
 
+	// ddlEventCh is a channel to notify a ddl operation has happened.
+	// It is sent only by owner or the drop stats executor, and read by stats handle.
+	ddlEventCh chan *ddlUtil.Event
+
 	// StatsCache ...
-	types.StatsCache
+	util.StatsCache
+
+	// StatsLoad is used to load stats concurrently
+	StatsLoad StatsLoad
+
+	lease atomic2.Duration
 }
 
 // Clear the statsCache, only for test.
 func (h *Handle) Clear() {
 	h.StatsCache.Clear()
-	for len(h.DDLEventCh()) > 0 {
-		<-h.DDLEventCh()
+	for len(h.ddlEventCh) > 0 {
+		<-h.ddlEventCh
 	}
 	h.ResetSessionStatsList()
 }
 
 // NewHandle creates a Handle for update stats.
-func NewHandle(
-	_, /* ctx, keep it for feature usage */
-	initStatsCtx sessionctx.Context,
-	lease time.Duration,
-	pool util.SessionPool,
-	tracker sessionctx.SysProcTracker,
-	autoAnalyzeProcIDGetter func() uint64,
-) (*Handle, error) {
+func NewHandle(_, initStatsCtx sessionctx.Context, lease time.Duration, pool util.SessionPool, tracker sessionctx.SysProcTracker, autoAnalyzeProcIDGetter func() uint64) (*Handle, error) {
+	cfg := config.GetGlobalConfig()
 	handle := &Handle{
-		InitStatsDone:   make(chan struct{}),
-		TableInfoGetter: util.NewTableInfoGetter(),
-		StatsLock:       lockstats.NewStatsLock(pool),
+		gpool:                   gp.New(math.MaxInt16, time.Minute),
+		ddlEventCh:              make(chan *ddlUtil.Event, 1000),
+		pool:                    pool,
+		sysProcTracker:          tracker,
+		autoAnalyzeProcIDGetter: autoAnalyzeProcIDGetter,
+		InitStatsDone:           make(chan struct{}),
+		TableInfoGetter:         util.NewTableInfoGetter(),
+		StatsLock:               lockstats.NewStatsLock(pool),
 	}
 	handle.StatsGC = storage.NewStatsGC(handle)
 	handle.StatsReadWriter = storage.NewStatsReadWriter(handle)
 
 	handle.initStatsCtx = initStatsCtx
+	handle.lease.Store(lease)
 	statsCache, err := cache.NewStatsCacheImpl(handle)
 	if err != nil {
 		return nil, err
 	}
-	handle.Pool = util.NewPool(pool)
-	handle.AutoAnalyzeProcIDGenerator = util.NewGenerator(autoAnalyzeProcIDGetter)
-	handle.LeaseGetter = util.NewLeaseGetter(lease)
 	handle.StatsCache = statsCache
 	handle.StatsHistory = history.NewStatsHistory(handle)
 	handle.StatsUsage = usage.NewStatsUsageImpl(handle)
-	handle.StatsAnalyze = autoanalyze.NewStatsAnalyze(handle, tracker)
-	handle.StatsSyncLoad = syncload.NewStatsSyncLoad(handle)
+	handle.StatsAnalyze = autoanalyze.NewStatsAnalyze(handle)
 	handle.StatsGlobal = globalstats.NewStatsGlobal(handle)
-	handle.DDL = ddl.NewDDLHandler(
-		handle.StatsReadWriter,
-		handle,
-		handle.StatsGlobal,
-	)
+	handle.StatsLoad.SubCtxs = make([]sessionctx.Context, cfg.Performance.StatsLoadConcurrency)
+	handle.StatsLoad.NeededItemsCh = make(chan *NeededItemTask, cfg.Performance.StatsLoadQueueSize)
+	handle.StatsLoad.TimeoutItemsCh = make(chan *NeededItemTask, cfg.Performance.StatsLoadQueueSize)
+	handle.StatsLoad.WorkingColMap = map[model.TableItemID][]chan stmtctx.StatsLoadResult{}
 	return handle, nil
+}
+
+// Lease returns the stats lease.
+func (h *Handle) Lease() time.Duration {
+	return h.lease.Load()
+}
+
+// SetLease sets the stats lease.
+func (h *Handle) SetLease(lease time.Duration) {
+	h.lease.Store(lease)
 }
 
 // GetTableStats retrieves the statistics table from cache, and the cache will be updated by a goroutine.
@@ -149,18 +159,9 @@ func (h *Handle) GetTableStats(tblInfo *model.TableInfo) *statistics.Table {
 	return h.GetPartitionStats(tblInfo, tblInfo.ID)
 }
 
-// GetTableStatsForAutoAnalyze is to get table stats but it will
-func (h *Handle) GetTableStatsForAutoAnalyze(tblInfo *model.TableInfo) *statistics.Table {
-	return h.getPartitionStats(tblInfo, tblInfo.ID, false)
-}
-
 // GetPartitionStats retrieves the partition stats from cache.
-// TODO: remove GetTableStats later on.
+// TODO: remove GetPartitionStats later on.
 func (h *Handle) GetPartitionStats(tblInfo *model.TableInfo, pid int64) *statistics.Table {
-	return h.getPartitionStats(tblInfo, pid, true)
-}
-
-func (h *Handle) getPartitionStats(tblInfo *model.TableInfo, pid int64, returnPseudo bool) *statistics.Table {
 	var tbl *statistics.Table
 	if h == nil {
 		tbl = statistics.PseudoTable(tblInfo, false)
@@ -169,23 +170,20 @@ func (h *Handle) getPartitionStats(tblInfo *model.TableInfo, pid int64, returnPs
 	}
 	tbl, ok := h.Get(pid)
 	if !ok {
-		if returnPseudo {
-			tbl = statistics.PseudoTable(tblInfo, false)
-			tbl.PhysicalID = pid
-			if tblInfo.GetPartitionInfo() == nil || h.Len() < 64 {
-				h.UpdateStatsCache([]*statistics.Table{tbl}, nil)
-			}
-			return tbl
+		tbl = statistics.PseudoTable(tblInfo, false)
+		tbl.PhysicalID = pid
+		if tblInfo.GetPartitionInfo() == nil || h.Len() < 64 {
+			h.UpdateStatsCache([]*statistics.Table{tbl}, nil)
 		}
-		return nil
+		return tbl
 	}
 	return tbl
 }
 
 // FlushStats flushes the cached stats update into store.
 func (h *Handle) FlushStats() {
-	for len(h.DDLEventCh()) > 0 {
-		e := <-h.DDLEventCh()
+	for len(h.ddlEventCh) > 0 {
+		e := <-h.ddlEventCh
 		if err := h.HandleDDLEvent(e); err != nil {
 			statslogutil.StatsLogger().Error("handle ddl event fail", zap.Error(err))
 		}
@@ -195,14 +193,37 @@ func (h *Handle) FlushStats() {
 	}
 }
 
-// StartWorker starts the background collector worker inside
-func (h *Handle) StartWorker() {
-	h.StatsUsage.StartWorker()
-}
-
 // Close stops the background
 func (h *Handle) Close() {
-	h.Pool.Close()
+	h.gpool.Close()
 	h.StatsCache.Close()
-	h.StatsUsage.Close()
+}
+
+// GetCurrentPruneMode returns the current latest partitioning table prune mode.
+func (h *Handle) GetCurrentPruneMode() (mode string, err error) {
+	err = util.CallWithSCtx(h.pool, func(sctx sessionctx.Context) error {
+		mode = sctx.GetSessionVars().PartitionPruneMode.Load()
+		return nil
+	})
+	return
+}
+
+// GPool returns the goroutine pool of handle.
+func (h *Handle) GPool() *gp.Pool {
+	return h.gpool
+}
+
+// SPool returns the session pool.
+func (h *Handle) SPool() util.SessionPool {
+	return h.pool
+}
+
+// SysProcTracker is used to track sys process like analyze
+func (h *Handle) SysProcTracker() sessionctx.SysProcTracker {
+	return h.sysProcTracker
+}
+
+// AutoAnalyzeProcID generates an analyze ID.
+func (h *Handle) AutoAnalyzeProcID() uint64 {
+	return h.autoAnalyzeProcIDGetter()
 }

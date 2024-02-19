@@ -153,7 +153,7 @@ func (b *PBPlanBuilder) buildTableScanSchema(tblInfo *model.TableInfo, columns [
 }
 
 func (b *PBPlanBuilder) pbToSelection(e *tipb.Executor) (PhysicalPlan, error) {
-	conds, err := expression.PBToExprs(b.sctx, e.Selection.Conditions, b.tps)
+	conds, err := expression.PBToExprs(e.Selection.Conditions, b.tps, b.sctx.GetSessionVars().StmtCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -165,9 +165,10 @@ func (b *PBPlanBuilder) pbToSelection(e *tipb.Executor) (PhysicalPlan, error) {
 
 func (b *PBPlanBuilder) pbToTopN(e *tipb.Executor) (PhysicalPlan, error) {
 	topN := e.TopN
+	sc := b.sctx.GetSessionVars().StmtCtx
 	byItems := make([]*util.ByItems, 0, len(topN.OrderBy))
 	for _, item := range topN.OrderBy {
-		expr, err := expression.PBToExpr(b.sctx, item.Expr, b.tps)
+		expr, err := expression.PBToExpr(item.Expr, b.tps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -229,7 +230,7 @@ func (b *PBPlanBuilder) getAggInfo(executor *tipb.Executor) ([]*aggregation.AggF
 		}
 		aggFuncs = append(aggFuncs, aggFunc)
 	}
-	groupBys, err := expression.PBToExprs(b.sctx, executor.Aggregation.GetGroupBy(), b.tps)
+	groupBys, err := expression.PBToExprs(executor.Aggregation.GetGroupBy(), b.tps, b.sctx.GetSessionVars().StmtCtx)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}

@@ -47,7 +47,7 @@ var (
 	maxWaitTime = 30 * time.Second
 )
 
-func TestImportInto(t *testing.T) {
+func TestLoadRemote(t *testing.T) {
 	suite.Run(t, &mockGCSSuite{})
 }
 

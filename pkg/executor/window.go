@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 // WindowExec is the executor for window functions.
@@ -128,7 +129,7 @@ func (e *WindowExec) consumeGroupRows(groupRows []chunk.Row) (err error) {
 		return nil
 	}
 	for i := 0; i < len(e.resultChunks); i++ {
-		remained := min(e.remainingRowsInChunk[i], remainingRowsInGroup)
+		remained := mathutil.Min(e.remainingRowsInChunk[i], remainingRowsInGroup)
 		e.remainingRowsInChunk[i] -= remained
 		remainingRowsInGroup -= remained
 
@@ -163,7 +164,7 @@ func (e *WindowExec) fetchChild(ctx context.Context) (eof bool, err error) {
 		return true, nil
 	}
 
-	resultChk := e.AllocPool.Alloc(e.RetFieldTypes(), 0, numRows)
+	resultChk := e.Ctx().GetSessionVars().GetNewChunkWithCapacity(e.RetFieldTypes(), 0, numRows, e.AllocPool)
 	err = e.copyChk(childResult, resultChk)
 	if err != nil {
 		return false, err

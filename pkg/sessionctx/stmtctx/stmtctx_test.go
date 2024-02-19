@@ -25,16 +25,16 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/types"
+	typectx "github.com/pingcap/tidb/pkg/types/context"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
-	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
+	"go.uber.org/atomic"
 )
 
 func TestCopTasksDetails(t *testing.T) {
@@ -83,7 +83,6 @@ func TestCopTasksDetails(t *testing.T) {
 func TestStatementContextPushDownFLags(t *testing.T) {
 	newStmtCtx := func(fn func(*stmtctx.StatementContext)) *stmtctx.StatementContext {
 		sc := stmtctx.NewStmtCtx()
-		sc.SetErrLevels(errctx.LevelMap{})
 		fn(sc)
 		return sc
 	}
@@ -96,28 +95,23 @@ func TestStatementContextPushDownFLags(t *testing.T) {
 		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.InUpdateStmt = true }), 16},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.InDeleteStmt = true }), 16},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.InSelectStmt = true }), 32},
-		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.SetTypeFlags(sc.TypeFlags().WithIgnoreTruncateErr(true)) }), 1},
-		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.SetTypeFlags(sc.TypeFlags().WithTruncateAsWarning(true)) }), 66},
-		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true)) }), 128},
-		{newStmtCtx(func(sc *stmtctx.StatementContext) {
-			var levels errctx.LevelMap
-			levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-			sc.SetErrLevels(levels)
-		}), 256},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.IgnoreTruncate = *atomic.NewBool(true) }), 1},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.TruncateAsWarning = true }), 2},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.OverflowAsWarning = true }), 64},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.IgnoreZeroInDate = true }), 128},
+		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.DividedByZeroAsWarning = true }), 256},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) { sc.InLoadDataStmt = true }), 1024},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) {
 			sc.InSelectStmt = true
-			sc.SetTypeFlags(sc.TypeFlags().WithTruncateAsWarning(true))
-		}), 98},
+			sc.TruncateAsWarning = true
+		}), 34},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) {
-			var levels errctx.LevelMap
-			levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-			sc.SetErrLevels(levels)
-			sc.SetTypeFlags(sc.TypeFlags().WithIgnoreTruncateErr(true))
+			sc.DividedByZeroAsWarning = true
+			sc.IgnoreTruncate = *atomic.NewBool(true)
 		}), 257},
 		{newStmtCtx(func(sc *stmtctx.StatementContext) {
 			sc.InUpdateStmt = true
-			sc.SetTypeFlags(sc.TypeFlags().WithIgnoreZeroInDate(true))
+			sc.IgnoreZeroInDate = true
 			sc.InLoadDataStmt = true
 		}), 1168},
 	}
@@ -300,7 +294,7 @@ func TestApproxRuntimeInfo(t *testing.T) {
 }
 
 func TestStmtHintsClone(t *testing.T) {
-	hints := hint.StmtHints{}
+	hints := stmtctx.StmtHints{}
 	value := reflect.ValueOf(&hints).Elem()
 	for i := 0; i < value.NumField(); i++ {
 		field := value.Field(i)
@@ -323,13 +317,10 @@ func TestStmtHintsClone(t *testing.T) {
 
 func TestNewStmtCtx(t *testing.T) {
 	sc := stmtctx.NewStmtCtx()
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
+	require.Equal(t, types.StrictFlags, sc.TypeCtx.Flags())
+	require.Same(t, time.UTC, sc.TypeCtx.Location())
 	require.Same(t, time.UTC, sc.TimeZone())
-	require.Same(t, time.UTC, sc.TimeZone())
-	var levels errctx.LevelMap
-	levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-	sc.AppendWarning(errors.NewNoStackError("err1"))
+	sc.TypeCtx.AppendWarning(errors.New("err1"))
 	warnings := sc.GetWarnings()
 	require.Equal(t, 1, len(warnings))
 	require.Equal(t, stmtctx.WarnLevelWarning, warnings[0].Level)
@@ -337,11 +328,10 @@ func TestNewStmtCtx(t *testing.T) {
 
 	tz := time.FixedZone("UTC+1", 2*60*60)
 	sc = stmtctx.NewStmtCtxWithTimeZone(tz)
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
+	require.Equal(t, types.StrictFlags, sc.TypeCtx.Flags())
+	require.Same(t, tz, sc.TypeCtx.Location())
 	require.Same(t, tz, sc.TimeZone())
-	require.Same(t, tz, sc.TimeZone())
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-	sc.AppendWarning(errors.NewNoStackError("err2"))
+	sc.TypeCtx.AppendWarning(errors.New("err2"))
 	warnings = sc.GetWarnings()
 	require.Equal(t, 1, len(warnings))
 	require.Equal(t, stmtctx.WarnLevelWarning, warnings[0].Level)
@@ -350,123 +340,57 @@ func TestNewStmtCtx(t *testing.T) {
 
 func TestSetStmtCtxTimeZone(t *testing.T) {
 	sc := stmtctx.NewStmtCtx()
-	require.Same(t, time.UTC, sc.TimeZone())
+	require.Same(t, time.UTC, sc.TypeCtx.Location())
 	tz := time.FixedZone("UTC+1", 2*60*60)
 	sc.SetTimeZone(tz)
-	require.Same(t, tz, sc.TimeZone())
+	require.Same(t, tz, sc.TypeCtx.Location())
 }
 
 func TestSetStmtCtxTypeFlags(t *testing.T) {
 	sc := stmtctx.NewStmtCtx()
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
+	require.Equal(t, types.StrictFlags, sc.TypeCtx.Flags())
 
-	levels := errctx.LevelMap{}
-	sc.SetErrLevels(levels)
-	sc.SetTypeFlags(types.FlagAllowNegativeToUnsigned | types.FlagSkipASCIICheck)
-	require.Equal(t, types.FlagAllowNegativeToUnsigned|types.FlagSkipASCIICheck, sc.TypeFlags())
-	require.Equal(t, sc.TypeFlags(), sc.TypeFlags())
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
+	sc.SetTypeFlags(typectx.FlagClipNegativeToZero | typectx.FlagSkipASCIICheck)
+	require.Equal(t, typectx.FlagClipNegativeToZero|typectx.FlagSkipASCIICheck, sc.TypeFlags())
+	require.Equal(t, sc.TypeFlags(), sc.TypeCtx.Flags())
 
-	sc.SetTypeFlags(types.FlagSkipASCIICheck | types.FlagSkipUTF8Check | types.FlagTruncateAsWarning)
-	require.Equal(t, types.FlagSkipASCIICheck|types.FlagSkipUTF8Check|types.FlagTruncateAsWarning, sc.TypeFlags())
-	require.Equal(t, sc.TypeFlags(), sc.TypeFlags())
-	levels[errctx.ErrGroupTruncate] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
+	sc.SetTypeFlags(typectx.FlagSkipASCIICheck | typectx.FlagSkipUTF8Check | typectx.FlagInvalidDateAsWarning)
+	require.Equal(t, typectx.FlagSkipASCIICheck|typectx.FlagSkipUTF8Check|typectx.FlagInvalidDateAsWarning, sc.TypeFlags())
+	require.Equal(t, sc.TypeFlags(), sc.TypeCtx.Flags())
+
+	sc.UpdateTypeFlags(func(flags typectx.Flags) typectx.Flags {
+		return (flags | typectx.FlagSkipUTF8Check | typectx.FlagClipNegativeToZero) &^ typectx.FlagSkipASCIICheck
+	})
+	require.Equal(t, typectx.FlagSkipUTF8Check|typectx.FlagClipNegativeToZero|typectx.FlagInvalidDateAsWarning, sc.TypeFlags())
+	require.Equal(t, sc.TypeFlags(), sc.TypeCtx.Flags())
 }
 
 func TestResetStmtCtx(t *testing.T) {
 	sc := stmtctx.NewStmtCtx()
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
+	require.Equal(t, types.StrictFlags, sc.TypeCtx.Flags())
 
 	tz := time.FixedZone("UTC+1", 2*60*60)
 	sc.SetTimeZone(tz)
-	sc.SetTypeFlags(types.FlagIgnoreTruncateErr | types.FlagAllowNegativeToUnsigned | types.FlagSkipASCIICheck)
-	sc.AppendWarning(errors.NewNoStackError("err1"))
+	sc.SetTypeFlags(typectx.FlagClipNegativeToZero | typectx.FlagSkipASCIICheck)
+	sc.AppendWarning(errors.New("err1"))
 	sc.InRestrictedSQL = true
 	sc.StmtType = "Insert"
 
 	require.Same(t, tz, sc.TimeZone())
-	require.Equal(t, types.FlagIgnoreTruncateErr|types.FlagAllowNegativeToUnsigned|types.FlagSkipASCIICheck, sc.TypeFlags())
+	require.Equal(t, typectx.FlagClipNegativeToZero|typectx.FlagSkipASCIICheck, sc.TypeFlags())
 	require.Equal(t, 1, len(sc.GetWarnings()))
-	levels := errctx.LevelMap{}
-	levels[errctx.ErrGroupTruncate] = errctx.LevelIgnore
-	levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
 
 	sc.Reset()
 	require.Same(t, time.UTC, sc.TimeZone())
-	require.Same(t, time.UTC, sc.TimeZone())
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
-	require.Equal(t, types.DefaultStmtFlags, sc.TypeFlags())
+	require.Same(t, time.UTC, sc.TypeCtx.Location())
+	require.Equal(t, types.StrictFlags, sc.TypeFlags())
+	require.Equal(t, types.StrictFlags, sc.TypeCtx.Flags())
 	require.False(t, sc.InRestrictedSQL)
 	require.Empty(t, sc.StmtType)
 	require.Equal(t, 0, len(sc.GetWarnings()))
-	sc.AppendWarning(errors.NewNoStackError("err2"))
+	sc.AppendWarning(errors.New("err2"))
 	warnings := sc.GetWarnings()
 	require.Equal(t, 1, len(warnings))
 	require.Equal(t, stmtctx.WarnLevelWarning, warnings[0].Level)
 	require.Equal(t, "err2", warnings[0].Err.Error())
-	levels = errctx.LevelMap{}
-	levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-}
-
-func TestStmtCtxID(t *testing.T) {
-	sc := stmtctx.NewStmtCtx()
-	currentID := sc.CtxID()
-
-	cases := []struct {
-		fn func() *stmtctx.StatementContext
-	}{
-		{func() *stmtctx.StatementContext { return stmtctx.NewStmtCtx() }},
-		{func() *stmtctx.StatementContext { return stmtctx.NewStmtCtxWithTimeZone(time.Local) }},
-		{func() *stmtctx.StatementContext {
-			sc.Reset()
-			return sc
-		}},
-	}
-
-	for _, c := range cases {
-		ctxID := c.fn().CtxID()
-		require.Greater(t, ctxID, currentID)
-		currentID = ctxID
-	}
-}
-
-func TestErrCtx(t *testing.T) {
-	sc := stmtctx.NewStmtCtx()
-	// the default errCtx
-	err := types.ErrTruncated
-	require.Error(t, sc.HandleError(err))
-	levels := errctx.LevelMap{}
-	levels[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-	levels[errctx.ErrGroupDividedByZero] = errctx.LevelError
-
-	// set error levels
-	levels[errctx.ErrGroupAutoIncReadFailed] = errctx.LevelIgnore
-	sc.SetErrLevels(levels)
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-
-	// reset the types flags will re-initialize the error flag, but keeps the error levels unchanged except for ErrGroupTruncate
-	sc.SetTypeFlags(types.DefaultStmtFlags | types.FlagTruncateAsWarning)
-	require.NoError(t, sc.HandleError(err))
-	levels = errctx.LevelMap{}
-	levels[errctx.ErrGroupTruncate] = errctx.LevelWarn
-	levels[errctx.ErrGroupAutoIncReadFailed] = errctx.LevelIgnore
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-
-	// SetErrLevels will not affect ErrGroupTruncate
-	sc.SetErrLevels(errctx.LevelMap{})
-	levels = errctx.LevelMap{}
-	levels[errctx.ErrGroupTruncate] = errctx.LevelWarn
-	require.Equal(t, errctx.NewContextWithLevels(levels, sc), sc.ErrCtx())
-}
-
-func BenchmarkErrCtx(b *testing.B) {
-	sc := stmtctx.NewStmtCtx()
-
-	for i := 0; i < b.N; i++ {
-		sc.ErrCtx()
-	}
 }

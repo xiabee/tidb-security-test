@@ -42,7 +42,6 @@ import (
 	"github.com/pingcap/tidb/pkg/session"
 	util2 "github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/util/replayer"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -94,7 +93,7 @@ func prepareServerAndClientForTest(t *testing.T, store kv.Storage, dom *domain.D
 	srv.SetDomain(dom)
 	require.NoError(t, err)
 	go func() {
-		err := srv.Run()
+		err := srv.Run(nil)
 		require.NoError(t, err)
 	}()
 
@@ -113,7 +112,6 @@ func TestDumpPlanReplayerAPI(t *testing.T) {
 	defer server.Close()
 
 	filename, fileNameFromCapture := prepareData4PlanReplayer(t, client, dom)
-	defer os.RemoveAll(replayer.GetPlanReplayerDirName())
 
 	// 2. check the contents of the plan replayer zip files.
 

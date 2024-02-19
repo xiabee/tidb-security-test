@@ -18,9 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,9 +38,10 @@ import (
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/pdapi"
 	"github.com/pingcap/tidb/pkg/util/syncutil"
 	"github.com/tikv/client-go/v2/tikv"
-	pd "github.com/tikv/pd/client/http"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -51,21 +55,21 @@ type TiFlashReplicaManager interface {
 	// SetTiFlashGroupConfig sets the group index of the tiflash placement rule
 	SetTiFlashGroupConfig(ctx context.Context) error
 	// SetPlacementRule is a helper function to set placement rule.
-	SetPlacementRule(ctx context.Context, rule *pd.Rule) error
+	SetPlacementRule(ctx context.Context, rule placement.TiFlashRule) error
 	// SetPlacementRuleBatch is a helper function to set a batch of placement rules.
-	SetPlacementRuleBatch(ctx context.Context, rules []*pd.Rule) error
+	SetPlacementRuleBatch(ctx context.Context, rules []placement.TiFlashRule) error
 	// DeletePlacementRule is to delete placement rule for certain group.
 	DeletePlacementRule(ctx context.Context, group string, ruleID string) error
 	// GetGroupRules to get all placement rule in a certain group.
-	GetGroupRules(ctx context.Context, group string) ([]*pd.Rule, error)
+	GetGroupRules(ctx context.Context, group string) ([]placement.TiFlashRule, error)
 	// PostAccelerateScheduleBatch sends `regions/accelerate-schedule/batch` request.
 	PostAccelerateScheduleBatch(ctx context.Context, tableIDs []int64) error
 	// GetRegionCountFromPD is a helper function calling `/stats/region`.
 	GetRegionCountFromPD(ctx context.Context, tableID int64, regionCount *int) error
 	// GetStoresStat gets the TiKV store information by accessing PD's api.
-	GetStoresStat(ctx context.Context) (*pd.StoresInfo, error)
+	GetStoresStat(ctx context.Context) (*helper.StoresStat, error)
 	// CalculateTiFlashProgress calculates TiFlash replica progress
-	CalculateTiFlashProgress(tableID int64, replicaCount uint64, TiFlashStores map[int64]pd.StoreInfo) (float64, error)
+	CalculateTiFlashProgress(tableID int64, replicaCount uint64, TiFlashStores map[int64]helper.StoreStat) (float64, error)
 	// UpdateTiFlashProgressCache updates tiflashProgressCache
 	UpdateTiFlashProgressCache(tableID int64, progress float64)
 	// GetTiFlashProgressFromCache gets tiflash replica progress from tiflashProgressCache
@@ -80,16 +84,18 @@ type TiFlashReplicaManager interface {
 
 // TiFlashReplicaManagerCtx manages placement with pd and replica progress for TiFlash.
 type TiFlashReplicaManagerCtx struct {
-	pdHTTPCli            pd.Client
+	etcdCli              *clientv3.Client
 	sync.RWMutex         // protect tiflashProgressCache
 	tiflashProgressCache map[int64]float64
 	codec                tikv.Codec
 }
 
 // Close is called to close TiFlashReplicaManagerCtx.
-func (*TiFlashReplicaManagerCtx) Close(context.Context) {}
+func (m *TiFlashReplicaManagerCtx) Close(ctx context.Context) {
 
-func getTiFlashPeerWithoutLagCount(tiFlashStores map[int64]pd.StoreInfo, keyspaceID tikv.KeyspaceID, tableID int64) (int, error) {
+}
+
+func getTiFlashPeerWithoutLagCount(tiFlashStores map[int64]helper.StoreStat, keyspaceID tikv.KeyspaceID, tableID int64) (int, error) {
 	// storeIDs -> regionID, PD will not create two peer on the same store
 	var flashPeerCount int
 	for _, store := range tiFlashStores {
@@ -115,7 +121,7 @@ func getTiFlashPeerWithoutLagCount(tiFlashStores map[int64]pd.StoreInfo, keyspac
 }
 
 // calculateTiFlashProgress calculates progress based on the region status from PD and TiFlash.
-func calculateTiFlashProgress(keyspaceID tikv.KeyspaceID, tableID int64, replicaCount uint64, tiFlashStores map[int64]pd.StoreInfo) (float64, error) {
+func calculateTiFlashProgress(keyspaceID tikv.KeyspaceID, tableID int64, replicaCount uint64, tiFlashStores map[int64]helper.StoreStat) (float64, error) {
 	var regionCount int
 	if err := GetTiFlashRegionCountFromPD(context.Background(), tableID, &regionCount); err != nil {
 		logutil.BgLogger().Error("Fail to get regionCount from PD.",
@@ -148,9 +154,10 @@ func calculateTiFlashProgress(keyspaceID tikv.KeyspaceID, tableID int64, replica
 	return progress, nil
 }
 
-func encodeRule(c tikv.Codec, rule *pd.Rule) {
+func encodeRule(c tikv.Codec, rule *placement.TiFlashRule) placement.TiFlashRule {
 	rule.StartKey, rule.EndKey = c.EncodeRange(rule.StartKey, rule.EndKey)
 	rule.ID = encodeRuleID(c, rule.ID)
+	return *rule
 }
 
 // encodeRule encodes the rule ID by the following way:
@@ -165,7 +172,7 @@ func encodeRuleID(c tikv.Codec, ruleID string) string {
 }
 
 // CalculateTiFlashProgress calculates TiFlash replica progress.
-func (m *TiFlashReplicaManagerCtx) CalculateTiFlashProgress(tableID int64, replicaCount uint64, tiFlashStores map[int64]pd.StoreInfo) (float64, error) {
+func (m *TiFlashReplicaManagerCtx) CalculateTiFlashProgress(tableID int64, replicaCount uint64, tiFlashStores map[int64]helper.StoreStat) (float64, error) {
 	return calculateTiFlashProgress(m.codec.GetKeyspaceID(), tableID, replicaCount, tiFlashStores)
 }
 
@@ -200,77 +207,259 @@ func (m *TiFlashReplicaManagerCtx) CleanTiFlashProgressCache() {
 
 // SetTiFlashGroupConfig sets the tiflash's rule group config
 func (m *TiFlashReplicaManagerCtx) SetTiFlashGroupConfig(ctx context.Context) error {
-	groupConfig, err := m.pdHTTPCli.GetPlacementRuleGroupByID(ctx, placement.TiFlashRuleGroupID)
+	res, err := doRequest(ctx,
+		"GetRuleGroupConfig",
+		m.etcdCli.Endpoints(),
+		path.Join(pdapi.Config, "rule_group", placement.TiFlashRuleGroupID),
+		"GET",
+		nil,
+	)
+
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if groupConfig != nil && groupConfig.Index == placement.RuleIndexTiFlash && !groupConfig.Override {
-		return nil
+
+	var groupConfig placement.RuleGroupConfig
+	shouldUpdate := res == nil
+	if res != nil {
+		if err = json.Unmarshal(res, &groupConfig); err != nil {
+			return errors.Trace(err)
+		}
+
+		if groupConfig.Index != placement.RuleIndexTiFlash || groupConfig.Override {
+			shouldUpdate = true
+		}
 	}
-	groupConfig = &pd.RuleGroup{
-		ID:       placement.TiFlashRuleGroupID,
-		Index:    placement.RuleIndexTiFlash,
-		Override: false,
+
+	if shouldUpdate {
+		groupConfig.ID = placement.TiFlashRuleGroupID
+		groupConfig.Index = placement.RuleIndexTiFlash
+		groupConfig.Override = false
+
+		body, err := json.Marshal(&groupConfig)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		_, err = doRequest(ctx,
+			"SetRuleGroupConfig",
+			m.etcdCli.Endpoints(),
+			path.Join(pdapi.Config, "rule_group"),
+			"POST",
+			bytes.NewBuffer(body),
+		)
+
+		if err != nil {
+			return errors.Trace(err)
+		}
 	}
-	return m.pdHTTPCli.SetPlacementRuleGroup(ctx, groupConfig)
+	return nil
 }
 
 // SetPlacementRule is a helper function to set placement rule.
-func (m *TiFlashReplicaManagerCtx) SetPlacementRule(ctx context.Context, rule *pd.Rule) error {
-	encodeRule(m.codec, rule)
-	return m.doSetPlacementRule(ctx, rule)
+func (m *TiFlashReplicaManagerCtx) SetPlacementRule(ctx context.Context, rule placement.TiFlashRule) error {
+	r := encodeRule(m.codec, &rule)
+	return m.doSetPlacementRule(ctx, r)
 }
 
-func (m *TiFlashReplicaManagerCtx) doSetPlacementRule(ctx context.Context, rule *pd.Rule) error {
+func (m *TiFlashReplicaManagerCtx) doSetPlacementRule(ctx context.Context, rule placement.TiFlashRule) error {
 	if err := m.SetTiFlashGroupConfig(ctx); err != nil {
 		return err
 	}
+
 	if rule.Count == 0 {
-		return m.pdHTTPCli.DeletePlacementRule(ctx, rule.GroupID, rule.ID)
+		return m.doDeletePlacementRule(ctx, rule.GroupID, rule.ID)
 	}
-	return m.pdHTTPCli.SetPlacementRule(ctx, rule)
+
+	j, err := rule.MarshalJSON()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	buf := bytes.NewBuffer(j)
+	res, err := doRequest(ctx, "SetPlacementRule", m.etcdCli.Endpoints(), path.Join(pdapi.Config, "rule"), "POST", buf)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in SetPlacementRule")
+	}
+	return nil
 }
 
 // SetPlacementRuleBatch is a helper function to set a batch of placement rules.
-func (m *TiFlashReplicaManagerCtx) SetPlacementRuleBatch(ctx context.Context, rules []*pd.Rule) error {
-	r := make([]*pd.Rule, 0, len(rules))
+func (m *TiFlashReplicaManagerCtx) SetPlacementRuleBatch(ctx context.Context, rules []placement.TiFlashRule) error {
+	r := make([]placement.TiFlashRule, 0, len(rules))
 	for _, rule := range rules {
-		encodeRule(m.codec, rule)
-		r = append(r, rule)
+		r = append(r, encodeRule(m.codec, &rule))
 	}
 	return m.doSetPlacementRuleBatch(ctx, r)
 }
 
-func (m *TiFlashReplicaManagerCtx) doSetPlacementRuleBatch(ctx context.Context, rules []*pd.Rule) error {
+// RuleOpType indicates the operation type
+type RuleOpType string
+
+const (
+	// RuleOpAdd a placement rule, only need to specify the field *Rule
+	RuleOpAdd RuleOpType = "add"
+	// RuleOpDel a placement rule, only need to specify the field `GroupID`, `ID`, `MatchID`
+	RuleOpDel RuleOpType = "del"
+)
+
+// RuleOp is for batching placement rule actions. The action type is
+// distinguished by the field `Action`.
+type RuleOp struct {
+	*placement.TiFlashRule // information of the placement rule to add/delete the operation type
+	Action                 RuleOpType
+	DeleteByIDPrefix       bool // if action == delete, delete by the prefix of id
+}
+
+var _ json.Marshaler = (*RuleOp)(nil)
+var _ json.Unmarshaler = (*RuleOp)(nil)
+
+type ruleOp struct {
+	GroupID          string                 `json:"group_id"`
+	ID               string                 `json:"id"`
+	Index            int                    `json:"index,omitempty"`
+	Override         bool                   `json:"override,omitempty"`
+	Role             placement.PeerRoleType `json:"role"`
+	Count            int                    `json:"count"`
+	Constraints      placement.Constraints  `json:"label_constraints,omitempty"`
+	LocationLabels   []string               `json:"location_labels,omitempty"`
+	IsolationLevel   string                 `json:"isolation_level,omitempty"`
+	StartKeyHex      string                 `json:"start_key"`
+	EndKeyHex        string                 `json:"end_key"`
+	Action           RuleOpType             `json:"action"`
+	DeleteByIDPrefix bool                   `json:"delete_by_id_prefix"`
+}
+
+// MarshalJSON implements json.Marshaler interface for RuleOp.
+func (r *RuleOp) MarshalJSON() ([]byte, error) {
+	return json.Marshal(&ruleOp{
+		GroupID:          r.GroupID,
+		ID:               r.ID,
+		Index:            r.Index,
+		Override:         r.Override,
+		Role:             r.Role,
+		Count:            r.Count,
+		Constraints:      r.Constraints,
+		LocationLabels:   r.LocationLabels,
+		IsolationLevel:   r.IsolationLevel,
+		StartKeyHex:      hex.EncodeToString(codec.EncodeBytes(nil, r.StartKey)),
+		EndKeyHex:        hex.EncodeToString(codec.EncodeBytes(nil, r.EndKey)),
+		Action:           r.Action,
+		DeleteByIDPrefix: r.DeleteByIDPrefix,
+	})
+}
+
+// UnmarshalJSON implements json.Unmarshaler interface for RuleOp.
+func (r *RuleOp) UnmarshalJSON(bytes []byte) error {
+	var rule ruleOp
+	if err := json.Unmarshal(bytes, &rule); err != nil {
+		return err
+	}
+	*r = RuleOp{
+		TiFlashRule: &placement.TiFlashRule{
+			GroupID:        rule.GroupID,
+			ID:             rule.ID,
+			Index:          rule.Index,
+			Override:       rule.Override,
+			Role:           rule.Role,
+			Count:          rule.Count,
+			Constraints:    rule.Constraints,
+			LocationLabels: rule.LocationLabels,
+			IsolationLevel: rule.IsolationLevel,
+		},
+		Action:           rule.Action,
+		DeleteByIDPrefix: rule.DeleteByIDPrefix,
+	}
+
+	startKey, err := hex.DecodeString(rule.StartKeyHex)
+	if err != nil {
+		return err
+	}
+
+	endKey, err := hex.DecodeString(rule.EndKeyHex)
+	if err != nil {
+		return err
+	}
+
+	_, r.StartKey, err = codec.DecodeBytes(startKey, nil)
+	if err != nil {
+		return err
+	}
+
+	_, r.EndKey, err = codec.DecodeBytes(endKey, nil)
+
+	return err
+}
+
+func (m *TiFlashReplicaManagerCtx) doSetPlacementRuleBatch(ctx context.Context, rules []placement.TiFlashRule) error {
 	if err := m.SetTiFlashGroupConfig(ctx); err != nil {
 		return err
 	}
-	ruleOps := make([]*pd.RuleOp, 0, len(rules))
+	ruleOps := make([]RuleOp, 0, len(rules))
 	for i, r := range rules {
 		if r.Count == 0 {
-			ruleOps = append(ruleOps, &pd.RuleOp{
-				Rule:   rules[i],
-				Action: pd.RuleOpDel,
+			ruleOps = append(ruleOps, RuleOp{
+				TiFlashRule: &rules[i],
+				Action:      RuleOpDel,
 			})
 		} else {
-			ruleOps = append(ruleOps, &pd.RuleOp{
-				Rule:   rules[i],
-				Action: pd.RuleOpAdd,
+			ruleOps = append(ruleOps, RuleOp{
+				TiFlashRule: &rules[i],
+				Action:      RuleOpAdd,
 			})
 		}
 	}
-	return m.pdHTTPCli.SetPlacementRuleInBatch(ctx, ruleOps)
+	j, err := json.Marshal(ruleOps)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	buf := bytes.NewBuffer(j)
+	res, err := doRequest(ctx, "SetPlacementRuleBatch", m.etcdCli.Endpoints(), path.Join(pdapi.Config, "rules", "batch"), "POST", buf)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in SetPlacementRuleBatch")
+	}
+	return nil
 }
 
 // DeletePlacementRule is to delete placement rule for certain group.
 func (m *TiFlashReplicaManagerCtx) DeletePlacementRule(ctx context.Context, group string, ruleID string) error {
 	ruleID = encodeRuleID(m.codec, ruleID)
-	return m.pdHTTPCli.DeletePlacementRule(ctx, group, ruleID)
+	return m.doDeletePlacementRule(ctx, group, ruleID)
+}
+
+func (m *TiFlashReplicaManagerCtx) doDeletePlacementRule(ctx context.Context, group string, ruleID string) error {
+	res, err := doRequest(ctx, "DeletePlacementRule", m.etcdCli.Endpoints(), path.Join(pdapi.Config, "rule", group, ruleID), "DELETE", nil)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in DeletePlacementRule")
+	}
+	return nil
 }
 
 // GetGroupRules to get all placement rule in a certain group.
-func (m *TiFlashReplicaManagerCtx) GetGroupRules(ctx context.Context, group string) ([]*pd.Rule, error) {
-	return m.pdHTTPCli.GetPlacementRulesByGroup(ctx, group)
+func (m *TiFlashReplicaManagerCtx) GetGroupRules(ctx context.Context, group string) ([]placement.TiFlashRule, error) {
+	res, err := doRequest(ctx, "GetGroupRules", m.etcdCli.Endpoints(), path.Join(pdapi.Config, "rules", "group", group), "GET", nil)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if res == nil {
+		return nil, fmt.Errorf("TiFlashReplicaManagerCtx returns error in GetGroupRules")
+	}
+
+	var rules []placement.TiFlashRule
+	err = json.Unmarshal(res, &rules)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return rules, nil
 }
 
 // PostAccelerateScheduleBatch sends `regions/batch-accelerate-schedule` request.
@@ -278,14 +467,29 @@ func (m *TiFlashReplicaManagerCtx) PostAccelerateScheduleBatch(ctx context.Conte
 	if len(tableIDs) == 0 {
 		return nil
 	}
-	input := make([]*pd.KeyRange, 0, len(tableIDs))
+	input := make([]map[string]string, 0, len(tableIDs))
 	for _, tableID := range tableIDs {
 		startKey := tablecodec.GenTableRecordPrefix(tableID)
 		endKey := tablecodec.EncodeTablePrefix(tableID + 1)
 		startKey, endKey = m.codec.EncodeRegionRange(startKey, endKey)
-		input = append(input, pd.NewKeyRange(startKey, endKey))
+		input = append(input, map[string]string{
+			"start_key": hex.EncodeToString(startKey),
+			"end_key":   hex.EncodeToString(endKey),
+		})
 	}
-	return m.pdHTTPCli.AccelerateScheduleInBatch(ctx, input)
+	j, err := json.Marshal(input)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	buf := bytes.NewBuffer(j)
+	res, err := doRequest(ctx, "PostAccelerateScheduleBatch", m.etcdCli.Endpoints(), path.Join(pdapi.Regions, "accelerate-schedule", "batch"), "POST", buf)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in PostAccelerateScheduleBatch")
+	}
+	return nil
 }
 
 // GetRegionCountFromPD is a helper function calling `/stats/region`.
@@ -293,17 +497,42 @@ func (m *TiFlashReplicaManagerCtx) GetRegionCountFromPD(ctx context.Context, tab
 	startKey := tablecodec.GenTableRecordPrefix(tableID)
 	endKey := tablecodec.EncodeTablePrefix(tableID + 1)
 	startKey, endKey = m.codec.EncodeRegionRange(startKey, endKey)
-	stats, err := m.pdHTTPCli.GetRegionStatusByKeyRange(ctx, pd.NewKeyRange(startKey, endKey), true)
+
+	p := fmt.Sprintf("/pd/api/v1/stats/region?start_key=%s&end_key=%s&count",
+		url.QueryEscape(string(startKey)),
+		url.QueryEscape(string(endKey)))
+	res, err := doRequest(ctx, "GetPDRegionStats", m.etcdCli.Endpoints(), p, "GET", nil)
 	if err != nil {
-		return err
+		return errors.Trace(err)
+	}
+	if res == nil {
+		return fmt.Errorf("TiFlashReplicaManagerCtx returns error in GetRegionCountFromPD")
+	}
+	var stats helper.PDRegionStats
+	err = json.Unmarshal(res, &stats)
+	if err != nil {
+		return errors.Trace(err)
 	}
 	*regionCount = stats.Count
 	return nil
 }
 
 // GetStoresStat gets the TiKV store information by accessing PD's api.
-func (m *TiFlashReplicaManagerCtx) GetStoresStat(ctx context.Context) (*pd.StoresInfo, error) {
-	return m.pdHTTPCli.GetStores(ctx)
+func (m *TiFlashReplicaManagerCtx) GetStoresStat(ctx context.Context) (*helper.StoresStat, error) {
+	var storesStat helper.StoresStat
+	res, err := doRequest(ctx, "GetStoresStat", m.etcdCli.Endpoints(), pdapi.Stores, "GET", nil)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if res == nil {
+		return nil, fmt.Errorf("TiFlashReplicaManagerCtx returns error in GetStoresStat")
+	}
+
+	err = json.Unmarshal(res, &storesStat)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &storesStat, err
 }
 
 type mockTiFlashReplicaManagerCtx struct {
@@ -314,18 +543,18 @@ type mockTiFlashReplicaManagerCtx struct {
 	tiflashProgressCache map[int64]float64
 }
 
-func makeBaseRule() pd.Rule {
-	return pd.Rule{
+func makeBaseRule() placement.TiFlashRule {
+	return placement.TiFlashRule{
 		GroupID:  placement.TiFlashRuleGroupID,
 		ID:       "",
 		Index:    placement.RuleIndexTiFlash,
 		Override: false,
-		Role:     pd.Learner,
+		Role:     placement.Learner,
 		Count:    2,
-		LabelConstraints: []pd.LabelConstraint{
+		Constraints: []placement.Constraint{
 			{
 				Key:    "engine",
-				Op:     pd.In,
+				Op:     placement.In,
 				Values: []string{"tiflash"},
 			},
 		},
@@ -333,7 +562,7 @@ func makeBaseRule() pd.Rule {
 }
 
 // MakeNewRule creates a pd rule for TiFlash.
-func MakeNewRule(id int64, count uint64, locationLabels []string) pd.Rule {
+func MakeNewRule(id int64, count uint64, locationLabels []string) placement.TiFlashRule {
 	ruleID := MakeRuleID(id)
 	startKey := tablecodec.GenTableRecordPrefix(id)
 	endKey := tablecodec.EncodeTablePrefix(id + 1)
@@ -379,8 +608,8 @@ type MockTiFlash struct {
 	StatusAddr                  string
 	StatusServer                *httptest.Server
 	SyncStatus                  map[int]mockTiFlashTableInfo
-	StoreInfo                   map[uint64]pd.MetaStore
-	GlobalTiFlashPlacementRules map[string]*pd.Rule
+	StoreInfo                   map[uint64]helper.StoreBaseStat
+	GlobalTiFlashPlacementRules map[string]placement.TiFlashRule
 	PdEnabled                   bool
 	TiflashDelay                time.Duration
 	StartTime                   time.Time
@@ -441,8 +670,8 @@ func NewMockTiFlash() *MockTiFlash {
 		StatusAddr:                  "",
 		StatusServer:                nil,
 		SyncStatus:                  make(map[int]mockTiFlashTableInfo),
-		StoreInfo:                   make(map[uint64]pd.MetaStore),
-		GlobalTiFlashPlacementRules: make(map[string]*pd.Rule),
+		StoreInfo:                   make(map[uint64]helper.StoreBaseStat),
+		GlobalTiFlashPlacementRules: make(map[string]placement.TiFlashRule),
 		PdEnabled:                   true,
 		TiflashDelay:                0,
 		StartTime:                   time.Now(),
@@ -453,7 +682,7 @@ func NewMockTiFlash() *MockTiFlash {
 }
 
 // HandleSetPlacementRule is mock function for SetTiFlashPlacementRule.
-func (tiflash *MockTiFlash) HandleSetPlacementRule(rule *pd.Rule) error {
+func (tiflash *MockTiFlash) HandleSetPlacementRule(rule placement.TiFlashRule) error {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	tiflash.groupIndex = placement.RuleIndexTiFlash
@@ -498,7 +727,7 @@ func (tiflash *MockTiFlash) HandleSetPlacementRule(rule *pd.Rule) error {
 }
 
 // HandleSetPlacementRuleBatch is mock function for batch SetTiFlashPlacementRule.
-func (tiflash *MockTiFlash) HandleSetPlacementRuleBatch(rules []*pd.Rule) error {
+func (tiflash *MockTiFlash) HandleSetPlacementRuleBatch(rules []placement.TiFlashRule) error {
 	for _, r := range rules {
 		if err := tiflash.HandleSetPlacementRule(r); err != nil {
 			return err
@@ -527,17 +756,17 @@ func (tiflash *MockTiFlash) ResetSyncStatus(tableID int, canAvailable bool) {
 }
 
 // HandleDeletePlacementRule is mock function for DeleteTiFlashPlacementRule.
-func (tiflash *MockTiFlash) HandleDeletePlacementRule(_ string, ruleID string) {
+func (tiflash *MockTiFlash) HandleDeletePlacementRule(group string, ruleID string) {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	delete(tiflash.GlobalTiFlashPlacementRules, ruleID)
 }
 
 // HandleGetGroupRules is mock function for GetTiFlashGroupRules.
-func (tiflash *MockTiFlash) HandleGetGroupRules(_ string) ([]*pd.Rule, error) {
+func (tiflash *MockTiFlash) HandleGetGroupRules(group string) ([]placement.TiFlashRule, error) {
 	tiflash.Lock()
 	defer tiflash.Unlock()
-	var result = make([]*pd.Rule, 0)
+	var result = make([]placement.TiFlashRule, 0)
 	for _, item := range tiflash.GlobalTiFlashPlacementRules {
 		result = append(result, item)
 	}
@@ -565,15 +794,15 @@ func (tiflash *MockTiFlash) HandlePostAccelerateSchedule(endKey string) error {
 
 // HandleGetPDRegionRecordStats is mock function for GetRegionCountFromPD.
 // It currently always returns 1 Region for convenience.
-func (*MockTiFlash) HandleGetPDRegionRecordStats(int64) pd.RegionStats {
-	return pd.RegionStats{
+func (tiflash *MockTiFlash) HandleGetPDRegionRecordStats(_ int64) helper.PDRegionStats {
+	return helper.PDRegionStats{
 		Count: 1,
 	}
 }
 
 // AddStore is mock function for adding store info into MockTiFlash.
 func (tiflash *MockTiFlash) AddStore(storeID uint64, address string) {
-	tiflash.StoreInfo[storeID] = pd.MetaStore{
+	tiflash.StoreInfo[storeID] = helper.StoreBaseStat{
 		ID:             int64(storeID),
 		Address:        address,
 		State:          0,
@@ -582,7 +811,7 @@ func (tiflash *MockTiFlash) AddStore(storeID uint64, address string) {
 		StatusAddress:  tiflash.StatusAddr,
 		GitHash:        "mock-tikv-githash",
 		StartTimestamp: tiflash.StartTime.Unix(),
-		Labels: []pd.StoreLabel{{
+		Labels: []helper.StoreLabel{{
 			Key:   "engine",
 			Value: "tiflash",
 		}},
@@ -591,16 +820,16 @@ func (tiflash *MockTiFlash) AddStore(storeID uint64, address string) {
 
 // HandleGetStoresStat is mock function for GetStoresStat.
 // It returns address of our mocked TiFlash server.
-func (tiflash *MockTiFlash) HandleGetStoresStat() *pd.StoresInfo {
+func (tiflash *MockTiFlash) HandleGetStoresStat() *helper.StoresStat {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	if len(tiflash.StoreInfo) == 0 {
 		// default Store
-		return &pd.StoresInfo{
+		return &helper.StoresStat{
 			Count: 1,
-			Stores: []pd.StoreInfo{
+			Stores: []helper.StoreStat{
 				{
-					Store: pd.MetaStore{
+					Store: helper.StoreBaseStat{
 						ID:             1,
 						Address:        "127.0.0.1:3930",
 						State:          0,
@@ -609,7 +838,7 @@ func (tiflash *MockTiFlash) HandleGetStoresStat() *pd.StoresInfo {
 						StatusAddress:  tiflash.StatusAddr,
 						GitHash:        "mock-tikv-githash",
 						StartTimestamp: tiflash.StartTime.Unix(),
-						Labels: []pd.StoreLabel{{
+						Labels: []helper.StoreLabel{{
 							Key:   "engine",
 							Value: "tiflash",
 						}},
@@ -618,11 +847,11 @@ func (tiflash *MockTiFlash) HandleGetStoresStat() *pd.StoresInfo {
 			},
 		}
 	}
-	stores := make([]pd.StoreInfo, 0, len(tiflash.StoreInfo))
+	stores := make([]helper.StoreStat, 0, len(tiflash.StoreInfo))
 	for _, storeInfo := range tiflash.StoreInfo {
-		stores = append(stores, pd.StoreInfo{Store: storeInfo, Status: pd.StoreStatus{}})
+		stores = append(stores, helper.StoreStat{Store: storeInfo, Status: helper.StoreDetailStat{}})
 	}
-	return &pd.StoresInfo{
+	return &helper.StoresStat{
 		Count:  len(tiflash.StoreInfo),
 		Stores: stores,
 	}
@@ -643,14 +872,14 @@ func (tiflash *MockTiFlash) GetRuleGroupIndex() int {
 }
 
 // Compare supposed rule, and we actually get from TableInfo
-func isRuleMatch(rule pd.Rule, startKey []byte, endKey []byte, count int, labels []string) bool {
+func isRuleMatch(rule placement.TiFlashRule, startKey []byte, endKey []byte, count int, labels []string) bool {
 	// Compute startKey
 	if !(bytes.Equal(rule.StartKey, startKey) && bytes.Equal(rule.EndKey, endKey)) {
 		return false
 	}
 	ok := false
-	for _, c := range rule.LabelConstraints {
-		if c.Key == "engine" && len(c.Values) == 1 && c.Values[0] == "tiflash" && c.Op == pd.In {
+	for _, c := range rule.Constraints {
+		if c.Key == "engine" && len(c.Values) == 1 && c.Values[0] == "tiflash" && c.Op == placement.In {
 			ok = true
 			break
 		}
@@ -670,14 +899,14 @@ func isRuleMatch(rule pd.Rule, startKey []byte, endKey []byte, count int, labels
 	if rule.Count != count {
 		return false
 	}
-	if rule.Role != pd.Learner {
+	if rule.Role != placement.Learner {
 		return false
 	}
 	return true
 }
 
 // CheckPlacementRule find if a given rule precisely matches already set rules.
-func (tiflash *MockTiFlash) CheckPlacementRule(rule pd.Rule) bool {
+func (tiflash *MockTiFlash) CheckPlacementRule(rule placement.TiFlashRule) bool {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	for _, r := range tiflash.GlobalTiFlashPlacementRules {
@@ -689,12 +918,12 @@ func (tiflash *MockTiFlash) CheckPlacementRule(rule pd.Rule) bool {
 }
 
 // GetPlacementRule find a rule by name.
-func (tiflash *MockTiFlash) GetPlacementRule(ruleName string) (*pd.Rule, bool) {
+func (tiflash *MockTiFlash) GetPlacementRule(ruleName string) (*placement.TiFlashRule, bool) {
 	tiflash.Lock()
 	defer tiflash.Unlock()
 	if r, ok := tiflash.GlobalTiFlashPlacementRules[ruleName]; ok {
 		p := r
-		return p, ok
+		return &p, ok
 	}
 	return nil, false
 }
@@ -703,7 +932,7 @@ func (tiflash *MockTiFlash) GetPlacementRule(ruleName string) (*pd.Rule, bool) {
 func (tiflash *MockTiFlash) CleanPlacementRules() {
 	tiflash.Lock()
 	defer tiflash.Unlock()
-	tiflash.GlobalTiFlashPlacementRules = make(map[string]*pd.Rule)
+	tiflash.GlobalTiFlashPlacementRules = make(map[string]placement.TiFlashRule)
 }
 
 // PlacementRulesLen gets length of all currently set placement rules.
@@ -739,7 +968,7 @@ func (tiflash *MockTiFlash) SetNetworkError(e bool) {
 }
 
 // CalculateTiFlashProgress return truncated string to avoid float64 comparison.
-func (*mockTiFlashReplicaManagerCtx) CalculateTiFlashProgress(tableID int64, replicaCount uint64, tiFlashStores map[int64]pd.StoreInfo) (float64, error) {
+func (m *mockTiFlashReplicaManagerCtx) CalculateTiFlashProgress(tableID int64, replicaCount uint64, tiFlashStores map[int64]helper.StoreStat) (float64, error) {
 	return calculateTiFlashProgress(tikv.NullspaceID, tableID, replicaCount, tiFlashStores)
 }
 
@@ -791,7 +1020,7 @@ func (m *mockTiFlashReplicaManagerCtx) SetTiFlashGroupConfig(_ context.Context) 
 }
 
 // SetPlacementRule is a helper function to set placement rule.
-func (m *mockTiFlashReplicaManagerCtx) SetPlacementRule(_ context.Context, rule *pd.Rule) error {
+func (m *mockTiFlashReplicaManagerCtx) SetPlacementRule(ctx context.Context, rule placement.TiFlashRule) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -801,7 +1030,7 @@ func (m *mockTiFlashReplicaManagerCtx) SetPlacementRule(_ context.Context, rule 
 }
 
 // SetPlacementRuleBatch is a helper function to set a batch of placement rules.
-func (m *mockTiFlashReplicaManagerCtx) SetPlacementRuleBatch(_ context.Context, rules []*pd.Rule) error {
+func (m *mockTiFlashReplicaManagerCtx) SetPlacementRuleBatch(ctx context.Context, rules []placement.TiFlashRule) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -811,7 +1040,7 @@ func (m *mockTiFlashReplicaManagerCtx) SetPlacementRuleBatch(_ context.Context, 
 }
 
 // DeletePlacementRule is to delete placement rule for certain group.
-func (m *mockTiFlashReplicaManagerCtx) DeletePlacementRule(_ context.Context, group string, ruleID string) error {
+func (m *mockTiFlashReplicaManagerCtx) DeletePlacementRule(ctx context.Context, group string, ruleID string) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -823,17 +1052,17 @@ func (m *mockTiFlashReplicaManagerCtx) DeletePlacementRule(_ context.Context, gr
 }
 
 // GetGroupRules to get all placement rule in a certain group.
-func (m *mockTiFlashReplicaManagerCtx) GetGroupRules(_ context.Context, group string) ([]*pd.Rule, error) {
+func (m *mockTiFlashReplicaManagerCtx) GetGroupRules(ctx context.Context, group string) ([]placement.TiFlashRule, error) {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
-		return []*pd.Rule{}, nil
+		return []placement.TiFlashRule{}, nil
 	}
 	return m.tiflash.HandleGetGroupRules(group)
 }
 
 // PostAccelerateScheduleBatch sends `regions/batch-accelerate-schedule` request.
-func (m *mockTiFlashReplicaManagerCtx) PostAccelerateScheduleBatch(_ context.Context, tableIDs []int64) error {
+func (m *mockTiFlashReplicaManagerCtx) PostAccelerateScheduleBatch(ctx context.Context, tableIDs []int64) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -850,7 +1079,7 @@ func (m *mockTiFlashReplicaManagerCtx) PostAccelerateScheduleBatch(_ context.Con
 }
 
 // GetRegionCountFromPD is a helper function calling `/stats/region`.
-func (m *mockTiFlashReplicaManagerCtx) GetRegionCountFromPD(_ context.Context, tableID int64, regionCount *int) error {
+func (m *mockTiFlashReplicaManagerCtx) GetRegionCountFromPD(ctx context.Context, tableID int64, regionCount *int) error {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -862,7 +1091,7 @@ func (m *mockTiFlashReplicaManagerCtx) GetRegionCountFromPD(_ context.Context, t
 }
 
 // GetStoresStat gets the TiKV store information by accessing PD's api.
-func (m *mockTiFlashReplicaManagerCtx) GetStoresStat(_ context.Context) (*pd.StoresInfo, error) {
+func (m *mockTiFlashReplicaManagerCtx) GetStoresStat(ctx context.Context) (*helper.StoresStat, error) {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {
@@ -872,7 +1101,7 @@ func (m *mockTiFlashReplicaManagerCtx) GetStoresStat(_ context.Context) (*pd.Sto
 }
 
 // Close is called to close mockTiFlashReplicaManager.
-func (m *mockTiFlashReplicaManagerCtx) Close(_ context.Context) {
+func (m *mockTiFlashReplicaManagerCtx) Close(ctx context.Context) {
 	m.Lock()
 	defer m.Unlock()
 	if m.tiflash == nil {

@@ -195,8 +195,7 @@ func (s *RowSampleBuilder) Collect() (RowSampleCollector, error) {
 						return nil, err
 					}
 					decodedVal.SetBytesAsString(s.Collators[i].Key(decodedVal.GetString()), decodedVal.Collation(), uint32(decodedVal.Length()))
-					encodedKey, err := tablecodec.EncodeValue(s.Sc.TimeZone(), nil, decodedVal)
-					err = s.Sc.HandleError(err)
+					encodedKey, err := tablecodec.EncodeValue(s.Sc, nil, decodedVal)
 					if err != nil {
 						return nil, err
 					}

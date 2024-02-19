@@ -55,9 +55,6 @@ func TestIndexChange(t *testing.T) {
 		publicTable     table.Table
 	)
 	onJobUpdatedExportedFunc := func(job *model.Job) {
-		if job.Type != model.ActionAddIndex || job.TableName != "t" {
-			return
-		}
 		if job.SchemaState == prevState {
 			return
 		}
@@ -90,11 +87,11 @@ func TestIndexChange(t *testing.T) {
 	// We need to make sure onJobUpdated is called in the first hook.
 	// After testCreateIndex(), onJobUpdated() may not be called when job.state is Sync.
 	// If we skip this check, prevState may wrongly set to StatePublic.
-	for i := 0; i <= 100; i++ {
+	for i := 0; i <= 10; i++ {
 		if addIndexDone {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	v := getSchemaVer(t, tk.Session())
 	checkHistoryJobArgs(t, tk.Session(), jobID.Load(), &historyJobArgs{ver: v, tbl: publicTable.Meta()})
@@ -138,8 +135,7 @@ func checkIndexExists(ctx sessionctx.Context, tbl table.Table, indexValue interf
 	if err != nil {
 		return errors.Trace(err)
 	}
-	sc := ctx.GetSessionVars().StmtCtx
-	doesExist, _, err := idx.Exist(sc.ErrCtx(), sc.TimeZone(), txn, types.MakeDatums(indexValue), kv.IntHandle(handle))
+	doesExist, _, err := idx.Exist(ctx.GetSessionVars().StmtCtx, txn, types.MakeDatums(indexValue), kv.IntHandle(handle))
 	if err != nil {
 		return errors.Trace(err)
 	}

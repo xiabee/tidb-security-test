@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/pingcap/errors"
 	pclog "github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -91,12 +92,7 @@ func InitLogger(cfg *Config, _ string) error {
 	} else {
 		// Only output logs of br package and main package.
 		loggerOptions = append(loggerOptions, zap.WrapCore(func(core zapcore.Core) zapcore.Core {
-			return NewFilterCore(
-				core,
-				"github.com/pingcap/tidb/br/",
-				"main.main",
-				"github.com/tikv/pd/client/http",
-			)
+			return NewFilterCore(core, "github.com/pingcap/tidb/br/", "main.main")
 		}))
 	}
 	tidbLogCfg := logutil.LogConfig{}
@@ -191,16 +187,8 @@ func IsContextCanceledError(err error) bool {
 		return true
 	}
 
-	// see https://github.com/aws/aws-sdk-go/blob/9d1f49ba/aws/credentials/credentials.go#L246-L249
-	// 2 cases that have meet:
-	// 	awserr.New("RequestCanceled", "request context canceled", err) and the nested err is context.Canceled
-	// 	awserr.New( "MultipartUpload", "upload multipart failed", err) and the nested err is the upper one
-	if v, ok := err.(awserr.BatchedErrors); ok {
-		for _, origErr := range v.OrigErrs() {
-			if IsContextCanceledError(origErr) {
-				return true
-			}
-		}
+	if v, ok := err.(awserr.Error); ok {
+		return v.Code() == request.CanceledErrorCode
 	}
 	return false
 }

@@ -180,11 +180,10 @@ func (e *AddExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 	if err := validateWatchRecord(record, do.ResourceGroupsController()); err != nil {
 		return err
 	}
-	id, err := do.AddRunawayWatch(record)
+	err = do.AddRunawayWatch(record)
 	if err != nil {
 		return err
 	}
-	req.AppendUint64(0, id)
 	return nil
 }
 

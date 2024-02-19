@@ -184,7 +184,7 @@ func (mgr *StoreManager) RemoveConn(ctx context.Context, storeID uint64) error {
 	return nil
 }
 
-func (mgr *StoreManager) TryWithConn(ctx context.Context, storeID uint64, f func(*grpc.ClientConn) error) error {
+func (mgr *StoreManager) WithConn(ctx context.Context, storeID uint64, f func(*grpc.ClientConn)) error {
 	if ctx.Err() != nil {
 		return errors.Trace(ctx.Err())
 	}
@@ -194,7 +194,8 @@ func (mgr *StoreManager) TryWithConn(ctx context.Context, storeID uint64, f func
 
 	if conn, ok := mgr.grpcClis.clis[storeID]; ok {
 		// Find a cached backup client.
-		return f(conn)
+		f(conn)
+		return nil
 	}
 
 	conn, err := mgr.getGrpcConnLocked(ctx, storeID)
@@ -203,11 +204,8 @@ func (mgr *StoreManager) TryWithConn(ctx context.Context, storeID uint64, f func
 	}
 	// Cache the conn.
 	mgr.grpcClis.clis[storeID] = conn
-	return f(conn)
-}
-
-func (mgr *StoreManager) WithConn(ctx context.Context, storeID uint64, f func(*grpc.ClientConn)) error {
-	return mgr.TryWithConn(ctx, storeID, func(cc *grpc.ClientConn) error { f(cc); return nil })
+	f(conn)
+	return nil
 }
 
 // ResetBackupClient reset the connection for backup client.

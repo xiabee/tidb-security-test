@@ -41,11 +41,12 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/store/pdtypes"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/engine"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/set"
-	pdhttp "github.com/tikv/pd/client/http"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -75,14 +76,10 @@ func (ci *clusterResourceCheckItem) getClusterAvail(ctx context.Context) (tikvAv
 	}
 
 	for _, store := range storeInfo.Stores {
-		avail, err := units.RAMInBytes(store.Status.Available)
-		if err != nil {
-			return 0, 0, errors.Trace(err)
-		}
-		if engine.IsTiFlashHTTPResp(&store.Store) {
-			tiflashAvail += uint64(avail)
+		if engine.IsTiFlash(store.Store.Store) {
+			tiflashAvail += uint64(store.Status.Available)
 		} else {
-			tikvAvail += uint64(avail)
+			tikvAvail += uint64(store.Status.Available)
 		}
 	}
 	return
@@ -162,11 +159,11 @@ func (ci *clusterResourceCheckItem) Check(ctx context.Context) (*precheck.CheckR
 		}
 	}
 
-	replicaCount, err := ci.preInfoGetter.GetMaxReplica(ctx)
+	replicaCount, err := ci.preInfoGetter.GetReplicationConfig(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	tikvSourceSize = tikvSourceSize * replicaCount
+	tikvSourceSize = tikvSourceSize * replicaCount.MaxReplicas
 
 	if tikvSourceSize <= tikvAvail && tiflashSourceSize <= tiflashAvail {
 		theResult.Message = fmt.Sprintf("The storage space is rich, which TiKV/Tiflash is %s/%s. The estimated storage space is %s/%s.",
@@ -265,16 +262,15 @@ func (ci *emptyRegionCheckItem) Check(ctx context.Context) (*precheck.CheckResul
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	regions := make(map[int64]int)
-	stores := make(map[int64]*pdhttp.StoreInfo)
+	regions := make(map[uint64]int)
+	stores := make(map[uint64]*pdtypes.StoreInfo)
 	for _, region := range emptyRegionsInfo.Regions {
 		for _, peer := range region.Peers {
-			regions[peer.StoreID]++
+			regions[peer.StoreId]++
 		}
 	}
 	for _, store := range storeInfo.Stores {
-		store := store
-		stores[store.Store.ID] = &store
+		stores[store.Store.GetId()] = store
 	}
 	tableCount := 0
 	for _, db := range ci.dbMetas {
@@ -284,8 +280,8 @@ func (ci *emptyRegionCheckItem) Check(ctx context.Context) (*precheck.CheckResul
 		}
 		tableCount += len(info.Tables)
 	}
-	errorThrehold := max(errorEmptyRegionCntPerStore, tableCount*3)
-	warnThrehold := max(warnEmptyRegionCntPerStore, tableCount)
+	errorThrehold := mathutil.Max(errorEmptyRegionCntPerStore, tableCount*3)
+	warnThrehold := mathutil.Max(warnEmptyRegionCntPerStore, tableCount)
 	var (
 		errStores  []string
 		warnStores []string
@@ -295,7 +291,7 @@ func (ci *emptyRegionCheckItem) Check(ctx context.Context) (*precheck.CheckResul
 			if metapb.StoreState(metapb.StoreState_value[store.Store.StateName]) != metapb.StoreState_Up {
 				continue
 			}
-			if engine.IsTiFlashHTTPResp(&store.Store) {
+			if engine.IsTiFlash(store.Store.Store) {
 				continue
 			}
 			if regionCnt > errorThrehold {
@@ -353,21 +349,20 @@ func (ci *regionDistributionCheckItem) Check(ctx context.Context) (*precheck.Che
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	stores := make([]*pdhttp.StoreInfo, 0, len(storesInfo.Stores))
+	stores := make([]*pdtypes.StoreInfo, 0, len(storesInfo.Stores))
 	for _, store := range storesInfo.Stores {
-		store := store
 		if metapb.StoreState(metapb.StoreState_value[store.Store.StateName]) != metapb.StoreState_Up {
 			continue
 		}
-		if engine.IsTiFlashHTTPResp(&store.Store) {
+		if engine.IsTiFlash(store.Store.Store) {
 			continue
 		}
-		stores = append(stores, &store)
+		stores = append(stores, store)
 	}
 	if len(stores) <= 1 {
 		return theResult, nil
 	}
-	slices.SortFunc(stores, func(i, j *pdhttp.StoreInfo) int {
+	slices.SortFunc(stores, func(i, j *pdtypes.StoreInfo) int {
 		return cmp.Compare(i.Status.RegionCount, j.Status.RegionCount)
 	})
 	minStore := stores[0]
@@ -385,8 +380,8 @@ func (ci *regionDistributionCheckItem) Check(ctx context.Context) (*precheck.Che
 		}
 		tableCount += len(info.Tables)
 	}
-	threhold := max(checkRegionCntRatioThreshold, tableCount)
-	if maxStore.Status.RegionCount <= int64(threhold) {
+	threhold := mathutil.Max(checkRegionCntRatioThreshold, tableCount)
+	if maxStore.Status.RegionCount <= threhold {
 		return theResult, nil
 	}
 	ratio := float64(minStore.Status.RegionCount) / float64(maxStore.Status.RegionCount)
@@ -394,11 +389,11 @@ func (ci *regionDistributionCheckItem) Check(ctx context.Context) (*precheck.Che
 		theResult.Passed = false
 		theResult.Message = fmt.Sprintf("Region distribution is unbalanced, the ratio of the regions count of the store(%v) "+
 			"with least regions(%v) to the store(%v) with most regions(%v) is %v, but we expect it must not be less than %v",
-			minStore.Store.ID, minStore.Status.RegionCount, maxStore.Store.ID, maxStore.Status.RegionCount, ratio, errorRegionCntMinMaxRatio)
+			minStore.Store.GetId(), minStore.Status.RegionCount, maxStore.Store.GetId(), maxStore.Status.RegionCount, ratio, errorRegionCntMinMaxRatio)
 	} else if ratio < warnRegionCntMinMaxRatio {
 		theResult.Message = fmt.Sprintf("Region distribution is unbalanced, the ratio of the regions count of the store(%v) "+
 			"with least regions(%v) to the store(%v) with most regions(%v) is %v, but we expect it should not be less than %v",
-			minStore.Store.ID, minStore.Status.RegionCount, maxStore.Store.ID, maxStore.Status.RegionCount, ratio, warnRegionCntMinMaxRatio)
+			minStore.Store.GetId(), minStore.Status.RegionCount, maxStore.Store.GetId(), maxStore.Status.RegionCount, ratio, warnRegionCntMinMaxRatio)
 	}
 	return theResult, nil
 }
@@ -469,7 +464,7 @@ func (ci *largeFileCheckItem) Check(_ context.Context) (*precheck.CheckResult, e
 		Item:     ci.GetCheckItemID(),
 		Severity: precheck.Warn,
 		Passed:   true,
-		Message:  "Source data files size is proper",
+		Message:  "Source csv files size is proper",
 	}
 
 	if !ci.cfg.Mydumper.StrictFormat {
@@ -477,14 +472,14 @@ func (ci *largeFileCheckItem) Check(_ context.Context) (*precheck.CheckResult, e
 			for _, t := range db.Tables {
 				for _, f := range t.DataFiles {
 					if f.FileMeta.RealSize > defaultCSVSize {
-						theResult.Message = fmt.Sprintf("large data file: %s file exists and it will slow down import performance", f.FileMeta.Path)
+						theResult.Message = fmt.Sprintf("large csv: %s file exists and it will slow down import performance", f.FileMeta.Path)
 						theResult.Passed = false
 					}
 				}
 			}
 		}
 	} else {
-		theResult.Message = "Skip the data file size check, because config.StrictFormat is true"
+		theResult.Message = "Skip the csv size check, because config.StrictFormat is true"
 	}
 	return theResult, nil
 }
@@ -754,13 +749,13 @@ func (ci *checkpointCheckItem) checkpointIsValid(ctx context.Context, tableInfo 
 type CDCPITRCheckItem struct {
 	cfg              *config.Config
 	Instruction      string
-	leaderAddrGetter func(context.Context) string
+	leaderAddrGetter func() string
 	// used in test
 	etcdCli *clientv3.Client
 }
 
 // NewCDCPITRCheckItem creates a checker to check downstream has enabled CDC or PiTR.
-func NewCDCPITRCheckItem(cfg *config.Config, leaderAddrGetter func(context.Context) string) precheck.Checker {
+func NewCDCPITRCheckItem(cfg *config.Config, leaderAddrGetter func() string) precheck.Checker {
 	return &CDCPITRCheckItem{
 		cfg:              cfg,
 		Instruction:      "local backend is not compatible with them. Please switch to tidb backend then try again.",
@@ -813,7 +808,7 @@ func (ci *CDCPITRCheckItem) Check(ctx context.Context) (*precheck.CheckResult, e
 
 	if ci.etcdCli == nil {
 		var err error
-		ci.etcdCli, err = dialEtcdWithCfg(ctx, ci.cfg, ci.leaderAddrGetter(ctx))
+		ci.etcdCli, err = dialEtcdWithCfg(ctx, ci.cfg, ci.leaderAddrGetter())
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1355,7 +1350,7 @@ func (ci *tableEmptyCheckItem) Check(ctx context.Context) (*precheck.CheckResult
 
 	var lock sync.Mutex
 	tableNames := make([]string, 0)
-	concurrency := min(tableCount, ci.cfg.App.RegionConcurrency)
+	concurrency := mathutil.Min(tableCount, ci.cfg.App.RegionConcurrency)
 	type tableNameComponents struct {
 		DBName    string
 		TableName string

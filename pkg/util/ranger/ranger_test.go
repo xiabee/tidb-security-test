@@ -265,7 +265,7 @@ func TestTableRange(t *testing.T) {
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			conds := make([]expression.Expression, len(selection.Conditions))
@@ -307,8 +307,7 @@ create table t(
 	index idx_float_unsigned(float_unsigned),
 	index idx_double_unsigned(double_unsigned),
 	index idx_int(col_int),
-	index idx_float(col_float),
-	index idx_int_bigint(a, col_int)
+	index idx_float(col_float)
 )`)
 	tests := []struct {
 		indexPos    int
@@ -317,13 +316,6 @@ create table t(
 		filterConds string
 		resultStr   string
 	}{
-		{
-			indexPos:    6,
-			exprStr:     `a = 1 and a = 2`,
-			accessConds: "[]",
-			filterConds: "[]",
-			resultStr:   `[]`,
-		},
 		{
 			indexPos:    0,
 			exprStr:     `a not in (0, 1, 2)`,
@@ -462,7 +454,7 @@ create table t(
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()
@@ -823,7 +815,7 @@ func TestColumnRange(t *testing.T) {
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			sel := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			ds, ok := sel.Children()[0].(*plannercore.DataSource)
@@ -980,7 +972,7 @@ func TestIndexRangeForYear(t *testing.T) {
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()
@@ -1048,7 +1040,7 @@ func TestPrefixIndexRangeScan(t *testing.T) {
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()
@@ -1106,7 +1098,7 @@ create table t(
 			indexPos:    0,
 			exprStr:     `a LIKE 'abc%'`,
 			accessConds: `[like(test.t.a, abc%, 92)]`,
-			filterConds: "[like(test.t.a, abc%, 92)]",
+			filterConds: "[]",
 			resultStr:   "[[\"abc\",\"abd\")]",
 		},
 		{
@@ -1120,14 +1112,14 @@ create table t(
 			indexPos:    0,
 			exprStr:     "a LIKE 'abc'",
 			accessConds: "[like(test.t.a, abc, 92)]",
-			filterConds: "[like(test.t.a, abc, 92)]",
+			filterConds: "[]",
 			resultStr:   "[[\"abc\",\"abc\"]]",
 		},
 		{
 			indexPos:    0,
 			exprStr:     `a LIKE "ab\_c"`,
 			accessConds: "[like(test.t.a, ab\\_c, 92)]",
-			filterConds: "[like(test.t.a, ab\\_c, 92)]",
+			filterConds: "[]",
 			resultStr:   "[[\"ab_c\",\"ab_c\"]]",
 		},
 		{
@@ -1141,21 +1133,21 @@ create table t(
 			indexPos:    0,
 			exprStr:     `a LIKE '\%a'`,
 			accessConds: "[like(test.t.a, \\%a, 92)]",
-			filterConds: "[like(test.t.a, \\%a, 92)]",
+			filterConds: "[]",
 			resultStr:   `[["%a","%a"]]`,
 		},
 		{
 			indexPos:    0,
 			exprStr:     `a LIKE "\\"`,
 			accessConds: "[like(test.t.a, \\, 92)]",
-			filterConds: "[like(test.t.a, \\, 92)]",
+			filterConds: "[]",
 			resultStr:   "[[\"\\\\\",\"\\\\\"]]",
 		},
 		{
 			indexPos:    0,
 			exprStr:     `a LIKE "\\\\a%"`,
 			accessConds: `[like(test.t.a, \\a%, 92)]`,
-			filterConds: "[like(test.t.a, \\\\a%, 92)]",
+			filterConds: "[]",
 			resultStr:   "[[\"\\\\a\",\"\\\\b\")]",
 		},
 		{
@@ -1303,7 +1295,7 @@ create table t(
 			exprStr:     `e = "你好啊"`,
 			accessConds: "[eq(test.t.e, 你好啊)]",
 			filterConds: "[eq(test.t.e, 你好啊)]",
-			resultStr:   "[[\"\\xe4\\xbd\",\"\\xe4\\xbd\"]]",
+			resultStr:   "[[0xE4BD,0xE4BD]]",
 		},
 		{
 			indexPos:    2,
@@ -1338,21 +1330,21 @@ create table t(
 			exprStr:     "f >= 'a' and f <= 'B'",
 			accessConds: "[ge(test.t.f, a) le(test.t.f, B)]",
 			filterConds: "[]",
-			resultStr:   "[[\"\\x00A\",\"\\x00B\"]]",
+			resultStr:   "[[\"a\",\"B\"]]",
 		},
 		{
 			indexPos:    4,
 			exprStr:     "f in ('a', 'B')",
 			accessConds: "[in(test.t.f, a, B)]",
 			filterConds: "[]",
-			resultStr:   "[[\"\\x00A\",\"\\x00A\"] [\"\\x00B\",\"\\x00B\"]]",
+			resultStr:   "[[\"a\",\"a\"] [\"B\",\"B\"]]",
 		},
 		{
 			indexPos:    4,
 			exprStr:     "f = 'a' and f = 'B' collate utf8mb4_bin",
 			accessConds: "[eq(test.t.f, a)]",
 			filterConds: "[eq(test.t.f, B)]",
-			resultStr:   "[[\"\\x00A\",\"\\x00A\"]]",
+			resultStr:   "[[\"a\",\"a\"]]",
 		},
 		{
 			indexPos:    4,
@@ -1366,7 +1358,7 @@ create table t(
 			exprStr:     "d in ('aab', 'aac') and e = 'a'",
 			accessConds: "[in(test.t.d, aab, aac) eq(test.t.e, a)]",
 			filterConds: "[in(test.t.d, aab, aac)]",
-			resultStr:   "[[\"aa\" \"a\",\"aa\" \"a\"]]",
+			resultStr:   "[[\"aa\" 0x61,\"aa\" 0x61]]",
 		},
 		{
 			indexPos:    6,
@@ -1395,7 +1387,7 @@ create table t(
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()
@@ -1636,7 +1628,7 @@ func TestTableShardIndex(t *testing.T) {
 			ret := &plannercore.PreprocessorReturn{}
 			err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 			require.NoError(t, err)
-			p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+			p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 			require.NoError(t, err)
 			selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 			conds := make([]expression.Expression, len(selection.Conditions))
@@ -1664,7 +1656,7 @@ func TestTableShardIndex(t *testing.T) {
 		ret := &plannercore.PreprocessorReturn{}
 		err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 		require.NoError(t, err)
-		p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+		p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 		require.NoError(t, err)
 		selection, ok := p.(*plannercore.Update).SelectPlan.(*plannercore.PhysicalSelection)
 		require.True(t, ok)
@@ -1682,7 +1674,7 @@ func TestTableShardIndex(t *testing.T) {
 		ret := &plannercore.PreprocessorReturn{}
 		err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 		require.NoError(t, err)
-		p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+		p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 		require.NoError(t, err)
 		selection, ok := p.(*plannercore.Delete).SelectPlan.(*plannercore.PhysicalSelection)
 		require.True(t, ok)
@@ -1827,7 +1819,7 @@ func getSelectionFromQuery(t *testing.T, sctx sessionctx.Context, sql string) *p
 	ret := &plannercore.PreprocessorReturn{}
 	err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 	require.NoError(t, err)
-	p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+	p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 	require.NoError(t, err)
 	selection, isSelection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 	require.True(t, isSelection)
@@ -2263,7 +2255,7 @@ create table t(
 		ret := &plannercore.PreprocessorReturn{}
 		err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 		require.NoError(t, err, fmt.Sprintf("error %v, for resolve name, expr %s", err, tt.exprStr))
-		p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+		p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 		require.NoError(t, err, fmt.Sprintf("error %v, for build plan, expr %s", err, tt.exprStr))
 		selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 		tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()

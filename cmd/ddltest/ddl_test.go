@@ -39,7 +39,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
@@ -77,7 +76,7 @@ type server struct {
 type ddlSuite struct {
 	store kv.Storage
 	dom   *domain.Domain
-	s     sessiontypes.Session
+	s     session.Session
 	ctx   sessionctx.Context
 
 	m     sync.Mutex
@@ -1157,5 +1156,6 @@ func addEnvPath(newPath string) {
 }
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
 	_ = store.Register("tikv", tidbdriver.TiKVDriver{})
 }

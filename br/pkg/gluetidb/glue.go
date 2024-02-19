@@ -18,7 +18,6 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -51,7 +50,7 @@ type Glue struct {
 }
 
 type tidbSession struct {
-	se sessiontypes.Session
+	se session.Session
 }
 
 // GetDomain implements glue.Glue.
@@ -238,7 +237,7 @@ func (gs *tidbSession) showCreatePlacementPolicy(policy *model.PolicyInfo) strin
 
 // mockSession is used for test.
 type mockSession struct {
-	se         sessiontypes.Session
+	se         session.Session
 	globalVars map[string]string
 }
 
@@ -314,11 +313,11 @@ func (s *mockSession) GetGlobalVariable(name string) (string, error) {
 
 // MockGlue only used for test
 type MockGlue struct {
-	se         sessiontypes.Session
+	se         session.Session
 	GlobalVars map[string]string
 }
 
-func (m *MockGlue) SetSession(se sessiontypes.Session) {
+func (m *MockGlue) SetSession(se session.Session) {
 	m.se = se
 }
 

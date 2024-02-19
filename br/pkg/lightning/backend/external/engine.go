@@ -18,14 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"slices"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/jfcg/sorty/v2"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
@@ -36,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // during test on ks3, we found that we can open about 8000 connections to ks3,
@@ -46,44 +45,7 @@ import (
 // but, ks3 supporter says there's no such limit on connections.
 // And our target for global sort is AWS s3, this default value might not fit well.
 // TODO: adjust it according to cloud storage.
-const maxCloudStorageConnections = 1000
-
-type memKVsAndBuffers struct {
-	mu           sync.Mutex
-	keys         [][]byte
-	values       [][]byte
-	memKVBuffers []*membuf.Buffer
-	size         int
-	droppedSize  int
-
-	// temporary fields to store KVs to reduce slice allocations.
-	keysPerFile        [][][]byte
-	valuesPerFile      [][][]byte
-	droppedSizePerFile []int
-}
-
-func (b *memKVsAndBuffers) build() {
-	sumKVCnt := 0
-	for _, keys := range b.keysPerFile {
-		sumKVCnt += len(keys)
-	}
-	b.keys = make([][]byte, 0, sumKVCnt)
-	b.values = make([][]byte, 0, sumKVCnt)
-	for i := range b.keysPerFile {
-		b.keys = append(b.keys, b.keysPerFile[i]...)
-		b.keysPerFile[i] = nil
-		b.values = append(b.values, b.valuesPerFile[i]...)
-		b.valuesPerFile[i] = nil
-	}
-	b.keysPerFile = nil
-	b.valuesPerFile = nil
-
-	b.droppedSize = 0
-	for _, size := range b.droppedSizePerFile {
-		b.droppedSize += size
-	}
-	b.droppedSizePerFile = nil
-}
+const maxCloudStorageConnections = 8000
 
 // Engine stored sorted key/value pairs in an external storage.
 type Engine struct {
@@ -95,17 +57,13 @@ type Engine struct {
 	splitKeys       [][]byte
 	regionSplitSize int64
 	bufPool         *membuf.Pool
-
-	memKVsAndBuffers memKVsAndBuffers
-
 	// checkHotspot is true means we will check hotspot file when using MergeKVIter.
 	// if hotspot file is detected, we will use multiple readers to read data.
 	// if it's false, MergeKVIter will read each file using 1 reader.
 	// this flag also affects the strategy of loading data, either:
 	// 	less load routine + check and read hotspot file concurrently (add-index uses this one)
 	// 	more load routine + read each file using 1 reader (import-into uses this one)
-	checkHotspot          bool
-	mergerIterConcurrency int
+	checkHotspot bool
 
 	keyAdapter         common.KeyAdapter
 	duplicateDetection bool
@@ -120,8 +78,6 @@ type Engine struct {
 	importedKVSize  *atomic.Int64
 	importedKVCount *atomic.Int64
 }
-
-const memLimit = 16 * 1024 * 1024 * 1024
 
 // NewExternalEngine creates an (external) engine.
 func NewExternalEngine(
@@ -142,20 +98,15 @@ func NewExternalEngine(
 	totalKVCount int64,
 	checkHotspot bool,
 ) common.Engine {
-	memLimiter := membuf.NewLimiter(memLimit)
 	return &Engine{
-		storage:         storage,
-		dataFiles:       dataFiles,
-		statsFiles:      statsFiles,
-		startKey:        startKey,
-		endKey:          endKey,
-		splitKeys:       splitKeys,
-		regionSplitSize: regionSplitSize,
-		bufPool: membuf.NewPool(
-			membuf.WithBlockNum(0),
-			membuf.WithPoolMemoryLimiter(memLimiter),
-			membuf.WithBlockSize(ConcurrentReaderBufferSizePerConc),
-		),
+		storage:            storage,
+		dataFiles:          dataFiles,
+		statsFiles:         statsFiles,
+		startKey:           startKey,
+		endKey:             endKey,
+		splitKeys:          splitKeys,
+		regionSplitSize:    regionSplitSize,
+		bufPool:            membuf.NewPool(),
 		checkHotspot:       checkHotspot,
 		keyAdapter:         keyAdapter,
 		duplicateDetection: duplicateDetection,
@@ -192,126 +143,13 @@ func split[T any](in []T, groupNum int) [][]T {
 
 func (e *Engine) getAdjustedConcurrency() int {
 	if e.checkHotspot {
-		// estimate we will open at most 8000 files, so if e.dataFiles is small we can
+		// estimate we will open at most 1000 files, so if e.dataFiles is small we can
 		// try to concurrently process ranges.
 		adjusted := maxCloudStorageConnections / len(e.dataFiles)
-		if adjusted == 0 {
-			return 1
-		}
 		return min(adjusted, 8)
 	}
 	adjusted := min(e.workerConcurrency, maxCloudStorageConnections/len(e.dataFiles))
 	return max(adjusted, 1)
-}
-
-func getFilesReadConcurrency(
-	ctx context.Context,
-	storage storage.ExternalStorage,
-	statsFiles []string,
-	startKey, endKey []byte,
-) ([]uint64, []uint64, error) {
-	result := make([]uint64, len(statsFiles))
-	offsets, err := seekPropsOffsets(ctx, []kv.Key{startKey, endKey}, statsFiles, storage, false)
-	if err != nil {
-		return nil, nil, err
-	}
-	startOffs, endOffs := offsets[0], offsets[1]
-	for i := range statsFiles {
-		result[i] = (endOffs[i] - startOffs[i]) / uint64(ConcurrentReaderBufferSizePerConc)
-		result[i] = max(result[i], 1)
-		logutil.Logger(ctx).Info("found hotspot file in getFilesReadConcurrency",
-			zap.String("filename", statsFiles[i]),
-			zap.Uint64("startOffset", startOffs[i]),
-			zap.Uint64("endOffset", endOffs[i]),
-			zap.Uint64("expected concurrency", result[i]),
-		)
-	}
-	return result, startOffs, nil
-}
-
-func (e *Engine) loadBatchRegionData(ctx context.Context, startKey, endKey []byte, outCh chan<- common.DataAndRange) error {
-	readAndSortRateHist := metrics.GlobalSortReadFromCloudStorageRate.WithLabelValues("read_and_sort")
-	readAndSortDurHist := metrics.GlobalSortReadFromCloudStorageDuration.WithLabelValues("read_and_sort")
-	readRateHist := metrics.GlobalSortReadFromCloudStorageRate.WithLabelValues("read")
-	readDurHist := metrics.GlobalSortReadFromCloudStorageDuration.WithLabelValues("read")
-	sortRateHist := metrics.GlobalSortReadFromCloudStorageRate.WithLabelValues("sort")
-	sortDurHist := metrics.GlobalSortReadFromCloudStorageDuration.WithLabelValues("sort")
-
-	readStart := time.Now()
-	err := readAllData(
-		ctx,
-		e.storage,
-		e.dataFiles,
-		e.statsFiles,
-		startKey,
-		endKey,
-		e.bufPool,
-		&e.memKVsAndBuffers,
-	)
-	if err != nil {
-		return err
-	}
-	e.memKVsAndBuffers.build()
-
-	readSecond := time.Since(readStart).Seconds()
-	readDurHist.Observe(readSecond)
-	logutil.Logger(ctx).Info("reading external storage in loadBatchRegionData",
-		zap.Duration("cost time", time.Since(readStart)),
-		zap.Int("droppedSize", e.memKVsAndBuffers.droppedSize))
-
-	sortStart := time.Now()
-	oldSortyGor := sorty.MaxGor
-	sorty.MaxGor = uint64(e.workerConcurrency * 2)
-	sorty.Sort(len(e.memKVsAndBuffers.keys), func(i, k, r, s int) bool {
-		if bytes.Compare(e.memKVsAndBuffers.keys[i], e.memKVsAndBuffers.keys[k]) < 0 { // strict comparator like < or >
-			if r != s {
-				e.memKVsAndBuffers.keys[r], e.memKVsAndBuffers.keys[s] = e.memKVsAndBuffers.keys[s], e.memKVsAndBuffers.keys[r]
-				e.memKVsAndBuffers.values[r], e.memKVsAndBuffers.values[s] = e.memKVsAndBuffers.values[s], e.memKVsAndBuffers.values[r]
-			}
-			return true
-		}
-		return false
-	})
-	sorty.MaxGor = oldSortyGor
-	sortSecond := time.Since(sortStart).Seconds()
-	sortDurHist.Observe(sortSecond)
-	logutil.Logger(ctx).Info("sorting in loadBatchRegionData",
-		zap.Duration("cost time", time.Since(sortStart)))
-
-	readAndSortSecond := time.Since(readStart).Seconds()
-	readAndSortDurHist.Observe(readAndSortSecond)
-
-	size := e.memKVsAndBuffers.size
-	readAndSortRateHist.Observe(float64(size) / 1024.0 / 1024.0 / readAndSortSecond)
-	readRateHist.Observe(float64(size) / 1024.0 / 1024.0 / readSecond)
-	sortRateHist.Observe(float64(size) / 1024.0 / 1024.0 / sortSecond)
-
-	data := e.buildIngestData(
-		e.memKVsAndBuffers.keys,
-		e.memKVsAndBuffers.values,
-		e.memKVsAndBuffers.memKVBuffers,
-	)
-
-	// release the reference of e.memKVsAndBuffers
-	e.memKVsAndBuffers.keys = nil
-	e.memKVsAndBuffers.values = nil
-	e.memKVsAndBuffers.memKVBuffers = nil
-
-	sendFn := func(dr common.DataAndRange) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case outCh <- dr:
-		}
-		return nil
-	}
-	return sendFn(common.DataAndRange{
-		Data: data,
-		Range: common.Range{
-			Start: startKey,
-			End:   endKey,
-		},
-	})
 }
 
 // LoadIngestData loads the data from the external storage to memory in [start,
@@ -323,22 +161,42 @@ func (e *Engine) LoadIngestData(
 	regionRanges []common.Range,
 	outCh chan<- common.DataAndRange,
 ) error {
-	// currently we assume the region size is 96MB and will download 96MB*32 = 3GB
-	// data at once
-	regionBatchSize := 32
-	failpoint.Inject("LoadIngestDataBatchSize", func(val failpoint.Value) {
-		regionBatchSize = val.(int)
-	})
-	for i := 0; i < len(regionRanges); i += regionBatchSize {
-		err := e.loadBatchRegionData(ctx, regionRanges[i].Start, regionRanges[min(i+regionBatchSize, len(regionRanges))-1].End, outCh)
-		if err != nil {
-			return err
-		}
+	concurrency := e.getAdjustedConcurrency()
+	rangeGroups := split(regionRanges, concurrency)
+
+	logutil.Logger(ctx).Info("load ingest data",
+		zap.Int("concurrency", concurrency),
+		zap.Int("ranges", len(regionRanges)),
+		zap.Int("range-groups", len(rangeGroups)),
+		zap.Int("data-files", len(e.dataFiles)),
+		zap.Bool("check-hotspot", e.checkHotspot),
+	)
+	eg, egCtx := errgroup.WithContext(ctx)
+	for _, ranges := range rangeGroups {
+		ranges := ranges
+		eg.Go(func() error {
+			iter, err := e.createMergeIter(egCtx, ranges[0].Start)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			defer iter.Close()
+
+			if !iter.Next() {
+				return iter.Error()
+			}
+			for _, r := range ranges {
+				err := e.loadIngestData(egCtx, iter, r.Start, r.End, outCh)
+				if err != nil {
+					return errors.Trace(err)
+				}
+			}
+			return nil
+		})
 	}
-	return nil
+	return eg.Wait()
 }
 
-func (e *Engine) buildIngestData(keys, values [][]byte, buf []*membuf.Buffer) *MemoryIngestData {
+func (e *Engine) buildIngestData(keys, values [][]byte, buf *membuf.Buffer) *MemoryIngestData {
 	return &MemoryIngestData{
 		keyAdapter:         e.keyAdapter,
 		duplicateDetection: e.duplicateDetection,
@@ -357,8 +215,101 @@ func (e *Engine) buildIngestData(keys, values [][]byte, buf []*membuf.Buffer) *M
 // LargeRegionSplitDataThreshold is exposed for test.
 var LargeRegionSplitDataThreshold = int(config.SplitRegionSize)
 
-// createMergeIter is unused now.
-// TODO(lance6716): check the performance of new design and remove it.
+// loadIngestData loads the data from the external storage to memory in [start,
+// end) range, and if the range is large enough, it will return multiple data.
+// The input `iter` should be called Next() before calling this function.
+func (e *Engine) loadIngestData(
+	ctx context.Context,
+	iter *MergeKVIter,
+	start, end []byte,
+	outCh chan<- common.DataAndRange) error {
+	if bytes.Equal(start, end) {
+		return errors.Errorf("start key and end key must not be the same: %s",
+			hex.EncodeToString(start))
+	}
+
+	readRateHist := metrics.GlobalSortReadFromCloudStorageRate.WithLabelValues("read_and_sort")
+	readDurHist := metrics.GlobalSortReadFromCloudStorageDuration.WithLabelValues("read_and_sort")
+	sendFn := func(dr common.DataAndRange) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case outCh <- dr:
+		}
+		return nil
+	}
+
+	loadStartTs, batchStartTs := time.Now(), time.Now()
+	keys := make([][]byte, 0, 1024)
+	values := make([][]byte, 0, 1024)
+	memBuf := e.bufPool.NewBuffer()
+	cnt := 0
+	size := 0
+	curStart := start
+
+	// there should be a key that just exceeds the end key in last loadIngestData
+	// invocation.
+	k, v := iter.Key(), iter.Value()
+	if len(k) > 0 {
+		keys = append(keys, memBuf.AddBytes(k))
+		values = append(values, memBuf.AddBytes(v))
+		cnt++
+		size += len(k) + len(v)
+	}
+
+	for iter.Next() {
+		k, v = iter.Key(), iter.Value()
+		if bytes.Compare(k, start) < 0 {
+			continue
+		}
+		if bytes.Compare(k, end) >= 0 {
+			break
+		}
+		// as we keep KV data in memory, to avoid OOM, we only keep at most 1
+		// DataAndRange for each loadIngestData and regionJobWorker routine(channel
+		// is unbuffered).
+		if size > LargeRegionSplitDataThreshold {
+			readRateHist.Observe(float64(size) / 1024.0 / 1024.0 / time.Since(batchStartTs).Seconds())
+			readDurHist.Observe(time.Since(batchStartTs).Seconds())
+			curKey := slices.Clone(k)
+			if err := sendFn(common.DataAndRange{
+				Data:  e.buildIngestData(keys, values, memBuf),
+				Range: common.Range{Start: curStart, End: curKey},
+			}); err != nil {
+				return errors.Trace(err)
+			}
+			keys = make([][]byte, 0, 1024)
+			values = make([][]byte, 0, 1024)
+			size = 0
+			curStart = curKey
+			batchStartTs = time.Now()
+			memBuf = e.bufPool.NewBuffer()
+		}
+
+		keys = append(keys, memBuf.AddBytes(k))
+		values = append(values, memBuf.AddBytes(v))
+		cnt++
+		size += len(k) + len(v)
+	}
+	if iter.Error() != nil {
+		return errors.Trace(iter.Error())
+	}
+	if len(keys) > 0 {
+		readRateHist.Observe(float64(size) / 1024.0 / 1024.0 / time.Since(batchStartTs).Seconds())
+		readDurHist.Observe(time.Since(batchStartTs).Seconds())
+		if err := sendFn(common.DataAndRange{
+			Data:  e.buildIngestData(keys, values, memBuf),
+			Range: common.Range{Start: curStart, End: end},
+		}); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	logutil.Logger(ctx).Info("load data from external storage",
+		zap.Duration("cost time", time.Since(loadStartTs)),
+		zap.Int("iterated count", cnt))
+	return nil
+}
+
 func (e *Engine) createMergeIter(ctx context.Context, start kv.Key) (*MergeKVIter, error) {
 	logger := logutil.Logger(ctx)
 
@@ -368,26 +319,18 @@ func (e *Engine) createMergeIter(ctx context.Context, start kv.Key) (*MergeKVIte
 		logger.Info("no stats files",
 			zap.String("startKey", hex.EncodeToString(start)))
 	} else {
-		offs, err := seekPropsOffsets(ctx, []kv.Key{start}, e.statsFiles, e.storage, e.checkHotspot)
+		offs, err := seekPropsOffsets(ctx, start, e.statsFiles, e.storage, e.checkHotspot)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		offsets = offs[0]
+		offsets = offs
 		logger.Debug("seek props offsets",
 			zap.Uint64s("offsets", offsets),
 			zap.String("startKey", hex.EncodeToString(start)),
 			zap.Strings("dataFiles", e.dataFiles),
 			zap.Strings("statsFiles", e.statsFiles))
 	}
-	iter, err := NewMergeKVIter(
-		ctx,
-		e.dataFiles,
-		offsets,
-		e.storage,
-		64*1024,
-		e.checkHotspot,
-		e.mergerIterConcurrency,
-	)
+	iter, err := NewMergeKVIter(ctx, e.dataFiles, offsets, e.storage, 64*1024, e.checkHotspot)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -436,26 +379,7 @@ func (e *Engine) SplitRanges(
 }
 
 // Close implements common.Engine.
-func (e *Engine) Close() error {
-	if e.bufPool != nil {
-		e.bufPool.Destroy()
-		e.bufPool = nil
-	}
-	e.storage.Close()
-	return nil
-}
-
-// Reset resets the memory buffer pool.
-func (e *Engine) Reset() error {
-	if e.bufPool != nil {
-		e.bufPool.Destroy()
-		memLimiter := membuf.NewLimiter(memLimit)
-		e.bufPool = membuf.NewPool(
-			membuf.WithPoolMemoryLimiter(memLimiter),
-		)
-	}
-	return nil
-}
+func (e *Engine) Close() error { return nil }
 
 // MemoryIngestData is the in-memory implementation of IngestData.
 type MemoryIngestData struct {
@@ -468,7 +392,7 @@ type MemoryIngestData struct {
 	values [][]byte
 	ts     uint64
 
-	memBuf          []*membuf.Buffer
+	memBuf          *membuf.Buffer
 	refCnt          *atomic.Int64
 	importedKVSize  *atomic.Int64
 	importedKVCount *atomic.Int64
@@ -570,15 +494,11 @@ func (m *memoryDataIter) Error() error {
 	return nil
 }
 
-// ReleaseBuf implements ForwardIter.
-func (m *memoryDataIter) ReleaseBuf() {}
-
 type memoryDataDupDetectIter struct {
 	iter           *memoryDataIter
 	dupDetector    *common.DupDetector
 	err            error
 	curKey, curVal []byte
-	buf            *membuf.Buffer
 }
 
 // First implements ForwardIter.
@@ -614,17 +534,16 @@ func (m *memoryDataDupDetectIter) Next() bool {
 
 // Key implements ForwardIter.
 func (m *memoryDataDupDetectIter) Key() []byte {
-	return m.buf.AddBytes(m.curKey)
+	return m.curKey
 }
 
 // Value implements ForwardIter.
 func (m *memoryDataDupDetectIter) Value() []byte {
-	return m.buf.AddBytes(m.curVal)
+	return m.curVal
 }
 
 // Close implements ForwardIter.
 func (m *memoryDataDupDetectIter) Close() error {
-	m.buf.Destroy()
 	return m.dupDetector.Close()
 }
 
@@ -633,17 +552,8 @@ func (m *memoryDataDupDetectIter) Error() error {
 	return m.err
 }
 
-// ReleaseBuf implements ForwardIter.
-func (m *memoryDataDupDetectIter) ReleaseBuf() {
-	m.buf.Reset()
-}
-
 // NewIter implements IngestData.NewIter.
-func (m *MemoryIngestData) NewIter(
-	ctx context.Context,
-	lowerBound, upperBound []byte,
-	bufPool *membuf.Pool,
-) common.ForwardIter {
+func (m *MemoryIngestData) NewIter(ctx context.Context, lowerBound, upperBound []byte) common.ForwardIter {
 	firstKeyIdx, lastKeyIdx := m.firstAndLastKeyIndex(lowerBound, upperBound)
 	iter := &memoryDataIter{
 		keys:        m.keys,
@@ -659,7 +569,6 @@ func (m *MemoryIngestData) NewIter(
 	return &memoryDataDupDetectIter{
 		iter:        iter,
 		dupDetector: detector,
-		buf:         bufPool.NewBuffer(),
 	}
 }
 
@@ -676,9 +585,7 @@ func (m *MemoryIngestData) IncRef() {
 // DecRef implements IngestData.DecRef.
 func (m *MemoryIngestData) DecRef() {
 	if m.refCnt.Dec() == 0 {
-		for _, b := range m.memBuf {
-			b.Destroy()
-		}
+		m.memBuf.Destroy()
 	}
 }
 

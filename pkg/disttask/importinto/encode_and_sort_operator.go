@@ -89,7 +89,7 @@ func newEncodeAndSortOperator(ctx context.Context, executor *importStepExecutor,
 	pool := workerpool.NewWorkerPool(
 		"encodeAndSortOperator",
 		util.ImportInto,
-		executor.taskMeta.Plan.ThreadCnt,
+		int(executor.taskMeta.Plan.ThreadCnt),
 		func() workerpool.Worker[*importStepMinimalTask, workerpool.None] {
 			return newChunkWorker(ctx, op, indexMemorySizeLimit)
 		},

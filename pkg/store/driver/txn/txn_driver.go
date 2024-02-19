@@ -17,6 +17,7 @@ package txn
 import (
 	"bytes"
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -53,8 +54,7 @@ type tikvTxn struct {
 func NewTiKVTxn(txn *tikv.KVTxn) kv.Transaction {
 	txn.SetKVFilter(TiDBKVFilter{})
 
-	// init default size limits by config
-	entryLimit := kv.TxnEntrySizeLimit.Load()
+	entryLimit := atomic.LoadUint64(&kv.TxnEntrySizeLimit)
 	totalLimit := kv.TxnTotalSizeLimit.Load()
 	txn.GetUnionStore().SetEntrySizeLimit(entryLimit, totalLimit)
 
@@ -281,9 +281,6 @@ func (txn *tikvTxn) SetOption(opt int, val interface{}) {
 		txn.KVTxn.GetSnapshot().SetLoadBasedReplicaReadThreshold(val.(time.Duration))
 	case kv.TiKVClientReadTimeout:
 		txn.KVTxn.GetSnapshot().SetKVReadTimeout(time.Duration(val.(uint64) * uint64(time.Millisecond)))
-	case kv.SizeLimits:
-		limits := val.(kv.TxnSizeLimits)
-		txn.KVTxn.GetUnionStore().SetEntrySizeLimit(limits.Entry, limits.Total)
 	}
 }
 

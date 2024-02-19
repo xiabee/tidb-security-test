@@ -351,16 +351,15 @@ func (s *schemaVersionSyncer) OwnerCheckAllVersions(ctx context.Context, jobID i
 							zap.String("ddl", string(kv.Key)), zap.Int("currentVer", ver), zap.Int64("latestVer", latestVer))
 					}
 					succ = false
+					notMatchVerCnt++
 					break
 				}
 				delete(updatedMap, tidbIDInResp)
 			}
 			if len(updatedMap) > 0 {
 				succ = false
-				if notMatchVerCnt%intervalCnt == 0 {
-					for _, info := range updatedMap {
-						logutil.BgLogger().Info("syncer check all versions, someone is not synced", zap.String("category", "ddl"), zap.String("info", info), zap.Int64("ddl job id", jobID), zap.Int64("ver", latestVer))
-					}
+				for _, info := range updatedMap {
+					logutil.BgLogger().Info("syncer check all versions, someone is not synced", zap.String("category", "ddl"), zap.String("info", info), zap.Int64("ddl job id", jobID), zap.Int64("ver", latestVer))
 				}
 			}
 		} else {
@@ -381,6 +380,7 @@ func (s *schemaVersionSyncer) OwnerCheckAllVersions(ctx context.Context, jobID i
 							zap.String("ddl", string(kv.Key)), zap.Int("currentVer", ver), zap.Int64("latestVer", latestVer))
 					}
 					succ = false
+					notMatchVerCnt++
 					break
 				}
 				updatedMap[string(kv.Key)] = ""
@@ -391,7 +391,6 @@ func (s *schemaVersionSyncer) OwnerCheckAllVersions(ctx context.Context, jobID i
 			return nil
 		}
 		time.Sleep(checkVersInterval)
-		notMatchVerCnt++
 	}
 }
 

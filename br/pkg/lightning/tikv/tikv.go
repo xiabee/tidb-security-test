@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/debugpb"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
@@ -34,7 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/tikv/client-go/v2/util"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -66,12 +64,32 @@ const (
 	StoreStateTombstone
 )
 
-func withTiKVConnection(
-	ctx context.Context,
-	tls *common.TLS,
-	tikvAddr string,
-	action func(import_sstpb.ImportSSTClient) error,
-) error {
+var jsonToStoreState = map[string]StoreState{
+	`"Up"`:           StoreStateUp,
+	`"Offline"`:      StoreStateOffline,
+	`"Disconnected"`: StoreStateDisconnected,
+	`"Down"`:         StoreStateDown,
+	`"Tombstone"`:    StoreStateTombstone,
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (ss *StoreState) UnmarshalJSON(content []byte) error {
+	if state, ok := jsonToStoreState[string(content)]; ok {
+		*ss = state
+		return nil
+	}
+	return errors.New("Unknown store state")
+}
+
+// Store contains metadata about a TiKV store.
+type Store struct {
+	Address string
+	Version string
+	State   StoreState `json:"state_name"`
+}
+
+func withTiKVConnection(ctx context.Context, tls *common.TLS, tikvAddr string,
+	action func(import_sstpb.ImportSSTClient) error) error {
 	// Connect to the ImportSST service on the given TiKV node.
 	// The connection is needed for executing `action` and will be tear down
 	// when this function exits.
@@ -86,27 +104,34 @@ func withTiKVConnection(
 }
 
 // ForAllStores executes `action` in parallel for all TiKV stores connected to
-// a PD server.
+// a PD server given by the HTTPS client `tls`.
 //
 // Returns the first non-nil error returned in all `action` calls. If all
 // `action` returns nil, this method would return nil as well.
 //
-// The `maxState` argument defines the maximum store state (inclusive) to be
-// included in the result (Up < Offline < Tombstone).
+// The `minState` argument defines the minimum store state to be included in the
+// result (Tombstone < Offline < Down < Disconnected < Up).
 func ForAllStores(
 	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	maxState metapb.StoreState,
-	action func(c context.Context, store *pdhttp.MetaStore) error,
+	tls *common.TLS,
+	minState StoreState,
+	action func(c context.Context, store *Store) error,
 ) error {
-	storesInfo, err := pdHTTPCli.GetStores(ctx)
+	// Go through the HTTP interface instead of gRPC so we don't need to keep
+	// track of the cluster ID.
+	var stores struct {
+		Stores []struct {
+			Store Store
+		}
+	}
+	err := tls.GetJSON(ctx, "/pd/api/v1/stores", &stores)
 	if err != nil {
 		return err
 	}
 
 	eg, c := errgroup.WithContext(ctx)
-	for _, store := range storesInfo.Stores {
-		if store.Store.State <= int64(maxState) {
+	for _, store := range stores.Stores {
+		if store.Store.State >= minState {
 			s := store.Store
 			eg.Go(func() error { return action(c, &s) })
 		}
@@ -216,12 +241,9 @@ func FetchRemoteTableModelsFromTLS(ctx context.Context, tls *common.TLS, schema 
 }
 
 // CheckPDVersion checks the version of PD.
-func CheckPDVersion(
-	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	requiredMinVersion, requiredMaxVersion semver.Version,
-) error {
-	ver, err := pdutil.FetchPDVersion(ctx, pdHTTPCli)
+func CheckPDVersion(ctx context.Context, tls *common.TLS, pdAddr string,
+	requiredMinVersion, requiredMaxVersion semver.Version) error {
+	ver, err := pdutil.FetchPDVersion(ctx, tls, pdAddr)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -230,16 +252,13 @@ func CheckPDVersion(
 }
 
 // CheckTiKVVersion checks the version of TiKV.
-func CheckTiKVVersion(
-	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	requiredMinVersion, requiredMaxVersion semver.Version,
-) error {
+func CheckTiKVVersion(ctx context.Context, tls *common.TLS, pdAddr string,
+	requiredMinVersion, requiredMaxVersion semver.Version) error {
 	return ForAllStores(
 		ctx,
-		pdHTTPCli,
-		metapb.StoreState_Offline,
-		func(c context.Context, store *pdhttp.MetaStore) error {
+		tls.WithHost(pdAddr),
+		StoreStateDown,
+		func(c context.Context, store *Store) error {
 			component := fmt.Sprintf("TiKV (at %s)", store.Address)
 			ver, err := semver.NewVersion(strings.TrimPrefix(store.Version, "v"))
 			if err != nil {

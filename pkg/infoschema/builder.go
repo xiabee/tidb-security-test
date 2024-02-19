@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/util/domainutil"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
@@ -419,9 +420,9 @@ func updateAutoIDForExchangePartition(store kv.Storage, ptSchemaID, ptID, ntSche
 
 		// Set both tables to the maximum auto IDs between normal table and partitioned table.
 		newAutoIDs := meta.AutoIDGroup{
-			RowID:       max(ptAutoIDs.RowID, ntAutoIDs.RowID),
-			IncrementID: max(ptAutoIDs.IncrementID, ntAutoIDs.IncrementID),
-			RandomID:    max(ptAutoIDs.RandomID, ntAutoIDs.RandomID),
+			RowID:       mathutil.Max(ptAutoIDs.RowID, ntAutoIDs.RowID),
+			IncrementID: mathutil.Max(ptAutoIDs.IncrementID, ntAutoIDs.IncrementID),
+			RandomID:    mathutil.Max(ptAutoIDs.RandomID, ntAutoIDs.RandomID),
 		}
 		err = t.GetAutoIDAccessors(ptSchemaID, ptID).Put(newAutoIDs)
 		if err != nil {
@@ -518,9 +519,7 @@ func (b *Builder) applyTableUpdate(m *meta.Meta, diff *model.SchemaDiff) ([]int6
 	// We try to reuse the old allocator, so the cached auto ID can be reused.
 	var allocs autoid.Allocators
 	if tableIDIsValid(oldTableID) {
-		if oldTableID == newTableID &&
-			// For rename table, keep the old alloc.
-
+		if oldTableID == newTableID && (diff.Type != model.ActionRenameTable && diff.Type != model.ActionRenameTables) &&
 			// For repairing table in TiDB cluster, given 2 normal node and 1 repair node.
 			// For normal node's information schema, repaired table is existed.
 			// For repair node's information schema, repaired table is filtered (couldn't find it in `is`).
@@ -528,9 +527,6 @@ func (b *Builder) applyTableUpdate(m *meta.Meta, diff *model.SchemaDiff) ([]int6
 			diff.Type != model.ActionRepairTable &&
 			// Alter sequence will change the sequence info in the allocator, so the old allocator is not valid any more.
 			diff.Type != model.ActionAlterSequence {
-			// TODO: Check how this would work with ADD/REMOVE Partitioning,
-			// which may have AutoID not connected to tableID
-			// TODO: can there be _tidb_rowid AutoID per partition?
 			oldAllocs, _ := b.is.AllocByID(oldTableID)
 			allocs = filterAllocators(diff, oldAllocs)
 		}

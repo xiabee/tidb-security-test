@@ -20,9 +20,6 @@ import (
 
 // Metrics for the domain package.
 var (
-	// LeaseExpireTime records the lease expire time.
-	LeaseExpireTime prometheus.Gauge
-
 	// LoadSchemaCounter records the counter of load schema.
 	LoadSchemaCounter *prometheus.CounterVec
 
@@ -54,14 +51,6 @@ var (
 
 // InitDomainMetrics initializes domain metrics.
 func InitDomainMetrics() {
-	LeaseExpireTime = NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "tidb",
-			Subsystem: "domain",
-			Name:      "lease_expire_time",
-			Help:      "When the last time the lease is expired, it is in seconds",
-		})
-
 	LoadSchemaCounter = NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "tidb",

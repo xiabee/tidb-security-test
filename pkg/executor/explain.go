@@ -54,7 +54,7 @@ type ExplainExec struct {
 // Open implements the Executor Open interface.
 func (e *ExplainExec) Open(ctx context.Context) error {
 	if e.analyzeExec != nil {
-		return exec.Open(ctx, e.analyzeExec)
+		return e.analyzeExec.Open(ctx)
 	}
 	return nil
 }
@@ -64,7 +64,7 @@ func (e *ExplainExec) Close() error {
 	e.rows = nil
 	if e.analyzeExec != nil && !e.executed {
 		// Open(), but Next() is not called.
-		return exec.Close(e.analyzeExec)
+		return e.analyzeExec.Close()
 	}
 	return nil
 }
@@ -84,7 +84,7 @@ func (e *ExplainExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		return nil
 	}
 
-	numCurRows := min(req.Capacity(), len(e.rows)-e.cursor)
+	numCurRows := mathutil.Min(req.Capacity(), len(e.rows)-e.cursor)
 	for i := e.cursor; i < e.cursor+numCurRows; i++ {
 		for j := range e.rows[i] {
 			req.AppendString(j, e.rows[i][j])
@@ -94,29 +94,10 @@ func (e *ExplainExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return nil
 }
 
-func (e *ExplainExec) handleRUDetails(ctx context.Context, onlyRegister bool) {
-	if e.analyzeExec == nil || !e.executed {
-		return
-	}
-	if coll := e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl; coll != nil {
-		if onlyRegister {
-			// Register RU stats to make sure the output of explain analyze doesn't change.
-			newRUDetails := clientutil.NewRUDetails()
-			coll.RegisterStats(e.explain.TargetPlan.ID(), &ruRuntimeStats{newRUDetails})
-			return
-		}
-
-		if ruDetailsRaw := ctx.Value(clientutil.RUDetailsCtxKey); ruDetailsRaw != nil {
-			ruDetails := ruDetailsRaw.(*clientutil.RUDetails)
-			coll.RegisterStats(e.explain.TargetPlan.ID(), &ruRuntimeStats{ruDetails})
-		}
-	}
-}
-
 func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 	if e.analyzeExec != nil && !e.executed {
 		defer func() {
-			err1 := exec.Close(e.analyzeExec)
+			err1 := e.analyzeExec.Close()
 			if err1 != nil {
 				if err != nil {
 					err = errors.New(err.Error() + ", " + err1.Error())
@@ -124,10 +105,6 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 					err = err1
 				}
 			}
-
-			// Handle RU runtime stats after Close() to make sure all ru has been collected.
-			// For example, localMppCoordinator reports last ru consumption when Close().
-			e.handleRUDetails(ctx, false)
 		}()
 		if minHeapInUse, alarmRatio := e.Ctx().GetSessionVars().MemoryDebugModeMinHeapInUse, e.Ctx().GetSessionVars().MemoryDebugModeAlarmRatio; minHeapInUse != 0 && alarmRatio != 0 {
 			memoryDebugModeCtx, cancel := context.WithCancel(ctx)
@@ -156,7 +133,14 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 			}
 		}
 	}
-	e.handleRUDetails(ctx, true)
+	// Register the RU runtime stats to the runtime stats collection after the analyze executor has been executed.
+	if e.analyzeExec != nil && e.executed {
+		ruDetailsRaw := ctx.Value(clientutil.RUDetailsCtxKey)
+		if coll := e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl; coll != nil && ruDetailsRaw != nil {
+			ruDetails := ruDetailsRaw.(*clientutil.RUDetails)
+			coll.RegisterStats(e.explain.TargetPlan.ID(), &ruRuntimeStats{ruDetails})
+		}
+	}
 	return err
 }
 
@@ -236,8 +220,9 @@ func updateTriggerIntervalByHeapInUse(heapInUse uint64) (time.Duration, int) {
 		return 5 * time.Second, 6
 	} else if heapInUse < 40*size.GB {
 		return 15 * time.Second, 2
+	} else {
+		return 30 * time.Second, 1
 	}
-	return 30 * time.Second, 1
 }
 
 func (h *memoryDebugModeHandler) run() {

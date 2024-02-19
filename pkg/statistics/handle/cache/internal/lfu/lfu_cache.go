@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/statistics/handle/cache/internal/metrics"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"go.uber.org/zap"
 	"golang.org/x/exp/rand"
@@ -68,7 +69,7 @@ func NewLFU(totalMemCost int64) (*LFU, error) {
 	bufferItems := int64(64)
 
 	cache, err := ristretto.NewCache(&ristretto.Config{
-		NumCounters:        max(min(cost/128, 1_000_000), 10), // assume the cost per table stats is 128
+		NumCounters:        mathutil.Max(mathutil.Min(cost/128, 1_000_000), 10), // assume the cost per table stats is 128
 		MaxCost:            cost,
 		BufferItems:        bufferItems,
 		OnEvict:            result.onEvict,

@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/store/mockstore/unistore/lockstore"
 	"github.com/pingcap/tidb/pkg/store/mockstore/unistore/tikv/dbreader"
 	"github.com/pingcap/tidb/pkg/store/mockstore/unistore/tikv/mvcc"
@@ -37,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
+	mockpkg "github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
@@ -130,7 +132,7 @@ func buildClosureExecutorFromExecutorList(dagCtx *dagContext, executors []*tipb.
 	}
 	var err error
 	if secondExec := executors[1]; secondExec.Tp == tipb.ExecType_TypeSelection {
-		ce.selectionCtx.conditions, err = convertToExprs(ce.sctx, ce.fieldTps, secondExec.Selection.Conditions)
+		ce.selectionCtx.conditions, err = convertToExprs(ce.sc, ce.fieldTps, secondExec.Selection.Conditions)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -183,10 +185,10 @@ func buildClosureExecutor(dagCtx *dagContext, dagReq *tipb.DAGRequest) (*closure
 	return ce, nil
 }
 
-func convertToExprs(sctx sessionctx.Context, fieldTps []*types.FieldType, pbExprs []*tipb.Expr) ([]expression.Expression, error) {
+func convertToExprs(sc *stmtctx.StatementContext, fieldTps []*types.FieldType, pbExprs []*tipb.Expr) ([]expression.Expression, error) {
 	exprs := make([]expression.Expression, 0, len(pbExprs))
 	for _, expr := range pbExprs {
-		e, err := expression.PBToExpr(sctx, expr, fieldTps)
+		e, err := expression.PBToExpr(expr, fieldTps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -241,6 +243,9 @@ func newClosureExecutor(dagCtx *dagContext, outputOffsets []uint32, scanExec *ti
 		startTS:    dagCtx.startTS,
 		limit:      math.MaxInt64,
 	}
+	seCtx := mockpkg.NewContext()
+	seCtx.GetSessionVars().StmtCtx = e.sc
+	e.seCtx = seCtx
 	switch scanExec.Tp {
 	case tipb.ExecType_TypeTableScan:
 		dagCtx.setColumnInfo(scanExec.TblScan.Columns)
@@ -281,7 +286,7 @@ func newClosureExecutor(dagCtx *dagContext, outputOffsets []uint32, scanExec *ti
 	e.kvRanges = ranges
 	e.scanCtx.chk = chunk.NewChunkWithCapacity(e.fieldTps, 32)
 	if e.scanType == TableScan {
-		e.scanCtx.decoder, err = newRowDecoder(e.evalContext.columnInfos, e.evalContext.fieldTps, e.evalContext.primaryCols, e.evalContext.sctx.GetSessionVars().StmtCtx.TimeZone())
+		e.scanCtx.decoder, err = newRowDecoder(e.evalContext.columnInfos, e.evalContext.fieldTps, e.evalContext.primaryCols, e.evalContext.sc.TimeZone())
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -474,6 +479,7 @@ type closureExecutor struct {
 	*dagContext
 	outputOff       []uint32
 	resultFieldType []*types.FieldType
+	seCtx           sessionctx.Context
 	kvRanges        []kv.KeyRange
 	startTS         uint64
 	ignoreLock      bool
@@ -669,9 +675,7 @@ func (e *countStarProcessor) Finish() error {
 // countFinish is used for `count(*)`.
 func (e *closureExecutor) countFinish() error {
 	d := types.NewIntDatum(int64(e.rowCount))
-	sc := e.evalContext.sctx.GetSessionVars().StmtCtx
-	rowData, err := codec.EncodeValue(sc.TimeZone(), nil, d)
-	err = sc.HandleError(err)
+	rowData, err := codec.EncodeValue(e.sc, nil, d)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -786,8 +790,8 @@ func (e *closureExecutor) processSelection(needCollectDetail bool) (gotRow bool,
 	row := chk.GetRow(chk.NumRows() - 1)
 	gotRow = true
 	for _, expr := range e.selectionCtx.conditions {
-		wc := e.sctx.GetSessionVars().StmtCtx.WarningCount()
-		d, err := expr.Eval(e.sctx, row)
+		wc := e.sc.WarningCount()
+		d, err := expr.Eval(row)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -795,21 +799,21 @@ func (e *closureExecutor) processSelection(needCollectDetail bool) (gotRow bool,
 		if d.IsNull() {
 			gotRow = false
 		} else {
-			isTrue, err := d.ToBool(e.sctx.GetSessionVars().StmtCtx.TypeCtx())
+			isTrue, err := d.ToBool(e.sc)
+			isTrue, err = expression.HandleOverflowOnSelection(e.sc, isTrue, err)
 			if err != nil {
 				return false, errors.Trace(err)
 			}
 			gotRow = isTrue != 0
 		}
 		if !gotRow {
-			sc := e.sctx.GetSessionVars().StmtCtx
-			if sc.WarningCount() > wc {
+			if e.sc.WarningCount() > wc {
 				// Deep-copy error object here, because the data it referenced is going to be truncated.
-				warns := sc.TruncateWarnings(int(wc))
+				warns := e.sc.TruncateWarnings(int(wc))
 				for i, warn := range warns {
 					warns[i].Err = e.copyError(warn.Err)
 				}
-				sc.AppendWarnings(warns)
+				e.sc.AppendWarnings(warns)
 			}
 			chk.TruncateTo(chk.NumRows() - 1)
 			break
@@ -921,7 +925,7 @@ func (e *closureExecutor) indexScanProcessCore(key, value []byte) error {
 		}
 	}
 	chk := e.scanCtx.chk
-	decoder := codec.NewDecoder(chk, e.sctx.GetSessionVars().StmtCtx.TimeZone())
+	decoder := codec.NewDecoder(chk, e.sc.TimeZone())
 	for i, colVal := range values {
 		if i < len(e.fieldTps) {
 			_, err = decoder.DecodeOne(colVal, i, e.fieldTps[i])
@@ -942,8 +946,6 @@ func (e *closureExecutor) indexScanProcessCore(key, value []byte) error {
 
 func (e *closureExecutor) chunkToOldChunk(chk *chunk.Chunk) error {
 	var oldRow []types.Datum
-	sc := e.sctx.GetSessionVars().StmtCtx
-	errCtx := sc.ErrCtx()
 	for i := 0; i < chk.NumRows(); i++ {
 		oldRow = oldRow[:0]
 		if e.outputOff != nil {
@@ -958,8 +960,7 @@ func (e *closureExecutor) chunkToOldChunk(chk *chunk.Chunk) error {
 			}
 		}
 		var err error
-		e.oldRowBuf, err = codec.EncodeValue(sc.TimeZone(), e.oldRowBuf[:0], oldRow...)
-		err = errCtx.HandleError(err)
+		e.oldRowBuf, err = codec.EncodeValue(e.sc, e.oldRowBuf[:0], oldRow...)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1026,7 +1027,7 @@ func (e *topNProcessor) Process(key, value []byte) (err error) {
 	ctx := e.topNCtx
 	row := e.scanCtx.chk.GetRow(0)
 	for i, expr := range ctx.orderByExprs {
-		d, err := expr.Eval(e.sctx, row)
+		d, err := expr.Eval(row)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1106,7 +1107,7 @@ func (e *hashAggProcessor) Process(key, value []byte) (err error) {
 	// Update aggregate expressions.
 	aggCtxs := e.getContexts(gk)
 	for i, agg := range e.aggExprs {
-		err = agg.Update(aggCtxs[i], e.sctx.GetSessionVars().StmtCtx, row)
+		err = agg.Update(aggCtxs[i], e.sc, row)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1121,15 +1122,12 @@ func (e *hashAggProcessor) getGroupKey(row chunk.Row) ([]byte, error) {
 		return nil, nil
 	}
 	key := make([]byte, 0, 32)
-	sc := e.sctx.GetSessionVars().StmtCtx
-	errCtx := sc.ErrCtx()
 	for _, item := range e.groupByExprs {
-		v, err := item.Eval(e.sctx, row)
+		v, err := item.Eval(row)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		b, err := codec.EncodeValue(sc.TimeZone(), nil, v)
-		err = errCtx.HandleError(err)
+		b, err := codec.EncodeValue(e.sc, nil, v)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1143,7 +1141,7 @@ func (e *hashAggProcessor) getContexts(groupKey []byte) []*aggregation.AggEvalua
 	if !ok {
 		aggCtxs = make([]*aggregation.AggEvaluateContext, 0, len(e.aggExprs))
 		for _, agg := range e.aggExprs {
-			aggCtxs = append(aggCtxs, agg.CreateContext(e.sctx))
+			aggCtxs = append(aggCtxs, agg.CreateContext(e.sc))
 		}
 		e.aggCtxsMap[string(groupKey)] = aggCtxs
 	}
@@ -1151,16 +1149,13 @@ func (e *hashAggProcessor) getContexts(groupKey []byte) []*aggregation.AggEvalua
 }
 
 func (e *hashAggProcessor) Finish() error {
-	tc := e.sctx.GetSessionVars().StmtCtx
-	errCtx := tc.ErrCtx()
 	for i, gk := range e.groupKeys {
 		aggCtxs := e.getContexts(gk)
 		e.oldRowBuf = e.oldRowBuf[:0]
 		for i, agg := range e.aggExprs {
 			partialResults := agg.GetPartialResult(aggCtxs[i])
 			var err error
-			e.oldRowBuf, err = codec.EncodeValue(tc.TimeZone(), e.oldRowBuf, partialResults...)
-			err = errCtx.HandleError(err)
+			e.oldRowBuf, err = codec.EncodeValue(e.sc, e.oldRowBuf, partialResults...)
 			if err != nil {
 				return err
 			}

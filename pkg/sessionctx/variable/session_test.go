@@ -469,33 +469,33 @@ func TestGetReuseChunk(t *testing.T) {
 
 	// SetAlloc efficient
 	sessVars.SetAlloc(nil)
-	require.False(t, sessVars.IsAllocValid())
+	require.Nil(t, sessVars.ChunkPool.Alloc)
 	require.False(t, sessVars.GetUseChunkAlloc())
 	// alloc is nil ，Allocate memory from the system
-	chk1 := sessVars.GetChunkAllocator().Alloc(fieldTypes, 10, 10)
+	chk1 := sessVars.GetNewChunkWithCapacity(fieldTypes, 10, 10, sessVars.ChunkPool.Alloc)
 	require.NotNil(t, chk1)
 
 	chunkReuseMap := make(map[*chunk.Chunk]struct{}, 14)
 	columnReuseMap := make(map[*chunk.Column]struct{}, 14)
 
 	alloc := chunk.NewAllocator()
-	sessVars.EnableReuseChunk = true
+	sessVars.EnableReuseCheck = true
 	sessVars.SetAlloc(alloc)
-	require.True(t, sessVars.IsAllocValid())
+	require.NotNil(t, sessVars.ChunkPool.Alloc)
+	require.Equal(t, alloc, sessVars.ChunkPool.Alloc)
 	require.False(t, sessVars.GetUseChunkAlloc())
 
 	//tries to apply from the cache
 	initCap := 10
-	chk1 = sessVars.GetChunkAllocator().Alloc(fieldTypes, initCap, initCap)
+	chk1 = sessVars.GetNewChunkWithCapacity(fieldTypes, initCap, initCap, sessVars.ChunkPool.Alloc)
 	require.NotNil(t, chk1)
 	chunkReuseMap[chk1] = struct{}{}
 	for i := 0; i < chk1.NumCols(); i++ {
 		columnReuseMap[chk1.Column(i)] = struct{}{}
 	}
-	require.True(t, sessVars.GetUseChunkAlloc())
 
 	alloc.Reset()
-	chkres1 := sessVars.GetChunkAllocator().Alloc(fieldTypes, 10, 10)
+	chkres1 := sessVars.GetNewChunkWithCapacity(fieldTypes, 10, 10, sessVars.ChunkPool.Alloc)
 	require.NotNil(t, chkres1)
 	_, exist := chunkReuseMap[chkres1]
 	require.True(t, exist)
@@ -503,14 +503,14 @@ func TestGetReuseChunk(t *testing.T) {
 		_, exist := columnReuseMap[chkres1.Column(i)]
 		require.True(t, exist)
 	}
+	allocpool := variable.ReuseChunkPool{Alloc: alloc}
 
-	var allocpool chunk.Allocator = alloc
-	sessVars.ClearAlloc(&allocpool, false)
-	require.Equal(t, alloc, allocpool)
+	sessVars.ClearAlloc(&allocpool.Alloc, false)
+	require.Equal(t, alloc, allocpool.Alloc)
 
-	sessVars.ClearAlloc(&allocpool, true)
-	require.NotEqual(t, allocpool, alloc)
-	require.False(t, sessVars.IsAllocValid())
+	sessVars.ClearAlloc(&allocpool.Alloc, true)
+	require.NotEqual(t, allocpool.Alloc, alloc)
+	require.Nil(t, sessVars.ChunkPool.Alloc)
 }
 
 func TestUserVarConcurrently(t *testing.T) {
@@ -543,17 +543,4 @@ func TestUserVarConcurrently(t *testing.T) {
 	})
 	wg.Wait()
 	cancel()
-}
-
-func TestSetStatus(t *testing.T) {
-	sv := variable.NewSessionVars(nil)
-	require.True(t, sv.IsAutocommit())
-	sv.SetStatusFlag(mysql.ServerStatusInTrans, true)
-	require.True(t, sv.InTxn())
-	sv.SetStatusFlag(mysql.ServerStatusCursorExists, true)
-	require.True(t, sv.InTxn())
-	sv.SetStatusFlag(mysql.ServerStatusInTrans, false)
-	require.True(t, sv.HasStatusFlag(mysql.ServerStatusCursorExists))
-	require.False(t, sv.InTxn())
-	require.Equal(t, mysql.ServerStatusAutocommit|mysql.ServerStatusCursorExists, sv.Status())
 }

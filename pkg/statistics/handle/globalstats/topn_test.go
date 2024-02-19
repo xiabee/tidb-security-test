@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +31,7 @@ func TestMergePartTopN2GlobalTopNWithoutHists(t *testing.T) {
 	loc := time.UTC
 	sc := stmtctx.NewStmtCtxWithTimeZone(loc)
 	version := 1
-	killer := sqlkiller.SQLKiller{}
+	isKilled := uint32(0)
 
 	// Prepare TopNs.
 	topNs := make([]*statistics.TopN, 0, 10)
@@ -40,13 +39,13 @@ func TestMergePartTopN2GlobalTopNWithoutHists(t *testing.T) {
 		// Construct TopN, should be key(1, 1) -> 2, key(1, 2) -> 2, key(1, 3) -> 3.
 		topN := statistics.NewTopN(3)
 		{
-			key1, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(1), types.NewIntDatum(1))
+			key1, err := codec.EncodeKey(sc, nil, types.NewIntDatum(1), types.NewIntDatum(1))
 			require.NoError(t, err)
 			topN.AppendTopN(key1, 2)
-			key2, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(1), types.NewIntDatum(2))
+			key2, err := codec.EncodeKey(sc, nil, types.NewIntDatum(1), types.NewIntDatum(2))
 			require.NoError(t, err)
 			topN.AppendTopN(key2, 2)
-			key3, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(1), types.NewIntDatum(3))
+			key3, err := codec.EncodeKey(sc, nil, types.NewIntDatum(1), types.NewIntDatum(3))
 			require.NoError(t, err)
 			topN.AppendTopN(key3, 3)
 		}
@@ -54,7 +53,7 @@ func TestMergePartTopN2GlobalTopNWithoutHists(t *testing.T) {
 	}
 
 	// Test merge 2 topN with nil hists.
-	globalTopN, leftTopN, _, err := MergePartTopN2GlobalTopN(loc, version, topNs, 2, nil, false, &killer)
+	globalTopN, leftTopN, _, err := MergePartTopN2GlobalTopN(loc, version, topNs, 2, nil, false, &isKilled)
 	require.NoError(t, err)
 	require.Len(t, globalTopN.TopN, 2, "should only have 2 topN")
 	require.Equal(t, uint64(50), globalTopN.TotalCount(), "should have 50 rows")
@@ -65,7 +64,7 @@ func TestMergePartTopN2GlobalTopNWithHists(t *testing.T) {
 	loc := time.UTC
 	sc := stmtctx.NewStmtCtxWithTimeZone(loc)
 	version := 1
-	killer := sqlkiller.SQLKiller{}
+	isKilled := uint32(0)
 
 	// Prepare TopNs.
 	topNs := make([]*statistics.TopN, 0, 10)
@@ -73,14 +72,14 @@ func TestMergePartTopN2GlobalTopNWithHists(t *testing.T) {
 		// Construct TopN, should be key1 -> 2, key2 -> 2, key3 -> 3.
 		topN := statistics.NewTopN(3)
 		{
-			key1, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(1))
+			key1, err := codec.EncodeKey(sc, nil, types.NewIntDatum(1))
 			require.NoError(t, err)
 			topN.AppendTopN(key1, 2)
-			key2, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(2))
+			key2, err := codec.EncodeKey(sc, nil, types.NewIntDatum(2))
 			require.NoError(t, err)
 			topN.AppendTopN(key2, 2)
 			if i%2 == 0 {
-				key3, err := codec.EncodeKey(sc.TimeZone(), nil, types.NewIntDatum(3))
+				key3, err := codec.EncodeKey(sc, nil, types.NewIntDatum(3))
 				require.NoError(t, err)
 				topN.AppendTopN(key3, 3)
 			}
@@ -105,7 +104,7 @@ func TestMergePartTopN2GlobalTopNWithHists(t *testing.T) {
 	}
 
 	// Test merge 2 topN.
-	globalTopN, leftTopN, _, err := MergePartTopN2GlobalTopN(loc, version, topNs, 2, hists, false, &killer)
+	globalTopN, leftTopN, _, err := MergePartTopN2GlobalTopN(loc, version, topNs, 2, hists, false, &isKilled)
 	require.NoError(t, err)
 	require.Len(t, globalTopN.TopN, 2, "should only have 2 topN")
 	require.Equal(t, uint64(55), globalTopN.TotalCount(), "should have 55")

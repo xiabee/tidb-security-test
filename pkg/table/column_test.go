@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/charset"
@@ -131,20 +130,18 @@ func TestHandleBadNull(t *testing.T) {
 	col := newCol("a")
 	sc := stmtctx.NewStmtCtx()
 	d := types.Datum{}
-	err := col.HandleBadNull(sc.ErrCtx(), &d, 0)
+	err := col.HandleBadNull(&d, sc, 0)
 	require.NoError(t, err)
-	cmp, err := d.Compare(sc.TypeCtx(), &types.Datum{}, collate.GetBinaryCollator())
+	cmp, err := d.Compare(sc, &types.Datum{}, collate.GetBinaryCollator())
 	require.NoError(t, err)
 	require.Equal(t, 0, cmp)
 
 	col.AddFlag(mysql.NotNullFlag)
-	err = col.HandleBadNull(sc.ErrCtx(), &types.Datum{}, 0)
+	err = col.HandleBadNull(&types.Datum{}, sc, 0)
 	require.Error(t, err)
 
-	var levels errctx.LevelMap
-	levels[errctx.ErrGroupBadNull] = errctx.LevelWarn
-	sc.SetErrLevels(levels)
-	err = col.HandleBadNull(sc.ErrCtx(), &types.Datum{}, 0)
+	sc.BadNullAsWarning = true
+	err = col.HandleBadNull(&types.Datum{}, sc, 0)
 	require.NoError(t, err)
 }
 
@@ -265,7 +262,7 @@ func TestGetZeroValue(t *testing.T) {
 			colInfo := &model.ColumnInfo{FieldType: *tt.ft}
 			zv := GetZeroValue(colInfo)
 			require.Equal(t, tt.value.Kind(), zv.Kind())
-			cmp, err := zv.Compare(sc.TypeCtx(), &tt.value, collate.GetCollator(tt.ft.GetCollate()))
+			cmp, err := zv.Compare(sc, &tt.value, collate.GetCollator(tt.ft.GetCollate()))
 			require.NoError(t, err)
 			require.Equal(t, 0, cmp)
 		})
@@ -466,19 +463,8 @@ func TestGetDefaultValue(t *testing.T) {
 		expression.EvalAstExpr = exp
 	}()
 
-	defaultMode, err := mysql.GetSQLMode(mysql.DefaultSQLMode)
-	require.NoError(t, err)
-	require.True(t, defaultMode.HasStrictMode())
 	for _, tt := range tests {
-		sc := ctx.GetSessionVars().StmtCtx
-		if tt.strict {
-			ctx.GetSessionVars().SQLMode = defaultMode
-		} else {
-			ctx.GetSessionVars().SQLMode = mysql.DelSQLMode(defaultMode, mysql.ModeStrictAllTables|mysql.ModeStrictTransTables)
-		}
-		levels := sc.ErrLevels()
-		levels[errctx.ErrGroupBadNull] = errctx.ResolveErrLevel(false, !tt.strict)
-		sc.SetErrLevels(levels)
+		ctx.GetSessionVars().StmtCtx.BadNullAsWarning = !tt.strict
 		val, err := GetColDefaultValue(ctx, tt.colInfo)
 		if err != nil {
 			require.Errorf(t, tt.err, "%v", err)
@@ -492,15 +478,7 @@ func TestGetDefaultValue(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		sc := ctx.GetSessionVars().StmtCtx
-		if tt.strict {
-			ctx.GetSessionVars().SQLMode = defaultMode
-		} else {
-			ctx.GetSessionVars().SQLMode = mysql.DelSQLMode(defaultMode, mysql.ModeStrictAllTables|mysql.ModeStrictTransTables)
-		}
-		levels := sc.ErrLevels()
-		levels[errctx.ErrGroupBadNull] = errctx.ResolveErrLevel(false, !tt.strict)
-		sc.SetErrLevels(levels)
+		ctx.GetSessionVars().StmtCtx.BadNullAsWarning = !tt.strict
 		val, err := GetColOriginDefaultValue(ctx, tt.colInfo)
 		if err != nil {
 			require.Errorf(t, tt.err, "%v", err)

@@ -39,6 +39,7 @@ import (
 	tidbcfg "github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"go.uber.org/atomic"
@@ -100,7 +101,6 @@ const (
 
 	DefaultEngineMemCacheSize      = 512 * units.MiB
 	DefaultLocalWriterMemCacheSize = 128 * units.MiB
-	DefaultBlockSize               = 16 * units.KiB
 
 	defaultCSVDataCharacterSet       = "binary"
 	defaultCSVDataInvalidCharReplace = utf8.RuneError
@@ -188,7 +188,7 @@ func (d *DBStore) adjust(
 		if d.Security.TLSConfig == nil {
 			/* #nosec G402 */
 			d.Security.TLSConfig = &tls.Config{
-				MinVersion:         tls.VersionTLS12,
+				MinVersion:         tls.VersionTLS10,
 				InsecureSkipVerify: true,
 				NextProtos:         []string{"h2", "http/1.1"}, // specify `h2` to let Go use HTTP/2.
 			}
@@ -216,18 +216,8 @@ func (d *DBStore) adjust(
 			d.Port = int(settings.Port)
 		}
 		if len(d.PdAddr) == 0 {
-			// verify that it is not a empty string
 			pdAddrs := strings.Split(settings.Path, ",")
-			for _, ip := range pdAddrs {
-				ipPort := strings.Split(ip, ":")
-				if len(ipPort[0]) == 0 {
-					return common.ErrInvalidConfig.GenWithStack("invalid `tidb.pd-addr` setting")
-				}
-				if len(ipPort[1]) == 0 || ipPort[1] == "0" {
-					return common.ErrInvalidConfig.GenWithStack("invalid `tidb.port` setting")
-				}
-			}
-			d.PdAddr = settings.Path
+			d.PdAddr = pdAddrs[0] // FIXME support multiple PDs once importer can.
 		}
 	}
 
@@ -598,16 +588,16 @@ const (
 	// DupeResAlgNone doesn't detect duplicate.
 	DupeResAlgNone DuplicateResolutionAlgorithm = iota
 
-	// DupeResAlgRecord only records duplicate records to `lightning_task_info.conflict_error_v2` table on the target TiDB.
+	// DupeResAlgRecord only records duplicate records to `lightning_task_info.conflict_error_v1` table on the target TiDB.
 	DupeResAlgRecord
 
 	// DupeResAlgRemove records all duplicate records like the 'record' algorithm and remove all information related to the
-	// duplicated rows. Users need to analyze the lightning_task_info.conflict_error_v2 table to add back the correct rows.
+	// duplicated rows. Users need to analyze the lightning_task_info.conflict_error_v1 table to add back the correct rows.
 	DupeResAlgRemove
 
 	// DupeResAlgReplace records all duplicate records like the 'record' algorithm, and remove some rows with conflict
 	// and reserve other rows that can be kept and not cause conflict anymore. Users need to analyze the
-	// lightning_task_info.conflict_error_v2 table to check whether the reserved data cater to their need and check whether
+	// lightning_task_info.conflict_error_v1 table to check whether the reserved data cater to their need and check whether
 	// they need to add back the correct rows.
 	DupeResAlgReplace
 
@@ -1081,7 +1071,6 @@ type TikvImporter struct {
 	StoreWriteBWLimit       ByteSize `toml:"store-write-bwlimit" json:"store-write-bwlimit"`
 	// default is PausePDSchedulerScopeTable to compatible with previous version(>= 6.1)
 	PausePDSchedulerScope PausePDSchedulerScope `toml:"pause-pd-scheduler-scope" json:"pause-pd-scheduler-scope"`
-	BlockSize             ByteSize              `toml:"block-size" json:"block-size"`
 }
 
 func (t *TikvImporter) adjust() error {
@@ -1115,9 +1104,6 @@ func (t *TikvImporter) adjust() error {
 		}
 		if t.LocalWriterMemCacheSize == 0 {
 			t.LocalWriterMemCacheSize = DefaultLocalWriterMemCacheSize
-		}
-		if t.BlockSize == 0 {
-			t.BlockSize = DefaultBlockSize
 		}
 
 		if t.ParallelImport && t.AddIndexBySQL {
@@ -1384,7 +1370,7 @@ func (c *Conflict) adjust(i *TikvImporter, l *Lightning) error {
 	if c.MaxRecordRows < 0 {
 		maxErr := l.MaxError
 		// Compatible with the old behavior that records all syntax,charset,type errors.
-		maxAccepted := max(maxErr.Syntax.Load(), maxErr.Charset.Load(), maxErr.Type.Load())
+		maxAccepted := mathutil.Max(maxErr.Syntax.Load(), maxErr.Charset.Load(), maxErr.Type.Load())
 		if maxAccepted < defaultMaxRecordRows {
 			maxAccepted = defaultMaxRecordRows
 		}
@@ -1472,7 +1458,6 @@ func NewConfig() *Config {
 			DiskQuota:               ByteSize(math.MaxInt64),
 			DuplicateResolution:     DupeResAlgNone,
 			PausePDSchedulerScope:   PausePDSchedulerScopeTable,
-			BlockSize:               16 * 1024,
 		},
 		PostRestore: PostRestore{
 			Checksum:          OpLevelRequired,

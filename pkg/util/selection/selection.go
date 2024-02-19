@@ -47,8 +47,9 @@ func introselect(data Interface, left, right, k int, depth int) int {
 		return k
 	} else if k < pivotIndex {
 		return introselect(data, left, pivotIndex-1, k, depth-1)
+	} else {
+		return introselect(data, pivotIndex+1, right, k, depth-1)
 	}
-	return introselect(data, pivotIndex+1, right, k, depth-1)
 }
 
 // quickselect is used in test for comparison.
@@ -63,8 +64,9 @@ func quickselect(data Interface, left, right, k int) int {
 		return k
 	} else if k < pivotIndex {
 		return quickselect(data, left, pivotIndex-1, k)
+	} else {
+		return quickselect(data, pivotIndex+1, right, k)
 	}
-	return quickselect(data, pivotIndex+1, right, k)
 }
 
 func medianOfMedians(data Interface, left, right, k int) int {
@@ -77,8 +79,9 @@ func medianOfMedians(data Interface, left, right, k int) int {
 		return k
 	} else if k < pivotIndex {
 		return medianOfMedians(data, left, pivotIndex-1, k)
+	} else {
+		return medianOfMedians(data, pivotIndex+1, right, k)
 	}
-	return medianOfMedians(data, pivotIndex+1, right, k)
 }
 
 func randomPivot(_ Interface, left, right int) int {

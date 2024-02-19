@@ -22,7 +22,6 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +46,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/membuf"
+	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
@@ -60,7 +60,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
-	"github.com/tikv/pd/client/http"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding"
@@ -111,12 +110,12 @@ func TestNextKey(t *testing.T) {
 
 	stmtCtx := stmtctx.NewStmtCtx()
 	for _, datums := range testDatums {
-		keyBytes, err := codec.EncodeKey(stmtCtx.TimeZone(), nil, types.NewIntDatum(123), datums[0])
+		keyBytes, err := codec.EncodeKey(stmtCtx, nil, types.NewIntDatum(123), datums[0])
 		require.NoError(t, err)
 		h, err := tidbkv.NewCommonHandle(keyBytes)
 		require.NoError(t, err)
 		key := tablecodec.EncodeRowKeyWithHandle(1, h)
-		nextKeyBytes, err := codec.EncodeKey(stmtCtx.TimeZone(), nil, types.NewIntDatum(123), datums[1])
+		nextKeyBytes, err := codec.EncodeKey(stmtCtx, nil, types.NewIntDatum(123), datums[1])
 		require.NoError(t, err)
 		nextHdl, err := tidbkv.NewCommonHandle(nextKeyBytes)
 		require.NoError(t, err)
@@ -126,7 +125,7 @@ func TestNextKey(t *testing.T) {
 	}
 
 	// a special case that when len(string datum) % 8 == 7, nextKey twice should not panic.
-	keyBytes, err := codec.EncodeKey(stmtCtx.TimeZone(), nil, types.NewStringDatum("1234567"))
+	keyBytes, err := codec.EncodeKey(stmtCtx, nil, types.NewStringDatum("1234567"))
 	require.NoError(t, err)
 	h, err := tidbkv.NewCommonHandle(keyBytes)
 	require.NoError(t, err)
@@ -328,9 +327,7 @@ func testLocalWriter(t *testing.T, needSort bool, partitialSort bool) {
 		ReadOnly:                 false,
 	}
 	db, tmpPath := makePebbleDB(t, opt)
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
+	defer db.Close()
 
 	_, engineUUID := backend.MakeUUID("ww", 0)
 	engineCtx, cancel := context.WithCancel(context.Background())
@@ -417,19 +414,19 @@ func testLocalWriter(t *testing.T, needSort bool, partitialSort bool) {
 		require.Equal(t, k, it.Key())
 		it.Next()
 	}
-	require.NoError(t, it.Close())
 	close(f.sstMetasChan)
 	f.wg.Wait()
 }
 
-func TestEngineLocalWriter(t *testing.T) {
-	// test local writer with sort
+func TestLocalWriterWithSort(t *testing.T) {
 	testLocalWriter(t, false, false)
+}
 
-	// test local writer with ingest
+func TestLocalWriterWithIngest(t *testing.T) {
 	testLocalWriter(t, true, false)
+}
 
-	// test local writer with ingest unsort
+func TestLocalWriterWithIngestUnsort(t *testing.T) {
 	testLocalWriter(t, true, true)
 }
 
@@ -449,7 +446,7 @@ func (c *mockSplitClient) GetRegion(ctx context.Context, key []byte) (*split.Reg
 
 type testIngester struct{}
 
-func (i testIngester) mergeSSTs(metas []*sstMeta, dir string, blockSize int) (*sstMeta, error) {
+func (i testIngester) mergeSSTs(metas []*sstMeta, dir string) (*sstMeta, error) {
 	if len(metas) == 0 {
 		return nil, errors.New("sst metas is empty")
 	} else if len(metas) == 1 {
@@ -593,7 +590,7 @@ func testMergeSSTs(t *testing.T, kvs [][]common.KvPair, meta *sstMeta) {
 
 	createSSTWriter := func() (*sstWriter, error) {
 		path := filepath.Join(f.sstDir, uuid.New().String()+".sst")
-		writer, err := newSSTWriter(path, 16*1024)
+		writer, err := newSSTWriter(path)
 		if err != nil {
 			return nil, err
 		}
@@ -615,7 +612,7 @@ func testMergeSSTs(t *testing.T, kvs [][]common.KvPair, meta *sstMeta) {
 	}
 
 	i := dbSSTIngester{e: f}
-	newMeta, err := i.mergeSSTs(metas, tmpPath, 16*1024)
+	newMeta, err := i.mergeSSTs(metas, tmpPath)
 	require.NoError(t, err)
 
 	require.Equal(t, meta.totalCount, newMeta.totalCount)
@@ -671,7 +668,7 @@ func (c *mockPdClient) GetAllStores(ctx context.Context, opts ...pd.GetStoreOpti
 	return c.stores, nil
 }
 
-func (c *mockPdClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, opts ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (c *mockPdClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	return c.regions, nil
 }
 
@@ -1061,9 +1058,11 @@ func TestMultiIngest(t *testing.T) {
 			err:                testCase.err,
 			multiIngestCheckFn: testCase.multiIngestSupport,
 		}
+		pdCtl := &pdutil.PdController{}
+		pdCtl.SetPDClient(&mockPdClient{stores: stores})
 
 		local := &Backend{
-			pdCli: &mockPdClient{stores: stores},
+			pdCtl: pdCtl,
 			importClientFactory: &mockImportClientFactory{
 				stores: allStores,
 				createClientFn: func(store *metapb.Store) sst.ImportSSTClient {
@@ -1201,9 +1200,7 @@ func (m *mockIngestIter) Close() error { return nil }
 
 func (m *mockIngestIter) Error() error { return nil }
 
-func (m *mockIngestIter) ReleaseBuf() {}
-
-func (m mockIngestData) NewIter(_ context.Context, lowerBound, upperBound []byte, _ *membuf.Pool) common.ForwardIter {
+func (m mockIngestData) NewIter(ctx context.Context, lowerBound, upperBound []byte) common.ForwardIter {
 	i, j := m.getFirstAndLastKeyIdx(lowerBound, upperBound)
 	return &mockIngestIter{data: m, startIdx: i, endIdx: j, curIdx: i}
 }
@@ -1256,16 +1253,13 @@ func TestCheckPeersBusy(t *testing.T) {
 		},
 		logger:             log.L(),
 		writeLimiter:       noopStoreWriteLimiter{},
+		bufferPool:         membuf.NewPool(),
 		supportMultiIngest: true,
 		BackendConfig: BackendConfig{
 			ShouldCheckWriteStall: true,
-			LocalStoreDir:         path.Join(t.TempDir(), "sorted-kv"),
 		},
 		tikvCodec: keyspace.CodecV1,
 	}
-	var err error
-	local.engineMgr, err = newEngineManager(local.BackendConfig, local, local.logger)
-	require.NoError(t, err)
 
 	data := mockIngestData{{[]byte("a"), []byte("a")}, {[]byte("b"), []byte("b")}}
 
@@ -1379,16 +1373,13 @@ func TestNotLeaderErrorNeedUpdatePeers(t *testing.T) {
 		},
 		logger:             log.L(),
 		writeLimiter:       noopStoreWriteLimiter{},
+		bufferPool:         membuf.NewPool(),
 		supportMultiIngest: true,
 		BackendConfig: BackendConfig{
 			ShouldCheckWriteStall: true,
-			LocalStoreDir:         path.Join(t.TempDir(), "sorted-kv"),
 		},
 		tikvCodec: keyspace.CodecV1,
 	}
-	var err error
-	local.engineMgr, err = newEngineManager(local.BackendConfig, local, local.logger)
-	require.NoError(t, err)
 
 	data := mockIngestData{{[]byte("a"), []byte("a")}}
 
@@ -1478,15 +1469,10 @@ func TestPartialWriteIngestErrorWontPanic(t *testing.T) {
 		},
 		logger:             log.L(),
 		writeLimiter:       noopStoreWriteLimiter{},
+		bufferPool:         membuf.NewPool(),
 		supportMultiIngest: true,
 		tikvCodec:          keyspace.CodecV1,
-		BackendConfig: BackendConfig{
-			LocalStoreDir: path.Join(t.TempDir(), "sorted-kv"),
-		},
 	}
-	var err error
-	local.engineMgr, err = newEngineManager(local.BackendConfig, local, local.logger)
-	require.NoError(t, err)
 
 	data := mockIngestData{{[]byte("a"), []byte("a")}, {[]byte("a2"), []byte("a2")}}
 
@@ -1574,15 +1560,10 @@ func TestPartialWriteIngestBusy(t *testing.T) {
 		},
 		logger:             log.L(),
 		writeLimiter:       noopStoreWriteLimiter{},
+		bufferPool:         membuf.NewPool(),
 		supportMultiIngest: true,
 		tikvCodec:          keyspace.CodecV1,
-		BackendConfig: BackendConfig{
-			LocalStoreDir: path.Join(t.TempDir(), "sorted-kv"),
-		},
 	}
-	var err error
-	local.engineMgr, err = newEngineManager(local.BackendConfig, local, local.logger)
-	require.NoError(t, err)
 
 	db, tmpPath := makePebbleDB(t, nil)
 	_, engineUUID := backend.MakeUUID("ww", 0)
@@ -1597,7 +1578,7 @@ func TestPartialWriteIngestBusy(t *testing.T) {
 		logger:       log.L(),
 	}
 	f.db.Store(db)
-	err = db.Set([]byte("a"), []byte("a"), nil)
+	err := db.Set([]byte("a"), []byte("a"), nil)
 	require.NoError(t, err)
 	err = db.Set([]byte("a2"), []byte("a2"), nil)
 	require.NoError(t, err)
@@ -1663,8 +1644,6 @@ func TestPartialWriteIngestBusy(t *testing.T) {
 
 	require.Equal(t, []uint64{1, 2, 3, 1, 2, 3}, apiInvokeRecorder["Write"])
 	require.Equal(t, []uint64{1, 1, 1}, apiInvokeRecorder["MultiIngest"])
-
-	require.NoError(t, f.Close())
 }
 
 // mockGetSizeProperties mocks that 50MB * 20 SST file.
@@ -1767,11 +1746,9 @@ func TestSplitRangeAgain4BigRegion(t *testing.T) {
 		jobWg.Done()
 	}
 	jobWg.Wait()
-	require.NoError(t, f.Close())
 }
 
 func TestSplitRangeAgain4BigRegionExternalEngine(t *testing.T) {
-	t.Skip("skip due to the delay of dynamic region feature, and external engine changed its behaviour")
 	backup := external.LargeRegionSplitDataThreshold
 	external.LargeRegionSplitDataThreshold = 1
 	t.Cleanup(func() {
@@ -2290,12 +2267,10 @@ func TestExternalEngine(t *testing.T) {
 	_ = failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/skipSplitAndScatter", "return()")
 	_ = failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/skipStartWorker", "return()")
 	_ = failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/injectVariables", "return()")
-	_ = failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/external/LoadIngestDataBatchSize", "return(2)")
 	t.Cleanup(func() {
 		_ = failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/skipSplitAndScatter")
 		_ = failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/skipStartWorker")
 		_ = failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/injectVariables")
-		_ = failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/external/LoadIngestDataBatchSize")
 	})
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -2323,23 +2298,24 @@ func TestExternalEngine(t *testing.T) {
 		StatFiles:     statFiles,
 		StartKey:      keys[0],
 		EndKey:        endKey,
-		SplitKeys:     [][]byte{keys[20], keys[30], keys[50], keys[60], keys[80], keys[90]},
+		SplitKeys:     [][]byte{keys[30], keys[60], keys[90]},
 		TotalFileSize: int64(config.SplitRegionSize) + 1,
 		TotalKVCount:  int64(config.SplitRegionKeys) + 1,
 	}
 	engineUUID := uuid.New()
+	pdCtl := &pdutil.PdController{}
+	pdCtl.SetPDClient(&mockPdClient{})
 	local := &Backend{
 		BackendConfig: BackendConfig{
 			WorkerConcurrency: 2,
-			LocalStoreDir:     path.Join(t.TempDir(), "sorted-kv"),
 		},
 		splitCli: initTestSplitClient([][]byte{
 			keys[0], keys[50], endKey,
 		}, nil),
-		pdCli: &mockPdClient{},
+		pdCtl:          pdCtl,
+		externalEngine: map[uuid.UUID]common.Engine{},
+		keyAdapter:     common.NoopKeyAdapter{},
 	}
-	local.engineMgr, err = newEngineManager(local.BackendConfig, local, local.logger)
-	require.NoError(t, err)
 	jobs := make([]*regionJob, 0, 5)
 
 	jobToWorkerCh := make(chan *regionJob, 10)
@@ -2382,7 +2358,7 @@ func TestExternalEngine(t *testing.T) {
 	kvIdx := 0
 	for i, job := range jobs {
 		require.Equal(t, expectedKeyRanges[i], job.keyRange)
-		iter := job.ingestData.NewIter(ctx, job.keyRange.Start, job.keyRange.End, nil)
+		iter := job.ingestData.NewIter(ctx, job.keyRange.Start, job.keyRange.End)
 		for iter.First(); iter.Valid(); iter.Next() {
 			require.Equal(t, keys[kvIdx], iter.Key())
 			require.Equal(t, values[kvIdx], iter.Value())
@@ -2394,14 +2370,12 @@ func TestExternalEngine(t *testing.T) {
 	require.Equal(t, 100, kvIdx)
 }
 
-func TestCheckDiskAvail(t *testing.T) {
-	store := &http.StoreInfo{Status: http.StoreStatus{Capacity: "100 GB", Available: "50 GB"}}
-	ctx := context.Background()
-	err := checkDiskAvail(ctx, store)
-	require.NoError(t, err)
-
-	// pd may return this StoreInfo before the store reports heartbeat
-	store = &http.StoreInfo{Status: http.StoreStatus{LeaderWeight: 1.0, RegionWeight: 1.0}}
-	err = checkDiskAvail(ctx, store)
-	require.NoError(t, err)
+func TestGetExternalEngineKVStatistics(t *testing.T) {
+	b := Backend{
+		externalEngine: map[uuid.UUID]common.Engine{},
+	}
+	// non existent uuid
+	size, count := b.GetExternalEngineKVStatistics(uuid.New())
+	require.Zero(t, size)
+	require.Zero(t, count)
 }

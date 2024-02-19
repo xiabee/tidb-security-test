@@ -41,6 +41,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -244,7 +245,7 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 		}
 
 		var syncLock sync.Mutex
-		size := min(len(splitKeyMap), local.RegionSplitConcurrency)
+		size := mathutil.Min(len(splitKeyMap), local.RegionSplitConcurrency)
 		ch := make(chan *splitInfo, size)
 		eg, splitCtx := errgroup.WithContext(ctx)
 

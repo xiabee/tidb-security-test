@@ -20,14 +20,13 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func genVecBuiltinRegexpBenchCaseForConstants(ctx sessionctx.Context) (baseFunc builtinFunc, childrenFieldTypes []*types.FieldType, input *chunk.Chunk, output *chunk.Column) {
+func genVecBuiltinRegexpBenchCaseForConstants() (baseFunc builtinFunc, childrenFieldTypes []*types.FieldType, input *chunk.Chunk, output *chunk.Column) {
 	const (
 		numArgs = 2
 		batchSz = 1024
@@ -50,7 +49,7 @@ func genVecBuiltinRegexpBenchCaseForConstants(ctx sessionctx.Context) (baseFunc 
 	args[1] = DatumToConstant(types.NewStringDatum(rePat), mysql.TypeString, 0)
 
 	var err error
-	baseFunc, err = funcs[ast.Regexp].getFunction(ctx, args)
+	baseFunc, err = funcs[ast.Regexp].getFunction(mock.NewContext(), args)
 	if err != nil {
 		panic(err)
 	}
@@ -62,9 +61,8 @@ func genVecBuiltinRegexpBenchCaseForConstants(ctx sessionctx.Context) (baseFunc 
 }
 
 func TestVectorizedBuiltinRegexpForConstants(t *testing.T) {
-	ctx := mock.NewContext()
-	bf, childrenFieldTypes, input, output := genVecBuiltinRegexpBenchCaseForConstants(ctx)
-	err := bf.vecEvalInt(ctx, input, output)
+	bf, childrenFieldTypes, input, output := genVecBuiltinRegexpBenchCaseForConstants()
+	err := bf.vecEvalInt(input, output)
 	require.NoError(t, err)
 	i64s := output.Int64s()
 
@@ -74,7 +72,7 @@ func TestVectorizedBuiltinRegexpForConstants(t *testing.T) {
 		return fmt.Sprintf("func: builtinRegexpUTF8Sig, row: %v, rowData: %v", row, input.GetRow(row).GetDatumRow(childrenFieldTypes))
 	}
 	for row := it.Begin(); row != it.End(); row = it.Next() {
-		val, isNull, err := bf.evalInt(ctx, row)
+		val, isNull, err := bf.evalInt(row)
 		require.NoError(t, err)
 		require.Equal(t, output.IsNull(i), isNull, commentf(i))
 		if !isNull {
@@ -85,12 +83,11 @@ func TestVectorizedBuiltinRegexpForConstants(t *testing.T) {
 }
 
 func BenchmarkVectorizedBuiltinRegexpForConstants(b *testing.B) {
-	ctx := mock.NewContext()
-	bf, _, input, output := genVecBuiltinRegexpBenchCaseForConstants(ctx)
+	bf, _, input, output := genVecBuiltinRegexpBenchCaseForConstants()
 	b.Run("builtinRegexpUTF8Sig-Constants-VecBuiltinFunc", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if err := bf.vecEvalInt(ctx, input, output); err != nil {
+			if err := bf.vecEvalInt(input, output); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -101,7 +98,7 @@ func BenchmarkVectorizedBuiltinRegexpForConstants(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			output.Reset(types.ETInt)
 			for row := it.Begin(); row != it.End(); row = it.Next() {
-				v, isNull, err := bf.evalInt(ctx, row)
+				v, isNull, err := bf.evalInt(row)
 				if err != nil {
 					b.Fatal(err)
 				}

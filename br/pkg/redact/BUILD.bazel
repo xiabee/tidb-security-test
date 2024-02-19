@@ -11,14 +11,10 @@ go_library(
 go_test(
     name = "redact_test",
     timeout = "short",
-    srcs = [
-        "main_test.go",
-        "redact_test.go",
-    ],
-    embed = [":redact"],
+    srcs = ["redact_test.go"],
     flaky = True,
     deps = [
-        "//pkg/testkit/testsetup",
+        ":redact",
         "@com_github_stretchr_testify//require",
         "@org_uber_go_goleak//:goleak",
     ],

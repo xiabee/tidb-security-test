@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/fatih/structtag"
-	"github.com/pingcap/tidb/build/linter/util"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/inspector"
 )
@@ -174,8 +173,4 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		})
 	}
 	return nil, nil
-}
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 }

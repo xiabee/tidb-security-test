@@ -376,8 +376,7 @@ func buildHandle(pkDts []types.Datum, tblInfo *model.TableInfo,
 	pkInfo *model.IndexInfo, stmtCtx *stmtctx.StatementContext) (kv.Handle, error) {
 	if tblInfo.IsCommonHandle {
 		tablecodec.TruncateIndexValues(tblInfo, pkInfo, pkDts)
-		handleBytes, err := codec.EncodeKey(stmtCtx.TimeZone(), nil, pkDts...)
-		err = stmtCtx.HandleError(err)
+		handleBytes, err := codec.EncodeKey(stmtCtx, nil, pkDts...)
 		if err != nil {
 			return nil, err
 		}

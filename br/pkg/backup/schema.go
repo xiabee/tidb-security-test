@@ -40,7 +40,6 @@ type schemaInfo struct {
 	totalKvs   uint64
 	totalBytes uint64
 	stats      *util.JSONTable
-	statsIndex []*backuppb.StatsFileIndex
 }
 
 type iterFuncTp func(kv.Storage, func(*model.DBInfo, *model.TableInfo)) error
@@ -148,10 +147,8 @@ func (ss *Schemas) BackupSchemas(
 					}
 				}
 				if statsHandle != nil {
-					statsWriter := metaWriter.NewStatsWriter()
-					if err := schema.dumpStatsToJSON(ctx, statsWriter, statsHandle, backupTS); err != nil {
+					if err := schema.dumpStatsToJSON(statsHandle, backupTS); err != nil {
 						logger.Error("dump table stats failed", logutil.ShortError(err))
-						return errors.Trace(err)
 					}
 				}
 			}
@@ -212,19 +209,15 @@ func (s *schemaInfo) calculateChecksum(
 	return nil
 }
 
-func (s *schemaInfo) dumpStatsToJSON(ctx context.Context, statsWriter *metautil.StatsWriter, statsHandle *handle.Handle, backupTS uint64) error {
+func (s *schemaInfo) dumpStatsToJSON(statsHandle *handle.Handle, backupTS uint64) error {
 	log.Info("dump stats to json", zap.Stringer("db", s.dbInfo.Name), zap.Stringer("table", s.tableInfo.Name))
-	if err := statsHandle.PersistStatsBySnapshot(
-		ctx, s.dbInfo.Name.String(), s.tableInfo, backupTS, statsWriter.BackupStats,
-	); err != nil {
-		return errors.Trace(err)
-	}
-
-	statsFileIndexes, err := statsWriter.BackupStatsDone(ctx)
+	jsonTable, err := statsHandle.DumpStatsToJSONBySnapshot(
+		s.dbInfo.Name.String(), s.tableInfo, backupTS, true)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	s.statsIndex = statsFileIndexes
+
+	s.stats = jsonTable
 	return nil
 }
 
@@ -256,6 +249,5 @@ func (s *schemaInfo) encodeToSchema() (*backuppb.Schema, error) {
 		TotalKvs:   s.totalKvs,
 		TotalBytes: s.totalBytes,
 		Stats:      statsBytes,
-		StatsIndex: s.statsIndex,
 	}, nil
 }

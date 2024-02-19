@@ -186,7 +186,7 @@ func (e *BatchPointGetExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 	for !req.IsFull() && e.index < len(e.values) {
 		handle, val := e.handles[e.index], e.values[e.index]
-		err := DecodeRowValToChunk(e.BaseExecutor.Ctx(), e.Schema(), e.tblInfo, handle, val, req, e.rowDecoder)
+		err := DecodeRowValToChunk(e.Base().Ctx(), e.Schema(), e.tblInfo, handle, val, req, e.rowDecoder)
 		if err != nil {
 			return err
 		}
@@ -226,16 +226,12 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			}
 
 			var physID int64
-			if e.partPos == core.GlobalWithoutColumnPos {
-				physID = e.tblInfo.ID
+			if len(e.planPhysIDs) > 0 {
+				physID = e.planPhysIDs[i]
 			} else {
-				if len(e.planPhysIDs) > 0 {
-					physID = e.planPhysIDs[i]
-				} else {
-					physID, err = core.GetPhysID(e.tblInfo, e.partExpr, e.partPos, idxVals[e.partPos])
-					if err != nil {
-						continue
-					}
+				physID, err = core.GetPhysID(e.tblInfo, e.partExpr, e.partPos, idxVals[e.partPos])
+				if err != nil {
+					continue
 				}
 			}
 
@@ -304,18 +300,8 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 				indexKeys = append(indexKeys, key)
 			}
 			if e.tblInfo.Partition != nil {
-				var pid int64
-				if e.idxInfo.Global {
-					segs := tablecodec.SplitIndexValue(handleVal)
-					_, pid, err = codec.DecodeInt(segs.PartitionID)
-					if err != nil {
-						return err
-					}
-					e.physIDs = append(e.physIDs, pid)
-				} else {
-					pid = tablecodec.DecodeTableID(key)
-					e.physIDs = append(e.physIDs, pid)
-				}
+				pid := tablecodec.DecodeTableID(key)
+				e.physIDs = append(e.physIDs, pid)
 				if e.lock {
 					e.UpdateDeltaForTableID(pid)
 				}

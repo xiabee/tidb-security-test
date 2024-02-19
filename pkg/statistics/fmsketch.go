@@ -97,8 +97,7 @@ func (s *FMSketch) insertHashValue(hashVal uint64) {
 
 // InsertValue inserts a value into the FM sketch.
 func (s *FMSketch) InsertValue(sc *stmtctx.StatementContext, value types.Datum) error {
-	bytes, err := codec.EncodeValue(sc.TimeZone(), nil, value)
-	err = sc.HandleError(err)
+	bytes, err := codec.EncodeValue(sc, nil, value)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -119,12 +118,9 @@ func (s *FMSketch) InsertRowValue(sc *stmtctx.StatementContext, values []types.D
 	hashFunc := murmur3Pool.Get().(hash.Hash64)
 	hashFunc.Reset()
 	defer murmur3Pool.Put(hashFunc)
-
-	errCtx := sc.ErrCtx()
 	for _, v := range values {
 		b = b[:0]
-		b, err := codec.EncodeValue(sc.TimeZone(), b, v)
-		err = errCtx.HandleError(err)
+		b, err := codec.EncodeValue(sc, b, v)
 		if err != nil {
 			return err
 		}

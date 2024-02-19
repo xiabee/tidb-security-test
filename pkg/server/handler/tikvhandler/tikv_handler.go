@@ -46,7 +46,6 @@ import (
 	"github.com/pingcap/tidb/pkg/server/handler"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/session/txninfo"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -61,9 +60,9 @@ import (
 	"github.com/pingcap/tidb/pkg/util/gcutil"
 	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/pdapi"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/tikv/client-go/v2/tikv"
-	pd "github.com/tikv/pd/client/http"
 	"go.uber.org/zap"
 )
 
@@ -826,7 +825,7 @@ type SchemaTableStorage struct {
 }
 
 func getSchemaTablesStorageInfo(h *SchemaStorageHandler, schema *model.CIStr, table *model.CIStr) (messages []*SchemaTableStorage, err error) {
-	var s sessiontypes.Session
+	var s session.Session
 	if s, err = session.CreateSession(h.Store); err != nil {
 		return
 	}
@@ -1202,7 +1201,7 @@ func (h *TableHandler) addScatterSchedule(startKey, endKey []byte, name string) 
 	if err != nil {
 		return err
 	}
-	scheduleURL := fmt.Sprintf("%s://%s%s", util.InternalHTTPSchema(), pdAddrs[0], pd.Schedulers)
+	scheduleURL := fmt.Sprintf("%s://%s/pd/api/v1/schedulers", util.InternalHTTPSchema(), pdAddrs[0])
 	resp, err := util.InternalHTTPClient().Post(scheduleURL, "application/json", bytes.NewBuffer(v))
 	if err != nil {
 		return err
@@ -1218,7 +1217,7 @@ func (h *TableHandler) deleteScatterSchedule(name string) error {
 	if err != nil {
 		return err
 	}
-	scheduleURL := fmt.Sprintf("%s://%s%s", util.InternalHTTPSchema(), pdAddrs[0], pd.ScatterRangeSchedulerWithName(name))
+	scheduleURL := fmt.Sprintf("%s://%s/pd/api/v1/schedulers/scatter-range-%s", util.InternalHTTPSchema(), pdAddrs[0], name)
 	req, err := http.NewRequest(http.MethodDelete, scheduleURL, nil)
 	if err != nil {
 		return err
@@ -1404,7 +1403,9 @@ func (h *TableHandler) getRegionsByID(tbl table.Table, id int64, name string) (*
 }
 
 func (h *TableHandler) handleDiskUsageRequest(tbl table.Table, w http.ResponseWriter) {
-	stats, err := h.GetPDRegionStats(context.Background(), tbl.Meta().ID, false)
+	tableID := tbl.Meta().ID
+	var stats helper.PDRegionStats
+	err := h.GetPDRegionStats(tableID, &stats, false)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1442,13 +1443,12 @@ func (h RegionHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				writeError(w, err)
 				return
 			}
-			ctx := context.Background()
-			hotRead, err := h.ScrapeHotInfo(ctx, helper.HotRead, schema.AllSchemas())
+			hotRead, err := h.ScrapeHotInfo(pdapi.HotRead, schema.AllSchemas())
 			if err != nil {
 				writeError(w, err)
 				return
 			}
-			hotWrite, err := h.ScrapeHotInfo(ctx, helper.HotWrite, schema.AllSchemas())
+			hotWrite, err := h.ScrapeHotInfo(pdapi.HotWrite, schema.AllSchemas())
 			if err != nil {
 				writeError(w, err)
 				return
@@ -1941,11 +1941,25 @@ func (h *TestHandler) handleGCResolveLocks(w http.ResponseWriter, req *http.Requ
 		writeError(w, errors.Errorf("parse safePoint(%s) failed", s))
 		return
 	}
+	usePhysical := true
+	s = req.FormValue("physical")
+	if s != "" {
+		usePhysical, err = strconv.ParseBool(s)
+		if err != nil {
+			writeError(w, errors.Errorf("parse physical(%s) failed", s))
+			return
+		}
+	}
+
 	ctx := req.Context()
-	logutil.Logger(ctx).Info("start resolving locks", zap.Uint64("safePoint", safePoint))
-	err = gcworker.RunResolveLocks(ctx, h.Store, h.RegionCache.PDClient(), safePoint, "testGCWorker", 3)
+	logutil.Logger(ctx).Info("start resolving locks", zap.Uint64("safePoint", safePoint), zap.Bool("physical", usePhysical))
+	physicalUsed, err := gcworker.RunResolveLocks(ctx, h.Store, h.RegionCache.PDClient(), safePoint, "testGCWorker", 3, usePhysical)
 	if err != nil {
 		writeError(w, errors.Annotate(err, "resolveLocks failed"))
+	} else {
+		writeData(w, map[string]interface{}{
+			"physicalUsed": physicalUsed,
+		})
 	}
 }
 

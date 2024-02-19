@@ -24,8 +24,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
-	"github.com/pingcap/tidb/pkg/executor/internal/testutil"
-	"github.com/pingcap/tidb/pkg/executor/sortexec"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -37,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/disk"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
@@ -91,7 +90,7 @@ func (r *requiredRowsDataSource) Next(ctx context.Context, req *chunk.Chunk) err
 	if r.count > r.totalRows {
 		return nil
 	}
-	required := min(req.RequiredRows(), r.totalRows-r.count)
+	required := mathutil.Min(req.RequiredRows(), r.totalRows-r.count)
 	for i := 0; i < required; i++ {
 		req.AppendRow(r.genOneRow())
 	}
@@ -196,7 +195,7 @@ func TestLimitRequiredRows(t *testing.T) {
 }
 
 func buildLimitExec(ctx sessionctx.Context, src exec.Executor, offset, count int) exec.Executor {
-	n := min(count, ctx.GetSessionVars().MaxChunkSize)
+	n := mathutil.Min(count, ctx.GetSessionVars().MaxChunkSize)
 	base := exec.NewBaseExecutor(ctx, src.Schema(), 0, src)
 	base.SetInitCap(n)
 	limitExec := &LimitExec{
@@ -280,10 +279,10 @@ func TestSortRequiredRows(t *testing.T) {
 }
 
 func buildSortExec(sctx sessionctx.Context, byItems []*util.ByItems, src exec.Executor) exec.Executor {
-	sortExec := sortexec.SortExec{
+	sortExec := SortExec{
 		BaseExecutor: exec.NewBaseExecutor(sctx, src.Schema(), 0, src),
 		ByItems:      byItems,
-		ExecSchema:   src.Schema(),
+		schema:       src.Schema(),
 	}
 	return &sortExec
 }
@@ -387,14 +386,14 @@ func TestTopNRequiredRows(t *testing.T) {
 }
 
 func buildTopNExec(ctx sessionctx.Context, offset, count int, byItems []*util.ByItems, src exec.Executor) exec.Executor {
-	sortExec := sortexec.SortExec{
+	sortExec := SortExec{
 		BaseExecutor: exec.NewBaseExecutor(ctx, src.Schema(), 0, src),
 		ByItems:      byItems,
-		ExecSchema:   src.Schema(),
+		schema:       src.Schema(),
 	}
-	return &sortexec.TopNExec{
+	return &TopNExec{
 		SortExec: sortExec,
-		Limit:    &plannercore.PhysicalLimit{Count: uint64(count), Offset: uint64(offset)},
+		limit:    &plannercore.PhysicalLimit{Count: uint64(count), Offset: uint64(offset)},
 	}
 }
 
@@ -741,7 +740,7 @@ func buildMergeJoinExec(ctx sessionctx.Context, joinType plannercore.JoinType, i
 }
 
 type mockPlan struct {
-	testutil.MockPhysicalPlan
+	MockPhysicalPlan
 	exec exec.Executor
 }
 

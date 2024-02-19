@@ -67,7 +67,7 @@ func TestInit(t *testing.T) {
 	em.conflictV1Enabled = true
 	mock.ExpectExec("CREATE SCHEMA IF NOT EXISTS `lightning_errors`;").
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.conflict_error_v2.*").
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.conflict_error_v1.*").
 		WillReturnResult(sqlmock.NewResult(2, 1))
 	err = em.Init(ctx)
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestInit(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(5, 1))
 	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.type_error_v1.*").
 		WillReturnResult(sqlmock.NewResult(6, 1))
-	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.conflict_error_v2.*").
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.conflict_error_v1.*").
 		WillReturnResult(sqlmock.NewResult(7, 1))
 	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_errors`\\.conflict_records.*").
 		WillReturnResult(sqlmock.NewResult(7, 1))
@@ -186,7 +186,7 @@ func TestRemoveAllConflictKeys(t *testing.T) {
 	require.Equal(t, totalRows, resolved.Load())
 }
 
-func TestReplaceConflictOneKey(t *testing.T) {
+func TestReplaceConflictKeysIndexKvChecking(t *testing.T) {
 	column1 := &model.ColumnInfo{
 		ID:           1,
 		Name:         model.NewCIStr("a"),
@@ -207,6 +207,7 @@ func TestReplaceConflictOneKey(t *testing.T) {
 		Hidden:       true,
 		State:        model.StatePublic,
 	}
+	column2.AddFlag(mysql.UniqueKeyFlag)
 
 	column3 := &model.ColumnInfo{
 		ID:           3,
@@ -220,7 +221,7 @@ func TestReplaceConflictOneKey(t *testing.T) {
 
 	index := &model.IndexInfo{
 		ID:    1,
-		Name:  model.NewCIStr("key_b"),
+		Name:  model.NewCIStr("uni_b"),
 		Table: model.NewCIStr(""),
 		Columns: []*model.IndexColumn{
 			{
@@ -228,13 +229,13 @@ func TestReplaceConflictOneKey(t *testing.T) {
 				Offset: 1,
 				Length: -1,
 			}},
-		Unique:  false,
+		Unique:  true,
 		Primary: false,
 		State:   model.StatePublic,
 	}
 
 	table := &model.TableInfo{
-		ID:         104,
+		ID:         75,
 		Name:       model.NewCIStr("a"),
 		Charset:    "utf8mb4",
 		Collate:    "utf8mb4_bin",
@@ -270,38 +271,18 @@ func TestReplaceConflictOneKey(t *testing.T) {
 		types.NewIntDatum(6),
 		types.NewStringDatum("2.csv"),
 	}
-	data3 := []types.Datum{
-		types.NewIntDatum(3),
-		types.NewIntDatum(3),
-		types.NewStringDatum("3.csv"),
-	}
-	data4 := []types.Datum{
-		types.NewIntDatum(3),
-		types.NewIntDatum(4),
-		types.NewStringDatum("4.csv"),
-	}
-	data5 := []types.Datum{
-		types.NewIntDatum(5),
-		types.NewIntDatum(4),
-		types.NewStringDatum("5.csv"),
-	}
 	_, err = encoder.Table.AddRecord(encoder.SessionCtx, data1)
 	require.NoError(t, err)
 	_, err = encoder.Table.AddRecord(encoder.SessionCtx, data2)
 	require.NoError(t, err)
-	_, err = encoder.Table.AddRecord(encoder.SessionCtx, data3)
-	require.NoError(t, err)
-	_, err = encoder.Table.AddRecord(encoder.SessionCtx, data4)
-	require.NoError(t, err)
-	_, err = encoder.Table.AddRecord(encoder.SessionCtx, data5)
-	require.NoError(t, err)
 	kvPairs := encoder.SessionCtx.TakeKvPairs()
 
-	data1IndexKey := kvPairs.Pairs[7].Key
-	data1IndexValue := kvPairs.Pairs[7].Val
-	data1RowKey := kvPairs.Pairs[4].Key
-	data1RowValue := kvPairs.Pairs[4].Val
-	data2RowValue := kvPairs.Pairs[6].Val
+	data1IndexKey := kvPairs.Pairs[1].Key
+	data1IndexValue := kvPairs.Pairs[1].Val
+	data2IndexValue := kvPairs.Pairs[3].Val
+	data1RowKey := kvPairs.Pairs[0].Key
+	data2RowKey := kvPairs.Pairs[2].Key
+	data2RowValue := kvPairs.Pairs[2].Val
 
 	db, mockDB, err := sqlmock.New()
 	require.NoError(t, err)
@@ -314,14 +295,14 @@ func TestReplaceConflictOneKey(t *testing.T) {
 
 	mockDB.ExpectExec("CREATE SCHEMA IF NOT EXISTS `lightning_task_info`").
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mockDB.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_task_info`\\.conflict_error_v2.*").
+	mockDB.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_task_info`\\.conflict_error_v1.*").
 		WillReturnResult(sqlmock.NewResult(2, 1))
-	mockDB.ExpectQuery("\\QSELECT raw_key, index_name, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v2 WHERE table_name = ? AND is_data_kv = 0 ORDER BY raw_key\\E").
-		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "index_name", "raw_value", "raw_handle"}))
-	mockDB.ExpectQuery("\\QSELECT raw_key, raw_value FROM `lightning_task_info`.conflict_error_v2 WHERE table_name = ? AND is_data_kv = 1 ORDER BY raw_key\\E").
-		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "raw_value"}).
-			AddRow(data1RowKey, data1RowValue).
-			AddRow(data1RowKey, data2RowValue))
+	mockDB.ExpectQuery("\\QSELECT raw_key, index_name, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v1 WHERE table_name = ? AND index_name <> 'PRIMARY' ORDER BY raw_key\\E").
+		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "index_name", "raw_value", "raw_handle"}).
+			AddRow(data1IndexKey, "uni_b", data1IndexValue, data1RowKey).
+			AddRow(data1IndexKey, "uni_b", data2IndexValue, data2RowKey))
+	mockDB.ExpectQuery("\\QSELECT raw_key, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v1 WHERE table_name = ? AND index_name = 'PRIMARY' ORDER BY raw_key\\E").
+		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "raw_value", "raw_handle"}))
 
 	cfg := config.NewConfig()
 	cfg.TikvImporter.DuplicateResolution = config.DupeResAlgReplace
@@ -340,15 +321,15 @@ func TestReplaceConflictOneKey(t *testing.T) {
 			switch {
 			case bytes.Equal(key, data1IndexKey):
 				return data1IndexValue, nil
-			case bytes.Equal(key, data1RowKey):
-				return data1RowValue, nil
+			case bytes.Equal(key, data2RowKey):
+				return data2RowValue, nil
 			default:
 				return nil, fmt.Errorf("key %v is not expected", key)
 			}
 		},
 		func(ctx context.Context, key []byte) error {
 			fnDeleteKeyCount.Add(1)
-			if !bytes.Equal(key, data1IndexKey) {
+			if !bytes.Equal(key, data2RowKey) {
 				return fmt.Errorf("key %v is not expected", key)
 			}
 			return nil
@@ -361,7 +342,7 @@ func TestReplaceConflictOneKey(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestReplaceConflictOneUniqueKey(t *testing.T) {
+func TestReplaceConflictKeys(t *testing.T) {
 	column1 := &model.ColumnInfo{
 		ID:           1,
 		Name:         model.NewCIStr("a"),
@@ -475,7 +456,7 @@ func TestReplaceConflictOneUniqueKey(t *testing.T) {
 
 	data1IndexKey := kvPairs.Pairs[7].Key
 	data3IndexKey := kvPairs.Pairs[1].Key
-	data1IndexValue := kvPairs.Pairs[7].Val
+	data1IndexValue := kvPairs.Pairs[5].Val
 	data2IndexValue := kvPairs.Pairs[9].Val
 	data3IndexValue := kvPairs.Pairs[1].Val
 	data4IndexValue := kvPairs.Pairs[3].Val
@@ -499,28 +480,18 @@ func TestReplaceConflictOneUniqueKey(t *testing.T) {
 
 	mockDB.ExpectExec("CREATE SCHEMA IF NOT EXISTS `lightning_task_info`").
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mockDB.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_task_info`\\.conflict_error_v2.*").
+	mockDB.ExpectExec("CREATE TABLE IF NOT EXISTS `lightning_task_info`\\.conflict_error_v1.*").
 		WillReturnResult(sqlmock.NewResult(2, 1))
-	mockDB.ExpectQuery("\\QSELECT raw_key, index_name, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v2 WHERE table_name = ? AND is_data_kv = 0 ORDER BY raw_key\\E").
+	mockDB.ExpectQuery("\\QSELECT raw_key, index_name, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v1 WHERE table_name = ? AND index_name <> 'PRIMARY' ORDER BY raw_key\\E").
 		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "index_name", "raw_value", "raw_handle"}).
 			AddRow(data1IndexKey, "uni_b", data1IndexValue, data1RowKey).
 			AddRow(data1IndexKey, "uni_b", data2IndexValue, data2RowKey).
 			AddRow(data3IndexKey, "uni_b", data3IndexValue, data3RowKey).
 			AddRow(data3IndexKey, "uni_b", data4IndexValue, data4RowKey))
-	mockDB.ExpectBegin()
-	mockDB.ExpectExec("INSERT INTO `lightning_task_info`\\.conflict_error_v2.*").
-		WithArgs(0, "test", nil, nil, data2RowKey, data2RowValue, 1).
-		WillReturnResult(driver.ResultNoRows)
-	mockDB.ExpectCommit()
-	mockDB.ExpectBegin()
-	mockDB.ExpectExec("INSERT INTO `lightning_task_info`\\.conflict_error_v2.*").
-		WithArgs(0, "test", nil, nil, data4RowKey, data4RowValue, 1).
-		WillReturnResult(driver.ResultNoRows)
-	mockDB.ExpectCommit()
-	mockDB.ExpectQuery("\\QSELECT raw_key, raw_value FROM `lightning_task_info`.conflict_error_v2 WHERE table_name = ? AND is_data_kv = 1 ORDER BY raw_key\\E").
-		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "raw_value"}).
-			AddRow(data1RowKey, data1RowValue).
-			AddRow(data1RowKey, data3RowValue))
+	mockDB.ExpectQuery("\\QSELECT raw_key, raw_value, raw_handle FROM `lightning_task_info`.conflict_error_v1 WHERE table_name = ? AND index_name = 'PRIMARY' ORDER BY raw_key\\E").
+		WillReturnRows(sqlmock.NewRows([]string{"raw_key", "raw_value", "raw_handle"}).
+			AddRow(data1RowKey, data1RowValue, data1RowKey).
+			AddRow(data1RowKey, data3RowValue, data1RowKey))
 
 	cfg := config.NewConfig()
 	cfg.TikvImporter.DuplicateResolution = config.DupeResAlgReplace
@@ -623,7 +594,7 @@ func TestErrorMgrErrorOutput(t *testing.T) {
 		remainingError:    cfg.App.MaxError,
 		configConflict:    &cfg.Conflict,
 		conflictErrRemain: atomic.NewInt64(100),
-		schema:            "error_info",
+		schemaEscaped:     "`error_info`",
 		conflictV1Enabled: true,
 	}
 
@@ -670,7 +641,7 @@ func TestErrorMgrErrorOutput(t *testing.T) {
 		"|\x1b[31m 1 \x1b[0m|\x1b[31m Data Type           \x1b[0m|\x1b[31m         100 \x1b[0m|\x1b[31m `error_info`.`type_error_v1`     \x1b[0m|\n" +
 		"|\x1b[31m 2 \x1b[0m|\x1b[31m Data Syntax         \x1b[0m|\x1b[31m         100 \x1b[0m|\x1b[31m `error_info`.`syntax_error_v1`   \x1b[0m|\n" +
 		"|\x1b[31m 3 \x1b[0m|\x1b[31m Charset Error       \x1b[0m|\x1b[31m         100 \x1b[0m|\x1b[31m                                  \x1b[0m|\n" +
-		"|\x1b[31m 4 \x1b[0m|\x1b[31m Unique Key Conflict \x1b[0m|\x1b[31m         100 \x1b[0m|\x1b[31m `error_info`.`conflict_error_v2` \x1b[0m|\n" +
+		"|\x1b[31m 4 \x1b[0m|\x1b[31m Unique Key Conflict \x1b[0m|\x1b[31m         100 \x1b[0m|\x1b[31m `error_info`.`conflict_error_v1` \x1b[0m|\n" +
 		"+---+---------------------+-------------+----------------------------------+\n"
 	require.Equal(t, expected, output)
 

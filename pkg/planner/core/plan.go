@@ -29,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"github.com/pingcap/tidb/pkg/util/tracing"
 	"github.com/pingcap/tipb/go-tipb"
@@ -67,11 +68,7 @@ type Plan interface {
 	// SetOutputNames sets the outputting name by the given slice.
 	SetOutputNames(names types.NameSlice)
 
-	// QueryBlockOffset is query block offset.
-	// For example, in query
-	//		`select /*+ use_index(@sel_2 t2, a) */ * from t1, (select a*2 as b from t2) tx where a>b`
-	// the hint should be applied on the sub-query, whose query block is 2.
-	QueryBlockOffset() int
+	SelectBlockOffset() int
 
 	BuildPlanTrace() *tracing.PlanTrace
 }
@@ -100,7 +97,7 @@ func enforceProperty(p *property.PhysicalProperty, tsk task, ctx sessionctx.Cont
 	sort := PhysicalSort{
 		ByItems:       make([]*util.ByItems, 0, len(p.SortItems)),
 		IsPartialSort: p.IsSortItemAllForPartition(),
-	}.Init(ctx, tsk.plan().StatsInfo(), tsk.plan().QueryBlockOffset(), sortReqProp)
+	}.Init(ctx, tsk.plan().StatsInfo(), tsk.plan().SelectBlockOffset(), sortReqProp)
 	for _, col := range p.SortItems {
 		sort.ByItems = append(sort.ByItems, &util.ByItems{Expr: col.Col, Desc: col.Desc})
 	}
@@ -152,7 +149,7 @@ func optimizeByShuffle4Window(pp *PhysicalWindow, ctx sessionctx.Context) *Physi
 	if ndv <= 1 {
 		return nil
 	}
-	concurrency = min(concurrency, int(ndv))
+	concurrency = mathutil.Min(concurrency, int(ndv))
 
 	byItems := make([]expression.Expression, 0, len(pp.PartitionBy))
 	for _, item := range pp.PartitionBy {
@@ -165,7 +162,7 @@ func optimizeByShuffle4Window(pp *PhysicalWindow, ctx sessionctx.Context) *Physi
 		DataSources:  []PhysicalPlan{dataSource},
 		SplitterType: PartitionHashSplitterType,
 		ByItemArrays: [][]expression.Expression{byItems},
-	}.Init(ctx, pp.StatsInfo(), pp.QueryBlockOffset(), reqProp)
+	}.Init(ctx, pp.StatsInfo(), pp.SelectBlockOffset(), reqProp)
 	return shuffle
 }
 
@@ -193,7 +190,7 @@ func optimizeByShuffle4StreamAgg(pp *PhysicalStreamAgg, ctx sessionctx.Context) 
 	if ndv <= 1 {
 		return nil
 	}
-	concurrency = min(concurrency, int(ndv))
+	concurrency = mathutil.Min(concurrency, int(ndv))
 
 	reqProp := &property.PhysicalProperty{ExpectedCnt: math.MaxFloat64}
 	shuffle := PhysicalShuffle{
@@ -202,7 +199,7 @@ func optimizeByShuffle4StreamAgg(pp *PhysicalStreamAgg, ctx sessionctx.Context) 
 		DataSources:  []PhysicalPlan{dataSource},
 		SplitterType: PartitionHashSplitterType,
 		ByItemArrays: [][]expression.Expression{util.CloneExprs(pp.GroupByItems)},
-	}.Init(ctx, pp.StatsInfo(), pp.QueryBlockOffset(), reqProp)
+	}.Init(ctx, pp.StatsInfo(), pp.SelectBlockOffset(), reqProp)
 	return shuffle
 }
 
@@ -241,7 +238,7 @@ func optimizeByShuffle4MergeJoin(pp *PhysicalMergeJoin, ctx sessionctx.Context) 
 		DataSources:  dataSources,
 		SplitterType: PartitionHashSplitterType,
 		ByItemArrays: [][]expression.Expression{leftByItemArray, rightByItemArray},
-	}.Init(ctx, pp.StatsInfo(), pp.QueryBlockOffset(), reqProp)
+	}.Init(ctx, pp.StatsInfo(), pp.SelectBlockOffset(), reqProp)
 	return shuffle
 }
 
@@ -260,7 +257,7 @@ type LogicalPlan interface {
 	PredicatePushDown([]expression.Expression, *logicalOptimizeOp) ([]expression.Expression, LogicalPlan)
 
 	// PruneColumns prunes the unused columns.
-	PruneColumns([]*expression.Column, *logicalOptimizeOp, LogicalPlan) error
+	PruneColumns([]*expression.Column, *logicalOptimizeOp) error
 
 	// findBestTask converts the logical plan to the physical plan. It's a new interface.
 	// It is called recursively from the parent to the children to create the result physical plan.
@@ -740,12 +737,12 @@ func (p *logicalSchemaProducer) BuildKeyInfo(selfSchema *expression.Schema, chil
 	}
 }
 
-func newBaseLogicalPlan(ctx sessionctx.Context, tp string, self LogicalPlan, qbOffset int) baseLogicalPlan {
+func newBaseLogicalPlan(ctx sessionctx.Context, tp string, self LogicalPlan, offset int) baseLogicalPlan {
 	return baseLogicalPlan{
 		taskMap:      make(map[string]task),
 		taskMapBak:   make([]string, 0, 10),
 		taskMapBakTS: make([]uint64, 0, 10),
-		Plan:         base.NewBasePlan(ctx, tp, qbOffset),
+		Plan:         base.NewBasePlan(ctx, tp, offset),
 		self:         self,
 	}
 }
@@ -762,11 +759,11 @@ func (*baseLogicalPlan) ExtractCorrelatedCols() []*expression.CorrelatedColumn {
 }
 
 // PruneColumns implements LogicalPlan interface.
-func (p *baseLogicalPlan) PruneColumns(parentUsedCols []*expression.Column, opt *logicalOptimizeOp, _ LogicalPlan) error {
+func (p *baseLogicalPlan) PruneColumns(parentUsedCols []*expression.Column, opt *logicalOptimizeOp) error {
 	if len(p.children) == 0 {
 		return nil
 	}
-	return p.children[0].PruneColumns(parentUsedCols, opt, p)
+	return p.children[0].PruneColumns(parentUsedCols, opt)
 }
 
 // Schema implements Plan Schema interface.

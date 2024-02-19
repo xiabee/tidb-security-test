@@ -6,6 +6,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +26,11 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
+	"github.com/pingcap/tidb/br/pkg/httputil"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/logutil"
+	"github.com/pingcap/tidb/pkg/store/pdtypes"
 	pd "github.com/tikv/pd/client"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -65,9 +72,9 @@ type SplitClient interface {
 	// Limit limits the maximum number of regions returned.
 	ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*RegionInfo, error)
 	// GetPlacementRule loads a placement rule from PD.
-	GetPlacementRule(ctx context.Context, groupID, ruleID string) (*pdhttp.Rule, error)
+	GetPlacementRule(ctx context.Context, groupID, ruleID string) (pdtypes.Rule, error)
 	// SetPlacementRule insert or update a placement rule to PD.
-	SetPlacementRule(ctx context.Context, rule *pdhttp.Rule) error
+	SetPlacementRule(ctx context.Context, rule pdtypes.Rule) error
 	// DeletePlacementRule removes a placement rule from PD.
 	DeletePlacementRule(ctx context.Context, groupID, ruleID string) error
 	// SetStoresLabel add or update specified label of stores. If labelValue
@@ -79,7 +86,6 @@ type SplitClient interface {
 type pdClient struct {
 	mu         sync.Mutex
 	client     pd.Client
-	httpCli    pdhttp.Client
 	tlsConf    *tls.Config
 	storeCache map[uint64]*metapb.Store
 
@@ -92,15 +98,9 @@ type pdClient struct {
 }
 
 // NewSplitClient returns a client used by RegionSplitter.
-func NewSplitClient(
-	client pd.Client,
-	httpCli pdhttp.Client,
-	tlsConf *tls.Config,
-	isRawKv bool,
-) SplitClient {
+func NewSplitClient(client pd.Client, tlsConf *tls.Config, isRawKv bool) SplitClient {
 	cli := &pdClient{
 		client:     client,
-		httpCli:    httpCli,
 		tlsConf:    tlsConf,
 		storeCache: make(map[uint64]*metapb.Store),
 		isRawKv:    isRawKv,
@@ -365,7 +365,6 @@ func sendSplitRegionRequest(ctx context.Context, c *pdClient, regionInfo *Region
 	if resp.RegionError != nil {
 		log.Warn("fail to split region",
 			logutil.Region(regionInfo.Region),
-			logutil.Keys(keys),
 			zap.Stringer("regionErr", resp.RegionError))
 		*splitErrors = multierr.Append(*splitErrors,
 			errors.Annotatef(berrors.ErrRestoreSplitFailed, "split region failed: err=%v", resp.RegionError))
@@ -463,16 +462,26 @@ func (c *pdClient) getStoreCount(ctx context.Context) (int, error) {
 }
 
 func (c *pdClient) getMaxReplica(ctx context.Context) (int, error) {
-	resp, err := c.httpCli.GetReplicateConfig(ctx)
+	api := c.getPDAPIAddr()
+	configAPI := api + "/pd/api/v1/config/replicate"
+	req, err := http.NewRequestWithContext(ctx, "GET", configAPI, nil)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
-	key := "max-replicas"
-	val, ok := resp[key]
-	if !ok {
-		return 0, errors.Errorf("key %s not found in response %v", key, resp)
+	res, err := httputil.NewClient(c.tlsConf).Do(req)
+	if err != nil {
+		return 0, errors.Trace(err)
 	}
-	return int(val.(float64)), nil
+	defer func() {
+		if err = res.Body.Close(); err != nil {
+			log.Error("Response fail to close", zap.Error(err))
+		}
+	}()
+	var conf pdtypes.ReplicationConfig
+	if err := json.NewDecoder(res.Body).Decode(&conf); err != nil {
+		return 0, errors.Trace(err)
+	}
+	return int(conf.MaxReplicas), nil
 }
 
 func (c *pdClient) checkNeedScatter(ctx context.Context) (bool, error) {
@@ -525,25 +534,94 @@ func (c *pdClient) ScanRegions(ctx context.Context, key, endKey []byte, limit in
 	return regionInfos, nil
 }
 
-func (c *pdClient) GetPlacementRule(ctx context.Context, groupID, ruleID string) (*pdhttp.Rule, error) {
-	resp, err := c.httpCli.GetPlacementRule(ctx, groupID, ruleID)
-	return resp, errors.Trace(err)
+func (c *pdClient) GetPlacementRule(ctx context.Context, groupID, ruleID string) (pdtypes.Rule, error) {
+	var rule pdtypes.Rule
+	addr := c.getPDAPIAddr()
+	if addr == "" {
+		return rule, errors.Annotate(berrors.ErrRestoreSplitFailed, "failed to add stores labels: no leader")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		addr+path.Join("/pd/api/v1/config/rule", groupID, ruleID), nil)
+	if err != nil {
+		return rule, errors.Trace(err)
+	}
+	res, err := httputil.NewClient(c.tlsConf).Do(req)
+	if err != nil {
+		return rule, errors.Trace(err)
+	}
+	defer func() {
+		if err = res.Body.Close(); err != nil {
+			log.Error("Response fail to close", zap.Error(err))
+		}
+	}()
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		return rule, errors.Trace(err)
+	}
+	err = json.Unmarshal(b, &rule)
+	if err != nil {
+		return rule, errors.Trace(err)
+	}
+	return rule, nil
 }
 
-func (c *pdClient) SetPlacementRule(ctx context.Context, rule *pdhttp.Rule) error {
-	return c.httpCli.SetPlacementRule(ctx, rule)
+func (c *pdClient) SetPlacementRule(ctx context.Context, rule pdtypes.Rule) error {
+	addr := c.getPDAPIAddr()
+	if addr == "" {
+		return errors.Annotate(berrors.ErrPDLeaderNotFound, "failed to add stores labels")
+	}
+	m, _ := json.Marshal(rule)
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		addr+path.Join("/pd/api/v1/config/rule"), bytes.NewReader(m))
+	if err != nil {
+		return errors.Trace(err)
+	}
+	res, err := httputil.NewClient(c.tlsConf).Do(req)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return errors.Trace(res.Body.Close())
 }
 
 func (c *pdClient) DeletePlacementRule(ctx context.Context, groupID, ruleID string) error {
-	return c.httpCli.DeletePlacementRule(ctx, groupID, ruleID)
+	addr := c.getPDAPIAddr()
+	if addr == "" {
+		return errors.Annotate(berrors.ErrPDLeaderNotFound, "failed to add stores labels")
+	}
+	req, err := http.NewRequestWithContext(ctx, "DELETE", addr+path.Join("/pd/api/v1/config/rule", groupID, ruleID), nil)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	res, err := httputil.NewClient(c.tlsConf).Do(req)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return errors.Trace(res.Body.Close())
 }
 
 func (c *pdClient) SetStoresLabel(
 	ctx context.Context, stores []uint64, labelKey, labelValue string,
 ) error {
-	m := map[string]string{labelKey: labelValue}
+	b := []byte(fmt.Sprintf(`{"%s": "%s"}`, labelKey, labelValue))
+	addr := c.getPDAPIAddr()
+	if addr == "" {
+		return errors.Annotate(berrors.ErrPDLeaderNotFound, "failed to add stores labels")
+	}
+	httpCli := httputil.NewClient(c.tlsConf)
 	for _, id := range stores {
-		err := c.httpCli.SetStoreLabels(ctx, int64(id), m)
+		req, err := http.NewRequestWithContext(
+			ctx, "POST",
+			addr+path.Join("/pd/api/v1/store", strconv.FormatUint(id, 10), "label"),
+			bytes.NewReader(b),
+		)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		res, err := httpCli.Do(req)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		err = res.Body.Close()
 		if err != nil {
 			return errors.Trace(err)
 		}

@@ -23,7 +23,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -97,7 +96,7 @@ func newTopNHelper(sample [][]byte, numTop uint32) *topNHelper {
 			onlyOnceItems++
 		}
 	}
-	slices.SortStableFunc(sorted, func(i, j dataCnt) int { return -cmp.Compare(i.cnt, j.cnt) })
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].cnt > sorted[j].cnt })
 	failpoint.Inject("StabilizeV1AnalyzeTopN", func(val failpoint.Value) {
 		if val.(bool) {
 			// The earlier TopN entry will modify the CMSketch, therefore influence later TopN entry's row count.
@@ -260,15 +259,10 @@ func (c *CMSketch) SubValue(h1, h2 uint64, count uint64) {
 // QueryValue is used to query the count of specified value.
 func QueryValue(sctx sessionctx.Context, c *CMSketch, t *TopN, val types.Datum) (uint64, error) {
 	var sc *stmtctx.StatementContext
-	tz := time.UTC
 	if sctx != nil {
 		sc = sctx.GetSessionVars().StmtCtx
-		tz = sc.TimeZone()
 	}
-	rawData, err := tablecodec.EncodeValue(tz, nil, val)
-	if sc != nil {
-		err = sc.HandleError(err)
-	}
+	rawData, err := tablecodec.EncodeValue(sc, nil, val)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -536,13 +530,6 @@ type TopN struct {
 	TopN []TopNMeta
 }
 
-// Scale scales the TopN by the given factor.
-func (c *TopN) Scale(scaleFactor float64) {
-	for i := range c.TopN {
-		c.TopN[i].Count = uint64(float64(c.TopN[i].Count) * scaleFactor)
-	}
-}
-
 // AppendTopN appends a topn into the TopN struct.
 func (c *TopN) AppendTopN(data []byte, count uint64) {
 	if c == nil {
@@ -684,8 +671,12 @@ func (c *TopN) LowerBound(d []byte) (idx int, match bool) {
 	if c == nil {
 		return 0, false
 	}
-	idx, match = slices.BinarySearchFunc(c.TopN, d, func(a TopNMeta, b []byte) int {
-		return bytes.Compare(a.Encoded, d)
+	idx = sort.Search(len(c.TopN), func(i int) bool {
+		cmpRst := bytes.Compare(c.TopN[i].Encoded, d)
+		if cmpRst == 0 {
+			match = true
+		}
+		return cmpRst >= 0
 	})
 	return idx, match
 }
@@ -837,12 +828,14 @@ func MergeTopN(topNs []*TopN, n uint32) (*TopN, []TopNMeta) {
 
 // CheckEmptyTopNs checks whether all TopNs are empty.
 func CheckEmptyTopNs(topNs []*TopN) bool {
+	count := uint64(0)
 	for _, topN := range topNs {
-		if topN.TotalCount() != 0 {
+		count += topN.TotalCount()
+		if count != 0 {
 			return false
 		}
 	}
-	return true
+	return count == 0
 }
 
 // SortTopnMeta sort topnMeta
@@ -857,8 +850,8 @@ func SortTopnMeta(topnMetas []TopNMeta) {
 
 // TopnMetaCompare compare topnMeta
 func TopnMetaCompare(i, j TopNMeta) int {
-	c := cmp.Compare(j.Count, i.Count)
-	if c != 0 {
+	c := cmp.Compare(i.Count, j.Count)
+	if c == 0 {
 		return c
 	}
 	return bytes.Compare(i.Encoded, j.Encoded)

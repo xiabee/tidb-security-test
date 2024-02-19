@@ -105,7 +105,7 @@ func fillExtStatsCorrVals(sctx sessionctx.Context, item *ExtendedStatsItem, cols
 	sc := sctx.GetSessionVars().StmtCtx
 
 	var err error
-	err = sortSampleItems(sc, samplesX)
+	samplesX, err = SortSampleItems(sc, samplesX)
 	if err != nil {
 		return nil
 	}
@@ -118,9 +118,7 @@ func fillExtStatsCorrVals(sctx sessionctx.Context, item *ExtendedStatsItem, cols
 		itemY.Ordinal = i
 		samplesYInXOrder = append(samplesYInXOrder, itemY)
 	}
-	samplesYInYOrder := make([]*SampleItem, len(samplesYInXOrder))
-	copy(samplesYInYOrder, samplesYInXOrder)
-	err = sortSampleItems(sc, samplesYInYOrder)
+	samplesYInYOrder, err := SortSampleItems(sc, samplesYInXOrder)
 	if err != nil {
 		return nil
 	}

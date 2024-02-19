@@ -42,7 +42,6 @@ import (
 	verify "github.com/pingcap/tidb/br/pkg/lightning/verification"
 	"github.com/pingcap/tidb/br/pkg/lightning/web"
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
-	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/pkg/errno"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
@@ -53,6 +52,7 @@ import (
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/extsort"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -189,12 +189,12 @@ func (tr *TableImporter) importTable(
 
 		// rebase the allocator so it exceeds the number of rows.
 		if tr.tableInfo.Core.ContainsAutoRandomBits() {
-			cp.AllocBase = max(cp.AllocBase, tr.tableInfo.Core.AutoRandID)
+			cp.AllocBase = mathutil.Max(cp.AllocBase, tr.tableInfo.Core.AutoRandID)
 			if err := tr.alloc.Get(autoid.AutoRandomType).Rebase(context.Background(), cp.AllocBase, false); err != nil {
 				return false, err
 			}
 		} else {
-			cp.AllocBase = max(cp.AllocBase, tr.tableInfo.Core.AutoIncID)
+			cp.AllocBase = mathutil.Max(cp.AllocBase, tr.tableInfo.Core.AutoIncID)
 			if err := tr.alloc.Get(autoid.RowIDAllocType).Rebase(context.Background(), cp.AllocBase, false); err != nil {
 				return false, err
 			}
@@ -449,7 +449,6 @@ func (tr *TableImporter) importEngines(pCtx context.Context, rc *Controller, cp 
 				Compact:            threshold > 0,
 				CompactConcurrency: 4,
 				CompactThreshold:   threshold,
-				BlockSize:          int(rc.cfg.TikvImporter.BlockSize),
 			}
 		}
 		// import backend can't reopen engine if engine is closed, so
@@ -770,13 +769,6 @@ ChunkLoop:
 			break
 		}
 
-		if chunk.FileMeta.Type == mydump.SourceTypeParquet {
-			// TODO: use the compressed size of the chunk to conduct memory control
-			if _, err = getChunkCompressedSizeForParquet(ctx, chunk, rc.store); err != nil {
-				return nil, errors.Trace(err)
-			}
-		}
-
 		restoreWorker := rc.regionWorkers.Apply()
 		wg.Add(1)
 		go func(w *worker.Worker, cr *chunkProcessor) {
@@ -997,7 +989,6 @@ func (tr *TableImporter) postProcess(
 	defer rc.checksumWorks.Recycle(w)
 
 	shouldSkipAnalyze := false
-	estimatedModifyCnt := 100_000_000
 	if cp.Status < checkpoints.CheckpointStatusChecksumSkipped {
 		// 4. do table checksum
 		var localChecksum verify.KVChecksum
@@ -1006,11 +997,6 @@ func (tr *TableImporter) postProcess(
 				localChecksum.Add(&chunk.Checksum)
 			}
 		}
-		indexNum := len(tr.tableInfo.Core.Indices)
-		if common.TableHasAutoRowID(tr.tableInfo.Core) {
-			indexNum++
-		}
-		estimatedModifyCnt = int(localChecksum.SumKVS()) / (1 + indexNum)
 		tr.logger.Info("local checksum", zap.Object("checksum", &localChecksum))
 
 		// 4.5. do duplicate detection.
@@ -1151,9 +1137,6 @@ func (tr *TableImporter) postProcess(
 	if cp.Status < checkpoints.CheckpointStatusAnalyzeSkipped {
 		switch {
 		case shouldSkipAnalyze || rc.cfg.PostRestore.Analyze == config.OpLevelOff:
-			if !shouldSkipAnalyze {
-				updateStatsMeta(ctx, rc.db, tr.tableInfo.ID, estimatedModifyCnt)
-			}
 			tr.logger.Info("skip analyze")
 			if err := rc.saveStatusCheckpoint(ctx, tr.tableName, checkpoints.WholeTableEngineID, nil, checkpoints.CheckpointStatusAnalyzeSkipped); err != nil {
 				return false, errors.Trace(err)
@@ -1177,70 +1160,6 @@ func (tr *TableImporter) postProcess(
 	}
 
 	return true, nil
-}
-
-func getChunkCompressedSizeForParquet(
-	ctx context.Context,
-	chunk *checkpoints.ChunkCheckpoint,
-	store storage.ExternalStorage,
-) (int64, error) {
-	reader, err := mydump.OpenReader(ctx, &chunk.FileMeta, store, storage.DecompressConfig{})
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	parser, err := mydump.NewParquetParser(ctx, store, reader, chunk.FileMeta.Path)
-	if err != nil {
-		_ = reader.Close()
-		return 0, errors.Trace(err)
-	}
-	//nolint: errcheck
-	defer parser.Close()
-	err = parser.Reader.ReadFooter()
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	rowGroups := parser.Reader.Footer.GetRowGroups()
-	var maxRowGroupSize int64
-	for _, rowGroup := range rowGroups {
-		var rowGroupSize int64
-		columnChunks := rowGroup.GetColumns()
-		for _, columnChunk := range columnChunks {
-			columnChunkSize := columnChunk.MetaData.GetTotalCompressedSize()
-			rowGroupSize += columnChunkSize
-		}
-		maxRowGroupSize = max(maxRowGroupSize, rowGroupSize)
-	}
-	return maxRowGroupSize, nil
-}
-
-func updateStatsMeta(ctx context.Context, db *sql.DB, tableID int64, count int) {
-	s := common.SQLWithRetry{
-		DB:     db,
-		Logger: log.FromContext(ctx).With(zap.Int64("tableID", tableID)),
-	}
-	err := s.Transact(ctx, "update stats_meta", func(ctx context.Context, tx *sql.Tx) error {
-		rs, err := tx.ExecContext(ctx, `
-update mysql.stats_meta
-	set modify_count = ?,
-		count = ?,
-		version = @@tidb_current_ts
-	where table_id = ?;
-`, count, count, tableID)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		affected, err := rs.RowsAffected()
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if affected == 0 {
-			return errors.Errorf("record with table_id %d not found", tableID)
-		}
-		return nil
-	})
-	if err != nil {
-		s.Logger.Warn("failed to update stats_meta", zap.Error(err))
-	}
 }
 
 func parseColumnPermutations(
@@ -1325,7 +1244,7 @@ func (tr *TableImporter) importKV(
 		regionSplitSize = int64(config.SplitRegionSize)
 		if err := rc.taskMgr.CheckTasksExclusively(ctx, func(tasks []taskMeta) ([]taskMeta, error) {
 			if len(tasks) > 0 {
-				regionSplitSize = int64(config.SplitRegionSize) * int64(min(len(tasks), config.MaxSplitRegionSizeRatio))
+				regionSplitSize = int64(config.SplitRegionSize) * int64(mathutil.Min(len(tasks), config.MaxSplitRegionSizeRatio))
 			}
 			return nil, nil
 		}); err != nil {
@@ -1393,9 +1312,10 @@ func (tr *TableImporter) dropIndexes(ctx context.Context, db *sql.DB) error {
 	logger := log.FromContext(ctx).With(zap.String("table", tr.tableName))
 
 	tblInfo := tr.tableInfo
+	tableName := common.UniqueTable(tblInfo.DB, tblInfo.Name)
 	remainIndexes, dropIndexes := common.GetDropIndexInfos(tblInfo.Core)
 	for _, idxInfo := range dropIndexes {
-		sqlStr := common.BuildDropIndexSQL(tblInfo.DB, tblInfo.Name, idxInfo)
+		sqlStr := common.BuildDropIndexSQL(tableName, idxInfo)
 
 		logger.Info("drop index", zap.String("sql", sqlStr))
 

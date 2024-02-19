@@ -19,7 +19,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"math"
+	gomath "math"
 	"slices"
 	"sort"
 	"strings"
@@ -35,7 +35,6 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	h "github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
 	"github.com/pingcap/tidb/pkg/util/ranger"
@@ -87,7 +86,7 @@ func (s *partitionProcessor) rewriteDataSource(lp LogicalPlan, opt *logicalOptim
 				us := LogicalUnionScan{
 					conditions: p.conditions,
 					handleCols: p.handleCols,
-				}.Init(ua.SCtx(), ua.QueryBlockOffset())
+				}.Init(ua.SCtx(), ua.SelectBlockOffset())
 				us.SetChildren(child)
 				children = append(children, us)
 			}
@@ -124,7 +123,7 @@ func generateHashPartitionExpr(ctx sessionctx.Context, pi *model.PartitionInfo, 
 	if err != nil {
 		return nil, err
 	}
-	exprs[0].HashCode()
+	exprs[0].HashCode(ctx.GetSessionVars().StmtCtx)
 	return exprs[0], nil
 }
 
@@ -180,28 +179,17 @@ func (s *partitionProcessor) getUsedHashPartitions(ctx sessionctx.Context,
 					posHigh--
 				}
 
-				var rangeScalar uint64
+				var rangeScalar float64
 				if mysql.HasUnsignedFlag(col.RetType.GetFlag()) {
-					// Avoid integer overflow
-					if uint64(posHigh) < uint64(posLow) {
-						rangeScalar = 0
-					} else {
-						rangeScalar = uint64(posHigh) - uint64(posLow)
-					}
+					rangeScalar = float64(uint64(posHigh)) - float64(uint64(posLow)) // use float64 to avoid integer overflow
 				} else {
-					// Avoid integer overflow
-					if posHigh < posLow {
-						rangeScalar = 0
-					} else {
-						rangeScalar = uint64(posHigh - posLow)
-					}
+					rangeScalar = float64(posHigh) - float64(posLow) // use float64 to avoid integer overflow
 				}
 
 				// if range is less than the number of partitions, there will be unused partitions we can prune out.
-				if rangeScalar < uint64(numPartitions) && !highIsNull && !lowIsNull {
-					var i int64
-					for i = 0; i <= int64(rangeScalar); i++ {
-						idx := mathutil.Abs((posLow + i) % int64(numPartitions))
+				if rangeScalar < float64(numPartitions) && !highIsNull && !lowIsNull {
+					for i := posLow; i <= posHigh; i++ {
+						idx := mathutil.Abs(i % int64(pi.Num))
 						if len(partitionNames) > 0 && !s.findByName(partitionNames, pi.Definitions[idx].Name.L) {
 							continue
 						}
@@ -213,7 +201,7 @@ func (s *partitionProcessor) getUsedHashPartitions(ctx sessionctx.Context,
 				// issue:#22619
 				if col.RetType.GetType() == mysql.TypeBit {
 					// maximum number of partitions is 8192
-					if col.RetType.GetFlen() > 0 && col.RetType.GetFlen() < int(math.Log2(mysql.PartitionCountLimit)) {
+					if col.RetType.GetFlen() > 0 && col.RetType.GetFlen() < int(gomath.Log2(mysql.PartitionCountLimit)) {
 						// all possible hash values
 						maxUsedPartitions := 1 << col.RetType.GetFlen()
 						if maxUsedPartitions < numPartitions {
@@ -291,47 +279,26 @@ func (s *partitionProcessor) getUsedKeyPartitions(ctx sessionctx.Context,
 					posHigh--
 				}
 
-				var rangeScalar uint64
+				var rangeScalar float64
 				if mysql.HasUnsignedFlag(col.RetType.GetFlag()) {
-					// Avoid integer overflow
-					if uint64(posHigh) < uint64(posLow) {
-						rangeScalar = 0
-					} else {
-						rangeScalar = uint64(posHigh) - uint64(posLow)
-					}
+					rangeScalar = float64(uint64(posHigh)) - float64(uint64(posLow)) // use float64 to avoid integer overflow
 				} else {
-					// Avoid integer overflow
-					if posHigh < posLow {
-						rangeScalar = 0
-					} else {
-						rangeScalar = uint64(posHigh - posLow)
-					}
+					rangeScalar = float64(posHigh) - float64(posLow) // use float64 to avoid integer overflow
 				}
 
 				// if range is less than the number of partitions, there will be unused partitions we can prune out.
-				if rangeScalar < pi.Num && !highIsNull && !lowIsNull {
-					m := make(map[int]struct{})
-					for i := 0; i <= int(rangeScalar); i++ {
-						var d types.Datum
-						if mysql.HasUnsignedFlag(col.RetType.GetFlag()) {
-							d = types.NewUintDatum(uint64(posLow) + uint64(i))
-						} else {
-							d = types.NewIntDatum(posLow + int64(i))
-						}
+				if rangeScalar < float64(pi.Num) && !highIsNull && !lowIsNull {
+					for i := posLow; i <= posHigh; i++ {
+						d := types.NewIntDatum(i)
 						idx, err := pe.LocateKeyPartition(pi.Num, []types.Datum{d})
 						if err != nil {
 							// If we failed to get the point position, we can just skip and ignore it.
-							continue
-						}
-						if _, ok := m[idx]; ok {
-							// Keys maybe in a same partition, we should skip.
 							continue
 						}
 						if len(partitionNames) > 0 && !s.findByName(partitionNames, pi.Definitions[idx].Name.L) {
 							continue
 						}
 						used = append(used, idx)
-						m[idx] = struct{}{}
 					}
 					continue
 				}
@@ -502,7 +469,7 @@ func (s *partitionProcessor) processHashOrKeyPartition(ds *DataSource, pi *model
 	if used != nil {
 		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi), opt)
 	}
-	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.QueryBlockOffset())
+	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.SelectBlockOffset())
 	tableDual.schema = ds.Schema()
 	appendNoPartitionChildTraceStep(ds, tableDual, opt)
 	return tableDual, nil
@@ -551,7 +518,7 @@ func newListPartitionPruner(ctx sessionctx.Context, tbl table.Table, partitionNa
 func (l *listPartitionPruner) locatePartition(cond expression.Expression) (tables.ListPartitionLocation, bool, error) {
 	switch sf := cond.(type) {
 	case *expression.Constant:
-		b, err := sf.Value.ToBool(l.ctx.GetSessionVars().StmtCtx.TypeCtx())
+		b, err := sf.Value.ToBool(l.ctx.GetSessionVars().StmtCtx)
 		if err == nil && b == 0 {
 			// A constant false expression.
 			return nil, false, nil
@@ -849,7 +816,6 @@ func (*partitionProcessor) name() string {
 
 type lessThanDataInt struct {
 	data     []int64
-	unsigned bool
 	maxvalue bool
 }
 
@@ -857,13 +823,32 @@ func (lt *lessThanDataInt) length() int {
 	return len(lt.data)
 }
 
-func (lt *lessThanDataInt) compare(ith int, v int64, unsigned bool) int {
-	// TODO: get an extra partition when `v` bigger than `lt.maxvalue``, but the result still correct.
-	if ith == lt.length()-1 && lt.maxvalue {
+func compareUnsigned(v1, v2 int64) int {
+	switch {
+	case uint64(v1) > uint64(v2):
 		return 1
+	case uint64(v1) == uint64(v2):
+		return 0
 	}
+	return -1
+}
 
-	return types.CompareInt(lt.data[ith], lt.unsigned, v, unsigned)
+func (lt *lessThanDataInt) compare(ith int, v int64, unsigned bool) int {
+	if ith == len(lt.data)-1 {
+		if lt.maxvalue {
+			return 1
+		}
+	}
+	if unsigned {
+		return compareUnsigned(lt.data[ith], v)
+	}
+	switch {
+	case lt.data[ith] > v:
+		return 1
+	case lt.data[ith] == v:
+		return 0
+	}
+	return -1
 }
 
 // partitionRange represents [start, end)
@@ -1006,7 +991,6 @@ func (s *partitionProcessor) pruneRangePartition(ctx sessionctx.Context, pi *mod
 	pruner := rangePruner{
 		lessThan: lessThanDataInt{
 			data:     partExpr.ForRangePruning.LessThan,
-			unsigned: mysql.HasUnsignedFlag(col.GetType().GetFlag()),
 			maxvalue: partExpr.ForRangePruning.MaxValue,
 		},
 		col:        col,
@@ -1034,7 +1018,7 @@ func (s *partitionProcessor) processListPartition(ds *DataSource, pi *model.Part
 	if used != nil {
 		return s.makeUnionAllChildren(ds, pi, convertToRangeOr(used, pi), opt)
 	}
-	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.QueryBlockOffset())
+	tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.SelectBlockOffset())
 	tableDual.schema = ds.Schema()
 	appendNoPartitionChildTraceStep(ds, tableDual, opt)
 	return tableDual, nil
@@ -1097,7 +1081,7 @@ func minCmp(ctx sessionctx.Context, lowVal []types.Datum, columnsPruner *rangeCo
 				return true
 			}
 			// Add Null as point here?
-			cmp, err := con.Value.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &lowVal[j], comparer[j])
+			cmp, err := con.Value.Compare(ctx.GetSessionVars().StmtCtx, &lowVal[j], comparer[j])
 			if err != nil {
 				*gotError = true
 			}
@@ -1176,7 +1160,7 @@ func maxCmp(ctx sessionctx.Context, hiVal []types.Datum, columnsPruner *rangeCol
 				return false
 			}
 			// Add Null as point here?
-			cmp, err := con.Value.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &hiVal[j], comparer[j])
+			cmp, err := con.Value.Compare(ctx.GetSessionVars().StmtCtx, &hiVal[j], comparer[j])
 			if err != nil {
 				*gotError = true
 				// error pushed, we will still use the cmp value
@@ -1313,7 +1297,7 @@ type rangePruner struct {
 
 func (p *rangePruner) partitionRangeForExpr(sctx sessionctx.Context, expr expression.Expression) (start int, end int, ok bool) {
 	if constExpr, ok := expr.(*expression.Constant); ok {
-		if b, err := constExpr.Value.ToBool(sctx.GetSessionVars().StmtCtx.TypeCtx()); err == nil && b == 0 {
+		if b, err := constExpr.Value.ToBool(sctx.GetSessionVars().StmtCtx); err == nil && b == 0 {
 			// A constant false expression.
 			return 0, 0, true
 		}
@@ -1324,7 +1308,8 @@ func (p *rangePruner) partitionRangeForExpr(sctx sessionctx.Context, expr expres
 		return 0, 0, false
 	}
 
-	start, end = pruneUseBinarySearch(p.lessThan, dataForPrune)
+	unsigned := mysql.HasUnsignedFlag(p.col.RetType.GetFlag())
+	start, end = pruneUseBinarySearch(p.lessThan, dataForPrune, unsigned)
 	return start, end, true
 }
 
@@ -1385,6 +1370,7 @@ func partitionRangeForInExpr(sctx sessionctx.Context, args []expression.Expressi
 	}
 
 	var result partitionRangeOR
+	unsigned := mysql.HasUnsignedFlag(col.RetType.GetFlag())
 	for i := 1; i < len(args); i++ {
 		constExpr, ok := args[i].(*expression.Constant)
 		if !ok {
@@ -1397,21 +1383,18 @@ func partitionRangeForInExpr(sctx sessionctx.Context, args []expression.Expressi
 
 		var val int64
 		var err error
-		var unsigned bool
 		if pruner.partFn != nil {
 			// replace fn(col) to fn(const)
 			partFnConst := replaceColumnWithConst(pruner.partFn, constExpr)
 			val, _, err = partFnConst.EvalInt(sctx, chunk.Row{})
-			unsigned = mysql.HasUnsignedFlag(partFnConst.GetType().GetFlag())
 		} else {
-			val, _, err = constExpr.EvalInt(sctx, chunk.Row{})
-			unsigned = mysql.HasUnsignedFlag(constExpr.GetType().GetFlag())
+			val, err = constExpr.Value.ToInt64(sctx.GetSessionVars().StmtCtx)
 		}
 		if err != nil {
 			return pruner.fullRange()
 		}
 
-		start, end := pruneUseBinarySearch(pruner.lessThan, dataForPrune{op: ast.EQ, c: val, unsigned: unsigned})
+		start, end := pruneUseBinarySearch(pruner.lessThan, dataForPrune{op: ast.EQ, c: val}, unsigned)
 		result = append(result, partitionRange{start, end})
 	}
 	return result.simplify()
@@ -1447,9 +1430,8 @@ func getMonotoneMode(fnName string) monotoneMode {
 
 // f(x) op const, op is > = <
 type dataForPrune struct {
-	op       string
-	c        int64
-	unsigned bool
+	op string
+	c  int64
 }
 
 // extractDataForPrune extracts data from the expression for pruning.
@@ -1517,13 +1499,12 @@ func (p *rangePruner) extractDataForPrune(sctx sessionctx.Context, expr expressi
 	// the constExpr may not a really constant when coming here.
 	// Suppose the partition expression is 'a + b' and we have a condition 'a = 2',
 	// the constExpr is '2 + b' after the replacement which we can't evaluate.
-	if !expression.ConstExprConsiderPlanCache(constExpr, sctx.GetSessionVars().StmtCtx.UseCache) {
+	if !constExpr.ConstItem(sctx.GetSessionVars().StmtCtx) {
 		return ret, false
 	}
 	c, isNull, err := constExpr.EvalInt(sctx, chunk.Row{})
 	if err == nil && !isNull {
 		ret.c = c
-		ret.unsigned = mysql.HasUnsignedFlag(constExpr.GetType().GetFlag())
 		return ret, true
 	}
 	return ret, false
@@ -1581,7 +1562,7 @@ func relaxOP(op string) string {
 
 // pruneUseBinarySearch returns the start and end of which partitions will match.
 // If no match (i.e. value > last partition) the start partition will be the number of partition, not the first partition!
-func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune) (start int, end int) {
+func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune, unsigned bool) (start int, end int) {
 	length := lessThan.length()
 	switch data.op {
 	case ast.EQ:
@@ -1589,21 +1570,21 @@ func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune) (start in
 		// col = 14, lessThan = [4 7 11 14 17] => [4, 5)
 		// col = 10, lessThan = [4 7 11 14 17] => [2, 3)
 		// col = 3, lessThan = [4 7 11 14 17] => [0, 1)
-		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, data.unsigned) > 0 })
+		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, unsigned) > 0 })
 		start, end = pos, pos+1
 	case ast.LT:
 		// col < 66, lessThan = [4 7 11 14 17] => [0, 5)
 		// col < 14, lessThan = [4 7 11 14 17] => [0, 4)
 		// col < 10, lessThan = [4 7 11 14 17] => [0, 3)
 		// col < 3, lessThan = [4 7 11 14 17] => [0, 1)
-		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, data.unsigned) >= 0 })
+		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, unsigned) >= 0 })
 		start, end = 0, pos+1
 	case ast.GE:
 		// col >= 66, lessThan = [4 7 11 14 17] => [5, 5)
 		// col >= 14, lessThan = [4 7 11 14 17] => [4, 5)
 		// col >= 10, lessThan = [4 7 11 14 17] => [2, 5)
 		// col >= 3, lessThan = [4 7 11 14 17] => [0, 5)
-		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, data.unsigned) > 0 })
+		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, unsigned) > 0 })
 		start, end = pos, length
 	case ast.GT:
 		// col > 66, lessThan = [4 7 11 14 17] => [5, 5)
@@ -1611,16 +1592,14 @@ func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune) (start in
 		// col > 10, lessThan = [4 7 11 14 17] => [3, 5)
 		// col > 3, lessThan = [4 7 11 14 17] => [1, 5)
 		// col > 2, lessThan = [4 7 11 14 17] => [0, 5)
-
-		// Although `data.c+1` will overflow in sometime, this does not affect the correct results obtained.
-		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c+1, data.unsigned) > 0 })
+		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c+1, unsigned) > 0 })
 		start, end = pos, length
 	case ast.LE:
 		// col <= 66, lessThan = [4 7 11 14 17] => [0, 6)
 		// col <= 14, lessThan = [4 7 11 14 17] => [0, 5)
 		// col <= 10, lessThan = [4 7 11 14 17] => [0, 3)
 		// col <= 3, lessThan = [4 7 11 14 17] => [0, 1)
-		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, data.unsigned) > 0 })
+		pos := sort.Search(length, func(i int) bool { return lessThan.compare(i, data.c, unsigned) > 0 })
 		start, end = 0, pos+1
 	case ast.IsNull:
 		start, end = 0, 1
@@ -1636,7 +1615,7 @@ func pruneUseBinarySearch(lessThan lessThanDataInt, data dataForPrune) (start in
 
 func (*partitionProcessor) resolveAccessPaths(ds *DataSource) error {
 	possiblePaths, err := getPossibleAccessPaths(
-		ds.SCtx(), &h.PlanHints{IndexMergeHintList: ds.indexMergeHints, IndexHintList: ds.IndexHints},
+		ds.SCtx(), &tableHintInfo{indexMergeHintList: ds.indexMergeHints, indexHintList: ds.IndexHints},
 		ds.astIndexHints, ds.table, ds.DBName, ds.tableInfo.Name, ds.isForUpdateRead, true)
 	if err != nil {
 		return err
@@ -1652,12 +1631,12 @@ func (*partitionProcessor) resolveAccessPaths(ds *DataSource) error {
 func (s *partitionProcessor) resolveOptimizeHint(ds *DataSource, partitionName model.CIStr) error {
 	// index hint
 	if len(ds.IndexHints) > 0 {
-		newIndexHint := make([]h.HintedIndex, 0, len(ds.IndexHints))
+		newIndexHint := make([]indexHintInfo, 0, len(ds.IndexHints))
 		for _, idxHint := range ds.IndexHints {
-			if len(idxHint.Partitions) == 0 {
+			if len(idxHint.partitions) == 0 {
 				newIndexHint = append(newIndexHint, idxHint)
 			} else {
-				for _, p := range idxHint.Partitions {
+				for _, p := range idxHint.partitions {
 					if p.String() == partitionName.String() {
 						newIndexHint = append(newIndexHint, idxHint)
 						break
@@ -1670,12 +1649,12 @@ func (s *partitionProcessor) resolveOptimizeHint(ds *DataSource, partitionName m
 
 	// index merge hint
 	if len(ds.indexMergeHints) > 0 {
-		newIndexMergeHint := make([]h.HintedIndex, 0, len(ds.indexMergeHints))
+		newIndexMergeHint := make([]indexHintInfo, 0, len(ds.indexMergeHints))
 		for _, idxHint := range ds.indexMergeHints {
-			if len(idxHint.Partitions) == 0 {
+			if len(idxHint.partitions) == 0 {
 				newIndexMergeHint = append(newIndexMergeHint, idxHint)
 			} else {
-				for _, p := range idxHint.Partitions {
+				for _, p := range idxHint.partitions {
 					if p.String() == partitionName.String() {
 						newIndexMergeHint = append(newIndexMergeHint, idxHint)
 						break
@@ -1687,29 +1666,29 @@ func (s *partitionProcessor) resolveOptimizeHint(ds *DataSource, partitionName m
 	}
 
 	// read from storage hint
-	if ds.preferStoreType&h.PreferTiKV > 0 {
-		if len(ds.preferPartitions[h.PreferTiKV]) > 0 {
-			ds.preferStoreType ^= h.PreferTiKV
-			for _, p := range ds.preferPartitions[h.PreferTiKV] {
+	if ds.preferStoreType&preferTiKV > 0 {
+		if len(ds.preferPartitions[preferTiKV]) > 0 {
+			ds.preferStoreType ^= preferTiKV
+			for _, p := range ds.preferPartitions[preferTiKV] {
 				if p.String() == partitionName.String() {
-					ds.preferStoreType |= h.PreferTiKV
+					ds.preferStoreType |= preferTiKV
 				}
 			}
 		}
 	}
-	if ds.preferStoreType&h.PreferTiFlash > 0 {
-		if len(ds.preferPartitions[h.PreferTiFlash]) > 0 {
-			ds.preferStoreType ^= h.PreferTiFlash
-			for _, p := range ds.preferPartitions[h.PreferTiFlash] {
+	if ds.preferStoreType&preferTiFlash > 0 {
+		if len(ds.preferPartitions[preferTiFlash]) > 0 {
+			ds.preferStoreType ^= preferTiFlash
+			for _, p := range ds.preferPartitions[preferTiFlash] {
 				if p.String() == partitionName.String() {
-					ds.preferStoreType |= h.PreferTiFlash
+					ds.preferStoreType |= preferTiFlash
 				}
 			}
 		}
 	}
-	if ds.preferStoreType&h.PreferTiFlash != 0 && ds.preferStoreType&h.PreferTiKV != 0 {
+	if ds.preferStoreType&preferTiFlash != 0 && ds.preferStoreType&preferTiKV != 0 {
 		ds.SCtx().GetSessionVars().StmtCtx.AppendWarning(
-			errors.NewNoStackError("hint `read_from_storage` has conflict storage type for the partition " + partitionName.L))
+			errors.New("hint `read_from_storage` has conflict storage type for the partition " + partitionName.L))
 	}
 
 	return s.resolveAccessPaths(ds)
@@ -1731,22 +1710,22 @@ func appendWarnForUnknownPartitions(ctx sessionctx.Context, hintName string, unk
 	}
 
 	warning := fmt.Errorf("unknown partitions (%s) in optimizer hint %s", strings.Join(unknownPartitions, ","), hintName)
-	ctx.GetSessionVars().StmtCtx.SetHintWarningFromError(warning)
+	ctx.GetSessionVars().StmtCtx.AppendWarning(warning)
 }
 
 func (*partitionProcessor) checkHintsApplicable(ds *DataSource, partitionSet set.StringSet) {
 	for _, idxHint := range ds.IndexHints {
-		unknownPartitions := checkTableHintsApplicableForPartition(idxHint.Partitions, partitionSet)
-		appendWarnForUnknownPartitions(ds.SCtx(), h.Restore2IndexHint(idxHint.HintTypeString(), idxHint), unknownPartitions)
+		unknownPartitions := checkTableHintsApplicableForPartition(idxHint.partitions, partitionSet)
+		appendWarnForUnknownPartitions(ds.SCtx(), restore2IndexHint(idxHint.hintTypeString(), idxHint), unknownPartitions)
 	}
 	for _, idxMergeHint := range ds.indexMergeHints {
-		unknownPartitions := checkTableHintsApplicableForPartition(idxMergeHint.Partitions, partitionSet)
-		appendWarnForUnknownPartitions(ds.SCtx(), h.Restore2IndexHint(h.HintIndexMerge, idxMergeHint), unknownPartitions)
+		unknownPartitions := checkTableHintsApplicableForPartition(idxMergeHint.partitions, partitionSet)
+		appendWarnForUnknownPartitions(ds.SCtx(), restore2IndexHint(HintIndexMerge, idxMergeHint), unknownPartitions)
 	}
-	unknownPartitions := checkTableHintsApplicableForPartition(ds.preferPartitions[h.PreferTiKV], partitionSet)
+	unknownPartitions := checkTableHintsApplicableForPartition(ds.preferPartitions[preferTiKV], partitionSet)
 	unknownPartitions = append(unknownPartitions,
-		checkTableHintsApplicableForPartition(ds.preferPartitions[h.PreferTiFlash], partitionSet)...)
-	appendWarnForUnknownPartitions(ds.SCtx(), h.HintReadFromStorage, unknownPartitions)
+		checkTableHintsApplicableForPartition(ds.preferPartitions[preferTiFlash], partitionSet)...)
+	appendWarnForUnknownPartitions(ds.SCtx(), HintReadFromStorage, unknownPartitions)
 }
 
 func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.PartitionInfo, or partitionRangeOR, opt *logicalOptimizeOp) (LogicalPlan, error) {
@@ -1763,7 +1742,7 @@ func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.Part
 			}
 			// Not a deep copy.
 			newDataSource := *ds
-			newDataSource.baseLogicalPlan = newBaseLogicalPlan(ds.SCtx(), plancodec.TypeTableScan, &newDataSource, ds.QueryBlockOffset())
+			newDataSource.baseLogicalPlan = newBaseLogicalPlan(ds.SCtx(), plancodec.TypeTableScan, &newDataSource, ds.SelectBlockOffset())
 			newDataSource.schema = ds.schema.Clone()
 			newDataSource.Columns = make([]*model.ColumnInfo, len(ds.Columns))
 			copy(newDataSource.Columns, ds.Columns)
@@ -1787,7 +1766,7 @@ func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.Part
 
 	if len(children) == 0 {
 		// No result after table pruning.
-		tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.QueryBlockOffset())
+		tableDual := LogicalTableDual{RowCount: 0}.Init(ds.SCtx(), ds.SelectBlockOffset())
 		tableDual.schema = ds.Schema()
 		appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, tableDual, children, opt)
 		return tableDual, nil
@@ -1797,7 +1776,7 @@ func (s *partitionProcessor) makeUnionAllChildren(ds *DataSource, pi *model.Part
 		appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, children[0], children, opt)
 		return children[0], nil
 	}
-	unionAll := LogicalPartitionUnionAll{}.Init(ds.SCtx(), ds.QueryBlockOffset())
+	unionAll := LogicalPartitionUnionAll{}.Init(ds.SCtx(), ds.SelectBlockOffset())
 	unionAll.SetChildren(children...)
 	unionAll.SetSchema(ds.schema.Clone())
 	appendMakeUnionAllChildrenTranceStep(ds, usedDefinition, unionAll, children, opt)

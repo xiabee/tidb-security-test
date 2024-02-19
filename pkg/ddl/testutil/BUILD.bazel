@@ -10,7 +10,6 @@ go_library(
         "//pkg/kv",
         "//pkg/parser/model",
         "//pkg/session",
-        "//pkg/session/types",
         "//pkg/sessiontxn",
         "//pkg/table",
         "//pkg/table/tables",

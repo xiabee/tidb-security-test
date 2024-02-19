@@ -17,6 +17,7 @@ package executor
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/pingcap/errors"
@@ -24,8 +25,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/tiancaiamao/gp"
+	"github.com/pingcap/tidb/pkg/util/memory"
 	"go.uber.org/atomic"
 )
 
@@ -58,6 +58,9 @@ func getAnalyzePanicErr(r interface{}) error {
 	if msg, ok := r.(string); ok {
 		if msg == globalPanicAnalyzeMemoryExceed {
 			return errors.Trace(errAnalyzeOOM)
+		}
+		if strings.Contains(msg, memory.PanicMemoryExceedWarnMsg) {
+			return errors.Errorf("%s, %s", msg, errAnalyzeOOM)
 		}
 	}
 	if err, ok := r.(error); ok {
@@ -104,17 +107,16 @@ func (w *analyzeResultsNotifyWaitGroupWrapper) Run(exec func()) {
 // notifyErrorWaitGroupWrapper is a wrapper for sync.WaitGroup
 // Please add all goroutine count when to `Add` to avoid exiting in advance.
 type notifyErrorWaitGroupWrapper struct {
-	*util.WaitGroupPool
+	sync.WaitGroup
 	notify chan error
 	cnt    atomic.Uint64
 }
 
 // newNotifyErrorWaitGroupWrapper is to create notifyErrorWaitGroupWrapper
-func newNotifyErrorWaitGroupWrapper(gp *gp.Pool, notify chan error) *notifyErrorWaitGroupWrapper {
+func newNotifyErrorWaitGroupWrapper(notify chan error) *notifyErrorWaitGroupWrapper {
 	return &notifyErrorWaitGroupWrapper{
-		WaitGroupPool: util.NewWaitGroupPool(gp),
-		notify:        notify,
-		cnt:           *atomic.NewUint64(0),
+		notify: notify,
+		cnt:    *atomic.NewUint64(0),
 	}
 }
 

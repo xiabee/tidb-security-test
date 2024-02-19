@@ -21,8 +21,6 @@ import (
 	"slices"
 
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/pkg/util/logutil"
-	"go.uber.org/zap"
 )
 
 type exhaustedHeapElem struct {
@@ -65,12 +63,13 @@ type RangeSplitter struct {
 	rangeSize       int64
 	rangeKeys       int64
 
-	propIter      *MergePropIter
-	multiFileStat []MultipleFilesStat
+	propIter  *MergePropIter
+	dataFiles []string
+	statFiles []string
 
-	// filename -> 2 level index in dataFiles/statFiles
-	activeDataFiles             map[string][2]int
-	activeStatFiles             map[string][2]int
+	// filename -> index in dataFiles/statFiles
+	activeDataFiles             map[string]int
+	activeStatFiles             map[string]int
 	curGroupSize                int64
 	curGroupKeys                int64
 	curRangeSize                int64
@@ -78,43 +77,27 @@ type RangeSplitter struct {
 	recordSplitKeyAfterNextProp bool
 	lastDataFile                string
 	lastStatFile                string
+	lastHeapSize                int
 	lastRangeProperty           *rangeProperty
 	willExhaustHeap             exhaustedHeap
 
 	rangeSplitKeysBuf [][]byte
-
-	logger *zap.Logger
 }
 
 // NewRangeSplitter creates a new RangeSplitter.
+// `dataFiles` and `statFiles` must be corresponding to each other.
 // `rangesGroupSize` and `rangesGroupKeys` controls the total range group
 // size of one `SplitOneRangesGroup` invocation, while `rangeSize` and
 // `rangeKeys` controls the size of one range.
 func NewRangeSplitter(
 	ctx context.Context,
-	multiFileStat []MultipleFilesStat,
+	dataFiles, statFiles []string,
 	externalStorage storage.ExternalStorage,
 	rangesGroupSize, rangesGroupKeys int64,
 	maxRangeSize, maxRangeKeys int64,
 	checkHotSpot bool,
 ) (*RangeSplitter, error) {
-	logger := logutil.Logger(ctx)
-	overlaps := make([]int64, 0, len(multiFileStat))
-	fileNums := make([]int, 0, len(multiFileStat))
-	for _, m := range multiFileStat {
-		overlaps = append(overlaps, m.MaxOverlappingNum)
-		fileNums = append(fileNums, len(m.Filenames))
-	}
-	logger.Info("create range splitter",
-		zap.Int64s("overlaps", overlaps),
-		zap.Ints("fileNums", fileNums),
-		zap.Int64("rangesGroupSize", rangesGroupSize),
-		zap.Int64("rangesGroupKeys", rangesGroupKeys),
-		zap.Int64("maxRangeSize", maxRangeSize),
-		zap.Int64("maxRangeKeys", maxRangeKeys),
-		zap.Bool("checkHotSpot", checkHotSpot),
-	)
-	propIter, err := NewMergePropIter(ctx, multiFileStat, externalStorage, checkHotSpot)
+	propIter, err := NewMergePropIter(ctx, statFiles, externalStorage, checkHotSpot)
 	if err != nil {
 		return nil, err
 	}
@@ -123,23 +106,20 @@ func NewRangeSplitter(
 		rangesGroupSize: rangesGroupSize,
 		rangesGroupKeys: rangesGroupKeys,
 		propIter:        propIter,
-		multiFileStat:   multiFileStat,
-		activeDataFiles: make(map[string][2]int),
-		activeStatFiles: make(map[string][2]int),
+		dataFiles:       dataFiles,
+		statFiles:       statFiles,
+		activeDataFiles: make(map[string]int),
+		activeStatFiles: make(map[string]int),
 
 		rangeSize:         maxRangeSize,
 		rangeKeys:         maxRangeKeys,
 		rangeSplitKeysBuf: make([][]byte, 0, 16),
-
-		logger: logger,
 	}, nil
 }
 
 // Close release the resources of RangeSplitter.
 func (r *RangeSplitter) Close() error {
-	err := r.propIter.Close()
-	r.logger.Info("close range splitter", zap.Error(err))
-	return err
+	return r.propIter.Close()
 }
 
 // GetRangeSplitSize returns the expected size of one range.
@@ -175,8 +155,9 @@ func (r *RangeSplitter) SplitOneRangesGroup() (
 		r.curGroupKeys += int64(prop.keys)
 		r.curRangeKeys += int64(prop.keys)
 
-		// if this Next call will close the last reader
-		if *r.propIter.baseCloseReaderFlag {
+		// a tricky way to detect source file will exhaust
+		heapSize := r.propIter.iter.h.Len()
+		if heapSize < r.lastHeapSize {
 			heap.Push(&r.willExhaustHeap, exhaustedHeapElem{
 				key:      r.lastRangeProperty.lastKey,
 				dataFile: r.lastDataFile,
@@ -184,14 +165,14 @@ func (r *RangeSplitter) SplitOneRangesGroup() (
 			})
 		}
 
-		idx, idx2 := r.propIter.readerIndex()
-		filePair := r.multiFileStat[idx].Filenames[idx2]
-		dataFilePath := filePair[0]
-		statFilePath := filePair[1]
-		r.activeDataFiles[dataFilePath] = [2]int{idx, idx2}
-		r.activeStatFiles[statFilePath] = [2]int{idx, idx2}
+		fileIdx := r.propIter.readerIndex()
+		dataFilePath := r.dataFiles[fileIdx]
+		statFilePath := r.statFiles[fileIdx]
+		r.activeDataFiles[dataFilePath] = fileIdx
+		r.activeStatFiles[statFilePath] = fileIdx
 		r.lastDataFile = dataFilePath
 		r.lastStatFile = statFilePath
+		r.lastHeapSize = heapSize
 		r.lastRangeProperty = prop
 
 		for r.willExhaustHeap.Len() > 0 &&
@@ -233,8 +214,8 @@ func (r *RangeSplitter) SplitOneRangesGroup() (
 	}
 
 	retDataFiles, retStatFiles = r.cloneActiveFiles()
-	r.activeDataFiles = make(map[string][2]int)
-	r.activeStatFiles = make(map[string][2]int)
+	r.activeDataFiles = make(map[string]int)
+	r.activeStatFiles = make(map[string]int)
 	return nil, retDataFiles, retStatFiles, r.takeSplitKeys(), r.propIter.Error()
 }
 
@@ -244,24 +225,14 @@ func (r *RangeSplitter) cloneActiveFiles() (data []string, stat []string) {
 		dataFiles = append(dataFiles, path)
 	}
 	slices.SortFunc(dataFiles, func(i, j string) int {
-		iInts := r.activeDataFiles[i]
-		jInts := r.activeDataFiles[j]
-		if iInts[0] != jInts[0] {
-			return iInts[0] - jInts[0]
-		}
-		return iInts[1] - jInts[1]
+		return r.activeDataFiles[i] - r.activeDataFiles[j]
 	})
 	statFiles := make([]string, 0, len(r.activeStatFiles))
 	for path := range r.activeStatFiles {
 		statFiles = append(statFiles, path)
 	}
 	slices.SortFunc(statFiles, func(i, j string) int {
-		iInts := r.activeStatFiles[i]
-		jInts := r.activeStatFiles[j]
-		if iInts[0] != jInts[0] {
-			return iInts[0] - jInts[0]
-		}
-		return iInts[1] - jInts[1]
+		return r.activeStatFiles[i] - r.activeStatFiles[j]
 	})
 	return dataFiles, statFiles
 }

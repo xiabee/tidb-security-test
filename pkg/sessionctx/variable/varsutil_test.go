@@ -133,10 +133,10 @@ func TestVarsutil(t *testing.T) {
 	val, err = v.GetSessionOrGlobalSystemVar(context.Background(), "sql_mode")
 	require.NoError(t, err)
 	require.Equal(t, "STRICT_TRANS_TABLES", val)
-	require.True(t, v.SQLMode.HasStrictMode())
+	require.True(t, v.StrictSQLMode)
 	err = v.SetSystemVar("sql_mode", "")
 	require.NoError(t, err)
-	require.False(t, v.SQLMode.HasStrictMode())
+	require.False(t, v.StrictSQLMode)
 
 	err = v.SetSystemVar("character_set_connection", "utf8")
 	require.NoError(t, err)

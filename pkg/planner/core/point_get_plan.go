@@ -47,9 +47,7 @@ import (
 	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
-	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
@@ -61,9 +59,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// GlobalWithoutColumnPos marks the index has no partition column.
-const GlobalWithoutColumnPos = -1
-
 // PointGetPlan is a fast plan for simple point get.
 // When we detect that the statement has a unique equal access condition, this plan is used.
 // This plan is much faster to build and to execute because it avoid the optimization and coprocessor cost.
@@ -73,7 +68,7 @@ type PointGetPlan struct {
 	schema             *expression.Schema
 	TblInfo            *model.TableInfo
 	IndexInfo          *model.IndexInfo
-	PartitionDef       *model.PartitionDefinition
+	PartitionInfo      *model.PartitionDefinition
 	Handle             kv.Handle
 	HandleConstant     *expression.Constant
 	handleFieldType    *types.FieldType
@@ -104,7 +99,7 @@ type PointGetPlan struct {
 	// Please see comments in PhysicalPlan for details.
 	probeParents []PhysicalPlan
 	// stmtHints should restore in executing context.
-	stmtHints *hint.StmtHints
+	stmtHints *stmtctx.StmtHints
 }
 
 func (p *PointGetPlan) getEstRowCountForDisplay() float64 {
@@ -274,8 +269,8 @@ func (p *PointGetPlan) MemoryUsage() (sum int64) {
 	if p.schema != nil {
 		sum += p.schema.MemoryUsage()
 	}
-	if p.PartitionDef != nil {
-		sum += p.PartitionDef.MemoryUsage()
+	if p.PartitionInfo != nil {
+		sum += p.PartitionInfo.MemoryUsage()
 	}
 	if p.HandleConstant != nil {
 		sum += p.HandleConstant.MemoryUsage()
@@ -317,7 +312,7 @@ type BatchPointGetPlan struct {
 	dbName           string
 	TblInfo          *model.TableInfo
 	IndexInfo        *model.IndexInfo
-	PartitionDefs    []*model.PartitionDefinition
+	PartitionInfos   []*model.PartitionDefinition
 	Handles          []kv.Handle
 	HandleType       *types.FieldType
 	HandleParams     []*expression.Constant // record all Parameters for Plan-Cache
@@ -495,7 +490,7 @@ func (p *BatchPointGetPlan) MemoryUsage() (sum int64) {
 
 	sum = emptyBatchPointGetPlanSize + p.baseSchemaProducer.MemoryUsage() + int64(len(p.dbName)) +
 		int64(cap(p.IdxColLens))*size.SizeOfInt + int64(cap(p.Handles))*size.SizeOfInterface +
-		int64(cap(p.PartitionDefs)+cap(p.HandleParams)+cap(p.IndexColTypes)+cap(p.IdxCols)+cap(p.Columns)+cap(p.accessCols))*size.SizeOfPointer
+		int64(cap(p.PartitionInfos)+cap(p.HandleParams)+cap(p.IndexColTypes)+cap(p.IdxCols)+cap(p.Columns)+cap(p.accessCols))*size.SizeOfPointer
 	if p.HandleType != nil {
 		sum += p.HandleType.MemoryUsage()
 	}
@@ -551,7 +546,7 @@ func TryFastPlan(ctx sessionctx.Context, node ast.Node) (p Plan) {
 		defer func() {
 			vars := ctx.GetSessionVars()
 			if vars.SelectLimit != math2.MaxUint64 && p != nil {
-				ctx.GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackError("sql_select_limit is set, so point get plan is not activated"))
+				ctx.GetSessionVars().StmtCtx.AppendWarning(errors.New("sql_select_limit is set, so point get plan is not activated"))
 				p = nil
 			}
 			if vars.StmtCtx.EnableOptimizeTrace && p != nil {
@@ -660,7 +655,7 @@ func newBatchPointGetPlan(
 		var handles = make([]kv.Handle, len(patternInExpr.List))
 		var handleParams = make([]*expression.Constant, len(patternInExpr.List))
 		var pos2PartitionDefinition = make(map[int]*model.PartitionDefinition)
-		partitionDefs := make([]*model.PartitionDefinition, 0, len(patternInExpr.List))
+		partitionInfos := make([]*model.PartitionDefinition, 0, len(patternInExpr.List))
 		for i, item := range patternInExpr.List {
 			// SELECT * FROM t WHERE (key) in ((1), (2))
 			if p, ok := item.(*ast.ParenthesesExpr); ok {
@@ -677,7 +672,7 @@ func newBatchPointGetPlan(
 				if err != nil {
 					return nil
 				}
-				d, err = con.Eval(ctx, chunk.Row{})
+				d, err = con.Eval(chunk.Row{})
 				if err != nil {
 					return nil
 				}
@@ -695,7 +690,7 @@ func newBatchPointGetPlan(
 			handleParams[i] = con
 			pairs := []nameValuePair{{colName: handleCol.Name.L, colFieldType: item.GetType(), value: *intDatum, con: con}}
 			if tbl.GetPartitionInfo() != nil {
-				tmpPartitionDefinition, _, pos, isTableDual := getPartitionDef(ctx, tbl, pairs)
+				tmpPartitionDefinition, _, pos, isTableDual := getPartitionInfo(ctx, tbl, pairs)
 				if isTableDual {
 					return nil
 				}
@@ -713,18 +708,18 @@ func newBatchPointGetPlan(
 		}
 		sort.Ints(posArr)
 		for _, pos := range posArr {
-			partitionDefs = append(partitionDefs, pos2PartitionDefinition[pos])
+			partitionInfos = append(partitionInfos, pos2PartitionDefinition[pos])
 		}
-		if len(partitionDefs) == 0 {
-			partitionDefs = nil
+		if len(partitionInfos) == 0 {
+			partitionInfos = nil
 		}
 		p := &BatchPointGetPlan{
-			TblInfo:       tbl,
-			Handles:       handles,
-			HandleParams:  handleParams,
-			HandleType:    &handleCol.FieldType,
-			PartitionExpr: partitionExpr,
-			PartitionDefs: partitionDefs,
+			TblInfo:        tbl,
+			Handles:        handles,
+			HandleParams:   handleParams,
+			HandleType:     &handleCol.FieldType,
+			PartitionExpr:  partitionExpr,
+			PartitionInfos: partitionInfos,
 		}
 
 		return p.Init(ctx, statsInfo, schema, names, 0)
@@ -742,7 +737,7 @@ func newBatchPointGetPlan(
 		}
 	}
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || (idxInfo.Invisible && !ctx.GetSessionVars().OptimizerUseInvisibleIndexes) || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
 			!indexIsAvailableByHints(idxInfo, indexHints) {
 			continue
 		}
@@ -781,7 +776,7 @@ func newBatchPointGetPlan(
 
 	indexValues := make([][]types.Datum, len(patternInExpr.List))
 	indexValueParams := make([][]*expression.Constant, len(patternInExpr.List))
-	partitionDefs := make([]*model.PartitionDefinition, 0, len(patternInExpr.List))
+	partitionInfos := make([]*model.PartitionDefinition, 0, len(patternInExpr.List))
 	var pos2PartitionDefinition = make(map[int]*model.PartitionDefinition)
 
 	var indexTypes []*types.FieldType
@@ -823,7 +818,7 @@ func newBatchPointGetPlan(
 					if err != nil {
 						return nil
 					}
-					d, err := con.Eval(ctx, chunk.Row{})
+					d, err := con.Eval(chunk.Row{})
 					if err != nil {
 						return nil
 					}
@@ -862,7 +857,7 @@ func newBatchPointGetPlan(
 			if err != nil {
 				return nil
 			}
-			d, err := con.Eval(ctx, chunk.Row{})
+			d, err := con.Eval(chunk.Row{})
 			if err != nil {
 				return nil
 			}
@@ -883,7 +878,7 @@ func newBatchPointGetPlan(
 		indexValues[i] = values
 		indexValueParams[i] = valuesParams
 		if tbl.GetPartitionInfo() != nil {
-			tmpPartitionDefinition, _, pos, isTableDual := getPartitionDef(ctx, tbl, pairs)
+			tmpPartitionDefinition, _, pos, isTableDual := getPartitionInfo(ctx, tbl, pairs)
 			if isTableDual {
 				return nil
 			}
@@ -901,10 +896,10 @@ func newBatchPointGetPlan(
 	}
 	sort.Ints(posArr)
 	for _, pos := range posArr {
-		partitionDefs = append(partitionDefs, pos2PartitionDefinition[pos])
+		partitionInfos = append(partitionInfos, pos2PartitionDefinition[pos])
 	}
-	if len(partitionDefs) == 0 {
-		partitionDefs = nil
+	if len(partitionInfos) == 0 {
+		partitionInfos = nil
 	}
 	p := &BatchPointGetPlan{
 		TblInfo:          tbl,
@@ -914,7 +909,7 @@ func newBatchPointGetPlan(
 		IndexColTypes:    indexTypes,
 		PartitionColPos:  pos,
 		PartitionExpr:    partitionExpr,
-		PartitionDefs:    partitionDefs,
+		PartitionInfos:   partitionInfos,
 	}
 
 	return p.Init(ctx, statsInfo, schema, names, 0)
@@ -1064,21 +1059,21 @@ func tryPointGetPlan(ctx sessionctx.Context, selStmt *ast.SelectStmt, check bool
 		return nil
 	}
 
-	var partitionDef *model.PartitionDefinition
-	var pairIdx int
+	var partitionInfo *model.PartitionDefinition
+	var pos int
 	if pi != nil {
-		partitionDef, pairIdx, _, isTableDual = getPartitionDef(ctx, tbl, pairs)
+		partitionInfo, pos, _, isTableDual = getPartitionInfo(ctx, tbl, pairs)
 		if isTableDual {
 			p := newPointGetPlan(ctx, tblName.Schema.O, schema, tbl, names)
 			p.IsTableDual = true
 			return p
 		}
-		if partitionDef == nil {
-			return checkTblIndexForPointPlan(ctx, tblName, schema, names, pairs, nil, pairIdx, true, isTableDual, check)
+		if partitionInfo == nil {
+			return nil
 		}
 		// Take partition selection into consideration.
 		if len(tblName.PartitionNames) > 0 {
-			if !partitionNameInSet(partitionDef.Name, tblName.PartitionNames) {
+			if !partitionNameInSet(partitionInfo.Name, tblName.PartitionNames) {
 				p := newPointGetPlan(ctx, tblName.Schema.O, schema, tbl, names)
 				p.IsTableDual = true
 				return p
@@ -1099,49 +1094,20 @@ func tryPointGetPlan(ctx sessionctx.Context, selStmt *ast.SelectStmt, check bool
 		p.UnsignedHandle = mysql.HasUnsignedFlag(fieldType.GetFlag())
 		p.handleFieldType = fieldType
 		p.HandleConstant = handlePair.con
-		p.PartitionDef = partitionDef
+		p.PartitionInfo = partitionInfo
 		return p
 	} else if handlePair.value.Kind() != types.KindNull {
 		return nil
 	}
 
-	return checkTblIndexForPointPlan(ctx, tblName, schema, names, pairs, partitionDef, pairIdx, false, isTableDual, check)
-}
-
-func checkTblIndexForPointPlan(ctx sessionctx.Context, tblName *ast.TableName, schema *expression.Schema,
-	names []*types.FieldName, pairs []nameValuePair, partitionDef *model.PartitionDefinition,
-	pos int, globalIndexCheck, isTableDual, check bool) *PointGetPlan {
-	if globalIndexCheck {
-		// when partitions are specified or some partition is in ddl, not use point get plan for global index.
-		// TODO: Add partition ID filter for Global Index Point Get.
-		// partitions are specified in select stmt.
-		if len(tblName.PartitionNames) > 0 {
-			return nil
-		}
-		tbl := tblName.TableInfo
-		// some partition is in ddl.
-		if tbl == nil ||
-			len(tbl.GetPartitionInfo().AddingDefinitions) > 0 ||
-			len(tbl.GetPartitionInfo().DroppingDefinitions) > 0 {
-			return nil
-		}
-	}
 	check = check || ctx.GetSessionVars().IsIsolation(ast.ReadCommitted)
 	check = check && ctx.GetSessionVars().ConnectionID > 0
 	var latestIndexes map[int64]*model.IndexInfo
 	var err error
 
-	tbl := tblName.TableInfo
-	dbName := tblName.Schema.L
-	if dbName == "" {
-		dbName = ctx.GetSessionVars().CurrentDB
-	}
 	for _, idxInfo := range tbl.Indices {
-		if !idxInfo.Unique || idxInfo.State != model.StatePublic || (idxInfo.Invisible && !ctx.GetSessionVars().OptimizerUseInvisibleIndexes) || idxInfo.MVIndex ||
+		if !idxInfo.Unique || idxInfo.State != model.StatePublic || idxInfo.Invisible || idxInfo.MVIndex ||
 			!indexIsAvailableByHints(idxInfo, tblName.IndexHints) {
-			continue
-		}
-		if globalIndexCheck && !idxInfo.Global {
 			continue
 		}
 		if isTableDual {
@@ -1182,8 +1148,8 @@ func checkTblIndexForPointPlan(ctx sessionctx.Context, tblName *ast.TableName, s
 		p.IndexValues = idxValues
 		p.IndexConstants = idxConstant
 		p.ColsFieldType = colsFieldType
-		p.PartitionDef = partitionDef
-		if p.PartitionDef != nil {
+		p.PartitionInfo = partitionInfo
+		if p.PartitionInfo != nil {
 			p.partitionColumnPos = findPartitionIdx(idxInfo, pos, pairs)
 		}
 		return p
@@ -1257,7 +1223,7 @@ func checkFastPlanPrivilege(ctx sessionctx.Context, dbName, tableName string, ch
 	visitInfos := make([]visitInfo, 0, len(checkTypes))
 	for _, checkType := range checkTypes {
 		if pm != nil && !pm.RequestVerification(ctx.GetSessionVars().ActiveRoles, dbName, tableName, "", checkType) {
-			return plannererrors.ErrPrivilegeCheckFail.GenWithStackByArgs(checkType.String())
+			return ErrPrivilegeCheckFail.GenWithStackByArgs(checkType.String())
 		}
 		// This visitInfo is only for table lock check, so we do not need column field,
 		// just fill it empty string.
@@ -1437,7 +1403,7 @@ func getNameValuePairs(ctx sessionctx.Context, tbl *model.TableInfo, tblName mod
 				if err != nil {
 					return nil, false
 				}
-				d, err = con.Eval(ctx, chunk.Row{})
+				d, err = con.Eval(chunk.Row{})
 				if err != nil {
 					return nil, false
 				}
@@ -1451,7 +1417,7 @@ func getNameValuePairs(ctx sessionctx.Context, tbl *model.TableInfo, tblName mod
 				if err != nil {
 					return nil, false
 				}
-				d, err = con.Eval(ctx, chunk.Row{})
+				d, err = con.Eval(chunk.Row{})
 				if err != nil {
 					return nil, false
 				}
@@ -1472,21 +1438,13 @@ func getNameValuePairs(ctx sessionctx.Context, tbl *model.TableInfo, tblName mod
 		col := model.FindColumnInfo(tbl.Cols(), colName.Name.Name.L)
 		if col == nil { // Handling the case when the column is _tidb_rowid.
 			return append(nvPairs, nameValuePair{colName: colName.Name.Name.L, colFieldType: types.NewFieldType(mysql.TypeLonglong), value: d, con: con}), false
-		}
-
-		// As in buildFromBinOp in util/ranger, when we build key from the expression to do range scan or point get on
-		// a string column, we should set the collation of the string datum to collation of the column.
-		if col.FieldType.EvalType() == types.ETString && (d.Kind() == types.KindString || d.Kind() == types.KindBinaryLiteral) {
-			d.SetString(d.GetString(), col.FieldType.GetCollate())
-		}
-
-		if col.GetType() == mysql.TypeString && col.GetCollate() == charset.CollationBin { // This type we needn't to pad `\0` in here.
+		} else if col.GetType() == mysql.TypeString && col.GetCollate() == charset.CollationBin { // This type we needn't to pad `\0` in here.
 			return append(nvPairs, nameValuePair{colName: colName.Name.Name.L, colFieldType: &col.FieldType, value: d, con: con}), false
 		}
 		if !checkCanConvertInPointGet(col, d) {
 			return nil, false
 		}
-		dVal, err := d.ConvertTo(stmtCtx.TypeCtx(), &col.FieldType)
+		dVal, err := d.ConvertTo(stmtCtx, &col.FieldType)
 		if err != nil {
 			if terror.ErrorEqual(types.ErrOverflow, err) {
 				return append(nvPairs, nameValuePair{colName: colName.Name.Name.L, colFieldType: &col.FieldType, value: d, con: con}), true
@@ -1497,7 +1455,7 @@ func getNameValuePairs(ctx sessionctx.Context, tbl *model.TableInfo, tblName mod
 			}
 		}
 		// The converted result must be same as original datum.
-		cmp, err := dVal.Compare(stmtCtx.TypeCtx(), &d, collate.GetCollator(col.GetCollate()))
+		cmp, err := dVal.Compare(stmtCtx, &d, collate.GetCollator(col.GetCollate()))
 		if err != nil || cmp != 0 {
 			return nil, false
 		}
@@ -1510,17 +1468,12 @@ func getPointGetValue(stmtCtx *stmtctx.StatementContext, col *model.ColumnInfo, 
 	if !checkCanConvertInPointGet(col, *d) {
 		return nil
 	}
-	// As in buildFromBinOp in util/ranger, when we build key from the expression to do range scan or point get on
-	// a string column, we should set the collation of the string datum to collation of the column.
-	if col.FieldType.EvalType() == types.ETString && (d.Kind() == types.KindString || d.Kind() == types.KindBinaryLiteral) {
-		d.SetString(d.GetString(), col.FieldType.GetCollate())
-	}
-	dVal, err := d.ConvertTo(stmtCtx.TypeCtx(), &col.FieldType)
+	dVal, err := d.ConvertTo(stmtCtx, &col.FieldType)
 	if err != nil {
 		return nil
 	}
 	// The converted result must be same as original datum.
-	cmp, err := dVal.Compare(stmtCtx.TypeCtx(), d, collate.GetCollator(col.GetCollate()))
+	cmp, err := dVal.Compare(stmtCtx, d, collate.GetCollator(col.GetCollate()))
 	if err != nil || cmp != 0 {
 		return nil
 	}
@@ -1877,7 +1830,7 @@ func buildHandleCols(ctx sessionctx.Context, tbl *model.TableInfo, schema *expre
 	return &IntHandleCols{col: handleCol}
 }
 
-func getPartitionDef(ctx sessionctx.Context, tbl *model.TableInfo, pairs []nameValuePair) (*model.PartitionDefinition, int, int, bool) {
+func getPartitionInfo(ctx sessionctx.Context, tbl *model.TableInfo, pairs []nameValuePair) (*model.PartitionDefinition, int, int, bool) {
 	partitionExpr := getPartitionExpr(ctx, tbl)
 	if partitionExpr == nil {
 		return nil, 0, 0, false
@@ -2036,9 +1989,6 @@ func getColumnPosInIndex(idx *model.IndexInfo, colName *model.CIStr) int {
 		if colName.L == idxCol.Name.L {
 			return i
 		}
-	}
-	if idx.Global {
-		return GlobalWithoutColumnPos
 	}
 	panic("unique index must include all partition columns")
 }

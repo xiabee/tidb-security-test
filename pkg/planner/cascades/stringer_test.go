@@ -61,7 +61,7 @@ func TestGroupStringer(t *testing.T) {
 		stmt, err := p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
 
-		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
+		plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
 		logic, ok := plan.(plannercore.LogicalPlan)

@@ -18,7 +18,6 @@ go_test(
     flaky = True,
     deps = [
         ":intest",
-        "@com_github_pingcap_errors//:errors",
         "@com_github_stretchr_testify//require",
     ],
 )

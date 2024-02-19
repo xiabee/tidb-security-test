@@ -107,3 +107,8 @@ func (*cloudImportExecutor) OnFinished(ctx context.Context, _ *proto.Subtask) er
 	logutil.Logger(ctx).Info("cloud import executor finish subtask")
 	return nil
 }
+
+func (*cloudImportExecutor) Rollback(ctx context.Context) error {
+	logutil.Logger(ctx).Info("cloud import executor rollback subtask")
+	return nil
+}

@@ -364,7 +364,7 @@ func TestSessionCtx(t *testing.T) {
 		{
 			// check Status
 			checkFunc: func(tk *testkit.TestKit, param any) {
-				require.True(t, tk.Session().GetSessionVars().IsAutocommit())
+				require.Equal(t, mysql.ServerStatusAutocommit, tk.Session().GetSessionVars().Status&mysql.ServerStatusAutocommit)
 			},
 		},
 		{
@@ -374,7 +374,7 @@ func TestSessionCtx(t *testing.T) {
 				return nil
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
-				require.False(t, tk.Session().GetSessionVars().IsAutocommit())
+				require.Equal(t, uint16(0), tk.Session().GetSessionVars().Status&mysql.ServerStatusAutocommit)
 			},
 		},
 		{
@@ -548,14 +548,12 @@ func TestSessionCtx(t *testing.T) {
 			setFunc: func(tk *testkit.TestKit) any {
 				tk.MustExec("SET GLOBAL tidb_enable_resource_control='on'")
 				tk.MustExec("CREATE RESOURCE GROUP rg1 ru_per_sec = 100")
-				tk.MustExec("CREATE RESOURCE GROUP rg2 ru_per_sec = 100")
 				tk.MustExec("SET RESOURCE GROUP `rg1`")
 				require.Equal(t, "rg1", tk.Session().GetSessionVars().ResourceGroupName)
 				return nil
 			},
 			checkFunc: func(tk *testkit.TestKit, param any) {
 				tk.MustQuery("SELECT CURRENT_RESOURCE_GROUP()").Check(testkit.Rows("rg1"))
-				tk.MustQuery("SELECT /*+ RESOURCE_GROUP(rg2) */ CURRENT_RESOURCE_GROUP()").Check(testkit.Rows("rg2"))
 			},
 		},
 		{

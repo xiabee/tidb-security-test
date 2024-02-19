@@ -15,6 +15,7 @@ package model
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -493,9 +494,9 @@ type TableInfo struct {
 	// Because auto increment ID has schemaID as prefix,
 	// We need to save original schemaID to keep autoID unchanged
 	// while renaming a table from one database to another.
-	// Only set if table has been renamed across schemas
-	// Old name 'old_schema_id' is kept for backwards compatibility
-	AutoIDSchemaID int64 `json:"old_schema_id,omitempty"`
+	// TODO: Remove it.
+	// Now it only uses for compatibility with the old version that already uses this field.
+	OldSchemaID int64 `json:"old_schema_id,omitempty"`
 
 	// ShardRowIDBits specify if the implicit row ID is sharded.
 	ShardRowIDBits uint64
@@ -541,12 +542,6 @@ type TableInfo struct {
 	ExchangePartitionInfo *ExchangePartitionInfo `json:"exchange_partition_info"`
 
 	TTLInfo *TTLInfo `json:"ttl_info"`
-}
-
-// TableNameInfo provides meta data describing a table name info.
-type TableNameInfo struct {
-	ID   int64 `json:"id"`
-	Name CIStr `json:"name"`
 }
 
 // SepAutoInc decides whether _rowid and auto_increment id use separate allocator.
@@ -724,10 +719,11 @@ func (t *TableInfo) GetUpdateTime() time.Time {
 	return TSConvert2Time(t.UpdateTS)
 }
 
-// GetAutoIDSchemaID returns the schema ID that was used to create an allocator.
-func (t *TableInfo) GetAutoIDSchemaID(dbID int64) int64 {
-	if t.AutoIDSchemaID != 0 {
-		return t.AutoIDSchemaID
+// GetDBID returns the schema ID that is used to create an allocator.
+// TODO: Remove it after removing OldSchemaID.
+func (t *TableInfo) GetDBID(dbID int64) int64 {
+	if t.OldSchemaID != 0 {
+		return t.OldSchemaID
 	}
 	return dbID
 }
@@ -1714,7 +1710,7 @@ func (db *DBInfo) Copy() *DBInfo {
 
 // LessDBInfo is used for sorting DBInfo by DBInfo.Name.
 func LessDBInfo(a *DBInfo, b *DBInfo) int {
-	return strings.Compare(a.Name.L, b.Name.L)
+	return cmp.Compare(a.Name.L, b.Name.L)
 }
 
 // CIStr is case insensitive string.

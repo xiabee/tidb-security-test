@@ -246,11 +246,10 @@ func (s *StmtSummary) Add(info *stmtsummary.StmtExecInfo) {
 	}
 
 	k := &stmtKey{
-		schemaName:        info.SchemaName,
-		digest:            info.Digest,
-		prevDigest:        info.PrevSQLDigest,
-		planDigest:        info.PlanDigest,
-		resourceGroupName: info.ResourceGroupName,
+		schemaName: info.SchemaName,
+		digest:     info.Digest,
+		prevDigest: info.PrevSQLDigest,
+		planDigest: info.PlanDigest,
 	}
 	k.Hash() // Calculate hash value in advance, to reduce the time holding the window lock.
 
@@ -456,8 +455,6 @@ type stmtKey struct {
 	prevDigest string
 	// The digest of the plan of this SQL.
 	planDigest string
-	// `resourceGroupName` is the resource group's name of this statement is bind to.
-	resourceGroupName string
 	// `hash` is the hash value of this object.
 	hash []byte
 }
@@ -472,7 +469,6 @@ func (k *stmtKey) Hash() []byte {
 		k.hash = append(k.hash, hack.Slice(k.schemaName)...)
 		k.hash = append(k.hash, hack.Slice(k.prevDigest)...)
 		k.hash = append(k.hash, hack.Slice(k.planDigest)...)
-		k.hash = append(k.hash, hack.Slice(k.resourceGroupName)...)
 	}
 	return k.hash
 }

@@ -18,7 +18,6 @@ go_test(
         "//pkg/testkit",
         "//pkg/testkit/testmain",
         "//pkg/testkit/testsetup",
-        "//pkg/util/dbterror/exeerrors",
         "//pkg/util/memory",
         "@com_github_pingcap_failpoint//:failpoint",
         "@com_github_stretchr_testify//require",

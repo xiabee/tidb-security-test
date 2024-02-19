@@ -300,9 +300,7 @@ func IsInCorrectIdentifierName(name string) bool {
 // GetRecoverError gets the error from recover.
 func GetRecoverError(r interface{}) error {
 	if err, ok := r.(error); ok {
-		// Runtime panic also implements error interface.
-		// So do not forget to add stack info for it.
-		return errors.Trace(err)
+		return err
 	}
 	return errors.Errorf("%v", r)
 }

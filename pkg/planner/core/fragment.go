@@ -105,13 +105,10 @@ type mppTaskGenerator struct {
 
 	// For MPPGather under UnionScan, need keyRange to scan MemBuffer.
 	KVRanges []kv.KeyRange
-
-	nodeInfo map[string]bool
 }
 
 // GenerateRootMPPTasks generate all mpp tasks and return root ones.
-func GenerateRootMPPTasks(ctx sessionctx.Context, startTs uint64, mppGatherID uint64,
-	mppQueryID kv.MPPQueryID, sender *PhysicalExchangeSender, is infoschema.InfoSchema) ([]*Fragment, []kv.KeyRange, map[string]bool, error) {
+func GenerateRootMPPTasks(ctx sessionctx.Context, startTs uint64, mppGatherID uint64, mppQueryID kv.MPPQueryID, sender *PhysicalExchangeSender, is infoschema.InfoSchema) ([]*Fragment, []kv.KeyRange, error) {
 	g := &mppTaskGenerator{
 		ctx:        ctx,
 		gatherID:   mppGatherID,
@@ -120,16 +117,15 @@ func GenerateRootMPPTasks(ctx sessionctx.Context, startTs uint64, mppGatherID ui
 		is:         is,
 		cache:      make(map[int]tasksAndFrags),
 		KVRanges:   make([]kv.KeyRange, 0),
-		nodeInfo:   make(map[string]bool),
 	}
 	frags, err := g.generateMPPTasks(sender)
 	if err != nil {
-		return frags, nil, nil, err
+		return frags, nil, err
 	}
 	if len(g.KVRanges) == 0 {
 		err = errors.New("kvRanges for MPPTask should not be empty")
 	}
-	return frags, g.KVRanges, g.nodeInfo, err
+	return frags, g.KVRanges, err
 }
 
 // AllocMPPTaskID allocates task id for mpp tasks. It will reset the task id when the query finished.
@@ -146,14 +142,13 @@ func AllocMPPQueryID() uint64 {
 }
 
 func (e *mppTaskGenerator) generateMPPTasks(s *PhysicalExchangeSender) ([]*Fragment, error) {
+	mppVersion := e.ctx.GetSessionVars().ChooseMppVersion()
 	tidbTask := &kv.MPPTask{
-		StartTs:      e.startTS,
-		GatherID:     e.gatherID,
-		MppQueryID:   e.mppQueryID,
-		ID:           -1,
-		MppVersion:   e.ctx.GetSessionVars().ChooseMppVersion(),
-		SessionID:    e.ctx.GetSessionVars().ConnectionID,
-		SessionAlias: e.ctx.GetSessionVars().SessionAlias,
+		StartTs:    e.startTS,
+		GatherID:   e.gatherID,
+		MppQueryID: e.mppQueryID,
+		ID:         -1,
+		MppVersion: mppVersion,
 	}
 	_, frags, err := e.generateMPPTasksForExchangeSender(s)
 	if err != nil {
@@ -188,10 +183,6 @@ func (e *mppTaskGenerator) constructMPPTasksByChildrenTasks(tasks []*kv.MPPTask,
 			cteAddrMap[addr] = struct{}{}
 		}
 	}
-
-	mppVersion := e.ctx.GetSessionVars().ChooseMppVersion()
-	sessionID := e.ctx.GetSessionVars().ConnectionID
-	sessionAlias := e.ctx.GetSessionVars().SessionAlias
 	for _, task := range tasks {
 		addr := task.Meta.GetAddress()
 		// for upper fragment, the task num is equal to address num covered by lower tasks
@@ -202,15 +193,13 @@ func (e *mppTaskGenerator) constructMPPTasksByChildrenTasks(tasks []*kv.MPPTask,
 		}
 		if !ok {
 			mppTask := &kv.MPPTask{
-				Meta:         &mppAddr{addr: addr},
-				ID:           AllocMPPTaskID(e.ctx),
-				GatherID:     e.gatherID,
-				MppQueryID:   e.mppQueryID,
-				StartTs:      e.startTS,
-				TableID:      -1,
-				MppVersion:   mppVersion,
-				SessionID:    sessionID,
-				SessionAlias: sessionAlias,
+				Meta:       &mppAddr{addr: addr},
+				ID:         AllocMPPTaskID(e.ctx),
+				GatherID:   e.gatherID,
+				MppQueryID: e.mppQueryID,
+				StartTs:    e.startTS,
+				TableID:    -1,
+				MppVersion: e.ctx.GetSessionVars().ChooseMppVersion(),
 			}
 			newTasks = append(newTasks, mppTask)
 			addressMap[addr] = struct{}{}
@@ -554,7 +543,7 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 		tbl := tmp.(table.PartitionedTable)
 		if !tiFlashStaticPrune {
 			var partitions []table.PhysicalTable
-			partitions, err = partitionPruning(e.ctx, tbl, ts.PlanPartInfo.PruningConds, ts.PlanPartInfo.PartitionNames, ts.PlanPartInfo.Columns, ts.PlanPartInfo.ColumnNames)
+			partitions, err = partitionPruning(e.ctx, tbl, ts.PartitionInfo.PruningConds, ts.PartitionInfo.PartitionNames, ts.PartitionInfo.Columns, ts.PartitionInfo.ColumnNames)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -591,27 +580,20 @@ func (e *mppTaskGenerator) constructMPPTasksImpl(ctx context.Context, ts *Physic
 		return nil, errors.Trace(err)
 	}
 
-	mppVersion := e.ctx.GetSessionVars().ChooseMppVersion()
-	sessionID := e.ctx.GetSessionVars().ConnectionID
-	sessionAlias := e.ctx.GetSessionVars().SessionAlias
 	tasks := make([]*kv.MPPTask, 0, len(metas))
 	for _, meta := range metas {
 		task := &kv.MPPTask{
 			Meta:               meta,
 			ID:                 AllocMPPTaskID(e.ctx),
+			MppVersion:         e.ctx.GetSessionVars().ChooseMppVersion(),
 			StartTs:            e.startTS,
 			GatherID:           e.gatherID,
 			MppQueryID:         e.mppQueryID,
 			TableID:            ts.Table.ID,
 			PartitionTableIDs:  allPartitionsIDs,
 			TiFlashStaticPrune: tiFlashStaticPrune,
-			MppVersion:         mppVersion,
-			SessionID:          sessionID,
-			SessionAlias:       sessionAlias,
 		}
 		tasks = append(tasks, task)
-		addr := meta.GetAddress()
-		e.nodeInfo[addr] = true
 	}
 	return tasks, nil
 }

@@ -46,7 +46,6 @@ var (
 	_ DDLNode = &DropSequenceStmt{}
 	_ DDLNode = &DropPlacementPolicyStmt{}
 	_ DDLNode = &DropResourceGroupStmt{}
-	_ DDLNode = &OptimizeTableStmt{}
 	_ DDLNode = &RenameTableStmt{}
 	_ DDLNode = &TruncateTableStmt{}
 	_ DDLNode = &RepairTableStmt{}
@@ -1320,40 +1319,6 @@ func (n *DropResourceGroupStmt) Accept(v Visitor) (Node, bool) {
 		return v.Leave(newNode)
 	}
 	n = newNode.(*DropResourceGroupStmt)
-	return v.Leave(n)
-}
-
-type OptimizeTableStmt struct {
-	ddlNode
-
-	NoWriteToBinLog bool
-	Tables          []*TableName
-}
-
-func (n *OptimizeTableStmt) Restore(ctx *format.RestoreCtx) error {
-	ctx.WriteKeyWord("OPTIMIZE ")
-	if n.NoWriteToBinLog {
-		ctx.WriteKeyWord("NO_WRITE_TO_BINLOG ")
-	}
-	ctx.WriteKeyWord("TABLE ")
-
-	for index, table := range n.Tables {
-		if index != 0 {
-			ctx.WritePlain(", ")
-		}
-		if err := table.Restore(ctx); err != nil {
-			return errors.Annotatef(err, "An error occurred while restore OptimizeTableStmt.Tables[%d]", index)
-		}
-	}
-	return nil
-}
-
-func (n *OptimizeTableStmt) Accept(v Visitor) (Node, bool) {
-	newNode, skipChildren := v.Enter(n)
-	if skipChildren {
-		return v.Leave(newNode)
-	}
-	n = newNode.(*OptimizeTableStmt)
 	return v.Leave(n)
 }
 
@@ -4416,16 +4381,16 @@ type RecoverTableStmt struct {
 // Restore implements Node interface.
 func (n *RecoverTableStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("RECOVER TABLE ")
-	if n.Table != nil {
+	if n.JobID != 0 {
+		ctx.WriteKeyWord("BY JOB ")
+		ctx.WritePlainf("%d", n.JobID)
+	} else {
 		if err := n.Table.Restore(ctx); err != nil {
 			return errors.Annotate(err, "An error occurred while splicing RecoverTableStmt Table")
 		}
 		if n.JobNum > 0 {
 			ctx.WritePlainf(" %d", n.JobNum)
 		}
-	} else {
-		ctx.WriteKeyWord("BY JOB ")
-		ctx.WritePlainf("%d", n.JobID)
 	}
 	return nil
 }
@@ -4452,10 +4417,9 @@ func (n *RecoverTableStmt) Accept(v Visitor) (Node, bool) {
 type FlashBackToTimestampStmt struct {
 	ddlNode
 
-	FlashbackTS  ExprNode
-	FlashbackTSO uint64
-	Tables       []*TableName
-	DBName       model.CIStr
+	FlashbackTS ExprNode
+	Tables      []*TableName
+	DBName      model.CIStr
 }
 
 // Restore implements Node interface
@@ -4477,14 +4441,9 @@ func (n *FlashBackToTimestampStmt) Restore(ctx *format.RestoreCtx) error {
 	} else {
 		ctx.WriteKeyWord("CLUSTER")
 	}
-	if n.FlashbackTSO == 0 {
-		ctx.WriteKeyWord(" TO TIMESTAMP ")
-		if err := n.FlashbackTS.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while splicing FlashBackToTimestampStmt.FlashbackTS")
-		}
-	} else {
-		ctx.WriteKeyWord(" TO TSO ")
-		ctx.WritePlainf("%d", n.FlashbackTSO)
+	ctx.WriteKeyWord(" TO TIMESTAMP ")
+	if err := n.FlashbackTS.Restore(ctx); err != nil {
+		return errors.Annotate(err, "An error occurred while splicing FlashBackToTimestampStmt.FlashbackTS")
 	}
 	return nil
 }
@@ -4505,14 +4464,11 @@ func (n *FlashBackToTimestampStmt) Accept(v Visitor) (Node, bool) {
 			n.Tables[i] = node.(*TableName)
 		}
 	}
-
-	if n.FlashbackTSO == 0 {
-		node, ok := n.FlashbackTS.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.FlashbackTS = node.(ExprNode)
+	node, ok := n.FlashbackTS.Accept(v)
+	if !ok {
+		return n, false
 	}
+	n.FlashbackTS = node.(ExprNode)
 	return v.Leave(n)
 }
 

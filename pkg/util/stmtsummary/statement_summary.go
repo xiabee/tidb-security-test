@@ -50,8 +50,6 @@ type stmtSummaryByDigestKey struct {
 	planDigest string
 	// `hash` is the hash value of this object.
 	hash []byte
-	// `resourceGroupName` is the resource group's name of this statement is bind to.
-	resourceGroupName string
 }
 
 // Hash implements SimpleLRUCache.Key.
@@ -64,7 +62,6 @@ func (key *stmtSummaryByDigestKey) Hash() []byte {
 		key.hash = append(key.hash, hack.Slice(key.schemaName)...)
 		key.hash = append(key.hash, hack.Slice(key.prevDigest)...)
 		key.hash = append(key.hash, hack.Slice(key.planDigest)...)
-		key.hash = append(key.hash, hack.Slice(key.resourceGroupName)...)
 	}
 	return key.hash
 }
@@ -214,9 +211,6 @@ type stmtSummaryByDigestElement struct {
 	// pessimistic execution retry information.
 	execRetryCount uint
 	execRetryTime  time.Duration
-	// request-units
-	resourceGroupName string
-	StmtRUSummary
 }
 
 // StmtExecInfo records execution information of each statement.
@@ -250,13 +244,11 @@ type StmtExecInfo struct {
 	ExecRetryCount      uint
 	ExecRetryTime       time.Duration
 	execdetails.StmtExecDetails
-	ResultRows        int64
-	TiKVExecDetails   util.ExecDetails
-	Prepared          bool
-	KeyspaceName      string
-	KeyspaceID        uint32
-	ResourceGroupName string
-	RUDetail          *util.RUDetails
+	ResultRows      int64
+	TiKVExecDetails util.ExecDetails
+	Prepared        bool
+	KeyspaceName    string
+	KeyspaceID      uint32
 }
 
 // newStmtSummaryByDigestMap creates an empty stmtSummaryByDigestMap.
@@ -298,8 +290,9 @@ func (ssMap *stmtSummaryByDigestMap) AddStatement(sei *StmtExecInfo) {
 			unixTime, err := strconv.ParseInt(unixTimeStr, 10, 64)
 			if err != nil {
 				panic(err.Error())
+			} else {
+				now = unixTime
 			}
-			now = unixTime
 		}
 	})
 
@@ -307,11 +300,10 @@ func (ssMap *stmtSummaryByDigestMap) AddStatement(sei *StmtExecInfo) {
 	historySize := ssMap.historySize()
 
 	key := &stmtSummaryByDigestKey{
-		schemaName:        sei.SchemaName,
-		digest:            sei.Digest,
-		prevDigest:        sei.PrevSQLDigest,
-		planDigest:        sei.PlanDigest,
-		resourceGroupName: sei.ResourceGroupName,
+		schemaName: sei.SchemaName,
+		digest:     sei.Digest,
+		prevDigest: sei.PrevSQLDigest,
+		planDigest: sei.PlanDigest,
 	}
 	// Calculate hash value in advance, to reduce the time holding the lock.
 	key.Hash()
@@ -660,21 +652,20 @@ func newStmtSummaryByDigestElement(sei *StmtExecInfo, beginTime int64, intervalS
 		// PrevSQL is already truncated to cfg.Log.QueryLogMaxLen.
 		prevSQL: sei.PrevSQL,
 		// samplePlan needs to be decoded so it can't be truncated.
-		samplePlan:        samplePlan,
-		sampleBinaryPlan:  binPlan,
-		planHint:          planHint,
-		indexNames:        sei.StmtCtx.IndexNames,
-		minLatency:        sei.TotalLatency,
-		firstSeen:         sei.StartTime,
-		lastSeen:          sei.StartTime,
-		backoffTypes:      make(map[string]int),
-		authUsers:         make(map[string]struct{}),
-		planInCache:       false,
-		planCacheHits:     0,
-		planInBinding:     false,
-		prepared:          sei.Prepared,
-		minResultRows:     math.MaxInt64,
-		resourceGroupName: sei.ResourceGroupName,
+		samplePlan:       samplePlan,
+		sampleBinaryPlan: binPlan,
+		planHint:         planHint,
+		indexNames:       sei.StmtCtx.IndexNames,
+		minLatency:       sei.TotalLatency,
+		firstSeen:        sei.StartTime,
+		lastSeen:         sei.StartTime,
+		backoffTypes:     make(map[string]int),
+		authUsers:        make(map[string]struct{}),
+		planInCache:      false,
+		planCacheHits:    0,
+		planInBinding:    false,
+		prepared:         sei.Prepared,
+		minResultRows:    math.MaxInt64,
 	}
 	ssElement.add(sei, intervalSeconds)
 	return ssElement
@@ -898,9 +889,6 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 	ssElement.sumPDTotal += time.Duration(atomic.LoadInt64(&sei.TiKVExecDetails.WaitPDRespDuration))
 	ssElement.sumBackoffTotal += time.Duration(atomic.LoadInt64(&sei.TiKVExecDetails.BackoffDuration))
 	ssElement.sumWriteSQLRespTotal += sei.StmtExecDetails.WriteSQLRespDuration
-
-	// request-units
-	ssElement.StmtRUSummary.Add(sei.RUDetail)
 }
 
 // Truncate SQL to maxSQLLength.
@@ -962,63 +950,9 @@ func avgFloat(sum int64, count int64) float64 {
 	return 0
 }
 
-func avgSumFloat(sum float64, count int64) float64 {
-	if count > 0 {
-		return sum / float64(count)
-	}
-	return 0
-}
-
 func convertEmptyToNil(str string) interface{} {
 	if str == "" {
 		return nil
 	}
 	return str
-}
-
-// StmtRUSummary is the request-units summary for each type of statements.
-type StmtRUSummary struct {
-	SumRRU            float64       `json:"sum_rru"`
-	SumWRU            float64       `json:"sum_wru"`
-	SumRUWaitDuration time.Duration `json:"sum_ru_wait_duration"`
-	MaxRRU            float64       `json:"max_rru"`
-	MaxWRU            float64       `json:"max_wru"`
-	MaxRUWaitDuration time.Duration `json:"max_ru_wait_duration"`
-}
-
-// Add add a new sample value to the ru summary record.
-func (s *StmtRUSummary) Add(info *util.RUDetails) {
-	if info != nil {
-		rru := info.RRU()
-		s.SumRRU += rru
-		if s.MaxRRU < rru {
-			s.MaxRRU = rru
-		}
-		wru := info.WRU()
-		s.SumWRU += wru
-		if s.MaxWRU < wru {
-			s.MaxWRU = wru
-		}
-		ruWaitDur := info.RUWaitDuration()
-		s.SumRUWaitDuration += ruWaitDur
-		if s.MaxRUWaitDuration < ruWaitDur {
-			s.MaxRUWaitDuration = ruWaitDur
-		}
-	}
-}
-
-// Merge merges the value of 2 ru summary records.
-func (s *StmtRUSummary) Merge(other *StmtRUSummary) {
-	s.SumRRU += other.SumRRU
-	s.SumWRU += other.SumWRU
-	s.SumRUWaitDuration += other.SumRUWaitDuration
-	if s.MaxRRU < other.MaxRRU {
-		s.MaxRRU = other.MaxRRU
-	}
-	if s.MaxWRU < other.MaxWRU {
-		s.MaxWRU = other.MaxWRU
-	}
-	if s.MaxRUWaitDuration < other.MaxRUWaitDuration {
-		s.MaxRUWaitDuration = other.MaxRUWaitDuration
-	}
 }

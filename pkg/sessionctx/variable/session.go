@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain/resourcegroup"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
 	"github.com/pingcap/tidb/pkg/metrics"
@@ -50,7 +49,6 @@ import (
 	pumpcli "github.com/pingcap/tidb/pkg/tidb-binlog/pump_client"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/disk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/kvcache"
@@ -58,7 +56,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/replayer"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/pingcap/tidb/pkg/util/stringutil"
 	"github.com/pingcap/tidb/pkg/util/tableutil"
 	"github.com/pingcap/tidb/pkg/util/tiflash"
@@ -106,6 +103,12 @@ type RetryInfo struct {
 	autoIncrementIDs       retryInfoAutoIDs
 	autoRandomIDs          retryInfoAutoIDs
 	LastRcReadTS           uint64
+}
+
+// ReuseChunkPool save Alloc object
+type ReuseChunkPool struct {
+	mu    sync.Mutex
+	Alloc chunk.Allocator
 }
 
 // Clean does some clean work.
@@ -723,8 +726,8 @@ type SessionVars struct {
 		value string
 	}
 
-	// status stands for the session status. e.g. in transaction or not, auto commit is on or off, and so on.
-	status atomic.Uint32
+	// Status stands for the session status. e.g. in transaction or not, auto commit is on or off, and so on.
+	Status uint16
 
 	// ClientCapability is client's capability.
 	ClientCapability uint32
@@ -759,6 +762,9 @@ type SessionVars struct {
 	// CurrentDBChanged indicates if the CurrentDB has been updated, and if it is we should print it into
 	// the slow log to make it be compatible with MySQL, https://github.com/pingcap/tidb/issues/17846.
 	CurrentDBChanged bool
+
+	// StrictSQLMode indicates if the session is in strict mode.
+	StrictSQLMode bool
 
 	// CommonGlobalLoaded indicates if common global variable has been loaded for this session.
 	CommonGlobalLoaded bool
@@ -1074,8 +1080,8 @@ type SessionVars struct {
 	// See https://github.com/pingcap/tidb/blob/7105505a78fc886c33258caa5813baf197b15247/docs/design/2023-06-30-configurable-kv-timeout.md?plain=1#L14-L15
 	TiKVClientReadTimeout uint64
 
-	// SQLKiller is a flag to indicate that this query is killed.
-	SQLKiller sqlkiller.SQLKiller
+	// Killed is a flag to indicate that this query is killed.
+	Killed uint32
 
 	// ConnectionStatus indicates current connection status.
 	ConnectionStatus int32
@@ -1195,9 +1201,6 @@ type SessionVars struct {
 
 	// EnableClusteredIndex indicates whether to enable clustered index when creating a new table.
 	EnableClusteredIndex ClusteredIndexDefMode
-
-	// EnableGlobalIndex indicates whether we could create an global index on a partition table or not.
-	EnableGlobalIndex bool
 
 	// PresumeKeyNotExists indicates lazy existence checking is enabled.
 	PresumeKeyNotExists bool
@@ -1388,9 +1391,6 @@ type SessionVars struct {
 	// EnableNonPreparedPlanCacheForDML indicates whether to enable non-prepared plan cache for DML statements.
 	EnableNonPreparedPlanCacheForDML bool
 
-	// EnableFuzzyBinding indicates whether to enable fuzzy binding.
-	EnableFuzzyBinding bool
-
 	// PlanCacheInvalidationOnFreshStats controls if plan cache will be invalidated automatically when
 	// related stats are analyzed after the plan cache is generated.
 	PlanCacheInvalidationOnFreshStats bool
@@ -1452,10 +1452,10 @@ type SessionVars struct {
 	// When set to true, `col is (not) null`(`col` is index prefix column) is regarded as index filter rather than table filter.
 	OptPrefixIndexSingleScan bool
 
-	// chunkPool Several chunks and columns are cached
-	chunkPool chunk.Allocator
-	// EnableReuseChunk indicates  request chunk whether use chunk alloc
-	EnableReuseChunk bool
+	// ChunkPool Several chunks and columns are cached
+	ChunkPool ReuseChunkPool
+	// EnableReuseCheck indicates  request chunk whether use chunk alloc
+	EnableReuseCheck bool
 
 	// EnableAdvancedJoinHint indicates whether the join method hint is compatible with join order hint.
 	EnableAdvancedJoinHint bool
@@ -1481,7 +1481,6 @@ type SessionVars struct {
 	shardRand *rand.Rand
 
 	// Resource group name
-	// NOTE: all statement relate opeartion should use StmtCtx.ResourceGroupName instead.
 	ResourceGroupName string
 
 	// PessimisticTransactionFairLocking controls whether fair locking for pessimistic transaction
@@ -1513,14 +1512,6 @@ type SessionVars struct {
 	// If there exists an index whose estimated selectivity is smaller than this threshold, the optimizer won't
 	// use the ExpectedCnt to adjust the estimated row count for index scan.
 	OptOrderingIdxSelThresh float64
-
-	// OptOrderingIdxSelRatio is the ratio for optimizer to determine when qualified rows from filtering outside
-	// of the index will be found during the scan of an ordering index.
-	// If all filtering is applied as matching on the ordering index, this ratio will have no impact.
-	// Value < 0 disables this enhancement.
-	// Value 0 will estimate row(s) found immediately.
-	// 0 > value <= 1 applies that percentage as the estimate when rows are found. For example 0.1 = 10%.
-	OptOrderingIdxSelRatio float64
 
 	// EnableMPPSharedCTEExecution indicates whether we enable the shared CTE execution strategy on MPP side.
 	EnableMPPSharedCTEExecution bool
@@ -1567,13 +1558,6 @@ type SessionVars struct {
 	// OptObjectiveModerate: The default value. The optimizer considers the real-time stats (real-time row count, modify count).
 	// OptObjectiveDeterminate: The optimizer doesn't consider the real-time stats.
 	OptObjective string
-
-	CompressionAlgorithm int
-	CompressionLevel     int
-
-	// TxnEntrySizeLimit indicates indicates the max size of a entry in membuf. The default limit (from config) will be
-	// overwritten if this value is not 0.
-	TxnEntrySizeLimit uint64
 }
 
 // GetOptimizerFixControlMap returns the specified value of the optimizer fix control.
@@ -1612,13 +1596,19 @@ func (s *SessionVars) IsPlanReplayerCaptureEnabled() bool {
 	return s.EnablePlanReplayerCapture || s.EnablePlanReplayedContinuesCapture
 }
 
-// GetChunkAllocator returns a vaid chunk allocator.
-func (s *SessionVars) GetChunkAllocator() chunk.Allocator {
-	if s.chunkPool == nil {
-		return chunk.NewEmptyAllocator()
+// GetNewChunkWithCapacity Attempt to request memory from the chunk pool
+// thread safety
+func (s *SessionVars) GetNewChunkWithCapacity(fields []*types.FieldType, capacity int, maxCachesize int, pool chunk.Allocator) *chunk.Chunk {
+	if pool == nil {
+		return chunk.New(fields, capacity, maxCachesize)
 	}
-
-	return s.chunkPool
+	s.ChunkPool.mu.Lock()
+	defer s.ChunkPool.mu.Unlock()
+	if pool.CheckReuseAllocSize() && (!s.GetUseChunkAlloc()) {
+		s.StmtCtx.SetUseChunkAlloc()
+	}
+	chk := pool.Alloc(fields, capacity, maxCachesize)
+	return chk
 }
 
 // ExchangeChunkStatus give the status to preUseChunkAlloc
@@ -1633,38 +1623,35 @@ func (s *SessionVars) GetUseChunkAlloc() bool {
 
 // SetAlloc Attempt to set the buffer pool address
 func (s *SessionVars) SetAlloc(alloc chunk.Allocator) {
-	if !s.EnableReuseChunk {
-		s.chunkPool = nil
+	if !s.EnableReuseCheck {
 		return
 	}
-	if alloc == nil {
-		s.chunkPool = nil
-		return
-	}
-	s.chunkPool = chunk.NewReuseHookAllocator(
-		chunk.NewSyncAllocator(alloc),
-		func() {
-			s.StmtCtx.SetUseChunkAlloc()
-		},
-	)
+	s.ChunkPool.Alloc = alloc
 }
 
-// IsAllocValid check if chunk reuse is enable or chunkPool is inused.
+// IsAllocValid check if chunk reuse is enable or ChunkPool is inused.
 func (s *SessionVars) IsAllocValid() bool {
-	if !s.EnableReuseChunk {
+	if !s.EnableReuseCheck {
 		return false
 	}
-	return s.chunkPool != nil
+	s.ChunkPool.mu.Lock()
+	defer s.ChunkPool.mu.Unlock()
+	return s.ChunkPool.Alloc != nil
 }
 
-// ClearAlloc indicates stop reuse chunk. If `hasErr` is true, it'll also recreate the `alloc` in parameter.
-func (s *SessionVars) ClearAlloc(alloc *chunk.Allocator, hasErr bool) {
-	if !hasErr {
-		s.chunkPool = nil
+// ClearAlloc indicates stop reuse chunk
+func (s *SessionVars) ClearAlloc(alloc *chunk.Allocator, b bool) {
+	if !b {
+		s.ChunkPool.Alloc = nil
 		return
 	}
 
-	s.chunkPool = nil
+	// If an error is reported, re-apply for alloc
+	// Prevent the goroutine left before, affecting the execution of the next sql
+	// issuse 38918
+	s.ChunkPool.mu.Lock()
+	s.ChunkPool.Alloc = nil
+	s.ChunkPool.mu.Unlock()
 	*alloc = chunk.NewAllocator()
 }
 
@@ -1672,7 +1659,7 @@ func (s *SessionVars) ClearAlloc(alloc *chunk.Allocator, hasErr bool) {
 func (s *SessionVars) GetPreparedStmtByName(stmtName string) (interface{}, error) {
 	stmtID, ok := s.PreparedStmtNameToID[stmtName]
 	if !ok {
-		return nil, plannererrors.ErrStmtNotFound
+		return nil, ErrStmtNotFound
 	}
 	return s.GetPreparedStmtByID(stmtID)
 }
@@ -1681,7 +1668,7 @@ func (s *SessionVars) GetPreparedStmtByName(stmtName string) (interface{}, error
 func (s *SessionVars) GetPreparedStmtByID(stmtID uint32) (interface{}, error) {
 	stmt, ok := s.PreparedStmts[stmtID]
 	if !ok {
-		return nil, plannererrors.ErrStmtNotFound
+		return nil, ErrStmtNotFound
 	}
 	return stmt, nil
 }
@@ -1741,9 +1728,9 @@ func (s *SessionVars) RaiseWarningWhenMPPEnforced(warning string) {
 		return
 	}
 	if s.StmtCtx.InExplainStmt {
-		s.StmtCtx.AppendWarning(errors.NewNoStackError(warning))
+		s.StmtCtx.AppendWarning(errors.New(warning))
 	} else {
-		s.StmtCtx.AppendExtraWarning(errors.NewNoStackError(warning))
+		s.StmtCtx.AppendExtraWarning(errors.New(warning))
 	}
 }
 
@@ -1942,8 +1929,10 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		TxnCtx:                        &TransactionContext{},
 		RetryInfo:                     &RetryInfo{},
 		ActiveRoles:                   make([]*auth.RoleIdentity, 0, 10),
+		StrictSQLMode:                 true,
 		AutoIncrementIncrement:        DefAutoIncrementIncrement,
 		AutoIncrementOffset:           DefAutoIncrementOffset,
+		Status:                        mysql.ServerStatusAutocommit,
 		StmtCtx:                       stmtctx.NewStmtCtx(),
 		AllowAggPushDown:              false,
 		AllowCartesianBCJ:             DefOptCartesianBCJ,
@@ -2023,9 +2012,9 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		EnableTiFlashReadForWriteStmt: true,
 		ForeignKeyChecks:              DefTiDBForeignKeyChecks,
 		HookContext:                   hctx,
-		EnableReuseChunk:              DefTiDBEnableReusechunk,
+		EnableReuseCheck:              DefTiDBEnableReusechunk,
 		preUseChunkAlloc:              DefTiDBUseAlloc,
-		chunkPool:                     nil,
+		ChunkPool:                     ReuseChunkPool{Alloc: nil},
 		mppExchangeCompressionMode:    DefaultExchangeCompressionMode,
 		mppVersion:                    kv.MppVersionUnspecified,
 		EnableLateMaterialization:     DefTiDBOptEnableLateMaterialization,
@@ -2033,9 +2022,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		ResourceGroupName:             resourcegroup.DefaultResourceGroupName,
 		DefaultCollationForUTF8MB4:    mysql.DefaultCollationName,
 	}
-	vars.status.Store(uint32(mysql.ServerStatusAutocommit))
-	vars.StmtCtx.ResourceGroupName = resourcegroup.DefaultResourceGroupName
-	vars.KVVars = tikvstore.NewVariables(&vars.SQLKiller.Signal)
+	vars.KVVars = tikvstore.NewVariables(&vars.Killed)
 	vars.Concurrency = Concurrency{
 		indexLookupConcurrency:            DefIndexLookupConcurrency,
 		indexSerialScanConcurrency:        DefIndexSerialScanConcurrency,
@@ -2043,7 +2030,6 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		hashJoinConcurrency:               DefTiDBHashJoinConcurrency,
 		projectionConcurrency:             DefTiDBProjectionConcurrency,
 		distSQLScanConcurrency:            DefDistSQLScanConcurrency,
-		analyzeDistSQLScanConcurrency:     DefAnalyzeDistSQLScanConcurrency,
 		hashAggPartialConcurrency:         DefTiDBHashAggPartialConcurrency,
 		hashAggFinalConcurrency:           DefTiDBHashAggFinalConcurrency,
 		windowConcurrency:                 DefTiDBWindowConcurrency,
@@ -2079,7 +2065,6 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 	vars.DiskTracker = disk.NewTracker(memory.LabelForSession, -1)
 	vars.MemTracker = memory.NewTracker(memory.LabelForSession, vars.MemQuotaQuery)
 	vars.MemTracker.IsRootTrackerOfSess = true
-	vars.MemTracker.Killer = &vars.SQLKiller
 
 	for _, engine := range config.GetGlobalConfig().IsolationRead.Engines {
 		switch engine {
@@ -2269,36 +2254,15 @@ func (s *SessionVars) SetLastInsertID(insertID uint64) {
 // otherwise removes the flag.
 func (s *SessionVars) SetStatusFlag(flag uint16, on bool) {
 	if on {
-		for {
-			status := s.status.Load()
-			if status&uint32(flag) == uint32(flag) {
-				break
-			}
-			if s.status.CompareAndSwap(status, status|uint32(flag)) {
-				break
-			}
-		}
+		s.Status |= flag
 		return
 	}
-	for {
-		status := s.status.Load()
-		if status&uint32(flag) == 0 {
-			break
-		}
-		if s.status.CompareAndSwap(status, status&^uint32(flag)) {
-			break
-		}
-	}
+	s.Status &= ^flag
 }
 
-// HasStatusFlag gets the session server status variable, returns true if it is on.
-func (s *SessionVars) HasStatusFlag(flag uint16) bool {
-	return s.status.Load()&uint32(flag) > 0
-}
-
-// Status returns the server status.
-func (s *SessionVars) Status() uint16 {
-	return uint16(s.status.Load())
+// GetStatusFlag gets the session server status variable, returns true if it is on.
+func (s *SessionVars) GetStatusFlag(flag uint16) bool {
+	return s.Status&flag > 0
 }
 
 // SetInTxn sets whether the session is in transaction.
@@ -2312,12 +2276,12 @@ func (s *SessionVars) SetInTxn(val bool) {
 
 // InTxn returns if the session is in transaction.
 func (s *SessionVars) InTxn() bool {
-	return s.HasStatusFlag(mysql.ServerStatusInTrans)
+	return s.GetStatusFlag(mysql.ServerStatusInTrans)
 }
 
 // IsAutocommit returns if the session is set to autocommit.
 func (s *SessionVars) IsAutocommit() bool {
-	return s.HasStatusFlag(mysql.ServerStatusAutocommit)
+	return s.GetStatusFlag(mysql.ServerStatusAutocommit)
 }
 
 // IsIsolation if true it means the transaction is at that isolation level.
@@ -2633,7 +2597,7 @@ func (s *SessionVars) GetPrevStmtDigest() string {
 
 // LazyCheckKeyNotExists returns if we can lazy check key not exists.
 func (s *SessionVars) LazyCheckKeyNotExists() bool {
-	return s.PresumeKeyNotExists || (s.TxnCtx != nil && s.TxnCtx.IsPessimistic && s.StmtCtx.ErrGroupLevel(errctx.ErrGroupDupKey) == errctx.LevelError)
+	return s.PresumeKeyNotExists || (s.TxnCtx != nil && s.TxnCtx.IsPessimistic && !s.StmtCtx.DupKeyAsWarning)
 }
 
 // GetTemporaryTable returns a TempTable by tableInfo.
@@ -2670,7 +2634,7 @@ func (s *SessionVars) EncodeSessionStates(_ context.Context, sessionStates *sess
 
 	// Encode other session contexts.
 	sessionStates.PreparedStmtID = s.preparedStmtID
-	sessionStates.Status = s.status.Load()
+	sessionStates.Status = s.Status
 	sessionStates.CurrentDB = s.CurrentDB
 	sessionStates.LastTxnInfo = s.LastTxnInfo
 	if s.LastQueryInfo.StartTS != 0 {
@@ -2706,7 +2670,7 @@ func (s *SessionVars) DecodeSessionStates(_ context.Context, sessionStates *sess
 
 	// Decode other session contexts.
 	s.preparedStmtID = sessionStates.PreparedStmtID
-	s.status.Store(sessionStates.Status)
+	s.Status = sessionStates.Status
 	s.CurrentDB = sessionStates.CurrentDB
 	s.LastTxnInfo = sessionStates.LastTxnInfo
 	if sessionStates.LastQueryInfo != nil {
@@ -2768,9 +2732,6 @@ type Concurrency struct {
 	// distSQLScanConcurrency is the number of concurrent dist SQL scan worker.
 	distSQLScanConcurrency int
 
-	// analyzeDistSQLScanConcurrency is the number of concurrent dist SQL scan worker when to analyze.
-	analyzeDistSQLScanConcurrency int
-
 	// hashJoinConcurrency is the number of concurrent hash join outer worker.
 	// hashJoinConcurrency is deprecated, use ExecutorConcurrency instead.
 	hashJoinConcurrency int
@@ -2810,9 +2771,6 @@ type Concurrency struct {
 
 	// SourceAddr is the source address of request. Available in coprocessor ONLY.
 	SourceAddr net.TCPAddr
-
-	// IdleTransactionTimeout indicates the maximum time duration a transaction could be idle, unit is second.
-	IdleTransactionTimeout int
 }
 
 // SetIndexLookupConcurrency set the number of concurrent index lookup worker.
@@ -2828,11 +2786,6 @@ func (c *Concurrency) SetIndexLookupJoinConcurrency(n int) {
 // SetDistSQLScanConcurrency set the number of concurrent dist SQL scan worker.
 func (c *Concurrency) SetDistSQLScanConcurrency(n int) {
 	c.distSQLScanConcurrency = n
-}
-
-// SetAnalyzeDistSQLScanConcurrency set the number of concurrent dist SQL scan worker when to analyze.
-func (c *Concurrency) SetAnalyzeDistSQLScanConcurrency(n int) {
-	c.analyzeDistSQLScanConcurrency = n
 }
 
 // SetHashJoinConcurrency set the number of concurrent hash join outer worker.
@@ -2899,11 +2852,6 @@ func (c *Concurrency) IndexLookupJoinConcurrency() int {
 // DistSQLScanConcurrency return the number of concurrent dist SQL scan worker.
 func (c *Concurrency) DistSQLScanConcurrency() int {
 	return c.distSQLScanConcurrency
-}
-
-// AnalyzeDistSQLScanConcurrency return the number of concurrent dist SQL scan worker when to analyze.
-func (c *Concurrency) AnalyzeDistSQLScanConcurrency() int {
-	return c.analyzeDistSQLScanConcurrency
 }
 
 // HashJoinConcurrency return the number of concurrent hash join outer worker.

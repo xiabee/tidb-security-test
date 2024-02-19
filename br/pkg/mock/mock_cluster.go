@@ -24,7 +24,6 @@ import (
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
 	pd "github.com/tikv/pd/client"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.opencensus.io/stats/view"
 	"go.uber.org/zap"
 )
@@ -40,7 +39,6 @@ type Cluster struct {
 	*domain.Domain
 	DSN        string
 	PDClient   pd.Client
-	PDHTTPCli  pdhttp.Client
 	HttpServer *http.Server
 }
 
@@ -81,7 +79,6 @@ func NewCluster() (*Cluster, error) {
 	cluster.Domain = dom
 
 	cluster.PDClient = storage.(tikv.Storage).GetRegionCache().PDClient()
-	cluster.PDHTTPCli = storage.(tikv.Storage).GetPDHTTPClient()
 	return cluster, nil
 }
 
@@ -103,7 +100,7 @@ func (mock *Cluster) Start() error {
 	}
 	mock.Server = svr
 	go func() {
-		if err1 := svr.Run(); err1 != nil {
+		if err1 := svr.Run(nil); err1 != nil {
 			panic(err1)
 		}
 	}()

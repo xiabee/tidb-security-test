@@ -42,7 +42,6 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit/testutil"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikvrpc"
@@ -423,7 +422,7 @@ func TestStmtHints(t *testing.T) {
 	val = int64(1) * 1024 * 1024
 	require.True(t, tk.Session().GetSessionVars().MemTracker.CheckBytesLimit(val))
 	require.Len(t, tk.Session().GetSessionVars().StmtCtx.GetWarnings(), 1)
-	require.EqualError(t, tk.Session().GetSessionVars().StmtCtx.GetWarnings()[0].Err, "[planner:3126]Hint MEMORY_QUOTA(`3145728`) is ignored as conflicting/duplicated.")
+	require.EqualError(t, tk.Session().GetSessionVars().StmtCtx.GetWarnings()[0].Err, "[util:3126]Hint MEMORY_QUOTA(`3145728`) is ignored as conflicting/duplicated.")
 
 	// Test NO_INDEX_MERGE hint
 	tk.Session().GetSessionVars().SetEnableIndexMerge(true)
@@ -728,9 +727,9 @@ func TestRandomBinary(t *testing.T) {
 	var val string
 	for i, bytes := range allBytes {
 		if i == 0 {
-			val += sqlescape.MustEscapeSQL("(874, 0, 1, %?, 3)", bytes)
+			val += sqlexec.MustEscapeSQL("(874, 0, 1, %?, 3)", bytes)
 		} else {
-			val += sqlescape.MustEscapeSQL(",(874, 0, 1, %?, 3)", bytes)
+			val += sqlexec.MustEscapeSQL(",(874, 0, 1, %?, 3)", bytes)
 		}
 	}
 	sql += val
@@ -798,7 +797,7 @@ func TestRequestSource(t *testing.T) {
 
 func TestEmptyInitSQLFile(t *testing.T) {
 	// A non-existent sql file would stop the bootstrap of the tidb cluster
-	store, err := mockstore.NewMockStore(mockstore.WithStoreType(mockstore.EmbedUnistore))
+	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	config.GetGlobalConfig().InitializeSQLFile = "non-existent.sql"
 	defer func() {
@@ -832,7 +831,7 @@ func TestInitSystemVariable(t *testing.T) {
 
 	// Create a mock store
 	// Set the config parameter for initialize sql file
-	store, err := mockstore.NewMockStore(mockstore.WithStoreType(mockstore.EmbedUnistore))
+	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	config.GetGlobalConfig().InitializeSQLFile = initializeSQLFile.Name()
 	defer func() {
@@ -921,7 +920,7 @@ DROP USER root;
 	_, err = sqlFiles[1].WriteString("drop user cloud_admin;")
 	require.NoError(t, err)
 
-	store, err := mockstore.NewMockStore(mockstore.WithStoreType(mockstore.EmbedUnistore))
+	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	config.GetGlobalConfig().InitializeSQLFile = sqlFiles[0].Name()
 	defer func() {
@@ -999,7 +998,7 @@ insert into test.t values ("abc"); -- invalid statement
 `)
 	require.NoError(t, err)
 
-	store, err := mockstore.NewMockStore(mockstore.WithStoreType(mockstore.EmbedUnistore))
+	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	config.GetGlobalConfig().InitializeSQLFile = sqlFiles[0].Name()
 	defer func() {
@@ -1015,7 +1014,7 @@ insert into test.t values ("abc"); -- invalid statement
 	session.DisableRunBootstrapSQLFileInTest()
 
 	// Bootstrap with the second sql file, which would not been executed.
-	store, err = mockstore.NewMockStore(mockstore.WithStoreType(mockstore.EmbedUnistore))
+	store, err = mockstore.NewMockStore()
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, store.Close())

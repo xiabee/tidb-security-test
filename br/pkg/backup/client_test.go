@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/kvproto/pkg/errorpb"
@@ -42,7 +41,6 @@ type testBackup struct {
 	cancel context.CancelFunc
 
 	mockPDClient pd.Client
-	mockCluster  *testutils.MockCluster
 	mockGlue     *gluetidb.MockGlue
 	backupClient *backup.Client
 
@@ -51,15 +49,15 @@ type testBackup struct {
 }
 
 func createBackupSuite(t *testing.T) *testBackup {
-	tikvClient, mockCluster, pdClient, err := testutils.NewMockTiKV("", nil)
+	tikvClient, _, pdClient, err := testutils.NewMockTiKV("", nil)
 	require.NoError(t, err)
 	s := new(testBackup)
 	s.mockGlue = &gluetidb.MockGlue{}
 	s.mockPDClient = pdClient
-	s.mockCluster = mockCluster
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	mockMgr := &conn.Mgr{PdController: &pdutil.PdController{}}
 	mockMgr.SetPDClient(s.mockPDClient)
+	mockMgr.SetHTTP([]string{"test"}, nil)
 	s.backupClient = backup.NewBackupClient(s.ctx, mockMgr)
 
 	s.cluster, err = mock.NewCluster()
@@ -179,9 +177,9 @@ func TestBuildTableRangeCommonHandle(t *testing.T) {
 		ids []int64
 		trs []kv.KeyRange
 	}
-	low, err_l := codec.EncodeKey(time.UTC, nil, []types.Datum{types.MinNotNullDatum()}...)
+	low, err_l := codec.EncodeKey(nil, nil, []types.Datum{types.MinNotNullDatum()}...)
 	require.NoError(t, err_l)
-	high, err_h := codec.EncodeKey(time.UTC, nil, []types.Datum{types.MaxValueDatum()}...)
+	high, err_h := codec.EncodeKey(nil, nil, []types.Datum{types.MaxValueDatum()}...)
 	require.NoError(t, err_h)
 	high = kv.Key(high).PrefixNext()
 	cases := []Case{
@@ -335,64 +333,4 @@ func TestCheckBackupIsLocked(t *testing.T) {
 	err = backup.CheckBackupStorageIsLocked(ctx, s.storage)
 	require.Error(t, err)
 	require.Regexp(t, "backup lock file and sst file exist in(.+)", err.Error())
-}
-
-func TestFindTargetPeer(t *testing.T) {
-	s := createBackupSuite(t)
-
-	ctx := context.Background()
-	testutils.BootstrapWithMultiRegions(s.mockCluster, []byte("g"), []byte("n"), []byte("t"))
-
-	leader1, err := s.backupClient.FindTargetPeer(ctx, []byte("a"), false, nil)
-	require.NoError(t, err)
-
-	leader2, err := s.backupClient.FindTargetPeer(ctx, []byte("b"), false, nil)
-	require.NoError(t, err)
-
-	// check passed keys on same region
-	require.Equal(t, leader1.GetId(), leader2.GetId())
-
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"hasLeader\")")
-
-	leader, err := s.backupClient.FindTargetPeer(ctx, []byte("m"), false, nil)
-	require.NoError(t, err)
-	// check passed keys on find leader after retry
-	require.Equal(t, 42, int(leader.GetId()))
-
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
-
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "return(\"noLeader\")")
-
-	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, nil)
-	// check passed keys with error on find leader after retry
-	require.ErrorContains(t, err, "cannot find leader")
-
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
-
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"hasPeer\")")
-
-	storeIDMap := make(map[uint64]struct{})
-	storeIDMap[42] = struct{}{}
-	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, storeIDMap)
-	require.NoError(t, err)
-	// check passed keys with target peer
-	require.Equal(t, 43, int(leader.GetId()))
-
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
-
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"noPeer\")")
-
-	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, storeIDMap)
-	// check passed keys with error and cannot find target peer
-	require.ErrorContains(t, err, "cannot find leader")
-
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
 }

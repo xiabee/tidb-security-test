@@ -25,19 +25,20 @@ import (
 )
 
 func TestBindCache(t *testing.T) {
-	variable.MemQuotaBindingCache.Store(250)
+	variable.MemQuotaBindingCache.Store(200)
 	bindCache := newBindCache()
 
-	value := make([]Bindings, 3)
+	value := make([][]*BindRecord, 3)
 	key := make([]bindCacheKey, 3)
 	var bigKey string
 	for i := 0; i < 3; i++ {
 		cacheKey := strings.Repeat(strconv.Itoa(i), 50)
 		key[i] = bindCacheKey(hack.Slice(cacheKey))
-		value[i] = []Binding{{OriginalSQL: cacheKey}}
+		record := &BindRecord{OriginalSQL: cacheKey, Db: ""}
+		value[i] = []*BindRecord{record}
 		bigKey += cacheKey
 
-		require.Equal(t, int64(116), calcBindCacheKVMem(key[i], value[i]))
+		require.Equal(t, int64(100), calcBindCacheKVMem(key[i], value[i]))
 	}
 
 	ok, err := bindCache.set(key[0], value[0])
@@ -54,7 +55,7 @@ func TestBindCache(t *testing.T) {
 
 	ok, err = bindCache.set(key[2], value[2])
 	require.True(t, ok)
-	require.NotNil(t, err) // exceed the memory limit
+	require.NotNil(t, err)
 	result = bindCache.get(key[2])
 	require.NotNil(t, result)
 
@@ -67,10 +68,11 @@ func TestBindCache(t *testing.T) {
 	require.NotNil(t, result)
 
 	bigBindCacheKey := bindCacheKey(hack.Slice(bigKey))
-	bigBindCacheValue := []Binding{{OriginalSQL: strings.Repeat("x", 100)}}
-	require.Equal(t, int64(266), calcBindCacheKVMem(bigBindCacheKey, bigBindCacheValue))
+	bigRecord := &BindRecord{OriginalSQL: bigKey, Db: ""}
+	bigBindCacheValue := []*BindRecord{bigRecord}
+	require.Equal(t, int64(300), calcBindCacheKVMem(bigBindCacheKey, bigBindCacheValue))
 	ok, err = bindCache.set(bigBindCacheKey, bigBindCacheValue)
-	require.False(t, ok) // the key-value pair is too big to be cached
+	require.False(t, ok)
 	require.NotNil(t, err)
 	result = bindCache.get(bigBindCacheKey)
 	require.Nil(t, result)

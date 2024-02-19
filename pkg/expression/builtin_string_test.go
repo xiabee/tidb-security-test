@@ -62,7 +62,7 @@ func TestLengthAndOctetLength(t *testing.T) {
 		for _, c := range cases {
 			f, err := newFunctionForTest(ctx, lengthMethod, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 			require.NoError(t, err)
-			d, err := f.Eval(ctx, chunk.Row{})
+			d, err := f.Eval(chunk.Row{})
 			if c.getErr {
 				require.Error(t, err)
 			} else {
@@ -97,7 +97,7 @@ func TestLengthAndOctetLength(t *testing.T) {
 			require.NoError(t, err)
 			f, err := newFunctionForTest(ctx, lengthMethod, primitiveValsToConstants(ctx, []interface{}{c.input})...)
 			require.NoError(t, err)
-			d, err := f.Eval(ctx, chunk.Row{})
+			d, err := f.Eval(chunk.Row{})
 			require.NoError(t, err)
 			require.Equal(t, c.result, d.GetInt64())
 		}
@@ -125,7 +125,7 @@ func TestASCII(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.ASCII, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -158,7 +158,7 @@ func TestASCII(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.ASCII, primitiveValsToConstants(ctx, []interface{}{c.input})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, c.result, d.GetInt64())
 	}
@@ -206,7 +206,7 @@ func TestConcat(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, fcName, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		v, err := f.Eval(ctx, chunk.Row{})
+		v, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -234,7 +234,7 @@ func TestConcatSig(t *testing.T) {
 		&Column{Index: 0, RetType: colTypes[0]},
 		&Column{Index: 1, RetType: colTypes[1]},
 	}
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	concat := &builtinConcatSig{base, 5}
 
 	cases := []struct {
@@ -253,7 +253,7 @@ func TestConcatSig(t *testing.T) {
 		input.AppendString(0, c.args[0].(string))
 		input.AppendString(1, c.args[1].(string))
 
-		res, isNull, err := concat.evalString(ctx, input.GetRow(0))
+		res, isNull, err := concat.evalString(input.GetRow(0))
 		require.Equal(t, c.res, res)
 		require.NoError(t, err)
 		if c.warnings == 0 {
@@ -323,7 +323,7 @@ func TestConcatWS(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, fcName, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		val, err1 := f.Eval(ctx, chunk.Row{})
+		val, err1 := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.NotNil(t, err1)
 		} else {
@@ -355,7 +355,7 @@ func TestConcatWSSig(t *testing.T) {
 		&Column{Index: 1, RetType: colTypes[1]},
 		&Column{Index: 2, RetType: colTypes[2]},
 	}
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	concat := &builtinConcatWSSig{base, 6}
 
 	cases := []struct {
@@ -375,7 +375,7 @@ func TestConcatWSSig(t *testing.T) {
 		input.AppendString(1, c.args[1].(string))
 		input.AppendString(2, c.args[2].(string))
 
-		res, isNull, err := concat.evalString(ctx, input.GetRow(0))
+		res, isNull, err := concat.evalString(input.GetRow(0))
 		require.Equal(t, c.res, res)
 		require.NoError(t, err)
 		if c.warnings == 0 {
@@ -393,11 +393,11 @@ func TestConcatWSSig(t *testing.T) {
 func TestLeft(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	cases := []struct {
 		args   []interface{}
@@ -423,7 +423,7 @@ func TestLeft(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Left, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		v, err := f.Eval(ctx, chunk.Row{})
+		v, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -443,11 +443,11 @@ func TestLeft(t *testing.T) {
 func TestRight(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	cases := []struct {
 		args   []interface{}
@@ -473,7 +473,7 @@ func TestRight(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Right, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		v, err := f.Eval(ctx, chunk.Row{})
+		v, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -509,7 +509,7 @@ func TestRepeat(t *testing.T) {
 	for _, c := range cases {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.args...)))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if c.isNull {
 			require.True(t, v.IsNull())
@@ -532,7 +532,7 @@ func TestRepeatSig(t *testing.T) {
 		&Column{Index: 0, RetType: colTypes[0]},
 		&Column{Index: 1, RetType: colTypes[1]},
 	}
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	repeat := &builtinRepeatSig{base, 1000}
 
 	cases := []struct {
@@ -551,7 +551,7 @@ func TestRepeatSig(t *testing.T) {
 		input.AppendString(0, c.args[0].(string))
 		input.AppendInt64(1, c.args[1].(int64))
 
-		res, isNull, err := repeat.evalString(ctx, input.GetRow(0))
+		res, isNull, err := repeat.evalString(input.GetRow(0))
 		require.Equal(t, c.res, res)
 		require.NoError(t, err)
 		if c.warning == 0 {
@@ -587,7 +587,7 @@ func TestLower(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Lower, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		v, err := f.Eval(ctx, chunk.Row{})
+		v, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -619,7 +619,7 @@ func TestLower(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.Lower, primitiveValsToConstants(ctx, []interface{}{c.input})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, c.result, d.GetString())
 	}
@@ -645,7 +645,7 @@ func TestUpper(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Upper, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		v, err := f.Eval(ctx, chunk.Row{})
+		v, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -678,7 +678,7 @@ func TestUpper(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.Upper, primitiveValsToConstants(ctx, []interface{}{c.input})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, c.result, d.GetString())
 	}
@@ -689,7 +689,7 @@ func TestReverse(t *testing.T) {
 	fc := funcs[ast.Reverse]
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(nil)))
 	require.NoError(t, err)
-	d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	d, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, types.KindNull, d.Kind())
 
@@ -709,7 +709,7 @@ func TestReverse(t *testing.T) {
 		f, err = fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		d, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err = evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, c["Expect"][0], d)
 	}
@@ -742,7 +742,7 @@ func TestStrcmp(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Strcmp, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -780,7 +780,7 @@ func TestReplace(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Replace, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
 		require.Equalf(t, c.flen, f.GetType().GetFlen(), "test %v", i)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -825,7 +825,7 @@ func TestSubstring(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Substring, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -872,7 +872,7 @@ func TestConvert(t *testing.T) {
 		require.Equal(t, collate, retType.GetCollate())
 		require.Equal(t, v.hasBinaryFlag, mysql.HasBinaryFlag(retType.GetFlag()))
 
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, types.KindString, r.Kind())
 		require.Equal(t, v.result, r.GetString())
@@ -901,7 +901,7 @@ func TestConvert(t *testing.T) {
 	require.NotNil(t, f)
 	wrongFunction := f.(*builtinConvertSig)
 	wrongFunction.tp.SetCharset("wrongcharset")
-	_, err = evalBuiltinFunc(wrongFunction, ctx, chunk.Row{})
+	_, err = evalBuiltinFunc(wrongFunction, chunk.Row{})
 	require.Error(t, err)
 	require.Equal(t, "[expression:1115]Unknown character set: 'wrongcharset'", err.Error())
 }
@@ -936,7 +936,7 @@ func TestSubstringIndex(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.SubstringIndex, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -956,11 +956,11 @@ func TestSubstringIndex(t *testing.T) {
 func TestSpace(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	cases := []struct {
 		arg    interface{}
@@ -982,7 +982,7 @@ func TestSpace(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Space, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1010,16 +1010,16 @@ func TestSpaceSig(t *testing.T) {
 	args := []Expression{
 		&Column{Index: 0, RetType: colTypes[0]},
 	}
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	space := &builtinSpaceSig{base, 1000}
 	input := chunk.NewChunkWithCapacity(colTypes, 10)
 	input.AppendInt64(0, 6)
 	input.AppendInt64(0, 1001)
-	res, isNull, err := space.evalString(ctx, input.GetRow(0))
+	res, isNull, err := space.evalString(input.GetRow(0))
 	require.Equal(t, "      ", res)
 	require.False(t, isNull)
 	require.NoError(t, err)
-	res, isNull, err = space.evalString(ctx, input.GetRow(1))
+	res, isNull, err = space.evalString(input.GetRow(1))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
@@ -1071,7 +1071,7 @@ func TestLocate(t *testing.T) {
 	for i, c := range Dtbl {
 		f, err := instr.getFunction(ctx, datumsToConstants(c["Args"]))
 		require.NoError(t, err)
-		got, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		got, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.NotNil(t, f)
 		require.Equalf(t, c["Want"][0], got, "[%d]: args: %v", i, c["Args"])
@@ -1094,7 +1094,7 @@ func TestLocate(t *testing.T) {
 		types.SetBinChsClnFlag(exprs[1].GetType())
 		f, err := instr.getFunction(ctx, exprs)
 		require.NoError(t, err)
-		got, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		got, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.NotNil(t, f)
 		require.Equalf(t, c["Want"][0], got, "[%d]: args: %v", i, c["Args"])
@@ -1130,7 +1130,7 @@ func TestTrim(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Trim, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1178,7 +1178,7 @@ func TestLTrim(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LTrim, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1218,7 +1218,7 @@ func TestRTrim(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.RTrim, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1259,7 +1259,7 @@ func TestHexFunc(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Hex, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1288,7 +1288,7 @@ func TestHexFunc(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.Hex, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.errCode != 0 {
 			require.Error(t, err)
 			require.True(t, strings.Contains(err.Error(), strconv.Itoa(c.errCode)))
@@ -1328,7 +1328,7 @@ func TestUnhexFunc(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Unhex, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1369,7 +1369,7 @@ func TestBitLength(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.BitLength, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1388,8 +1388,7 @@ func TestBitLength(t *testing.T) {
 
 func TestChar(t *testing.T) {
 	ctx := createContext(t)
-	typeFlags := ctx.GetSessionVars().StmtCtx.TypeFlags()
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(typeFlags.WithIgnoreTruncateErr(true))
+	ctx.GetSessionVars().StmtCtx.IgnoreTruncate.Store(true)
 	tbl := []struct {
 		str      string
 		iNum     int64
@@ -1412,7 +1411,7 @@ func TestChar(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(dts...)))
 		require.NoError(t, err, i)
 		require.NotNil(t, f, i)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err, i)
 		testutil.DatumEqual(t, types.NewDatum(result), r, i)
 		if warnCnt != 0 {
@@ -1424,11 +1423,9 @@ func TestChar(t *testing.T) {
 		run(i, v.result, v.warnings, v.str, v.iNum, v.fNum, v.charset)
 	}
 	// char() returns null only when the sql_mode is strict.
-	require.True(t, ctx.GetSessionVars().SQLMode.HasStrictMode())
+	ctx.GetSessionVars().StrictSQLMode = true
 	run(-1, nil, 1, 123456, "utf8")
-
-	ctx.GetSessionVars().SQLMode = ctx.GetSessionVars().SQLMode &^ (mysql.ModeStrictTransTables | mysql.ModeStrictAllTables)
-	require.False(t, ctx.GetSessionVars().SQLMode.HasStrictMode())
+	ctx.GetSessionVars().StrictSQLMode = false
 	run(-2, string([]byte{1}), 1, 123456, "utf8")
 }
 
@@ -1448,7 +1445,7 @@ func TestCharLength(t *testing.T) {
 		fc := funcs[ast.CharLength]
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(v.input)))
 		require.NoError(t, err)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(v.result), r)
 	}
@@ -1475,7 +1472,7 @@ func TestCharLength(t *testing.T) {
 		tp.SetFlag(mysql.BinaryFlag)
 		f, err := fc.getFunction(ctx, arg)
 		require.NoError(t, err)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(v.result), r)
 	}
@@ -1503,7 +1500,7 @@ func TestFindInSet(t *testing.T) {
 		fc := funcs[ast.FindInSet]
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.str, c.strlst)))
 		require.NoError(t, err)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c.ret), r, fmt.Sprintf("FindInSet(%s, %s)", c.str, c.strlst))
 	}
@@ -1512,11 +1509,11 @@ func TestFindInSet(t *testing.T) {
 func TestField(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	tbl := []struct {
 		argLst []interface{}
@@ -1538,7 +1535,7 @@ func TestField(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.argLst...)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c.ret), r)
 	}
@@ -1573,7 +1570,7 @@ func TestLpad(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{str, length, padStr}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.expect == nil {
 			require.Equal(t, types.KindNull, result.Kind())
@@ -1613,7 +1610,7 @@ func TestRpad(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{str, length, padStr}))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.expect == nil {
 			require.Equal(t, types.KindNull, result.Kind())
@@ -1641,7 +1638,7 @@ func TestRpadSig(t *testing.T) {
 		&Column{Index: 2, RetType: colTypes[2]},
 	}
 
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	rpad := &builtinRpadUTF8Sig{base, 1000}
 
 	input := chunk.NewChunkWithCapacity(colTypes, 10)
@@ -1652,12 +1649,12 @@ func TestRpadSig(t *testing.T) {
 	input.AppendString(2, "123")
 	input.AppendString(2, "123")
 
-	res, isNull, err := rpad.evalString(ctx, input.GetRow(0))
+	res, isNull, err := rpad.evalString(input.GetRow(0))
 	require.Equal(t, "abc123", res)
 	require.False(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = rpad.evalString(ctx, input.GetRow(1))
+	res, isNull, err = rpad.evalString(input.GetRow(1))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
@@ -1687,7 +1684,7 @@ func TestInsertBinarySig(t *testing.T) {
 		&Column{Index: 3, RetType: colTypes[3]},
 	}
 
-	base := baseBuiltinFunc{args: args, tp: resultType}
+	base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 	insert := &builtinInsertSig{base, 3}
 
 	input := chunk.NewChunkWithCapacity(colTypes, 2)
@@ -1720,37 +1717,37 @@ func TestInsertBinarySig(t *testing.T) {
 	input.AppendString(3, "d")
 	input.AppendNull(3)
 
-	res, isNull, err := insert.evalString(ctx, input.GetRow(0))
+	res, isNull, err := insert.evalString(input.GetRow(0))
 	require.Equal(t, "abd", res)
 	require.False(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(1))
+	res, isNull, err = insert.evalString(input.GetRow(1))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(2))
+	res, isNull, err = insert.evalString(input.GetRow(2))
 	require.Equal(t, "abc", res)
 	require.False(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(3))
+	res, isNull, err = insert.evalString(input.GetRow(3))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(4))
+	res, isNull, err = insert.evalString(input.GetRow(4))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(5))
+	res, isNull, err = insert.evalString(input.GetRow(5))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
 
-	res, isNull, err = insert.evalString(ctx, input.GetRow(6))
+	res, isNull, err = insert.evalString(input.GetRow(6))
 	require.Equal(t, "", res)
 	require.True(t, isNull)
 	require.NoError(t, err)
@@ -1800,7 +1797,7 @@ func TestInstr(t *testing.T) {
 		f, err := instr.getFunction(ctx, datumsToConstants(c["Args"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		got, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		got, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		require.Equalf(t, c["Want"][0], got, "[%d]: args: %v", i, c["Args"])
 	}
@@ -1822,7 +1819,7 @@ func TestLoadFile(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LoadFile, primitiveValsToConstants(ctx, []interface{}{c.arg})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -1858,7 +1855,7 @@ func TestMakeSet(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.argList...)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c.ret), r)
 	}
@@ -1899,7 +1896,7 @@ func TestOct(t *testing.T) {
 		in := types.NewDatum(tt.origin)
 		f, _ := fc.getFunction(ctx, datumsToConstants([]types.Datum{in}))
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		res, err := r.ToString()
 		require.NoError(t, err)
@@ -1908,7 +1905,7 @@ func TestOct(t *testing.T) {
 	// tt NULL input for sha
 	var argNull types.Datum
 	f, _ := fc.getFunction(ctx, datumsToConstants([]types.Datum{argNull}))
-	r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	r, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, r.IsNull())
 }
@@ -1989,18 +1986,18 @@ func TestFormat(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(tt.number, tt.precision, tt.locale)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.ret), r)
 	}
 
-	origTypeFlags := ctx.GetSessionVars().StmtCtx.TypeFlags()
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(origTypeFlags.WithTruncateAsWarning(true))
+	origConfig := ctx.GetSessionVars().StmtCtx.TruncateAsWarning
+	ctx.GetSessionVars().StmtCtx.TruncateAsWarning = true
 	for _, tt := range formatTests1 {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(tt.number, tt.precision)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.ret), r, fmt.Sprintf("test %v", tt))
 		if tt.warnings > 0 {
@@ -2012,26 +2009,26 @@ func TestFormat(t *testing.T) {
 			ctx.GetSessionVars().StmtCtx.SetWarnings([]stmtctx.SQLWarn{})
 		}
 	}
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(origTypeFlags)
+	ctx.GetSessionVars().StmtCtx.TruncateAsWarning = origConfig
 
 	f2, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(formatTests2.number, formatTests2.precision, formatTests2.locale)))
 	require.NoError(t, err)
 	require.NotNil(t, f2)
-	r2, err := evalBuiltinFunc(f2, ctx, chunk.Row{})
+	r2, err := evalBuiltinFunc(f2, chunk.Row{})
 	testutil.DatumEqual(t, types.NewDatum(errors.New("not implemented")), types.NewDatum(err))
 	testutil.DatumEqual(t, types.NewDatum(formatTests2.ret), r2)
 
 	f3, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(formatTests3.number, formatTests3.precision, formatTests3.locale)))
 	require.NoError(t, err)
 	require.NotNil(t, f3)
-	r3, err := evalBuiltinFunc(f3, ctx, chunk.Row{})
+	r3, err := evalBuiltinFunc(f3, chunk.Row{})
 	testutil.DatumEqual(t, types.NewDatum(errors.New("not support for the specific locale")), types.NewDatum(err))
 	testutil.DatumEqual(t, types.NewDatum(formatTests3.ret), r3)
 
 	f4, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(formatTests4.number, formatTests4.precision, formatTests4.locale)))
 	require.NoError(t, err)
 	require.NotNil(t, f4)
-	r4, err := evalBuiltinFunc(f4, ctx, chunk.Row{})
+	r4, err := evalBuiltinFunc(f4, chunk.Row{})
 	require.NoError(t, err)
 	testutil.DatumEqual(t, types.NewDatum(formatTests4.ret), r4)
 	warnings := ctx.GetSessionVars().StmtCtx.GetWarnings()
@@ -2076,7 +2073,7 @@ func TestFromBase64(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(test.args)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.expect == nil {
 			require.Equal(t, types.KindNull, result.Kind())
@@ -2123,12 +2120,12 @@ func TestFromBase64Sig(t *testing.T) {
 		resultType := &types.FieldType{}
 		resultType.SetType(mysql.TypeVarchar)
 		resultType.SetFlen(mysql.MaxBlobWidth)
-		base := baseBuiltinFunc{args: args, tp: resultType}
+		base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 		fromBase64 := &builtinFromBase64Sig{base, test.maxAllowPacket}
 
 		input := chunk.NewChunkWithCapacity(colTypes, 1)
 		input.AppendString(0, test.args)
-		res, isNull, err := fromBase64.evalString(ctx, input.GetRow(0))
+		res, isNull, err := fromBase64.evalString(input.GetRow(0))
 		require.NoError(t, err)
 		require.Equal(t, test.isNil, isNull)
 		if isNull {
@@ -2177,7 +2174,7 @@ func TestInsert(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(test.args...)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if test.expect == nil {
 			require.Equal(t, types.KindNull, result.Kind())
@@ -2220,7 +2217,7 @@ func TestOrd(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Ord, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -2253,7 +2250,7 @@ func TestElt(t *testing.T) {
 		fc := funcs[ast.Elt]
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.argLst...)))
 		require.NoError(t, err)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c.ret), r)
 	}
@@ -2281,7 +2278,7 @@ func TestExportSet(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.argLst...)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		exportSetRes, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		exportSetRes, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		res, err := exportSetRes.ToString()
 		require.NoError(t, err)
@@ -2309,13 +2306,12 @@ func TestBin(t *testing.T) {
 	fc := funcs[ast.Bin]
 	dtbl := tblToDtbl(tbl)
 	ctx := mock.NewContext()
-	typeFlags := ctx.GetSessionVars().StmtCtx.TypeFlags()
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(typeFlags.WithIgnoreTruncateErr(true))
+	ctx.GetSessionVars().StmtCtx.IgnoreTruncate.Store(true)
 	for _, c := range dtbl {
 		f, err := fc.getFunction(ctx, datumsToConstants(c["Input"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c["Expected"][0]), r)
 	}
@@ -2344,7 +2340,7 @@ func TestQuote(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(c.arg)))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		r, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		r, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(c.ret), r)
 	}
@@ -2403,7 +2399,7 @@ func TestToBase64(t *testing.T) {
 	for _, test := range tests {
 		f, err := newFunctionForTest(ctx, ast.ToBase64, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if test.getErr {
 			require.Error(t, err)
 		} else {
@@ -2436,7 +2432,7 @@ func TestToBase64(t *testing.T) {
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.ToBase64, primitiveValsToConstants(ctx, []interface{}{c.input})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, c.result, d.GetString())
 	}
@@ -2490,12 +2486,12 @@ func TestToBase64Sig(t *testing.T) {
 		resultType := &types.FieldType{}
 		resultType.SetType(mysql.TypeVarchar)
 		resultType.SetFlen(base64NeededEncodedLength(len(test.args)))
-		base := baseBuiltinFunc{args: args, tp: resultType}
+		base := baseBuiltinFunc{args: args, ctx: ctx, tp: resultType}
 		toBase64 := &builtinToBase64Sig{base, test.maxAllowPacket}
 
 		input := chunk.NewChunkWithCapacity(colTypes, 1)
 		input.AppendString(0, test.args)
-		res, isNull, err := toBase64.evalString(ctx, input.GetRow(0))
+		res, isNull, err := toBase64.evalString(input.GetRow(0))
 		require.NoError(t, err)
 		if test.isNil {
 			require.True(t, isNull)
@@ -2532,7 +2528,7 @@ func TestStringRight(t *testing.T) {
 		str := types.NewDatum(test.str)
 		length := types.NewDatum(test.length)
 		f, _ := fc.getFunction(ctx, datumsToConstants([]types.Datum{str, length}))
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if result.IsNull() {
 			require.Nil(t, test.expect)
@@ -2598,7 +2594,7 @@ func TestWeightString(t *testing.T) {
 
 		// Reset warnings.
 		ctx.GetSessionVars().StmtCtx.ResetForRetry()
-		result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		result, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		if result.IsNull() {
 			require.Nil(t, test.expect)
@@ -2654,7 +2650,7 @@ func TestTranslate(t *testing.T) {
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Translate, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.isErr {
 			require.Error(t, err)
 		} else {
@@ -2692,7 +2688,7 @@ func TestCIWeightString(t *testing.T) {
 				f, err = fc.getFunction(ctx, datumsToConstants([]types.Datum{str, padding, length}))
 			}
 			require.NoError(t, err)
-			result, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+			result, err := evalBuiltinFunc(f, chunk.Row{})
 			require.NoError(t, err)
 			if result.IsNull() {
 				require.Nil(t, test.expect)

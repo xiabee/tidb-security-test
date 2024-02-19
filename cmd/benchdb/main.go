@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/store"
 	"github.com/pingcap/tidb/pkg/store/driver"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -89,7 +88,7 @@ func main() {
 
 type benchDB struct {
 	store   tikv.Storage
-	session sessiontypes.Session
+	session session.Session
 }
 
 func newBenchDB() *benchDB {

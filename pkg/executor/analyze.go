@@ -22,6 +22,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -43,11 +44,10 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/sqlescape"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/pingcap/tipb/go-tipb"
-	"github.com/tiancaiamao/gp"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -58,10 +58,9 @@ var _ exec.Executor = &AnalyzeExec{}
 type AnalyzeExec struct {
 	exec.BaseExecutor
 	tasks      []*analyzeTask
-	wg         *util.WaitGroupPool
+	wg         util.WaitGroupWrapper
 	opts       map[ast.AnalyzeOptionType]uint64
 	OptionsMap map[int64]core.V2AnalyzeOptions
-	gp         *gp.Pool
 	// errExitCh is used to notice the worker that the whole analyze task is finished when to meet error.
 	errExitCh chan struct{}
 }
@@ -292,7 +291,7 @@ func warnLockedTableMsg(sessionVars *variable.SessionVars, needAnalyzeTableCnt u
 		} else {
 			msg = "skip analyze locked table: %s"
 		}
-		sessionVars.StmtCtx.AppendWarning(errors.NewNoStackErrorf(msg, tables))
+		sessionVars.StmtCtx.AppendWarning(errors.Errorf(msg, tables))
 	}
 }
 
@@ -320,7 +319,7 @@ func (e *AnalyzeExec) saveV2AnalyzeOpts() error {
 		}
 	}
 	sql := new(strings.Builder)
-	sqlescape.MustFormatSQL(sql, "REPLACE INTO mysql.analyze_options (table_id,sample_num,sample_rate,buckets,topn,column_choice,column_ids) VALUES ")
+	sqlexec.MustFormatSQL(sql, "REPLACE INTO mysql.analyze_options (table_id,sample_num,sample_rate,buckets,topn,column_choice,column_ids) VALUES ")
 	idx := 0
 	for _, opts := range toSaveMap {
 		sampleNum := opts.RawOpts[ast.AnalyzeOptNumSamples]
@@ -334,14 +333,14 @@ func (e *AnalyzeExec) saveV2AnalyzeOpts() error {
 			topn = int64(val)
 		}
 		colChoice := opts.ColChoice.String()
-		colIDs := make([]string, 0, len(opts.ColumnList))
-		for _, colInfo := range opts.ColumnList {
-			colIDs = append(colIDs, strconv.FormatInt(colInfo.ID, 10))
+		colIDs := make([]string, len(opts.ColumnList))
+		for i, colInfo := range opts.ColumnList {
+			colIDs[i] = strconv.FormatInt(colInfo.ID, 10)
 		}
 		colIDStrs := strings.Join(colIDs, ",")
-		sqlescape.MustFormatSQL(sql, "(%?,%?,%?,%?,%?,%?,%?)", opts.PhyTableID, sampleNum, sampleRate, buckets, topn, colChoice, colIDStrs)
+		sqlexec.MustFormatSQL(sql, "(%?,%?,%?,%?,%?,%?,%?)", opts.PhyTableID, sampleNum, sampleRate, buckets, topn, colChoice, colIDStrs)
 		if idx < len(toSaveMap)-1 {
-			sqlescape.MustFormatSQL(sql, ",")
+			sqlexec.MustFormatSQL(sql, ",")
 		}
 		idx++
 	}
@@ -436,10 +435,10 @@ func (e *AnalyzeExec) handleResultsError(
 		} else {
 			finishJobWithLog(e.Ctx(), results.Job, nil)
 		}
-		if err := e.Ctx().GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			finishJobWithLog(e.Ctx(), results.Job, err)
+		if atomic.LoadUint32(&e.Ctx().GetSessionVars().Killed) == 1 {
+			finishJobWithLog(e.Ctx(), results.Job, exeerrors.ErrQueryInterrupted)
 			results.DestroyAndPutToPool()
-			return err
+			return errors.Trace(exeerrors.ErrQueryInterrupted)
 		}
 		results.DestroyAndPutToPool()
 	}
@@ -458,11 +457,11 @@ func (e *AnalyzeExec) handleResultsErrorWithConcurrency(ctx context.Context, sta
 	globalStatsMap globalStatsMap, resultsCh <-chan *statistics.AnalyzeResults) error {
 	partitionStatsConcurrency := len(subSctxs)
 
-	wg := util.NewWaitGroupPool(e.gp)
+	var wg util.WaitGroupWrapper
 	saveResultsCh := make(chan *statistics.AnalyzeResults, partitionStatsConcurrency)
 	errCh := make(chan error, partitionStatsConcurrency)
 	for i := 0; i < partitionStatsConcurrency; i++ {
-		worker := newAnalyzeSaveStatsWorker(saveResultsCh, subSctxs[i], errCh, &e.Ctx().GetSessionVars().SQLKiller)
+		worker := newAnalyzeSaveStatsWorker(saveResultsCh, subSctxs[i], errCh, &e.Ctx().GetSessionVars().Killed)
 		ctx1 := kv.WithInternalSourceType(context.Background(), kv.InternalTxnStats)
 		wg.Run(func() {
 			worker.run(ctx1, e.Ctx().GetSessionVars().EnableAnalyzeSnapshot)
@@ -472,9 +471,9 @@ func (e *AnalyzeExec) handleResultsErrorWithConcurrency(ctx context.Context, sta
 	panicCnt := 0
 	var err error
 	for panicCnt < statsConcurrency {
-		if err := e.Ctx().GetSessionVars().SQLKiller.HandleSignal(); err != nil {
+		if atomic.LoadUint32(&e.Ctx().GetSessionVars().Killed) == 1 {
 			close(saveResultsCh)
-			return err
+			return errors.Trace(exeerrors.ErrQueryInterrupted)
 		}
 		results, ok := <-resultsCh
 		if !ok {
@@ -538,7 +537,7 @@ func (e *AnalyzeExec) analyzeWorker(taskCh <-chan *analyzeTask, resultsCh chan<-
 			select {
 			case <-e.errExitCh:
 				return
-			case resultsCh <- analyzeColumnsPushDownEntry(e.gp, task.colExec):
+			case resultsCh <- analyzeColumnsPushDownEntry(task.colExec):
 			}
 		case idxTask:
 			select {

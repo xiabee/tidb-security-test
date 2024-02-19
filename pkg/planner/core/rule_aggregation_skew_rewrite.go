@@ -21,7 +21,7 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/util/intset"
+	fd "github.com/pingcap/tidb/pkg/planner/funcdep"
 )
 
 type skewDistinctAggRewriter struct {
@@ -95,7 +95,7 @@ func (a *skewDistinctAggRewriter) rewriteSkewDistinctAgg(agg *LogicalAggregation
 	groupCols := make([]*expression.Column, 0, 3)
 	// columns that should be used by firstrow(), which will be appended to
 	// bottomAgg schema and aggregate functions
-	firstRowCols := intset.NewFastIntSet()
+	firstRowCols := fd.NewFastIntSet()
 	for _, groupByItem := range agg.GroupByItems {
 		usedCols := expression.ExtractColumns(groupByItem)
 		groupCols = append(groupCols, usedCols...)
@@ -194,7 +194,7 @@ func (a *skewDistinctAggRewriter) rewriteSkewDistinctAgg(agg *LogicalAggregation
 		AggFuncs:     bottomAggFuncs,
 		GroupByItems: bottomAggGroupbyItems,
 		aggHints:     agg.aggHints,
-	}.Init(agg.SCtx(), agg.QueryBlockOffset())
+	}.Init(agg.SCtx(), agg.SelectBlockOffset())
 	bottomAgg.SetChildren(agg.children...)
 	bottomAgg.SetSchema(bottomAggSchema)
 
@@ -202,7 +202,7 @@ func (a *skewDistinctAggRewriter) rewriteSkewDistinctAgg(agg *LogicalAggregation
 		AggFuncs:     topAggFuncs,
 		GroupByItems: agg.GroupByItems,
 		aggHints:     agg.aggHints,
-	}.Init(agg.SCtx(), agg.QueryBlockOffset())
+	}.Init(agg.SCtx(), agg.SelectBlockOffset())
 	topAgg.SetChildren(bottomAgg)
 	topAgg.SetSchema(topAggSchema)
 
@@ -215,7 +215,7 @@ func (a *skewDistinctAggRewriter) rewriteSkewDistinctAgg(agg *LogicalAggregation
 	// we have to return a project operator that casts decimal to bigint
 	proj := LogicalProjection{
 		Exprs: make([]expression.Expression, 0, len(agg.AggFuncs)),
-	}.Init(agg.SCtx(), agg.QueryBlockOffset())
+	}.Init(agg.SCtx(), agg.SelectBlockOffset())
 	for _, column := range topAggSchema.Columns {
 		proj.Exprs = append(proj.Exprs, column.Clone())
 	}

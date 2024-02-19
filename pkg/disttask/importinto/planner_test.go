@@ -61,7 +61,7 @@ func TestToPhysicalPlan(t *testing.T) {
 		ChunkMap:          map[int32][]Chunk{chunkID: {{Path: "gs://test-load/1.csv"}}},
 	}
 	planCtx := planner.PlanCtx{
-		NextTaskStep: proto.ImportStepImport,
+		NextTaskStep: StepImport,
 	}
 	physicalPlan, err := logicalPlan.ToPhysicalPlan(planCtx)
 	require.NoError(t, err)
@@ -81,13 +81,13 @@ func TestToPhysicalPlan(t *testing.T) {
 						},
 					},
 				},
-				Step: proto.ImportStepImport,
+				Step: StepImport,
 			},
 		},
 	}
 	require.Equal(t, plan, physicalPlan)
 
-	subtaskMetas1, err := physicalPlan.ToSubtaskMetas(planCtx, proto.ImportStepImport)
+	subtaskMetas1, err := physicalPlan.ToSubtaskMetas(planCtx, StepImport)
 	require.NoError(t, err)
 	subtaskMeta1 := ImportStepMeta{
 		ID:     chunkID,
@@ -101,15 +101,15 @@ func TestToPhysicalPlan(t *testing.T) {
 	bs, err = json.Marshal(subtaskMeta1)
 	require.NoError(t, err)
 	planCtx = planner.PlanCtx{
-		NextTaskStep: proto.ImportStepPostProcess,
+		NextTaskStep: StepPostProcess,
 	}
 	physicalPlan, err = logicalPlan.ToPhysicalPlan(planCtx)
 	require.NoError(t, err)
 	subtaskMetas2, err := physicalPlan.ToSubtaskMetas(planner.PlanCtx{
 		PreviousSubtaskMetas: map[proto.Step][][]byte{
-			proto.ImportStepImport: {bs},
+			StepImport: {bs},
 		},
-	}, proto.ImportStepPostProcess)
+	}, StepPostProcess)
 	require.NoError(t, err)
 	subtaskMeta2 := PostProcessStepMeta{
 		Checksum: Checksum{Size: 1, KVs: 2, Sum: 3},
@@ -176,7 +176,7 @@ func TestGenerateMergeSortSpecs(t *testing.T) {
 		Ctx:    context.Background(),
 		TaskID: 1,
 		PreviousSubtaskMetas: map[proto.Step][][]byte{
-			proto.ImportStepEncodeAndSort: encodeStepMetaBytes,
+			StepEncodeAndSort: encodeStepMetaBytes,
 		},
 	}
 	specs, err := generateMergeSortSpecs(planCtx)
@@ -244,8 +244,8 @@ func TestGetSortedKVMetas(t *testing.T) {
 	})
 	allKVMetas, err := getSortedKVMetasForIngest(planner.PlanCtx{
 		PreviousSubtaskMetas: map[proto.Step][][]byte{
-			proto.ImportStepEncodeAndSort: encodeStepMetaBytes,
-			proto.ImportStepMergeSort:     mergeStepMetas,
+			StepEncodeAndSort: encodeStepMetaBytes,
+			StepMergeSort:     mergeStepMetas,
 		},
 	})
 	require.NoError(t, err)

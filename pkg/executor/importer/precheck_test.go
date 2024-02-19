@@ -81,8 +81,7 @@ func TestCheckRequirements(t *testing.T) {
 
 	c := &importer.LoadDataController{
 		Plan: &importer.Plan{
-			DBName:         "test",
-			DataSourceType: importer.DataSourceTypeFile,
+			DBName: "test",
 		},
 		Table: tableObj,
 	}

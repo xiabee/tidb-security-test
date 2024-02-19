@@ -52,6 +52,10 @@ type dumpFileGcChecker struct {
 	planReplayerTaskStatus *planReplayerDumpTaskStatus
 }
 
+func parseType(s string) string {
+	return strings.Split(s, "_")[0]
+}
+
 func parseTime(s string) (time.Time, error) {
 	startIdx := strings.LastIndex(s, "_")
 	if startIdx == -1 {
@@ -571,7 +575,7 @@ type PlanReplayerDumpTask struct {
 
 	// variables used to dump the plan
 	StartTS           uint64
-	SessionBindings   []bindinfo.Bindings
+	SessionBindings   []*bindinfo.BindRecord
 	EncodedPlan       string
 	SessionVars       *variable.SessionVars
 	ExecStmts         []ast.StmtNode

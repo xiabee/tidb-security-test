@@ -8,8 +8,8 @@ go_library(
     deps = [
         "//br/pkg/lightning/log",
         "//br/pkg/lightning/verification",
-        "//pkg/parser/mysql",
-        "//pkg/table",
-        "//pkg/types",
+        "//parser/mysql",
+        "//table",
+        "//types",
     ],
 )

@@ -6,8 +6,8 @@ go_library(
     importpath = "github.com/pingcap/tidb/br/pkg/restore/ingestrec",
     visibility = ["//visibility:public"],
     deps = [
-        "//pkg/parser/model",
-        "//pkg/types",
+        "//parser/model",
+        "//types",
         "@com_github_pingcap_errors//:errors",
     ],
 )
@@ -20,7 +20,7 @@ go_test(
     shard_count = 3,
     deps = [
         ":ingestrec",
-        "//pkg/parser/model",
+        "//parser/model",
         "@com_github_pkg_errors//:errors",
         "@com_github_stretchr_testify//require",
     ],

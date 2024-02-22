@@ -37,15 +37,15 @@ import (
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/distsql"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/ranger"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/distsql"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/ranger"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -472,7 +472,7 @@ func appendRanges(tbl *model.TableInfo, tblID int64) ([]kv.KeyRange, error) {
 	}
 
 	retRanges := make([]kv.KeyRange, 0, 1+len(tbl.Indices))
-	kvRanges, err := distsql.TableHandleRangesToKVRanges(nil, []int64{tblID}, tbl.IsCommonHandle, ranges)
+	kvRanges, err := distsql.TableHandleRangesToKVRanges(nil, []int64{tblID}, tbl.IsCommonHandle, ranges, nil)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -483,7 +483,7 @@ func appendRanges(tbl *model.TableInfo, tblID int64) ([]kv.KeyRange, error) {
 			continue
 		}
 		ranges = ranger.FullRange()
-		idxRanges, err := distsql.IndexRangesToKVRanges(nil, tblID, index.ID, ranges)
+		idxRanges, err := distsql.IndexRangesToKVRanges(nil, tblID, index.ID, ranges, nil)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -788,7 +788,7 @@ func WriteBackupDDLJobs(metaWriter *metautil.MetaWriter, g glue.Glue, store kv.S
 	newestMeta := meta.NewSnapshotMeta(store.GetSnapshot(kv.NewVersion(version.Ver)))
 	allJobs := make([]*model.Job, 0)
 	err = g.UseOneShotSession(store, !needDomain, func(se glue.Session) error {
-		allJobs, err = ddl.GetAllDDLJobs(se.GetSessionCtx())
+		allJobs, err = ddl.GetAllDDLJobs(se.GetSessionCtx(), newestMeta)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1387,22 +1387,57 @@ func SendBackup(
 	var errReset error
 	var errBackup error
 
-	retry := -1
-	return utils.WithRetry(ctx, func() error {
-		retry += 1
-		if retry != 0 {
-			client, errReset = resetFn()
-			if errReset != nil {
-				return errors.Annotatef(errReset, "failed to reset backup connection on store:%d "+
-					"please check the tikv status", storeID)
-			}
-		}
-		logutil.CL(ctx).Info("try backup", zap.Int("retry time", retry))
+	for retry := 0; retry < backupRetryTimes; retry++ {
+		logutil.CL(ctx).Info("try backup",
+			zap.Int("retry time", retry),
+		)
 		errBackup = doSendBackup(ctx, client, req, respFn)
 		if errBackup != nil {
+			if isRetryableError(errBackup) {
+				time.Sleep(3 * time.Second)
+				client, errReset = resetFn()
+				if errReset != nil {
+					return errors.Annotatef(errReset, "failed to reset backup connection on store:%d "+
+						"please check the tikv status", storeID)
+				}
+				continue
+			}
+			logutil.CL(ctx).Error("fail to backup", zap.Uint64("StoreID", storeID), zap.Int("retry", retry))
 			return berrors.ErrFailedToConnect.Wrap(errBackup).GenWithStack("failed to create backup stream to store %d", storeID)
 		}
+		// finish backup
+		break
+	}
+	return nil
+}
 
-		return nil
-	}, utils.NewBackupSSTBackoffer())
+// gRPC communication cancelled with connection closing
+const (
+	gRPC_Cancel = "the client connection is closing"
+)
+
+// isRetryableError represents whether we should retry reset grpc connection.
+func isRetryableError(err error) bool {
+	// some errors can be retried
+	// https://github.com/pingcap/tidb/issues/34350
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded,
+		codes.ResourceExhausted, codes.Aborted, codes.Internal:
+		{
+			log.Warn("backup met some errors, these errors can be retry 5 times", zap.Error(err))
+			return true
+		}
+	}
+
+	// At least, there are two possible cancel() call,
+	// one from backup range, another from gRPC, here we retry when gRPC cancel with connection closing
+	if status.Code(err) == codes.Canceled {
+		if s, ok := status.FromError(err); ok {
+			if strings.Contains(s.Message(), gRPC_Cancel) {
+				log.Warn("backup met grpc cancel error, this errors can be retry 5 times", zap.Error(err))
+				return true
+			}
+		}
+	}
+	return false
 }

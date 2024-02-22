@@ -20,9 +20,9 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/promutil"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/promutil"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 	"go.uber.org/atomic"
@@ -68,7 +68,6 @@ const (
 	flagKey                      = "key"
 	flagCsvSeparator             = "csv-separator"
 	flagCsvDelimiter             = "csv-delimiter"
-	flagCsvLineTerminator        = "csv-line-terminator"
 	flagOutputFilenameTemplate   = "output-filename-template"
 	flagCompleteInsert           = "complete-insert"
 	flagParams                   = "params"
@@ -84,7 +83,7 @@ const (
 type Config struct {
 	storage.BackendOptions
 
-	SpecifiedTables          bool
+	specifiedTables          bool
 	AllowCleartextPasswords  bool
 	SortByPk                 bool
 	NoViews                  bool
@@ -114,19 +113,18 @@ type Config struct {
 		SSLKeyBytes  []byte `json:"-"`
 	}
 
-	LogLevel          string
-	LogFile           string
-	LogFormat         string
-	OutputDirPath     string
-	StatusAddr        string
-	Snapshot          string
-	Consistency       string
-	CsvNullValue      string
-	SQL               string
-	CsvSeparator      string
-	CsvDelimiter      string
-	CsvLineTerminator string
-	Databases         []string
+	LogLevel      string
+	LogFile       string
+	LogFormat     string
+	OutputDirPath string
+	StatusAddr    string
+	Snapshot      string
+	Consistency   string
+	CsvNullValue  string
+	SQL           string
+	CsvSeparator  string
+	CsvDelimiter  string
+	Databases     []string
 
 	TableFilter         filter.Filter `json:"-"`
 	Where               string
@@ -162,46 +160,41 @@ var ServerInfoUnknown = version.ServerInfo{
 func DefaultConfig() *Config {
 	allFilter, _ := filter.Parse([]string{"*.*"})
 	return &Config{
-		Databases:                nil,
-		Host:                     "127.0.0.1",
-		User:                     "root",
-		Port:                     3306,
-		Password:                 "",
-		Threads:                  4,
-		Logger:                   nil,
-		StatusAddr:               ":8281",
-		FileSize:                 UnspecifiedSize,
-		StatementSize:            DefaultStatementSize,
-		OutputDirPath:            ".",
-		ServerInfo:               ServerInfoUnknown,
-		SortByPk:                 true,
-		Tables:                   nil,
-		Snapshot:                 "",
-		Consistency:              ConsistencyTypeAuto,
-		NoViews:                  true,
-		NoSequences:              true,
-		Rows:                     UnspecifiedSize,
-		Where:                    "",
-		EscapeBackslash:          true,
-		FileType:                 "",
-		NoHeader:                 false,
-		NoSchemas:                false,
-		NoData:                   false,
-		CsvNullValue:             "\\N",
-		SQL:                      "",
-		TableFilter:              allFilter,
-		DumpEmptyDatabase:        true,
-		CsvDelimiter:             "\"",
-		CsvSeparator:             ",",
-		CsvLineTerminator:        "\r\n",
-		SessionParams:            make(map[string]interface{}),
-		OutputFileTemplate:       DefaultOutputFileTemplate,
-		PosAfterConnect:          false,
-		CollationCompatible:      LooseCollationCompatible,
-		SpecifiedTables:          false,
-		PromFactory:              promutil.NewDefaultFactory(),
-		PromRegistry:             promutil.NewDefaultRegistry(),
-		TransactionalConsistency: true,
+		Databases:           nil,
+		Host:                "127.0.0.1",
+		User:                "root",
+		Port:                3306,
+		Password:            "",
+		Threads:             4,
+		Logger:              nil,
+		StatusAddr:          ":8281",
+		FileSize:            UnspecifiedSize,
+		StatementSize:       DefaultStatementSize,
+		OutputDirPath:       ".",
+		ServerInfo:          ServerInfoUnknown,
+		SortByPk:            true,
+		Tables:              nil,
+		Snapshot:            "",
+		Consistency:         ConsistencyTypeAuto,
+		NoViews:             true,
+		NoSequences:         true,
+		Rows:                UnspecifiedSize,
+		Where:               "",
+		FileType:            "",
+		NoHeader:            false,
+		NoSchemas:           false,
+		NoData:              false,
+		CsvNullValue:        "\\N",
+		SQL:                 "",
+		TableFilter:         allFilter,
+		DumpEmptyDatabase:   true,
+		SessionParams:       make(map[string]interface{}),
+		OutputFileTemplate:  DefaultOutputFileTemplate,
+		PosAfterConnect:     false,
+		CollationCompatible: LooseCollationCompatible,
+		specifiedTables:     false,
+		PromFactory:         promutil.NewDefaultFactory(),
+		PromRegistry:        promutil.NewDefaultRegistry(),
 	}
 }
 
@@ -303,7 +296,6 @@ func (*Config) DefineFlags(flags *pflag.FlagSet) {
 	flags.String(flagKey, "", "The path name to the client private key file for TLS connection")
 	flags.String(flagCsvSeparator, ",", "The separator for csv files, default ','")
 	flags.String(flagCsvDelimiter, "\"", "The delimiter for values in csv files, default '\"'")
-	flags.String(flagCsvLineTerminator, "\r\n", "The line terminator for csv files, default '\\r\\n'")
 	flags.String(flagOutputFilenameTemplate, "", "The output filename template (without file extension)")
 	flags.Bool(flagCompleteInsert, false, "Use complete INSERT statements that include column names")
 	flags.StringToString(flagParams, nil, `Extra session variables used while dumping, accepted format: --params "character_set_client=latin1,character_set_connection=latin1"`)
@@ -451,10 +443,6 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	conf.CsvLineTerminator, err = flags.GetString(flagCsvLineTerminator)
-	if err != nil {
-		return errors.Trace(err)
-	}
 	conf.CompleteInsert, err = flags.GetBool(flagCompleteInsert)
 	if err != nil {
 		return errors.Trace(err)
@@ -508,7 +496,7 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
-	conf.SpecifiedTables = len(tablesList) > 0
+	conf.specifiedTables = len(tablesList) > 0
 	conf.Tables, err = GetConfTables(tablesList)
 	if err != nil {
 		return errors.Trace(err)

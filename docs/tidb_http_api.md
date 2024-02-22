@@ -591,7 +591,7 @@ timezone.*
     curl -X POST -d "transaction_summary_capacity={number}" http://{TiDBIP}:10080/settings
     ```
 
-1. Send upgrade operations to the cluster. The operations here include `start`, `finish` and `show`.
+1. Send upgrade operations to the cluster. The operations here include `start` and `finish`.
 
    ```shell
    curl -X POST http://{TiDBIP}:10080/upgrade/{op}

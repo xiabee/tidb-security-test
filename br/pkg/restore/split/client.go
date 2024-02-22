@@ -29,7 +29,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/httputil"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/store/pdtypes"
+	"github.com/pingcap/tidb/store/pdtypes"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -136,7 +136,7 @@ func (c *pdClient) ScatterRegions(ctx context.Context, regionInfo []*RegionInfo)
 			logutil.Key("end", v.Region.EndKey),
 			zap.Uint64("id", v.Region.Id))
 	}
-	resp, err := c.client.ScatterRegions(ctx, regionsID, pd.WithSkipStoreLimit())
+	resp, err := c.client.ScatterRegions(ctx, regionsID)
 	if err != nil {
 		return err
 	}

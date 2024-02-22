@@ -19,7 +19,6 @@ import (
 	"context"
 	"database/sql"
 	"math"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -40,10 +39,11 @@ import (
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
+	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/mathutil"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
@@ -112,7 +112,7 @@ func (g *TableRegionSizeGetterImpl) GetTableRegionSize(ctx context.Context, tabl
 // Too many split&scatter requests may put a lot of pressure on TiKV and PD.
 func (local *Backend) SplitAndScatterRegionInBatches(
 	ctx context.Context,
-	ranges []common.Range,
+	ranges []Range,
 	needSplit bool,
 	batchCnt int,
 ) error {
@@ -134,7 +134,7 @@ func (local *Backend) SplitAndScatterRegionInBatches(
 // TODO: remove this file and use br internal functions
 func (local *Backend) SplitAndScatterRegionByRanges(
 	ctx context.Context,
-	ranges []common.Range,
+	ranges []Range,
 	needSplit bool,
 ) (err error) {
 	if len(ranges) == 0 {
@@ -150,8 +150,8 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 		}()
 	}
 
-	minKey := codec.EncodeBytes([]byte{}, ranges[0].Start)
-	maxKey := codec.EncodeBytes([]byte{}, ranges[len(ranges)-1].End)
+	minKey := codec.EncodeBytes([]byte{}, ranges[0].start)
+	maxKey := codec.EncodeBytes([]byte{}, ranges[len(ranges)-1].end)
 
 	scatterRegions := make([]*split.RegionInfo, 0)
 	var retryKeys [][]byte
@@ -192,12 +192,12 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 			break
 		}
 
-		needSplitRanges := make([]common.Range, 0, len(ranges))
+		needSplitRanges := make([]Range, 0, len(ranges))
 		startKey := make([]byte, 0)
 		endKey := make([]byte, 0)
 		for _, r := range ranges {
-			startKey = codec.EncodeBytes(startKey, r.Start)
-			endKey = codec.EncodeBytes(endKey, r.End)
+			startKey = codec.EncodeBytes(startKey, r.start)
+			endKey = codec.EncodeBytes(endKey, r.end)
 			idx := sort.Search(len(regions), func(i int) bool {
 				return beforeEnd(startKey, regions[i].Region.EndKey)
 			})
@@ -256,7 +256,9 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 					var err1 error
 					region := sp.region
 					keys := sp.keys
-					slices.SortFunc(keys, bytes.Compare)
+					slices.SortFunc(keys, func(i, j []byte) bool {
+						return bytes.Compare(i, j) < 0
+					})
 					splitRegion := region
 					startIdx := 0
 					endIdx := 0
@@ -300,8 +302,8 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 							log.FromContext(ctx).Info("batch split region", zap.Uint64("region_id", splitRegion.Region.Id),
 								zap.Int("keys", endIdx-startIdx), zap.Binary("firstKey", keys[startIdx]),
 								zap.Binary("end", keys[endIdx-1]))
-							slices.SortFunc(newRegions, func(i, j *split.RegionInfo) int {
-								return bytes.Compare(i.Region.StartKey, j.Region.StartKey)
+							slices.SortFunc(newRegions, func(i, j *split.RegionInfo) bool {
+								return bytes.Compare(i.Region.StartKey, j.Region.StartKey) < 0
 							})
 							syncLock.Lock()
 							scatterRegions = append(scatterRegions, newRegions...)
@@ -346,7 +348,9 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 		if len(retryKeys) == 0 {
 			break
 		}
-		slices.SortFunc(retryKeys, bytes.Compare)
+		slices.SortFunc(retryKeys, func(i, j []byte) bool {
+			return bytes.Compare(i, j) < 0
+		})
 		minKey = codec.EncodeBytes([]byte{}, retryKeys[0])
 		maxKey = codec.EncodeBytes([]byte{}, nextKey(retryKeys[len(retryKeys)-1]))
 	}
@@ -369,23 +373,6 @@ func (local *Backend) SplitAndScatterRegionByRanges(
 	return nil
 }
 
-// ScatterRegion scatter the regions and retry if it fails. It returns error if can not scatter after max_retry.
-func (local *Backend) ScatterRegion(ctx context.Context, regionInfo *split.RegionInfo) error {
-	backoffer := split.NewWaitRegionOnlineBackoffer().(*split.WaitRegionOnlineBackoffer)
-	err := utils.WithRetry(ctx, func() error {
-		var failedErr error
-		err := local.splitCli.ScatterRegion(ctx, regionInfo)
-		if err != nil {
-			failedErr = errors.Annotatef(berrors.ErrPDBatchScanRegion, "scatter region failed")
-		}
-		return failedErr
-	}, backoffer)
-	if err != nil {
-		log.FromContext(ctx).Warn("scatter region failed", zap.Error(ctx.Err()))
-	}
-	return err
-}
-
 // BatchSplitRegions will split regions by the given split keys and tries to
 // scatter new regions. If split/scatter fails because new region is not ready,
 // this function will not return error.
@@ -402,22 +389,24 @@ func (local *Backend) BatchSplitRegions(
 		return nil, nil, errors.Annotatef(err, "batch split regions failed")
 	}
 	var failedErr error
-	splitRegions := newRegions
-	// wait for regions to be split
+	scatterRegions := newRegions
 	backoffer := split.NewWaitRegionOnlineBackoffer().(*split.WaitRegionOnlineBackoffer)
-	failedErr = utils.WithRetry(ctx, func() error {
+	_ = utils.WithRetry(ctx, func() error {
 		retryRegions := make([]*split.RegionInfo, 0)
-		for _, region := range splitRegions {
+		for _, region := range scatterRegions {
 			// Wait for a while until the regions successfully splits.
 			ok, err2 := local.hasRegion(ctx, region.Region.Id)
 			if !ok || err2 != nil {
-				if err2 == nil {
-					log.FromContext(ctx).Warn("split region failed", zap.Uint64("regionID", region.Region.Id))
-				} else {
-					log.FromContext(ctx).Warn("split region failed", zap.Uint64("regionID", region.Region.Id), zap.Error(err2))
+				failedErr = err2
+				if failedErr == nil {
+					failedErr = errors.Errorf("region %d not found", region.Region.Id)
 				}
 				retryRegions = append(retryRegions, region)
 				continue
+			}
+			if err = local.splitCli.ScatterRegion(ctx, region); err != nil {
+				failedErr = err
+				retryRegions = append(retryRegions, region)
 			}
 		}
 		if len(retryRegions) == 0 {
@@ -425,39 +414,23 @@ func (local *Backend) BatchSplitRegions(
 		}
 		// if the number of becomes smaller, we can infer TiKV side really
 		// made some progress so don't increase the retry times.
-		if len(retryRegions) < len(splitRegions) {
+		if len(retryRegions) < len(scatterRegions) {
 			backoffer.Stat.ReduceRetry()
 		}
-		log.FromContext(ctx).Warn("split region failed", zap.Int("regionCount", len(newRegions)),
-			zap.Int("failedCount", len(retryRegions)))
-		splitRegions = retryRegions
+		// the scatter operation likely fails because region replicate not finish yet
+		// pack them to one log to avoid printing a lot warn logs.
+		log.FromContext(ctx).Warn("scatter region failed", zap.Int("regionCount", len(newRegions)),
+			zap.Int("failedCount", len(retryRegions)), zap.Error(failedErr))
+		scatterRegions = retryRegions
 		// although it's not PDBatchScanRegion, WaitRegionOnlineBackoffer will only
 		// check this error class so we simply reuse it. Will refine WaitRegionOnlineBackoffer
 		// later
-		failedErr = errors.Annotatef(berrors.ErrPDBatchScanRegion, "split region failed")
+		failedErr = errors.Annotatef(berrors.ErrPDBatchScanRegion, "scatter region failed")
 		return failedErr
 	}, backoffer)
 
-	if failedErr != nil {
-		log.FromContext(ctx).Warn("split region failed for few regions", zap.Int("regionCount", len(newRegions)), zap.Int("failedCount", len(splitRegions)))
-	}
-
-	if ctx.Err() != nil {
-		return region, newRegions, ctx.Err()
-	}
-
-	// scatter regions
-	failedErr = nil
-	scatterRegions := newRegions
-	for _, region := range scatterRegions {
-		err = local.ScatterRegion(ctx, region)
-		if err != nil && failedErr == nil {
-			failedErr = err
-		}
-	}
-
 	// TODO: there's still change that we may skip scatter if the retry is timeout.
-	return region, newRegions, failedErr
+	return region, newRegions, ctx.Err()
 }
 
 func (local *Backend) hasRegion(ctx context.Context, regionID uint64) (bool, error) {
@@ -541,19 +514,19 @@ func (local *Backend) checkRegionScatteredOrReScatter(ctx context.Context, regio
 	default:
 		log.FromContext(ctx).Debug("scatter-region operator status is abnormal, will scatter region again",
 			logutil.Region(regionInfo.Region), zap.Stringer("status", resp.GetStatus()))
-		return false, local.ScatterRegion(ctx, regionInfo)
+		return false, local.splitCli.ScatterRegion(ctx, regionInfo)
 	}
 }
 
-func getSplitKeysByRanges(ranges []common.Range, regions []*split.RegionInfo, logger log.Logger) map[uint64][][]byte {
+func getSplitKeysByRanges(ranges []Range, regions []*split.RegionInfo, logger log.Logger) map[uint64][][]byte {
 	checkKeys := make([][]byte, 0)
 	var lastEnd []byte
 	for _, rg := range ranges {
-		if !bytes.Equal(lastEnd, rg.Start) {
-			checkKeys = append(checkKeys, rg.Start)
+		if !bytes.Equal(lastEnd, rg.start) {
+			checkKeys = append(checkKeys, rg.start)
 		}
-		checkKeys = append(checkKeys, rg.End)
-		lastEnd = rg.End
+		checkKeys = append(checkKeys, rg.end)
+		lastEnd = rg.end
 	}
 	return getSplitKeys(checkKeys, regions, logger)
 }
@@ -619,22 +592,22 @@ func keyInsideRegion(region *metapb.Region, key []byte) bool {
 	return bytes.Compare(key, region.GetStartKey()) >= 0 && (beforeEnd(key, region.GetEndKey()))
 }
 
-func intersectRange(region *metapb.Region, rg common.Range) common.Range {
+func intersectRange(region *metapb.Region, rg Range) Range {
 	var startKey, endKey []byte
 	if len(region.StartKey) > 0 {
 		_, startKey, _ = codec.DecodeBytes(region.StartKey, []byte{})
 	}
-	if bytes.Compare(startKey, rg.Start) < 0 {
-		startKey = rg.Start
+	if bytes.Compare(startKey, rg.start) < 0 {
+		startKey = rg.start
 	}
 	if len(region.EndKey) > 0 {
 		_, endKey, _ = codec.DecodeBytes(region.EndKey, []byte{})
 	}
-	if beforeEnd(rg.End, endKey) {
-		endKey = rg.End
+	if beforeEnd(rg.end, endKey) {
+		endKey = rg.end
 	}
 
-	return common.Range{Start: startKey, End: endKey}
+	return Range{start: startKey, end: endKey}
 }
 
 // StoreWriteLimiter is used to limit the write rate of a store.
@@ -748,12 +721,6 @@ func EstimateCompactionThreshold(files []mydump.FileInfo, cp *checkpoints.TableC
 	}
 	totalRawFileSize *= factor
 
-	return EstimateCompactionThreshold2(totalRawFileSize)
-}
-
-// EstimateCompactionThreshold2 estimate SST files compression threshold by total row file size
-// see EstimateCompactionThreshold for more details.
-func EstimateCompactionThreshold2(totalRawFileSize int64) int64 {
 	// try restrict the total file number within 512
 	threshold := totalRawFileSize / 512
 	threshold = utils.NextPowerOfTwo(threshold)

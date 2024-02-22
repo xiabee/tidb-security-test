@@ -27,9 +27,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -109,7 +109,7 @@ func checkStoresAlive(ctx context.Context,
 	// Check live tikv.
 	stores, err := util.GetAllTiKVStores(ctx, pdclient, storeBehavior)
 	if err != nil {
-		log.Error("failed to get store", zap.Error(err))
+		log.Error("fail to get store", zap.Error(err))
 		return errors.Trace(err)
 	}
 
@@ -150,7 +150,7 @@ func NewMgr(
 
 	controller, err := pdutil.NewPdController(ctx, pdAddrs, tlsConf, securityOption)
 	if err != nil {
-		log.Error("failed to create pd controller", zap.Error(err))
+		log.Error("fail to create pd controller", zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 	if checkRequirements {

@@ -38,7 +38,7 @@ const codeTemplate = `
 package main
 
 import (
-	"github.com/pingcap/tidb/pkg/plugin"
+	"github.com/pingcap/tidb/plugin"
 )
 
 func PluginManifest() *plugin.Manifest {

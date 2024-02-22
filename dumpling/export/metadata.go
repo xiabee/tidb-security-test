@@ -28,7 +28,7 @@ type globalMetadata struct {
 
 const (
 	metadataPath       = "metadata"
-	metadataTimeLayout = time.DateTime
+	metadataTimeLayout = "2006-01-02 15:04:05"
 
 	fileFieldIndex    = 0
 	posFieldIndex     = 1

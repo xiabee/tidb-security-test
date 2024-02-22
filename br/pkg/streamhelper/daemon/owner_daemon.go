@@ -8,7 +8,7 @@ import (
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/owner"
+	"github.com/pingcap/tidb/owner"
 	"go.uber.org/zap"
 )
 

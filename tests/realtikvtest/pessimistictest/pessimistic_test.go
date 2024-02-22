@@ -26,32 +26,31 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/auth"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/terror"
-	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/sessiontxn"
-	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
-	"github.com/pingcap/tidb/pkg/store/gcworker"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/external"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/deadlockhistory"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/auth"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
+	plannercore "github.com/pingcap/tidb/planner/core"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessiontxn"
+	storeerr "github.com/pingcap/tidb/store/driver/error"
+	"github.com/pingcap/tidb/store/gcworker"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/testkit/external"
 	"github.com/pingcap/tidb/tests/realtikvtest"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/deadlockhistory"
 	"github.com/stretchr/testify/require"
-	tikvcfg "github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
@@ -288,10 +287,10 @@ func TestSingleStatementRollback(t *testing.T) {
 	tableStart := tablecodec.GenTableRecordPrefix(tblID)
 	cluster.SplitKeys(tableStart, tableStart.PrefixNext(), 2)
 	region1Key := codec.EncodeBytes(nil, tablecodec.EncodeRowKeyWithHandle(tblID, kv.IntHandle(1)))
-	region1, _, _, _ := cluster.GetRegionByKey(region1Key)
+	region1, _, _ := cluster.GetRegionByKey(region1Key)
 	region1ID := region1.Id
 	region2Key := codec.EncodeBytes(nil, tablecodec.EncodeRowKeyWithHandle(tblID, kv.IntHandle(3)))
-	region2, _, _, _ := cluster.GetRegionByKey(region2Key)
+	region2, _, _ := cluster.GetRegionByKey(region2Key)
 	region2ID := region2.Id
 
 	syncCh := make(chan bool)
@@ -666,10 +665,10 @@ func TestAsyncRollBackNoWait(t *testing.T) {
 	// test get ts failed for handlePessimisticLockError when using nowait
 	// even though async rollback for pessimistic lock may rollback later locked key if get ts failed from pd
 	// the txn correctness should be ensured
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/ExecStmtGetTsError", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/ExecStmtGetTsError", "return"))
 	require.NoError(t, failpoint.Enable("tikvclient/beforeAsyncPessimisticRollback", "sleep(100)"))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/ExecStmtGetTsError"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/ExecStmtGetTsError"))
 		require.NoError(t, failpoint.Disable("tikvclient/beforeAsyncPessimisticRollback"))
 	}()
 	tk.MustExec("begin pessimistic")
@@ -2815,7 +2814,7 @@ func TestLazyUniquenessCheckWithStatementRetry(t *testing.T) {
 }
 
 func TestRCPointWriteLockIfExists(t *testing.T) {
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/assertPessimisticLockErr", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/assertPessimisticLockErr", "return"))
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 
 	tk := testkit.NewTestKit(t, store)
@@ -2970,7 +2969,7 @@ func TestRCPointWriteLockIfExists(t *testing.T) {
 	tk.MustExec("rollback")
 	tk2.MustExec("rollback")
 
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/assertPessimisticLockErr"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/assertPessimisticLockErr"))
 }
 
 func TestLazyUniquenessCheckWithInconsistentReadResult(t *testing.T) {
@@ -3249,8 +3248,8 @@ func TestFairLockingRetry(t *testing.T) {
 	mustTimeout(t, res, time.Millisecond*50)
 
 	// Pause on pessimistic retry.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/pessimisticSelectForUpdateRetry", "pause"))
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/pessimisticDMLRetry", "pause"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/pessimisticSelectForUpdateRetry", "pause"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/pessimisticDMLRetry", "pause"))
 	tk2.MustExec("commit")
 	mustTimeout(t, res, time.Millisecond*50)
 
@@ -3258,8 +3257,8 @@ func TestFairLockingRetry(t *testing.T) {
 	mustLocked("select * from t2 where id = 10 for update nowait")
 
 	// Still locked after the retry.
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/pessimisticSelectForUpdateRetry"))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/pessimisticDMLRetry"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/pessimisticSelectForUpdateRetry"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/pessimisticDMLRetry"))
 	mustRecv(t, res)
 	mustLocked("select * from t2 where id = 10 for update nowait")
 
@@ -3281,8 +3280,8 @@ func TestFairLockingRetry(t *testing.T) {
 
 	tk2.MustExec("update t1 set v = 11 where id = 1")
 	// Pause on pessimistic retry.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/pessimisticSelectForUpdateRetry", "pause"))
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/pessimisticDMLRetry", "pause"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/pessimisticSelectForUpdateRetry", "pause"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/executor/pessimisticDMLRetry", "pause"))
 	tk2.MustExec("commit")
 	mustTimeout(t, res, time.Millisecond*50)
 
@@ -3290,8 +3289,8 @@ func TestFairLockingRetry(t *testing.T) {
 	mustLocked("select * from t2 where id = 10 for update nowait")
 
 	// The lock is released after the pessimistic retry, but the other row is locked instead.
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/pessimisticSelectForUpdateRetry"))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/pessimisticDMLRetry"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/pessimisticSelectForUpdateRetry"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/pessimisticDMLRetry"))
 	mustRecv(t, res)
 	tk2.MustExec("begin pessimistic")
 	tk2.MustQuery("select * from t2 where id = 10 for update").Check(testkit.Rows("10 100"))
@@ -3364,12 +3363,12 @@ func TestPointLockNonExistentKeyWithFairLockingUnderRC(t *testing.T) {
 	tk.MustExec("begin pessimistic")
 	tk2.MustExec("begin pessimistic")
 	tk2.MustExec("insert into t values (1, 2)")
-	require.NoError(t, failpoint.EnableWith("github.com/pingcap/tidb/pkg/store/driver/txn/lockedWithConflictOccurs", "return", func() error {
+	require.NoError(t, failpoint.EnableWith("github.com/pingcap/tidb/store/driver/txn/lockedWithConflictOccurs", "return", func() error {
 		lockedWithConflictCounter++
 		return nil
 	}))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/store/driver/txn/lockedWithConflictOccurs"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/store/driver/txn/lockedWithConflictOccurs"))
 	}()
 	ch := mustQueryAsync(tk, "select * from t where a = 1 for update")
 	mustTimeout(t, ch, time.Millisecond*100)
@@ -3566,38 +3565,4 @@ func TestIssue42937(t *testing.T) {
 		"4 41",
 		"5 11",
 	))
-}
-
-func TestEndTxnOnLockExpire(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("create table t(a int, b int)")
-	tk.MustExec("prepare ps_commit from 'commit'")
-	tk.MustExec("prepare ps_rollback from 'rollback'")
-
-	defer setLockTTL(300).restore()
-	defer tikvcfg.UpdateGlobal(func(conf *tikvcfg.Config) {
-		conf.MaxTxnTTL = 500
-	})()
-
-	for _, tt := range []struct {
-		name      string
-		endTxnSQL string
-	}{
-		{"CommitTxt", "commit"},
-		{"CommitBin", "execute ps_commit"},
-		{"RollbackTxt", "rollback"},
-		{"RollbackBin", "execute ps_rollback"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			tk.Exec("delete from t")
-			tk.Exec("insert into t values (1, 1)")
-			tk.Exec("begin pessimistic")
-			tk.Exec("update t set b = 10 where a = 1")
-			time.Sleep(time.Second)
-			tk.MustContainErrMsg("select * from t", "TTL manager has timed out")
-			tk.MustExec(tt.endTxnSQL)
-		})
-	}
 }

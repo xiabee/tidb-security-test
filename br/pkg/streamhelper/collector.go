@@ -15,8 +15,8 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/metrics"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/metrics"
 	"go.uber.org/zap"
 )
 
@@ -187,8 +187,6 @@ func (c *storeCollector) sendPendingRequests(ctx context.Context) error {
 	}
 	cps, err := cli.GetLastFlushTSOfRegion(ctx, &c.currentRequest)
 	if err != nil {
-		// try disable connection cache if met error
-		_ = c.service.ClearCache(ctx, c.storeID)
 		return err
 	}
 	metrics.GetCheckpointBatchSize.WithLabelValues("checkpoint").Observe(float64(len(c.currentRequest.GetRegions())))

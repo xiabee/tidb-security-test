@@ -28,9 +28,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	pd "github.com/tikv/pd/client"
@@ -209,7 +209,6 @@ type Config struct {
 	TLS                 TLSConfig `json:"tls" toml:"tls"`
 	RateLimit           uint64    `json:"rate-limit" toml:"rate-limit"`
 	ChecksumConcurrency uint      `json:"checksum-concurrency" toml:"checksum-concurrency"`
-	TableConcurrency    uint      `json:"table-concurrency" toml:"table-concurrency"`
 	Concurrency         uint32    `json:"concurrency" toml:"concurrency"`
 	Checksum            bool      `json:"checksum" toml:"checksum"`
 	SendCreds           bool      `json:"send-credentials-to-tikv" toml:"send-credentials-to-tikv"`
@@ -270,7 +269,8 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 	flags.String(flagCA, "", "CA certificate path for TLS connection")
 	flags.String(flagCert, "", "Certificate path for TLS connection")
 	flags.String(flagKey, "", "Private key path for TLS connection")
-	flags.Uint(flagChecksumConcurrency, variable.DefChecksumTableConcurrency, "The concurrency of checksumming in one table")
+	flags.Uint(flagChecksumConcurrency, variable.DefChecksumTableConcurrency, "The concurrency of table checksumming")
+	_ = flags.MarkHidden(flagChecksumConcurrency)
 
 	flags.Uint64(flagRateLimit, unlimited, "The rate limit of the task, MB/s per node")
 	flags.Bool(flagChecksum, true, "Run checksum at end of task")
@@ -690,25 +690,26 @@ func ReadBackupMeta(
 	}
 	metaData, err := s.ReadFile(ctx, fileName)
 	if err != nil {
-		if !gcsObjectNotFound(err) {
+		if gcsObjectNotFound(err) {
+			// change gcs://bucket/abc/def to gcs://bucket/abc and read defbackupmeta
+			oldPrefix := u.GetGcs().GetPrefix()
+			newPrefix, file := path.Split(oldPrefix)
+			newFileName := file + fileName
+			u.GetGcs().Prefix = newPrefix
+			s, err = storage.New(ctx, u, storageOpts(cfg))
+			if err != nil {
+				return nil, nil, nil, errors.Trace(err)
+			}
+			log.Info("retry load metadata in gcs", zap.String("newPrefix", newPrefix), zap.String("newFileName", newFileName))
+			metaData, err = s.ReadFile(ctx, newFileName)
+			if err != nil {
+				return nil, nil, nil, errors.Trace(err)
+			}
+			// reset prefix for tikv download sst file correctly.
+			u.GetGcs().Prefix = oldPrefix
+		} else {
 			return nil, nil, nil, errors.Annotate(err, "load backupmeta failed")
 		}
-		// change gcs://bucket/abc/def to gcs://bucket/abc and read defbackupmeta
-		oldPrefix := u.GetGcs().GetPrefix()
-		newPrefix, file := path.Split(oldPrefix)
-		newFileName := file + fileName
-		u.GetGcs().Prefix = newPrefix
-		s, err = storage.New(ctx, u, storageOpts(cfg))
-		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
-		}
-		log.Info("retry load metadata in gcs", zap.String("newPrefix", newPrefix), zap.String("newFileName", newFileName))
-		metaData, err = s.ReadFile(ctx, newFileName)
-		if err != nil {
-			return nil, nil, nil, errors.Trace(err)
-		}
-		// reset prefix for tikv download sst file correctly.
-		u.GetGcs().Prefix = oldPrefix
 	}
 
 	// the prefix of backupmeta file is iv(16 bytes) if encryption method is valid

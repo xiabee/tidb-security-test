@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -38,12 +37,11 @@ import (
 	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -266,10 +264,6 @@ func (*targetInfoGetter) CheckRequirements(ctx context.Context, _ *backend.Check
 
 type tidbBackend struct {
 	db          *sql.DB
-	conflictCfg config.Conflict
-	// onDuplicate is the type of INSERT SQL. It may be different with
-	// conflictCfg.Strategy to implement other feature, but the behaviour in caller's
-	// view should be the same.
 	onDuplicate string
 	errorMgr    *errormanager.ErrorManager
 }
@@ -280,33 +274,15 @@ var _ backend.Backend = (*tidbBackend)(nil)
 //
 // The backend does not take ownership of `db`. Caller should close `db`
 // manually after the backend expired.
-func NewTiDBBackend(
-	ctx context.Context,
-	db *sql.DB,
-	conflict config.Conflict,
-	errorMgr *errormanager.ErrorManager,
-) backend.Backend {
-	var onDuplicate string
-	switch conflict.Strategy {
-	case config.ErrorOnDup:
-		onDuplicate = config.ErrorOnDup
-	case config.ReplaceOnDup:
-		onDuplicate = config.ReplaceOnDup
-	case config.IgnoreOnDup:
-		if conflict.MaxRecordRows == 0 {
-			onDuplicate = config.IgnoreOnDup
-		} else {
-			// need to stop batch insert on error and fall back to row by row insert
-			// to record the row
-			onDuplicate = config.ErrorOnDup
-		}
+func NewTiDBBackend(ctx context.Context, db *sql.DB, onDuplicate string, errorMgr *errormanager.ErrorManager) backend.Backend {
+	switch onDuplicate {
+	case config.ReplaceOnDup, config.IgnoreOnDup, config.ErrorOnDup:
 	default:
-		log.FromContext(ctx).Warn("unsupported conflict strategy, overwrite with `error`")
-		onDuplicate = config.ErrorOnDup
+		log.FromContext(ctx).Warn("unsupported action on duplicate, overwrite with `replace`")
+		onDuplicate = config.ReplaceOnDup
 	}
 	return &tidbBackend{
 		db:          db,
-		conflictCfg: conflict,
 		onDuplicate: onDuplicate,
 		errorMgr:    errorMgr,
 	}
@@ -620,15 +596,13 @@ rowLoop:
 				continue rowLoop
 			case common.IsRetryableError(err):
 				// retry next loop
-			case be.errorMgr.TypeErrorsRemain() > 0 ||
-				be.errorMgr.ConflictErrorsRemain() > 0 ||
-				(be.conflictCfg.Strategy == config.ErrorOnDup && !be.errorMgr.RecordErrorOnce()):
+			case be.errorMgr.TypeErrorsRemain() > 0:
 				// WriteBatchRowsToDB failed in the batch mode and can not be retried,
 				// we need to redo the writing row-by-row to find where the error locates (and skip it correctly in future).
 				if err = be.WriteRowsToDB(ctx, tableName, columnNames, r); err != nil {
-					// If the error is not nil, it means we reach the max error count in the
-					// non-batch mode or this is "error" conflict strategy.
-					return errors.Annotatef(err, "[%s] write rows exceed conflict threshold", tableName)
+					// If the error is not nil, it means we reach the max error count in the non-batch mode.
+					// For now, we will treat like maxErrorCount is always 0. So we will just return if any error occurs.
+					return errors.Annotatef(err, "[%s] write rows reach max error count %d", tableName, 0)
 				}
 				continue rowLoop
 			default:
@@ -725,101 +699,39 @@ func (be *tidbBackend) buildStmt(tableName string, columnNames []string) *string
 }
 
 func (be *tidbBackend) execStmts(ctx context.Context, stmtTasks []stmtTask, tableName string, batch bool) error {
-stmtLoop:
 	for _, stmtTask := range stmtTasks {
-		var (
-			result sql.Result
-			err    error
-		)
 		for i := 0; i < writeRowsMaxRetryTimes; i++ {
 			stmt := stmtTask.stmt
-			result, err = be.db.ExecContext(ctx, stmt)
-			if err == nil {
-				affected, err2 := result.RowsAffected()
-				if err2 != nil {
-					// should not happen
-					return errors.Trace(err2)
+			_, err := be.db.ExecContext(ctx, stmt)
+			if err != nil {
+				if !common.IsContextCanceledError(err) {
+					log.FromContext(ctx).Error("execute statement failed",
+						zap.Array("rows", stmtTask.rows), zap.String("stmt", redact.String(stmt)), zap.Error(err))
 				}
-				diff := int64(len(stmtTask.rows)) - affected
-				if diff < 0 {
-					diff = -diff
+				// It's batch mode, just return the error.
+				if batch {
+					return errors.Trace(err)
 				}
-				if diff > 0 {
-					if err2 = be.errorMgr.RecordDuplicateCount(diff); err2 != nil {
-						return err2
-					}
+				// Retry the non-batch insert here if this is not the last retry.
+				if common.IsRetryableError(err) && i != writeRowsMaxRetryTimes-1 {
+					continue
 				}
-				continue stmtLoop
-			}
-
-			if !common.IsContextCanceledError(err) {
-				log.FromContext(ctx).Error("execute statement failed",
-					zap.Array("rows", stmtTask.rows), zap.String("stmt", redact.String(stmt)), zap.Error(err))
-			}
-			// It's batch mode, just return the error. Caller will fall back to row-by-row mode.
-			if batch {
+				firstRow := stmtTask.rows[0]
+				err = be.errorMgr.RecordTypeError(ctx, log.FromContext(ctx), tableName, firstRow.path, firstRow.offset, firstRow.insertStmt, err)
+				if err == nil {
+					// max-error not yet reached (error consumed by errorMgr), proceed to next stmtTask.
+					break
+				}
 				return errors.Trace(err)
 			}
-			if !common.IsRetryableError(err) {
-				break
-			}
+			// No error, continue the next stmtTask.
+			break
 		}
-
-		firstRow := stmtTask.rows[0]
-
-		if isDupEntryError(err) {
-			// rowID is ignored in tidb backend
-			if be.conflictCfg.Strategy == config.ErrorOnDup {
-				be.errorMgr.RecordDuplicateOnce(
-					ctx,
-					log.FromContext(ctx),
-					tableName,
-					firstRow.path,
-					firstRow.offset,
-					err.Error(),
-					0,
-					firstRow.insertStmt,
-				)
-				return err
-			}
-			err = be.errorMgr.RecordDuplicate(
-				ctx,
-				log.FromContext(ctx),
-				tableName,
-				firstRow.path,
-				firstRow.offset,
-				err.Error(),
-				0,
-				firstRow.insertStmt,
-			)
-		} else {
-			err = be.errorMgr.RecordTypeError(
-				ctx,
-				log.FromContext(ctx),
-				tableName,
-				firstRow.path,
-				firstRow.offset,
-				firstRow.insertStmt,
-				err,
-			)
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		// max-error not yet reached (error consumed by errorMgr), proceed to next stmtTask.
 	}
 	failpoint.Inject("FailIfImportedSomeRows", func() {
 		panic("forcing failure due to FailIfImportedSomeRows, before saving checkpoint")
 	})
 	return nil
-}
-
-func isDupEntryError(err error) bool {
-	merr, ok := errors.Cause(err).(*gmysql.MySQLError)
-	if !ok {
-		return false
-	}
-	return merr.Number == errno.ErrDupEntry
 }
 
 // FlushEngine flushes the data in the engine to the underlying storage.

@@ -4,14 +4,12 @@ package restore
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,28 +43,28 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/config"
-	ddlutil "github.com/pingcap/tidb/pkg/ddl/util"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/domain/infosync"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/statistics/handle"
-	"github.com/pingcap/tidb/pkg/store/helper"
-	"github.com/pingcap/tidb/pkg/store/pdtypes"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/collate"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
-	"github.com/pingcap/tidb/pkg/util/sqlexec"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/config"
+	ddlutil "github.com/pingcap/tidb/ddl/util"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/domain/infosync"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/statistics/handle"
+	"github.com/pingcap/tidb/store/helper"
+	"github.com/pingcap/tidb/store/pdtypes"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/collate"
+	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/sqlexec"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/tikv/client-go/v2/oracle"
-	kvutil "github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
@@ -131,7 +129,7 @@ type Client struct {
 
 	// statHandler and dom are used for analyze table after restore.
 	// it will backup stats with #dump.DumpStatsToJSON
-	// and restore stats with #dump.LoadStatsFromJSONNoUpdate
+	// and restore stats with #dump.LoadStatsFromJSON
 	statsHandler *handle.Handle
 	dom          *domain.Domain
 
@@ -232,22 +230,24 @@ func (rc *Client) Init(g glue.Glue, store kv.Storage) error {
 		rc.backupMeta = new(backuppb.BackupMeta)
 	}
 
-	// There are different ways to create session between in binary and in SQL.
-	//
-	// Maybe allow user modify the DDL concurrency isn't necessary,
-	// because executing DDL is really I/O bound (or, algorithm bound?),
-	// and we cost most of time at waiting DDL jobs be enqueued.
-	// So these jobs won't be faster or slower when machine become faster or slower,
-	// hence make it a fixed value would be fine.
-	rc.dbPool, err = makeDBPool(defaultDDLConcurrency, func() (*DB, error) {
-		db, _, err := NewDB(g, store, rc.policyMode)
-		return db, err
-	})
-	if err != nil {
-		log.Warn("create session pool failed, we will send DDLs only by created sessions",
-			zap.Error(err),
-			zap.Int("sessionCount", len(rc.dbPool)),
-		)
+	// Only in binary we can use multi-thread sessions to create tables.
+	// so use OwnStorage() to tell whether we are use binary or SQL.
+	if g.OwnsStorage() {
+		// Maybe allow user modify the DDL concurrency isn't necessary,
+		// because executing DDL is really I/O bound (or, algorithm bound?),
+		// and we cost most of time at waiting DDL jobs be enqueued.
+		// So these jobs won't be faster or slower when machine become faster or slower,
+		// hence make it a fixed value would be fine.
+		rc.dbPool, err = makeDBPool(defaultDDLConcurrency, func() (*DB, error) {
+			db, _, err := NewDB(g, store, rc.policyMode)
+			return db, err
+		})
+		if err != nil {
+			log.Warn("create session pool failed, we will send DDLs only by created sessions",
+				zap.Error(err),
+				zap.Int("sessionCount", len(rc.dbPool)),
+			)
+		}
 	}
 	return errors.Trace(err)
 }
@@ -261,18 +261,28 @@ func (rc *Client) InitCheckpoint(
 	s storage.ExternalStorage,
 	taskName string,
 	config *pdutil.ClusterConfig,
-	checkpointFirstRun bool,
+	useCheckpoint bool,
 ) (map[int64]map[string]struct{}, *pdutil.ClusterConfig, error) {
 	var (
 		// checkpoint sets distinguished by range key
 		checkpointSetWithTableID = make(map[int64]map[string]struct{})
 
 		checkpointClusterConfig *pdutil.ClusterConfig
-
-		err error
 	)
 
-	if !checkpointFirstRun {
+	// if not use checkpoint, return empty checkpoint ranges and new gc-safepoint id
+	if !useCheckpoint {
+		return checkpointSetWithTableID, nil, nil
+	}
+
+	// if the checkpoint metadata exists in the external storage, the restore is not
+	// for the first time.
+	exists, err := checkpoint.ExistsRestoreCheckpoint(ctx, s, taskName)
+	if err != nil {
+		return checkpointSetWithTableID, nil, errors.Trace(err)
+	}
+
+	if exists {
 		// load the checkpoint since this is not the first time to restore
 		meta, err := checkpoint.LoadCheckpointMetadataForRestore(ctx, s, taskName)
 		if err != nil {
@@ -477,21 +487,12 @@ func (rc *Client) GetRewriteMode() RewriteMode {
 	return rc.rewriteMode
 }
 
-func (rc *Client) closeConn() {
+// Close a client.
+func (rc *Client) Close() {
 	// rc.db can be nil in raw kv mode.
 	if rc.db != nil {
 		rc.db.Close()
 	}
-	for _, db := range rc.dbPool {
-		db.Close()
-	}
-}
-
-// Close a client.
-func (rc *Client) Close() {
-	// close the connection, and it must be succeed when in SQL mode.
-	rc.closeConn()
-
 	if rc.rawKVClient != nil {
 		rc.rawKVClient.Close()
 	}
@@ -774,38 +775,13 @@ func (rc *Client) GetDBSchema(dom *domain.Domain, dbName model.CIStr) (*model.DB
 	return info.SchemaByName(dbName)
 }
 
-// CreateDatabases creates databases. If the client has the db pool, it would create it.
-func (rc *Client) CreateDatabases(ctx context.Context, dbs []*utils.Database) error {
+// CreateDatabase creates a database.
+func (rc *Client) CreateDatabase(ctx context.Context, db *model.DBInfo) error {
 	if rc.IsSkipCreateSQL() {
-		log.Info("skip create database")
+		log.Info("skip create database", zap.Stringer("name", db.Name))
 		return nil
 	}
 
-	if len(rc.dbPool) == 0 {
-		log.Info("create databases sequentially")
-		for _, db := range dbs {
-			err := rc.createDatabaseWithDBConn(ctx, db.Info, rc.db)
-			if err != nil {
-				return errors.Trace(err)
-			}
-		}
-		return nil
-	}
-
-	log.Info("create databases in db pool", zap.Int("pool size", len(rc.dbPool)))
-	eg, ectx := errgroup.WithContext(ctx)
-	workers := utils.NewWorkerPool(uint(len(rc.dbPool)), "DB DDL workers")
-	for _, db_ := range dbs {
-		db := db_
-		workers.ApplyWithIDInErrorGroup(eg, func(id uint64) error {
-			conn := rc.dbPool[id%uint64(len(rc.dbPool))]
-			return rc.createDatabaseWithDBConn(ectx, db.Info, conn)
-		})
-	}
-	return eg.Wait()
-}
-
-func (rc *Client) createDatabaseWithDBConn(ctx context.Context, db *model.DBInfo, conn *DB) error {
 	log.Info("create database", zap.Stringer("name", db.Name))
 
 	if !rc.supportPolicy {
@@ -815,12 +791,12 @@ func (rc *Client) createDatabaseWithDBConn(ctx context.Context, db *model.DBInfo
 	}
 
 	if db.PlacementPolicyRef != nil {
-		if err := conn.ensurePlacementPolicy(ctx, db.PlacementPolicyRef.Name, rc.policyMap); err != nil {
+		if err := rc.db.ensurePlacementPolicy(ctx, db.PlacementPolicyRef.Name, rc.policyMap); err != nil {
 			return errors.Trace(err)
 		}
 	}
 
-	return conn.CreateDatabase(ctx, db)
+	return rc.db.CreateDatabase(ctx, db)
 }
 
 // CreateTables creates multiple tables, and returns their rewrite rules.
@@ -845,8 +821,8 @@ func (rc *Client) CreateTables(
 		newTables = append(newTables, et.Table)
 	}
 	// Let's ensure that it won't break the original order.
-	slices.SortFunc(newTables, func(i, j *model.TableInfo) int {
-		return cmp.Compare(tbMapping[i.Name.String()], tbMapping[j.Name.String()])
+	slices.SortFunc(newTables, func(i, j *model.TableInfo) bool {
+		return tbMapping[i.Name.String()] < tbMapping[j.Name.String()]
 	})
 
 	select {
@@ -965,17 +941,19 @@ func (rc *Client) GoCreateTables(
 
 	if rc.batchDdlSize > minBatchDdlSize && len(rc.dbPool) > 0 {
 		err = rc.createTablesInWorkerPool(ctx, dom, tables, newTS, outCh)
+
 		if err == nil {
 			defer log.Debug("all tables are created")
 			close(outCh)
 			return outCh
-		} else if !utils.FallBack2CreateTable(err) {
+		} else if utils.FallBack2CreateTable(err) {
+			// fall back to old create table (sequential create table)
+			log.Info("fall back to the sequential create table")
+		} else {
 			errCh <- err
 			close(outCh)
 			return outCh
 		}
-		// fall back to old create table (sequential create table)
-		log.Info("fall back to the sequential create table")
 	}
 
 	createOneTable := func(c context.Context, db *DB, t *metautil.Table) error {
@@ -1084,11 +1062,6 @@ func (rc *Client) createTablesInWorkerPool(ctx context.Context, dom *domain.Doma
 		})
 	}
 	return eg.Wait()
-}
-
-// NeedCheckFreshCluster is every time. except restore from a checkpoint or user has not set filter argument.
-func (rc *Client) NeedCheckFreshCluster(ExplicitFilter bool, firstRun bool) bool {
-	return rc.IsFull() && !ExplicitFilter && firstRun
 }
 
 // CheckTargetClusterFresh check whether the target cluster is fresh or not
@@ -1221,8 +1194,8 @@ func (rc *Client) CheckSysTableCompatibility(dom *domain.Domain, tables []*metau
 // ExecDDLs executes the queries of the ddl jobs.
 func (rc *Client) ExecDDLs(ctx context.Context, ddlJobs []*model.Job) error {
 	// Sort the ddl jobs by schema version in ascending order.
-	slices.SortFunc(ddlJobs, func(i, j *model.Job) int {
-		return cmp.Compare(i.BinlogInfo.SchemaVersion, j.BinlogInfo.SchemaVersion)
+	slices.SortFunc(ddlJobs, func(i, j *model.Job) bool {
+		return i.BinlogInfo.SchemaVersion < j.BinlogInfo.SchemaVersion
 	})
 
 	for _, job := range ddlJobs {
@@ -1739,7 +1712,6 @@ func (rc *Client) execChecksum(
 			SetConcurrency(concurrency).
 			SetOldKeyspace(tbl.RewriteRule.OldKeyspace).
 			SetNewKeyspace(tbl.RewriteRule.NewKeyspace).
-			SetExplicitRequestSourceType(kvutil.ExplicitTypeBR).
 			Build()
 		if err != nil {
 			return errors.Trace(err)
@@ -1784,10 +1756,7 @@ func (rc *Client) execChecksum(
 func (rc *Client) GoUpdateMetaAndLoadStats(ctx context.Context, inCh <-chan *CreatedTable, errCh chan<- error) chan *CreatedTable {
 	log.Info("Start to update meta then load stats")
 	outCh := DefaultOutputTableChan()
-	workers := utils.NewWorkerPool(16, "UpdateStats")
-	// The rc.db is not thread safe
-	var updateMetaLock sync.Mutex
-
+	workers := utils.NewWorkerPool(1, "UpdateStats")
 	go concurrentHandleTablesCh(ctx, inCh, outCh, errCh, workers, func(c context.Context, tbl *CreatedTable) error {
 		oldTable := tbl.OldTable
 		// Not need to return err when failed because of update analysis-meta
@@ -1795,8 +1764,6 @@ func (rc *Client) GoUpdateMetaAndLoadStats(ctx context.Context, inCh <-chan *Cre
 		if err != nil {
 			log.Error("getTS failed", zap.Error(err))
 		} else {
-			updateMetaLock.Lock()
-
 			log.Info("start update metas",
 				zap.Stringer("table", oldTable.Info.Name),
 				zap.Stringer("db", oldTable.DB.Name))
@@ -1804,8 +1771,6 @@ func (rc *Client) GoUpdateMetaAndLoadStats(ctx context.Context, inCh <-chan *Cre
 			if err != nil {
 				log.Error("update stats meta failed", zap.Any("table", tbl.Table), zap.Error(err))
 			}
-
-			updateMetaLock.Unlock()
 		}
 
 		if oldTable.Stats != nil {
@@ -1814,8 +1779,7 @@ func (rc *Client) GoUpdateMetaAndLoadStats(ctx context.Context, inCh <-chan *Cre
 				zap.Int64("new id", tbl.Table.ID),
 			)
 			start := time.Now()
-			// NOTICE: skip updating cache after load stats from json
-			if err := rc.statsHandler.LoadStatsFromJSONNoUpdate(ctx, rc.dom.InfoSchema(), oldTable.Stats, 0); err != nil {
+			if err := rc.statsHandler.LoadStatsFromJSON(rc.dom.InfoSchema(), oldTable.Stats); err != nil {
 				log.Error("analyze table failed", zap.Any("table", oldTable.Stats), zap.Error(err))
 			}
 			log.Info("restore stat done",
@@ -1994,7 +1958,6 @@ func (rc *Client) FailpointDoChecksumForLogRestore(
 				SetConcurrency(4).
 				SetOldKeyspace(rewriteRule.OldKeyspace).
 				SetNewKeyspace(rewriteRule.NewKeyspace).
-				SetExplicitRequestSourceType(kvutil.ExplicitTypeBR).
 				Build()
 			if err != nil {
 				return errors.Trace(err)
@@ -2858,14 +2821,26 @@ func (rc *Client) InitSchemasReplaceForDDL(
 }
 
 func SortMetaKVFiles(files []*backuppb.DataFileInfo) []*backuppb.DataFileInfo {
-	slices.SortFunc(files, func(i, j *backuppb.DataFileInfo) int {
-		if c := cmp.Compare(i.GetMinTs(), j.GetMinTs()); c != 0 {
-			return c
+	slices.SortFunc(files, func(i, j *backuppb.DataFileInfo) bool {
+		if i.GetMinTs() < j.GetMinTs() {
+			return true
+		} else if i.GetMinTs() > j.GetMinTs() {
+			return false
 		}
-		if c := cmp.Compare(i.GetMaxTs(), j.GetMaxTs()); c != 0 {
-			return c
+
+		if i.GetMaxTs() < j.GetMaxTs() {
+			return true
+		} else if i.GetMaxTs() > j.GetMaxTs() {
+			return false
 		}
-		return cmp.Compare(i.GetResolvedTs(), j.GetResolvedTs())
+
+		if i.GetResolvedTs() < j.GetResolvedTs() {
+			return true
+		} else if i.GetResolvedTs() > j.GetResolvedTs() {
+			return false
+		}
+
+		return true
 	})
 	return files
 }
@@ -3120,8 +3095,8 @@ func (rc *Client) RestoreBatchMetaKVFiles(
 	}
 
 	// sort these entries.
-	slices.SortFunc(curKvEntries, func(i, j *KvEntryWithTS) int {
-		return cmp.Compare(i.ts, j.ts)
+	slices.SortFunc(curKvEntries, func(i, j *KvEntryWithTS) bool {
+		return i.ts < j.ts
 	})
 
 	// restore these entries with rawPut() method.
@@ -3306,7 +3281,7 @@ func (rc *Client) generateRepairIngestIndexSQLs(
 				return sqls, false, errors.Trace(err)
 			}
 			sqls = checkpointSQLs.SQLs
-			log.Info("load ingest index repair sqls from checkpoint", zap.String("category", "ingest"), zap.Reflect("sqls", sqls))
+			log.Info("[ingest] load ingest index repair sqls from checkpoint", zap.Reflect("sqls", sqls))
 			return sqls, true, nil
 		}
 	}
@@ -3408,7 +3383,9 @@ NEXTSQL:
 				if indexInfo.Name.O == sql.IndexName {
 					// find the same name index, but not the same index id,
 					// which means the repaired index id is created
-					if _, err := fmt.Fprintf(console.Out(), "%s ... %s\n", progressTitle, color.HiGreenString("SKIPPED DUE TO CHECKPOINT MODE")); err != nil {
+					if _, err := console.Out().Write(
+						[]byte(fmt.Sprintf("%s ... %s\n", progressTitle, color.HiGreenString("SKIPPED DUE TO CHECKPOINT MODE"))),
+					); err != nil {
 						return errors.Trace(err)
 					}
 					continue NEXTSQL
@@ -3734,43 +3711,43 @@ func CheckNewCollationEnable(
 	g glue.Glue,
 	storage kv.Storage,
 	CheckRequirements bool,
-) (bool, error) {
+) error {
+	if backupNewCollationEnable == "" {
+		if CheckRequirements {
+			return errors.Annotatef(berrors.ErrUnknown,
+				"the config 'new_collations_enabled_on_first_bootstrap' not found in backupmeta. "+
+					"you can use \"show config WHERE name='new_collations_enabled_on_first_bootstrap';\" to manually check the config. "+
+					"if you ensure the config 'new_collations_enabled_on_first_bootstrap' in backup cluster is as same as restore cluster, "+
+					"use --check-requirements=false to skip this check")
+		}
+		log.Warn("the config 'new_collations_enabled_on_first_bootstrap' is not in backupmeta")
+		return nil
+	}
+
 	se, err := g.CreateSession(storage)
 	if err != nil {
-		return false, errors.Trace(err)
+		return errors.Trace(err)
 	}
 
 	newCollationEnable, err := se.GetGlobalVariable(utils.GetTidbNewCollationEnabled())
 	if err != nil {
-		return false, errors.Trace(err)
+		return errors.Trace(err)
 	}
+
+	if !strings.EqualFold(backupNewCollationEnable, newCollationEnable) {
+		return errors.Annotatef(berrors.ErrUnknown,
+			"the config 'new_collations_enabled_on_first_bootstrap' not match, upstream:%v, downstream: %v",
+			backupNewCollationEnable, newCollationEnable)
+	}
+
 	// collate.newCollationEnabled is set to 1 when the collate package is initialized,
 	// so we need to modify this value according to the config of the cluster
 	// before using the collate package.
 	enabled := newCollationEnable == "True"
 	// modify collate.newCollationEnabled according to the config of the cluster
 	collate.SetNewCollationEnabledForTest(enabled)
-	log.Info(fmt.Sprintf("set %s", utils.TidbNewCollationEnabled), zap.Bool("new_collation_enabled", enabled))
-
-	if backupNewCollationEnable == "" {
-		if CheckRequirements {
-			return enabled, errors.Annotatef(berrors.ErrUnknown,
-				"the value '%s' not found in backupmeta. "+
-					"you can use \"SELECT VARIABLE_VALUE FROM mysql.tidb WHERE VARIABLE_NAME='%s';\" to manually check the config. "+
-					"if you ensure the value '%s' in backup cluster is as same as restore cluster, use --check-requirements=false to skip this check",
-				utils.TidbNewCollationEnabled, utils.TidbNewCollationEnabled, utils.TidbNewCollationEnabled)
-		}
-		log.Warn(fmt.Sprintf("the config '%s' is not in backupmeta", utils.TidbNewCollationEnabled))
-		return enabled, nil
-	}
-
-	if !strings.EqualFold(backupNewCollationEnable, newCollationEnable) {
-		return enabled, errors.Annotatef(berrors.ErrUnknown,
-			"the config '%s' not match, upstream:%v, downstream: %v",
-			utils.TidbNewCollationEnabled, backupNewCollationEnable, newCollationEnable)
-	}
-
-	return enabled, nil
+	log.Info("set new_collation_enabled", zap.Bool("new_collation_enabled", enabled))
+	return nil
 }
 
 type waitTiFlashBackoffer struct {

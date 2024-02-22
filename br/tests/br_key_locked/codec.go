@@ -21,7 +21,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/util/codec"
 	pd "github.com/tikv/pd/client"
 )
 

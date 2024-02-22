@@ -26,8 +26,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -169,10 +169,6 @@ func (t trivialFlushStream) SendMsg(m interface{}) error {
 
 func (t trivialFlushStream) RecvMsg(m interface{}) error {
 	return nil
-}
-
-func (f *fakeStore) GetID() uint64 {
-	return f.id
 }
 
 func (f *fakeStore) SubscribeFlushEvent(ctx context.Context, in *logbackup.SubscribeFlushEventRequest, opts ...grpc.CallOption) (logbackup.LogBackup_SubscribeFlushEventClient, error) {
@@ -317,17 +313,6 @@ func (f *fakeCluster) GetLogBackupClient(ctx context.Context, storeID uint64) (l
 		f.testCtx.Fatalf("the store %d doesn't exist", storeID)
 	}
 	return cli, nil
-}
-
-func (f *fakeCluster) ClearCache(ctx context.Context, storeID uint64) error {
-	if f.onGetClient != nil {
-		err := f.onGetClient(storeID)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-	return nil
 }
 
 // Stores returns the store metadata from the cluster.

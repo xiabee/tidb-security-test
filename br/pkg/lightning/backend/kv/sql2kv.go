@@ -17,26 +17,25 @@
 package kv
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
-	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql" //nolint: goimports
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql" //nolint: goimports
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/types"
+	"golang.org/x/exp/slices"
 )
 
 type tableKVEncoder struct {
@@ -127,8 +126,8 @@ func CollectGeneratedColumns(se *Session, meta *model.TableInfo, cols []*table.C
 	}
 
 	// order the result by column offset so they match the evaluation order.
-	slices.SortFunc(genCols, func(i, j GeneratedCol) int {
-		return cmp.Compare(cols[i.Index].Offset, cols[j.Index].Offset)
+	slices.SortFunc(genCols, func(i, j GeneratedCol) bool {
+		return cols[i.Index].Offset < cols[j.Index].Offset
 	})
 	return genCols, nil
 }
@@ -174,13 +173,6 @@ func Rows2KvPairs(rows encode.Rows) []common.KvPair {
 // constructed in such way.
 func Row2KvPairs(row encode.Row) []common.KvPair {
 	return row.(*Pairs).Pairs
-}
-
-// ClearRow recycles the memory used by the row.
-func ClearRow(row encode.Row) {
-	if pairs, ok := row.(*Pairs); ok {
-		pairs.Clear()
-	}
 }
 
 // Encode a row of data into KV pairs.

@@ -11,8 +11,8 @@ import (
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/config"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/config"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )

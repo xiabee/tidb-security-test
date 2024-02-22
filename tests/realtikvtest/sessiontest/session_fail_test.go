@@ -16,15 +16,13 @@ package sessiontest
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"testing"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
 	"github.com/stretchr/testify/require"
 )
@@ -42,10 +40,10 @@ func TestFailStatementCommitInRetry(t *testing.T) {
 	tk.MustExec("insert into t values (2),(3),(4),(5)")
 	tk.MustExec("insert into t values (6)")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockCommitError8942", `return(true)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockCommitError8942", `return(true)`))
 	_, err := tk.Exec("commit")
 	require.Error(t, err)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockCommitError8942"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockCommitError8942"))
 
 	tk.MustExec("insert into t values (6)")
 	tk.MustQuery(`select * from t`).Check(testkit.Rows("6"))
@@ -59,9 +57,9 @@ func TestGetTSFailDirtyState(t *testing.T) {
 	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 	tk.MustExec("create table t (id int)")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockGetTSFail", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockGetTSFail", "return"))
 	ctx := failpoint.WithHook(context.Background(), func(ctx context.Context, fpname string) bool {
-		return fpname == "github.com/pingcap/tidb/pkg/session/mockGetTSFail"
+		return fpname == "github.com/pingcap/tidb/session/mockGetTSFail"
 	})
 	_, err := tk.Session().Execute(ctx, "select * from t")
 	if config.GetGlobalConfig().Store == "unistore" {
@@ -74,12 +72,12 @@ func TestGetTSFailDirtyState(t *testing.T) {
 	// affected by this fail flag.
 	tk.MustExec("insert into t values (1)")
 	tk.MustQuery(`select * from t`).Check(testkit.Rows("1"))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockGetTSFail"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockGetTSFail"))
 }
 
 func TestGetTSFailDirtyStateInretry(t *testing.T) {
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockCommitError"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockCommitError"))
 		require.NoError(t, failpoint.Disable("tikvclient/mockGetTSErrorInRetry"))
 	}()
 
@@ -90,7 +88,7 @@ func TestGetTSFailDirtyStateInretry(t *testing.T) {
 	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
 	tk.MustExec("create table t (id int)")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockCommitError", `return(true)`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockCommitError", `return(true)`))
 	// This test will mock a PD timeout error, and recover then.
 	// Just make mockGetTSErrorInRetry return true once, and then return false.
 	require.NoError(t, failpoint.Enable("tikvclient/mockGetTSErrorInRetry",
@@ -225,95 +223,4 @@ func TestIssue42426(t *testing.T) {
 	tk.MustExec(`DELETE FROM sbtest1 WHERE id=502571;`)
 	tk.MustExec(`INSERT INTO sbtest1 (id, k, c, pad) VALUES (502571, 499449, "abc", "def");`)
 	tk.MustExec(`COMMIT;`)
-}
-
-// for https://github.com/pingcap/tidb/issues/44123
-func TestIndexLookUpWithStaticPrune(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a bigint, b decimal(41,16), c set('a', 'b', 'c'), key idx_c(c)) partition by hash(a) partitions 4")
-	tk.MustExec("insert into t values (1,2.0,'c')")
-	tk.MustHavePlan("select * from t use index(idx_c) order by c limit 5", "Limit")
-	tk.MustExec("select * from t use index(idx_c) order by c limit 5")
-}
-
-func TestTiKVClientReadTimeout(t *testing.T) {
-	if !*realtikvtest.WithRealTiKV {
-		t.Skip("skip test since it's only work for tikv")
-	}
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("create table t (a int primary key, b int)")
-
-	rows := tk.MustQuery("select count(*) from information_schema.cluster_info where `type`='tikv';").Rows()
-	require.Len(t, rows, 1)
-	tikvCount, err := strconv.Atoi(rows[0][0].(string))
-	require.NoError(t, err)
-	if tikvCount < 3 {
-		t.Skip("skip test since it's only work for tikv with at least 3 node")
-	}
-
-	require.NoError(t, failpoint.Enable("tikvclient/mockBatchClientSendDelay", "return(100)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("tikvclient/mockBatchClientSendDelay"))
-	}()
-	tk.MustExec("set @stale_read_ts_var=now(6);")
-
-	// Test for point_get request
-	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t where a = 1").Rows()
-	require.Len(t, rows, 1)
-	explain := fmt.Sprintf("%v", rows[0])
-	// num_rpc is 4 because there are 3 replica, and first try all 3 replicas with specified timeout will failed, then try again with default timeout will success.
-	require.Regexp(t, ".*Point_Get.* Get:{num_rpc:4, total_time:.*", explain)
-
-	// Test for batch_point_get request
-	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t where a in (1,2)").Rows()
-	require.Len(t, rows, 1)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*Batch_Point_Get.* BatchGet:{num_rpc:4, total_time:.*", explain)
-
-	// Test for cop request
-	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t where b > 1").Rows()
-	require.Len(t, rows, 3)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 4.*", explain)
-
-	// Test for stale read.
-	tk.MustExec("insert into t values (1,1), (2,2);")
-	tk.MustExec("set @@tidb_replica_read='closest-replicas';")
-	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t as of timestamp(@stale_read_ts_var) where b > 1").Rows()
-	require.Len(t, rows, 3)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: (3|4|5).*", explain)
-
-	// Test for tikv_client_read_timeout session variable.
-	tk.MustExec("set @@tikv_client_read_timeout=1;")
-	// Test for point_get request
-	rows = tk.MustQuery("explain analyze select * from t where a = 1").Rows()
-	require.Len(t, rows, 1)
-	explain = fmt.Sprintf("%v", rows[0])
-	// num_rpc is 4 because there are 3 replica, and first try all 3 replicas with specified timeout will failed, then try again with default timeout will success.
-	require.Regexp(t, ".*Point_Get.* Get:{num_rpc:4, total_time:.*", explain)
-
-	// Test for batch_point_get request
-	rows = tk.MustQuery("explain analyze select * from t where a in (1,2)").Rows()
-	require.Len(t, rows, 1)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*Batch_Point_Get.* BatchGet:{num_rpc:4, total_time:.*", explain)
-
-	// Test for cop request
-	rows = tk.MustQuery("explain analyze select * from t where b > 1").Rows()
-	require.Len(t, rows, 3)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 4.*", explain)
-
-	// Test for stale read.
-	tk.MustExec("set @@tidb_replica_read='closest-replicas';")
-	rows = tk.MustQuery("explain analyze select * from t as of timestamp(@stale_read_ts_var) where b > 1").Rows()
-	require.Len(t, rows, 3)
-	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: (3|4|5).*", explain)
 }

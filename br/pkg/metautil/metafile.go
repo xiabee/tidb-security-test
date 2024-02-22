@@ -23,10 +23,10 @@ import (
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/summary"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/statistics/handle/util"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/encrypt"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/statistics/handle"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/encrypt"
 	"go.uber.org/zap"
 )
 
@@ -153,7 +153,7 @@ type Table struct {
 	TotalBytes      uint64
 	Files           []*backuppb.File
 	TiFlashReplicas int
-	Stats           *util.JSONTable
+	Stats           *handle.JSONTable
 }
 
 // NoChecksum checks whether the table has a calculated checksum.
@@ -344,9 +344,9 @@ func (reader *MetaReader) ReadSchemasFiles(ctx context.Context, output chan<- *T
 					return errors.Trace(err)
 				}
 			}
-			var stats *util.JSONTable
+			var stats *handle.JSONTable
 			if s.Stats != nil {
-				stats = &util.JSONTable{}
+				stats = &handle.JSONTable{}
 				if err := json.Unmarshal(s.Stats, stats); err != nil {
 					return errors.Trace(err)
 				}
@@ -545,9 +545,6 @@ type MetaWriter struct {
 
 	// records the total datafile size
 	totalDataFileSize int
-
-	// records the total metafile size for backupmeta v2
-	totalMetaFileSize int
 }
 
 // NewMetaWriter creates MetaWriter.
@@ -685,9 +682,6 @@ func (writer *MetaWriter) FlushBackupMeta(ctx context.Context) error {
 		writer.backupMeta.Version = MetaV1
 	}
 
-	// update the total size of backup files (include data files and meta files)
-	writer.backupMeta.BackupSize = writer.MetaFilesSize() + writer.ArchiveSize() + uint64(writer.backupMeta.Size())
-
 	// Flush the writer.backupMeta to storage
 	backupMetaData, err := proto.Marshal(writer.backupMeta)
 	if err != nil {
@@ -768,7 +762,6 @@ func (writer *MetaWriter) flushMetasV2(ctx context.Context, op AppendOp) error {
 		return errors.Trace(err)
 	}
 
-	writer.totalMetaFileSize += len(encyptedContent)
 	if err = writer.storage.WriteFile(ctx, fname, encyptedContent); err != nil {
 		return errors.Trace(err)
 	}
@@ -794,12 +787,6 @@ func (writer *MetaWriter) ArchiveSize() uint64 {
 	}
 	total += uint64(writer.totalDataFileSize)
 	return total
-}
-
-// MetaFilesSize represents the size of meta files from backupmeta v2,
-// must be called after everything finishes by `FinishWriteMetas`.
-func (writer *MetaWriter) MetaFilesSize() uint64 {
-	return uint64(writer.totalMetaFileSize)
 }
 
 // Backupmeta clones a backupmeta.

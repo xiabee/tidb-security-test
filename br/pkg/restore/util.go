@@ -24,9 +24,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/codec"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -281,9 +281,7 @@ func makeDBPool(size uint, dbFactory func() (*DB, error)) ([]*DB, error) {
 		if e != nil {
 			return dbPool, e
 		}
-		if db != nil {
-			dbPool = append(dbPool, db)
-		}
+		dbPool = append(dbPool, db)
 	}
 	return dbPool, nil
 }

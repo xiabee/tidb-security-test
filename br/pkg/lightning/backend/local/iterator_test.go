@@ -16,11 +16,9 @@ package local
 
 import (
 	"bytes"
-	"fmt"
 	"math/rand"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"testing"
 	"time"
 
@@ -29,12 +27,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/stretchr/testify/require"
 )
-
-func randBytes(n int) []byte {
-	b := make([]byte, n)
-	rand.Read(b)
-	return b
-}
 
 func TestDupDetectIterator(t *testing.T) {
 	var pairs []common.KvPair
@@ -109,7 +101,7 @@ func TestDupDetectIterator(t *testing.T) {
 		i = j
 	}
 
-	keyAdapter := common.DupDetectKeyAdapter{}
+	keyAdapter := dupDetectKeyAdapter{}
 
 	// Write pairs to db after shuffling the pairs.
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -129,7 +121,7 @@ func TestDupDetectIterator(t *testing.T) {
 	dupDB, err := pebble.Open(filepath.Join(storeDir, "duplicates"), &pebble.Options{})
 	require.NoError(t, err)
 	var iter Iter
-	iter = newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), common.DupDetectOpt{})
+	iter = newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), DupDetectOpt{})
 	sort.Slice(pairs, func(i, j int) bool {
 		key1 := keyAdapter.Encode(nil, pairs[i].Key, pairs[i].RowID)
 		key2 := keyAdapter.Encode(nil, pairs[j].Key, pairs[j].RowID)
@@ -214,7 +206,7 @@ func TestDupDetectIterSeek(t *testing.T) {
 	db, err := pebble.Open(filepath.Join(storeDir, "kv"), &pebble.Options{})
 	require.NoError(t, err)
 
-	keyAdapter := common.DupDetectKeyAdapter{}
+	keyAdapter := dupDetectKeyAdapter{}
 	wb := db.NewBatch()
 	for _, p := range pairs {
 		key := keyAdapter.Encode(nil, p.Key, p.RowID)
@@ -224,7 +216,7 @@ func TestDupDetectIterSeek(t *testing.T) {
 
 	dupDB, err := pebble.Open(filepath.Join(storeDir, "duplicates"), &pebble.Options{})
 	require.NoError(t, err)
-	iter := newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), common.DupDetectOpt{})
+	iter := newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), DupDetectOpt{})
 
 	require.True(t, iter.Seek([]byte{1, 2, 3, 1}))
 	require.Equal(t, pairs[1].Val, iter.Value())
@@ -236,7 +228,7 @@ func TestDupDetectIterSeek(t *testing.T) {
 }
 
 func TestKeyAdapterEncoding(t *testing.T) {
-	keyAdapter := common.DupDetectKeyAdapter{}
+	keyAdapter := dupDetectKeyAdapter{}
 	srcKey := []byte{1, 2, 3}
 	v := keyAdapter.Encode(nil, srcKey, common.EncodeIntRowID(1))
 	resKey, err := keyAdapter.Decode(nil, v)
@@ -247,33 +239,4 @@ func TestKeyAdapterEncoding(t *testing.T) {
 	resKey, err = keyAdapter.Decode(nil, v)
 	require.NoError(t, err)
 	require.EqualValues(t, srcKey, resKey)
-}
-
-func BenchmarkDupDetectIter(b *testing.B) {
-	keyAdapter := common.DupDetectKeyAdapter{}
-	db, _ := pebble.Open(filepath.Join(b.TempDir(), "kv"), &pebble.Options{})
-	wb := db.NewBatch()
-	val := []byte("value")
-	for i := 0; i < 100_000; i++ {
-		keyNum := i
-		// mimic we have 20% duplication
-		if keyNum%5 == 0 {
-			keyNum--
-		}
-		keyStr := fmt.Sprintf("%09d", keyNum)
-		rowID := strconv.Itoa(i)
-		key := keyAdapter.Encode(nil, []byte(keyStr), []byte(rowID))
-		wb.Set(key, val, nil)
-	}
-	wb.Commit(pebble.Sync)
-
-	dupDB, _ := pebble.Open(filepath.Join(b.TempDir(), "dup"), &pebble.Options{})
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		iter := newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), common.DupDetectOpt{})
-		keyCnt := 0
-		for iter.First(); iter.Valid(); iter.Next() {
-			keyCnt++
-		}
-	}
 }

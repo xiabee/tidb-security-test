@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/types"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/types"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 )
 
@@ -644,8 +644,6 @@ var (
 	dropTable1Job                 = &model.Job{Type: model.ActionDropTable, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`["",[],[""]]`)}
 	dropTable0Partition1Job       = &model.Job{Type: model.ActionDropTablePartition, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[73]]`)}
 	reorganizeTable0Partition1Job = &model.Job{Type: model.ActionReorganizePartition, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[73]]`)}
-	removeTable0Partition1Job     = &model.Job{Type: model.ActionRemovePartitioning, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[73]]`)}
-	alterTable0Partition1Job      = &model.Job{Type: model.ActionAlterTablePartitioning, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[[73]]`)}
 	rollBackTable0IndexJob        = &model.Job{Type: model.ActionAddIndex, State: model.JobStateRollbackDone, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[2,false,[72,73,74]]`)}
 	rollBackTable1IndexJob        = &model.Job{Type: model.ActionAddIndex, State: model.JobStateRollbackDone, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable1OldID, RawArgs: json.RawMessage(`[2,false,[]]`)}
 	addTable0IndexJob             = &model.Job{Type: model.ActionAddIndex, State: model.JobStateSynced, SchemaID: mDDLJobDBOldID, TableID: mDDLJobTable0OldID, RawArgs: json.RawMessage(`[2,false,[72,73,74]]`)}
@@ -794,20 +792,6 @@ func TestDeleteRangeForMDDLJob(t *testing.T) {
 
 	// reorganize table partition1
 	err = schemaReplace.deleteRange(reorganizeTable0Partition1Job)
-	require.NoError(t, err)
-	targs = <-midr.tableCh
-	require.Equal(t, len(targs.tableIDs), 1)
-	require.Equal(t, targs.tableIDs[0], mDDLJobPartition1NewID)
-
-	// remove table partition1
-	err = schemaReplace.deleteRange(removeTable0Partition1Job)
-	require.NoError(t, err)
-	targs = <-midr.tableCh
-	require.Equal(t, len(targs.tableIDs), 1)
-	require.Equal(t, targs.tableIDs[0], mDDLJobPartition1NewID)
-
-	// alter table partition1
-	err = schemaReplace.deleteRange(alterTable0Partition1Job)
 	require.NoError(t, err)
 	targs = <-midr.tableCh
 	require.Equal(t, len(targs.tableIDs), 1)

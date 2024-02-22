@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -27,13 +26,14 @@ import (
 	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/tablecodec"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
+	"golang.org/x/exp/slices"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -124,36 +124,6 @@ func getStartedMockedCluster(t *testing.T) *mock.Cluster {
 	return cluster
 }
 
-func TestNeedCheckTargetClusterFresh(t *testing.T) {
-	// cannot use shared `mc`, other parallel case may change it.
-	cluster := getStartedMockedCluster(t)
-	defer cluster.Stop()
-
-	g := gluetidb.New()
-	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
-	err := client.Init(g, cluster.Storage)
-	require.NoError(t, err)
-
-	// not set filter and first run with checkpoint
-	require.True(t, client.NeedCheckFreshCluster(false, true))
-
-	// skip check when has checkpoint
-	require.False(t, client.NeedCheckFreshCluster(false, false))
-
-	// skip check when set --filter
-	require.False(t, client.NeedCheckFreshCluster(true, false))
-
-	// skip check when has set --filter and has checkpoint
-	require.False(t, client.NeedCheckFreshCluster(true, true))
-
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/restore/mock-incr-backup-data", "return(false)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/br/pkg/restore/mock-incr-backup-data"))
-	}()
-	// skip check when increment backup
-	require.False(t, client.NeedCheckFreshCluster(false, true))
-}
-
 func TestCheckTargetClusterFresh(t *testing.T) {
 	// cannot use shared `mc`, other parallel case may change it.
 	cluster := getStartedMockedCluster(t)
@@ -167,7 +137,7 @@ func TestCheckTargetClusterFresh(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, client.CheckTargetClusterFresh(ctx))
 
-	require.NoError(t, client.CreateDatabases(ctx, []*utils.Database{{Info: &model.DBInfo{Name: model.NewCIStr("user_db")}}}))
+	require.NoError(t, client.CreateDatabase(ctx, &model.DBInfo{Name: model.NewCIStr("user_db")}))
 	require.True(t, berrors.ErrRestoreNotFreshCluster.Equal(client.CheckTargetClusterFresh(ctx)))
 }
 
@@ -1902,25 +1872,19 @@ func TestCheckNewCollationEnable(t *testing.T) {
 			CheckRequirements:           true,
 			isErr:                       true,
 		},
-		{
-			backupMeta:                  &backuppb.BackupMeta{NewCollationsEnabled: ""},
-			newCollationEnableInCluster: "False",
-			CheckRequirements:           false,
-			isErr:                       false,
-		},
 	}
 
 	for i, ca := range caseList {
 		g := &gluetidb.MockGlue{
 			GlobalVars: map[string]string{"new_collation_enabled": ca.newCollationEnableInCluster},
 		}
-		enabled, err := restore.CheckNewCollationEnable(ca.backupMeta.GetNewCollationsEnabled(), g, nil, ca.CheckRequirements)
+		err := restore.CheckNewCollationEnable(ca.backupMeta.GetNewCollationsEnabled(), g, nil, ca.CheckRequirements)
+
 		t.Logf("[%d] Got Error: %v\n", i, err)
 		if ca.isErr {
 			require.Error(t, err)
 		} else {
 			require.NoError(t, err)
 		}
-		require.Equal(t, ca.newCollationEnableInCluster == "True", enabled)
 	}
 }

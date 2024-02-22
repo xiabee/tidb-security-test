@@ -22,13 +22,12 @@ import (
 	"strings"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	regexprrouter "github.com/pingcap/tidb/pkg/util/regexpr-router"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	regexprrouter "github.com/pingcap/tidb/util/regexpr-router"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"go.uber.org/zap"
 )
 
@@ -128,6 +127,11 @@ func (m *MDTableMeta) GetSchema(ctx context.Context, store storage.ExternalStora
 		return "", err
 	}
 	return string(schema), nil
+}
+
+// FullTableName return FQDN of the table.
+func (m *MDTableMeta) FullTableName() string {
+	return common.UniqueTable(m.DB, m.Name)
 }
 
 // MDLoaderSetupConfig stores the configs when setting up a MDLoader.
@@ -245,7 +249,13 @@ func NewMyDumpLoaderWithStore(ctx context.Context, cfg *config.Config,
 		}
 	}
 
-	f, err := filter.Parse(cfg.Mydumper.Filter)
+	// use the legacy black-white-list if defined. otherwise use the new filter.
+	var f filter.Filter
+	if cfg.HasLegacyBlackWhiteList() {
+		f, err = filter.ParseMySQLReplicationRules(&cfg.BWList)
+	} else {
+		f, err = filter.Parse(cfg.Mydumper.Filter)
+	}
 	if err != nil {
 		return nil, common.ErrInvalidConfig.Wrap(err).GenWithStack("parse filter failed")
 	}
@@ -350,10 +360,11 @@ func (s *mdLoaderSetup) setup(ctx context.Context) error {
 		return errors.New("file iterator is not defined")
 	}
 	if err := fileIter.IterateFiles(ctx, s.constructFileInfo); err != nil {
-		if !s.setupCfg.ReturnPartialResultOnError {
+		if s.setupCfg.ReturnPartialResultOnError {
+			gerr = err
+		} else {
 			return common.ErrStorageUnknown.Wrap(err).GenWithStack("list file failed")
 		}
-		gerr = err
 	}
 	if err := s.route(); err != nil {
 		return common.ErrTableRoute.Wrap(err).GenWithStackByArgs()
@@ -455,7 +466,7 @@ func (s *mdLoaderSetup) constructFileInfo(ctx context.Context, path string, size
 		return errors.Annotatef(err, "apply file routing on file '%s' failed", path)
 	}
 	if res == nil {
-		logger.Info("file is filtered by file router", zap.String("category", "loader"))
+		logger.Info("[loader] file is filtered by file router")
 		return nil
 	}
 
@@ -465,7 +476,7 @@ func (s *mdLoaderSetup) constructFileInfo(ctx context.Context, path string, size
 	}
 
 	if s.loader.shouldSkip(&info.TableName) {
-		logger.Debug("ignoring table file", zap.String("category", "filter"))
+		logger.Debug("[filter] ignoring table file")
 
 		return nil
 	}
@@ -481,7 +492,7 @@ func (s *mdLoaderSetup) constructFileInfo(ctx context.Context, path string, size
 		if info.FileMeta.Compression != CompressionNone {
 			compressRatio, err2 := SampleFileCompressRatio(ctx, info.FileMeta, s.loader.GetStore())
 			if err2 != nil {
-				logger.Error("fail to calculate data file compress ratio", zap.String("category", "loader"),
+				logger.Error("[loader] fail to calculate data file compress ratio",
 					zap.String("schema", res.Schema), zap.String("table", res.Name), zap.Stringer("type", res.Type))
 			} else {
 				info.FileMeta.RealSize = int64(compressRatio * float64(info.FileMeta.FileSize))
@@ -699,14 +710,13 @@ func calculateFileBytes(ctx context.Context,
 	store storage.ExternalStorage,
 	offset int64) (tot int, pos int64, err error) {
 	bytes := make([]byte, sampleCompressedFileSize)
-	reader, err := store.Open(ctx, dataFile, nil)
+	reader, err := store.Open(ctx, dataFile)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
 	}
 	defer reader.Close()
 
-	decompressConfig := storage.DecompressConfig{ZStdDecodeConcurrency: 1}
-	compressReader, err := storage.NewLimitedInterceptReader(reader, compressType, decompressConfig, offset)
+	compressReader, err := storage.NewLimitedInterceptReader(reader, compressType, offset)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
 	}
@@ -746,14 +756,6 @@ func calculateFileBytes(ctx context.Context,
 
 // SampleFileCompressRatio samples the compress ratio of the compressed file.
 func SampleFileCompressRatio(ctx context.Context, fileMeta SourceFileMeta, store storage.ExternalStorage) (float64, error) {
-	failpoint.Inject("SampleFileCompressPercentage", func(val failpoint.Value) {
-		switch v := val.(type) {
-		case string:
-			failpoint.Return(1.0, errors.New(v))
-		case int:
-			failpoint.Return(float64(v)/100, nil)
-		}
-	})
 	if fileMeta.Compression == CompressionNone {
 		return 1, nil
 	}
@@ -787,7 +789,7 @@ func SampleParquetDataSize(ctx context.Context, fileMeta SourceFileMeta, store s
 		return 0, err
 	}
 
-	reader, err := store.Open(ctx, fileMeta.Path, nil)
+	reader, err := store.Open(ctx, fileMeta.Path)
 	if err != nil {
 		return 0, err
 	}

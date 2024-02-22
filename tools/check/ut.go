@@ -76,7 +76,10 @@ ut build xxx
 ut run --junitfile xxx
 
 // test with race flag
-ut run --race`
+ut run --race
+
+// test with test.short flag
+ut run --short`
 
 	fmt.Println(msg)
 	return true
@@ -402,10 +405,10 @@ func handleFlags(flag string) string {
 	return res
 }
 
-func handleRaceFlag() (found bool) {
+func handleFlag(f string) (found bool) {
 	tmp := os.Args[:0]
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == "--race" {
+		if os.Args[i] == f {
 			found = true
 			continue
 		}
@@ -419,6 +422,7 @@ var junitfile string
 var coverprofile string
 var coverFileTempDir string
 var race bool
+var short bool
 
 var except string
 var only string
@@ -429,7 +433,8 @@ func main() {
 	coverprofile = handleFlags("--coverprofile")
 	except = handleFlags("--except")
 	only = handleFlags("--only")
-	race = handleRaceFlag()
+	race = handleFlag("--race")
+	short = handleFlag("--short")
 
 	if coverprofile != "" {
 		var err error
@@ -826,7 +831,7 @@ func (n *numa) testCommand(pkg string, fn string) *exec.Cmd {
 }
 
 func skipDIR(pkg string) bool {
-	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check"}
+	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check", "build"}
 	for _, ignore := range skipDir {
 		if strings.HasPrefix(pkg, ignore) {
 			return true
@@ -837,12 +842,15 @@ func skipDIR(pkg string) bool {
 
 func buildTestBinary(pkg string) error {
 	// go test -c
-	cmd := exec.Command("go", "test", "-c", "-vet", "off", "-o", testFileName(pkg))
+	cmd := exec.Command("go", "test", "-c", "-vet", "off", "--tags=intest", "-o", testFileName(pkg))
 	if coverprofile != "" {
 		cmd.Args = append(cmd.Args, "-cover")
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
+	}
+	if short {
+		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Dir = path.Join(workDir, pkg)
 	cmd.Stdout = os.Stdout
@@ -863,12 +871,15 @@ func buildTestBinaryMulti(pkgs []string) error {
 	}
 
 	var cmd *exec.Cmd
-	cmd = exec.Command("go", "test", "--exec", xprogPath, "-vet", "off", "-count", "0")
+	cmd = exec.Command("go", "test", "--tags=intest", "--exec", xprogPath, "-vet", "off", "-count", "0")
 	if coverprofile != "" {
 		cmd.Args = append(cmd.Args, "-cover")
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
+	}
+	if short {
+		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Args = append(cmd.Args, packages...)
 	cmd.Dir = workDir

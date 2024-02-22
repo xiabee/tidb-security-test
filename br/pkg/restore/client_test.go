@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -26,13 +27,13 @@ import (
 	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/parser/types"
-	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/pkg/tablecodec"
+	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
-	"golang.org/x/exp/slices"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -123,6 +124,36 @@ func getStartedMockedCluster(t *testing.T) *mock.Cluster {
 	return cluster
 }
 
+func TestNeedCheckTargetClusterFresh(t *testing.T) {
+	// cannot use shared `mc`, other parallel case may change it.
+	cluster := getStartedMockedCluster(t)
+	defer cluster.Stop()
+
+	g := gluetidb.New()
+	client := restore.NewRestoreClient(cluster.PDClient, nil, defaultKeepaliveCfg, false)
+	err := client.Init(g, cluster.Storage)
+	require.NoError(t, err)
+
+	// not set filter and first run with checkpoint
+	require.True(t, client.NeedCheckFreshCluster(false, true))
+
+	// skip check when has checkpoint
+	require.False(t, client.NeedCheckFreshCluster(false, false))
+
+	// skip check when set --filter
+	require.False(t, client.NeedCheckFreshCluster(true, false))
+
+	// skip check when has set --filter and has checkpoint
+	require.False(t, client.NeedCheckFreshCluster(true, true))
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/restore/mock-incr-backup-data", "return(false)"))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/br/pkg/restore/mock-incr-backup-data"))
+	}()
+	// skip check when increment backup
+	require.False(t, client.NeedCheckFreshCluster(false, true))
+}
+
 func TestCheckTargetClusterFresh(t *testing.T) {
 	// cannot use shared `mc`, other parallel case may change it.
 	cluster := getStartedMockedCluster(t)
@@ -136,7 +167,7 @@ func TestCheckTargetClusterFresh(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, client.CheckTargetClusterFresh(ctx))
 
-	require.NoError(t, client.CreateDatabase(ctx, &model.DBInfo{Name: model.NewCIStr("user_db")}))
+	require.NoError(t, client.CreateDatabases(ctx, []*utils.Database{{Info: &model.DBInfo{Name: model.NewCIStr("user_db")}}}))
 	require.True(t, berrors.ErrRestoreNotFreshCluster.Equal(client.CheckTargetClusterFresh(ctx)))
 }
 
@@ -433,7 +464,7 @@ func TestPreCheckTableTiFlashReplicas(t *testing.T) {
 		}
 
 		tables[i] = &metautil.Table{
-			DB: &model.DBInfo{},
+			DB: &model.DBInfo{Name: model.NewCIStr("test")},
 			Info: &model.TableInfo{
 				ID:             int64(i),
 				Name:           model.NewCIStr("test" + strconv.Itoa(i)),
@@ -632,6 +663,21 @@ func TestDeleteRangeQuery(t *testing.T) {
 	require.Equal(t, querys[3], "INSERT IGNORE INTO mysql.gc_delete_range VALUES (9, 2, '74800000000000000a5f698000000000000001', '74800000000000000a5f698000000000000002', %[1]d),(9, 3, '74800000000000000a5f698000000000000002', '74800000000000000a5f698000000000000003', %[1]d)")
 }
 
+func MockEmptySchemasReplace() *stream.SchemasReplace {
+	dbMap := make(map[stream.UpstreamID]*stream.DBReplace)
+	return stream.NewSchemasReplace(
+		dbMap,
+		true,
+		nil,
+		9527,
+		filter.All(),
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+}
+
 func TestRestoreBatchMetaKVFiles(t *testing.T) {
 	client := restore.MockClient(nil)
 	files := []*backuppb.DataFileInfo{}
@@ -647,11 +693,12 @@ func TestRestoreMetaKVFilesWithBatchMethod1(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -686,11 +733,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_default_empty(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -732,11 +780,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_write_empty_1(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -786,11 +835,12 @@ func TestRestoreMetaKVFilesWithBatchMethod2_write_empty_2(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -852,11 +902,12 @@ func TestRestoreMetaKVFilesWithBatchMethod_with_entries(t *testing.T) {
 	batchCount := 0
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		files_default,
 		files_write,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -959,11 +1010,12 @@ func TestRestoreMetaKVFilesWithBatchMethod3(t *testing.T) {
 	resultKV := make(map[int]int)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1045,11 +1097,12 @@ func TestRestoreMetaKVFilesWithBatchMethod4(t *testing.T) {
 	result := make(map[int][]*backuppb.DataFileInfo)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1125,11 +1178,12 @@ func TestRestoreMetaKVFilesWithBatchMethod5(t *testing.T) {
 	result := make(map[int][]*backuppb.DataFileInfo)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1222,11 +1276,12 @@ func TestRestoreMetaKVFilesWithBatchMethod6(t *testing.T) {
 	resultKV := make(map[int]int)
 
 	client := restore.MockClient(nil)
+	sr := MockEmptySchemasReplace()
 	err := client.RestoreMetaKVFilesWithBatchMethod(
 		context.Background(),
 		defaultFiles,
 		writeFiles,
-		nil,
+		sr,
 		nil,
 		nil,
 		func(
@@ -1305,6 +1360,14 @@ func TestSortMetaKVFiles(t *testing.T) {
 	require.Equal(t, files[4].Path, "f5")
 }
 
+func toLogDataFileInfoIter(logIter iter.TryNextor[*backuppb.DataFileInfo]) restore.LogIter {
+	return iter.Map(logIter, func(d *backuppb.DataFileInfo) *restore.LogDataFileInfo {
+		return &restore.LogDataFileInfo{
+			DataFileInfo: d,
+		}
+	})
+}
+
 func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 	var (
 		totalKVCount int64  = 0
@@ -1335,7 +1398,7 @@ func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1348,7 +1411,7 @@ func TestApplyKVFilesWithSingelMethod(t *testing.T) {
 
 	restore.ApplyKVFilesWithSingelMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		applyFunc,
 		&applyWg,
 	)
@@ -1407,7 +1470,7 @@ func TestApplyKVFilesWithBatchMethod1(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1422,7 +1485,7 @@ func TestApplyKVFilesWithBatchMethod1(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1497,7 +1560,7 @@ func TestApplyKVFilesWithBatchMethod2(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1512,7 +1575,7 @@ func TestApplyKVFilesWithBatchMethod2(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1581,7 +1644,7 @@ func TestApplyKVFilesWithBatchMethod3(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1596,7 +1659,7 @@ func TestApplyKVFilesWithBatchMethod3(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1663,7 +1726,7 @@ func TestApplyKVFilesWithBatchMethod4(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1678,7 +1741,7 @@ func TestApplyKVFilesWithBatchMethod4(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		batchCount,
 		batchSize,
 		applyFunc,
@@ -1741,7 +1804,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 	}
 	var applyWg sync.WaitGroup
 	applyFunc := func(
-		files []*backuppb.DataFileInfo,
+		files []*restore.LogDataFileInfo,
 		kvCount int64,
 		size uint64,
 	) {
@@ -1762,7 +1825,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 
 	restore.ApplyKVFilesWithBatchMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		2,
 		1500,
 		applyFunc,
@@ -1775,7 +1838,7 @@ func TestApplyKVFilesWithBatchMethod5(t *testing.T) {
 	types = make([]backuppb.FileType, 0)
 	restore.ApplyKVFilesWithSingelMethod(
 		context.TODO(),
-		iter.FromSlice(ds),
+		toLogDataFileInfoIter(iter.FromSlice(ds)),
 		applyFunc,
 		&applyWg,
 	)

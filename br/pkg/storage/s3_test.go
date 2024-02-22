@@ -20,13 +20,13 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/golang/mock/gomock"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/tidb/br/pkg/mock"
 	. "github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 const bucketRegionHeader = "X-Amz-Bucket-Region"
@@ -147,6 +147,7 @@ func TestApplyUpdate(t *testing.T) {
 		if test.setEnv {
 			require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
 			require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
+			require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
 		}
 		u, err := ParseBackend("s3://bucket/prefix/", &BackendOptions{S3: test.options})
 		require.NoError(t, err)
@@ -266,11 +267,13 @@ func TestApplyUpdate(t *testing.T) {
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 			},
 			s3: &backuppb.S3{
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 			},
@@ -293,6 +296,7 @@ func TestS3Storage(t *testing.T) {
 
 	require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
 	require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
+	require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
 	s := createGetBucketRegionServer("us-west-2", 200, true)
 	defer s.Close()
 
@@ -362,6 +366,7 @@ func TestS3Storage(t *testing.T) {
 				Endpoint:        s.URL,
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 				ForcePathStyle:  true,
@@ -417,10 +422,12 @@ func TestS3Storage(t *testing.T) {
 func TestS3URI(t *testing.T) {
 	accessKey := "ab"
 	secretAccessKey := "cd"
+	sessionToken := "ef"
 	options := &BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err := ParseBackend("s3://bucket/prefix/", options)
@@ -653,7 +660,7 @@ func TestOpenAsBufio(t *testing.T) {
 			}, nil
 		})
 
-	reader, err := s.storage.Open(ctx, "plain-text-file")
+	reader, err := s.storage.Open(ctx, "plain-text-file", nil)
 	require.NoError(t, err)
 	require.Nil(t, reader.Close())
 	bufReader := bufio.NewReaderSize(reader, 5)
@@ -698,11 +705,36 @@ func TestOpenReadSlowly(t *testing.T) {
 			ContentLength: aws.Int64(26),
 		}, nil)
 
-	reader, err := s.storage.Open(ctx, "alphabets")
+	reader, err := s.storage.Open(ctx, "alphabets", nil)
 	require.NoError(t, err)
 	res, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	require.Equal(t, []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), res)
+}
+
+func TestPutAndDeleteObjectCheck(t *testing.T) {
+	s := createS3Suite(t)
+	ctx := aws.BackgroundContext()
+
+	s.s3.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, nil)
+	s.s3.EXPECT().DeleteObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, nil)
+	require.NoError(t, PutAndDeleteObjectCheck(ctx, s.s3, &backuppb.S3{}))
+
+	s.s3.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, errors.New("mock put error"))
+	s.s3.EXPECT().DeleteObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, nil)
+	require.ErrorContains(t, PutAndDeleteObjectCheck(ctx, s.s3, &backuppb.S3{}), "mock put error")
+
+	s.s3.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, nil)
+	s.s3.EXPECT().DeleteObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, errors.New("mock del error"))
+	require.ErrorContains(t, PutAndDeleteObjectCheck(ctx, s.s3, &backuppb.S3{}), "mock del error")
+
+	s.s3.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, nil)
+	s.s3.EXPECT().DeleteObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, awserr.New("AccessDenied", "", nil))
+	require.ErrorContains(t, PutAndDeleteObjectCheck(ctx, s.s3, &backuppb.S3{}), "AccessDenied")
+
+	s.s3.EXPECT().PutObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, errors.New("mock put error"))
+	s.s3.EXPECT().DeleteObjectWithContext(gomock.Any(), gomock.Any()).Return(nil, errors.New("mock del error"))
+	require.ErrorContains(t, PutAndDeleteObjectCheck(ctx, s.s3, &backuppb.S3{}), "mock put error")
 }
 
 // TestOpenSeek checks that Seek is implemented correctly.
@@ -718,7 +750,7 @@ func TestOpenSeek(t *testing.T) {
 		return io.NopCloser(bytes.NewReader(data[offset:]))
 	})
 
-	reader, err := s.storage.Open(ctx, "random")
+	reader, err := s.storage.Open(ctx, "random", nil)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, reader.Close())
@@ -836,7 +868,7 @@ func TestS3ReaderWithRetryEOF(t *testing.T) {
 		return io.NopCloser(&limitedBytesReader{Reader: bytes.NewReader(data[offset:]), limit: 30})
 	})
 
-	reader, err := s.storage.Open(ctx, "random")
+	reader, err := s.storage.Open(ctx, "random", nil)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, reader.Close())
@@ -882,7 +914,7 @@ func TestS3ReaderWithRetryFailed(t *testing.T) {
 		return io.NopCloser(&limitedBytesReader{Reader: bytes.NewReader(data[offset:]), limit: 30})
 	})
 
-	reader, err := s.storage.Open(ctx, "random")
+	reader, err := s.storage.Open(ctx, "random", nil)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, reader.Close())
@@ -1146,10 +1178,12 @@ func TestWalkDirWithEmptyPrefix(t *testing.T) {
 func TestSendCreds(t *testing.T) {
 	accessKey := "ab"
 	secretAccessKey := "cd"
+	sessionToken := "ef"
 	backendOpt := BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err := ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1162,12 +1196,15 @@ func TestSendCreds(t *testing.T) {
 	sentAccessKey := backend.GetS3().AccessKey
 	require.Equal(t, accessKey, sentAccessKey)
 	sentSecretAccessKey := backend.GetS3().SecretAccessKey
-	require.Equal(t, sentSecretAccessKey, sentSecretAccessKey)
+	require.Equal(t, secretAccessKey, sentSecretAccessKey)
+	sentSessionToken := backend.GetS3().SessionToken
+	require.Equal(t, sessionToken, sentSessionToken)
 
 	backendOpt = BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err = ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1181,6 +1218,8 @@ func TestSendCreds(t *testing.T) {
 	require.Equal(t, "", sentAccessKey)
 	sentSecretAccessKey = backend.GetS3().SecretAccessKey
 	require.Equal(t, "", sentSecretAccessKey)
+	sentSessionToken = backend.GetS3().SessionToken
+	require.Equal(t, "", sentSessionToken)
 }
 
 func TestObjectLock(t *testing.T) {
@@ -1331,12 +1370,13 @@ func TestRetryError(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	s, err := NewS3Storage(&backuppb.S3{
+	s, err := NewS3Storage(ctx, &backuppb.S3{
 		Endpoint:        server.URL,
 		Bucket:          "test",
 		Prefix:          "retry",
 		AccessKey:       "none",
 		SecretAccessKey: "none",
+		Provider:        "skip check region",
 		ForcePathStyle:  true,
 	}, &ExternalStorageOptions{})
 	require.NoError(t, err)

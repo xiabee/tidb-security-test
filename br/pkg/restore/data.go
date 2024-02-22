@@ -16,8 +16,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/utils/storewatch"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/rangetask"
@@ -397,11 +397,15 @@ func (recovery *Recovery) SpawnTiKVShutDownWatchers(ctx context.Context) {
 
 // prepare the region for flashback the data, the purpose is to stop region service, put region in flashback state
 func (recovery *Recovery) PrepareFlashbackToVersion(ctx context.Context, resolveTS uint64, startTS uint64) (err error) {
+	retryState := utils.InitialRetryState(utils.FlashbackRetryTime, utils.FlashbackWaitInterval, utils.FlashbackMaxWaitInterval)
 	retryErr := utils.WithRetry(
 		ctx,
 		func() error {
 			handler := func(ctx context.Context, r tikvstore.KeyRange) (rangetask.TaskStat, error) {
 				stats, err := ddl.SendPrepareFlashbackToVersionRPC(ctx, recovery.mgr.GetStorage().(tikv.Storage), resolveTS, startTS, r)
+				if err != nil {
+					log.Warn("region may not ready to serve, retry it...", zap.Error(err))
+				}
 				return stats, err
 			}
 
@@ -414,9 +418,7 @@ func (recovery *Recovery) PrepareFlashbackToVersion(ctx context.Context, resolve
 			}
 			log.Info("region flashback prepare complete", zap.Int("regions", runner.CompletedRegions()))
 			return nil
-		},
-		utils.NewFlashBackBackoffer(),
-	)
+		}, &retryState)
 
 	recovery.progress.Inc()
 	return retryErr

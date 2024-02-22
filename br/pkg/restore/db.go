@@ -3,8 +3,10 @@
 package restore
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/pingcap/errors"
@@ -13,15 +15,14 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	prealloctableid "github.com/pingcap/tidb/br/pkg/restore/prealloc_table_id"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	tidbutil "github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/domain"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 )
 
 // DB is a TiDB instance, not thread-safe.
@@ -65,12 +66,11 @@ func NewDB(g glue.Glue, store kv.Storage, policyMode string) (*DB, bool, error) 
 		// Set placement mode for handle placement policy.
 		err = se.Execute(context.Background(), fmt.Sprintf("set @@tidb_placement_mode='%s';", policyMode))
 		if err != nil {
-			if variable.ErrUnknownSystemVar.Equal(err) {
-				// not support placement policy, just ignore it
-				log.Warn("target tidb not support tidb_placement_mode, ignore create policies", zap.Error(err))
-			} else {
+			if !variable.ErrUnknownSystemVar.Equal(err) {
 				return nil, false, errors.Trace(err)
 			}
+			// not support placement policy, just ignore it
+			log.Warn("target tidb not support tidb_placement_mode, ignore create policies", zap.Error(err))
 		} else {
 			log.Info("set tidb_placement_mode success", zap.String("mode", policyMode))
 			supportPolicy = true
@@ -308,6 +308,10 @@ func (db *DB) CreateTables(ctx context.Context, tables []*metautil.Table,
 					return errors.Trace(err)
 				}
 			}
+
+			if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
+				ttlInfo.Enable = false
+			}
 		}
 		if err := batchSession.CreateTables(ctx, m, db.tableIDAllocFilter()); err != nil {
 			return err
@@ -334,6 +338,10 @@ func (db *DB) CreateTable(ctx context.Context, table *metautil.Table,
 		if err := db.ensureTablePlacementPolicies(ctx, table.Info, policyMap); err != nil {
 			return errors.Trace(err)
 		}
+	}
+
+	if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
+		ttlInfo.Enable = false
 	}
 
 	err := db.se.CreateTable(ctx, table.DB.Name, table.Info, db.tableIDAllocFilter())
@@ -396,8 +404,8 @@ func (db *DB) ensureTablePlacementPolicies(ctx context.Context, tableInfo *model
 // FilterDDLJobs filters ddl jobs.
 func FilterDDLJobs(allDDLJobs []*model.Job, tables []*metautil.Table) (ddlJobs []*model.Job) {
 	// Sort the ddl jobs by schema version in descending order.
-	slices.SortFunc(allDDLJobs, func(i, j *model.Job) bool {
-		return i.BinlogInfo.SchemaVersion > j.BinlogInfo.SchemaVersion
+	slices.SortFunc(allDDLJobs, func(i, j *model.Job) int {
+		return cmp.Compare(j.BinlogInfo.SchemaVersion, i.BinlogInfo.SchemaVersion)
 	})
 	dbs := getDatabases(tables)
 	for _, db := range dbs {

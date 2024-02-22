@@ -19,13 +19,12 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
-	tmysql "github.com/pingcap/tidb/pkg/errno"
-	drivererr "github.com/pingcap/tidb/pkg/store/driver/error"
+	tmysql "github.com/pingcap/tidb/errno"
+	drivererr "github.com/pingcap/tidb/store/driver/error"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/multierr"
 	"google.golang.org/grpc/codes"
@@ -68,9 +67,6 @@ func TestIsRetryableError(t *testing.T) {
 	_, err := net.Dial("tcp", "localhost:65533")
 	require.Error(t, err)
 	require.True(t, IsRetryableError(err))
-	// wrap net.OpErr inside url.Error
-	urlErr := &url.Error{Op: "post", Err: err}
-	require.True(t, IsRetryableError(urlErr))
 
 	// MySQL Errors
 	require.False(t, IsRetryableError(&mysql.MySQLError{}))

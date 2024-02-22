@@ -3,7 +3,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"os"
@@ -115,17 +114,6 @@ func (s *GCSStorage) DeleteFile(ctx context.Context, name string) error {
 	return errors.Trace(err)
 }
 
-// DeleteFiles delete the files in storage.
-func (s *GCSStorage) DeleteFiles(ctx context.Context, names []string) error {
-	for _, name := range names {
-		err := s.DeleteFile(ctx, name)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *GCSStorage) objectName(name string) string {
 	return path.Join(s.gcs.Prefix, name)
 }
@@ -180,41 +168,23 @@ func (s *GCSStorage) FileExists(ctx context.Context, name string) (bool, error) 
 }
 
 // Open a Reader by file path.
-func (s *GCSStorage) Open(ctx context.Context, path string, o *ReaderOption) (ExternalFileReader, error) {
+func (s *GCSStorage) Open(ctx context.Context, path string) (ExternalFileReader, error) {
 	object := s.objectName(path)
 	handle := s.bucket.Object(object)
 
-	attrs, err := handle.Attrs(ctx)
+	rc, err := handle.NewRangeReader(ctx, 0, -1)
 	if err != nil {
-		if errors.Cause(err) == storage.ErrObjectNotExist { // nolint:errorlint
-			return nil, errors.Annotatef(err,
-				"the object doesn't exist, file info: input.bucket='%s', input.key='%s'",
-				s.gcs.Bucket, path)
-		}
 		return nil, errors.Annotatef(err,
-			"failed to get gcs file attribute, file info: input.bucket='%s', input.key='%s'",
+			"failed to read gcs file, file info: input.bucket='%s', input.key='%s'",
 			s.gcs.Bucket, path)
-	}
-	pos := int64(0)
-	endPos := attrs.Size
-	if o != nil {
-		if o.StartOffset != nil {
-			pos = *o.StartOffset
-		}
-		if o.EndOffset != nil {
-			endPos = *o.EndOffset
-		}
 	}
 
 	return &gcsObjectReader{
 		storage:   s,
 		name:      path,
 		objHandle: handle,
-		reader:    nil, // lazy create
+		reader:    rc,
 		ctx:       ctx,
-		pos:       pos,
-		endPos:    endPos,
-		totalSize: attrs.Size,
 	}, nil
 }
 
@@ -228,14 +198,13 @@ func (s *GCSStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(strin
 	if opt == nil {
 		opt = &WalkOption{}
 	}
+	if len(opt.ObjPrefix) != 0 {
+		return errors.New("gcs storage not support ObjPrefix for now")
+	}
 	prefix := path.Join(s.gcs.Prefix, opt.SubDir)
 	if len(prefix) > 0 && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	if len(opt.ObjPrefix) != 0 {
-		prefix += opt.ObjPrefix
-	}
-
 	query := &storage.Query{Prefix: prefix}
 	// only need each object's name and size
 	err := query.SetAttrSelection([]string{"Name", "Size"})
@@ -379,8 +348,6 @@ type gcsObjectReader struct {
 	objHandle *storage.ObjectHandle
 	reader    io.ReadCloser
 	pos       int64
-	endPos    int64
-	totalSize int64
 	// reader context used for implement `io.Seek`
 	// currently, lightning depends on package `xitongsys/parquet-go` to read parquet file and it needs `io.Seeker`
 	// See: https://github.com/xitongsys/parquet-go/blob/207a3cee75900b2b95213627409b7bac0f190bb3/source/source.go#L9-L10
@@ -390,11 +357,7 @@ type gcsObjectReader struct {
 // Read implement the io.Reader interface.
 func (r *gcsObjectReader) Read(p []byte) (n int, err error) {
 	if r.reader == nil {
-		length := int64(-1)
-		if r.endPos != r.totalSize {
-			length = r.endPos - r.pos
-		}
-		rc, err := r.objHandle.NewRangeReader(r.ctx, r.pos, length)
+		rc, err := r.objHandle.NewRangeReader(r.ctx, r.pos, -1)
 		if err != nil {
 			return 0, errors.Annotatef(err,
 				"failed to read gcs file, file info: input.bucket='%s', input.key='%s'",
@@ -422,35 +385,31 @@ func (r *gcsObjectReader) Seek(offset int64, whence int) (int64, error) {
 	var realOffset int64
 	switch whence {
 	case io.SeekStart:
+		if offset < 0 {
+			return 0, errors.Annotatef(berrors.ErrInvalidArgument, "Seek: offset '%v' out of range.", offset)
+		}
 		realOffset = offset
 	case io.SeekCurrent:
 		realOffset = r.pos + offset
+		if r.pos < 0 && realOffset >= 0 {
+			return 0, errors.Annotatef(berrors.ErrInvalidArgument, "Seek: offset '%v' out of range. current pos is '%v'.", offset, r.pos)
+		}
 	case io.SeekEnd:
-		if offset > 0 {
+		if offset >= 0 {
 			return 0, errors.Annotatef(berrors.ErrInvalidArgument, "Seek: offset '%v' should be negative.", offset)
 		}
-		realOffset = offset + r.totalSize
+		// GCS supports `NewRangeReader(ctx, -10, -1)`, which means read the last 10 bytes.
+		realOffset = offset
 	default:
 		return 0, errors.Annotatef(berrors.ErrStorageUnknown, "Seek: invalid whence '%d'", whence)
-	}
-
-	if realOffset < 0 {
-		return 0, errors.Annotatef(berrors.ErrInvalidArgument, "Seek: offset '%v' out of range. current pos is '%v'. total size is '%v'", offset, r.pos, r.totalSize)
 	}
 
 	if realOffset == r.pos {
 		return realOffset, nil
 	}
 
-	if r.reader != nil {
-		_ = r.reader.Close()
-		r.reader = nil
-	}
+	_ = r.reader.Close()
 	r.pos = realOffset
-	if realOffset >= r.totalSize {
-		r.reader = io.NopCloser(bytes.NewReader(nil))
-		return realOffset, nil
-	}
 	rc, err := r.objHandle.NewRangeReader(r.ctx, r.pos, -1)
 	if err != nil {
 		return 0, errors.Annotatef(err,
@@ -460,8 +419,4 @@ func (r *gcsObjectReader) Seek(offset int64, whence int) (int64, error) {
 	r.reader = rc
 
 	return realOffset, nil
-}
-
-func (r *gcsObjectReader) GetFileSize() (int64, error) {
-	return r.totalSize, nil
 }

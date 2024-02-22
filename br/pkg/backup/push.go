@@ -56,7 +56,7 @@ func (push *pushDown) pushBackup(
 	req backuppb.BackupRequest,
 	pr *rtree.ProgressRange,
 	stores []*metapb.Store,
-	checkpointRunner *checkpoint.CheckpointRunner[checkpoint.BackupKeyType, checkpoint.BackupValueType],
+	checkpointRunner *checkpoint.CheckpointRunner,
 	progressCallBack func(ProgressUnit),
 ) error {
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
@@ -130,7 +130,7 @@ func (push *pushDown) pushBackup(
 			}
 			failpoint.Inject("backup-timeout-error", func(val failpoint.Value) {
 				msg := val.(string)
-				logutil.CL(ctx).Info("failpoint backup-timeout-error injected.", zap.String("msg", msg))
+				logutil.CL(ctx).Debug("failpoint backup-timeout-error injected.", zap.String("msg", msg))
 				resp.Error = &backuppb.Error{
 					Msg: msg,
 				}
@@ -164,9 +164,8 @@ func (push *pushDown) pushBackup(
 			if resp.GetError() == nil {
 				// None error means range has been backuped successfully.
 				if checkpointRunner != nil {
-					if err := checkpoint.AppendForBackup(
+					if err := checkpointRunner.Append(
 						ctx,
-						checkpointRunner,
 						pr.GroupKey,
 						resp.StartKey,
 						resp.EndKey,

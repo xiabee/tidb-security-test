@@ -16,7 +16,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/parser/model"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -164,12 +164,6 @@ type TableWithRange struct {
 	Range []rtree.Range
 }
 
-type TableIDWithFiles struct {
-	TableID int64
-
-	Files []*backuppb.File
-}
-
 // Exhaust drains all remaining errors in the channel, into a slice of errors.
 func Exhaust(ec <-chan error) []error {
 	out := make([]error, 0, len(ec))
@@ -208,7 +202,7 @@ type TiKVRestorer interface {
 		isRawKv bool) error
 	// RestoreSSTFiles import the files to the TiKV.
 	RestoreSSTFiles(ctx context.Context,
-		tableIDWithFiles []TableIDWithFiles,
+		files []*backuppb.File,
 		rewriteRules *RewriteRules,
 		updateCh glue.Progress) error
 }
@@ -391,7 +385,7 @@ func (b *tikvSender) restoreWorker(ctx context.Context, ranges <-chan drainResul
 			eg.Go(func() error {
 				e := b.client.RestoreSSTFiles(ectx, files, r.result.RewriteRules, b.updateCh)
 				if e != nil {
-					log.Error("restore batch meet error", logutil.ShortError(e), zapTableIDWithFiles(files))
+					log.Error("restore batch meet error", logutil.ShortError(e), logutil.Files(files))
 					r.done()
 					return e
 				}

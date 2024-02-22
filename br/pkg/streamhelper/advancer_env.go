@@ -8,19 +8,14 @@ import (
 
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/util/engine"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/util/engine"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	pd "github.com/tikv/pd/client"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
-)
-
-const (
-	logBackupServiceID    = "log-backup-coordinator"
-	logBackupSafePointTTL = 24 * time.Hour
 )
 
 // Env is the interface required by the advancer.
@@ -41,16 +36,9 @@ type PDRegionScanner struct {
 	pd.Client
 }
 
-// Updates the service GC safe point for the cluster.
-// Returns the minimal service GC safe point across all services.
-// If the arguments is `0`, this would remove the service safe point.
-func (c PDRegionScanner) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
-	return c.UpdateServiceGCSafePoint(ctx, logBackupServiceID, int64(logBackupSafePointTTL.Seconds()), at)
-}
-
 // RegionScan gets a list of regions, starts from the region that contains key.
 // Limit limits the maximum number of regions returned.
-func (c PDRegionScanner) RegionScan(ctx context.Context, key, endKey []byte, limit int) ([]RegionWithLeader, error) {
+func (c PDRegionScanner) RegionScan(ctx context.Context, key []byte, endKey []byte, limit int) ([]RegionWithLeader, error) {
 	rs, err := c.Client.ScanRegions(ctx, key, endKey, limit)
 	if err != nil {
 		return nil, err

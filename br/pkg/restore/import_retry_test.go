@@ -21,9 +21,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/store/pdtypes"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/store/pdtypes"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -438,16 +438,12 @@ func TestImportKVFiles(t *testing.T) {
 
 	err := importer.ImportKVFiles(
 		ctx,
-		[]*restore.LogDataFileInfo{
+		[]*backuppb.DataFileInfo{
 			{
-				DataFileInfo: &backuppb.DataFileInfo{
-					Path: "log3",
-				},
+				Path: "log3",
 			},
 			{
-				DataFileInfo: &backuppb.DataFileInfo{
-					Path: "log1",
-				},
+				Path: "log1",
 			},
 		},
 		nil,
@@ -460,16 +456,12 @@ func TestImportKVFiles(t *testing.T) {
 }
 
 func TestFilterFilesByRegion(t *testing.T) {
-	files := []*restore.LogDataFileInfo{
+	files := []*backuppb.DataFileInfo{
 		{
-			DataFileInfo: &backuppb.DataFileInfo{
-				Path: "log3",
-			},
+			Path: "log1",
 		},
 		{
-			DataFileInfo: &backuppb.DataFileInfo{
-				Path: "log1",
-			},
+			Path: "log2",
 		},
 	}
 	ranges := []kv.KeyRange{
@@ -484,7 +476,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 
 	testCases := []struct {
 		r        split.RegionInfo
-		subfiles []*restore.LogDataFileInfo
+		subfiles []*backuppb.DataFileInfo
 		err      error
 	}{
 		{
@@ -494,7 +486,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("1110"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{},
+			subfiles: []*backuppb.DataFileInfo{},
 			err:      nil,
 		},
 		{
@@ -504,7 +496,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("1111"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[0],
 			},
 			err: nil,
@@ -516,7 +508,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("2222"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[0],
 			},
 			err: nil,
@@ -528,7 +520,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("3332"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[0],
 			},
 			err: nil,
@@ -540,7 +532,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("3332"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{},
+			subfiles: []*backuppb.DataFileInfo{},
 			err:      nil,
 		},
 		{
@@ -550,7 +542,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("3333"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[1],
 			},
 			err: nil,
@@ -562,7 +554,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   []byte("5555"),
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[1],
 			},
 			err: nil,
@@ -574,7 +566,7 @@ func TestFilterFilesByRegion(t *testing.T) {
 					EndKey:   nil,
 				},
 			},
-			subfiles: []*restore.LogDataFileInfo{
+			subfiles: []*backuppb.DataFileInfo{
 				files[1],
 			},
 			err: nil,

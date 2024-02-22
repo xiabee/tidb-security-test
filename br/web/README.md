@@ -14,9 +14,8 @@ The web app requires `npm` to build. It can be compiled by running webpack in
 *this* directory
 
 ```sh
-# from `br/web/src/*` produces `br/web/dist/*`
+# from `web/src/*` produces `web/dist/*`
 cd web/
-export NODE_OPTIONS="--openssl-legacy-provider"
 npm install
 npm run build
 ```
@@ -24,12 +23,12 @@ npm run build
 or, equivalently, running the make command in the *parent* directory.
 
 ```sh
-# from `br/web/src/*` produces `br/web/dist/*`
-make br_web
+# from `web/src/*` produces `web/dist/*`
+make web
 ```
 
-The output can be found in the `br/web/dist/` folder. Lightning embeds the entire
-`br/web/dist/` folder into Go code via [vfsgen]. The web app compilation and Go
+The output can be found in the `web/dist/` folder. Lightning embeds the entire
+`web/dist/` folder into Go code via [vfsgen]. The web app compilation and Go
 code conversion can be done via the make command
 
 ```sh
@@ -38,10 +37,10 @@ make data_parsers
 ```
 
 For web development, you could build a special version of `tidb-lightning` which
-reads directly from `br/web/dist/` by
+reads directly from `web/dist/` by
 
 ```sh
-make build_lightning_for_web
+make lightning_for_web
 ```
 
 Run `bin/tidb-lightning --server-mode --status-addr 127.0.0.1:8289`, then open

@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"fmt"
 	"strings"
 	"sync"
 
@@ -17,22 +16,15 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
-	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/kv"
 	"go.uber.org/zap"
 )
 
 // MetaIter is the type of iterator of metadata files' content.
 type MetaIter = iter.TryNextor[*backuppb.Metadata]
 
-type LogDataFileInfo struct {
-	*backuppb.DataFileInfo
-	MetaDataGroupName   string
-	OffsetInMetaGroup   int
-	OffsetInMergedGroup int
-}
-
 // LogIter is the type of iterator of each log files' meta information.
-type LogIter = iter.TryNextor[*LogDataFileInfo]
+type LogIter = iter.TryNextor[*backuppb.DataFileInfo]
 
 // MetaGroupIter is the iterator of flushes of metadata.
 type MetaGroupIter = iter.TryNextor[DDLMetaGroup]
@@ -183,28 +175,14 @@ func (rc *logFileManager) createMetaIterOver(ctx context.Context, s storage.Exte
 
 func (rc *logFileManager) FilterDataFiles(ms MetaIter) LogIter {
 	return iter.FlatMap(ms, func(m *backuppb.Metadata) LogIter {
-		return iter.FlatMap(iter.Enumerate(iter.FromSlice(m.FileGroups)), func(gi iter.Indexed[*backuppb.DataFileGroup]) LogIter {
-			return iter.Map(
-				iter.FilterOut(iter.Enumerate(iter.FromSlice(gi.Item.DataFilesInfo)), func(di iter.Indexed[*backuppb.DataFileInfo]) bool {
-					// Modify the data internally, a little hacky.
-					if m.MetaVersion > backuppb.MetaVersion_V1 {
-						di.Item.Path = gi.Item.Path
-					}
-					return di.Item.IsMeta || rc.ShouldFilterOut(di.Item)
-				}),
-				func(di iter.Indexed[*backuppb.DataFileInfo]) *LogDataFileInfo {
-					return &LogDataFileInfo{
-						DataFileInfo: di.Item,
-
-						// Since there is a `datafileinfo`, the length of `m.FileGroups`
-						// must be larger than 0. So we use the first group's name as
-						// metadata's unique key.
-						MetaDataGroupName:   m.FileGroups[0].Path,
-						OffsetInMetaGroup:   gi.Index,
-						OffsetInMergedGroup: di.Index,
-					}
-				},
-			)
+		return iter.FlatMap(iter.FromSlice(m.FileGroups), func(g *backuppb.DataFileGroup) LogIter {
+			return iter.FilterOut(iter.FromSlice(g.DataFilesInfo), func(d *backuppb.DataFileInfo) bool {
+				// Modify the data internally, a little hacky.
+				if m.MetaVersion > backuppb.MetaVersion_V1 {
+					d.Path = g.Path
+				}
+				return d.IsMeta || rc.ShouldFilterOut(d)
+			})
 		})
 	})
 }
@@ -317,8 +295,8 @@ func (rc *logFileManager) ReadAllEntries(
 	}
 
 	if checksum := sha256.Sum256(buff); !bytes.Equal(checksum[:], file.GetSha256()) {
-		return nil, nil, berrors.ErrInvalidMetaFile.GenWithStackByArgs(fmt.Sprintf(
-			"checksum mismatch expect %x, got %x", file.GetSha256(), checksum[:]))
+		return nil, nil, errors.Annotatef(berrors.ErrInvalidMetaFile,
+			"checksum mismatch expect %x, got %x", file.GetSha256(), checksum[:])
 	}
 
 	iter := stream.NewEventIterator(buff)

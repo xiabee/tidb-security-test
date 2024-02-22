@@ -45,8 +45,7 @@ func TestGCS(t *testing.T) {
 	err = stg.WriteFile(ctx, "key1", []byte("data1"))
 	require.NoError(t, err)
 
-	key2Data := []byte("data22223346757222222222289722222")
-	err = stg.WriteFile(ctx, "key2", key2Data)
+	err = stg.WriteFile(ctx, "key2", []byte("data22223346757222222222289722222"))
 	require.NoError(t, err)
 
 	rc, err := server.Client().Bucket(bucketName).Object("a/b/key").NewReader(ctx)
@@ -92,7 +91,7 @@ func TestGCS(t *testing.T) {
 		err = stg.WalkDir(ctx, opt, func(name string, size int64) error {
 			totalSize += size
 			// also test can use this path open file
-			_, err := stg.Open(ctx, name, nil)
+			_, err := stg.Open(ctx, name)
 			require.NoError(t, err)
 			return nil
 		})
@@ -182,7 +181,7 @@ func TestGCS(t *testing.T) {
 		require.True(t, ok)
 	}
 
-	efr, err := stg.Open(ctx, "key2", nil)
+	efr, err := stg.Open(ctx, "key2")
 	require.NoError(t, err)
 
 	p := make([]byte, 10)
@@ -217,36 +216,17 @@ func TestGCS(t *testing.T) {
 	require.Equal(t, 5, n)
 	require.Equal(t, "67572", string(p))
 
+	/* Since fake_gcs_server hasn't support for negative offset yet.
 	p = make([]byte, 5)
 	offs, err = efr.Seek(int64(-7), io.SeekEnd)
 	require.NoError(t, err)
-	require.Equal(t, int64(26), offs)
+	require.Equal(t, int64(-7), offs)
 
 	n, err = efr.Read(p)
 	require.NoError(t, err)
 	require.Equal(t, 5, n)
 	require.Equal(t, "97222", string(p))
-
-	offs, err = efr.Seek(int64(100), io.SeekStart)
-	require.NoError(t, err)
-	require.Equal(t, int64(100), offs)
-	_, err = efr.Read(p)
-	require.Contains(t, err.Error(), "EOF")
-
-	offs, err = efr.Seek(int64(0), io.SeekEnd)
-	require.NoError(t, err)
-	require.Equal(t, int64(len(key2Data)), offs)
-	_, err = efr.Read(p)
-	require.Contains(t, err.Error(), "EOF")
-
-	offs, err = efr.Seek(int64(1), io.SeekCurrent)
-	require.NoError(t, err)
-	require.Equal(t, int64(len(key2Data)+1), offs)
-	_, err = efr.Read(p)
-	require.Contains(t, err.Error(), "EOF")
-
-	_, err = efr.Seek(int64(-10000), io.SeekEnd)
-	require.Error(t, err)
+	*/
 
 	err = efr.Close()
 	require.NoError(t, err)
@@ -397,47 +377,4 @@ func TestNewGCSStorage(t *testing.T) {
 		require.Equal(t, "", gcs.CredentialsBlob)
 		require.Equal(t, "a/b/x", s.objectName("x"))
 	}
-}
-
-func TestReadRange(t *testing.T) {
-	ctx := context.Background()
-
-	opts := fakestorage.Options{
-		NoListener: true,
-	}
-	server, err := fakestorage.NewServerWithOptions(opts)
-	require.NoError(t, err)
-	bucketName := "testbucket"
-	server.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucketName})
-
-	gcs := &backuppb.GCS{
-		Bucket:          bucketName,
-		Prefix:          "a/b/",
-		StorageClass:    "NEARLINE",
-		PredefinedAcl:   "private",
-		CredentialsBlob: "Fake Credentials",
-	}
-	stg, err := NewGCSStorage(ctx, gcs, &ExternalStorageOptions{
-		SendCredentials:  false,
-		CheckPermissions: []Permission{AccessBuckets},
-		HTTPClient:       server.HTTPClient(),
-	})
-	require.NoError(t, err)
-
-	filename := "key"
-	err = stg.WriteFile(ctx, filename, []byte("0123456789"))
-	require.NoError(t, err)
-
-	start := int64(2)
-	end := int64(5)
-	r, err := stg.Open(ctx, filename, &ReaderOption{
-		StartOffset: &start,
-		EndOffset:   &end,
-	})
-	require.NoError(t, err)
-
-	content := make([]byte, 10)
-	n, err := r.Read(content)
-	require.NoError(t, err)
-	require.Equal(t, []byte("234"), content[:n])
 }

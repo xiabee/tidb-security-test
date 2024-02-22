@@ -19,15 +19,15 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/br/pkg/glue"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTheSessionIsoation(t *testing.T) {
 	req := require.New(t)
-	store := testkit.CreateMockStore(t)
+	store, _ := testkit.CreateMockStoreAndDomain(t)
 	ctx := context.Background()
 
 	g := Glue{}

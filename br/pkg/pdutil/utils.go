@@ -13,9 +13,9 @@ import (
 	"github.com/pingcap/errors"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/httputil"
-	"github.com/pingcap/tidb/pkg/store/pdtypes"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/store/pdtypes"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/codec"
 )
 
 // UndoFunc is a 'undo' operation of some undoable command.
@@ -55,8 +55,7 @@ func GetPlacementRules(ctx context.Context, pdAddr string, tlsConf *tls.Config) 
 		return []pdtypes.Rule{}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Annotatef(berrors.ErrPDInvalidResponse,
-			"get placement rules failed: resp=%v, err=%v, code=%d", buf.String(), err, resp.StatusCode)
+		return nil, errors.Annotatef(berrors.ErrPDInvalidResponse, "get placement rules failed: resp=%v, err=%v, code=%d", buf.String(), err, resp.StatusCode)
 	}
 	var rules []pdtypes.Rule
 	err = json.Unmarshal(buf.Bytes(), &rules)

@@ -23,12 +23,10 @@ import (
 	"strings"
 	"time"
 
-	gmysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
@@ -38,12 +36,11 @@ import (
 	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -91,39 +88,30 @@ type tidbEncoder struct {
 	// directly check the total column count, so we fall back to only check that
 	// the there are enough columns.
 	columnCnt int
-	// data file path
-	path   string
-	logger log.Logger
 }
 
 type encodingBuilder struct{}
 
 // NewEncodingBuilder creates an EncodingBuilder with TiDB backend implementation.
-func NewEncodingBuilder() encode.EncodingBuilder {
+func NewEncodingBuilder() backend.EncodingBuilder {
 	return new(encodingBuilder)
 }
 
 // NewEncoder creates a KV encoder.
 // It implements the `backend.EncodingBuilder` interface.
-func (*encodingBuilder) NewEncoder(ctx context.Context, config *encode.EncodingConfig) (encode.Encoder, error) {
-	se := kv.NewSessionCtx(&config.SessionOptions, log.FromContext(ctx))
-	if config.SQLMode.HasStrictMode() {
+func (b *encodingBuilder) NewEncoder(ctx context.Context, tbl table.Table, options *kv.SessionOptions) (kv.Encoder, error) {
+	se := kv.NewSession(options, log.FromContext(ctx))
+	if options.SQLMode.HasStrictMode() {
 		se.GetSessionVars().SkipUTF8Check = false
 		se.GetSessionVars().SkipASCIICheck = false
 	}
 
-	return &tidbEncoder{
-		mode:   config.SQLMode,
-		tbl:    config.Table,
-		se:     se,
-		path:   config.Path,
-		logger: config.Logger,
-	}, nil
+	return &tidbEncoder{mode: options.SQLMode, tbl: tbl, se: se}, nil
 }
 
 // MakeEmptyRows creates an empty KV rows.
 // It implements the `backend.EncodingBuilder` interface.
-func (*encodingBuilder) MakeEmptyRows() encode.Rows {
+func (b *encodingBuilder) MakeEmptyRows() kv.Rows {
 	return tidbRows(nil)
 }
 
@@ -259,57 +247,37 @@ func (b *targetInfoGetter) FetchRemoteTableModels(ctx context.Context, schemaNam
 
 // CheckRequirements performs the check whether the backend satisfies the version requirements.
 // It implements the `backend.TargetInfoGetter` interface.
-func (*targetInfoGetter) CheckRequirements(ctx context.Context, _ *backend.CheckCtx) error {
+func (b *targetInfoGetter) CheckRequirements(ctx context.Context, _ *backend.CheckCtx) error {
 	log.FromContext(ctx).Info("skipping check requirements for tidb backend")
 	return nil
 }
 
 type tidbBackend struct {
-	db          *sql.DB
-	conflictCfg config.Conflict
-	// onDuplicate is the type of INSERT SQL. It may be different with
-	// conflictCfg.Strategy to implement other feature, but the behaviour in caller's
-	// view should be the same.
-	onDuplicate string
-	errorMgr    *errormanager.ErrorManager
+	db               *sql.DB
+	onDuplicate      string
+	errorMgr         *errormanager.ErrorManager
+	encBuilder       backend.EncodingBuilder
+	targetInfoGetter backend.TargetInfoGetter
 }
-
-var _ backend.Backend = (*tidbBackend)(nil)
 
 // NewTiDBBackend creates a new TiDB backend using the given database.
 //
 // The backend does not take ownership of `db`. Caller should close `db`
 // manually after the backend expired.
-func NewTiDBBackend(
-	ctx context.Context,
-	db *sql.DB,
-	conflict config.Conflict,
-	errorMgr *errormanager.ErrorManager,
-) backend.Backend {
-	var onDuplicate string
-	switch conflict.Strategy {
-	case config.ErrorOnDup:
-		onDuplicate = config.ErrorOnDup
-	case config.ReplaceOnDup:
-		onDuplicate = config.ReplaceOnDup
-	case config.IgnoreOnDup:
-		if conflict.MaxRecordRows == 0 {
-			onDuplicate = config.IgnoreOnDup
-		} else {
-			// need to stop batch insert on error and fall back to row by row insert
-			// to record the row
-			onDuplicate = config.ErrorOnDup
-		}
+func NewTiDBBackend(ctx context.Context, db *sql.DB, onDuplicate string, errorMgr *errormanager.ErrorManager) backend.Backend {
+	switch onDuplicate {
+	case config.ReplaceOnDup, config.IgnoreOnDup, config.ErrorOnDup:
 	default:
-		log.FromContext(ctx).Warn("unsupported conflict strategy, overwrite with `error`")
-		onDuplicate = config.ErrorOnDup
+		log.FromContext(ctx).Warn("unsupported action on duplicate, overwrite with `replace`")
+		onDuplicate = config.ReplaceOnDup
 	}
-	return &tidbBackend{
-		db:          db,
-		conflictCfg: conflict,
-		onDuplicate: onDuplicate,
-		errorMgr:    errorMgr,
-	}
+	return backend.MakeBackend(&tidbBackend{
+		db:               db,
+		onDuplicate:      onDuplicate,
+		errorMgr:         errorMgr,
+		encBuilder:       NewEncodingBuilder(),
+		targetInfoGetter: NewTargetInfoGetter(db),
+	})
 }
 
 func (row tidbRow) Size() uint64 {
@@ -320,7 +288,7 @@ func (row tidbRow) String() string {
 	return row.insertStmt
 }
 
-func (row tidbRow) ClassifyAndAppend(data *encode.Rows, checksum *verification.KVChecksum, _ *encode.Rows, _ *verification.KVChecksum) {
+func (row tidbRow) ClassifyAndAppend(data *kv.Rows, checksum *verification.KVChecksum, _ *kv.Rows, _ *verification.KVChecksum) {
 	rows := (*data).(tidbRows)
 	// Cannot do `rows := data.(*tidbRows); *rows = append(*rows, row)`.
 	//nolint:gocritic
@@ -329,12 +297,12 @@ func (row tidbRow) ClassifyAndAppend(data *encode.Rows, checksum *verification.K
 	checksum.Add(&cs)
 }
 
-func (rows tidbRows) SplitIntoChunks(splitSizeInt int) []encode.Rows {
+func (rows tidbRows) SplitIntoChunks(splitSizeInt int) []kv.Rows {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	res := make([]encode.Rows, 0, 1)
+	res := make([]kv.Rows, 0, 1)
 	i := 0
 	cumSize := uint64(0)
 	splitSize := uint64(splitSizeInt)
@@ -351,7 +319,7 @@ func (rows tidbRows) SplitIntoChunks(splitSizeInt int) []encode.Rows {
 	return append(res, rows[i:])
 }
 
-func (rows tidbRows) Clear() encode.Rows {
+func (rows tidbRows) Clear() kv.Rows {
 	return rows[:0]
 }
 
@@ -431,7 +399,7 @@ func (enc *tidbEncoder) appendSQL(sb *strings.Builder, datum *types.Datum, _ *ta
 		//		return errors.Trace(err)
 		//	}
 		//	datum = &d
-		// }
+		// }
 
 		enc.appendSQLBytes(sb, datum.GetBytes())
 	case types.KindBytes:
@@ -485,7 +453,7 @@ func getColumnByIndex(cols []*table.Column, index int) *table.Column {
 	return cols[index]
 }
 
-func (enc *tidbEncoder) Encode(row []types.Datum, _ int64, columnPermutation []int, offset int64) (encode.Row, error) {
+func (enc *tidbEncoder) Encode(logger log.Logger, row []types.Datum, _ int64, columnPermutation []int, path string, offset int64) (kv.Row, error) {
 	cols := enc.tbl.Cols()
 
 	if len(enc.columnIdx) == 0 {
@@ -512,16 +480,16 @@ func (enc *tidbEncoder) Encode(row []types.Datum, _ int64, columnPermutation []i
 	if len(row) < enc.columnCnt {
 		// 1. if len(row) < enc.columnCnt: data in row cannot populate the insert statement, because
 		// there are enc.columnCnt elements to insert but fewer columns in row
-		enc.logger.Error("column count mismatch", zap.Ints("column_permutation", columnPermutation),
-			zap.Array("data", kv.RowArrayMarshaller(row)))
+		logger.Error("column count mismatch", zap.Ints("column_permutation", columnPermutation),
+			zap.Array("data", kv.RowArrayMarshaler(row)))
 		return emptyTiDBRow, errors.Errorf("column count mismatch, expected %d, got %d", enc.columnCnt, len(row))
 	}
 
 	if len(row) > len(enc.columnIdx) {
 		// 2. if len(row) > len(columnIdx): raw row data has more columns than those
 		// in the table
-		enc.logger.Error("column count mismatch", zap.Ints("column_count", enc.columnIdx),
-			zap.Array("data", kv.RowArrayMarshaller(row)))
+		logger.Error("column count mismatch", zap.Ints("column_count", enc.columnIdx),
+			zap.Array("data", kv.RowArrayMarshaler(row)))
 		return emptyTiDBRow, errors.Errorf("column count mismatch, at most %d but got %d", len(enc.columnIdx), len(row))
 	}
 
@@ -538,8 +506,8 @@ func (enc *tidbEncoder) Encode(row []types.Datum, _ int64, columnPermutation []i
 		}
 		datum := field
 		if err := enc.appendSQL(&encoded, &datum, getColumnByIndex(cols, enc.columnIdx[i])); err != nil {
-			enc.logger.Error("tidb encode failed",
-				zap.Array("original", kv.RowArrayMarshaller(row)),
+			logger.Error("tidb encode failed",
+				zap.Array("original", kv.RowArrayMarshaler(row)),
 				zap.Int("originalCol", i),
 				log.ShortError(err),
 			)
@@ -550,7 +518,7 @@ func (enc *tidbEncoder) Encode(row []types.Datum, _ int64, columnPermutation []i
 	encoded.WriteByte(')')
 	return tidbRow{
 		insertStmt: encoded.String(),
-		path:       enc.path,
+		path:       path,
 		offset:     offset,
 	}, nil
 }
@@ -558,11 +526,10 @@ func (enc *tidbEncoder) Encode(row []types.Datum, _ int64, columnPermutation []i
 // EncodeRowForRecord encodes a row to a string compatible with INSERT statements.
 func EncodeRowForRecord(ctx context.Context, encTable table.Table, sqlMode mysql.SQLMode, row []types.Datum, columnPermutation []int) string {
 	enc := tidbEncoder{
-		tbl:    encTable,
-		mode:   sqlMode,
-		logger: log.FromContext(ctx),
+		tbl:  encTable,
+		mode: sqlMode,
 	}
-	resRow, err := enc.Encode(row, 0, columnPermutation, 0)
+	resRow, err := enc.Encode(log.FromContext(ctx), row, 0, columnPermutation, "", 0)
 	if err != nil {
 		// if encode can't succeed, fallback to record the raw input strings
 		// ignore the error since it can only happen if the datum type is unknown, this can't happen here.
@@ -572,43 +539,67 @@ func EncodeRowForRecord(ctx context.Context, encTable table.Table, sqlMode mysql
 	return resRow.(tidbRow).insertStmt
 }
 
-func (*tidbBackend) Close() {
+func (be *tidbBackend) Close() {
 	// *Not* going to close `be.db`. The db object is normally borrowed from a
 	// TidbManager, so we let the manager to close it.
 }
 
-func (*tidbBackend) RetryImportDelay() time.Duration {
+func (be *tidbBackend) MakeEmptyRows() kv.Rows {
+	return be.encBuilder.MakeEmptyRows()
+}
+
+func (be *tidbBackend) RetryImportDelay() time.Duration {
 	return 0
 }
 
-func (*tidbBackend) MaxChunkSize() int {
+func (be *tidbBackend) MaxChunkSize() int {
 	failpoint.Inject("FailIfImportedSomeRows", func() {
 		failpoint.Return(1)
 	})
 	return 1048576
 }
 
-func (*tidbBackend) ShouldPostProcess() bool {
+func (be *tidbBackend) ShouldPostProcess() bool {
 	return true
 }
 
-func (*tidbBackend) OpenEngine(context.Context, *backend.EngineConfig, uuid.UUID) error {
+func (be *tidbBackend) CheckRequirements(ctx context.Context, _ *backend.CheckCtx) error {
+	return be.targetInfoGetter.CheckRequirements(ctx, nil)
+}
+
+func (be *tidbBackend) NewEncoder(ctx context.Context, tbl table.Table, options *kv.SessionOptions) (kv.Encoder, error) {
+	return be.encBuilder.NewEncoder(ctx, tbl, options)
+}
+
+func (be *tidbBackend) OpenEngine(context.Context, *backend.EngineConfig, uuid.UUID) error {
 	return nil
 }
 
-func (*tidbBackend) CloseEngine(context.Context, *backend.EngineConfig, uuid.UUID) error {
+func (be *tidbBackend) CloseEngine(context.Context, *backend.EngineConfig, uuid.UUID) error {
 	return nil
 }
 
-func (*tidbBackend) CleanupEngine(context.Context, uuid.UUID) error {
+func (be *tidbBackend) CleanupEngine(context.Context, uuid.UUID) error {
 	return nil
 }
 
-func (*tidbBackend) ImportEngine(context.Context, uuid.UUID, int64, int64) error {
+func (be *tidbBackend) CollectLocalDuplicateRows(ctx context.Context, tbl table.Table, tableName string, opts *kv.SessionOptions) (bool, error) {
+	panic("Unsupported Operation")
+}
+
+func (be *tidbBackend) CollectRemoteDuplicateRows(ctx context.Context, tbl table.Table, tableName string, opts *kv.SessionOptions) (bool, error) {
+	panic("Unsupported Operation")
+}
+
+func (be *tidbBackend) ResolveDuplicateRows(ctx context.Context, tbl table.Table, tableName string, algorithm config.DuplicateResolutionAlgorithm) error {
 	return nil
 }
 
-func (be *tidbBackend) WriteRows(ctx context.Context, tableName string, columnNames []string, rows encode.Rows) error {
+func (be *tidbBackend) ImportEngine(context.Context, uuid.UUID, int64, int64) error {
+	return nil
+}
+
+func (be *tidbBackend) WriteRows(ctx context.Context, tableName string, columnNames []string, rows kv.Rows) error {
 	var err error
 rowLoop:
 	for _, r := range rows.SplitIntoChunks(be.MaxChunkSize()) {
@@ -620,15 +611,13 @@ rowLoop:
 				continue rowLoop
 			case common.IsRetryableError(err):
 				// retry next loop
-			case be.errorMgr.TypeErrorsRemain() > 0 ||
-				be.errorMgr.ConflictErrorsRemain() > 0 ||
-				(be.conflictCfg.Strategy == config.ErrorOnDup && !be.errorMgr.RecordErrorOnce()):
+			case be.errorMgr.TypeErrorsRemain() > 0:
 				// WriteBatchRowsToDB failed in the batch mode and can not be retried,
 				// we need to redo the writing row-by-row to find where the error locates (and skip it correctly in future).
 				if err = be.WriteRowsToDB(ctx, tableName, columnNames, r); err != nil {
-					// If the error is not nil, it means we reach the max error count in the
-					// non-batch mode or this is "error" conflict strategy.
-					return errors.Annotatef(err, "[%s] write rows exceed conflict threshold", tableName)
+					// If the error is not nil, it means we reach the max error count in the non-batch mode.
+					// For now, we will treat like maxErrorCount is always 0. So we will just return if any error occurs.
+					return errors.Annotatef(err, "[%s] write rows reach max error count %d", tableName, 0)
 				}
 				continue rowLoop
 			default:
@@ -640,6 +629,10 @@ rowLoop:
 	return nil
 }
 
+func (be *tidbBackend) TotalMemoryConsume() int64 {
+	return 0
+}
+
 type stmtTask struct {
 	rows tidbRows
 	stmt string
@@ -648,7 +641,7 @@ type stmtTask struct {
 // WriteBatchRowsToDB write rows in batch mode, which will insert multiple rows like this:
 //
 //	insert into t1 values (111), (222), (333), (444);
-func (be *tidbBackend) WriteBatchRowsToDB(ctx context.Context, tableName string, columnNames []string, r encode.Rows) error {
+func (be *tidbBackend) WriteBatchRowsToDB(ctx context.Context, tableName string, columnNames []string, r kv.Rows) error {
 	rows := r.(tidbRows)
 	insertStmt := be.checkAndBuildStmt(rows, tableName, columnNames)
 	if insertStmt == nil {
@@ -682,7 +675,7 @@ func (be *tidbBackend) checkAndBuildStmt(rows tidbRows, tableName string, column
 //	insert into t1 values (444);
 //
 // See more details in br#1366: https://github.com/pingcap/br/issues/1366
-func (be *tidbBackend) WriteRowsToDB(ctx context.Context, tableName string, columnNames []string, r encode.Rows) error {
+func (be *tidbBackend) WriteRowsToDB(ctx context.Context, tableName string, columnNames []string, r kv.Rows) error {
 	rows := r.(tidbRows)
 	insertStmt := be.checkAndBuildStmt(rows, tableName, columnNames)
 	if insertStmt == nil {
@@ -725,88 +718,34 @@ func (be *tidbBackend) buildStmt(tableName string, columnNames []string) *string
 }
 
 func (be *tidbBackend) execStmts(ctx context.Context, stmtTasks []stmtTask, tableName string, batch bool) error {
-stmtLoop:
 	for _, stmtTask := range stmtTasks {
-		var (
-			result sql.Result
-			err    error
-		)
 		for i := 0; i < writeRowsMaxRetryTimes; i++ {
 			stmt := stmtTask.stmt
-			result, err = be.db.ExecContext(ctx, stmt)
-			if err == nil {
-				affected, err2 := result.RowsAffected()
-				if err2 != nil {
-					// should not happen
-					return errors.Trace(err2)
+			_, err := be.db.ExecContext(ctx, stmt)
+			if err != nil {
+				if !common.IsContextCanceledError(err) {
+					log.FromContext(ctx).Error("execute statement failed",
+						zap.Array("rows", stmtTask.rows), zap.String("stmt", redact.String(stmt)), zap.Error(err))
 				}
-				diff := int64(len(stmtTask.rows)) - affected
-				if diff < 0 {
-					diff = -diff
+				// It's batch mode, just return the error.
+				if batch {
+					return errors.Trace(err)
 				}
-				if diff > 0 {
-					if err2 = be.errorMgr.RecordDuplicateCount(diff); err2 != nil {
-						return err2
-					}
+				// Retry the non-batch insert here if this is not the last retry.
+				if common.IsRetryableError(err) && i != writeRowsMaxRetryTimes-1 {
+					continue
 				}
-				continue stmtLoop
-			}
-
-			if !common.IsContextCanceledError(err) {
-				log.FromContext(ctx).Error("execute statement failed",
-					zap.Array("rows", stmtTask.rows), zap.String("stmt", redact.String(stmt)), zap.Error(err))
-			}
-			// It's batch mode, just return the error. Caller will fall back to row-by-row mode.
-			if batch {
+				firstRow := stmtTask.rows[0]
+				err = be.errorMgr.RecordTypeError(ctx, log.FromContext(ctx), tableName, firstRow.path, firstRow.offset, firstRow.insertStmt, err)
+				if err == nil {
+					// max-error not yet reached (error consumed by errorMgr), proceed to next stmtTask.
+					break
+				}
 				return errors.Trace(err)
 			}
-			if !common.IsRetryableError(err) {
-				break
-			}
+			// No error, continue the next stmtTask.
+			break
 		}
-
-		firstRow := stmtTask.rows[0]
-
-		if isDupEntryError(err) {
-			// rowID is ignored in tidb backend
-			if be.conflictCfg.Strategy == config.ErrorOnDup {
-				be.errorMgr.RecordDuplicateOnce(
-					ctx,
-					log.FromContext(ctx),
-					tableName,
-					firstRow.path,
-					firstRow.offset,
-					err.Error(),
-					0,
-					firstRow.insertStmt,
-				)
-				return err
-			}
-			err = be.errorMgr.RecordDuplicate(
-				ctx,
-				log.FromContext(ctx),
-				tableName,
-				firstRow.path,
-				firstRow.offset,
-				err.Error(),
-				0,
-				firstRow.insertStmt,
-			)
-		} else {
-			err = be.errorMgr.RecordTypeError(
-				ctx,
-				log.FromContext(ctx),
-				tableName,
-				firstRow.path,
-				firstRow.offset,
-				firstRow.insertStmt,
-				err,
-			)
-		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		// max-error not yet reached (error consumed by errorMgr), proceed to next stmtTask.
 	}
 	failpoint.Inject("FailIfImportedSomeRows", func() {
 		panic("forcing failure due to FailIfImportedSomeRows, before saving checkpoint")
@@ -814,67 +753,56 @@ stmtLoop:
 	return nil
 }
 
-func isDupEntryError(err error) bool {
-	merr, ok := errors.Cause(err).(*gmysql.MySQLError)
-	if !ok {
-		return false
-	}
-	return merr.Number == errno.ErrDupEntry
+func (be *tidbBackend) FetchRemoteTableModels(ctx context.Context, schemaName string) ([]*model.TableInfo, error) {
+	return be.targetInfoGetter.FetchRemoteTableModels(ctx, schemaName)
 }
 
-// FlushEngine flushes the data in the engine to the underlying storage.
-func (*tidbBackend) FlushEngine(context.Context, uuid.UUID) error {
+func (be *tidbBackend) EngineFileSizes() []backend.EngineFileSize {
 	return nil
 }
 
-// FlushAllEngines flushes all the data in the engines to the underlying storage.
-func (*tidbBackend) FlushAllEngines(context.Context) error {
+func (be *tidbBackend) FlushEngine(context.Context, uuid.UUID) error {
 	return nil
 }
 
-// ResetEngine resets the engine.
-func (*tidbBackend) ResetEngine(context.Context, uuid.UUID) error {
+func (be *tidbBackend) FlushAllEngines(context.Context) error {
+	return nil
+}
+
+func (be *tidbBackend) ResetEngine(context.Context, uuid.UUID) error {
 	return errors.New("cannot reset an engine in TiDB backend")
 }
 
-// LocalWriter returns a writer that writes data to local storage.
 func (be *tidbBackend) LocalWriter(
-	_ context.Context,
+	ctx context.Context,
 	cfg *backend.LocalWriterConfig,
 	_ uuid.UUID,
 ) (backend.EngineWriter, error) {
-	return &Writer{be: be, tableName: cfg.TableName}, nil
+	return &Writer{be: be}, nil
 }
 
-// Writer is a writer that writes data to local storage.
 type Writer struct {
-	be        *tidbBackend
-	tableName string
+	be *tidbBackend
 }
 
-// Close implements the EngineWriter interface.
-func (*Writer) Close(_ context.Context) (backend.ChunkFlushStatus, error) {
+func (w *Writer) Close(ctx context.Context) (backend.ChunkFlushStatus, error) {
 	return nil, nil
 }
 
-// AppendRows implements the EngineWriter interface.
-func (w *Writer) AppendRows(ctx context.Context, columnNames []string, rows encode.Rows) error {
-	return w.be.WriteRows(ctx, w.tableName, columnNames, rows)
+func (w *Writer) AppendRows(ctx context.Context, tableName string, columnNames []string, rows kv.Rows) error {
+	return w.be.WriteRows(ctx, tableName, columnNames, rows)
 }
 
-// IsSynced implements the EngineWriter interface.
-func (*Writer) IsSynced() bool {
+func (w *Writer) IsSynced() bool {
 	return true
 }
 
-// TableAutoIDInfo is the auto id information of a table.
 type TableAutoIDInfo struct {
 	Column string
 	NextID uint64
 	Type   string
 }
 
-// FetchTableAutoIDInfos fetches the auto id information of a table.
 func FetchTableAutoIDInfos(ctx context.Context, exec utils.QueryExecutor, tableName string) ([]*TableAutoIDInfo, error) {
 	rows, e := exec.QueryContext(ctx, fmt.Sprintf("SHOW TABLE %s NEXT_ROW_ID", tableName))
 	if e != nil {

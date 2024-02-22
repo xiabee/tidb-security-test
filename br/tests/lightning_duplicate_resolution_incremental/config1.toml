@@ -5,6 +5,7 @@ table-concurrency = 10
 
 [tikv-importer]
 backend = "local"
+on-duplicate = "replace"
 duplicate-resolution = "remove"
 incremental-import = true
 

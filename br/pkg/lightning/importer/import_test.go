@@ -30,13 +30,13 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/version/build"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/parser"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/types"
-	tmock "github.com/pingcap/tidb/util/mock"
-	router "github.com/pingcap/tidb/util/table-router"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/types"
+	tmock "github.com/pingcap/tidb/pkg/util/mock"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/stretchr/testify/require"
 	tikvconfig "github.com/tikv/client-go/v2/config"
 )
@@ -147,15 +147,6 @@ func TestVerifyCheckpoint(t *testing.T) {
 		"mydumper.data-source-dir": func(cfg *config.Config) {
 			cfg.Mydumper.SourceDir = "/tmp/test"
 		},
-		"tidb.host": func(cfg *config.Config) {
-			cfg.TiDB.Host = "192.168.0.1"
-		},
-		"tidb.port": func(cfg *config.Config) {
-			cfg.TiDB.Port = 5000
-		},
-		"tidb.pd-addr": func(cfg *config.Config) {
-			cfg.TiDB.PdAddr = "127.0.0.1:3379"
-		},
 		"version": func(cfg *config.Config) {
 			build.ReleaseVersion = "some newer version"
 		},
@@ -176,6 +167,12 @@ func TestVerifyCheckpoint(t *testing.T) {
 			require.Regexp(t, fmt.Sprintf("config '%s' value '.*' different from checkpoint value .*", conf), err.Error())
 		}
 	}
+
+	// changing TiDB IP is OK
+	cfg := newCfg()
+	cfg.TiDB.Host = "192.168.0.1"
+	err = verifyCheckpoint(cfg, taskCp)
+	require.NoError(t, err)
 
 	for conf, fn := range adjustFuncs {
 		if conf == "tikv-importer.backend" {

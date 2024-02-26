@@ -30,8 +30,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	md "github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	filter "github.com/pingcap/tidb/util/table-filter"
-	router "github.com/pingcap/tidb/util/table-router"
+	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	router "github.com/pingcap/tidb/pkg/util/table-router"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xitongsys/parquet-go/parquet"
@@ -1130,17 +1130,17 @@ func TestSampleParquetDataSize(t *testing.T) {
 	pwriter.PageSize = 8 * 1024              //8K
 	pwriter.CompressionType = parquet.CompressionCodec_SNAPPY
 	seed := time.Now().Unix()
-	t.Logf("seed: %d", seed)
-	rand.Seed(seed)
+	t.Logf("seed: %d. To reproduce the random behaviour, manually set `rand.New(rand.NewSource(seed))`", seed)
+	rnd := rand.New(rand.NewSource(seed))
 	totalRowSize := 0
 	for i := 0; i < 1000; i++ {
-		kl := rand.Intn(20) + 1
+		kl := rnd.Intn(20) + 1
 		key := make([]byte, kl)
-		kl, err = rand.Read(key)
+		kl, err = rnd.Read(key)
 		require.NoError(t, err)
-		vl := rand.Intn(20) + 1
+		vl := rnd.Intn(20) + 1
 		value := make([]byte, vl)
-		vl, err = rand.Read(value)
+		vl, err = rnd.Read(value)
 		require.NoError(t, err)
 
 		totalRowSize += kl + vl + 8

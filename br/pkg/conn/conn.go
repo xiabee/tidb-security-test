@@ -27,9 +27,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/pkg/config"
+	"github.com/pingcap/tidb/pkg/domain"
+	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -109,7 +109,7 @@ func checkStoresAlive(ctx context.Context,
 	// Check live tikv.
 	stores, err := util.GetAllTiKVStores(ctx, pdclient, storeBehavior)
 	if err != nil {
-		log.Error("fail to get store", zap.Error(err))
+		log.Error("failed to get store", zap.Error(err))
 		return errors.Trace(err)
 	}
 
@@ -131,7 +131,7 @@ func checkStoresAlive(ctx context.Context,
 func NewMgr(
 	ctx context.Context,
 	g glue.Glue,
-	pdAddrs string,
+	pdAddrs []string,
 	tlsConf *tls.Config,
 	securityOption pd.SecurityOption,
 	keepalive keepalive.ClientParameters,
@@ -146,11 +146,11 @@ func NewMgr(
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
-	log.Info("new mgr", zap.String("pdAddrs", pdAddrs))
+	log.Info("new mgr", zap.Strings("pdAddrs", pdAddrs))
 
 	controller, err := pdutil.NewPdController(ctx, pdAddrs, tlsConf, securityOption)
 	if err != nil {
-		log.Error("fail to create pd controller", zap.Error(err))
+		log.Error("failed to create pd controller", zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 	if checkRequirements {
@@ -176,7 +176,10 @@ func NewMgr(
 	}
 
 	// Disable GC because TiDB enables GC already.
-	path := fmt.Sprintf("tikv://%s?disableGC=true&keyspaceName=%s", pdAddrs, config.GetGlobalKeyspaceName())
+	path := fmt.Sprintf(
+		"tikv://%s?disableGC=true&keyspaceName=%s",
+		strings.Join(pdAddrs, ","), config.GetGlobalKeyspaceName(),
+	)
 	storage, err := g.Open(path, securityOption)
 	if err != nil {
 		return nil, errors.Trace(err)

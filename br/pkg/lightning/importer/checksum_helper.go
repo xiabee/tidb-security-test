@@ -25,7 +25,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
-	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/pkg/kv"
 	"go.uber.org/zap"
 )
 
@@ -36,7 +36,7 @@ func NewChecksumManager(ctx context.Context, rc *Controller, store kv.Storage) (
 		return nil, nil
 	}
 
-	pdVersion, err := pdutil.FetchPDVersion(ctx, rc.tls, rc.pdCli.GetLeaderAddr())
+	pdVersion, err := pdutil.FetchPDVersion(ctx, rc.pdHTTPCli)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -52,7 +52,8 @@ func NewChecksumManager(ctx context.Context, rc *Controller, store kv.Storage) (
 			log.FromContext(ctx).Info("set tidb_backoff_weight to default", zap.Int("backoff_weight", local.DefaultBackoffWeight))
 			backoffWeight = local.DefaultBackoffWeight
 		}
-		manager = local.NewTiKVChecksumManager(store.GetClient(), rc.pdCli, uint(rc.cfg.TiDB.DistSQLScanConcurrency), backoffWeight)
+
+		manager = local.NewTiKVChecksumManager(store.GetClient(), rc.pdCli, uint(rc.cfg.TiDB.DistSQLScanConcurrency), backoffWeight, rc.resourceGroupName, rc.taskType)
 	} else {
 		manager = local.NewTiDBChecksumExecutor(rc.db)
 	}

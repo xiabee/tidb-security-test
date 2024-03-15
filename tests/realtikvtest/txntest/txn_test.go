@@ -18,17 +18,17 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
-	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
 func TestInTxnPSProtoPointGet(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -42,7 +42,7 @@ func TestInTxnPSProtoPointGet(t *testing.T) {
 	require.NoError(t, err)
 	idForUpdate, _, _, err := tk.Session().PrepareStmt("select c1, c2 from t1 where c1 = ? for update")
 	require.NoError(t, err)
-	params := expression.Args2Expressions4Test(1)
+	params := []types.Datum{types.NewDatum(1)}
 	rs, err := tk.Session().ExecutePreparedStmt(ctx, id, params)
 	require.NoError(t, err)
 	tk.ResultSetToResult(rs, fmt.Sprintf("%v", rs)).Check(testkit.Rows("1 10"))
@@ -89,7 +89,8 @@ func TestInTxnPSProtoPointGet(t *testing.T) {
 }
 
 func TestTxnGoString(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -114,7 +115,8 @@ func TestTxnGoString(t *testing.T) {
 }
 
 func TestSetTransactionIsolationOneSho(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -132,17 +134,15 @@ func TestSetTransactionIsolationOneSho(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "CheckSelectRequestHook", func(req *kv.Request) {
 		require.Equal(t, kv.SI, req.IsolationLevel)
 	})
-	rs, err := tk.Session().Execute(ctx, "select * from t where k = 1")
+	_, err := tk.Session().Execute(ctx, "select * from t where k = 1")
 	require.NoError(t, err)
-	rs[0].Close()
 
 	// Check it just take effect for one time.
 	ctx = context.WithValue(context.Background(), "CheckSelectRequestHook", func(req *kv.Request) {
 		require.Equal(t, kv.SI, req.IsolationLevel)
 	})
-	rs, err = tk.Session().Execute(ctx, "select * from t where k = 1")
+	_, err = tk.Session().Execute(ctx, "select * from t where k = 1")
 	require.NoError(t, err)
-	rs[0].Close()
 
 	// Can't change isolation level when it's inside a transaction.
 	tk.MustExec("begin")
@@ -151,7 +151,8 @@ func TestSetTransactionIsolationOneSho(t *testing.T) {
 }
 
 func TestStatementErrorInTransaction(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -177,168 +178,4 @@ func TestStatementErrorInTransaction(t *testing.T) {
 	tk.MustExec("update test set b = 11 where a = 1 and b = 2;")
 	tk.MustExec("rollback")
 	tk.MustQuery("select * from test where a = 1 and b = 11").Check(testkit.Rows())
-}
-
-func TestWriteConflictMessage(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk2.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t (c int primary key)")
-	tk.MustExec("begin optimistic")
-	tk2.MustExec("insert into t values (1)")
-	tk.MustExec("insert into t values (1)")
-	err := tk.ExecToErr("commit")
-	require.Contains(t, err.Error(), "Write conflict")
-	require.Contains(t, err.Error(), "tableName=test.t, handle=1}")
-	require.Contains(t, err.Error(), "reason=Optimistic")
-
-	tk.MustExec("create table t2 (id varchar(30) primary key clustered)")
-	tk.MustExec("begin optimistic")
-	tk2.MustExec("insert into t2 values ('hello')")
-	tk.MustExec("insert into t2 values ('hello')")
-	err = tk.ExecToErr("commit")
-	require.Contains(t, err.Error(), "Write conflict")
-	require.Contains(t, err.Error(), "tableName=test.t2, handle={hello}")
-	require.Contains(t, err.Error(), "reason=Optimistic")
-}
-
-func TestDuplicateErrorMessage(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("set @@tx_isolation='read-committed'")
-	tk2.MustExec("use test")
-	tk.MustExec("set @@tidb_constraint_check_in_place_pessimistic=off")
-	tk.MustExec("create table t (c int primary key, v int)")
-	tk.MustExec("create table t2 (c int primary key, v int)")
-	tk.MustExec("begin pessimistic")
-	tk.MustExec("insert into t values (1, 1)")
-	tk2.MustExec("insert into t values (1, 1)")
-	tk2.MustExec("insert into t2 values (1, 2)")
-	tk.MustContainErrMsg("update t set v = v + 1 where c = 1", "Duplicate entry '1' for key 't.PRIMARY'")
-
-	tk.MustExec("create table t3 (c int, v int, unique key i1(v))")
-	tk.MustExec("create table t4 (c int, v int, unique key i1(v))")
-	tk.MustExec("begin pessimistic")
-	tk.MustExec("insert into t3 values (1, 1)")
-	tk2.MustExec("insert into t3 values (1, 1)")
-	tk2.MustExec("insert into t4 values (1, 2)")
-	tk.MustContainErrMsg("update t3 set c = c + 1 where v = 1", "Duplicate entry '1' for key 't3.i1'")
-}
-
-func TestAssertionWhenPessimisticLockLost(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk1 := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk1.MustExec("set @@tidb_constraint_check_in_place_pessimistic=0")
-	tk1.MustExec("set @@tidb_txn_assertion_level=strict")
-	tk2.MustExec("set @@tidb_constraint_check_in_place_pessimistic=0")
-	tk2.MustExec("set @@tidb_txn_assertion_level=strict")
-	tk1.MustExec("use test")
-	tk2.MustExec("use test")
-	tk1.MustExec("create table t (id int primary key, val text)")
-	tk1.MustExec("begin pessimistic")
-	tk1.MustExec("select * from t where id = 1 for update")
-	tk2.MustExec("begin pessimistic")
-	tk2.MustExec("insert into t values (1, 'b')")
-	tk2.MustExec("insert into t values (2, 'b')")
-	tk2.MustExec("commit")
-	tk1.MustExec("select * from t where id = 2 for update")
-	tk1.MustExec("insert into t values (1, 'a') on duplicate key update val = concat(val, 'a')")
-	err := tk1.ExecToErr("commit")
-	require.NotContains(t, err.Error(), "assertion")
-}
-
-func TestSelectLockForPartitionTable(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk1 := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-
-	tk1.MustExec("use test")
-	tk1.MustExec("create table t(a int, b int, c int, key idx(a, b, c)) PARTITION BY HASH (c) PARTITIONS 10")
-	tk1.MustExec("insert into t values (1, 1, 1), (2, 2, 2), (3, 3, 3)")
-	tk1.MustExec("analyze table t")
-	tk1.MustExec("begin")
-	tk1.MustHavePlan("select * from t use index(idx) where a = 1 and b = 1 order by a limit 1 for update", "IndexLookUp")
-	tk1.MustExec("select * from t use index(idx) where a = 1 and b = 1 order by a limit 1 for update")
-	ch := make(chan bool, 1)
-	go func() {
-		tk2.MustExec("use test")
-		tk2.MustExec("begin")
-		ch <- false
-		// block here, until tk1 finish
-		tk2.MustExec("select * from t use index(idx) where a = 1 and b = 1 order by a limit 1 for update")
-		ch <- true
-	}()
-
-	res := <-ch
-	// Sleep here to make sure SelectLock stmt is executed
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case res = <-ch:
-	default:
-	}
-	require.False(t, res)
-
-	tk1.MustExec("commit")
-	// wait until tk2 finished
-	res = <-ch
-	require.True(t, res)
-}
-
-func TestTxnEntrySizeLimit(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk1 := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk1.MustExec("use test")
-	tk2.MustExec("use test")
-	tk1.MustExec("create table t (a int, b longtext)")
-
-	// cannot insert a large entry by default
-	tk1.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
-
-	// increase the entry size limit allow user write large entries
-	tk1.MustExec("set session tidb_txn_entry_size_limit=8388608")
-	tk1.MustExec("insert into t values (1, repeat('a', 7340032))")
-	tk1.MustContainErrMsg("insert into t values (1, repeat('a', 9427968))", "[kv:8025]entry too large, the max entry size is 8388608")
-
-	// update session var does not affect other sessions
-	tk2.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
-	tk3 := testkit.NewTestKit(t, store)
-	tk3.MustExec("use test")
-	tk3.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
-
-	// update session var does not affect internal session used by ddl backfilling
-	tk1.MustContainErrMsg("alter table t modify column a varchar(255)", "[kv:8025]entry too large, the max entry size is 6291456")
-
-	// update global var allows ddl backfilling write large entries
-	tk1.MustExec("set global tidb_txn_entry_size_limit=8388608")
-	tk1.MustExec("alter table t modify column a varchar(255)")
-	tk2.MustExec("alter table t modify column a int")
-
-	// update global var does not affect existing sessions
-	tk2.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
-	tk3.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
-
-	// update global var affects new sessions
-	tk4 := testkit.NewTestKit(t, store)
-	tk4.MustExec("use test")
-	tk4.MustExec("insert into t values (2, repeat('b', 7340032))")
-
-	// reset global var to default
-	tk1.MustExec("set global tidb_txn_entry_size_limit=0")
-	tk1.MustContainErrMsg("alter table t modify column a varchar(255)", "[kv:8025]entry too large, the max entry size is 6291456")
-	tk2.MustContainErrMsg("alter table t modify column a varchar(255)", "[kv:8025]entry too large, the max entry size is 6291456")
-	tk3.MustContainErrMsg("alter table t modify column a varchar(255)", "[kv:8025]entry too large, the max entry size is 6291456")
-	tk4.MustContainErrMsg("alter table t modify column a varchar(255)", "[kv:8025]entry too large, the max entry size is 6291456")
-
-	// reset session var to default
-	tk1.MustExec("insert into t values (3, repeat('c', 7340032))")
-	tk1.MustExec("set session tidb_txn_entry_size_limit=0")
-	tk1.MustContainErrMsg("insert into t values (1, repeat('a', 7340032))", "[kv:8025]entry too large, the max entry size is 6291456")
 }

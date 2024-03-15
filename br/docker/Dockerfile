@@ -1,15 +1,7 @@
 # For loading data to TiDB
+
 FROM golang:1.18.9-alpine as go-ycsb-builder
 WORKDIR /go/src/github.com/pingcap/
-
-RUN apk add --no-cache \
-    wget \
-    make \
-    git \
-    binutils-gold \
-    gcc \
-    musl-dev
-
 RUN git clone https://github.com/pingcap/go-ycsb.git --depth=1 && \
     cd go-ycsb && \
     make

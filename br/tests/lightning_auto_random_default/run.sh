@@ -16,7 +16,6 @@
 
 set -eu
 
-CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # FIXME: auto-random is only stable on master currently.
 check_cluster_version 4 0 0 AUTO_RANDOM || exit 0
 
@@ -67,7 +66,7 @@ function run_for_auro_random_data2() {
     run_sql 'DROP DATABASE IF EXISTS auto_random;'
     run_sql 'CREATE DATABASE IF NOT EXISTS auto_random;'
     run_sql "$create_table"
-    run_lightning --backend $backend -d "$CUR/data2"
+    run_lightning --backend $backend -d "tests/$TEST_NAME/data2"
     run_sql 'select count(*) as count from auto_random.t where c > 0'
     check_contains "count: 2"
     run_sql 'select count(*) as count from auto_random.t where a=1 and b=11'
@@ -84,7 +83,7 @@ for backend in tidb local; do
     run_for_auro_random_data2 'create table auto_random.t(c bigint auto_random primary key, a int, b int)'
     run_for_auro_random_data2 'create table auto_random.t(a int, b int, c bigint auto_random primary key)'
     # composite key and auto_random is the first column
-    run_for_auro_random_data2 'create table auto_random.t(c bigint auto_random, a int, b int, primary key(c, a))'
+    run_for_auro_random_data2 'create table auto_random.t(c bigint auto_random, a int, b int, primary key(c, a) clustered)'
     # composite key and auto_random is not the first column
-    run_for_auro_random_data2 'create table auto_random.t(a int, b int, c bigint auto_random, primary key(c, a))'
+    run_for_auro_random_data2 'create table auto_random.t(a int, b int, c bigint auto_random, primary key(c, a) clustered)'
 done

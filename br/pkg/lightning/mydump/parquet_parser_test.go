@@ -6,10 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xitongsys/parquet-go-source/local"
@@ -43,7 +42,7 @@ func TestParquetParser(t *testing.T) {
 
 	store, err := storage.NewLocalStorage(dir)
 	require.NoError(t, err)
-	r, err := store.Open(context.TODO(), name, nil)
+	r, err := store.Open(context.TODO(), name)
 	require.NoError(t, err)
 	reader, err := NewParquetParser(context.TODO(), store, r, name)
 	require.NoError(t, err)
@@ -120,7 +119,7 @@ func TestParquetVariousTypes(t *testing.T) {
 
 	store, err := storage.NewLocalStorage(dir)
 	require.NoError(t, err)
-	r, err := store.Open(context.TODO(), name, nil)
+	r, err := store.Open(context.TODO(), name)
 	require.NoError(t, err)
 	reader, err := NewParquetParser(context.TODO(), store, r, name)
 	require.NoError(t, err)
@@ -145,7 +144,7 @@ func TestParquetVariousTypes(t *testing.T) {
 		DecimalRef *int32 `parquet:"name=decimal2, type=DECIMAL, scale=3, precision=5, basetype=INT32"`
 	}
 
-	cases := [][]any{
+	cases := [][]interface{}{
 		{int32(0), "0.000"},
 		{int32(1000), "1.000"},
 		{int32(-1000), "-1.000"},
@@ -163,8 +162,7 @@ func TestParquetVariousTypes(t *testing.T) {
 	writer, err = writer2.NewParquetWriter(pf, td, 2)
 	require.NoError(t, err)
 	for i, testCase := range cases {
-		val, ok := testCase[0].(int32)
-		require.True(t, ok)
+		val := testCase[0].(int32)
 		td.Decimal1 = val
 		if i%2 == 0 {
 			td.DecimalRef = &val
@@ -176,7 +174,7 @@ func TestParquetVariousTypes(t *testing.T) {
 	require.NoError(t, writer.WriteStop())
 	require.NoError(t, pf.Close())
 
-	r, err = store.Open(context.TODO(), fileName, nil)
+	r, err = store.Open(context.TODO(), fileName)
 	require.NoError(t, err)
 	reader, err = NewParquetParser(context.TODO(), store, r, fileName)
 	require.NoError(t, err)
@@ -184,9 +182,7 @@ func TestParquetVariousTypes(t *testing.T) {
 
 	for i, testCase := range cases {
 		assert.NoError(t, reader.ReadRow())
-		strDatum, ok := testCase[1].(string)
-		require.True(t, ok)
-		vals := []types.Datum{types.NewCollationStringDatum(strDatum, "")}
+		vals := []types.Datum{types.NewCollationStringDatum(testCase[1].(string), "")}
 		if i%2 == 0 {
 			vals = append(vals, vals[0])
 		} else {
@@ -200,36 +196,6 @@ func TestParquetVariousTypes(t *testing.T) {
 			assert.Equal(t, val.GetValue(), reader.lastRow.Row[i].GetValue())
 		}
 	}
-
-	type TestBool struct {
-		BoolVal bool `parquet:"name=bool_val, type=BOOLEAN"`
-	}
-
-	fileName = "test.bool.parquet"
-	testPath = filepath.Join(dir, fileName)
-	pf, err = local.NewLocalFileWriter(testPath)
-	require.NoError(t, err)
-	writer, err = writer2.NewParquetWriter(pf, new(TestBool), 2)
-	require.NoError(t, err)
-	require.NoError(t, writer.Write(&TestBool{false}))
-	require.NoError(t, writer.Write(&TestBool{true}))
-	require.NoError(t, writer.WriteStop())
-	require.NoError(t, pf.Close())
-
-	r, err = store.Open(context.TODO(), fileName, nil)
-	require.NoError(t, err)
-	reader, err = NewParquetParser(context.TODO(), store, r, fileName)
-	require.NoError(t, err)
-	defer reader.Close()
-
-	// because we always reuse the datums in reader.lastRow.Row, so we can't directly
-	// compare will `DeepEqual` here
-	assert.NoError(t, reader.ReadRow())
-	assert.Equal(t, types.KindUint64, reader.lastRow.Row[0].Kind())
-	assert.Equal(t, uint64(0), reader.lastRow.Row[0].GetValue())
-	assert.NoError(t, reader.ReadRow())
-	assert.Equal(t, types.KindUint64, reader.lastRow.Row[0].Kind())
-	assert.Equal(t, uint64(1), reader.lastRow.Row[0].GetValue())
 }
 
 func TestParquetAurora(t *testing.T) {
@@ -237,14 +203,14 @@ func TestParquetAurora(t *testing.T) {
 	require.NoError(t, err)
 
 	fileName := "test.parquet"
-	r, err := store.Open(context.TODO(), fileName, nil)
+	r, err := store.Open(context.TODO(), fileName)
 	require.NoError(t, err)
 	parser, err := NewParquetParser(context.TODO(), store, r, fileName)
 	require.NoError(t, err)
 
 	require.Equal(t, []string{"id", "val1", "val2", "d1", "d2", "d3", "d4", "d5", "d6"}, parser.Columns())
 
-	expectedRes := [][]any{
+	expectedRes := [][]interface{}{
 		{int64(1), int64(1), "0", int64(123), "1.23", "0.00000001", "1234567890", "123", "1.23000000"},
 		{
 			int64(2), int64(123456), "0", int64(123456), "9999.99", "0.12345678", "99999999999999999999",
@@ -287,43 +253,4 @@ func TestParquetAurora(t *testing.T) {
 	}
 
 	require.ErrorIs(t, parser.ReadRow(), io.EOF)
-}
-
-func TestHiveParquetParser(t *testing.T) {
-	name := "000000_0.parquet"
-	dir := "./parquet/"
-	store, err := storage.NewLocalStorage(dir)
-	require.NoError(t, err)
-	r, err := store.Open(context.TODO(), name, nil)
-	require.NoError(t, err)
-	reader, err := NewParquetParser(context.TODO(), store, r, name)
-	require.NoError(t, err)
-	defer reader.Close()
-	// UTC+0:00
-	results := []time.Time{
-		time.Date(2022, 9, 10, 9, 9, 0, 0, time.UTC),
-		time.Date(1997, 8, 11, 2, 1, 10, 0, time.UTC),
-		time.Date(1995, 12, 31, 23, 0, 1, 0, time.UTC),
-		time.Date(2020, 2, 29, 23, 0, 0, 0, time.UTC),
-		time.Date(2038, 1, 19, 0, 0, 0, 0, time.UTC),
-	}
-
-	for i := 0; i < 5; i++ {
-		err = reader.ReadRow()
-		require.NoError(t, err)
-		lastRow := reader.LastRow()
-		require.Equal(t, 2, len(lastRow.Row))
-		require.Equal(t, types.KindString, lastRow.Row[1].Kind())
-		ts, err := time.Parse(utcTimeLayout, lastRow.Row[1].GetString())
-		require.NoError(t, err)
-		require.Equal(t, results[i], ts)
-	}
-}
-
-func TestNsecOutSideRange(t *testing.T) {
-	a := time.Date(2022, 9, 10, 9, 9, 0, 0, time.Now().Local().Location())
-	b := time.Unix(a.Unix(), 1000000000)
-	// For nano sec out of 999999999, time will automatically execute a
-	// carry operation. i.e. 1000000000 nsec => 1 sec
-	require.Equal(t, a.Add(1*time.Second), b)
 }

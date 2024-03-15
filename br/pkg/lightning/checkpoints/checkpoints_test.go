@@ -303,6 +303,7 @@ func TestCheckpointMarshallUnmarshall(t *testing.T) {
 }
 
 func TestSeparateCompletePath(t *testing.T) {
+
 	testCases := []struct {
 		complete       string
 		expectFileName string

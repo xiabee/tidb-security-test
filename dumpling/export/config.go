@@ -4,7 +4,6 @@ package export
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -16,16 +15,15 @@ import (
 	"github.com/coreos/go-semver/semver"
 	"github.com/docker/go-units"
 	"github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/promutil"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/util"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -68,59 +66,23 @@ const (
 	flagKey                      = "key"
 	flagCsvSeparator             = "csv-separator"
 	flagCsvDelimiter             = "csv-delimiter"
-	flagCsvLineTerminator        = "csv-line-terminator"
 	flagOutputFilenameTemplate   = "output-filename-template"
 	flagCompleteInsert           = "complete-insert"
 	flagParams                   = "params"
 	flagReadTimeout              = "read-timeout"
 	flagTransactionalConsistency = "transactional-consistency"
 	flagCompress                 = "compress"
-	flagCsvOutputDialect         = "csv-output-dialect"
 
 	// FlagHelp represents the help flag
 	FlagHelp = "help"
 )
 
-// CSVDialect is the dialect of the CSV output for compatible with different import target
-type CSVDialect int
-
-const (
-	// CSVDialectDefault is the default dialect, which is MySQL/MariaDB/TiDB etc.
-	CSVDialectDefault CSVDialect = iota
-	// CSVDialectSnowflake is the dialect of Snowflake
-	CSVDialectSnowflake
-	// CSVDialectRedshift is the dialect of Redshift
-	CSVDialectRedshift
-	// CSVDialectBigQuery is the dialect of BigQuery
-	CSVDialectBigQuery
-)
-
-// BinaryFormat is the format of binary data
-// Three standard formats are supported: UTF8, HEX and Base64 now.
-type BinaryFormat int
-
-const (
-	// BinaryFormatUTF8 is the default format, format binary data as UTF8 string
-	BinaryFormatUTF8 BinaryFormat = iota
-	// BinaryFormatHEX format binary data as HEX string, e.g. 12ABCD
-	BinaryFormatHEX
-	// BinaryFormatBase64 format binary data as Base64 string, e.g. 123qwer==
-	BinaryFormatBase64
-)
-
-// DialectBinaryFormatMap is the map of dialect and binary format
-var DialectBinaryFormatMap = map[CSVDialect]BinaryFormat{
-	CSVDialectDefault:   BinaryFormatUTF8,
-	CSVDialectSnowflake: BinaryFormatHEX,
-	CSVDialectRedshift:  BinaryFormatHEX,
-	CSVDialectBigQuery:  BinaryFormatBase64,
-}
-
 // Config is the dump config for dumpling
 type Config struct {
 	storage.BackendOptions
+	ExtStorage storage.ExternalStorage `json:"-"`
 
-	SpecifiedTables          bool
+	specifiedTables          bool
 	AllowCleartextPasswords  bool
 	SortByPk                 bool
 	NoViews                  bool
@@ -141,7 +103,7 @@ type Config struct {
 	User     string
 	Password string `json:"-"`
 	Security struct {
-		TLS          *tls.Config `json:"-"`
+		DriveTLSName string `json:"-"`
 		CAPath       string
 		CertPath     string
 		KeyPath      string
@@ -150,19 +112,18 @@ type Config struct {
 		SSLKeyBytes  []byte `json:"-"`
 	}
 
-	LogLevel          string
-	LogFile           string
-	LogFormat         string
-	OutputDirPath     string
-	StatusAddr        string
-	Snapshot          string
-	Consistency       string
-	CsvNullValue      string
-	SQL               string
-	CsvSeparator      string
-	CsvDelimiter      string
-	CsvLineTerminator string
-	Databases         []string
+	LogLevel      string
+	LogFile       string
+	LogFormat     string
+	OutputDirPath string
+	StatusAddr    string
+	Snapshot      string
+	Consistency   string
+	CsvNullValue  string
+	SQL           string
+	CsvSeparator  string
+	CsvDelimiter  string
+	Databases     []string
 
 	TableFilter         filter.Filter `json:"-"`
 	Where               string
@@ -175,19 +136,10 @@ type Config struct {
 	TiDBMemQuotaQuery   uint64
 	FileSize            uint64
 	StatementSize       uint64
-	SessionParams       map[string]any
+	SessionParams       map[string]interface{}
+	Labels              prometheus.Labels `json:"-"`
 	Tables              DatabaseTables
 	CollationCompatible string
-	CsvOutputDialect    CSVDialect
-
-	Labels        prometheus.Labels       `json:"-"`
-	PromFactory   promutil.Factory        `json:"-"`
-	PromRegistry  promutil.Registry       `json:"-"`
-	ExtStorage    storage.ExternalStorage `json:"-"`
-	MinTLSVersion uint16                  `json:"-"`
-
-	IOTotalBytes *atomic.Uint64
-	Net          string
 }
 
 // ServerInfoUnknown is the unknown database type to dumpling
@@ -200,47 +152,39 @@ var ServerInfoUnknown = version.ServerInfo{
 func DefaultConfig() *Config {
 	allFilter, _ := filter.Parse([]string{"*.*"})
 	return &Config{
-		Databases:                nil,
-		Host:                     "127.0.0.1",
-		User:                     "root",
-		Port:                     3306,
-		Password:                 "",
-		Threads:                  4,
-		Logger:                   nil,
-		StatusAddr:               ":8281",
-		FileSize:                 UnspecifiedSize,
-		StatementSize:            DefaultStatementSize,
-		OutputDirPath:            ".",
-		ServerInfo:               ServerInfoUnknown,
-		SortByPk:                 true,
-		Tables:                   nil,
-		Snapshot:                 "",
-		Consistency:              ConsistencyTypeAuto,
-		NoViews:                  true,
-		NoSequences:              true,
-		Rows:                     UnspecifiedSize,
-		Where:                    "",
-		EscapeBackslash:          true,
-		FileType:                 "",
-		NoHeader:                 false,
-		NoSchemas:                false,
-		NoData:                   false,
-		CsvNullValue:             "\\N",
-		SQL:                      "",
-		TableFilter:              allFilter,
-		DumpEmptyDatabase:        true,
-		CsvDelimiter:             "\"",
-		CsvSeparator:             ",",
-		CsvLineTerminator:        "\r\n",
-		SessionParams:            make(map[string]any),
-		OutputFileTemplate:       DefaultOutputFileTemplate,
-		PosAfterConnect:          false,
-		CollationCompatible:      LooseCollationCompatible,
-		CsvOutputDialect:         CSVDialectDefault,
-		SpecifiedTables:          false,
-		PromFactory:              promutil.NewDefaultFactory(),
-		PromRegistry:             promutil.NewDefaultRegistry(),
-		TransactionalConsistency: true,
+		Databases:           nil,
+		Host:                "127.0.0.1",
+		User:                "root",
+		Port:                3306,
+		Password:            "",
+		Threads:             4,
+		Logger:              nil,
+		StatusAddr:          ":8281",
+		FileSize:            UnspecifiedSize,
+		StatementSize:       DefaultStatementSize,
+		OutputDirPath:       ".",
+		ServerInfo:          ServerInfoUnknown,
+		SortByPk:            true,
+		Tables:              nil,
+		Snapshot:            "",
+		Consistency:         consistencyTypeAuto,
+		NoViews:             true,
+		NoSequences:         true,
+		Rows:                UnspecifiedSize,
+		Where:               "",
+		FileType:            "",
+		NoHeader:            false,
+		NoSchemas:           false,
+		NoData:              false,
+		CsvNullValue:        "\\N",
+		SQL:                 "",
+		TableFilter:         allFilter,
+		DumpEmptyDatabase:   true,
+		SessionParams:       make(map[string]interface{}),
+		OutputFileTemplate:  DefaultOutputFileTemplate,
+		PosAfterConnect:     false,
+		CollationCompatible: LooseCollationCompatible,
+		specifiedTables:     false,
 	}
 }
 
@@ -253,6 +197,25 @@ func (conf *Config) String() string {
 	return string(cfg)
 }
 
+// GetDSN generates DSN from Config
+func (conf *Config) GetDSN(db string) string {
+	// maxAllowedPacket=0 can be used to automatically fetch the max_allowed_packet variable from server on every connection.
+	// https://github.com/go-sql-driver/mysql#maxallowedpacket
+	hostPort := net.JoinHostPort(conf.Host, strconv.Itoa(conf.Port))
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?collation=utf8mb4_general_ci&readTimeout=%s&writeTimeout=30s&interpolateParams=true&maxAllowedPacket=0",
+		conf.User, conf.Password, hostPort, db, conf.ReadTimeout)
+	if conf.Security.DriveTLSName != "" {
+		dsn += "&tls=" + conf.Security.DriveTLSName
+	}
+	if conf.AllowCleartextPasswords {
+		dsn += "&allowCleartextPasswords=1"
+	}
+	failpoint.Inject("SetWaitTimeout", func(val failpoint.Value) {
+		dsn += "&wait_timeout=" + strconv.Itoa(val.(int))
+	})
+	return dsn
+}
+
 // GetDriverConfig returns the MySQL driver config from Config.
 func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	driverCfg := mysql.NewConfig()
@@ -262,9 +225,6 @@ func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	driverCfg.User = conf.User
 	driverCfg.Passwd = conf.Password
 	driverCfg.Net = "tcp"
-	if conf.Net != "" {
-		driverCfg.Net = conf.Net
-	}
 	driverCfg.Addr = hostPort
 	driverCfg.DBName = db
 	driverCfg.Collation = "utf8mb4_general_ci"
@@ -272,30 +232,12 @@ func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	driverCfg.WriteTimeout = 30 * time.Second
 	driverCfg.InterpolateParams = true
 	driverCfg.MaxAllowedPacket = 0
-	if conf.Security.TLS != nil {
-		driverCfg.TLS = conf.Security.TLS
-	} else {
-		// Use TLS first.
-		driverCfg.AllowFallbackToPlaintext = true
-		minTLSVersion := uint16(tls.VersionTLS12)
-		if conf.MinTLSVersion != 0 {
-			minTLSVersion = conf.MinTLSVersion
-		}
-		/* #nosec G402 */
-		driverCfg.TLS = &tls.Config{
-			InsecureSkipVerify: true,
-			MinVersion:         minTLSVersion,
-			NextProtos:         []string{"h2", "http/1.1"}, // specify `h2` to let Go use HTTP/2.
-		}
+	if conf.Security.DriveTLSName != "" {
+		driverCfg.TLSConfig = conf.Security.DriveTLSName
 	}
 	if conf.AllowCleartextPasswords {
 		driverCfg.AllowCleartextPasswords = true
 	}
-	failpoint.Inject("SetWaitTimeout", func(val failpoint.Value) {
-		driverCfg.Params = map[string]string{
-			"wait_timeout": strconv.Itoa(val.(int)),
-		}
-	})
 	return driverCfg
 }
 
@@ -304,7 +246,7 @@ func timestampDirName() string {
 }
 
 // DefineFlags defines flags of dumpling's configuration
-func (*Config) DefineFlags(flags *pflag.FlagSet) {
+func (conf *Config) DefineFlags(flags *pflag.FlagSet) {
 	storage.DefineFlags(flags)
 	flags.StringSliceP(flagDatabase, "B", nil, "Databases to dump")
 	flags.StringSliceP(flagTablesList, "T", nil, "Comma delimited table list to dump; must be qualified table names")
@@ -320,7 +262,7 @@ func (*Config) DefineFlags(flags *pflag.FlagSet) {
 	flags.String(flagLoglevel, "info", "Log level: {debug|info|warn|error|dpanic|panic|fatal}")
 	flags.StringP(flagLogfile, "L", "", "Log file `path`, leave empty to write to console")
 	flags.String(flagLogfmt, "text", "Log `format`: {text|json}")
-	flags.String(flagConsistency, ConsistencyTypeAuto, "Consistency level during dumping: {auto|none|flush|lock|snapshot}")
+	flags.String(flagConsistency, consistencyTypeAuto, "Consistency level during dumping: {auto|none|flush|lock|snapshot}")
 	flags.String(flagSnapshot, "", "Snapshot position (uint64 or MySQL style string timestamp). Valid only when consistency=snapshot")
 	flags.BoolP(flagNoViews, "W", true, "Do not dump views")
 	flags.Bool(flagNoSequences, true, "Do not dump sequences")
@@ -346,7 +288,6 @@ func (*Config) DefineFlags(flags *pflag.FlagSet) {
 	flags.String(flagKey, "", "The path name to the client private key file for TLS connection")
 	flags.String(flagCsvSeparator, ",", "The separator for csv files, default ','")
 	flags.String(flagCsvDelimiter, "\"", "The delimiter for values in csv files, default '\"'")
-	flags.String(flagCsvLineTerminator, "\r\n", "The line terminator for csv files, default '\\r\\n'")
 	flags.String(flagOutputFilenameTemplate, "", "The output filename template (without file extension)")
 	flags.Bool(flagCompleteInsert, false, "Use complete INSERT statements that include column names")
 	flags.StringToString(flagParams, nil, `Extra session variables used while dumping, accepted format: --params "character_set_client=latin1,character_set_connection=latin1"`)
@@ -355,8 +296,7 @@ func (*Config) DefineFlags(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagReadTimeout)
 	flags.Bool(flagTransactionalConsistency, true, "Only support transactional consistency")
 	_ = flags.MarkHidden(flagTransactionalConsistency)
-	flags.StringP(flagCompress, "c", "", "Compress output file type, support 'gzip', 'snappy', 'zstd', 'no-compression' now")
-	flags.String(flagCsvOutputDialect, "", "The dialect of output CSV file, support 'snowflake', 'redshift', 'bigquery' now")
+	flags.StringP(flagCompress, "c", "", "Compress output file type, support 'gzip', 'no-compression' now")
 }
 
 // ParseFromFlags parses dumpling's export.Config from flags
@@ -495,10 +435,6 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	conf.CsvLineTerminator, err = flags.GetString(flagCsvLineTerminator)
-	if err != nil {
-		return errors.Trace(err)
-	}
 	conf.CompleteInsert, err = flags.GetBool(flagCompleteInsert)
 	if err != nil {
 		return errors.Trace(err)
@@ -524,7 +460,7 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	}
 
 	if conf.SessionParams == nil {
-		conf.SessionParams = make(map[string]any)
+		conf.SessionParams = make(map[string]interface{})
 	}
 
 	tablesList, err := flags.GetStringSlice(flagTablesList)
@@ -552,7 +488,7 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
-	conf.SpecifiedTables = len(tablesList) > 0
+	conf.specifiedTables = len(tablesList) > 0
 	conf.Tables, err = GetConfTables(tablesList)
 	if err != nil {
 		return errors.Trace(err)
@@ -577,7 +513,7 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	}
 	tmpl, err := ParseOutputFileTemplate(outputFilenameFormat)
 	if err != nil {
-		return errors.Errorf("failed to parse output filename template (--output-filename-template '%s')", outputFilenameFormat)
+		return errors.Errorf("failed to parse output filename template (--output-filename-template '%s')\n", outputFilenameFormat)
 	}
 	conf.OutputFileTemplate = tmpl
 
@@ -586,18 +522,6 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 	conf.CompressType, err = ParseCompressType(compressType)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	dialect, err := flags.GetString(flagCsvOutputDialect)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if dialect != "" && conf.FileType != "csv" {
-		return errors.Errorf("%s is only supported when dumping whole table to csv, not compatible with %s", flagCsvOutputDialect, conf.FileType)
-	}
-	conf.CsvOutputDialect, err = ParseOutputDialect(dialect)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -650,7 +574,6 @@ func ParseTableFilter(tablesList, filters []string) (filter.Filter, error) {
 	return filter.NewTablesFilter(tableNames...), nil
 }
 
-// GetConfTables parses tables from tables-list and filter arguments
 func GetConfTables(tablesList []string) (DatabaseTables, error) {
 	dbTables := DatabaseTables{}
 	var (
@@ -677,28 +600,8 @@ func ParseCompressType(compressType string) (storage.CompressType, error) {
 		return storage.NoCompression, nil
 	case "gzip", "gz":
 		return storage.Gzip, nil
-	case "snappy":
-		return storage.Snappy, nil
-	case "zstd", "zst":
-		return storage.Zstd, nil
 	default:
 		return storage.NoCompression, errors.Errorf("unknown compress type %s", compressType)
-	}
-}
-
-// ParseOutputDialect parses output dialect string to Dialect
-func ParseOutputDialect(outputDialect string) (CSVDialect, error) {
-	switch outputDialect {
-	case "", "default":
-		return CSVDialectDefault, nil
-	case "snowflake":
-		return CSVDialectSnowflake, nil
-	case "redshift":
-		return CSVDialectRedshift, nil
-	case "bigquery":
-		return CSVDialectBigQuery, nil
-	default:
-		return CSVDialectDefault, errors.Errorf("unknown output dialect %s", outputDialect)
 	}
 }
 
@@ -725,13 +628,11 @@ const (
 	// DefaultTableFilter is the default exclude table filter. It will exclude all system databases
 	DefaultTableFilter = "!/^(mysql|sys|INFORMATION_SCHEMA|PERFORMANCE_SCHEMA|METRICS_SCHEMA|INSPECTION_SCHEMA)$/.*"
 
-	defaultTaskChannelCapacity = 128
-	defaultDumpGCSafePointTTL  = 5 * 60
-	defaultEtcdDialTimeOut     = 3 * time.Second
+	defaultDumpThreads        = 128
+	defaultDumpGCSafePointTTL = 5 * 60
+	defaultEtcdDialTimeOut    = 3 * time.Second
 
-	// LooseCollationCompatible is used in DM, represents a collation setting for best compatibility.
-	LooseCollationCompatible = "loose"
-	// StrictCollationCompatible is used in DM, represents a collation setting for correctness.
+	LooseCollationCompatible  = "loose"
 	StrictCollationCompatible = "strict"
 
 	dumplingServiceSafePointPrefix = "dumpling"
@@ -753,19 +654,24 @@ func adjustConfig(conf *Config, fns ...func(*Config) error) error {
 	return nil
 }
 
-func buildTLSConfig(conf *Config) error {
+func registerTLSConfig(conf *Config) error {
 	tlsConfig, err := util.NewTLSConfig(
 		util.WithCAPath(conf.Security.CAPath),
 		util.WithCertAndKeyPath(conf.Security.CertPath, conf.Security.KeyPath),
 		util.WithCAContent(conf.Security.SSLCABytes),
 		util.WithCertAndKeyContent(conf.Security.SSLCertBytes, conf.Security.SSLKeyBytes),
-		util.WithMinTLSVersion(conf.MinTLSVersion),
 	)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	conf.Security.TLS = tlsConfig
-	return nil
+
+	if tlsConfig == nil {
+		return nil
+	}
+
+	conf.Security.DriveTLSName = "dumpling" + uuid.New().String()
+	err = mysql.RegisterTLSConfig(conf.Security.DriveTLSName, tlsConfig)
+	return errors.Trace(err)
 }
 
 func validateSpecifiedSQL(conf *Config) error {

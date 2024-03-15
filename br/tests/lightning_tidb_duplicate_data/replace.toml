@@ -1,4 +1,2 @@
 [tikv-importer]
 backend = "tidb"
-on-duplicate = "replace"
-logical-import-batch-rows = 1

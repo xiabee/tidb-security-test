@@ -1,4 +1,4 @@
-# Copyright 2022 PingCAP, Inc.
+# Copyright 2019 PingCAP, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,25 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The current dockerfile is only used for development purposes. If used in a 
-# production environment, please refer to https://github.com/PingCAP-QE/artifacts/blob/main/dockerfiles/cd/builders/tidb/Dockerfile.
-
 # Builder image
-FROM golang:1.21 as builder
-WORKDIR /tidb
+FROM golang:1.18.1-alpine as builder
 
+RUN apk add --no-cache \
+    wget \
+    make \
+    git \
+    gcc \
+    binutils-gold \
+    musl-dev
+
+RUN wget -O /usr/local/bin/dumb-init https://github.com/Yelp/dumb-init/releases/download/v1.2.2/dumb-init_1.2.2_amd64 \
+ && chmod +x /usr/local/bin/dumb-init
+
+RUN mkdir -p /go/src/github.com/pingcap/tidb
+WORKDIR /go/src/github.com/pingcap/tidb
+
+# Cache dependencies
+COPY go.mod .
+COPY go.sum .
+COPY parser/go.mod parser/go.mod
+COPY parser/go.sum parser/go.sum
+
+RUN GO111MODULE=on go mod download
+
+# Build real binaries
 COPY . .
+RUN make
 
-ARG GOPROXY
-ENV GOPROXY ${GOPROXY}
+# Executable image
+FROM alpine
 
-RUN make server
+RUN apk add --no-cache \
+    curl
 
-
-FROM rockylinux:9-minimal
-
-COPY --from=builder /tidb/bin/tidb-server /tidb-server
+COPY --from=builder /go/src/github.com/pingcap/tidb/bin/tidb-server /tidb-server
+COPY --from=builder /usr/local/bin/dumb-init /usr/local/bin/dumb-init
 
 WORKDIR /
+
 EXPOSE 4000
-ENTRYPOINT ["/tidb-server"]
+
+ENTRYPOINT ["/usr/local/bin/dumb-init", "/tidb-server"]

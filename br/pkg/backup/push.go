@@ -4,6 +4,7 @@ package backup
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/opentracing/opentracing-go"
@@ -12,7 +13,6 @@ import (
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/redact"
@@ -54,11 +54,9 @@ func newPushDown(mgr ClientMgr, capacity int) *pushDown {
 func (push *pushDown) pushBackup(
 	ctx context.Context,
 	req backuppb.BackupRequest,
-	pr *rtree.ProgressRange,
 	stores []*metapb.Store,
-	checkpointRunner *checkpoint.CheckpointRunner[checkpoint.BackupKeyType, checkpoint.BackupValueType],
 	progressCallBack func(ProgressUnit),
-) error {
+) (rtree.RangeTree, error) {
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("pushDown.pushBackup", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -66,13 +64,13 @@ func (push *pushDown) pushBackup(
 	}
 
 	// Push down backup tasks to all tikv instances.
+	res := rtree.NewRangeTree()
 	failpoint.Inject("noop-backup", func(_ failpoint.Value) {
 		logutil.CL(ctx).Warn("skipping normal backup, jump to fine-grained backup, meow :3", logutil.Key("start-key", req.StartKey), logutil.Key("end-key", req.EndKey))
-		failpoint.Return(nil)
+		failpoint.Return(res, nil)
 	})
 
 	wg := new(sync.WaitGroup)
-	errContext := utils.NewErrorContext("pushBackup", 10)
 	for _, s := range stores {
 		store := s
 		storeID := s.GetId()
@@ -119,6 +117,7 @@ func (push *pushDown) pushBackup(
 		close(push.respCh)
 	}()
 
+	regionErrorIngestedOnce := false
 	for {
 		select {
 		case respAndStore, ok := <-push.respCh:
@@ -126,15 +125,8 @@ func (push *pushDown) pushBackup(
 			store := respAndStore.GetStore()
 			if !ok {
 				// Finished.
-				return nil
+				return res, nil
 			}
-			failpoint.Inject("backup-timeout-error", func(val failpoint.Value) {
-				msg := val.(string)
-				logutil.CL(ctx).Info("failpoint backup-timeout-error injected.", zap.String("msg", msg))
-				resp.Error = &backuppb.Error{
-					Msg: msg,
-				}
-			})
 			failpoint.Inject("backup-storage-error", func(val failpoint.Value) {
 				msg := val.(string)
 				logutil.CL(ctx).Debug("failpoint backup-storage-error injected.", zap.String("msg", msg))
@@ -150,63 +142,75 @@ func (push *pushDown) pushBackup(
 				}
 			})
 			failpoint.Inject("tikv-region-error", func(val failpoint.Value) {
-				msg := val.(string)
-				logutil.CL(ctx).Debug("failpoint tikv-region-error injected.", zap.String("msg", msg))
-				resp.Error = &backuppb.Error{
-					// Msg: msg,
-					Detail: &backuppb.Error_RegionError{
-						RegionError: &errorpb.Error{
-							Message: msg,
+				if !regionErrorIngestedOnce {
+					msg := val.(string)
+					logutil.CL(ctx).Debug("failpoint tikv-regionh-error injected.", zap.String("msg", msg))
+					resp.Error = &backuppb.Error{
+						// Msg: msg,
+						Detail: &backuppb.Error_RegionError{
+							RegionError: &errorpb.Error{
+								Message: msg,
+							},
 						},
-					},
+					}
 				}
+				regionErrorIngestedOnce = true
 			})
 			if resp.GetError() == nil {
 				// None error means range has been backuped successfully.
-				if checkpointRunner != nil {
-					if err := checkpoint.AppendForBackup(
-						ctx,
-						checkpointRunner,
-						pr.GroupKey,
-						resp.StartKey,
-						resp.EndKey,
-						resp.Files,
-					); err != nil {
-						// the error is only from flush operator
-						return errors.Annotate(err, "failed to flush checkpoint")
-					}
-				}
-				pr.Res.Put(
+				res.Put(
 					resp.GetStartKey(), resp.GetEndKey(), resp.GetFiles())
 
 				// Update progress
 				progressCallBack(RegionUnit)
 			} else {
 				errPb := resp.GetError()
-				res := errContext.HandleIgnorableError(errPb, store.GetId())
-				switch res.Strategy {
-				case utils.GiveUpStrategy:
-					errMsg := res.Reason
+				switch v := errPb.Detail.(type) {
+				case *backuppb.Error_KvError:
+					logutil.CL(ctx).Warn("backup occur kv error", zap.Reflect("error", v))
+
+				case *backuppb.Error_RegionError:
+					logutil.CL(ctx).Warn("backup occur region error", zap.Reflect("error", v))
+
+				case *backuppb.Error_ClusterIdError:
+					logutil.CL(ctx).Error("backup occur cluster ID error", zap.Reflect("error", v))
+					return res, errors.Annotatef(berrors.ErrKVClusterIDMismatch, "%v", errPb)
+				default:
+					if utils.MessageIsRetryableStorageError(errPb.GetMsg()) {
+						logutil.CL(ctx).Warn("backup occur storage error", zap.String("error", errPb.GetMsg()))
+						continue
+					}
+					var errMsg string
+					if utils.MessageIsNotFoundStorageError(errPb.GetMsg()) {
+						errMsg = fmt.Sprintf("File or directory not found on TiKV Node (store id: %v; Address: %s). "+
+							"work around:please ensure br and tikv nodes share a same storage and the user of br and tikv has same uid.",
+							store.GetId(), redact.String(store.GetAddress()))
+						logutil.CL(ctx).Error("", zap.String("error", berrors.ErrKVStorage.Error()+": "+errMsg))
+					}
+					if utils.MessageIsPermissionDeniedStorageError(errPb.GetMsg()) {
+						errMsg = fmt.Sprintf("I/O permission denied error occurs on TiKV Node(store id: %v; Address: %s). "+
+							"work around:please ensure tikv has permission to read from & write to the storage.",
+							store.GetId(), redact.String(store.GetAddress()))
+						logutil.CL(ctx).Error("", zap.String("error", berrors.ErrKVStorage.Error()+": "+errMsg))
+					}
+
 					if len(errMsg) <= 0 {
 						errMsg = errPb.Msg
 					}
-					return errors.Annotatef(berrors.ErrKVStorage, "error happen in store %v at %s: %s",
+					return res, errors.Annotatef(berrors.ErrKVStorage, "error happen in store %v at %s: %s %s",
 						store.GetId(),
 						redact.String(store.GetAddress()),
+						req.StorageBackend.String(),
 						errMsg,
 					)
-				default:
-					// other type just continue for next response
-					// and finally handle the range in fineGrainedBackup
-					continue
 				}
 			}
 		case err := <-push.errCh:
 			if !berrors.Is(err, berrors.ErrFailedToConnect) {
-				return errors.Annotatef(err, "failed to backup range [%s, %s)", redact.Key(req.StartKey), redact.Key(req.EndKey))
+				return res, errors.Annotatef(err, "failed to backup range [%s, %s)", redact.Key(req.StartKey), redact.Key(req.EndKey))
 			}
 			logutil.CL(ctx).Warn("skipping disconnected stores", logutil.ShortError(err))
-			return nil
+			return res, nil
 		}
 	}
 }

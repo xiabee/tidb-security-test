@@ -50,9 +50,7 @@ func main() {
 			return errors.Trace(err)
 		}
 
-		dsn := fmt.Sprintf(
-			"%s:%s@tcp(%s)/%s?charset=utf8mb4",
-			"root", "", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), database)
+		dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=utf8mb4", "root", "", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), database)
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
 			return errors.Trace(err)
@@ -66,7 +64,7 @@ func main() {
 			return errors.Trace(err)
 		}
 
-		query := fmt.Sprintf("insert into %s values('aaaaaaaaaa')", table)
+		query := fmt.Sprintf("insert into %s values('aaaaaaaaaa')", table) // nolint:gosec
 		for i := 1; i < 10000; i++ {
 			query += ",('aaaaaaaaaa')"
 		}

@@ -18,7 +18,6 @@ set -eux
 DB="$TEST_NAME"
 TABLE="usertable"
 DB_COUNT=3
-CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 GCS_HOST="localhost"
 GCS_PORT=21808
@@ -52,7 +51,7 @@ mkdir -p "$TEST_DIR/$DB"
 # Fill in the database
 for i in $(seq $DB_COUNT); do
     run_sql "CREATE DATABASE $DB${i};"
-    go-ycsb load mysql -P $CUR/workload -p mysql.host=$TIDB_IP -p mysql.port=$TIDB_PORT -p mysql.user=root -p mysql.db=$DB${i}
+    go-ycsb load mysql -P tests/$TEST_NAME/workload -p mysql.host=$TIDB_IP -p mysql.port=$TIDB_PORT -p mysql.user=root -p mysql.db=$DB${i}
 done
 
 # we need start a oauth server or gcs client will failed to handle request.
@@ -67,10 +66,10 @@ EOF
 )
 
 # save CREDENTIALS to file
-echo $KEY > "$CUR/config.json"
+echo $KEY > "tests/$TEST_NAME/config.json"
 
 # export test CREDENTIALS for gcs oauth
-export GOOGLE_APPLICATION_CREDENTIALS="$CUR/config.json"
+export GOOGLE_APPLICATION_CREDENTIALS="tests/$TEST_NAME/config.json"
 
 # create gcs bucket
 curl -XPOST http://$GCS_HOST:$GCS_PORT/storage/v1/b -d '{"name":"test"}'

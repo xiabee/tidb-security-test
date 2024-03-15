@@ -17,7 +17,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
-	tidbutils "github.com/pingcap/tidb/pkg/util"
+	tidbutils "github.com/pingcap/tidb/util"
 	"go.uber.org/zap"
 )
 

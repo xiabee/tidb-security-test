@@ -20,19 +20,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/lightning"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/local"
 	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
-	"github.com/pingcap/tidb/br/pkg/lightning/importer"
+	"github.com/pingcap/tidb/br/pkg/lightning/restore"
 	"github.com/pingcap/tidb/br/pkg/lightning/tikv"
-	pdhttp "github.com/tikv/pd/client/http"
 )
 
 func main() {
@@ -91,28 +88,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err = cfg.TiDB.Security.BuildTLSConfig(); err != nil {
+	if err = cfg.TiDB.Security.RegisterMySQL(); err != nil {
 		return err
 	}
 
-	var opts []pdhttp.ClientOption
-	if tls != nil {
-		opts = append(opts, pdhttp.WithTLSConfig(tls.TLSConfig()))
-	}
-	cli := pdhttp.NewClient(
-		"lightning-ctl",
-		strings.Split(cfg.TiDB.PdAddr, ","),
-		opts...)
-	defer cli.Close()
-
 	if *compact {
-		return errors.Trace(compactCluster(ctx, cli, tls))
+		return errors.Trace(compactCluster(ctx, cfg, tls))
 	}
 	if *flagFetchMode {
-		return errors.Trace(fetchMode(ctx, cli, tls))
+		return errors.Trace(fetchMode(ctx, cfg, tls))
 	}
 	if len(*mode) != 0 {
-		return errors.Trace(lightning.SwitchMode(ctx, cli, tls, *mode))
+		return errors.Trace(lightning.SwitchMode(ctx, cfg, tls, *mode))
 	}
 
 	if len(*cpRemove) != 0 {
@@ -135,23 +122,23 @@ func run() error {
 	return nil
 }
 
-func compactCluster(ctx context.Context, cli pdhttp.Client, tls *common.TLS) error {
+func compactCluster(ctx context.Context, cfg *config.Config, tls *common.TLS) error {
 	return tikv.ForAllStores(
 		ctx,
-		cli,
-		metapb.StoreState_Offline,
-		func(c context.Context, store *pdhttp.MetaStore) error {
-			return tikv.Compact(c, tls, store.Address, importer.FullLevelCompact, "")
+		tls.WithHost(cfg.TiDB.PdAddr),
+		tikv.StoreStateDisconnected,
+		func(c context.Context, store *tikv.Store) error {
+			return tikv.Compact(c, tls, store.Address, restore.FullLevelCompact)
 		},
 	)
 }
 
-func fetchMode(ctx context.Context, cli pdhttp.Client, tls *common.TLS) error {
+func fetchMode(ctx context.Context, cfg *config.Config, tls *common.TLS) error {
 	return tikv.ForAllStores(
 		ctx,
-		cli,
-		metapb.StoreState_Offline,
-		func(c context.Context, store *pdhttp.MetaStore) error {
+		tls.WithHost(cfg.TiDB.PdAddr),
+		tikv.StoreStateDisconnected,
+		func(c context.Context, store *tikv.Store) error {
 			mode, err := tikv.FetchMode(c, tls, store.Address)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%-30s | Error: %v\n", store.Address, err)
@@ -168,7 +155,6 @@ func checkpointErrorIgnore(ctx context.Context, cfg *config.Config, tableName st
 	if err != nil {
 		return errors.Trace(err)
 	}
-	//nolint: errcheck
 	defer cpdb.Close()
 
 	return errors.Trace(cpdb.IgnoreErrorCheckpoint(ctx, tableName))
@@ -179,10 +165,9 @@ func checkpointErrorDestroy(ctx context.Context, cfg *config.Config, tls *common
 	if err != nil {
 		return errors.Trace(err)
 	}
-	//nolint: errcheck
 	defer cpdb.Close()
 
-	target, err := importer.NewTiDBManager(ctx, cfg.TiDB, tls)
+	target, err := restore.NewTiDBManager(ctx, cfg.TiDB, tls)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -209,11 +194,11 @@ func checkpointErrorDestroy(ctx context.Context, cfg *config.Config, tls *common
 	// we need either lightning process alive or engine map persistent.
 	// both of them seems unnecessary if we only need to do is cleanup specify engine directory.
 	// so we didn't choose to use common API.
-	if cfg.TikvImporter.Backend == config.BackendLocal {
+	if cfg.TikvImporter.Backend == "local" {
 		for _, table := range targetTables {
 			for engineID := table.MinEngineID; engineID <= table.MaxEngineID; engineID++ {
 				fmt.Fprintln(os.Stderr, "Closing and cleaning up engine:", table.TableName, engineID)
-				_, eID := backend.MakeUUID(table.TableName, int64(engineID))
+				_, eID := backend.MakeUUID(table.TableName, engineID)
 				engine := local.Engine{UUID: eID}
 				err := engine.Cleanup(cfg.TikvImporter.SortedKVDir)
 				if err != nil {
@@ -237,7 +222,6 @@ func checkpointDump(ctx context.Context, cfg *config.Config, dumpFolder string) 
 	if err != nil {
 		return errors.Trace(err)
 	}
-	//nolint: errcheck
 	defer cpdb.Close()
 
 	if err := os.MkdirAll(dumpFolder, 0o750); err != nil {
@@ -278,7 +262,7 @@ func checkpointDump(ctx context.Context, cfg *config.Config, dumpFolder string) 
 }
 
 func getLocalStoringTables(ctx context.Context, cfg *config.Config) (err2 error) {
-	//nolint: prealloc
+	//nolint:prealloc // This is a placeholder.
 	var tables []string
 	defer func() {
 		if err2 == nil {
@@ -304,7 +288,6 @@ func getLocalStoringTables(ctx context.Context, cfg *config.Config) (err2 error)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	//nolint: errcheck
 	defer cpdb.Close()
 
 	tableWithEngine, err := cpdb.GetLocalStoringTables(ctx)

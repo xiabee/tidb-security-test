@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"go.uber.org/zap"
+
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
-	"go.uber.org/zap"
 )
 
 type globalMetadata struct {
@@ -28,7 +29,7 @@ type globalMetadata struct {
 
 const (
 	metadataPath       = "metadata"
-	metadataTimeLayout = time.DateTime
+	metadataTimeLayout = "2006-01-02 15:04:05"
 
 	fileFieldIndex    = 0
 	posFieldIndex     = 1
@@ -160,7 +161,7 @@ func recordGlobalMetaData(tctx *tcontext.Context, db *sql.Conn, buffer *bytes.Bu
 		isms  bool
 		query string
 	)
-	if err := simpleQuery(db, "SELECT @@default_master_connection", func(*sql.Rows) error {
+	if err := simpleQuery(db, "SELECT @@default_master_connection", func(rows *sql.Rows) error {
 		isms = true
 		return nil
 	}); err != nil {
@@ -177,7 +178,7 @@ func recordGlobalMetaData(tctx *tcontext.Context, db *sql.Conn, buffer *bytes.Bu
 			return errors.Trace(err)
 		}
 		data := make([]sql.NullString, len(cols))
-		args := make([]any, 0, len(cols))
+		args := make([]interface{}, 0, len(cols))
 		for i := range data {
 			args = append(args, &data[i])
 		}
@@ -219,12 +220,9 @@ func (m *globalMetadata) writeGlobalMetaData() error {
 	if err != nil {
 		return err
 	}
-	err = write(m.tctx, fileWriter, m.String())
-	tearDownErr := tearDown(m.tctx)
-	if err == nil {
-		return tearDownErr
-	}
-	return err
+	defer tearDown(m.tctx)
+
+	return write(m.tctx, fileWriter, m.String())
 }
 
 func getValidStr(str []string, idx int) string {

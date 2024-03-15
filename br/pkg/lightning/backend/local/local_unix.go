@@ -29,8 +29,7 @@ const (
 	maxRLimit = 1000000
 )
 
-// GetSystemRLimit returns the current open-file limit.
-func GetSystemRLimit() (RlimT, error) {
+func GetSystemRLimit() (Rlim_t, error) {
 	var rLimit syscall.Rlimit
 	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	return rLimit.Cur, err
@@ -39,14 +38,14 @@ func GetSystemRLimit() (RlimT, error) {
 // VerifyRLimit checks whether the open-file limit is large enough.
 // In Local-backend, we need to read and write a lot of L0 SST files, so we need
 // to check system max open files limit.
-func VerifyRLimit(estimateMaxFiles RlimT) error {
+func VerifyRLimit(estimateMaxFiles Rlim_t) error {
 	if estimateMaxFiles > maxRLimit {
 		estimateMaxFiles = maxRLimit
 	}
 	var rLimit syscall.Rlimit
 	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 	failpoint.Inject("GetRlimitValue", func(v failpoint.Value) {
-		limit := RlimT(v.(int))
+		limit := Rlim_t(v.(int))
 		rLimit.Cur = limit
 		rLimit.Max = limit
 		err = nil
@@ -87,6 +86,6 @@ func VerifyRLimit(estimateMaxFiles RlimT) error {
 	}
 
 	log.L().Info("Set the maximum number of open file descriptors(rlimit)",
-		zapRlimT("old", prevLimit), zapRlimT("new", estimateMaxFiles))
+		zapRlim_t("old", prevLimit), zapRlim_t("new", estimateMaxFiles))
 	return nil
 }

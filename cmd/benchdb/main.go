@@ -24,12 +24,11 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
-	"github.com/pingcap/tidb/pkg/store"
-	"github.com/pingcap/tidb/pkg/store/driver"
-	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/store"
+	"github.com/pingcap/tidb/store/driver"
+	"github.com/pingcap/tidb/util/logutil"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 )
@@ -89,7 +88,7 @@ func main() {
 
 type benchDB struct {
 	store   tikv.Storage
-	session sessiontypes.Session
+	session session.Session
 }
 
 func newBenchDB() *benchDB {
@@ -109,7 +108,7 @@ func newBenchDB() *benchDB {
 	}
 }
 
-func (ut *benchDB) mustExec(sql string, args ...any) {
+func (ut *benchDB) mustExec(sql string, args ...interface{}) {
 	// executeInternal only return one resultSet for this.
 	rs, err := ut.session.ExecuteInternal(context.Background(), sql, args...)
 	defer func() {
@@ -294,12 +293,12 @@ func (ut *benchDB) query(spec string) {
 	})
 }
 
-func cLogf(format string, args ...any) {
+func cLogf(format string, args ...interface{}) {
 	str := fmt.Sprintf(format, args...)
 	fmt.Println("\033[0;32m" + str + "\033[0m\n")
 }
 
-func cLog(args ...any) {
+func cLog(args ...interface{}) {
 	str := fmt.Sprint(args...)
 	fmt.Println("\033[0;32m" + str + "\033[0m\n")
 }

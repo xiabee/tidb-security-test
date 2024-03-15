@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -88,15 +88,15 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, tub *tabby.Tabby) {
 	tub.AddLine(prefix+suffix+t.Span.Name(), start.Format("15:04:05.000000"), duration.String())
 
 	// Sort events by their start time
-	slices.SortFunc(t.Sub, func(i, j *appdash.Trace) int {
+	sort.Slice(t.Sub, func(i, j int) bool {
 		var istart, jstart time.Time
-		if ievent, err := i.TimespanEvent(); err == nil {
+		if ievent, err := t.Sub[i].TimespanEvent(); err == nil {
 			istart = ievent.Start()
 		}
-		if jevent, err := j.TimespanEvent(); err == nil {
+		if jevent, err := t.Sub[j].TimespanEvent(); err == nil {
 			jstart = jevent.Start()
 		}
-		return istart.Compare(jstart)
+		return istart.Before(jstart)
 	})
 
 	for i, sp := range t.Sub {

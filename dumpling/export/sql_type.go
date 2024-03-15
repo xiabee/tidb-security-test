@@ -5,7 +5,6 @@ package export
 import (
 	"bytes"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 )
 
@@ -34,7 +33,6 @@ func initColTypeRowReceiverMap() {
 	dataTypeIntArr := []string{
 		"INTEGER", "BIGINT", "TINYINT", "SMALLINT", "MEDIUMINT",
 		"INT", "INT1", "INT2", "INT3", "INT8",
-		"UNSIGNED INT", "UNSIGNED BIGINT", "UNSIGNED TINYINT", "UNSIGNED SMALLINT", // introduced in https://github.com/go-sql-driver/mysql/pull/1238
 	}
 
 	dataTypeNumArr := append(dataTypeIntArr, []string{
@@ -176,7 +174,7 @@ func SQLTypeNumberMaker() RowReceiverStringer {
 }
 
 // MakeRowReceiver constructs RowReceiverArr from column types
-func MakeRowReceiver(colTypes []string) *RowReceiverArr {
+func MakeRowReceiver(colTypes []string) RowReceiverArr {
 	rowReceiverArr := make([]RowReceiverStringer, len(colTypes))
 	for i, colTp := range colTypes {
 		recMaker, ok := colTypeRowReceiverMap[colTp]
@@ -185,7 +183,7 @@ func MakeRowReceiver(colTypes []string) *RowReceiverArr {
 		}
 		rowReceiverArr[i] = recMaker()
 	}
-	return &RowReceiverArr{
+	return RowReceiverArr{
 		bound:     false,
 		receivers: rowReceiverArr,
 	}
@@ -198,7 +196,7 @@ type RowReceiverArr struct {
 }
 
 // BindAddress implements RowReceiver.BindAddress
-func (r *RowReceiverArr) BindAddress(args []any) {
+func (r RowReceiverArr) BindAddress(args []interface{}) {
 	if r.bound {
 		return
 	}
@@ -209,7 +207,7 @@ func (r *RowReceiverArr) BindAddress(args []any) {
 }
 
 // WriteToBuffer implements Stringer.WriteToBuffer
-func (r *RowReceiverArr) WriteToBuffer(bf *bytes.Buffer, escapeBackslash bool) {
+func (r RowReceiverArr) WriteToBuffer(bf *bytes.Buffer, escapeBackslash bool) {
 	bf.WriteByte('(')
 	for i, receiver := range r.receivers {
 		receiver.WriteToBuffer(bf, escapeBackslash)
@@ -221,7 +219,7 @@ func (r *RowReceiverArr) WriteToBuffer(bf *bytes.Buffer, escapeBackslash bool) {
 }
 
 // WriteToBufferInCsv implements Stringer.WriteToBufferInCsv
-func (r *RowReceiverArr) WriteToBufferInCsv(bf *bytes.Buffer, escapeBackslash bool, opt *csvOption) {
+func (r RowReceiverArr) WriteToBufferInCsv(bf *bytes.Buffer, escapeBackslash bool, opt *csvOption) {
 	for i, receiver := range r.receivers {
 		receiver.WriteToBufferInCsv(bf, escapeBackslash, opt)
 		if i != len(r.receivers)-1 {
@@ -259,7 +257,7 @@ type SQLTypeString struct {
 }
 
 // BindAddress implements RowReceiver.BindAddress
-func (s *SQLTypeString) BindAddress(arg []any) {
+func (s *SQLTypeString) BindAddress(arg []interface{}) {
 	arg[0] = &s.RawBytes
 }
 
@@ -291,7 +289,7 @@ type SQLTypeBytes struct {
 }
 
 // BindAddress implements RowReceiver.BindAddress
-func (s *SQLTypeBytes) BindAddress(arg []any) {
+func (s *SQLTypeBytes) BindAddress(arg []interface{}) {
 	arg[0] = &s.RawBytes
 }
 
@@ -308,14 +306,7 @@ func (s *SQLTypeBytes) WriteToBuffer(bf *bytes.Buffer, _ bool) {
 func (s *SQLTypeBytes) WriteToBufferInCsv(bf *bytes.Buffer, escapeBackslash bool, opt *csvOption) {
 	if s.RawBytes != nil {
 		bf.Write(opt.delimiter)
-		switch opt.binaryFormat {
-		case BinaryFormatHEX:
-			fmt.Fprintf(bf, "%x", s.RawBytes)
-		case BinaryFormatBase64:
-			bf.WriteString(base64.StdEncoding.EncodeToString(s.RawBytes))
-		default:
-			escapeCSV(s.RawBytes, bf, escapeBackslash, opt)
-		}
+		escapeCSV(s.RawBytes, bf, escapeBackslash, opt)
 		bf.Write(opt.delimiter)
 	} else {
 		bf.WriteString(opt.nullValue)

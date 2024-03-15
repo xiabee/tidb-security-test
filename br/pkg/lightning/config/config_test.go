@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package config_test
 
 import (
 	"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,13 +50,13 @@ func startMockServer(t *testing.T, statusCode int, content string) (*httptest.Se
 	return ts, host, port
 }
 
-func assignMinimalLegalValue(cfg *Config) {
+func assignMinimalLegalValue(cfg *config.Config) {
 	cfg.TiDB.Host = "123.45.67.89"
 	cfg.TiDB.Port = 4567
 	cfg.TiDB.StatusPort = 8901
 	cfg.TiDB.PdAddr = "234.56.78.90:12345"
 	cfg.Mydumper.SourceDir = "file://."
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TikvImporter.DiskQuota = 1
 }
@@ -67,50 +67,18 @@ func TestAdjustPdAddrAndPort(t *testing.T) {
 	)
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
 	cfg.Mydumper.SourceDir = "."
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
 
 	err := cfg.Adjust(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 4444, cfg.TiDB.Port)
-	require.Equal(t, "123.45.67.89:1234,56.78.90.12:3456", cfg.TiDB.PdAddr)
-}
-
-func TestPausePDSchedulerScope(t *testing.T) {
-	ts, host, port := startMockServer(t, http.StatusOK,
-		`{"port":4444,"advertise-address":"","path":"123.45.67.89:1234,56.78.90.12:3456"}`,
-	)
-	defer ts.Close()
-	tmpDir := t.TempDir()
-
-	cfg := NewConfig()
-	cfg.TiDB.Host = host
-	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.TikvImporter.SortedKVDir = "test"
-	cfg.Mydumper.SourceDir = tmpDir
-	require.Equal(t, PausePDSchedulerScopeTable, cfg.TikvImporter.PausePDSchedulerScope)
-
-	cfg.TikvImporter.PausePDSchedulerScope = ""
-	err := cfg.Adjust(context.Background())
-	require.ErrorContains(t, err, "pause-pd-scheduler-scope is invalid")
-
-	cfg.TikvImporter.PausePDSchedulerScope = "xxx"
-	err = cfg.Adjust(context.Background())
-	require.ErrorContains(t, err, "pause-pd-scheduler-scope is invalid")
-
-	cfg.TikvImporter.PausePDSchedulerScope = "TABLE"
-	require.NoError(t, cfg.Adjust(context.Background()))
-	require.Equal(t, PausePDSchedulerScopeTable, cfg.TikvImporter.PausePDSchedulerScope)
-
-	cfg.TikvImporter.PausePDSchedulerScope = "globAL"
-	require.NoError(t, cfg.Adjust(context.Background()))
-	require.Equal(t, PausePDSchedulerScopeGlobal, cfg.TikvImporter.PausePDSchedulerScope)
+	require.Equal(t, "123.45.67.89:1234", cfg.TiDB.PdAddr)
 }
 
 func TestAdjustPdAddrAndPortViaAdvertiseAddr(t *testing.T) {
@@ -119,11 +87,11 @@ func TestAdjustPdAddrAndPortViaAdvertiseAddr(t *testing.T) {
 	)
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
 	cfg.Mydumper.SourceDir = "."
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
 
@@ -137,13 +105,12 @@ func TestAdjustPageNotFound(t *testing.T) {
 	ts, host, port := startMockServer(t, http.StatusNotFound, "{}")
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
 
 	err := cfg.Adjust(context.Background())
 	require.Error(t, err)
@@ -153,13 +120,12 @@ func TestAdjustPageNotFound(t *testing.T) {
 func TestAdjustConnectRefused(t *testing.T) {
 	ts, host, port := startMockServer(t, http.StatusOK, "{}")
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
 
 	ts.Close() // immediately close to ensure connection refused.
 
@@ -169,14 +135,14 @@ func TestAdjustConnectRefused(t *testing.T) {
 }
 
 func TestAdjustBackendNotSet(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.DistSQLScanConcurrency = 1
 	err := cfg.Adjust(context.Background())
 	require.EqualError(t, err, "[Lightning:Config:ErrInvalidConfig]tikv-importer.backend must not be empty!")
 }
 
 func TestAdjustInvalidBackend(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TikvImporter.Backend = "no_such_backend"
 	cfg.TiDB.DistSQLScanConcurrency = 1
 	err := cfg.Adjust(context.Background())
@@ -194,7 +160,7 @@ func TestCheckAndAdjustFilePath(t *testing.T) {
 	specialDir1, err := os.MkdirTemp(tmpDir, "abc%3F%3F%3Fbcd")
 	require.NoError(t, err)
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 
 	cases := []struct {
 		test   string
@@ -214,7 +180,7 @@ func TestCheckAndAdjustFilePath(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		cfg.Mydumper.SourceDir = testCase.test
-		err = cfg.Mydumper.adjustFilePath()
+		err = cfg.CheckAndAdjustFilePath()
 		require.NoError(t, err)
 		u, err := url.Parse(cfg.Mydumper.SourceDir)
 		require.NoError(t, err)
@@ -223,15 +189,15 @@ func TestCheckAndAdjustFilePath(t *testing.T) {
 }
 
 func TestAdjustFileRoutePath(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 	cfg.Mydumper.SourceDir = tmpDir
 	invalidPath := filepath.Join(tmpDir, "../test123/1.sql")
-	rule := &FileRouteRule{Path: invalidPath, Type: "sql", Schema: "test", Table: "tbl"}
-	cfg.Mydumper.FileRouters = []*FileRouteRule{rule}
+	rule := &config.FileRouteRule{Path: invalidPath, Type: "sql", Schema: "test", Table: "tbl"}
+	cfg.Mydumper.FileRouters = []*config.FileRouteRule{rule}
 	cfg.TiDB.DistSQLScanConcurrency = 1
 	err := cfg.Adjust(ctx)
 	require.Error(t, err)
@@ -248,13 +214,12 @@ func TestDecodeError(t *testing.T) {
 	ts, host, port := startMockServer(t, http.StatusOK, "invalid-string")
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
 
 	err := cfg.Adjust(context.Background())
 	require.Error(t, err)
@@ -265,14 +230,12 @@ func TestInvalidSetting(t *testing.T) {
 	ts, host, port := startMockServer(t, http.StatusOK, `{"port": 0}`)
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
-	cfg.TiDB.PdAddr = "234.56.78.90:12345"
 
 	err := cfg.Adjust(context.Background())
 	require.EqualError(t, err, "[Lightning:Config:ErrInvalidConfig]invalid `tidb.port` setting")
@@ -282,20 +245,19 @@ func TestInvalidPDAddr(t *testing.T) {
 	ts, host, port := startMockServer(t, http.StatusOK, `{"port": 1234, "path": ",,"}`)
 	defer ts.Close()
 
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	cfg.TiDB.Host = host
 	cfg.TiDB.StatusPort = port
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = "."
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
 
 	err := cfg.Adjust(context.Background())
 	require.EqualError(t, err, "[Lightning:Config:ErrInvalidConfig]invalid `tidb.pd-addr` setting")
 }
 
 func TestAdjustWillNotContactServerIfEverythingIsDefined(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.TiDB.DistSQLScanConcurrency = 1
 
@@ -306,7 +268,7 @@ func TestAdjustWillNotContactServerIfEverythingIsDefined(t *testing.T) {
 }
 
 func TestAdjustWillBatchImportRatioInvalid(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.Mydumper.BatchImportRatio = -1
 	cfg.TiDB.DistSQLScanConcurrency = 1
@@ -316,34 +278,31 @@ func TestAdjustWillBatchImportRatioInvalid(t *testing.T) {
 }
 
 func TestAdjustSecuritySection(t *testing.T) {
+	uuidHolder := "<uuid>"
 	testCases := []struct {
-		input          string
-		expectedCA     string
-		hasTLS         bool
-		fallback2NoTLS bool
+		input       string
+		expectedCA  string
+		expectedTLS string
 	}{
 		{
-			input:          ``,
-			expectedCA:     "",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			input:       ``,
+			expectedCA:  "",
+			expectedTLS: "false",
 		},
 		{
 			input: `
 				[security]
 			`,
-			expectedCA:     "",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "",
+			expectedTLS: "false",
 		},
 		{
 			input: `
 				[security]
 				ca-path = "/path/to/ca.pem"
 			`,
-			expectedCA:     "/path/to/ca.pem",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "/path/to/ca.pem",
+			expectedTLS: uuidHolder,
 		},
 		{
 			input: `
@@ -351,9 +310,8 @@ func TestAdjustSecuritySection(t *testing.T) {
 				ca-path = "/path/to/ca.pem"
 				[tidb.security]
 			`,
-			expectedCA:     "",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "",
+			expectedTLS: "false",
 		},
 		{
 			input: `
@@ -362,9 +320,8 @@ func TestAdjustSecuritySection(t *testing.T) {
 				[tidb.security]
 				ca-path = "/path/to/ca2.pem"
 			`,
-			expectedCA:     "/path/to/ca2.pem",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "/path/to/ca2.pem",
+			expectedTLS: uuidHolder,
 		},
 		{
 			input: `
@@ -372,9 +329,8 @@ func TestAdjustSecuritySection(t *testing.T) {
 				[tidb.security]
 				ca-path = "/path/to/ca2.pem"
 			`,
-			expectedCA:     "/path/to/ca2.pem",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "/path/to/ca2.pem",
+			expectedTLS: uuidHolder,
 		},
 		{
 			input: `
@@ -383,47 +339,36 @@ func TestAdjustSecuritySection(t *testing.T) {
 				tls = "skip-verify"
 				[tidb.security]
 			`,
-			expectedCA:     "",
-			hasTLS:         true,
-			fallback2NoTLS: true,
-		},
-		{
-			input: `
-				[security]
-				[tidb]
-				tls = "false"
-				[tidb.security]
-			`,
-			expectedCA:     "",
-			hasTLS:         false,
-			fallback2NoTLS: false,
+			expectedCA:  "",
+			expectedTLS: "skip-verify",
 		},
 	}
 
 	for _, tc := range testCases {
 		comment := fmt.Sprintf("input = %s", tc.input)
 
-		cfg := NewConfig()
+		cfg := config.NewConfig()
 		assignMinimalLegalValue(cfg)
 		cfg.TiDB.DistSQLScanConcurrency = 1
 		err := cfg.LoadFromTOML([]byte(tc.input))
 		require.NoError(t, err, comment)
 
-		err = cfg.TiDB.adjust(context.Background(), &cfg.TikvImporter, &cfg.Security, nil)
+		err = cfg.Adjust(context.Background())
 		require.NoError(t, err, comment)
 		require.Equal(t, tc.expectedCA, cfg.TiDB.Security.CAPath, comment)
-		if tc.hasTLS {
-			require.NotNil(t, cfg.TiDB.Security.TLSConfig, comment)
+		if tc.expectedTLS == uuidHolder {
+			require.NotEmpty(t, cfg.TiDB.TLS, comment)
 		} else {
-			require.Nil(t, cfg.TiDB.Security.TLSConfig, comment)
+			require.Equal(t, tc.expectedTLS, cfg.TiDB.TLS, comment)
 		}
-		require.Equal(t, tc.fallback2NoTLS, cfg.TiDB.Security.AllowFallbackToPlaintext, comment)
 	}
 	// test different tls config name
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.Security.CAPath = "/path/to/ca.pem"
-	require.NoError(t, cfg.TiDB.adjust(context.Background(), &cfg.TikvImporter, &cfg.Security, nil))
+	cfg.Security.TLSConfigName = "tidb-tls"
+	require.NoError(t, cfg.Adjust(context.Background()))
+	require.Equal(t, cfg.TiDB.TLS, cfg.TiDB.Security.TLSConfigName)
 }
 
 func TestInvalidCSV(t *testing.T) {
@@ -513,15 +458,15 @@ func TestInvalidCSV(t *testing.T) {
 				separator = '\'
 				backslash-escape = true
 			`,
-			err: "[Lightning:Config:ErrInvalidConfig]cannot use '\\' both as CSV separator and `mydumper.csv.escaped-by`",
+			err: "[Lightning:Config:ErrInvalidConfig]cannot use '\\' as CSV separator when `mydumper.csv.backslash-escape` is true",
 		},
 		{
 			input: `
 				[mydumper.csv]
 				delimiter = '\'
-				escaped-by = '\'
+				backslash-escape = true
 			`,
-			err: "[Lightning:Config:ErrInvalidConfig]cannot use '\\' both as CSV delimiter and `mydumper.csv.escaped-by`",
+			err: "[Lightning:Config:ErrInvalidConfig]cannot use '\\' as CSV delimiter when `mydumper.csv.backslash-escape` is true",
 		},
 		{
 			input: `
@@ -550,11 +495,11 @@ func TestInvalidCSV(t *testing.T) {
 
 	for _, tc := range testCases {
 		comment := fmt.Sprintf("input = %s", tc.input)
-		cfg := NewConfig()
+		cfg := config.NewConfig()
 		cfg.Mydumper.SourceDir = "file://."
 		cfg.TiDB.Port = 4000
 		cfg.TiDB.PdAddr = "test.invalid:2379"
-		cfg.TikvImporter.Backend = BackendLocal
+		cfg.TikvImporter.Backend = config.BackendLocal
 		cfg.TikvImporter.SortedKVDir = "."
 		cfg.TiDB.DistSQLScanConcurrency = 1
 		err := cfg.LoadFromTOML([]byte(tc.input))
@@ -564,42 +509,23 @@ func TestInvalidCSV(t *testing.T) {
 		if tc.err != "" {
 			require.EqualError(t, err, tc.err, comment)
 		} else {
-			require.NoError(t, err, tc.input)
+			require.NoError(t, err)
 		}
 	}
 }
 
 func TestInvalidTOML(t *testing.T) {
-	cfg := &Config{}
+	cfg := &config.Config{}
 	err := cfg.LoadFromTOML([]byte(`
 		invalid[mydumper.csv]
 		delimiter = '\'
 		backslash-escape = true
 	`))
-	require.EqualError(t, err, "toml: line 2: expected '.' or '=', but got '[' instead")
-}
-
-func TestStringOrStringSlice(t *testing.T) {
-	cfg := &Config{}
-	err := cfg.LoadFromTOML([]byte(`
-		[mydumper.csv]
-		null = '\N'
-	`))
-	require.NoError(t, err)
-	err = cfg.LoadFromTOML([]byte(`
-		[mydumper.csv]
-		null = [ '\N', 'NULL' ]
-	`))
-	require.NoError(t, err)
-	err = cfg.LoadFromTOML([]byte(`
-		[mydumper.csv]
-		null = [ '\N', 123 ]
-	`))
-	require.ErrorContains(t, err, "invalid string slice")
+	require.EqualError(t, err, "Near line 0 (last key parsed ''): bare keys cannot contain '['")
 }
 
 func TestTOMLUnusedKeys(t *testing.T) {
-	cfg := &Config{}
+	cfg := &config.Config{}
 	err := cfg.LoadFromTOML([]byte(`
 		[lightning]
 		typo = 123
@@ -608,7 +534,7 @@ func TestTOMLUnusedKeys(t *testing.T) {
 }
 
 func TestDurationUnmarshal(t *testing.T) {
-	duration := Duration{}
+	duration := config.Duration{}
 	err := duration.UnmarshalText([]byte("13m20s"))
 	require.NoError(t, err)
 	require.Equal(t, 13*60+20.0, duration.Duration.Seconds())
@@ -617,116 +543,8 @@ func TestDurationUnmarshal(t *testing.T) {
 	require.Regexp(t, "time: unknown unit .?x.? in duration .?13x20s.?", err.Error())
 }
 
-func TestMaxErrorUnmarshal(t *testing.T) {
-	type testCase struct {
-		TOMLStr        string
-		ExpectedValues map[string]int64
-		ExpectErrStr   string
-		CaseName       string
-	}
-	for _, tc := range []*testCase{
-		{
-			TOMLStr: `max-error = 123`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    123,
-			},
-			CaseName: "Normal_Int",
-		},
-		{
-			TOMLStr: `max-error = -123`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    0,
-			},
-			CaseName: "Abnormal_Negative_Int",
-		},
-		{
-			TOMLStr:      `max-error = "abcde"`,
-			ExpectErrStr: "invalid max-error 'abcde', should be an integer or a map of string:int64",
-			CaseName:     "Abnormal_String",
-		},
-		{
-			TOMLStr: `[max-error]
-syntax = 1
-charset = 2
-type = 3
-`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    3,
-			},
-			CaseName: "Normal_Map_All_Set",
-		},
-		{
-			TOMLStr: `[max-error]
-type = 1000
-`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    1000,
-			},
-			CaseName: "Normal_Map_Partial_Set",
-		},
-		{
-			TOMLStr: `max-error = { type = 123 }`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    123,
-			},
-			CaseName: "Normal_OneLineMap_Partial_Set",
-		},
-		{
-			TOMLStr: `[max-error]
-not_exist = 123
-`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    0,
-			},
-			CaseName: "Normal_Map_Partial_Set_Invalid_Key",
-		},
-		{
-			TOMLStr: `[max-error]
-type = -123
-`,
-			ExpectedValues: map[string]int64{
-				"syntax":  0,
-				"charset": math.MaxInt64,
-				"type":    0,
-			},
-			CaseName: "Normal_Map_Partial_Set_Invalid_Value",
-		},
-		{
-			TOMLStr: `[max-error]
-type = abc
-`,
-			ExpectErrStr: `toml: line 2 (last key "max-error.type"): expected value but found "abc" instead`,
-			CaseName:     "Normal_Map_Partial_Set_Invalid_ValueType",
-		},
-	} {
-		targetLightningCfg := new(Lightning)
-		err := toml.Unmarshal([]byte(tc.TOMLStr), targetLightningCfg)
-		if len(tc.ExpectErrStr) > 0 {
-			require.Errorf(t, err, "test case: %s", tc.CaseName)
-			require.Equalf(t, tc.ExpectErrStr, err.Error(), "test case: %s", tc.CaseName)
-		} else {
-			require.NoErrorf(t, err, "test case: %s", tc.CaseName)
-			require.Equalf(t, tc.ExpectedValues["syntax"], targetLightningCfg.MaxError.Syntax.Load(), "test case: %s", tc.CaseName)
-			require.Equalf(t, tc.ExpectedValues["charset"], targetLightningCfg.MaxError.Charset.Load(), "test case: %s", tc.CaseName)
-			require.Equalf(t, tc.ExpectedValues["type"], targetLightningCfg.MaxError.Type.Load(), "test case: %s", tc.CaseName)
-		}
-	}
-}
-
 func TestDurationMarshalJSON(t *testing.T) {
-	duration := Duration{}
+	duration := config.Duration{}
 	err := duration.UnmarshalText([]byte("13m20s"))
 	require.NoError(t, err)
 	require.Equal(t, 13*60+20.0, duration.Duration.Seconds())
@@ -736,39 +554,39 @@ func TestDurationMarshalJSON(t *testing.T) {
 }
 
 func TestDuplicateResolutionAlgorithm(t *testing.T) {
-	var dra DuplicateResolutionAlgorithm
+	var dra config.DuplicateResolutionAlgorithm
+	require.NoError(t, dra.FromStringValue("record"))
+	require.Equal(t, config.DupeResAlgRecord, dra)
 	require.NoError(t, dra.FromStringValue("none"))
-	require.Equal(t, DupeResAlgNone, dra)
-	require.NoError(t, dra.FromStringValue("replace"))
-	require.Equal(t, DupeResAlgReplace, dra)
-	require.NoError(t, dra.FromStringValue("error"))
-	require.Equal(t, DupeResAlgErr, dra)
+	require.Equal(t, config.DupeResAlgNone, dra)
+	require.NoError(t, dra.FromStringValue("remove"))
+	require.Equal(t, config.DupeResAlgRemove, dra)
 
-	require.Equal(t, "none", DupeResAlgNone.String())
-	require.Equal(t, "replace", DupeResAlgReplace.String())
-	require.Equal(t, "error", DupeResAlgErr.String())
+	require.Equal(t, "record", config.DupeResAlgRecord.String())
+	require.Equal(t, "none", config.DupeResAlgNone.String())
+	require.Equal(t, "remove", config.DupeResAlgRemove.String())
 }
 
 func TestLoadConfig(t *testing.T) {
-	cfg, err := LoadGlobalConfig([]string{"-tidb-port", "sss"}, nil)
+	cfg, err := config.LoadGlobalConfig([]string{"-tidb-port", "sss"}, nil)
 	require.EqualError(t, err, `[Lightning:Common:ErrInvalidArgument]invalid argument: invalid value "sss" for flag -tidb-port: parse error`)
 	require.Nil(t, cfg)
 
-	cfg, err = LoadGlobalConfig([]string{"-V"}, nil)
+	cfg, err = config.LoadGlobalConfig([]string{"-V"}, nil)
 	require.Equal(t, flag.ErrHelp, err)
 	require.Nil(t, cfg)
 
-	cfg, err = LoadGlobalConfig([]string{"-config", "not-exists"}, nil)
+	cfg, err = config.LoadGlobalConfig([]string{"-config", "not-exists"}, nil)
 	require.Error(t, err)
 	require.Regexp(t, ".*(no such file or directory|The system cannot find the file specified).*", err.Error())
 	require.Nil(t, cfg)
 
-	cfg, err = LoadGlobalConfig([]string{"--server-mode"}, nil)
+	cfg, err = config.LoadGlobalConfig([]string{"--server-mode"}, nil)
 	require.EqualError(t, err, "[Lightning:Config:ErrInvalidConfig]If server-mode is enabled, the status-addr must be a valid listen address")
 	require.Nil(t, cfg)
 
 	path, _ := filepath.Abs(".")
-	cfg, err = LoadGlobalConfig([]string{
+	cfg, err = config.LoadGlobalConfig([]string{
 		"-L", "debug",
 		"-log-file", "/path/to/file.log",
 		"-tidb-host", "172.16.30.11",
@@ -777,52 +595,52 @@ func TestLoadConfig(t *testing.T) {
 		"-tidb-password", "12345",
 		"-pd-urls", "172.16.30.11:2379,172.16.30.12:2379",
 		"-d", path,
-		"-backend", BackendLocal,
+		"-backend", config.BackendLocal,
 		"-sorted-kv-dir", ".",
 		"-checksum=false",
 	}, nil)
 	require.NoError(t, err)
-	require.Equal(t, "debug", cfg.App.Level)
-	require.Equal(t, "/path/to/file.log", cfg.App.File)
+	require.Equal(t, "debug", cfg.App.Config.Level)
+	require.Equal(t, "/path/to/file.log", cfg.App.Config.File)
 	require.Equal(t, "172.16.30.11", cfg.TiDB.Host)
 	require.Equal(t, 4001, cfg.TiDB.Port)
 	require.Equal(t, "guest", cfg.TiDB.User)
 	require.Equal(t, "12345", cfg.TiDB.Psw)
 	require.Equal(t, "172.16.30.11:2379,172.16.30.12:2379", cfg.TiDB.PdAddr)
 	require.Equal(t, path, cfg.Mydumper.SourceDir)
-	require.Equal(t, BackendLocal, cfg.TikvImporter.Backend)
+	require.Equal(t, config.BackendLocal, cfg.TikvImporter.Backend)
 	require.Equal(t, ".", cfg.TikvImporter.SortedKVDir)
-	require.Equal(t, OpLevelOff, cfg.PostRestore.Checksum)
-	require.Equal(t, OpLevelOptional, cfg.PostRestore.Analyze)
+	require.Equal(t, config.OpLevelOff, cfg.PostRestore.Checksum)
+	require.Equal(t, config.OpLevelOptional, cfg.PostRestore.Analyze)
 
-	taskCfg := NewConfig()
+	taskCfg := config.NewConfig()
 	err = taskCfg.LoadFromGlobal(cfg)
 	require.NoError(t, err)
-	require.Equal(t, OpLevelOff, taskCfg.PostRestore.Checksum)
-	require.Equal(t, OpLevelOptional, taskCfg.PostRestore.Analyze)
+	require.Equal(t, config.OpLevelOff, taskCfg.PostRestore.Checksum)
+	require.Equal(t, config.OpLevelOptional, taskCfg.PostRestore.Analyze)
 
 	taskCfg.Checkpoint.DSN = ""
-	taskCfg.Checkpoint.Driver = CheckpointDriverMySQL
+	taskCfg.Checkpoint.Driver = config.CheckpointDriverMySQL
 	taskCfg.TiDB.DistSQLScanConcurrency = 1
 	err = taskCfg.Adjust(context.Background())
 	require.NoError(t, err)
 	equivalentDSN := taskCfg.Checkpoint.MySQLParam.ToDriverConfig().FormatDSN()
-	expectedDSN := "guest:12345@tcp(172.16.30.11:4001)/?charset=utf8mb4&sql_mode=%27ONLY_FULL_GROUP_BY%2CSTRICT_TRANS_TABLES%2CNO_ZERO_IN_DATE%2CNO_ZERO_DATE%2CERROR_FOR_DIVISION_BY_ZERO%2CNO_AUTO_CREATE_USER%2CNO_ENGINE_SUBSTITUTION%27"
+	expectedDSN := "guest:12345@tcp(172.16.30.11:4001)/?tls=false&maxAllowedPacket=67108864&charset=utf8mb4&sql_mode=%27ONLY_FULL_GROUP_BY%2CSTRICT_TRANS_TABLES%2CNO_ZERO_IN_DATE%2CNO_ZERO_DATE%2CERROR_FOR_DIVISION_BY_ZERO%2CNO_AUTO_CREATE_USER%2CNO_ENGINE_SUBSTITUTION%27"
 	require.Equal(t, expectedDSN, equivalentDSN)
 
 	result := taskCfg.String()
 	require.Regexp(t, `.*"pd-addr":"172.16.30.11:2379,172.16.30.12:2379".*`, result)
 
-	cfg, err = LoadGlobalConfig([]string{}, nil)
+	cfg, err = config.LoadGlobalConfig([]string{}, nil)
 	require.NoError(t, err)
-	require.Regexp(t, ".*lightning.log.*", cfg.App.File)
-	cfg, err = LoadGlobalConfig([]string{"--log-file", "-"}, nil)
+	require.Regexp(t, ".*lightning.log.*", cfg.App.Config.File)
+	cfg, err = config.LoadGlobalConfig([]string{"--log-file", "-"}, nil)
 	require.NoError(t, err)
-	require.Equal(t, "-", cfg.App.File)
+	require.Equal(t, "-", cfg.App.Config.File)
 }
 
 func TestDefaultImporterBackendValue(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.TikvImporter.Backend = "local"
 	cfg.TiDB.DistSQLScanConcurrency = 1
@@ -830,11 +648,10 @@ func TestDefaultImporterBackendValue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, cfg.App.IndexConcurrency)
 	require.Equal(t, 6, cfg.App.TableConcurrency)
-	require.Equal(t, 4096, cfg.TikvImporter.RegionSplitBatchSize)
 }
 
 func TestDefaultTidbBackendValue(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.TikvImporter.Backend = "tidb"
 	cfg.App.RegionConcurrency = 123
@@ -845,44 +662,29 @@ func TestDefaultTidbBackendValue(t *testing.T) {
 }
 
 func TestDefaultCouldBeOverwritten(t *testing.T) {
-	ctx := context.Background()
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 	cfg.TikvImporter.Backend = "local"
 	cfg.App.IndexConcurrency = 20
 	cfg.App.TableConcurrency = 60
 	cfg.TiDB.DistSQLScanConcurrency = 1
-	err := cfg.Adjust(ctx)
+	err := cfg.Adjust(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, 20, cfg.App.IndexConcurrency)
 	require.Equal(t, 60, cfg.App.TableConcurrency)
-
-	require.Equal(t, 32768, cfg.TikvImporter.SendKVPairs)
-	require.Equal(t, ByteSize(KVWriteBatchSize), cfg.TikvImporter.SendKVSize)
-
-	cfg.TikvImporter.RegionSplitConcurrency = 1
-	// backoff can be 0
-	cfg.TikvImporter.RegionCheckBackoffLimit = 0
-	err = cfg.Adjust(ctx)
-	require.NoError(t, err)
-	require.Equal(t, 1, cfg.TikvImporter.RegionSplitConcurrency)
-	require.Equal(t, 0, cfg.TikvImporter.RegionCheckBackoffLimit)
-	cfg.TikvImporter.RegionSplitBatchSize = 0
-	err = cfg.Adjust(ctx)
-	require.ErrorContains(t, err, "`tikv-importer.region-split-batch-size` got 0, should be larger than 0")
 }
 
 func TestLoadFromInvalidConfig(t *testing.T) {
-	taskCfg := NewConfig()
-	err := taskCfg.LoadFromGlobal(&GlobalConfig{
+	taskCfg := config.NewConfig()
+	err := taskCfg.LoadFromGlobal(&config.GlobalConfig{
 		ConfigFileContent: []byte("invalid toml"),
 	})
 	require.Error(t, err)
-	require.Regexp(t, "line 1.*", err.Error())
+	require.Regexp(t, "Near line 1.*", err.Error())
 }
 
 func TestTomlPostRestore(t *testing.T) {
-	cfg := &Config{}
+	cfg := &config.Config{}
 	err := cfg.LoadFromTOML([]byte(`
 		[post-restore]
 		checksum = "req"
@@ -895,19 +697,19 @@ func TestTomlPostRestore(t *testing.T) {
 	`))
 	require.EqualError(t, err, "invalid op level '123', please choose valid option between ['off', 'optional', 'required']")
 
-	kvMap := map[string]PostOpLevel{
-		`"off"`:      OpLevelOff,
-		`"required"`: OpLevelRequired,
-		`"optional"`: OpLevelOptional,
-		"true":       OpLevelRequired,
-		"false":      OpLevelOff,
+	kvMap := map[string]config.PostOpLevel{
+		`"off"`:      config.OpLevelOff,
+		`"required"`: config.OpLevelRequired,
+		`"optional"`: config.OpLevelOptional,
+		"true":       config.OpLevelRequired,
+		"false":      config.OpLevelOff,
 	}
 
 	var b bytes.Buffer
 	enc := toml.NewEncoder(&b)
 
 	for k, v := range kvMap {
-		cfg := &Config{}
+		cfg := &config.Config{}
 		confStr := fmt.Sprintf("[post-restore]\r\nchecksum= %s\r\n", k)
 		err := cfg.LoadFromTOML([]byte(confStr))
 		require.NoError(t, err)
@@ -919,7 +721,7 @@ func TestTomlPostRestore(t *testing.T) {
 	}
 
 	for k, v := range kvMap {
-		cfg := &Config{}
+		cfg := &config.Config{}
 		confStr := fmt.Sprintf("[post-restore]\r\nanalyze= %s\r\n", k)
 		err := cfg.LoadFromTOML([]byte(confStr))
 		require.NoError(t, err)
@@ -932,7 +734,7 @@ func TestTomlPostRestore(t *testing.T) {
 }
 
 func TestCronEncodeDecode(t *testing.T) {
-	cfg := &Config{}
+	cfg := &config.Config{}
 	cfg.Cron.SwitchMode.Duration = 1 * time.Minute
 	cfg.Cron.LogProgress.Duration = 2 * time.Minute
 	cfg.Cron.CheckDiskQuota.Duration = 3 * time.Second
@@ -941,94 +743,43 @@ func TestCronEncodeDecode(t *testing.T) {
 	require.Equal(t, "switch-mode = \"1m0s\"\nlog-progress = \"2m0s\"\ncheck-disk-quota = \"3s\"\n", b.String())
 
 	confStr := "[cron]\r\n" + b.String()
-	cfg2 := &Config{}
+	cfg2 := &config.Config{}
 	require.NoError(t, cfg2.LoadFromTOML([]byte(confStr)))
 	require.Equal(t, cfg.Cron, cfg2.Cron)
 }
 
+func TestAdjustWithLegacyBlackWhiteList(t *testing.T) {
+	cfg := config.NewConfig()
+	assignMinimalLegalValue(cfg)
+	require.Equal(t, config.DefaultFilter, cfg.Mydumper.Filter)
+	require.False(t, cfg.HasLegacyBlackWhiteList())
+
+	ctx := context.Background()
+	cfg.Mydumper.Filter = []string{"test.*"}
+	cfg.TiDB.DistSQLScanConcurrency = 1
+	require.NoError(t, cfg.Adjust(ctx))
+	require.False(t, cfg.HasLegacyBlackWhiteList())
+
+	cfg.BWList.DoDBs = []string{"test"}
+	require.EqualError(t, cfg.Adjust(ctx), "[Lightning:Config:ErrInvalidConfig]`mydumper.filter` and `black-white-list` cannot be simultaneously defined")
+
+	cfg.Mydumper.Filter = config.DefaultFilter
+	require.NoError(t, cfg.Adjust(ctx))
+	require.True(t, cfg.HasLegacyBlackWhiteList())
+}
+
 func TestAdjustDiskQuota(t *testing.T) {
-	cfg := NewConfig()
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 
 	base := t.TempDir()
 	ctx := context.Background()
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.DiskQuota = 0
 	cfg.TikvImporter.SortedKVDir = base
 	cfg.TiDB.DistSQLScanConcurrency = 1
 	require.NoError(t, cfg.Adjust(ctx))
 	require.Equal(t, int64(0), int64(cfg.TikvImporter.DiskQuota))
-}
-
-func TestAdjustConflictStrategy(t *testing.T) {
-	cfg := NewConfig()
-	assignMinimalLegalValue(cfg)
-	ctx := context.Background()
-
-	cfg.TikvImporter.Backend = BackendTiDB
-	cfg.Conflict.Strategy = ""
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Equal(t, ErrorOnDup, cfg.Conflict.Strategy)
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Strategy = ""
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Empty(t, cfg.Conflict.Strategy)
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Strategy = ReplaceOnDup
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Equal(t, ReplaceOnDup, cfg.Conflict.Strategy)
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Strategy = ReplaceOnDup
-	cfg.TikvImporter.ParallelImport = true
-	require.ErrorContains(t, cfg.Adjust(ctx), `conflict.strategy cannot be used with tikv-importer.parallel-import and tikv-importer.backend = "local"`)
-
-	cfg.TikvImporter.Backend = BackendTiDB
-	cfg.Conflict.Strategy = IgnoreOnDup
-	require.NoError(t, cfg.Adjust(ctx))
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Strategy = ReplaceOnDup
-	cfg.TikvImporter.ParallelImport = false
-	cfg.TikvImporter.DuplicateResolution = DupeResAlgReplace
-	require.ErrorContains(t, cfg.Adjust(ctx), "conflict.strategy cannot be used with tikv-importer.duplicate-resolution")
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Strategy = ""
-	cfg.TikvImporter.OnDuplicate = ReplaceOnDup
-	cfg.TikvImporter.ParallelImport = false
-	cfg.TikvImporter.DuplicateResolution = DupeResAlgReplace
-	require.ErrorContains(t, cfg.Adjust(ctx), "tikv-importer.on-duplicate cannot be used with tikv-importer.duplicate-resolution")
-}
-
-func TestAdjustMaxRecordRows(t *testing.T) {
-	ctx := context.Background()
-
-	cfg := NewConfig()
-	assignMinimalLegalValue(cfg)
-	cfg.Conflict.Threshold = 9999
-
-	cfg.Conflict.MaxRecordRows = -1
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Equal(t, int64(100), cfg.Conflict.MaxRecordRows)
-
-	cfg.Conflict.MaxRecordRows = -1
-	cfg.App.MaxError.Syntax.Store(1000)
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Equal(t, int64(1000), cfg.Conflict.MaxRecordRows)
-}
-
-func TestRemoveAllowAllFiles(t *testing.T) {
-	cfg := NewConfig()
-	assignMinimalLegalValue(cfg)
-	ctx := context.Background()
-
-	cfg.Checkpoint.Driver = CheckpointDriverMySQL
-	cfg.Checkpoint.DSN = "guest:12345@tcp(172.16.30.11:4001)/?tls=false&allowAllFiles=true&charset=utf8mb4"
-	require.NoError(t, cfg.Adjust(ctx))
-	require.Equal(t, "guest:12345@tcp(172.16.30.11:4001)/?tls=false&charset=utf8mb4", cfg.Checkpoint.DSN)
 }
 
 func TestDataCharacterSet(t *testing.T) {
@@ -1096,11 +847,11 @@ func TestDataCharacterSet(t *testing.T) {
 
 	for _, tc := range testCases {
 		comment := fmt.Sprintf("input = %s", tc.input)
-		cfg := NewConfig()
+		cfg := config.NewConfig()
 		cfg.Mydumper.SourceDir = "file://."
 		cfg.TiDB.Port = 4000
 		cfg.TiDB.PdAddr = "test.invalid:2379"
-		cfg.TikvImporter.Backend = BackendLocal
+		cfg.TikvImporter.Backend = config.BackendLocal
 		cfg.TikvImporter.SortedKVDir = "."
 		cfg.TiDB.DistSQLScanConcurrency = 1
 		err := cfg.LoadFromTOML([]byte(tc.input))
@@ -1115,14 +866,14 @@ func TestDataCharacterSet(t *testing.T) {
 }
 
 func TestCheckpointKeepStrategy(t *testing.T) {
-	tomlCases := map[any]CheckpointKeepStrategy{
-		true:     CheckpointRename,
-		false:    CheckpointRemove,
-		"remove": CheckpointRemove,
-		"rename": CheckpointRename,
-		"origin": CheckpointOrigin,
+	tomlCases := map[interface{}]config.CheckpointKeepStrategy{
+		true:     config.CheckpointRename,
+		false:    config.CheckpointRemove,
+		"remove": config.CheckpointRemove,
+		"rename": config.CheckpointRename,
+		"origin": config.CheckpointOrigin,
 	}
-	var cp CheckpointKeepStrategy
+	var cp config.CheckpointKeepStrategy
 	for key, strategy := range tomlCases {
 		err := cp.UnmarshalTOML(key)
 		require.NoError(t, err)
@@ -1130,10 +881,10 @@ func TestCheckpointKeepStrategy(t *testing.T) {
 	}
 
 	defaultCp := "enable = true\r\n"
-	cpCfg := &Checkpoint{}
+	cpCfg := &config.Checkpoint{}
 	_, err := toml.Decode(defaultCp, cpCfg)
 	require.NoError(t, err)
-	require.Equal(t, CheckpointRemove, cpCfg.KeepAfterSuccess)
+	require.Equal(t, config.CheckpointRemove, cpCfg.KeepAfterSuccess)
 
 	cpFmt := "keep-after-success = %v\r\n"
 	for key, strategy := range tomlCases {
@@ -1142,16 +893,16 @@ func TestCheckpointKeepStrategy(t *testing.T) {
 			cpValue = `"` + strVal + `"`
 		}
 		tomlStr := fmt.Sprintf(cpFmt, cpValue)
-		cpCfg := &Checkpoint{}
+		cpCfg := &config.Checkpoint{}
 		_, err := toml.Decode(tomlStr, cpCfg)
 		require.NoError(t, err)
 		require.Equal(t, strategy, cpCfg.KeepAfterSuccess)
 	}
 
-	marshalTextCases := map[CheckpointKeepStrategy]string{
-		CheckpointRemove: "remove",
-		CheckpointRename: "rename",
-		CheckpointOrigin: "origin",
+	marshalTextCases := map[config.CheckpointKeepStrategy]string{
+		config.CheckpointRemove: "remove",
+		config.CheckpointRename: "rename",
+		config.CheckpointOrigin: "origin",
 	}
 	for strategy, value := range marshalTextCases {
 		res, err := strategy.MarshalText()
@@ -1161,137 +912,47 @@ func TestCheckpointKeepStrategy(t *testing.T) {
 }
 
 func TestLoadCharsetFromConfig(t *testing.T) {
-	cases := map[string]Charset{
-		"binary":  Binary,
-		"BINARY":  Binary,
-		"GBK":     GBK,
-		"gbk":     GBK,
-		"Gbk":     GBK,
-		"gB18030": GB18030,
-		"GB18030": GB18030,
+	cases := map[string]config.Charset{
+		"binary":  config.Binary,
+		"BINARY":  config.Binary,
+		"GBK":     config.GBK,
+		"gbk":     config.GBK,
+		"Gbk":     config.GBK,
+		"gB18030": config.GB18030,
+		"GB18030": config.GB18030,
 	}
 	for k, v := range cases {
-		charset, err := ParseCharset(k)
+		charset, err := config.ParseCharset(k)
 		require.NoError(t, err)
 		require.Equal(t, v, charset)
 	}
 
-	_, err := ParseCharset("Unknown")
+	_, err := config.ParseCharset("Unknown")
 	require.EqualError(t, err, "found unsupported data-character-set: Unknown")
 }
 
-func TestAdjustTikvImporter(t *testing.T) {
-	cfg := NewConfig()
+func TestCheckAndAdjustForLocalBackend(t *testing.T) {
+	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
 
-	cfg.TikvImporter.Backend = BackendLocal
+	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = ""
-	require.EqualError(t, cfg.TikvImporter.adjust(), "[Lightning:Config:ErrInvalidConfig]tikv-importer.sorted-kv-dir must not be empty!")
+	require.EqualError(t, cfg.CheckAndAdjustForLocalBackend(), "[Lightning:Config:ErrInvalidConfig]tikv-importer.sorted-kv-dir must not be empty!")
 
 	// non exists dir is legal
 	cfg.TikvImporter.SortedKVDir = "./not-exists"
-	require.NoError(t, cfg.TikvImporter.adjust())
+	require.NoError(t, cfg.CheckAndAdjustForLocalBackend())
 
 	base := t.TempDir()
 	// create empty file
 	file := filepath.Join(base, "file")
 	require.NoError(t, os.WriteFile(file, []byte(""), 0644))
 	cfg.TikvImporter.SortedKVDir = file
-	err := cfg.TikvImporter.adjust()
+	err := cfg.CheckAndAdjustForLocalBackend()
 	require.Error(t, err)
 	require.Regexp(t, "tikv-importer.sorted-kv-dir (.*) is not a directory", err.Error())
 
 	// legal dir
 	cfg.TikvImporter.SortedKVDir = base
-	require.NoError(t, cfg.TikvImporter.adjust())
-
-	cfg.TikvImporter.ParallelImport = true
-	cfg.TikvImporter.AddIndexBySQL = true
-	require.ErrorContains(t, cfg.TikvImporter.adjust(), "tikv-importer.add-index-using-ddl cannot be used with tikv-importer.parallel-import")
-}
-
-func TestCreateSeveralConfigsWithDifferentFilters(t *testing.T) {
-	originalDefaultCfg := append([]string{}, GetDefaultFilter()...)
-	cfg1 := NewConfig()
-	require.NoError(t, cfg1.LoadFromTOML([]byte(`
-		[mydumper]
-		filter = ["db1.tbl1", "db2.*", "!db2.tbl1"]
-	`)))
-	require.Equal(t, []string{"db1.tbl1", "db2.*", "!db2.tbl1"}, cfg1.Mydumper.Filter)
-	require.Equal(t, GetDefaultFilter(), originalDefaultCfg)
-
-	cfg2 := NewConfig()
-	require.Equal(t, originalDefaultCfg, cfg2.Mydumper.Filter)
-	require.Equal(t, GetDefaultFilter(), originalDefaultCfg)
-
-	gCfg1, err := LoadGlobalConfig([]string{"-f", "db1.tbl1", "-f", "db2.*", "-f", "!db2.tbl1"}, nil)
-	require.NoError(t, err)
-	require.Equal(t, []string{"db1.tbl1", "db2.*", "!db2.tbl1"}, gCfg1.Mydumper.Filter)
-	require.Equal(t, GetDefaultFilter(), originalDefaultCfg)
-
-	gCfg2, err := LoadGlobalConfig([]string{}, nil)
-	require.NoError(t, err)
-	require.Equal(t, originalDefaultCfg, gCfg2.Mydumper.Filter)
-	require.Equal(t, GetDefaultFilter(), originalDefaultCfg)
-}
-
-func TestCompressionType(t *testing.T) {
-	var ct CompressionType
-	require.NoError(t, ct.FromStringValue(""))
-	require.Equal(t, CompressionNone, ct)
-	require.NoError(t, ct.FromStringValue("gzip"))
-	require.Equal(t, CompressionGzip, ct)
-	require.NoError(t, ct.FromStringValue("gz"))
-	require.Equal(t, CompressionGzip, ct)
-	require.EqualError(t, ct.FromStringValue("zstd"), "invalid compression-type 'zstd', please choose valid option between ['gzip']")
-
-	require.Equal(t, "", CompressionNone.String())
-	require.Equal(t, "gzip", CompressionGzip.String())
-}
-
-func TestAdjustConflict(t *testing.T) {
-	cfg := NewConfig()
-	assignMinimalLegalValue(cfg)
-	cfg.Conflict.Strategy = "123"
-	require.ErrorContains(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App), "unsupported `conflict.strategy` (123)")
-
-	cfg.Conflict.Strategy = "IGNORE"
-	require.NoError(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App))
-	require.Equal(t, int64(math.MaxInt64), cfg.Conflict.Threshold)
-
-	cfg.Conflict.Strategy = ErrorOnDup
-	cfg.Conflict.Threshold = 1
-	require.ErrorContains(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App), `conflict.threshold cannot be set when use conflict.strategy = "error"`)
-
-	cfg.TikvImporter.Backend = BackendTiDB
-	cfg.Conflict.Strategy = ReplaceOnDup
-	cfg.Conflict.MaxRecordRows = -1
-	require.NoError(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App))
-	require.Equal(t, int64(0), cfg.Conflict.MaxRecordRows)
-
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.Conflict.Threshold = 1
-	cfg.Conflict.MaxRecordRows = 1
-	require.NoError(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App))
-	cfg.Conflict.MaxRecordRows = 2
-	require.ErrorContains(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App), `conflict.max-record-rows (2) cannot be larger than conflict.threshold (1)`)
-
-	cfg.TikvImporter.Backend = BackendTiDB
-	cfg.Conflict.Strategy = ReplaceOnDup
-	cfg.Conflict.Threshold = 1
-	cfg.Conflict.MaxRecordRows = 1
-	require.ErrorContains(t, cfg.Conflict.adjust(&cfg.TikvImporter, &cfg.App), `cannot record duplication (conflict.max-record-rows > 0) when use tikv-importer.backend = "tidb" and conflict.strategy = "replace"`)
-}
-
-func TestAdjustBlockSize(t *testing.T) {
-	cfg := NewConfig()
-	cfg.TikvImporter.Backend = BackendLocal
-	cfg.TikvImporter.SortedKVDir = "."
-	cfg.TiDB.DistSQLScanConcurrency = 1
-	cfg.Mydumper.SourceDir = "."
-	cfg.TikvImporter.BlockSize = 0
-
-	err := cfg.Adjust(context.Background())
-	require.Error(t, err)
-	require.Equal(t, ByteSize(16384), cfg.TikvImporter.BlockSize)
+	require.NoError(t, cfg.CheckAndAdjustForLocalBackend())
 }

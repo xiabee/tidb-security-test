@@ -3,32 +3,26 @@
 package restore
 
 import (
-	"cmp"
 	"context"
 	"fmt"
-	"slices"
+	"sort"
 	"sync"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/metautil"
-	prealloctableid "github.com/pingcap/tidb/br/pkg/restore/prealloc_table_id"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	tidbutil "github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx/variable"
 	"go.uber.org/zap"
 )
 
 // DB is a TiDB instance, not thread-safe.
 type DB struct {
-	se            glue.Session
-	preallocedIDs *prealloctableid.PreallocIDs
+	se glue.Session
 }
 
 type UniqueTableName struct {
@@ -66,11 +60,12 @@ func NewDB(g glue.Glue, store kv.Storage, policyMode string) (*DB, bool, error) 
 		// Set placement mode for handle placement policy.
 		err = se.Execute(context.Background(), fmt.Sprintf("set @@tidb_placement_mode='%s';", policyMode))
 		if err != nil {
-			if !variable.ErrUnknownSystemVar.Equal(err) {
+			if variable.ErrUnknownSystemVar.Equal(err) {
+				// not support placement policy, just ignore it
+				log.Warn("target tidb not support tidb_placement_mode, ignore create policies", zap.Error(err))
+			} else {
 				return nil, false, errors.Trace(err)
 			}
-			// not support placement policy, just ignore it
-			log.Warn("target tidb not support tidb_placement_mode, ignore create policies", zap.Error(err))
 		} else {
 			log.Info("set tidb_placement_mode success", zap.String("mode", policyMode))
 			supportPolicy = true
@@ -79,10 +74,6 @@ func NewDB(g glue.Glue, store kv.Storage, policyMode string) (*DB, bool, error) 
 	return &DB{
 		se: se,
 	}, supportPolicy, nil
-}
-
-func (db *DB) registerPreallocatedIDs(ids *prealloctableid.PreallocIDs) {
-	db.preallocedIDs = ids
 }
 
 // ExecDDL executes the query of a ddl job.
@@ -236,6 +227,7 @@ func (db *DB) restoreSequence(ctx context.Context, table *metautil.Table) error 
 }
 
 func (db *DB) CreateTablePostRestore(ctx context.Context, table *metautil.Table, toBeCorrectedTables map[UniqueTableName]bool) error {
+
 	var restoreMetaSQL string
 	var err error
 	switch {
@@ -279,19 +271,6 @@ func (db *DB) CreateTablePostRestore(ctx context.Context, table *metautil.Table,
 	return nil
 }
 
-func (db *DB) tableIDAllocFilter() ddl.AllocTableIDIf {
-	return func(ti *model.TableInfo) bool {
-		if db.preallocedIDs == nil {
-			return true
-		}
-		prealloced := db.preallocedIDs.PreallocedFor(ti)
-		if prealloced {
-			log.Info("reusing table ID", zap.Stringer("table", ti.Name))
-		}
-		return !prealloced
-	}
-}
-
 // CreateTables execute a internal CREATE TABLES.
 func (db *DB) CreateTables(ctx context.Context, tables []*metautil.Table,
 	ddlTables map[UniqueTableName]bool, supportPolicy bool, policyMap *sync.Map) error {
@@ -308,12 +287,8 @@ func (db *DB) CreateTables(ctx context.Context, tables []*metautil.Table,
 					return errors.Trace(err)
 				}
 			}
-
-			if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
-				ttlInfo.Enable = false
-			}
 		}
-		if err := batchSession.CreateTables(ctx, m, db.tableIDAllocFilter()); err != nil {
+		if err := batchSession.CreateTables(ctx, m); err != nil {
 			return err
 		}
 
@@ -340,11 +315,7 @@ func (db *DB) CreateTable(ctx context.Context, table *metautil.Table,
 		}
 	}
 
-	if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
-		ttlInfo.Enable = false
-	}
-
-	err := db.se.CreateTable(ctx, table.DB.Name, table.Info, db.tableIDAllocFilter())
+	err := db.se.CreateTable(ctx, table.DB.Name, table.Info)
 	if err != nil {
 		log.Error("create table failed",
 			zap.Stringer("db", table.DB.Name),
@@ -404,8 +375,8 @@ func (db *DB) ensureTablePlacementPolicies(ctx context.Context, tableInfo *model
 // FilterDDLJobs filters ddl jobs.
 func FilterDDLJobs(allDDLJobs []*model.Job, tables []*metautil.Table) (ddlJobs []*model.Job) {
 	// Sort the ddl jobs by schema version in descending order.
-	slices.SortFunc(allDDLJobs, func(i, j *model.Job) int {
-		return cmp.Compare(j.BinlogInfo.SchemaVersion, i.BinlogInfo.SchemaVersion)
+	sort.Slice(allDDLJobs, func(i, j int) bool {
+		return allDDLJobs[i].BinlogInfo.SchemaVersion > allDDLJobs[j].BinlogInfo.SchemaVersion
 	})
 	dbs := getDatabases(tables)
 	for _, db := range dbs {
@@ -476,25 +447,6 @@ func FilterDDLJobByRules(srcDDLJobs []*model.Job, rules ...DDLJobFilterRule) (ds
 // DDLJobBlockListRule rule for filter ddl job with type in block list.
 func DDLJobBlockListRule(ddlJob *model.Job) bool {
 	return checkIsInActions(ddlJob.Type, incrementalRestoreActionBlockList)
-}
-
-// GetExistedUserDBs get dbs created or modified by users
-func GetExistedUserDBs(dom *domain.Domain) []*model.DBInfo {
-	databases := dom.InfoSchema().AllSchemas()
-	existedDatabases := make([]*model.DBInfo, 0, 16)
-	for _, db := range databases {
-		dbName := db.Name.L
-		if tidbutil.IsMemOrSysDB(dbName) {
-			continue
-		} else if dbName == "test" && len(db.Tables) == 0 {
-			// tidb create test db on fresh cluster
-			// if it's empty we don't take it as user db
-			continue
-		}
-		existedDatabases = append(existedDatabases, db)
-	}
-
-	return existedDatabases
 }
 
 func getDatabases(tables []*metautil.Table) (dbs []*model.DBInfo) {

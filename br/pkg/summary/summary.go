@@ -14,7 +14,7 @@ func SetUnit(unit string) {
 }
 
 // CollectSuccessUnit collects success time costs.
-func CollectSuccessUnit(name string, unitCount int, arg any) {
+func CollectSuccessUnit(name string, unitCount int, arg interface{}) {
 	collector.CollectSuccessUnit(name, unitCount, arg)
 }
 
@@ -43,21 +43,11 @@ func SetSuccessStatus(success bool) {
 	collector.SetSuccessStatus(success)
 }
 
-// NowDureTime returns the duration between start time and current time
-func NowDureTime() time.Duration {
-	return collector.NowDureTime()
-}
-
-func AdjustStartTimeToEarlierTime(t time.Duration) {
-	collector.AdjustStartTimeToEarlierTime(t)
-}
-
 // Summary outputs summary log.
 func Summary(name string) {
 	collector.Summary(name)
 }
 
-// Log outputs log.
 func Log(msg string, fields ...zap.Field) {
 	collector.Log(msg, fields...)
 }

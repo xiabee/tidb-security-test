@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/util/hack"
+	"github.com/pingcap/tidb/util/hack"
 	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/rawkv"
 	pd "github.com/tikv/pd/client"
@@ -64,7 +64,7 @@ func NewRawKVBatchClient(
 
 // Close closes the RawKVBatchClient.
 func (c *RawKVBatchClient) Close() {
-	_ = c.rawkvClient.Close()
+	c.rawkvClient.Close()
 }
 
 // SetColumnFamily set the columnFamily for the client.

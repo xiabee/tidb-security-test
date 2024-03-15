@@ -1,4 +1,3 @@
-/*!40014 SET FOREIGN_KEY_CHECKS=0*/;
 /*!40101 SET NAMES binary*/;
 CREATE TABLE `v`(
 `a` int,

@@ -7,11 +7,11 @@ import (
 	"crypto/sha256"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	mockstorage "github.com/pingcap/tidb/br/pkg/mock/storage"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 )
 
 func checksum(m *backuppb.MetaFile) []byte {
@@ -214,42 +214,4 @@ func TestEncryptAndDecrypt(t *testing.T) {
 			}
 		}
 	}
-}
-
-func TestMetaFileSize(t *testing.T) {
-	files := []*backuppb.File{
-		{Name: "f0", Size_: 99999}, // Size() is 8
-		{Name: "f1", Size_: 99999},
-		{Name: "f2", Size_: 99999},
-		{Name: "f3", Size_: 99999},
-		{Name: "f4", Size_: 99999},
-		{Name: "f5", Size_: 99999},
-	}
-	metafiles := NewSizedMetaFile(50) // >= 50, then flush
-
-	needFlush := metafiles.append(files, AppendDataFile)
-	t.Logf("needFlush: %v, %+v", needFlush, metafiles)
-	require.False(t, needFlush)
-
-	needFlush = metafiles.append([]*backuppb.File{
-		{Name: "f5", Size_: 99999},
-	}, AppendDataFile)
-	t.Logf("needFlush: %v, %+v", needFlush, metafiles)
-	require.True(t, needFlush)
-
-	metas := []*backuppb.File{
-		{Name: "meta0", Size_: 99999}, // Size() is 11
-		{Name: "meta1", Size_: 99999},
-		{Name: "meta2", Size_: 99999},
-		{Name: "meta3", Size_: 99999},
-	}
-	metafiles = NewSizedMetaFile(50)
-	for _, meta := range metas {
-		needFlush = metafiles.append(meta, AppendMetaFile)
-		t.Logf("needFlush: %v, %+v", needFlush, metafiles)
-		require.False(t, needFlush)
-	}
-	needFlush = metafiles.append(&backuppb.File{Name: "meta4", Size_: 99999}, AppendMetaFile)
-	t.Logf("needFlush: %v, %+v", needFlush, metafiles)
-	require.True(t, needFlush)
 }

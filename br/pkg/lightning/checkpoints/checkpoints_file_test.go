@@ -11,7 +11,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,7 +26,7 @@ func newTestConfig() *config.Config {
 	return cfg
 }
 
-func newFileCheckpointsDB(t *testing.T) *checkpoints.FileCheckpointsDB {
+func newFileCheckpointsDB(t *testing.T) (*checkpoints.FileCheckpointsDB, func()) {
 	dir := t.TempDir()
 	ctx := context.Background()
 	cpdb, err := checkpoints.NewFileCheckpointsDB(ctx, filepath.Join(dir, "cp.pb"))
@@ -46,12 +45,7 @@ func newFileCheckpointsDB(t *testing.T) *checkpoints.FileCheckpointsDB {
 		"db2": {
 			Name: "db2",
 			Tables: map[string]*checkpoints.TidbTableInfo{
-				"t3": {
-					Name: "t3",
-					Desired: &model.TableInfo{
-						Name: model.NewCIStr("t3"),
-					},
-				},
+				"t3": {Name: "t3"},
 			},
 		},
 	})
@@ -125,12 +119,11 @@ func newFileCheckpointsDB(t *testing.T) *checkpoints.FileCheckpointsDB {
 	}
 	ccm.MergeInto(cpd)
 
-	cpdb.Update(ctx, map[string]*checkpoints.TableCheckpointDiff{"`db1`.`t2`": cpd})
-	t.Cleanup(func() {
+	cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{"`db1`.`t2`": cpd})
+	return cpdb, func() {
 		err := cpdb.Close()
 		require.NoError(t, err)
-	})
-	return cpdb
+	}
 }
 
 func setInvalidStatus(cpdb *checkpoints.FileCheckpointsDB) {
@@ -142,7 +135,7 @@ func setInvalidStatus(cpdb *checkpoints.FileCheckpointsDB) {
 	scm.SetInvalid()
 	scm.MergeInto(cpd)
 
-	cpdb.Update(context.Background(), map[string]*checkpoints.TableCheckpointDiff{
+	cpdb.Update(map[string]*checkpoints.TableCheckpointDiff{
 		"`db1`.`t2`": cpd,
 		"`db2`.`t3`": cpd,
 	})
@@ -150,7 +143,8 @@ func setInvalidStatus(cpdb *checkpoints.FileCheckpointsDB) {
 
 func TestGet(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	// 5. get back the checkpoints
 
@@ -201,9 +195,6 @@ func TestGet(t *testing.T) {
 				Chunks: []*checkpoints.ChunkCheckpoint{},
 			},
 		},
-		TableInfo: &model.TableInfo{
-			Name: model.NewCIStr("t3"),
-		},
 	}
 	require.Equal(t, expect, cp)
 
@@ -214,7 +205,8 @@ func TestGet(t *testing.T) {
 
 func TestRemoveAllCheckpoints(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	err := cpdb.RemoveCheckpoint(ctx, "all")
 	require.NoError(t, err)
@@ -230,7 +222,8 @@ func TestRemoveAllCheckpoints(t *testing.T) {
 
 func TestRemoveOneCheckpoint(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	err := cpdb.RemoveCheckpoint(ctx, "`db1`.`t2`")
 	require.NoError(t, err)
@@ -246,7 +239,8 @@ func TestRemoveOneCheckpoint(t *testing.T) {
 
 func TestIgnoreAllErrorCheckpoints(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	setInvalidStatus(cpdb)
 
@@ -264,7 +258,8 @@ func TestIgnoreAllErrorCheckpoints(t *testing.T) {
 
 func TestIgnoreOneErrorCheckpoints(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	setInvalidStatus(cpdb)
 
@@ -282,7 +277,8 @@ func TestIgnoreOneErrorCheckpoints(t *testing.T) {
 
 func TestDestroyAllErrorCheckpoints(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	setInvalidStatus(cpdb)
 
@@ -314,7 +310,8 @@ func TestDestroyAllErrorCheckpoints(t *testing.T) {
 
 func TestDestroyOneErrorCheckpoint(t *testing.T) {
 	ctx := context.Background()
-	cpdb := newFileCheckpointsDB(t)
+	cpdb, clean := newFileCheckpointsDB(t)
+	defer clean()
 
 	setInvalidStatus(cpdb)
 

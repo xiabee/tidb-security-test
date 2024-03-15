@@ -7,26 +7,21 @@ import (
 	"database/sql"
 
 	"github.com/pingcap/errors"
+
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 )
 
 const (
-	// ConsistencyTypeAuto will use flush for MySQL/MariaDB and snapshot for TiDB.
-	ConsistencyTypeAuto = "auto"
-	// ConsistencyTypeFlush will use FLUSH TABLES WITH READ LOCK to temporarily interrupt the DML and DDL operations of the replica database,
-	// to ensure the global consistency of the backup connection.
-	ConsistencyTypeFlush = "flush"
-	// ConsistencyTypeLock will add read locks on all tables to be exported.
-	ConsistencyTypeLock = "lock"
-	// ConsistencyTypeSnapshot gets a consistent snapshot of the specified timestamp and exports it.
-	ConsistencyTypeSnapshot = "snapshot"
-	// ConsistencyTypeNone doesn't guarantee for consistency.
-	ConsistencyTypeNone = "none"
+	consistencyTypeAuto     = "auto"
+	consistencyTypeFlush    = "flush"
+	consistencyTypeLock     = "lock"
+	consistencyTypeSnapshot = "snapshot"
+	consistencyTypeNone     = "none"
 )
 
-var errTiDBDisableTableLock = errors.New("try to apply lock consistency on TiDB but it doesn't enable table lock. please set enable-table-lock=true in tidb server config")
+var tiDBDisableTableLockErr = errors.New("try to apply lock consistency on TiDB but it doesn't enable table lock. please set enable-table-lock=true in tidb server config")
 
 // NewConsistencyController returns a new consistency controller
 func NewConsistencyController(ctx context.Context, conf *Config, session *sql.DB) (ConsistencyController, error) {
@@ -35,23 +30,22 @@ func NewConsistencyController(ctx context.Context, conf *Config, session *sql.DB
 		return nil, errors.Trace(err)
 	}
 	switch conf.Consistency {
-	case ConsistencyTypeFlush:
+	case consistencyTypeFlush:
 		return &ConsistencyFlushTableWithReadLock{
 			serverType: conf.ServerInfo.ServerType,
 			conn:       conn,
 		}, nil
-	case ConsistencyTypeLock:
+	case consistencyTypeLock:
 		return &ConsistencyLockDumpingTables{
-			conn:         conn,
-			conf:         conf,
-			emptyLockSQL: false,
+			conn: conn,
+			conf: conf,
 		}, nil
-	case ConsistencyTypeSnapshot:
+	case consistencyTypeSnapshot:
 		if conf.ServerInfo.ServerType != version.ServerTypeTiDB {
 			return nil, errors.New("snapshot consistency is not supported for this server")
 		}
 		return &ConsistencyNone{}, nil
-	case ConsistencyTypeNone:
+	case consistencyTypeNone:
 		return &ConsistencyNone{}, nil
 	default:
 		return nil, errors.Errorf("invalid consistency option %s", conf.Consistency)
@@ -69,17 +63,17 @@ type ConsistencyController interface {
 type ConsistencyNone struct{}
 
 // Setup implements ConsistencyController.Setup
-func (*ConsistencyNone) Setup(_ *tcontext.Context) error {
+func (c *ConsistencyNone) Setup(_ *tcontext.Context) error {
 	return nil
 }
 
 // TearDown implements ConsistencyController.TearDown
-func (*ConsistencyNone) TearDown(_ context.Context) error {
+func (c *ConsistencyNone) TearDown(_ context.Context) error {
 	return nil
 }
 
 // PingContext implements ConsistencyController.PingContext
-func (*ConsistencyNone) PingContext(_ context.Context) error {
+func (c *ConsistencyNone) PingContext(_ context.Context) error {
 	return nil
 }
 
@@ -103,7 +97,7 @@ func (c *ConsistencyFlushTableWithReadLock) TearDown(ctx context.Context) error 
 		return nil
 	}
 	defer func() {
-		_ = c.conn.Close()
+		c.conn.Close()
 		c.conn = nil
 	}()
 	return UnlockTables(ctx, c.conn)
@@ -119,9 +113,8 @@ func (c *ConsistencyFlushTableWithReadLock) PingContext(ctx context.Context) err
 
 // ConsistencyLockDumpingTables execute lock tables read on all tables before dump
 type ConsistencyLockDumpingTables struct {
-	conn         *sql.Conn
-	conf         *Config
-	emptyLockSQL bool
+	conn *sql.Conn
+	conf *Config
 }
 
 // Setup implements ConsistencyController.Setup
@@ -130,22 +123,15 @@ func (c *ConsistencyLockDumpingTables) Setup(tctx *tcontext.Context) error {
 		if enableTableLock, err := CheckTiDBEnableTableLock(c.conn); err != nil || !enableTableLock {
 			if err != nil {
 				return err
+			} else {
+				return tiDBDisableTableLockErr
 			}
-			return errTiDBDisableTableLock
 		}
 	}
-	blockList := make(map[string]map[string]any)
+	blockList := make(map[string]map[string]interface{})
 	return utils.WithRetry(tctx, func() error {
 		lockTablesSQL := buildLockTablesSQL(c.conf.Tables, blockList)
-		var err error
-		if len(lockTablesSQL) == 0 {
-			c.emptyLockSQL = true
-			// transfer to ConsistencyNone
-			_ = c.conn.Close()
-			c.conn = nil
-		} else {
-			_, err = c.conn.ExecContext(tctx, lockTablesSQL)
-		}
+		_, err := c.conn.ExecContext(tctx, lockTablesSQL)
 		if err == nil {
 			if len(blockList) > 0 {
 				filterTablesFunc(tctx, c.conf, func(db string, tbl string) bool {
@@ -158,7 +144,7 @@ func (c *ConsistencyLockDumpingTables) Setup(tctx *tcontext.Context) error {
 				})
 			}
 		}
-		return errors.Annotatef(err, "sql: %s", lockTablesSQL)
+		return errors.Trace(err)
 	}, newLockTablesBackoffer(tctx, blockList, c.conf))
 }
 
@@ -168,7 +154,7 @@ func (c *ConsistencyLockDumpingTables) TearDown(ctx context.Context) error {
 		return nil
 	}
 	defer func() {
-		_ = c.conn.Close()
+		c.conn.Close()
 		c.conn = nil
 	}()
 	return UnlockTables(ctx, c.conn)
@@ -176,9 +162,6 @@ func (c *ConsistencyLockDumpingTables) TearDown(ctx context.Context) error {
 
 // PingContext implements ConsistencyController.PingContext
 func (c *ConsistencyLockDumpingTables) PingContext(ctx context.Context) error {
-	if c.emptyLockSQL {
-		return nil
-	}
 	if c.conn == nil {
 		return errors.New("consistency connection has already been closed")
 	}

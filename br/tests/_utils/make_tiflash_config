@@ -12,8 +12,8 @@ key-path = "$TEST_DIR/certs/tiflash.key"
 [server]
 addr = "0.0.0.0:20170"
 advertise-addr = "127.0.0.1:20170"
-status-addr = "127.0.0.1:20292"
 engine-addr = "127.0.0.1:3930"
+status-addr = "$TIFLASH_STATUS"
 
 [storage]
 data-dir = "$TEST_DIR/tiflash/data"
@@ -63,6 +63,7 @@ pd_addr = "$PD_ADDR"
 [profiles.default]
 load_balancing = "random"
 max_memory_usage = 10000000000
+use_uncompressed_cache = 0
 
 [users]
 [users.default]

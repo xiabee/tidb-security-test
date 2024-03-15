@@ -43,7 +43,7 @@ type lightningServerSuite struct {
 	taskRunCh chan struct{}
 }
 
-func createSuite(t *testing.T) *lightningServerSuite {
+func createSuite(t *testing.T) (s *lightningServerSuite, clean func()) {
 	initProgressOnce.Do(web.EnableCurrentProgress)
 
 	cfg := config.NewGlobalConfig()
@@ -56,7 +56,7 @@ func createSuite(t *testing.T) *lightningServerSuite {
 	cfg.TikvImporter.Backend = config.BackendLocal
 	cfg.TikvImporter.SortedKVDir = t.TempDir()
 
-	s := new(lightningServerSuite)
+	s = new(lightningServerSuite)
 	s.lightning = New(cfg)
 	s.taskRunCh = make(chan struct{}, 1)
 	s.taskCfgCh = make(chan *config.Config)
@@ -65,16 +65,17 @@ func createSuite(t *testing.T) *lightningServerSuite {
 	_ = s.lightning.GoServe()
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/SkipRunTask", "return"))
-	t.Cleanup(func() {
+	clean = func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/SkipRunTask"))
 		s.lightning.Stop()
-	})
+	}
 
-	return s
+	return
 }
 
 func TestRunServer(t *testing.T) {
-	s := createSuite(t)
+	s, clean := createSuite(t)
+	defer clean()
 
 	url := "http://" + s.lightning.serverAddr.String() + "/tasks"
 
@@ -110,8 +111,7 @@ func TestRunServer(t *testing.T) {
 	require.Regexp(t, "^cannot parse task", data["error"])
 	require.NoError(t, resp.Body.Close())
 
-	resp, err = http.Post(url, "application/toml",
-		strings.NewReader("[mydumper.csv]\nseparator = 'fooo'\ndelimiter= 'foo'"))
+	resp, err = http.Post(url, "application/toml", strings.NewReader("[mydumper.csv]\nseparator = 'fooo'\ndelimiter= 'foo'"))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	err = json.NewDecoder(resp.Body).Decode(&data)
@@ -147,7 +147,8 @@ func TestRunServer(t *testing.T) {
 }
 
 func TestGetDeleteTask(t *testing.T) {
-	s := createSuite(t)
+	s, clean := createSuite(t)
+	defer clean()
 
 	url := "http://" + s.lightning.serverAddr.String() + "/tasks"
 
@@ -303,7 +304,8 @@ func TestGetDeleteTask(t *testing.T) {
 }
 
 func TestHTTPAPIOutsideServerMode(t *testing.T) {
-	s := createSuite(t)
+	s, clean := createSuite(t)
+	defer clean()
 
 	s.lightning.globalCfg.App.ServerMode = false
 

@@ -21,16 +21,17 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/session/txninfo"
-	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/session/txninfo"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
 func TestBasicTxnState(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -47,7 +48,7 @@ func TestBasicTxnState(t *testing.T) {
 
 	require.NoError(t, failpoint.Enable("tikvclient/beforePessimisticLock", "pause"))
 	defer func() { require.NoError(t, failpoint.Disable("tikvclient/beforePessimisticLock")) }()
-	ch := make(chan any)
+	ch := make(chan interface{})
 	go func() {
 		tk.MustExec("select * from t for update;")
 		ch <- nil
@@ -57,7 +58,7 @@ func TestBasicTxnState(t *testing.T) {
 	info = tk.Session().TxnInfo()
 	_, expectedDigest := parser.NormalizeDigest("select * from t for update;")
 	require.Equal(t, expectedDigest.String(), info.CurrentSQLDigest)
-	require.Equal(t, txninfo.TxnLockAcquiring, info.State)
+	require.Equal(t, txninfo.TxnLockWaiting, info.State)
 	require.True(t, info.BlockStartTime.Valid)
 	require.Equal(t, startTS, info.StartTS)
 
@@ -119,7 +120,8 @@ func TestBasicTxnState(t *testing.T) {
 }
 
 func TestEntriesCountAndSize(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -128,39 +130,24 @@ func TestEntriesCountAndSize(t *testing.T) {
 	tk.MustExec("insert into t(a) values (1);")
 	info := tk.Session().TxnInfo()
 	require.Equal(t, uint64(1), info.EntriesCount)
+	require.Equal(t, uint64(29), info.EntriesSize)
 	tk.MustExec("insert into t(a) values (2);")
 	info = tk.Session().TxnInfo()
 	require.Equal(t, uint64(2), info.EntriesCount)
+	require.Equal(t, uint64(58), info.EntriesSize)
 	tk.MustExec("commit;")
 }
 
-func TestMemDBTracker(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	session := tk.Session()
-	tk.MustExec("use test")
-	tk.MustExec("create table t (id int)")
-	tk.MustExec("begin")
-	for i := 0; i < (1 << 10); i++ {
-		tk.MustExec("insert t (id) values (1)")
-	}
-	require.Less(t, int64(1<<(10+4)), session.GetSessionVars().MemDBFootprint.BytesConsumed())
-	require.Greater(t, int64(1<<(14+4)), session.GetSessionVars().MemDBFootprint.BytesConsumed())
-	for i := 0; i < (1 << 14); i++ {
-		tk.MustExec("insert t (id) values (1)")
-	}
-	require.Less(t, int64(1<<(14+4)), session.GetSessionVars().MemDBFootprint.BytesConsumed())
-}
-
 func TestRunning(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int);")
 	tk.MustExec("insert into t(a) values (1);")
 	tk.MustExec("begin pessimistic;")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockStmtSlow", "return(200)"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockStmtSlow", "return(200)"))
 	ch := make(chan struct{})
 	go func() {
 		tk.MustExec("select * from t for update /* sleep */;")
@@ -170,12 +157,13 @@ func TestRunning(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	info := tk.Session().TxnInfo()
 	require.Equal(t, txninfo.TxnRunning, info.State)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockStmtSlow"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockStmtSlow"))
 	<-ch
 }
 
 func TestBlocked(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk2 := testkit.NewTestKit(t, store)
@@ -194,14 +182,15 @@ func TestBlocked(t *testing.T) {
 		ch <- struct{}{}
 	}()
 	time.Sleep(100 * time.Millisecond)
-	require.Equal(t, txninfo.TxnLockAcquiring, tk2.Session().TxnInfo().State)
+	require.Equal(t, txninfo.TxnLockWaiting, tk2.Session().TxnInfo().State)
 	require.NotNil(t, tk2.Session().TxnInfo().BlockStartTime)
 	tk1.MustExec("commit;")
 	<-ch
 }
 
 func TestCommitting(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk2 := testkit.NewTestKit(t, store)
@@ -217,19 +206,20 @@ func TestCommitting(t *testing.T) {
 		tk2.MustExec("begin pessimistic")
 		require.NotNil(t, tk2.Session().TxnInfo())
 		tk2.MustExec("select * from t where a = 2 for update;")
-		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockSlowCommit", "pause"))
+		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockSlowCommit", "pause"))
 		tk2.MustExec("commit;")
 		ch <- struct{}{}
 	}()
 	time.Sleep(100 * time.Millisecond)
 	require.Equal(t, txninfo.TxnCommitting, tk2.Session().TxnInfo().State)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockSlowCommit"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockSlowCommit"))
 	tk1.MustExec("commit;")
 	<-ch
 }
 
 func TestRollbackTxnState(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -239,18 +229,19 @@ func TestRollbackTxnState(t *testing.T) {
 	go func() {
 		tk.MustExec("begin pessimistic")
 		tk.MustExec("insert into t(a) values (3);")
-		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/session/mockSlowRollback", "pause"))
+		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/session/mockSlowRollback", "pause"))
 		tk.MustExec("rollback;")
 		ch <- struct{}{}
 	}()
 	time.Sleep(100 * time.Millisecond)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/session/mockSlowRollback"))
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/session/mockSlowRollback"))
 	require.Equal(t, txninfo.TxnRollingBack, tk.Session().TxnInfo().State)
 	<-ch
 }
 
 func TestTxnInfoWithPreparedStmt(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -260,7 +251,7 @@ func TestTxnInfoWithPreparedStmt(t *testing.T) {
 
 	tk.MustExec("begin pessimistic")
 	require.NoError(t, failpoint.Enable("tikvclient/beforePessimisticLock", "pause"))
-	ch := make(chan any)
+	ch := make(chan interface{})
 	go func() {
 		tk.MustExec("execute s1 using @v")
 		ch <- nil
@@ -281,7 +272,8 @@ func TestTxnInfoWithPreparedStmt(t *testing.T) {
 }
 
 func TestTxnInfoWithScalarSubquery(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -294,7 +286,7 @@ func TestTxnInfoWithScalarSubquery(t *testing.T) {
 	_, s1Digest := parser.NormalizeDigest("select * from t where a = (select b from t where a = 2)")
 
 	require.NoError(t, failpoint.Enable("tikvclient/beforePessimisticLock", "pause"))
-	ch := make(chan any)
+	ch := make(chan interface{})
 	go func() {
 		tk.MustExec("update t set b = b + 1 where a = (select b from t where a = 2)")
 		ch <- nil
@@ -311,7 +303,8 @@ func TestTxnInfoWithScalarSubquery(t *testing.T) {
 }
 
 func TestTxnInfoWithPSProtocol(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
+	store, clean := realtikvtest.CreateMockStoreAndSetup(t)
+	defer clean()
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -323,9 +316,9 @@ func TestTxnInfoWithPSProtocol(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, failpoint.Enable("tikvclient/beforePrewrite", "pause"))
-	ch := make(chan any)
+	ch := make(chan interface{})
 	go func() {
-		_, err := tk.Session().ExecutePreparedStmt(context.Background(), idInsert, expression.Args2Expressions4Test(1))
+		_, err := tk.Session().ExecutePreparedStmt(context.Background(), idInsert, types.MakeDatums(1))
 		require.NoError(t, err)
 		ch <- nil
 	}()
@@ -354,12 +347,12 @@ func TestTxnInfoWithPSProtocol(t *testing.T) {
 
 	tk.MustExec("begin pessimistic")
 
-	_, err = tk.Session().ExecutePreparedStmt(context.Background(), id1, expression.Args2Expressions4Test(1))
+	_, err = tk.Session().ExecutePreparedStmt(context.Background(), id1, types.MakeDatums(1))
 	require.NoError(t, err)
 
 	require.NoError(t, failpoint.Enable("tikvclient/beforePessimisticLock", "pause"))
 	go func() {
-		_, err := tk.Session().ExecutePreparedStmt(context.Background(), id2, expression.Args2Expressions4Test(1))
+		_, err := tk.Session().ExecutePreparedStmt(context.Background(), id2, types.MakeDatums(1))
 		require.NoError(t, err)
 		ch <- nil
 	}()
@@ -367,7 +360,7 @@ func TestTxnInfoWithPSProtocol(t *testing.T) {
 	info = tk.Session().TxnInfo()
 	require.Greater(t, info.StartTS, uint64(0))
 	require.Equal(t, digest2.String(), info.CurrentSQLDigest)
-	require.Equal(t, txninfo.TxnLockAcquiring, info.State)
+	require.Equal(t, txninfo.TxnLockWaiting, info.State)
 	require.True(t, info.BlockStartTime.Valid)
 	_, beginDigest := parser.NormalizeDigest("begin pessimistic")
 	require.Equal(t, []string{beginDigest.String(), digest1.String(), digest2.String()}, info.AllSQLDigests)

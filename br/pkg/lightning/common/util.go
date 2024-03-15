@@ -15,9 +15,7 @@
 package common
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -36,14 +34,10 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	tmysql "github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/table/tables"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/format"
+	tmysql "github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/table/tables"
 	"go.uber.org/zap"
 )
 
@@ -55,19 +49,16 @@ const (
 
 // MySQLConnectParam records the parameters needed to connect to a MySQL database.
 type MySQLConnectParam struct {
-	Host                     string
-	Port                     int
-	User                     string
-	Password                 string
-	SQLMode                  string
-	MaxAllowedPacket         uint64
-	TLSConfig                *tls.Config
-	AllowFallbackToPlaintext bool
-	Net                      string
-	Vars                     map[string]string
+	Host             string
+	Port             int
+	User             string
+	Password         string
+	SQLMode          string
+	MaxAllowedPacket uint64
+	TLS              string
+	Vars             map[string]string
 }
 
-// ToDriverConfig converts the MySQLConnectParam to a mysql.Config.
 func (param *MySQLConnectParam) ToDriverConfig() *mysql.Config {
 	cfg := mysql.NewConfig()
 	cfg.Params = make(map[string]string)
@@ -75,16 +66,11 @@ func (param *MySQLConnectParam) ToDriverConfig() *mysql.Config {
 	cfg.User = param.User
 	cfg.Passwd = param.Password
 	cfg.Net = "tcp"
-	if param.Net != "" {
-		cfg.Net = param.Net
-	}
 	cfg.Addr = net.JoinHostPort(param.Host, strconv.Itoa(param.Port))
 	cfg.Params["charset"] = "utf8mb4"
 	cfg.Params["sql_mode"] = fmt.Sprintf("'%s'", param.SQLMode)
 	cfg.MaxAllowedPacket = int(param.MaxAllowedPacket)
-
-	cfg.TLS = param.TLSConfig
-	cfg.AllowFallbackToPlaintext = param.AllowFallbackToPlaintext
+	cfg.TLSConfig = param.TLS
 
 	for k, v := range param.Vars {
 		cfg.Params[k] = fmt.Sprintf("'%s'", v)
@@ -123,8 +109,7 @@ func ConnectMySQL(cfg *mysql.Config) (*sql.DB, error) {
 	// If access is denied and password is encoded by base64, try the decoded string as well.
 	if mysqlErr, ok := errors.Cause(firstErr).(*mysql.MySQLError); ok && mysqlErr.Number == tmysql.ErrAccessDenied {
 		// If password is encoded by base64, try the decoded string as well.
-		password, decodeErr := base64.StdEncoding.DecodeString(cfg.Passwd)
-		if decodeErr == nil && string(password) != cfg.Passwd {
+		if password, decodeErr := base64.StdEncoding.DecodeString(cfg.Passwd); decodeErr == nil && string(password) != cfg.Passwd {
 			cfg.Passwd = string(password)
 			db2, err := tryConnectMySQL(cfg)
 			if err == nil {
@@ -136,7 +121,6 @@ func ConnectMySQL(cfg *mysql.Config) (*sql.DB, error) {
 	return nil, errors.Trace(firstErr)
 }
 
-// Connect creates a new connection to the database.
 func (param *MySQLConnectParam) Connect() (*sql.DB, error) {
 	db, err := ConnectMySQL(param.ToDriverConfig())
 	if err != nil {
@@ -171,7 +155,7 @@ type SQLWithRetry struct {
 	HideQueryLog bool
 }
 
-func (SQLWithRetry) perform(_ context.Context, parentLogger log.Logger, purpose string, action func() error) error {
+func (t SQLWithRetry) perform(_ context.Context, parentLogger log.Logger, purpose string, action func() error) error {
 	return Retry(purpose, parentLogger, action)
 }
 
@@ -206,8 +190,7 @@ outside:
 	return errors.Annotatef(err, "%s failed", purpose)
 }
 
-// QueryRow executes a query that is expected to return at most one row.
-func (t SQLWithRetry) QueryRow(ctx context.Context, purpose string, query string, dest ...any) error {
+func (t SQLWithRetry) QueryRow(ctx context.Context, purpose string, query string, dest ...interface{}) error {
 	logger := t.Logger
 	if !t.HideQueryLog {
 		logger = logger.With(zap.String("query", query))
@@ -215,43 +198,6 @@ func (t SQLWithRetry) QueryRow(ctx context.Context, purpose string, query string
 	return t.perform(ctx, logger, purpose, func() error {
 		return t.DB.QueryRowContext(ctx, query).Scan(dest...)
 	})
-}
-
-// QueryStringRows executes a query that is expected to return multiple rows
-// whose every column is string.
-func (t SQLWithRetry) QueryStringRows(ctx context.Context, purpose string, query string) ([][]string, error) {
-	var res [][]string
-	logger := t.Logger
-	if !t.HideQueryLog {
-		logger = logger.With(zap.String("query", query))
-	}
-
-	err := t.perform(ctx, logger, purpose, func() error {
-		rows, err := t.DB.QueryContext(ctx, query)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-
-		colNames, err := rows.Columns()
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			row := make([]string, len(colNames))
-			refs := make([]any, 0, len(row))
-			for i := range row {
-				refs = append(refs, &row[i])
-			}
-			if err := rows.Scan(refs...); err != nil {
-				return err
-			}
-			res = append(res, row)
-		}
-		return rows.Err()
-	})
-
-	return res, err
 }
 
 // Transact executes an action in a transaction, and retry if the
@@ -284,7 +230,7 @@ func (t SQLWithRetry) Transact(ctx context.Context, purpose string, action func(
 }
 
 // Exec executes a single SQL with optional retry.
-func (t SQLWithRetry) Exec(ctx context.Context, purpose string, query string, args ...any) error {
+func (t SQLWithRetry) Exec(ctx context.Context, purpose string, query string, args ...interface{}) error {
 	logger := t.Logger
 	if !t.HideQueryLog {
 		logger = logger.With(zap.String("query", query), zap.Reflect("args", args))
@@ -313,26 +259,6 @@ func UniqueTable(schema string, table string) string {
 	return builder.String()
 }
 
-func escapeIdentifiers(identifier []string) []any {
-	escaped := make([]any, len(identifier))
-	for i, id := range identifier {
-		escaped[i] = EscapeIdentifier(id)
-	}
-	return escaped
-}
-
-// SprintfWithIdentifiers escapes the identifiers and sprintf them. The input
-// identifiers must not be escaped.
-func SprintfWithIdentifiers(format string, identifiers ...string) string {
-	return fmt.Sprintf(format, escapeIdentifiers(identifiers)...)
-}
-
-// FprintfWithIdentifiers escapes the identifiers and fprintf them. The input
-// identifiers must not be escaped.
-func FprintfWithIdentifiers(w io.Writer, format string, identifiers ...string) (int, error) {
-	return fmt.Fprintf(w, format, escapeIdentifiers(identifiers)...)
-}
-
 // EscapeIdentifier quote and escape an sql identifier
 func EscapeIdentifier(identifier string) string {
 	var builder strings.Builder
@@ -340,7 +266,6 @@ func EscapeIdentifier(identifier string) string {
 	return builder.String()
 }
 
-// WriteMySQLIdentifier writes a MySQL identifier into the string builder.
 // Writes a MySQL identifier into the string builder.
 // The identifier is always escaped into the form "`foo`".
 func WriteMySQLIdentifier(builder *strings.Builder, identifier string) {
@@ -360,7 +285,6 @@ func WriteMySQLIdentifier(builder *strings.Builder, identifier string) {
 	builder.WriteByte('`')
 }
 
-// InterpolateMySQLString interpolates a string into a MySQL string literal.
 func InterpolateMySQLString(s string) string {
 	var builder strings.Builder
 	builder.Grow(len(s) + 2)
@@ -378,32 +302,17 @@ func InterpolateMySQLString(s string) string {
 }
 
 // TableExists return whether table with specified name exists in target db
-func TableExists(ctx context.Context, db utils.QueryExecutor, schema, table string) (bool, error) {
+func TableExists(ctx context.Context, db *sql.DB, schema, table string) (bool, error) {
 	query := "SELECT 1 from INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
 	var exist string
 	err := db.QueryRowContext(ctx, query, schema, table).Scan(&exist)
-	switch err {
-	case nil:
+	switch {
+	case err == nil:
 		return true, nil
-	case sql.ErrNoRows:
+	case err == sql.ErrNoRows:
 		return false, nil
 	default:
 		return false, errors.Annotatef(err, "check table exists failed")
-	}
-}
-
-// SchemaExists return whether schema with specified name exists.
-func SchemaExists(ctx context.Context, db utils.QueryExecutor, schema string) (bool, error) {
-	query := "SELECT 1 from INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?"
-	var exist string
-	err := db.QueryRowContext(ctx, query, schema).Scan(&exist)
-	switch err {
-	case nil:
-		return true, nil
-	case sql.ErrNoRows:
-		return false, nil
-	default:
-		return false, errors.Annotatef(err, "check schema exists failed")
 	}
 }
 
@@ -419,7 +328,7 @@ func SchemaExists(ctx context.Context, db utils.QueryExecutor, schema string) (b
 //		return errors.Trace(err)
 //	}
 //	fmt.Println(resp.IP)
-func GetJSON(ctx context.Context, client *http.Client, url string, v any) error {
+func GetJSON(ctx context.Context, client *http.Client, url string, v interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return errors.Trace(err)
@@ -454,25 +363,14 @@ func KillMySelf() error {
 	return errors.Trace(err)
 }
 
-// KvPair contains a key-value pair and other fields that can be used to ingest
-// KV pairs into TiKV.
+// KvPair is a pair of key and value.
 type KvPair struct {
 	// Key is the key of the KV pair
 	Key []byte
 	// Val is the value of the KV pair
 	Val []byte
-	// RowID identifies a KvPair in case two KvPairs are equal in Key and Val. It's
-	// often set to the file offset of the KvPair in the source file or the record
-	// handle.
-	RowID []byte
-}
-
-// EncodeIntRowIDToBuf encodes an int64 row id to a buffer.
-var EncodeIntRowIDToBuf = codec.EncodeComparableVarint
-
-// EncodeIntRowID encodes an int64 row id.
-func EncodeIntRowID(rowID int64) []byte {
-	return codec.EncodeComparableVarint(nil, rowID)
+	// RowID is the row id of the KV pair.
+	RowID int64
 }
 
 // TableHasAutoRowID return whether table has auto generated row id
@@ -480,9 +378,17 @@ func TableHasAutoRowID(info *model.TableInfo) bool {
 	return !info.PKIsHandle && !info.IsCommonHandle
 }
 
-// TableHasAutoID return whether table has auto generated id.
-func TableHasAutoID(info *model.TableInfo) bool {
-	return TableHasAutoRowID(info) || info.GetAutoIncrementColInfo() != nil || info.ContainsAutoRandomBits()
+// StringSliceEqual checks if two string slices are equal.
+func StringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // GetAutoRandomColumn return the column with auto_random, return nil if the table doesn't have it.
@@ -504,119 +410,6 @@ func GetAutoRandomColumn(tblInfo *model.TableInfo) *model.ColumnInfo {
 	return nil
 }
 
-// GetDropIndexInfos returns the index infos that need to be dropped and the remain indexes.
-func GetDropIndexInfos(
-	tblInfo *model.TableInfo,
-) (remainIndexes []*model.IndexInfo, dropIndexes []*model.IndexInfo) {
-	cols := tblInfo.Columns
-loop:
-	for _, idxInfo := range tblInfo.Indices {
-		if idxInfo.State != model.StatePublic {
-			remainIndexes = append(remainIndexes, idxInfo)
-			continue
-		}
-		// Primary key is a cluster index.
-		if idxInfo.Primary && tblInfo.HasClusteredIndex() {
-			remainIndexes = append(remainIndexes, idxInfo)
-			continue
-		}
-		// Skip index that contains auto-increment column.
-		// Because auto colum must be defined as a key.
-		for _, idxCol := range idxInfo.Columns {
-			flag := cols[idxCol.Offset].GetFlag()
-			if tmysql.HasAutoIncrementFlag(flag) {
-				remainIndexes = append(remainIndexes, idxInfo)
-				continue loop
-			}
-		}
-		dropIndexes = append(dropIndexes, idxInfo)
-	}
-	return remainIndexes, dropIndexes
-}
-
-// BuildDropIndexSQL builds the SQL statement to drop index.
-func BuildDropIndexSQL(dbName, tableName string, idxInfo *model.IndexInfo) string {
-	if idxInfo.Primary {
-		return SprintfWithIdentifiers("ALTER TABLE %s.%s DROP PRIMARY KEY", dbName, tableName)
-	}
-	return SprintfWithIdentifiers("ALTER TABLE %s.%s DROP INDEX %s", dbName, tableName, idxInfo.Name.O)
-}
-
-// BuildAddIndexSQL builds the SQL statement to create missing indexes.
-// It returns both a single SQL statement that creates all indexes at once,
-// and a list of SQL statements that creates each index individually.
-func BuildAddIndexSQL(
-	tableName string,
-	curTblInfo,
-	desiredTblInfo *model.TableInfo,
-) (singleSQL string, multiSQLs []string) {
-	addIndexSpecs := make([]string, 0, len(desiredTblInfo.Indices))
-loop:
-	for _, desiredIdxInfo := range desiredTblInfo.Indices {
-		for _, curIdxInfo := range curTblInfo.Indices {
-			if curIdxInfo.Name.L == desiredIdxInfo.Name.L {
-				continue loop
-			}
-		}
-
-		var buf bytes.Buffer
-		if desiredIdxInfo.Primary {
-			buf.WriteString("ADD PRIMARY KEY ")
-		} else if desiredIdxInfo.Unique {
-			buf.WriteString("ADD UNIQUE KEY ")
-		} else {
-			buf.WriteString("ADD KEY ")
-		}
-		// "primary" is a special name for primary key, we should not use it as index name.
-		if desiredIdxInfo.Name.L != "primary" {
-			buf.WriteString(EscapeIdentifier(desiredIdxInfo.Name.O))
-		}
-
-		colStrs := make([]string, 0, len(desiredIdxInfo.Columns))
-		for _, col := range desiredIdxInfo.Columns {
-			var colStr string
-			if desiredTblInfo.Columns[col.Offset].Hidden {
-				colStr = fmt.Sprintf("(%s)", desiredTblInfo.Columns[col.Offset].GeneratedExprString)
-			} else {
-				colStr = EscapeIdentifier(col.Name.O)
-				if col.Length != types.UnspecifiedLength {
-					colStr = fmt.Sprintf("%s(%s)", colStr, strconv.Itoa(col.Length))
-				}
-			}
-			colStrs = append(colStrs, colStr)
-		}
-		fmt.Fprintf(&buf, "(%s)", strings.Join(colStrs, ","))
-
-		if desiredIdxInfo.Invisible {
-			fmt.Fprint(&buf, " INVISIBLE")
-		}
-		if desiredIdxInfo.Comment != "" {
-			fmt.Fprintf(&buf, ` COMMENT '%s'`, format.OutputFormat(desiredIdxInfo.Comment))
-		}
-		addIndexSpecs = append(addIndexSpecs, buf.String())
-	}
-	if len(addIndexSpecs) == 0 {
-		return "", nil
-	}
-
-	singleSQL = fmt.Sprintf("ALTER TABLE %s %s", tableName, strings.Join(addIndexSpecs, ", "))
-	for _, spec := range addIndexSpecs {
-		multiSQLs = append(multiSQLs, fmt.Sprintf("ALTER TABLE %s %s", tableName, spec))
-	}
-	return singleSQL, multiSQLs
-}
-
-// IsDupKeyError checks if err is a duplicate index error.
-func IsDupKeyError(err error) bool {
-	if merr, ok := errors.Cause(err).(*mysql.MySQLError); ok {
-		switch merr.Number {
-		case errno.ErrDupKeyName, errno.ErrMultiplePriKey, errno.ErrDupUnique:
-			return true
-		}
-	}
-	return false
-}
-
 // GetBackoffWeightFromDB gets the backoff weight from database.
 func GetBackoffWeightFromDB(ctx context.Context, db *sql.DB) (int, error) {
 	val, err := getSessionVariable(ctx, db, variable.TiDBBackOffWeight)
@@ -624,11 +417,6 @@ func GetBackoffWeightFromDB(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	return strconv.Atoi(val)
-}
-
-// GetExplicitRequestSourceTypeFromDB gets the explicit request source type from database.
-func GetExplicitRequestSourceTypeFromDB(ctx context.Context, db *sql.DB) (string, error) {
-	return getSessionVariable(ctx, db, variable.TiDBExplicitRequestSourceType)
 }
 
 // copy from dbutil to avoid import cycle
@@ -662,36 +450,4 @@ func getSessionVariable(ctx context.Context, db *sql.DB, variable string) (value
 	}
 
 	return value, nil
-}
-
-// IsFunctionNotExistErr checks if err is a function not exist error.
-func IsFunctionNotExistErr(err error, functionName string) bool {
-	return err != nil &&
-		(strings.Contains(err.Error(), "No database selected") ||
-			strings.Contains(err.Error(), fmt.Sprintf("%s does not exist", functionName)))
-}
-
-// IsRaftKV2 checks whether the raft-kv2 is enabled
-func IsRaftKV2(ctx context.Context, db *sql.DB) (bool, error) {
-	var (
-		getRaftKvVersionSQL       = "show config where type = 'tikv' and name = 'storage.engine'"
-		raftKv2                   = "raft-kv2"
-		tp, instance, name, value string
-	)
-
-	rows, err := db.QueryContext(ctx, getRaftKvVersionSQL)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		if err = rows.Scan(&tp, &instance, &name, &value); err != nil {
-			return false, errors.Trace(err)
-		}
-		if value == raftKv2 {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
 }

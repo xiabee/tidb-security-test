@@ -17,72 +17,53 @@
 package realtikvtest
 
 import (
+	"context"
 	"flag"
-	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/store/driver"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testmain"
-	"github.com/pingcap/tidb/pkg/testkit/testsetup"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/store/driver"
+	"github.com/pingcap/tidb/store/mockstore"
+	"github.com/pingcap/tidb/testkit/testmain"
+	"github.com/pingcap/tidb/testkit/testsetup"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/transaction"
-	"go.opencensus.io/stats/view"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/goleak"
+	"google.golang.org/grpc"
 )
 
-var (
-	// WithRealTiKV is a flag identify whether tests run with real TiKV
-	WithRealTiKV = flag.Bool("with-real-tikv", false, "whether tests run with real TiKV")
-
-	// TiKVPath is the path of the TiKV Storage.
-	TiKVPath = flag.String("tikv-path", "tikv://127.0.0.1:2379?disableGC=true", "TiKV addr")
-
-	// PDAddr is the address of PD.
-	PDAddr = "127.0.0.1:2379"
-
-	// KeyspaceName is an option to specify the name of keyspace that the tests run on,
-	// this option is only valid while the flag WithRealTiKV is set.
-	KeyspaceName = flag.String("keyspace-name", "", "the name of keyspace that the tests run on")
-)
+// WithRealTiKV is a flag identify whether tests run with real TiKV
+var WithRealTiKV = flag.Bool("with-real-tikv", false, "whether tests run with real TiKV")
 
 // RunTestMain run common setups for all real tikv tests.
 func RunTestMain(m *testing.M) {
 	testsetup.SetupForCommonTest()
 	flag.Parse()
-	session.SetSchemaLease(5 * time.Second)
+	session.SetSchemaLease(20 * time.Millisecond)
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.TiKVClient.AsyncCommit.SafeWindow = 0
 		conf.TiKVClient.AsyncCommit.AllowedClockDrift = 0
 	})
 	tikv.EnableFailpoints()
 	opts := []goleak.Option{
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
-		goleak.IgnoreTopFunction("github.com/bazelbuild/rules_go/go/tools/bzltestutil.RegisterTimeoutHandler.func1"),
-		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
-		goleak.IgnoreTopFunction("github.com/tikv/client-go/v2/config/retry.newBackoffFn.func1"),
+		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/tikv/client-go/v2/internal/retry.newBackoffFn.func1"),
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/v3.waitRetryBackoff"),
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
+		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
 		goleak.IgnoreTopFunction("google.golang.org/grpc.(*addrConn).resetTransport"),
 		goleak.IgnoreTopFunction("google.golang.org/grpc.(*ccBalancerWrapper).watcher"),
 		goleak.IgnoreTopFunction("google.golang.org/grpc/internal/transport.(*controlBuffer).get"),
 		goleak.IgnoreTopFunction("google.golang.org/grpc/internal/transport.(*http2Client).keepalive"),
 		goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),
 		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
-		goleak.IgnoreTopFunction("github.com/tikv/client-go/v2/txnkv/transaction.keepAlive"),
-		// backoff function will lead to sleep, so there is a high probability of goroutine leak while it's doing backoff.
-		goleak.IgnoreTopFunction("github.com/tikv/client-go/v2/config/retry.(*Config).createBackoffFn.newBackoffFn.func2"),
-		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
 	}
 	callback := func(i int) int {
 		// wait for MVCCLevelDB to close, MVCCLevelDB will be closed in one second
@@ -92,14 +73,52 @@ func RunTestMain(m *testing.M) {
 	goleak.VerifyTestMain(testmain.WrapTestingM(m, callback), opts...)
 }
 
+func clearTiKVStorage(t *testing.T, store kv.Storage) {
+	txn, err := store.Begin()
+	require.NoError(t, err)
+	iter, err := txn.Iter(nil, nil)
+	require.NoError(t, err)
+	for iter.Valid() {
+		require.NoError(t, txn.Delete(iter.Key()))
+		require.NoError(t, iter.Next())
+	}
+	require.NoError(t, txn.Commit(context.Background()))
+}
+
+func clearEtcdStorage(t *testing.T, backend kv.EtcdBackend) {
+	endpoints, err := backend.EtcdAddrs()
+	require.NoError(t, err)
+	cli, err := clientv3.New(clientv3.Config{
+		Endpoints:        endpoints,
+		AutoSyncInterval: 30 * time.Second,
+		DialTimeout:      5 * time.Second,
+		DialOptions: []grpc.DialOption{
+			grpc.WithBackoffMaxDelay(time.Second * 3),
+		},
+		TLS: backend.TLSConfig(),
+	})
+	require.NoError(t, err)
+	defer func() { require.NoError(t, cli.Close()) }()
+	resp, err := cli.Get(context.Background(), "/tidb", clientv3.WithPrefix())
+	require.NoError(t, err)
+	for _, entry := range resp.Kvs {
+		if entry.Lease != 0 {
+			_, err := cli.Revoke(context.Background(), clientv3.LeaseID(entry.Lease))
+			require.NoError(t, err)
+		}
+	}
+	_, err = cli.Delete(context.Background(), "/tidb", clientv3.WithPrefix())
+	require.NoError(t, err)
+}
+
 // CreateMockStoreAndSetup return a new kv.Storage.
-func CreateMockStoreAndSetup(t *testing.T, opts ...mockstore.MockTiKVStoreOption) kv.Storage {
-	store, _ := CreateMockStoreAndDomainAndSetup(t, opts...)
-	return store
+func CreateMockStoreAndSetup(t *testing.T, opts ...mockstore.MockTiKVStoreOption) (kv.Storage, func()) {
+	store, _, clean := CreateMockStoreAndDomainAndSetup(t, opts...)
+	return store, clean
 }
 
 // CreateMockStoreAndDomainAndSetup return a new kv.Storage and *domain.Domain.
-func CreateMockStoreAndDomainAndSetup(t *testing.T, opts ...mockstore.MockTiKVStoreOption) (kv.Storage, *domain.Domain) {
+func CreateMockStoreAndDomainAndSetup(t *testing.T, opts ...mockstore.MockTiKVStoreOption) (kv.Storage, *domain.Domain, func()) {
 	// set it to 5 seconds for testing lock resolve.
 	atomic.StoreUint64(&transaction.ManagedLockTTL, 5000)
 	transaction.PrewriteMaxBackoff.Store(500)
@@ -108,48 +127,32 @@ func CreateMockStoreAndDomainAndSetup(t *testing.T, opts ...mockstore.MockTiKVSt
 	var dom *domain.Domain
 	var err error
 
-	session.SetSchemaLease(500 * time.Millisecond)
-
 	if *WithRealTiKV {
 		var d driver.TiKVDriver
 		config.UpdateGlobal(func(conf *config.Config) {
 			conf.TxnLocalLatches.Enabled = false
-			conf.KeyspaceName = *KeyspaceName
 		})
-		store, err = d.Open(*TiKVPath)
+		store, err = d.Open("tikv://127.0.0.1:2379?disableGC=true")
 		require.NoError(t, err)
 
+		clearTiKVStorage(t, store)
+		clearEtcdStorage(t, store.(kv.EtcdBackend))
+
+		session.ResetStoreForWithTiKVTest(store)
 		dom, err = session.BootstrapSession(store)
 		require.NoError(t, err)
-		sm := testkit.MockSessionManager{}
-		dom.InfoSyncer().SetSessionManager(&sm)
-		tk := testkit.NewTestKit(t, store)
-		// set it to default value.
-		tk.MustExec(fmt.Sprintf("set global innodb_lock_wait_timeout = %d", variable.DefInnodbLockWaitTimeout))
-		tk.MustExec("use test")
-		rs := tk.MustQuery("show tables")
-		tables := []string{}
-		for _, row := range rs.Rows() {
-			tables = append(tables, fmt.Sprintf("`%v`", row[0]))
-		}
-		if len(tables) > 0 {
-			tk.MustExec(fmt.Sprintf("drop table %s", strings.Join(tables, ",")))
-		}
+
 	} else {
 		store, err = mockstore.NewMockStore(opts...)
 		require.NoError(t, err)
 		session.DisableStats4Test()
 		dom, err = session.BootstrapSession(store)
-		sm := testkit.MockSessionManager{}
-		dom.InfoSyncer().SetSessionManager(&sm)
 		require.NoError(t, err)
 	}
 
-	t.Cleanup(func() {
+	return store, dom, func() {
 		dom.Close()
 		require.NoError(t, store.Close())
 		transaction.PrewriteMaxBackoff.Store(20000)
-		view.Stop()
-	})
-	return store, dom
+	}
 }

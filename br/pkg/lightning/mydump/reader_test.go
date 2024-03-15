@@ -15,18 +15,17 @@
 package mydump_test
 
 import (
-	"compress/gzip"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/golang/mock/gomock"
 	. "github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	mockstorage "github.com/pingcap/tidb/br/pkg/mock/storage"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/mock/gomock"
 )
 
 func TestExportStatementNoTrailingNewLine(t *testing.T) {
@@ -159,10 +158,6 @@ func (AlwaysErrorReadSeekCloser) Close() error {
 	return nil
 }
 
-func (AlwaysErrorReadSeekCloser) GetFileSize() (int64, error) {
-	return 0, errors.New("get file size error")
-}
-
 func TestExportStatementHandleNonEOFError(t *testing.T) {
 	controller := gomock.NewController(t)
 	defer controller.Finish()
@@ -171,35 +166,10 @@ func TestExportStatementHandleNonEOFError(t *testing.T) {
 
 	mockStorage := mockstorage.NewMockExternalStorage(controller)
 	mockStorage.EXPECT().
-		Open(ctx, "no-perm-file", nil).
+		Open(ctx, "no-perm-file").
 		Return(AlwaysErrorReadSeekCloser{}, nil)
 
 	f := FileInfo{FileMeta: SourceFileMeta{Path: "no-perm-file", FileSize: 1}}
 	_, err := ExportStatement(ctx, mockStorage, f, "auto")
 	require.Contains(t, err.Error(), "read error")
-}
-
-func TestExportStatementCompressed(t *testing.T) {
-	dir := t.TempDir()
-	file, err := os.Create(filepath.Join(dir, "tidb_lightning_test_reader"))
-	require.NoError(t, err)
-	defer os.Remove(file.Name())
-
-	store, err := storage.NewLocalStorage(dir)
-	require.NoError(t, err)
-
-	gzipFile := gzip.NewWriter(file)
-	_, err = gzipFile.Write([]byte("CREATE DATABASE whatever;"))
-	require.NoError(t, err)
-	err = gzipFile.Close()
-	require.NoError(t, err)
-	stat, err := file.Stat()
-	require.NoError(t, err)
-	err = file.Close()
-	require.NoError(t, err)
-
-	f := FileInfo{FileMeta: SourceFileMeta{Path: stat.Name(), FileSize: stat.Size(), Compression: CompressionGZ}}
-	data, err := ExportStatement(context.TODO(), store, f, "auto")
-	require.NoError(t, err)
-	require.Equal(t, []byte("CREATE DATABASE whatever;"), data)
 }

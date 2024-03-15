@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/br/pkg/version"
-	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"go.uber.org/zap"
+
+	tcontext "github.com/pingcap/tidb/dumpling/context"
 )
 
 // rowIter implements the SQLRowIter interface.
@@ -17,14 +17,14 @@ import (
 type rowIter struct {
 	rows    *sql.Rows
 	hasNext bool
-	args    []any
+	args    []interface{}
 }
 
 func newRowIter(rows *sql.Rows, argLen int) *rowIter {
 	r := &rowIter{
 		rows:    rows,
 		hasNext: false,
-		args:    make([]any, argLen),
+		args:    make([]interface{}, argLen),
 	}
 	r.hasNext = r.rows.Next()
 	return r
@@ -59,7 +59,7 @@ type multiQueriesChunkIter struct {
 	hasNext bool
 	id      int
 	queries []string
-	args    []any
+	args    []interface{}
 	err     error
 }
 
@@ -69,7 +69,7 @@ func newMultiQueryChunkIter(tctx *tcontext.Context, conn *sql.Conn, queries []st
 		conn:    conn,
 		queries: queries,
 		id:      0,
-		args:    make([]any, argLen),
+		args:    make([]interface{}, argLen),
 	}
 	r.nextRows()
 	return r
@@ -92,10 +92,12 @@ func (iter *multiQueriesChunkIter) nextRows() {
 	for iter.id < len(iter.queries) {
 		rows := iter.rows
 		if rows != nil {
-			if err = rows.Close(); err != nil {
+			err = rows.Close()
+			if err != nil {
 				return
 			}
-			if err = rows.Err(); err != nil {
+			err = rows.Err()
+			if err != nil {
 				return
 			}
 		}
@@ -232,8 +234,6 @@ func (td *tableData) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 }
 
 func (td *tableData) Rows() SQLRowIter {
-	// should be initialized lazily since it calls rows.Next() which might close the rows when
-	// there's nothing to read, causes code which relies on rows not closed to fail.
 	if td.SQLRowIter == nil {
 		td.SQLRowIter = newRowIter(td.rows, td.colLen)
 	}
@@ -241,13 +241,7 @@ func (td *tableData) Rows() SQLRowIter {
 }
 
 func (td *tableData) Close() error {
-	if td.SQLRowIter != nil {
-		// will close td.rows internally
-		return td.SQLRowIter.Close()
-	} else if td.rows != nil {
-		return td.rows.Close()
-	}
-	return nil
+	return td.SQLRowIter.Close()
 }
 
 func (td *tableData) RawRows() *sql.Rows {
@@ -362,7 +356,6 @@ func newMultiQueriesChunk(queries []string, colLength int) *multiQueriesChunk {
 func (td *multiQueriesChunk) Start(tctx *tcontext.Context, conn *sql.Conn) error {
 	td.tctx = tctx
 	td.conn = conn
-	td.SQLRowIter = nil
 	return nil
 }
 
@@ -374,31 +367,9 @@ func (td *multiQueriesChunk) Rows() SQLRowIter {
 }
 
 func (td *multiQueriesChunk) Close() error {
-	if td.SQLRowIter != nil {
-		return td.SQLRowIter.Close()
-	}
+	return td.SQLRowIter.Close()
+}
+
+func (td *multiQueriesChunk) RawRows() *sql.Rows {
 	return nil
-}
-
-func (*multiQueriesChunk) RawRows() *sql.Rows {
-	return nil
-}
-
-var serverSpecialComments = map[version.ServerType][]string{
-	version.ServerTypeMySQL: {
-		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
-		"/*!40101 SET NAMES binary*/;",
-	},
-	version.ServerTypeTiDB: {
-		"/*!40014 SET FOREIGN_KEY_CHECKS=0*/;",
-		"/*!40101 SET NAMES binary*/;",
-	},
-	version.ServerTypeMariaDB: {
-		"/*!40101 SET NAMES binary*/;",
-		"SET FOREIGN_KEY_CHECKS=0;",
-	},
-}
-
-func getSpecialComments(serverType version.ServerType) []string {
-	return serverSpecialComments[serverType]
 }

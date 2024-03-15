@@ -11,7 +11,6 @@ import (
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/backup"
-	"github.com/pingcap/tidb/br/pkg/conn"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/metautil"
@@ -138,19 +137,21 @@ func RunBackupRaw(c context.Context, g glue.Glue, cmdName string, cfg *RawKvConf
 	}
 	// Backup raw does not need domain.
 	needDomain := false
-	mgr, err := NewMgr(ctx, g, cfg.PD, cfg.TLS, GetKeepalive(&cfg.Config), cfg.CheckRequirements, needDomain, conn.NormalVersionChecker)
+	mgr, err := NewMgr(ctx, g, cfg.PD, cfg.TLS, GetKeepalive(&cfg.Config), cfg.CheckRequirements, needDomain)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer mgr.Close()
 
-	client := backup.NewBackupClient(ctx, mgr)
-	opts := storage.ExternalStorageOptions{
-		NoCredentials:            cfg.NoCreds,
-		SendCredentials:          cfg.SendCreds,
-		CheckS3ObjectLockOptions: true,
+	client, err := backup.NewBackupClient(ctx, mgr)
+	if err != nil {
+		return errors.Trace(err)
 	}
-	if err = client.SetStorageAndCheckNotInUse(ctx, u, &opts); err != nil {
+	opts := storage.ExternalStorageOptions{
+		NoCredentials:   cfg.NoCreds,
+		SendCredentials: cfg.SendCreds,
+	}
+	if err = client.SetStorage(ctx, u, &opts); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -213,18 +214,9 @@ func RunBackupRaw(c context.Context, g glue.Glue, cmdName string, cfg *RawKvConf
 		CompressionLevel: cfg.CompressionLevel,
 		CipherInfo:       &cfg.CipherInfo,
 	}
-	rg := rtree.Range{
-		StartKey: backupRange.StartKey,
-		EndKey:   backupRange.EndKey,
-	}
-	progressRange := &rtree.ProgressRange{
-		Res:        rtree.NewRangeTree(),
-		Incomplete: []rtree.Range{rg},
-		Origin:     rg,
-	}
 	metaWriter := metautil.NewMetaWriter(client.GetStorage(), metautil.MetaFileSize, false, metautil.MetaFile, &cfg.CipherInfo)
 	metaWriter.StartWriteMetasAsync(ctx, metautil.AppendDataFile)
-	err = client.BackupRange(ctx, req, map[string]string{}, progressRange, metaWriter, progressCallBack)
+	err = client.BackupRange(ctx, req, metaWriter, progressCallBack)
 	if err != nil {
 		return errors.Trace(err)
 	}

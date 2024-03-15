@@ -77,6 +77,7 @@ func testPrettyString(t *testing.T) {
 			}
 		}
 	}
+
 }
 
 func testPrettyStringSlicing(t *testing.T) {
@@ -108,8 +109,8 @@ type writerGlue struct {
 	w io.Writer
 }
 
-func (w writerGlue) Out() io.Writer {
-	return w.w
+func (w writerGlue) Write(b []byte) (int, error) {
+	return w.w.Write(b)
 }
 
 func testPrintFrame(t *testing.T) {

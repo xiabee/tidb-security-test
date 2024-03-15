@@ -28,17 +28,13 @@ const (
 	BackupDataSize = "backup data size(after compressed)"
 	// RestoreDataSize is a field we collection after restore finish
 	RestoreDataSize = "restore data size(after compressed)"
-	// SkippedKVCountByCheckpoint is a field we skip during backup/restore
-	SkippedKVCountByCheckpoint = "skipped kv count by checkpoint"
-	// SkippedBytesByCheckpoint is a field we skip during backup/restore
-	SkippedBytesByCheckpoint = "skipped bytes by checkpoint"
 )
 
 // LogCollector collects infos into summary log.
 type LogCollector interface {
 	SetUnit(unit string)
 
-	CollectSuccessUnit(name string, unitCount int, arg any)
+	CollectSuccessUnit(name string, unitCount int, arg interface{})
 
 	CollectFailureUnit(name string, reason error)
 
@@ -49,10 +45,6 @@ type LogCollector interface {
 	CollectUInt(name string, t uint64)
 
 	SetSuccessStatus(success bool)
-
-	NowDureTime() time.Duration
-
-	AdjustStartTimeToEarlierTime(t time.Duration)
 
 	Summary(name string)
 
@@ -100,7 +92,7 @@ type logCollector struct {
 }
 
 // NewLogCollector returns a new LogCollector.
-func NewLogCollector(logf logFunc) LogCollector {
+func NewLogCollector(log logFunc) LogCollector {
 	return &logCollector{
 		successUnitCount: 0,
 		failureUnitCount: 0,
@@ -110,7 +102,7 @@ func NewLogCollector(logf logFunc) LogCollector {
 		durations:        make(map[string]time.Duration),
 		ints:             make(map[string]int),
 		uints:            make(map[string]uint64),
-		log:              logf,
+		log:              log,
 		startTime:        time.Now(),
 	}
 }
@@ -121,7 +113,7 @@ func (tc *logCollector) SetUnit(unit string) {
 	tc.unit = unit
 }
 
-func (tc *logCollector) CollectSuccessUnit(name string, unitCount int, arg any) {
+func (tc *logCollector) CollectSuccessUnit(name string, unitCount int, arg interface{}) {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 
@@ -169,18 +161,6 @@ func (tc *logCollector) SetSuccessStatus(success bool) {
 
 func logKeyFor(key string) string {
 	return strings.ReplaceAll(key, " ", "-")
-}
-
-func (tc *logCollector) NowDureTime() time.Duration {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	return time.Since(tc.startTime)
-}
-
-func (tc *logCollector) AdjustStartTimeToEarlierTime(t time.Duration) {
-	tc.mu.Lock()
-	defer tc.mu.Unlock()
-	tc.startTime = tc.startTime.Add(-t)
 }
 
 func (tc *logCollector) Summary(name string) {
@@ -235,13 +215,8 @@ func (tc *logCollector) Summary(name string) {
 				zap.String("average-speed", units.HumanSize(float64(data)/totalDureTime.Seconds())+"/s"))
 			continue
 		}
-		if name == SkippedBytesByCheckpoint {
-			logFields = append(logFields,
-				zap.String("skipped-kv-size-by-checkpoint", units.HumanSize(float64(data))))
-			continue
-		}
 		if name == BackupDataSize {
-			if tc.failureUnitCount+tc.successUnitCount == 0 && !tc.successStatus {
+			if tc.failureUnitCount+tc.successUnitCount == 0 {
 				logFields = append(logFields, zap.String("Result", "Nothing to bakcup"))
 			} else {
 				logFields = append(logFields,
@@ -250,7 +225,7 @@ func (tc *logCollector) Summary(name string) {
 			continue
 		}
 		if name == RestoreDataSize {
-			if tc.failureUnitCount+tc.successUnitCount == 0 && !tc.successStatus {
+			if tc.failureUnitCount+tc.successUnitCount == 0 {
 				logFields = append(logFields, zap.String("Result", "Nothing to restore"))
 			} else {
 				logFields = append(logFields,

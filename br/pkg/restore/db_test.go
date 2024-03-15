@@ -18,42 +18,39 @@ import (
 	"github.com/pingcap/tidb/br/pkg/mock"
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
+	"github.com/pingcap/tidb/testkit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
 
 type testRestoreSchemaSuite struct {
-	mock     *mock.Cluster
-	mockGlue *gluetidb.MockGlue
-	storage  storage.ExternalStorage
+	mock    *mock.Cluster
+	storage storage.ExternalStorage
 }
 
-func createRestoreSchemaSuite(t *testing.T) *testRestoreSchemaSuite {
+func createRestoreSchemaSuite(t *testing.T) (s *testRestoreSchemaSuite, clean func()) {
 	var err error
-	s := new(testRestoreSchemaSuite)
-	s.mockGlue = &gluetidb.MockGlue{}
+	s = new(testRestoreSchemaSuite)
 	s.mock, err = mock.NewCluster()
 	require.NoError(t, err)
 	base := t.TempDir()
 	s.storage, err = storage.NewLocalStorage(base)
 	require.NoError(t, err)
 	require.NoError(t, s.mock.Start())
-	t.Cleanup(func() {
+	clean = func() {
 		s.mock.Stop()
-	})
-	return s
+	}
+	return
 }
 
 func TestRestoreAutoIncID(t *testing.T) {
-	s := createRestoreSchemaSuite(t)
+	s, clean := createRestoreSchemaSuite(t)
+	defer clean()
 	tk := testkit.NewTestKit(t, s.mock.Storage)
 	tk.MustExec("use test")
 	tk.MustExec("set @@sql_mode=''")
@@ -79,7 +76,7 @@ func TestRestoreAutoIncID(t *testing.T) {
 		DB:   dbInfo,
 	}
 	// Get the next AutoIncID
-	idAlloc := autoid.NewAllocator(s.mock.Domain, dbInfo.ID, table.Info.ID, false, autoid.RowIDAllocType)
+	idAlloc := autoid.NewAllocator(s.mock.Storage, dbInfo.ID, table.Info.ID, false, autoid.RowIDAllocType)
 	globalAutoID, err := idAlloc.NextGlobalAutoID()
 	require.NoErrorf(t, err, "Error allocate next auto id")
 	require.Equal(t, uint64(globalAutoID), autoIncID)
@@ -127,10 +124,12 @@ func TestRestoreAutoIncID(t *testing.T) {
 	autoIncID, err = strconv.ParseUint(tk.MustQuery("admin show `\"t\"` next_row_id").Rows()[0][3].(string), 10, 64)
 	require.NoErrorf(t, err, "Error query auto inc id: %s", err)
 	require.Equal(t, uint64(globalAutoID+300), autoIncID)
+
 }
 
 func TestCreateTablesInDb(t *testing.T) {
-	s := createRestoreSchemaSuite(t)
+	s, clean := createRestoreSchemaSuite(t)
+	defer clean()
 	info, err := s.mock.Domain.GetSnapshotInfoSchema(math.MaxUint64)
 	require.NoErrorf(t, err, "Error get snapshot info schema: %s", err)
 
@@ -164,10 +163,12 @@ func TestCreateTablesInDb(t *testing.T) {
 
 	err = db.CreateTables(context.Background(), tables, ddlJobMap, false, nil)
 	require.NoError(t, err)
+
 }
 
 func TestFilterDDLJobs(t *testing.T) {
-	s := createRestoreSchemaSuite(t)
+	s, clean := createRestoreSchemaSuite(t)
+	defer clean()
 	tk := testkit.NewTestKit(t, s.mock.Storage)
 	tk.MustExec("CREATE DATABASE IF NOT EXISTS test_db;")
 	tk.MustExec("CREATE TABLE IF NOT EXISTS test_db.test_table (c1 INT);")
@@ -192,8 +193,7 @@ func TestFilterDDLJobs(t *testing.T) {
 	metaWriter := metautil.NewMetaWriter(s.storage, metautil.MetaFileSize, false, "", &cipher)
 	ctx := context.Background()
 	metaWriter.StartWriteMetasAsync(ctx, metautil.AppendDDL)
-	s.mockGlue.SetSession(tk.Session())
-	err = backup.WriteBackupDDLJobs(metaWriter, s.mockGlue, s.mock.Storage, lastTS, ts, false)
+	err = backup.WriteBackupDDLJobs(metaWriter, s.mock.Storage, lastTS, ts)
 	require.NoErrorf(t, err, "Error get ddl jobs: %s", err)
 	err = metaWriter.FinishWriteMetas(ctx, metautil.AppendDDL)
 	require.NoErrorf(t, err, "Flush failed", err)
@@ -231,7 +231,8 @@ func TestFilterDDLJobs(t *testing.T) {
 }
 
 func TestFilterDDLJobsV2(t *testing.T) {
-	s := createRestoreSchemaSuite(t)
+	s, clean := createRestoreSchemaSuite(t)
+	defer clean()
 	tk := testkit.NewTestKit(t, s.mock.Storage)
 	tk.MustExec("CREATE DATABASE IF NOT EXISTS test_db;")
 	tk.MustExec("CREATE TABLE IF NOT EXISTS test_db.test_table (c1 INT);")
@@ -256,8 +257,7 @@ func TestFilterDDLJobsV2(t *testing.T) {
 	metaWriter := metautil.NewMetaWriter(s.storage, metautil.MetaFileSize, true, "", &cipher)
 	ctx := context.Background()
 	metaWriter.StartWriteMetasAsync(ctx, metautil.AppendDDL)
-	s.mockGlue.SetSession(tk.Session())
-	err = backup.WriteBackupDDLJobs(metaWriter, s.mockGlue, s.mock.Storage, lastTS, ts, false)
+	err = backup.WriteBackupDDLJobs(metaWriter, s.mock.Storage, lastTS, ts)
 	require.NoErrorf(t, err, "Error get ddl jobs: %s", err)
 	err = metaWriter.FinishWriteMetas(ctx, metautil.AppendDDL)
 	require.NoErrorf(t, err, "Flush failed", err)
@@ -296,7 +296,8 @@ func TestFilterDDLJobsV2(t *testing.T) {
 }
 
 func TestDB_ExecDDL(t *testing.T) {
-	s := createRestoreSchemaSuite(t)
+	s, clean := createRestoreSchemaSuite(t)
+	defer clean()
 
 	ctx := context.Background()
 	ddlJobs := []*model.Job{
@@ -366,64 +367,4 @@ func TestFilterDDLJobByRules(t *testing.T) {
 	for i, ddlJob := range ddlJobs {
 		assert.Equal(t, expectedDDLTypes[i], ddlJob.Type)
 	}
-}
-
-func TestGetExistedUserDBs(t *testing.T) {
-	m, err := mock.NewCluster()
-	require.Nil(t, err)
-	defer m.Stop()
-	dom := m.Domain
-
-	dbs := restore.GetExistedUserDBs(dom)
-	require.Equal(t, 0, len(dbs))
-
-	builder, err := infoschema.NewBuilder(dom, nil, nil).InitWithDBInfos(
-		[]*model.DBInfo{
-			{Name: model.NewCIStr("mysql")},
-			{Name: model.NewCIStr("test")},
-		},
-		nil, nil, 1)
-	require.Nil(t, err)
-	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
-	dbs = restore.GetExistedUserDBs(dom)
-	require.Equal(t, 0, len(dbs))
-
-	builder, err = infoschema.NewBuilder(dom, nil, nil).InitWithDBInfos(
-		[]*model.DBInfo{
-			{Name: model.NewCIStr("mysql")},
-			{Name: model.NewCIStr("test")},
-			{Name: model.NewCIStr("d1")},
-		},
-		nil, nil, 1)
-	require.Nil(t, err)
-	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
-	dbs = restore.GetExistedUserDBs(dom)
-	require.Equal(t, 1, len(dbs))
-
-	builder, err = infoschema.NewBuilder(dom, nil, nil).InitWithDBInfos(
-		[]*model.DBInfo{
-			{Name: model.NewCIStr("mysql")},
-			{Name: model.NewCIStr("d1")},
-			{
-				Name:   model.NewCIStr("test"),
-				Tables: []*model.TableInfo{{Name: model.NewCIStr("t1"), State: model.StatePublic}},
-				State:  model.StatePublic,
-			},
-		},
-		nil, nil, 1)
-	require.Nil(t, err)
-	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
-	dbs = restore.GetExistedUserDBs(dom)
-	require.Equal(t, 2, len(dbs))
-}
-
-// NOTICE: Once there is a new system table, BR needs to ensure that it is correctly classified:
-//
-// - IF it is an unrecoverable table, please add the table name into `unRecoverableTable`.
-// - IF it is an system privilege table, please add the table name into `sysPrivilegeTableMap`.
-// - IF it is an statistics table, please add the table name into `statsTables`.
-//
-// The above variables are in the file br/pkg/restore/systable_restore.go
-func TestMonitorTheSystemTableIncremental(t *testing.T) {
-	require.Equal(t, int64(185), session.CurrentBootstrapVersion)
 }

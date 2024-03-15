@@ -17,8 +17,6 @@ package local
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"math"
 	"sync"
@@ -30,25 +28,22 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/errormanager"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/br/pkg/restore/split"
+	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/distsql"
-	tidbkv "github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/hack"
-	"github.com/pingcap/tidb/pkg/util/ranger"
+	"github.com/pingcap/tidb/distsql"
+	tidbkv "github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/util/hack"
+	"github.com/pingcap/tidb/util/ranger"
 	"github.com/tikv/client-go/v2/tikv"
-	kvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -121,7 +116,6 @@ func (indexHandles *pendingIndexHandles) Swap(i, j int) {
 
 type pendingKeyRange tidbkv.KeyRange
 
-// Less implements btree.Item.
 func (kr pendingKeyRange) Less(other btree.Item) bool {
 	return bytes.Compare(kr.EndKey, other.(pendingKeyRange).EndKey) < 0
 }
@@ -217,19 +211,27 @@ func physicalTableIDs(tableInfo *model.TableInfo) []int64 {
 }
 
 // tableHandleKeyRanges returns all key ranges associated with the tableInfo.
-func tableHandleKeyRanges(tableInfo *model.TableInfo) (*tidbkv.KeyRanges, error) {
+func tableHandleKeyRanges(tableInfo *model.TableInfo) ([]tidbkv.KeyRange, error) {
 	ranges := ranger.FullIntRange(false)
 	if tableInfo.IsCommonHandle {
 		ranges = ranger.FullRange()
 	}
 	tableIDs := physicalTableIDs(tableInfo)
-	return distsql.TableHandleRangesToKVRanges(nil, tableIDs, tableInfo.IsCommonHandle, ranges)
+	return distsql.TableHandleRangesToKVRanges(nil, tableIDs, tableInfo.IsCommonHandle, ranges, nil)
 }
 
 // tableIndexKeyRanges returns all key ranges associated with the tableInfo and indexInfo.
-func tableIndexKeyRanges(tableInfo *model.TableInfo, indexInfo *model.IndexInfo) (*tidbkv.KeyRanges, error) {
+func tableIndexKeyRanges(tableInfo *model.TableInfo, indexInfo *model.IndexInfo) ([]tidbkv.KeyRange, error) {
 	tableIDs := physicalTableIDs(tableInfo)
-	return distsql.IndexRangesToKVRangesForTables(nil, tableIDs, indexInfo.ID, ranger.FullRange())
+	var keyRanges []tidbkv.KeyRange
+	for _, tid := range tableIDs {
+		partitionKeysRanges, err := distsql.IndexRangesToKVRanges(nil, tid, indexInfo.ID, ranger.FullRange(), nil)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		keyRanges = append(keyRanges, partitionKeysRanges...)
+	}
+	return keyRanges, nil
 }
 
 // DupKVStream is a streaming interface for collecting duplicate key-value pairs.
@@ -241,27 +243,26 @@ type DupKVStream interface {
 	Close() error
 }
 
-// DupKVStreamImpl implements the interface of DupKVStream.
+// LocalDupKVStream implements the interface of DupKVStream.
 // It collects duplicate key-value pairs from a pebble.DB.
 //
 //goland:noinspection GoNameStartsWithPackageName
-type DupKVStreamImpl struct {
+type LocalDupKVStream struct {
 	iter Iter
 }
 
-// NewLocalDupKVStream creates a new DupKVStreamImpl with the given duplicate db and key range.
-func NewLocalDupKVStream(dupDB *pebble.DB, keyAdapter common.KeyAdapter, keyRange tidbkv.KeyRange) *DupKVStreamImpl {
+// NewLocalDupKVStream creates a new LocalDupKVStream with the given duplicate db and key range.
+func NewLocalDupKVStream(dupDB *pebble.DB, keyAdapter KeyAdapter, keyRange tidbkv.KeyRange) *LocalDupKVStream {
 	opts := &pebble.IterOptions{
 		LowerBound: keyRange.StartKey,
 		UpperBound: keyRange.EndKey,
 	}
 	iter := newDupDBIter(dupDB, keyAdapter, opts)
 	iter.First()
-	return &DupKVStreamImpl{iter: iter}
+	return &LocalDupKVStream{iter: iter}
 }
 
-// Next implements the interface of DupKVStream.
-func (s *DupKVStreamImpl) Next() (key, val []byte, err error) {
+func (s *LocalDupKVStream) Next() (key, val []byte, err error) {
 	if !s.iter.Valid() {
 		err = s.iter.Error()
 		if err == nil {
@@ -275,8 +276,7 @@ func (s *DupKVStreamImpl) Next() (key, val []byte, err error) {
 	return
 }
 
-// Close implements the interface of DupKVStream.
-func (s *DupKVStreamImpl) Close() error {
+func (s *LocalDupKVStream) Close() error {
 	return s.iter.Close()
 }
 
@@ -284,7 +284,6 @@ type regionError struct {
 	inner *errorpb.Error
 }
 
-// Error implements the interface of error.
 func (r regionError) Error() string {
 	return r.inner.String()
 }
@@ -300,11 +299,9 @@ type RemoteDupKVStream struct {
 
 func getDupDetectClient(
 	ctx context.Context,
-	region *split.RegionInfo,
+	region *restore.RegionInfo,
 	keyRange tidbkv.KeyRange,
 	importClientFactory ImportClientFactory,
-	resourceGroupName string,
-	taskType string,
 ) (import_sstpb.ImportSST_DuplicateDetectClient, error) {
 	leader := region.Leader
 	if leader == nil {
@@ -318,10 +315,6 @@ func getDupDetectClient(
 		RegionId:    region.Region.GetId(),
 		RegionEpoch: region.Region.GetRegionEpoch(),
 		Peer:        leader,
-		ResourceControlContext: &kvrpcpb.ResourceControlContext{
-			ResourceGroupName: resourceGroupName,
-		},
-		RequestSource: kvutil.BuildRequestSource(true, tidbkv.InternalTxnLightning, taskType),
 	}
 	req := &import_sstpb.DuplicateDetectRequest{
 		Context:  reqCtx,
@@ -338,14 +331,12 @@ func getDupDetectClient(
 // NewRemoteDupKVStream creates a new RemoteDupKVStream.
 func NewRemoteDupKVStream(
 	ctx context.Context,
-	region *split.RegionInfo,
+	region *restore.RegionInfo,
 	keyRange tidbkv.KeyRange,
 	importClientFactory ImportClientFactory,
-	resourceGroupName string,
-	taskType string,
 ) (*RemoteDupKVStream, error) {
 	subCtx, cancel := context.WithCancel(ctx)
-	cli, err := getDupDetectClient(subCtx, region, keyRange, importClientFactory, resourceGroupName, taskType)
+	cli, err := getDupDetectClient(subCtx, region, keyRange, importClientFactory)
 	if err != nil {
 		cancel()
 		return nil, errors.Trace(err)
@@ -378,7 +369,6 @@ func (s *RemoteDupKVStream) tryRecv() error {
 	return nil
 }
 
-// Next implements the interface of DupKVStream.
 func (s *RemoteDupKVStream) Next() (key, val []byte, err error) {
 	for len(s.kvs) == 0 {
 		if s.atEOF {
@@ -393,74 +383,56 @@ func (s *RemoteDupKVStream) Next() (key, val []byte, err error) {
 	return
 }
 
-// Close implements the interface of DupKVStream.
 func (s *RemoteDupKVStream) Close() error {
 	s.cancel()
 	return nil
 }
 
-// DupeDetector provides methods to collect and decode duplicated KV pairs into row data. The results
+// DuplicateManager provides methods to collect and decode duplicated KV pairs into row data. The results
 // are stored into the errorMgr.
-// this object can only be used once, either for local or remote deduplication.
-type DupeDetector struct {
-	tbl               table.Table
-	tableName         string
-	splitCli          split.SplitClient
-	tikvCli           *tikv.KVStore
-	tikvCodec         tikv.Codec
-	errorMgr          *errormanager.ErrorManager
-	decoder           *kv.TableKVDecoder
-	logger            log.Logger
-	concurrency       int
-	hasDupe           atomic.Bool
-	indexID           int64
-	resourceGroupName string
-	taskType          string
+type DuplicateManager struct {
+	tbl         table.Table
+	tableName   string
+	splitCli    restore.SplitClient
+	tikvCli     *tikv.KVStore
+	errorMgr    *errormanager.ErrorManager
+	decoder     *kv.TableKVDecoder
+	logger      log.Logger
+	concurrency int
+	hasDupe     *atomic.Bool
 }
 
-// NewDupeDetector creates a new DupeDetector.
-func NewDupeDetector(
+// NewDuplicateManager creates a new DuplicateManager.
+func NewDuplicateManager(
 	tbl table.Table,
 	tableName string,
-	splitCli split.SplitClient,
+	splitCli restore.SplitClient,
 	tikvCli *tikv.KVStore,
-	tikvCodec tikv.Codec,
 	errMgr *errormanager.ErrorManager,
-	sessOpts *encode.SessionOptions,
+	sessOpts *kv.SessionOptions,
 	concurrency int,
-	logger log.Logger,
-	resourceGroupName string,
-	taskType string,
-) (*DupeDetector, error) {
-	logger = logger.With(zap.String("tableName", tableName))
-	decoder, err := kv.NewTableKVDecoder(tbl, tableName, sessOpts, logger)
+	hasDupe *atomic.Bool,
+) (*DuplicateManager, error) {
+	decoder, err := kv.NewTableKVDecoder(tbl, tableName, sessOpts)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &DupeDetector{
-		tbl:               tbl,
-		tableName:         tableName,
-		splitCli:          splitCli,
-		tikvCli:           tikvCli,
-		tikvCodec:         tikvCodec,
-		errorMgr:          errMgr,
-		decoder:           decoder,
-		logger:            logger,
-		concurrency:       concurrency,
-		indexID:           sessOpts.IndexID,
-		resourceGroupName: resourceGroupName,
-		taskType:          taskType,
+	logger := log.With(zap.String("tableName", tableName))
+	return &DuplicateManager{
+		tbl:         tbl,
+		tableName:   tableName,
+		splitCli:    splitCli,
+		tikvCli:     tikvCli,
+		errorMgr:    errMgr,
+		decoder:     decoder,
+		logger:      logger,
+		concurrency: concurrency,
+		hasDupe:     hasDupe,
 	}, nil
 }
 
-// HasDuplicate returns true if there are duplicated KV pairs.
-func (m *DupeDetector) HasDuplicate() bool {
-	return m.hasDupe.Load()
-}
-
 // RecordDataConflictError records data conflicts to errorMgr. The key received from stream must be a row key.
-func (m *DupeDetector) RecordDataConflictError(ctx context.Context, stream DupKVStream) error {
-	//nolint: errcheck
+func (m *DuplicateManager) RecordDataConflictError(ctx context.Context, stream DupKVStream) error {
 	defer stream.Close()
 	var dataConflictInfos []errormanager.DataConflictInfo
 	for {
@@ -468,10 +440,6 @@ func (m *DupeDetector) RecordDataConflictError(ctx context.Context, stream DupKV
 		if errors.Cause(err) == io.EOF {
 			break
 		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		key, err = m.tikvCodec.DecodeKey(key)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -503,7 +471,7 @@ func (m *DupeDetector) RecordDataConflictError(ctx context.Context, stream DupKV
 	return nil
 }
 
-func (m *DupeDetector) saveIndexHandles(ctx context.Context, handles pendingIndexHandles) error {
+func (m *DuplicateManager) saveIndexHandles(ctx context.Context, handles pendingIndexHandles) error {
 	snapshot := m.tikvCli.GetSnapshot(math.MaxUint64)
 	batchGetMap, err := snapshot.BatchGet(ctx, handles.rawHandles)
 	if err != nil {
@@ -517,7 +485,7 @@ func (m *DupeDetector) saveIndexHandles(ctx context.Context, handles pendingInde
 			rawRows[i] = rawValue
 			handles.dataConflictInfos[i].Row = m.decoder.DecodeRawRowDataAsStr(handles.handles[i], rawValue)
 		} else {
-			m.logger.Warn("can not found row data corresponding to the handle", zap.String("category", "detect-dupe"),
+			m.logger.Warn("[detect-dupe] can not found row data corresponding to the handle",
 				logutil.Key("rawHandle", rawHandle))
 		}
 	}
@@ -528,8 +496,7 @@ func (m *DupeDetector) saveIndexHandles(ctx context.Context, handles pendingInde
 }
 
 // RecordIndexConflictError records index conflicts to errorMgr. The key received from stream must be an index key.
-func (m *DupeDetector) RecordIndexConflictError(ctx context.Context, stream DupKVStream, tableID int64, indexInfo *model.IndexInfo) error {
-	//nolint: errcheck
+func (m *DuplicateManager) RecordIndexConflictError(ctx context.Context, stream DupKVStream, tableID int64, indexInfo *model.IndexInfo) error {
 	defer stream.Close()
 	indexHandles := makePendingIndexHandlesWithCapacity(0)
 	for {
@@ -537,10 +504,6 @@ func (m *DupeDetector) RecordIndexConflictError(ctx context.Context, stream DupK
 		if errors.Cause(err) == io.EOF {
 			break
 		}
-		if err != nil {
-			return errors.Trace(err)
-		}
-		key, err = m.tikvCodec.DecodeKey(key)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -573,42 +536,25 @@ func (m *DupeDetector) RecordIndexConflictError(ctx context.Context, stream DupK
 	return nil
 }
 
-// BuildDuplicateTaskForTest is only used for test.
-var BuildDuplicateTaskForTest = func(m *DupeDetector) ([]dupTask, error) {
-	return m.buildDupTasks()
-}
-
 type dupTask struct {
 	tidbkv.KeyRange
 	tableID   int64
 	indexInfo *model.IndexInfo
 }
 
-func (m *DupeDetector) buildDupTasks() ([]dupTask, error) {
-	if m.indexID != 0 {
-		return m.buildIndexDupTasks()
-	}
+func (m *DuplicateManager) buildDupTasks() ([]dupTask, error) {
 	keyRanges, err := tableHandleKeyRanges(m.tbl.Meta())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	tasks := make([]dupTask, 0, keyRanges.TotalRangeNum()*(1+len(m.tbl.Meta().Indices)))
-	putToTaskFunc := func(ranges []tidbkv.KeyRange, indexInfo *model.IndexInfo) {
-		if len(ranges) == 0 {
-			return
-		}
-		tid := tablecodec.DecodeTableID(ranges[0].StartKey)
-		for _, r := range ranges {
-			tasks = append(tasks, dupTask{
-				KeyRange:  r,
-				tableID:   tid,
-				indexInfo: indexInfo,
-			})
-		}
+	tasks := make([]dupTask, 0, len(keyRanges))
+	for _, kr := range keyRanges {
+		tableID := tablecodec.DecodeTableID(kr.StartKey)
+		tasks = append(tasks, dupTask{
+			KeyRange: kr,
+			tableID:  tableID,
+		})
 	}
-	keyRanges.ForEachPartition(func(ranges []tidbkv.KeyRange) {
-		putToTaskFunc(ranges, nil)
-	})
 	for _, indexInfo := range m.tbl.Meta().Indices {
 		if indexInfo.State != model.StatePublic {
 			continue
@@ -617,50 +563,22 @@ func (m *DupeDetector) buildDupTasks() ([]dupTask, error) {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		keyRanges.ForEachPartition(func(ranges []tidbkv.KeyRange) {
-			putToTaskFunc(ranges, indexInfo)
-		})
-	}
-
-	// Encode all the tasks
-	for i := range tasks {
-		tasks[i].StartKey, tasks[i].EndKey = m.tikvCodec.EncodeRange(tasks[i].StartKey, tasks[i].EndKey)
+		for _, kr := range keyRanges {
+			tableID := tablecodec.DecodeTableID(kr.StartKey)
+			tasks = append(tasks, dupTask{
+				KeyRange:  kr,
+				tableID:   tableID,
+				indexInfo: indexInfo,
+			})
+		}
 	}
 	return tasks, nil
 }
 
-func (m *DupeDetector) buildIndexDupTasks() ([]dupTask, error) {
-	for _, indexInfo := range m.tbl.Meta().Indices {
-		if m.indexID != indexInfo.ID {
-			continue
-		}
-		keyRanges, err := tableIndexKeyRanges(m.tbl.Meta(), indexInfo)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		tasks := make([]dupTask, 0, keyRanges.TotalRangeNum())
-		keyRanges.ForEachPartition(func(ranges []tidbkv.KeyRange) {
-			if len(ranges) == 0 {
-				return
-			}
-			tid := tablecodec.DecodeTableID(ranges[0].StartKey)
-			for _, r := range ranges {
-				tasks = append(tasks, dupTask{
-					KeyRange:  r,
-					tableID:   tid,
-					indexInfo: indexInfo,
-				})
-			}
-		})
-		return tasks, nil
-	}
-	return nil, nil
-}
-
-func (m *DupeDetector) splitLocalDupTaskByKeys(
+func (m *DuplicateManager) splitLocalDupTaskByKeys(
 	task dupTask,
 	dupDB *pebble.DB,
-	keyAdapter common.KeyAdapter,
+	keyAdapter KeyAdapter,
 	sizeLimit int64,
 	keysLimit int64,
 ) ([]dupTask, error) {
@@ -668,13 +586,13 @@ func (m *DupeDetector) splitLocalDupTaskByKeys(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	ranges := splitRangeBySizeProps(common.Range{Start: task.StartKey, End: task.EndKey}, sizeProps, sizeLimit, keysLimit)
+	ranges := splitRangeBySizeProps(Range{start: task.StartKey, end: task.EndKey}, sizeProps, sizeLimit, keysLimit)
 	newDupTasks := make([]dupTask, 0, len(ranges))
 	for _, r := range ranges {
 		newDupTasks = append(newDupTasks, dupTask{
 			KeyRange: tidbkv.KeyRange{
-				StartKey: r.Start,
-				EndKey:   r.End,
+				StartKey: r.start,
+				EndKey:   r.end,
 			},
 			tableID:   task.tableID,
 			indexInfo: task.indexInfo,
@@ -683,12 +601,11 @@ func (m *DupeDetector) splitLocalDupTaskByKeys(
 	return newDupTasks, nil
 }
 
-func (m *DupeDetector) buildLocalDupTasks(dupDB *pebble.DB, keyAdapter common.KeyAdapter) ([]dupTask, error) {
+func (m *DuplicateManager) buildLocalDupTasks(dupDB *pebble.DB, keyAdapter KeyAdapter) ([]dupTask, error) {
 	tasks, err := m.buildDupTasks()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	//nolint: prealloc
 	var newTasks []dupTask
 	for _, task := range tasks {
 		// FIXME: Do not hardcode sizeLimit and keysLimit.
@@ -702,13 +619,13 @@ func (m *DupeDetector) buildLocalDupTasks(dupDB *pebble.DB, keyAdapter common.Ke
 }
 
 // CollectDuplicateRowsFromDupDB collects duplicates from the duplicate DB and records all duplicate row info into errorMgr.
-func (m *DupeDetector) CollectDuplicateRowsFromDupDB(ctx context.Context, dupDB *pebble.DB, keyAdapter common.KeyAdapter) error {
+func (m *DuplicateManager) CollectDuplicateRowsFromDupDB(ctx context.Context, dupDB *pebble.DB, keyAdapter KeyAdapter) error {
 	tasks, err := m.buildLocalDupTasks(dupDB, keyAdapter)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	logger := m.logger
-	logger.Info("collect duplicate rows from local duplicate db", zap.String("category", "detect-dupe"), zap.Int("tasks", len(tasks)))
+	logger.Info("[detect-dupe] collect duplicate rows from local duplicate db", zap.Int("tasks", len(tasks)))
 
 	pool := utils.NewWorkerPool(uint(m.concurrency), "collect duplicate rows from duplicate db")
 	g, gCtx := errgroup.WithContext(ctx)
@@ -729,8 +646,8 @@ func (m *DupeDetector) CollectDuplicateRowsFromDupDB(ctx context.Context, dupDB 
 			}
 
 			// Delete the key range in duplicate DB since we have the duplicates have been collected.
-			rawStartKey := keyAdapter.Encode(nil, task.StartKey, common.MinRowID)
-			rawEndKey := keyAdapter.Encode(nil, task.EndKey, common.MinRowID)
+			rawStartKey := keyAdapter.Encode(nil, task.StartKey, math.MinInt64)
+			rawEndKey := keyAdapter.Encode(nil, task.EndKey, math.MinInt64)
 			err = dupDB.DeleteRange(rawStartKey, rawEndKey, nil)
 			return errors.Trace(err)
 		})
@@ -738,16 +655,16 @@ func (m *DupeDetector) CollectDuplicateRowsFromDupDB(ctx context.Context, dupDB 
 	return errors.Trace(g.Wait())
 }
 
-func (m *DupeDetector) splitKeyRangeByRegions(
+func (m *DuplicateManager) splitKeyRangeByRegions(
 	ctx context.Context, keyRange tidbkv.KeyRange,
-) ([]*split.RegionInfo, []tidbkv.KeyRange, error) {
+) ([]*restore.RegionInfo, []tidbkv.KeyRange, error) {
 	rawStartKey := codec.EncodeBytes(nil, keyRange.StartKey)
 	rawEndKey := codec.EncodeBytes(nil, keyRange.EndKey)
-	allRegions, err := split.PaginateScanRegion(ctx, m.splitCli, rawStartKey, rawEndKey, 1024)
+	allRegions, err := restore.PaginateScanRegion(ctx, m.splitCli, rawStartKey, rawEndKey, 1024)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
-	regions := make([]*split.RegionInfo, 0, len(allRegions))
+	regions := make([]*restore.RegionInfo, 0, len(allRegions))
 	keyRanges := make([]tidbkv.KeyRange, 0, len(allRegions))
 	for _, region := range allRegions {
 		startKey := keyRange.StartKey
@@ -781,7 +698,7 @@ func (m *DupeDetector) splitKeyRangeByRegions(
 	return regions, keyRanges, nil
 }
 
-func (m *DupeDetector) processRemoteDupTaskOnce(
+func (m *DuplicateManager) processRemoteDupTaskOnce(
 	ctx context.Context,
 	task dupTask,
 	logger log.Logger,
@@ -789,11 +706,10 @@ func (m *DupeDetector) processRemoteDupTaskOnce(
 	regionPool *utils.WorkerPool,
 	remainKeyRanges *pendingKeyRanges,
 ) (madeProgress bool, err error) {
-	//nolint: prealloc
-	var regions []*split.RegionInfo
-	//nolint: prealloc
-	var keyRanges []tidbkv.KeyRange
-
+	var (
+		regions   []*restore.RegionInfo
+		keyRanges []tidbkv.KeyRange
+	)
 	for _, kr := range remainKeyRanges.list() {
 		subRegions, subKeyRanges, err := m.splitKeyRangeByRegions(ctx, kr)
 		if err != nil {
@@ -823,7 +739,7 @@ func (m *DupeDetector) processRemoteDupTaskOnce(
 				logutil.Key("dupDetectEndKey", kr.EndKey),
 			)
 			err := func() error {
-				stream, err := NewRemoteDupKVStream(ctx, region, kr, importClientFactory, m.resourceGroupName, m.taskType)
+				stream, err := NewRemoteDupKVStream(ctx, region, kr, importClientFactory)
 				if err != nil {
 					return errors.Annotatef(err, "failed to create remote duplicate kv stream")
 				}
@@ -839,13 +755,13 @@ func (m *DupeDetector) processRemoteDupTaskOnce(
 			}()
 			if err != nil {
 				if regionErr, ok := errors.Cause(err).(regionError); ok {
-					logger.Debug("collect duplicate rows from region failed due to region error", zap.String("category", "detect-dupe"), zap.Error(regionErr))
+					logger.Debug("[detect-dupe] collect duplicate rows from region failed due to region error", zap.Error(regionErr))
 				} else {
-					logger.Warn("collect duplicate rows from region failed", zap.String("category", "detect-dupe"), log.ShortError(err))
+					logger.Warn("[detect-dupe] collect duplicate rows from region failed", log.ShortError(err))
 				}
 				metErr.Set(err)
 			} else {
-				logger.Debug("collect duplicate rows from region completed", zap.String("category", "detect-dupe"))
+				logger.Debug("[detect-dupe] collect duplicate rows from region completed")
 				remainKeyRanges.finish(kr)
 				atomicMadeProgress.Store(true)
 			}
@@ -858,14 +774,13 @@ func (m *DupeDetector) processRemoteDupTaskOnce(
 // processRemoteDupTask processes a remoteDupTask. A task contains a key range.
 // A key range is associated with multiple regions. processRemoteDupTask tries
 // to collect duplicates from each region.
-func (m *DupeDetector) processRemoteDupTask(
+func (m *DuplicateManager) processRemoteDupTask(
 	ctx context.Context,
 	task dupTask,
 	logger log.Logger,
 	importClientFactory ImportClientFactory,
 	regionPool *utils.WorkerPool,
 ) error {
-	regionErrRetryAttempts := split.WaitRegionOnlineAttemptTimes
 	remainAttempts := maxDupCollectAttemptTimes
 	remainKeyRanges := newPendingKeyRanges(task.KeyRange)
 	for {
@@ -882,35 +797,25 @@ func (m *DupeDetector) processRemoteDupTask(
 			return errors.Trace(err)
 		}
 		if !madeProgress {
-			_, isRegionErr := errors.Cause(err).(regionError)
-			if isRegionErr && regionErrRetryAttempts > 0 {
-				regionErrRetryAttempts--
-				if regionErrRetryAttempts%10 == 0 {
-					logger.Warn("process remote dupTask encounters region error, retrying", zap.String("category", "detect-dupe"),
-						log.ShortError(err), zap.Int("remainRegionErrAttempts", regionErrRetryAttempts))
-				}
-				continue
-			}
-
 			remainAttempts--
 			if remainAttempts <= 0 {
-				logger.Error("all attempts to process the remote dupTask have failed", zap.String("category", "detect-dupe"), log.ShortError(err))
+				logger.Error("[detect-dupe] all attempts to process the remote dupTask have failed", log.ShortError(err))
 				return errors.Trace(err)
 			}
 		}
-		logger.Warn("process remote dupTask encounters error, retrying", zap.String("category", "detect-dupe"),
+		logger.Warn("[detect-dupe] process remote dupTask encounters error, retrying",
 			log.ShortError(err), zap.Int("remainAttempts", remainAttempts))
 	}
 }
 
 // CollectDuplicateRowsFromTiKV collects duplicates from the remote TiKV and records all duplicate row info into errorMgr.
-func (m *DupeDetector) CollectDuplicateRowsFromTiKV(ctx context.Context, importClientFactory ImportClientFactory) error {
+func (m *DuplicateManager) CollectDuplicateRowsFromTiKV(ctx context.Context, importClientFactory ImportClientFactory) error {
 	tasks, err := m.buildDupTasks()
 	if err != nil {
 		return errors.Trace(err)
 	}
 	logger := m.logger
-	logger.Info("collect duplicate rows from tikv", zap.String("category", "detect-dupe"), zap.Int("tasks", len(tasks)))
+	logger.Info("[detect-dupe] collect duplicate rows from tikv", zap.Int("tasks", len(tasks)))
 
 	taskPool := utils.NewWorkerPool(uint(m.concurrency), "collect duplicate rows from tikv")
 	regionPool := utils.NewWorkerPool(uint(m.concurrency), "collect duplicate rows from tikv by region")
@@ -934,158 +839,4 @@ func (m *DupeDetector) CollectDuplicateRowsFromTiKV(ctx context.Context, importC
 		})
 	}
 	return errors.Trace(g.Wait())
-}
-
-// DupeController is used to collect duplicate keys from local and remote data source and resolve duplication.
-type DupeController struct {
-	splitCli  split.SplitClient
-	tikvCli   *tikv.KVStore
-	tikvCodec tikv.Codec
-	errorMgr  *errormanager.ErrorManager
-	// number of workers to do duplicate detection on local db and TiKV
-	// on TiKV, it is the max number of regions being checked concurrently
-	dupeConcurrency     int
-	duplicateDB         *pebble.DB
-	keyAdapter          common.KeyAdapter
-	importClientFactory ImportClientFactory
-	resourceGroupName   string
-	taskType            string
-}
-
-// CollectLocalDuplicateRows collect duplicate keys from local db. We will store the duplicate keys which
-// may be repeated with other keys in local data source.
-func (local *DupeController) CollectLocalDuplicateRows(ctx context.Context, tbl table.Table, tableName string, opts *encode.SessionOptions) (hasDupe bool, err error) {
-	logger := log.FromContext(ctx).With(zap.String("table", tableName)).Begin(zap.InfoLevel, "[detect-dupe] collect local duplicate keys")
-	defer func() {
-		logger.End(zap.ErrorLevel, err)
-	}()
-
-	duplicateManager, err := NewDupeDetector(tbl, tableName, local.splitCli, local.tikvCli, local.tikvCodec,
-		local.errorMgr, opts, local.dupeConcurrency, log.FromContext(ctx), local.resourceGroupName, local.taskType)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	if err := duplicateManager.CollectDuplicateRowsFromDupDB(ctx, local.duplicateDB, local.keyAdapter); err != nil {
-		return false, errors.Trace(err)
-	}
-	return duplicateManager.HasDuplicate(), nil
-}
-
-// CollectRemoteDuplicateRows collect duplicate keys from remote TiKV storage. This keys may be duplicate with
-// the data import by other lightning.
-func (local *DupeController) CollectRemoteDuplicateRows(ctx context.Context, tbl table.Table, tableName string, opts *encode.SessionOptions) (hasDupe bool, err error) {
-	logger := log.FromContext(ctx).With(zap.String("table", tableName)).Begin(zap.InfoLevel, "[detect-dupe] collect remote duplicate keys")
-	defer func() {
-		logger.End(zap.ErrorLevel, err)
-	}()
-
-	duplicateManager, err := NewDupeDetector(tbl, tableName, local.splitCli, local.tikvCli, local.tikvCodec,
-		local.errorMgr, opts, local.dupeConcurrency, log.FromContext(ctx), local.resourceGroupName, local.taskType)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	if err := duplicateManager.CollectDuplicateRowsFromTiKV(ctx, local.importClientFactory); err != nil {
-		return false, errors.Trace(err)
-	}
-	return duplicateManager.HasDuplicate(), nil
-}
-
-// ResolveDuplicateRows resolves duplicated rows by deleting/inserting data
-// according to the required algorithm.
-func (local *DupeController) ResolveDuplicateRows(ctx context.Context, tbl table.Table, tableName string, algorithm config.DuplicateResolutionAlgorithm) (err error) {
-	logger := log.FromContext(ctx).With(zap.String("table", tableName)).Begin(zap.InfoLevel, "[resolve-dupe] resolve duplicate rows")
-	defer func() {
-		logger.End(zap.ErrorLevel, err)
-	}()
-
-	switch algorithm {
-	case config.DupeResAlgNone:
-		logger.Warn("skipping resolution due to selected algorithm. this table will become inconsistent!", zap.String("category", "resolve-dupe"), zap.Stringer("algorithm", algorithm))
-		return nil
-	case config.DupeResAlgReplace, config.DupeResAlgErr:
-	default:
-		panic(fmt.Sprintf("[resolve-dupe] unknown resolution algorithm %v", algorithm))
-	}
-
-	pool := utils.NewWorkerPool(uint(local.dupeConcurrency), "resolve duplicate rows")
-
-	tblInfo, err := json.Marshal(tbl.Meta())
-	if err != nil {
-		return errors.Trace(err)
-	}
-	logger.Debug("got tblInfo from tbl",
-		zap.ByteString("tblInfo", tblInfo))
-
-	switch algorithm {
-	case config.DupeResAlgReplace:
-		err = local.errorMgr.ReplaceConflictKeys(
-			ctx, tbl, tableName, pool,
-			func(ctx context.Context, key []byte) ([]byte, error) {
-				value, err := local.getLatestValue(ctx, logger, key)
-				if err != nil {
-					return nil, errors.Trace(err)
-				}
-				return value, nil
-			},
-			func(ctx context.Context, key []byte) error {
-				err := local.deleteDuplicateRow(ctx, logger, key)
-				if err != nil {
-					logger.Warn("delete duplicate rows encounter error", log.ShortError(err))
-					return common.ErrResolveDuplicateRows.Wrap(errors.Trace(err)).GenWithStackByArgs(tableName)
-				}
-				return nil
-			},
-		)
-	case config.DupeResAlgErr:
-		err = local.errorMgr.ResolveConflictKeysError(
-			ctx, tableName,
-		)
-	}
-
-	return errors.Trace(err)
-}
-
-func (local *DupeController) getLatestValue(
-	ctx context.Context,
-	logger *log.Task,
-	key []byte,
-) ([]byte, error) {
-	snapshot := local.tikvCli.GetSnapshot(math.MaxUint64)
-	value, err := snapshot.Get(ctx, key)
-	logger.Debug("getLatestValue",
-		logutil.Key("key", key),
-		zap.Binary("value", value),
-		zap.Error(err))
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	return value, nil
-}
-
-func (local *DupeController) deleteDuplicateRow(
-	ctx context.Context,
-	logger *log.Task,
-	key []byte,
-) (err error) {
-	// Starts a Delete transaction.
-	txn, err := local.tikvCli.Begin()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	defer func() {
-		if err == nil {
-			err = txn.Commit(ctx)
-		} else {
-			if rollbackErr := txn.Rollback(); rollbackErr != nil {
-				logger.Warn("failed to rollback transaction", zap.Error(rollbackErr))
-			}
-		}
-	}()
-
-	logger.Debug("deleteDuplicateRow will delete key",
-		zap.String("category", "resolve-dupe"),
-		logutil.Key("key", key))
-	err = txn.Delete(key)
-
-	return errors.Trace(err)
 }

@@ -5,7 +5,8 @@ table-concurrency = 10
 
 [tikv-importer]
 backend = "local"
-duplicate-resolution = "replace"
+on-duplicate = "replace"
+duplicate-resolution = "remove"
 incremental-import = true
 
 [checkpoint]

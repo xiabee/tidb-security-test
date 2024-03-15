@@ -15,14 +15,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
+
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/br/pkg/version"
-	tcontext "github.com/pingcap/tidb/dumpling/context"
-	dbconfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/util/promutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pingcap/tidb/br/pkg/version"
+	dbconfig "github.com/pingcap/tidb/config"
+	tcontext "github.com/pingcap/tidb/dumpling/context"
 )
 
 var showIndexHeaders = []string{
@@ -425,6 +426,7 @@ func TestShowCreatePolicy(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "CREATE PLACEMENT POLICY `policy_x` LEARNERS=1", createPolicySQL)
 	require.NoError(t, mock.ExpectationsWereMet())
+
 }
 
 func TestListPolicyNames(t *testing.T) {
@@ -533,13 +535,11 @@ func TestBuildTableSampleQueries(t *testing.T) {
 	require.NoError(t, err)
 	baseConn := newBaseConn(conn, true, nil)
 	tctx, cancel := tcontext.Background().WithLogger(appLogger).WithCancel()
-	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
 
 	d := &Dumper{
 		tctx:                      tctx,
 		conf:                      DefaultConfig(),
 		cancelCtx:                 cancel,
-		metrics:                   metrics,
 		selectTiDBTableRegionFunc: selectTiDBTableRegion,
 	}
 	d.conf.ServerInfo = version.ServerInfo{
@@ -945,13 +945,11 @@ func TestBuildRegionQueriesWithoutPartition(t *testing.T) {
 	require.NoError(t, err)
 	baseConn := newBaseConn(conn, true, nil)
 	tctx, cancel := tcontext.Background().WithLogger(appLogger).WithCancel()
-	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
 
 	d := &Dumper{
 		tctx:                      tctx,
 		conf:                      DefaultConfig(),
 		cancelCtx:                 cancel,
-		metrics:                   metrics,
 		selectTiDBTableRegionFunc: selectTiDBTableRegion,
 	}
 	d.conf.ServerInfo = version.ServerInfo{
@@ -1106,13 +1104,11 @@ func TestBuildRegionQueriesWithPartitions(t *testing.T) {
 	require.NoError(t, err)
 	baseConn := newBaseConn(conn, true, nil)
 	tctx, cancel := tcontext.Background().WithLogger(appLogger).WithCancel()
-	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
 
 	d := &Dumper{
 		tctx:                      tctx,
 		conf:                      DefaultConfig(),
 		cancelCtx:                 cancel,
-		metrics:                   metrics,
 		selectTiDBTableRegionFunc: selectTiDBTableRegion,
 	}
 	d.conf.ServerInfo = version.ServerInfo{
@@ -1308,8 +1304,6 @@ func buildMockNewRows(mock sqlmock.Sqlmock, columns []string, driverValues [][]d
 }
 
 func readRegionCsvDriverValues(t *testing.T) [][]driver.Value {
-	t.Helper()
-
 	csvFilename := "region_results.csv"
 	file, err := os.Open(csvFilename)
 	require.NoError(t, err)
@@ -1366,13 +1360,10 @@ func TestBuildVersion3RegionQueries(t *testing.T) {
 			{"t4", 0, TableTypeBase},
 		},
 	}
-	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
-
 	d := &Dumper{
 		tctx:                      tctx,
 		conf:                      conf,
 		cancelCtx:                 cancel,
-		metrics:                   metrics,
 		selectTiDBTableRegionFunc: selectTiDBTableRegion,
 	}
 	showStatsHistograms := buildMockNewRows(mock, []string{"Db_name", "Table_name", "Partition_name", "Column_name", "Is_index", "Update_time", "Distinct_count", "Null_count", "Avg_col_size", "Correlation"},
@@ -1636,7 +1627,7 @@ func TestCheckTiDBWithTiKV(t *testing.T) {
 	}
 
 	errLackPrivilege := errors.New("ERROR 1142 (42000): SELECT command denied to user 'test'@'%' for table 'tidb'")
-	expectedResults := []any{errLackPrivilege, 1, 0}
+	expectedResults := []interface{}{errLackPrivilege, 1, 0}
 	for i, res := range expectedResults {
 		t.Logf("case #%d", i)
 		mock.ExpectQuery("SELECT @@tidb_config").WillReturnError(errLackPrivilege)
@@ -1848,85 +1839,4 @@ func TestGetCharsetAndDefaultCollation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "utf8mb4_0900_ai_ci", charsetAndDefaultCollation["utf8mb4"])
 	require.Equal(t, "latin1_swedish_ci", charsetAndDefaultCollation["latin1"])
-}
-
-func TestGetSpecifiedColumnValueAndClose(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, db.Close())
-	}()
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	require.NoError(t, err)
-
-	mock.ExpectQuery("SHOW BINARY LOGS").
-		WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size"}).
-			AddRow("mysql-bin.000001", 52119).
-			AddRow("mysql-bin.000002", 114))
-
-	query := "SHOW BINARY LOGS"
-	rows, err := conn.QueryContext(ctx, query)
-	require.NoError(t, err)
-	defer rows.Close()
-	var rowsResult []string
-	rowsResult, err = GetSpecifiedColumnValueAndClose(rows, "Log_name")
-	require.NoError(t, err)
-	require.Equal(t, 2, len(rowsResult))
-	require.Equal(t, "mysql-bin.000001", rowsResult[0])
-	require.Equal(t, "mysql-bin.000002", rowsResult[1])
-
-	err = mock.ExpectationsWereMet()
-	require.NoError(t, err)
-}
-
-func TestGetSpecifiedColumnValuesAndClose(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, db.Close())
-	}()
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	require.NoError(t, err)
-
-	mock.ExpectQuery("SHOW BINARY LOGS").
-		WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size"}).
-			AddRow("mysql-bin.000001", 52119).
-			AddRow("mysql-bin.000002", 114))
-
-	query := "SHOW BINARY LOGS"
-	rows, err := conn.QueryContext(ctx, query)
-	require.NoError(t, err)
-	defer rows.Close()
-	var rowsResult [][]string
-	rowsResult, err = GetSpecifiedColumnValuesAndClose(rows, "Log_name", "File_size")
-	require.NoError(t, err)
-	require.Equal(t, 2, len(rowsResult))
-	require.Equal(t, 2, len(rowsResult[0]))
-	require.Equal(t, "mysql-bin.000001", rowsResult[0][0])
-	require.Equal(t, "52119", rowsResult[0][1])
-	require.Equal(t, "mysql-bin.000002", rowsResult[1][0])
-	require.Equal(t, "114", rowsResult[1][1])
-
-	mock.ExpectQuery("SHOW BINARY LOGS").
-		WillReturnRows(sqlmock.NewRows([]string{"Log_name", "File_size", "Encrypted"}).
-			AddRow("mysql-bin.000001", 52119, "No").
-			AddRow("mysql-bin.000002", 114, "No"))
-
-	rows2, err := conn.QueryContext(ctx, query)
-	require.NoError(t, err)
-	defer rows2.Close()
-	var rowsResult2 [][]string
-	rowsResult2, err = GetSpecifiedColumnValuesAndClose(rows2, "Log_name", "File_size")
-	require.NoError(t, err)
-	require.Equal(t, 2, len(rowsResult2))
-	require.Equal(t, 2, len(rowsResult2[0]))
-	require.Equal(t, "mysql-bin.000001", rowsResult2[0][0])
-	require.Equal(t, "52119", rowsResult2[0][1])
-	require.Equal(t, "mysql-bin.000002", rowsResult2[1][0])
-	require.Equal(t, "114", rowsResult2[1][1])
-
-	err = mock.ExpectationsWereMet()
-	require.NoError(t, err)
 }

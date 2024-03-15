@@ -24,17 +24,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/debugpb"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
-	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/tikv/client-go/v2/util"
-	pdhttp "github.com/tikv/pd/client/http"
+	"github.com/pingcap/tidb/parser/model"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -66,16 +60,35 @@ const (
 	StoreStateTombstone
 )
 
-func withTiKVConnection(
-	ctx context.Context,
-	tls *common.TLS,
-	tikvAddr string,
-	action func(import_sstpb.ImportSSTClient) error,
-) error {
+var jsonToStoreState = map[string]StoreState{
+	`"Up"`:           StoreStateUp,
+	`"Offline"`:      StoreStateOffline,
+	`"Disconnected"`: StoreStateDisconnected,
+	`"Down"`:         StoreStateDown,
+	`"Tombstone"`:    StoreStateTombstone,
+}
+
+// UnmarshalJSON implements the json.Unmarshaler interface.
+func (ss *StoreState) UnmarshalJSON(content []byte) error {
+	if state, ok := jsonToStoreState[string(content)]; ok {
+		*ss = state
+		return nil
+	}
+	return errors.New("Unknown store state")
+}
+
+// Store contains metadata about a TiKV store.
+type Store struct {
+	Address string
+	Version string
+	State   StoreState `json:"state_name"`
+}
+
+func withTiKVConnection(ctx context.Context, tls *common.TLS, tikvAddr string, action func(import_sstpb.ImportSSTClient) error) error {
 	// Connect to the ImportSST service on the given TiKV node.
 	// The connection is needed for executing `action` and will be tear down
 	// when this function exits.
-	conn, err := grpc.DialContext(ctx, tikvAddr, tls.ToGRPCDialOption(), config.DefaultGrpcKeepaliveParams)
+	conn, err := grpc.DialContext(ctx, tikvAddr, tls.ToGRPCDialOption())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -86,27 +99,34 @@ func withTiKVConnection(
 }
 
 // ForAllStores executes `action` in parallel for all TiKV stores connected to
-// a PD server.
+// a PD server given by the HTTPS client `tls`.
 //
 // Returns the first non-nil error returned in all `action` calls. If all
 // `action` returns nil, this method would return nil as well.
 //
-// The `maxState` argument defines the maximum store state (inclusive) to be
-// included in the result (Up < Offline < Tombstone).
+// The `minState` argument defines the minimum store state to be included in the
+// result (Tombstone < Offline < Down < Disconnected < Up).
 func ForAllStores(
 	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	maxState metapb.StoreState,
-	action func(c context.Context, store *pdhttp.MetaStore) error,
+	tls *common.TLS,
+	minState StoreState,
+	action func(c context.Context, store *Store) error,
 ) error {
-	storesInfo, err := pdHTTPCli.GetStores(ctx)
+	// Go through the HTTP interface instead of gRPC so we don't need to keep
+	// track of the cluster ID.
+	var stores struct {
+		Stores []struct {
+			Store Store
+		}
+	}
+	err := tls.GetJSON(ctx, "/pd/api/v1/stores", &stores)
 	if err != nil {
 		return err
 	}
 
 	eg, c := errgroup.WithContext(ctx)
-	for _, store := range storesInfo.Stores {
-		if store.Store.State <= int64(maxState) {
+	for _, store := range stores.Stores {
+		if store.Store.State >= minState {
 			s := store.Store
 			eg.Go(func() error { return action(c, &s) })
 		}
@@ -123,19 +143,11 @@ func ignoreUnimplementedError(err error, logger log.Logger) error {
 }
 
 // SwitchMode changes the TiKV node at the given address to a particular mode.
-func SwitchMode(
-	ctx context.Context,
-	tls *common.TLS,
-	tikvAddr string,
-	mode import_sstpb.SwitchMode,
-	ranges ...*import_sstpb.Range,
-) error {
-	task := log.With(zap.Stringer("mode", mode),
-		zap.String("tikv", tikvAddr)).Begin(zap.DebugLevel, "switch mode")
+func SwitchMode(ctx context.Context, tls *common.TLS, tikvAddr string, mode import_sstpb.SwitchMode) error {
+	task := log.With(zap.Stringer("mode", mode), zap.String("tikv", tikvAddr)).Begin(zap.DebugLevel, "switch mode")
 	err := withTiKVConnection(ctx, tls, tikvAddr, func(client import_sstpb.ImportSSTClient) error {
 		_, err := client.SwitchMode(ctx, &import_sstpb.SwitchModeRequest{
-			Mode:   mode,
-			Ranges: ranges,
+			Mode: mode,
 		})
 		return ignoreUnimplementedError(err, task.Logger)
 	})
@@ -144,17 +156,11 @@ func SwitchMode(
 }
 
 // Compact performs a leveled compaction with the given minimum level.
-func Compact(ctx context.Context, tls *common.TLS, tikvAddr string, level int32, resourceGroupName string) error {
+func Compact(ctx context.Context, tls *common.TLS, tikvAddr string, level int32) error {
 	task := log.With(zap.Int32("level", level), zap.String("tikv", tikvAddr)).Begin(zap.InfoLevel, "compact cluster")
 	err := withTiKVConnection(ctx, tls, tikvAddr, func(client import_sstpb.ImportSSTClient) error {
 		_, err := client.Compact(ctx, &import_sstpb.CompactRequest{
 			OutputLevel: level,
-			Context: &kvrpcpb.Context{
-				ResourceControlContext: &kvrpcpb.ResourceControlContext{
-					ResourceGroupName: resourceGroupName,
-				},
-				RequestSource: util.BuildRequestSource(true, kv.InternalTxnLightning, util.ExplicitTypeLightning),
-			},
 		})
 		return ignoreUnimplementedError(err, task.Logger)
 	})
@@ -162,13 +168,11 @@ func Compact(ctx context.Context, tls *common.TLS, tikvAddr string, level int32,
 	return err
 }
 
-var fetchModeRegexp = regexp.MustCompile(
-	`\btikv_config_rocksdb\{cf="default",name="hard_pending_compaction_bytes_limit"\} ([^\n]+)`)
+var fetchModeRegexp = regexp.MustCompile(`\btikv_config_rocksdb\{cf="default",name="hard_pending_compaction_bytes_limit"\} ([^\n]+)`)
 
 // FetchMode obtains the import mode status of the TiKV node.
 func FetchMode(ctx context.Context, tls *common.TLS, tikvAddr string) (import_sstpb.SwitchMode, error) {
-	conn, err := grpc.DialContext(ctx, tikvAddr, tls.ToGRPCDialOption(),
-		config.DefaultGrpcKeepaliveParams)
+	conn, err := grpc.DialContext(ctx, tikvAddr, tls.ToGRPCDialOption())
 	if err != nil {
 		return 0, err
 	}
@@ -182,7 +186,7 @@ func FetchMode(ctx context.Context, tls *common.TLS, tikvAddr string) (import_ss
 	return FetchModeFromMetrics(resp.Prometheus)
 }
 
-// FetchModeFromMetrics obtains the import mode status from the Prometheus metrics of a TiKV node.
+// FetchMode obtains the import mode status from the Prometheus metrics of a TiKV node.
 func FetchModeFromMetrics(metrics string) (import_sstpb.SwitchMode, error) {
 	m := fetchModeRegexp.FindStringSubmatch(metrics)
 	switch {
@@ -195,17 +199,6 @@ func FetchModeFromMetrics(metrics string) (import_sstpb.SwitchMode, error) {
 	}
 }
 
-// FetchRemoteDBModelsFromTLS obtains the remote DB models from the given TLS.
-func FetchRemoteDBModelsFromTLS(ctx context.Context, tls *common.TLS) ([]*model.DBInfo, error) {
-	var dbs []*model.DBInfo
-	err := tls.GetJSON(ctx, "/schema", &dbs)
-	if err != nil {
-		return nil, errors.Annotatef(err, "cannot read db schemas from remote")
-	}
-	return dbs, nil
-}
-
-// FetchRemoteTableModelsFromTLS obtains the remote table models from the given TLS.
 func FetchRemoteTableModelsFromTLS(ctx context.Context, tls *common.TLS, schema string) ([]*model.TableInfo, error) {
 	var tables []*model.TableInfo
 	err := tls.GetJSON(ctx, "/schema/"+schema, &tables)
@@ -215,13 +208,8 @@ func FetchRemoteTableModelsFromTLS(ctx context.Context, tls *common.TLS, schema 
 	return tables, nil
 }
 
-// CheckPDVersion checks the version of PD.
-func CheckPDVersion(
-	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	requiredMinVersion, requiredMaxVersion semver.Version,
-) error {
-	ver, err := pdutil.FetchPDVersion(ctx, pdHTTPCli)
+func CheckPDVersion(ctx context.Context, tls *common.TLS, pdAddr string, requiredMinVersion, requiredMaxVersion semver.Version) error {
+	ver, err := pdutil.FetchPDVersion(ctx, tls, pdAddr)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -229,38 +217,18 @@ func CheckPDVersion(
 	return version.CheckVersion("PD", *ver, requiredMinVersion, requiredMaxVersion)
 }
 
-// CheckTiKVVersion checks the version of TiKV.
-func CheckTiKVVersion(
-	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	requiredMinVersion, requiredMaxVersion semver.Version,
-) error {
-	return ForTiKVVersions(
-		ctx,
-		pdHTTPCli,
-		func(ver *semver.Version, addrMsg string) error {
-			return version.CheckVersion(addrMsg, *ver, requiredMinVersion, requiredMaxVersion)
-		},
-	)
-}
-
-// ForTiKVVersions runs the given action for all versions of TiKV nodes.
-func ForTiKVVersions(
-	ctx context.Context,
-	pdHTTPCli pdhttp.Client,
-	action func(ver *semver.Version, addrMsg string) error,
-) error {
+func CheckTiKVVersion(ctx context.Context, tls *common.TLS, pdAddr string, requiredMinVersion, requiredMaxVersion semver.Version) error {
 	return ForAllStores(
 		ctx,
-		pdHTTPCli,
-		metapb.StoreState_Offline,
-		func(_ context.Context, store *pdhttp.MetaStore) error {
+		tls.WithHost(pdAddr),
+		StoreStateDown,
+		func(c context.Context, store *Store) error {
 			component := fmt.Sprintf("TiKV (at %s)", store.Address)
 			ver, err := semver.NewVersion(strings.TrimPrefix(store.Version, "v"))
 			if err != nil {
 				return errors.Annotate(err, component)
 			}
-			return action(ver, component)
+			return version.CheckVersion(component, *ver, requiredMinVersion, requiredMaxVersion)
 		},
 	)
 }

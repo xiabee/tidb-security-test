@@ -15,27 +15,18 @@
 package mydump_test
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
-	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
-	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	md "github.com/pingcap/tidb/br/pkg/lightning/mydump"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
-	router "github.com/pingcap/tidb/pkg/util/table-router"
+	filter "github.com/pingcap/tidb/util/table-filter"
+	router "github.com/pingcap/tidb/util/table-router"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/xitongsys/parquet-go/parquet"
-	"github.com/xitongsys/parquet-go/writer"
 )
 
 type testMydumpLoaderSuite struct {
@@ -190,16 +181,13 @@ func TestTableInfoNotFound(t *testing.T) {
 	loader, err := md.NewMyDumpLoader(ctx, s.cfg)
 	require.NoError(t, err)
 	for _, dbMeta := range loader.GetDatabases() {
-		logger, buffer := log.MakeTestLogger()
-		logCtx := log.NewContext(ctx, logger)
-		dbSQL := dbMeta.GetSchema(logCtx, store)
+		dbSQL := dbMeta.GetSchema(ctx, store)
 		require.Equal(t, "CREATE DATABASE IF NOT EXISTS `db`", dbSQL)
 		for _, tblMeta := range dbMeta.Tables {
-			sql, err := tblMeta.GetSchema(logCtx, store)
+			sql, err := tblMeta.GetSchema(ctx, store)
 			require.Equal(t, "", sql)
 			require.NoError(t, err)
 		}
-		require.NotContains(t, buffer.Stripped(), "failed to extract table schema")
 	}
 }
 
@@ -219,27 +207,6 @@ func TestTableUnexpectedError(t *testing.T) {
 			sql, err := tblMeta.GetSchema(ctx, store)
 			require.Equal(t, "", sql)
 			require.Contains(t, err.Error(), "failed to decode db.tbl-schema.sql as : Unsupported encoding ")
-		}
-	}
-}
-
-func TestMissingTableSchema(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-
-	s.cfg.Mydumper.CharacterSet = "auto"
-
-	s.touch(t, "db.tbl.csv")
-
-	ctx := context.Background()
-	store, err := storage.NewLocalStorage(s.sourceDir)
-	require.NoError(t, err)
-
-	loader, err := md.NewMyDumpLoader(ctx, s.cfg)
-	require.NoError(t, err)
-	for _, dbMeta := range loader.GetDatabases() {
-		for _, tblMeta := range dbMeta.Tables {
-			_, err := tblMeta.GetSchema(ctx, store)
-			require.ErrorContains(t, err, "schema file is missing for the table")
 		}
 	}
 }
@@ -692,23 +659,6 @@ func TestRouter(t *testing.T) {
 	}
 }
 
-func TestRoutesPanic(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-	s.cfg.Routes = []*router.TableRule{
-		{
-			SchemaPattern: "test1",
-			TargetSchema:  "test",
-		},
-	}
-
-	s.touch(t, "test1.dump_test.001.sql")
-	s.touch(t, "test1.dump_test.002.sql")
-	s.touch(t, "test1.dump_test.003.sql")
-
-	_, err := md.NewMyDumpLoader(context.Background(), s.cfg)
-	require.NoError(t, err)
-}
-
 func TestBadRouterRule(t *testing.T) {
 	s := newTestMydumpLoaderSuite(t)
 
@@ -957,212 +907,4 @@ func TestInputWithSpecialChars(t *testing.T) {
 			},
 		},
 	}, mdl.GetDatabases())
-}
-
-func TestMaxScanFilesOption(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	memStore := storage.NewMemStorage()
-	require.NoError(t, memStore.WriteFile(ctx, "/test-src/db1.tbl1-schema.sql",
-		[]byte("CREATE TABLE db1.tbl1 ( id INTEGER, val VARCHAR(255) );"),
-	))
-	require.NoError(t, memStore.WriteFile(ctx, "/test-src/db1-schema-create.sql",
-		[]byte("CREATE DATABASE db1;"),
-	))
-	const dataFilesCount = 200
-	maxScanFilesCount := 500
-	for i := 0; i < dataFilesCount; i++ {
-		require.NoError(t, memStore.WriteFile(ctx, fmt.Sprintf("/test-src/db1.tbl1.%d.sql", i),
-			[]byte(fmt.Sprintf("INSERT INTO db1.tbl1 (id, val) VALUES (%d, 'aaa%d');", i, i)),
-		))
-	}
-	cfg := newConfigWithSourceDir("/test-src")
-
-	mdl, err := md.NewMyDumpLoaderWithStore(ctx, cfg, memStore)
-	require.NoError(t, err)
-	require.NotNil(t, mdl)
-	dbMetas := mdl.GetDatabases()
-	require.Equal(t, 1, len(dbMetas))
-	dbMeta := dbMetas[0]
-	require.Equal(t, 1, len(dbMeta.Tables))
-	tbl := dbMeta.Tables[0]
-	require.Equal(t, dataFilesCount, len(tbl.DataFiles))
-
-	mdl, err = md.NewMyDumpLoaderWithStore(ctx, cfg, memStore,
-		md.WithMaxScanFiles(maxScanFilesCount),
-	)
-	require.NoError(t, err)
-	require.NotNil(t, mdl)
-	dbMetas = mdl.GetDatabases()
-	require.Equal(t, 1, len(dbMetas))
-	dbMeta = dbMetas[0]
-	require.Equal(t, 1, len(dbMeta.Tables))
-	tbl = dbMeta.Tables[0]
-	require.Equal(t, dataFilesCount, len(tbl.DataFiles))
-
-	maxScanFilesCount = 100
-	mdl, err = md.NewMyDumpLoaderWithStore(ctx, cfg, memStore,
-		md.WithMaxScanFiles(maxScanFilesCount),
-	)
-	require.EqualError(t, err, common.ErrTooManySourceFiles.Error())
-	require.NotNil(t, mdl)
-	dbMetas = mdl.GetDatabases()
-	require.Equal(t, 1, len(dbMetas))
-	dbMeta = dbMetas[0]
-	require.Equal(t, 1, len(dbMeta.Tables))
-	tbl = dbMeta.Tables[0]
-	require.Equal(t, maxScanFilesCount-2, len(tbl.DataFiles))
-}
-
-func TestExternalDataRoutes(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-
-	s.touch(t, "test_1-schema-create.sql")
-	s.touch(t, "test_1.t1-schema.sql")
-	s.touch(t, "test_1.t1.sql")
-	s.touch(t, "test_2-schema-create.sql")
-	s.touch(t, "test_2.t2-schema.sql")
-	s.touch(t, "test_2.t2.sql")
-	s.touch(t, "test_3-schema-create.sql")
-	s.touch(t, "test_3.t1-schema.sql")
-	s.touch(t, "test_3.t1.sql")
-	s.touch(t, "test_3.t3-schema.sql")
-	s.touch(t, "test_3.t3.sql")
-
-	s.cfg.Mydumper.SourceID = "mysql-01"
-	s.cfg.Routes = []*router.TableRule{
-		{
-			TableExtractor: &router.TableExtractor{
-				TargetColumn: "c_table",
-				TableRegexp:  "t(.*)",
-			},
-			SchemaExtractor: &router.SchemaExtractor{
-				TargetColumn: "c_schema",
-				SchemaRegexp: "test_(.*)",
-			},
-			SourceExtractor: &router.SourceExtractor{
-				TargetColumn: "c_source",
-				SourceRegexp: "mysql-(.*)",
-			},
-			SchemaPattern: "test_*",
-			TablePattern:  "t*",
-			TargetSchema:  "test",
-			TargetTable:   "t",
-		},
-	}
-
-	mdl, err := md.NewMyDumpLoader(context.Background(), s.cfg)
-
-	require.NoError(t, err)
-	var database *md.MDDatabaseMeta
-	for _, db := range mdl.GetDatabases() {
-		if db.Name == "test" {
-			require.Nil(t, database)
-			database = db
-		}
-	}
-	require.NotNil(t, database)
-	require.Len(t, database.Tables, 1)
-	require.Len(t, database.Tables[0].DataFiles, 4)
-	expectExtendCols := []string{"c_table", "c_schema", "c_source"}
-	expectedExtendVals := [][]string{
-		{"1", "1", "01"},
-		{"2", "2", "01"},
-		{"1", "3", "01"},
-		{"3", "3", "01"},
-	}
-	for i, fileInfo := range database.Tables[0].DataFiles {
-		require.Equal(t, expectExtendCols, fileInfo.FileMeta.ExtendData.Columns)
-		require.Equal(t, expectedExtendVals[i], fileInfo.FileMeta.ExtendData.Values)
-	}
-}
-
-func TestSampleFileCompressRatio(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-	store, err := storage.NewLocalStorage(s.sourceDir)
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	byteArray := make([]byte, 0, 4096)
-	bf := bytes.NewBuffer(byteArray)
-	compressWriter := gzip.NewWriter(bf)
-	csvData := []byte("aaaa\n")
-	for i := 0; i < 1000; i++ {
-		_, err = compressWriter.Write(csvData)
-		require.NoError(t, err)
-	}
-	err = compressWriter.Flush()
-	require.NoError(t, err)
-
-	fileName := "test_1.t1.csv.gz"
-	err = store.WriteFile(ctx, fileName, bf.Bytes())
-	require.NoError(t, err)
-
-	ratio, err := md.SampleFileCompressRatio(ctx, md.SourceFileMeta{
-		Path:        fileName,
-		Compression: md.CompressionGZ,
-	}, store)
-	require.NoError(t, err)
-	require.InDelta(t, ratio, 5000.0/float64(bf.Len()), 1e-5)
-}
-
-func TestSampleParquetDataSize(t *testing.T) {
-	s := newTestMydumpLoaderSuite(t)
-	store, err := storage.NewLocalStorage(s.sourceDir)
-	require.NoError(t, err)
-
-	type row struct {
-		ID    int64  `parquet:"name=id, type=INT64"`
-		Key   string `parquet:"name=key, type=BYTE_ARRAY, encoding=PLAIN_DICTIONARY"`
-		Value string `parquet:"name=value, type=BYTE_ARRAY, encoding=PLAIN_DICTIONARY"`
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	byteArray := make([]byte, 0, 40*1024)
-	bf := bytes.NewBuffer(byteArray)
-	pwriter, err := writer.NewParquetWriterFromWriter(bf, new(row), 4)
-	require.NoError(t, err)
-	pwriter.RowGroupSize = 128 * 1024 * 1024 //128M
-	pwriter.PageSize = 8 * 1024              //8K
-	pwriter.CompressionType = parquet.CompressionCodec_SNAPPY
-	seed := time.Now().Unix()
-	t.Logf("seed: %d. To reproduce the random behaviour, manually set `rand.New(rand.NewSource(seed))`", seed)
-	rnd := rand.New(rand.NewSource(seed))
-	totalRowSize := 0
-	for i := 0; i < 1000; i++ {
-		kl := rnd.Intn(20) + 1
-		key := make([]byte, kl)
-		kl, err = rnd.Read(key)
-		require.NoError(t, err)
-		vl := rnd.Intn(20) + 1
-		value := make([]byte, vl)
-		vl, err = rnd.Read(value)
-		require.NoError(t, err)
-
-		totalRowSize += kl + vl + 8
-		row := row{
-			ID:    int64(i),
-			Key:   string(key[:kl]),
-			Value: string(value[:vl]),
-		}
-		err = pwriter.Write(row)
-		require.NoError(t, err)
-	}
-	err = pwriter.WriteStop()
-	require.NoError(t, err)
-
-	fileName := "test_1.t1.parquet"
-	err = store.WriteFile(ctx, fileName, bf.Bytes())
-	require.NoError(t, err)
-
-	size, err := md.SampleParquetDataSize(ctx, md.SourceFileMeta{
-		Path: fileName,
-	}, store)
-	require.NoError(t, err)
-	// expected error within 10%, so delta = totalRowSize / 10
-	require.InDelta(t, totalRowSize, size, float64(totalRowSize)/10)
 }

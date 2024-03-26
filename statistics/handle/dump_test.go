@@ -33,7 +33,6 @@ func requireTableEqual(t *testing.T, a *statistics.Table, b *statistics.Table) {
 	require.Equal(t, b.ModifyCount, a.ModifyCount)
 	require.Equal(t, len(b.Columns), len(a.Columns))
 	for i := range a.Columns {
-		require.Equal(t, b.Columns[i].Count, a.Columns[i].Count)
 		require.True(t, statistics.HistogramEqual(&a.Columns[i].Histogram, &b.Columns[i].Histogram, false))
 		if a.Columns[i].CMSketch == nil {
 			require.Nil(t, b.Columns[i].CMSketch)
@@ -74,8 +73,7 @@ func cleanStats(tk *testkit.TestKit, do *domain.Domain) {
 }
 
 func TestConversion(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 
@@ -91,7 +89,7 @@ func TestConversion(t *testing.T) {
 
 	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
-	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 	loadTbl, err := handle.TableStatsFromJSON(tableInfo.Meta(), tableInfo.Meta().ID, jsonTbl)
 	require.NoError(t, err)
@@ -118,14 +116,13 @@ func getStatsJSON(t *testing.T, dom *domain.Domain, db, tableName string) *handl
 	table, err := is.TableByName(model.NewCIStr(db), model.NewCIStr(tableName))
 	require.NoError(t, err)
 	tableInfo := table.Meta()
-	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo, nil)
+	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo, nil, true)
 	require.NoError(t, err)
 	return jsonTbl
 }
 
 func TestDumpGlobalStats(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set @@tidb_analyze_version = 2")
@@ -151,8 +148,7 @@ func TestDumpGlobalStats(t *testing.T) {
 }
 
 func TestLoadGlobalStats(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set @@tidb_analyze_version = 2")
@@ -178,8 +174,7 @@ func TestLoadGlobalStats(t *testing.T) {
 }
 
 func TestDumpPartitions(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -202,7 +197,7 @@ PARTITION BY RANGE ( a ) (
 	table, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tableInfo := table.Meta()
-	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo, nil)
+	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo, nil, true)
 	require.NoError(t, err)
 	pi := tableInfo.GetPartitionInfo()
 	originTables := make([]*statistics.Table, 0, len(pi.Definitions))
@@ -224,8 +219,7 @@ PARTITION BY RANGE ( a ) (
 }
 
 func TestDumpAlteredTable(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -238,14 +232,13 @@ func TestDumpAlteredTable(t *testing.T) {
 	tk.MustExec("alter table t drop column a")
 	table, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
-	_, err = h.DumpStatsToJSON("test", table.Meta(), nil)
+	_, err = h.DumpStatsToJSON("test", table.Meta(), nil, true)
 	require.NoError(t, err)
 }
 
 func TestDumpCMSketchWithTopN(t *testing.T) {
 	// Just test if we can store and recover the Top N elements stored in database.
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
 	testKit.MustExec("use test")
 	testKit.MustExec("create table t(a int)")
@@ -267,7 +260,7 @@ func TestDumpCMSketchWithTopN(t *testing.T) {
 	cms, _, _, _ := statistics.NewCMSketchAndTopN(5, 2048, fakeData, 20, 100)
 
 	stat := h.GetTableStats(tableInfo)
-	err = h.SaveStatsToStorage(tableInfo.ID, 1, 0, 0, &stat.Columns[tableInfo.Columns[0].ID].Histogram, cms, nil, nil, statistics.Version2, 1, false, false)
+	err = h.SaveStatsToStorage(tableInfo.ID, 1, 0, 0, &stat.Columns[tableInfo.Columns[0].ID].Histogram, cms, nil, statistics.Version2, 1, false)
 	require.NoError(t, err)
 	require.Nil(t, h.Update(is))
 
@@ -276,7 +269,7 @@ func TestDumpCMSketchWithTopN(t *testing.T) {
 	require.NotNil(t, cmsFromStore)
 	require.True(t, cms.Equal(cmsFromStore))
 
-	jsonTable, err := h.DumpStatsToJSON("test", tableInfo, nil)
+	jsonTable, err := h.DumpStatsToJSON("test", tableInfo, nil, true)
 	require.NoError(t, err)
 	err = h.LoadStatsFromJSON(is, jsonTable)
 	require.NoError(t, err)
@@ -286,8 +279,7 @@ func TestDumpCMSketchWithTopN(t *testing.T) {
 }
 
 func TestDumpPseudoColumns(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
 	testKit.MustExec("use test")
 	testKit.MustExec("create table t(a int, b int, index idx(a))")
@@ -299,13 +291,12 @@ func TestDumpPseudoColumns(t *testing.T) {
 	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	h := dom.StatsHandle()
-	_, err = h.DumpStatsToJSON("test", tbl.Meta(), nil)
+	_, err = h.DumpStatsToJSON("test", tbl.Meta(), nil, true)
 	require.NoError(t, err)
 }
 
 func TestDumpExtendedStats(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set session tidb_enable_extended_stats = on")
 	tk.MustExec("use test")
@@ -321,7 +312,7 @@ func TestDumpExtendedStats(t *testing.T) {
 	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tbl := h.GetTableStats(tableInfo.Meta())
-	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	jsonTbl, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 	loadTbl, err := handle.TableStatsFromJSON(tableInfo.Meta(), tableInfo.Meta().ID, jsonTbl)
 	require.NoError(t, err)
@@ -340,8 +331,7 @@ func TestDumpExtendedStats(t *testing.T) {
 }
 
 func TestDumpVer2Stats(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@tidb_analyze_version = 2")
 	tk.MustExec("use test")
@@ -362,7 +352,7 @@ func TestDumpVer2Stats(t *testing.T) {
 	storageTbl, err := h.TableStatsFromStorage(tableInfo.Meta(), tableInfo.Meta().ID, false, 0)
 	require.NoError(t, err)
 
-	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 
 	jsonBytes, err := json.MarshalIndent(dumpJSONTable, "", " ")
@@ -393,8 +383,7 @@ func TestDumpVer2Stats(t *testing.T) {
 
 func TestLoadStatsForNewCollation(t *testing.T) {
 	// This test is almost the same as TestDumpVer2Stats, except that: b varchar(10) => b varchar(3) collate utf8mb4_unicode_ci
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@tidb_analyze_version = 2")
 	tk.MustExec("use test")
@@ -415,7 +404,7 @@ func TestLoadStatsForNewCollation(t *testing.T) {
 	storageTbl, err := h.TableStatsFromStorage(tableInfo.Meta(), tableInfo.Meta().ID, false, 0)
 	require.NoError(t, err)
 
-	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 
 	jsonBytes, err := json.MarshalIndent(dumpJSONTable, "", " ")
@@ -445,8 +434,7 @@ func TestLoadStatsForNewCollation(t *testing.T) {
 }
 
 func TestJSONTableToBlocks(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@tidb_analyze_version = 2")
 	tk.MustExec("use test")
@@ -464,12 +452,12 @@ func TestJSONTableToBlocks(t *testing.T) {
 	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 
-	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 	jsOrigin, _ := json.Marshal(dumpJSONTable)
 
 	blockSize := 30
-	js, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil)
+	js, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
 	dumpJSONBlocks, err := handle.JSONTableToBlocks(js, blockSize)
 	require.NoError(t, err)
@@ -478,4 +466,70 @@ func TestJSONTableToBlocks(t *testing.T) {
 	jsonStr, err := json.Marshal(jsConverted)
 	require.NoError(t, err)
 	require.JSONEq(t, string(jsOrigin), string(jsonStr))
+}
+
+func TestLoadStatsFromOldVersion(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int, b int, index idx(b))")
+	h := dom.StatsHandle()
+	is := dom.InfoSchema()
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	require.NoError(t, h.Update(is))
+
+	statsJSONFromOldVersion := `{
+ "database_name": "test",
+ "table_name": "t",
+ "columns": {
+  "a": {
+   "histogram": {
+    "ndv": 0
+   },
+   "cm_sketch": null,
+   "null_count": 0,
+   "tot_col_size": 256,
+   "last_update_version": 440735055846047747,
+   "correlation": 0
+  },
+  "b": {
+   "histogram": {
+    "ndv": 0
+   },
+   "cm_sketch": null,
+   "null_count": 0,
+   "tot_col_size": 256,
+   "last_update_version": 440735055846047747,
+   "correlation": 0
+  }
+ },
+ "indices": {
+  "idx": {
+   "histogram": {
+    "ndv": 0
+   },
+   "cm_sketch": null,
+   "null_count": 0,
+   "tot_col_size": 0,
+   "last_update_version": 440735055846047747,
+   "correlation": 0
+  }
+ },
+ "count": 256,
+ "modify_count": 256,
+ "partitions": null
+}`
+	jsonTbl := &handle.JSONTable{}
+	require.NoError(t, json.Unmarshal([]byte(statsJSONFromOldVersion), jsonTbl))
+	require.NoError(t, h.LoadStatsFromJSON(is, jsonTbl))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	statsTbl := h.GetTableStats(tbl.Meta())
+	for _, col := range statsTbl.Columns {
+		require.False(t, col.IsStatsInitialized())
+	}
+	for _, idx := range statsTbl.Indices {
+		require.False(t, idx.IsStatsInitialized())
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"os"
 	"path"
@@ -21,11 +22,13 @@ import (
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/conn"
+	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/spf13/cobra"
@@ -74,20 +77,52 @@ const (
 	// flagEnableOpenTracing is whether to enable opentracing
 	flagEnableOpenTracing = "enable-opentracing"
 	flagSkipCheckPath     = "skip-check-path"
+	flagDryRun            = "dry-run"
+	// TODO used for local test, should be removed later
+	flagSkipAWS                       = "skip-aws"
+	flagUseFSR                        = "use-fsr"
+	flagCloudAPIConcurrency           = "cloud-api-concurrency"
+	flagWithSysTable                  = "with-sys-table"
+	flagOperatorPausedGCAndSchedulers = "operator-paused-gc-and-scheduler"
 
 	defaultSwitchInterval       = 5 * time.Minute
 	defaultGRPCKeepaliveTime    = 10 * time.Second
 	defaultGRPCKeepaliveTimeout = 3 * time.Second
+	defaultCloudAPIConcurrency  = 8
 
 	flagCipherType    = "crypter.method"
 	flagCipherKey     = "crypter.key"
 	flagCipherKeyFile = "crypter.key-file"
 
+	flagMetadataDownloadBatchSize    = "metadata-download-batch-size"
+	defaultMetadataDownloadBatchSize = 128
+
 	unlimited           = 0
 	crypterAES128KeyLen = 16
 	crypterAES192KeyLen = 24
 	crypterAES256KeyLen = 32
+
+	flagFullBackupType = "type"
 )
+
+const (
+	// Once TableInfoVersion updated. BR need to check compatibility with
+	// new TableInfoVersion. both snapshot restore and pitr need to be checked.
+	CURRENT_BACKUP_SUPPORT_TABLE_INFO_VERSION = model.TableInfoVersion5
+)
+
+// FullBackupType type when doing full backup or restore
+type FullBackupType string
+
+const (
+	FullBackupTypeKV  FullBackupType = "kv" // default type
+	FullBackupTypeEBS FullBackupType = "aws-ebs"
+)
+
+// Valid whether the type is valid
+func (t FullBackupType) Valid() bool {
+	return t == FullBackupTypeKV || t == FullBackupTypeEBS
+}
 
 // TLSConfig is the common configuration for TLS connection.
 type TLSConfig struct {
@@ -113,6 +148,15 @@ func (tls *TLSConfig) ToTLSConfig() (*tls.Config, error) {
 		return nil, errors.Trace(err)
 	}
 	return tlsConfig, nil
+}
+
+// Convert the TLS config to the PD security option.
+func (tls *TLSConfig) ToPDSecurityOption() pd.SecurityOption {
+	securityOption := pd.SecurityOption{}
+	securityOption.CAPath = tls.CA
+	securityOption.CertPath = tls.Cert
+	securityOption.KeyPath = tls.Key
+	return securityOption
 }
 
 // ParseFromFlags parses the TLS config from the flag set.
@@ -206,6 +250,12 @@ type Config struct {
 	GRPCKeepaliveTimeout time.Duration `json:"grpc-keepalive-timeout" toml:"grpc-keepalive-timeout"`
 
 	CipherInfo backuppb.CipherInfo `json:"-" toml:"-"`
+
+	// whether there's explicit filter
+	ExplicitFilter bool `json:"-" toml:"-"`
+
+	// Metadata download batch size, such as metadata for log restore
+	MetadataDownloadBatchSize uint `json:"metadata-download-batch-size" toml:"metadata-download-batch-size"`
 }
 
 // DefineCommonFlags defines the flags common to all BRIE commands.
@@ -261,6 +311,11 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 			"by the hexadecimal string, eg: \"0123456789abcdef0123456789abcdef\"")
 	flags.String(flagCipherKeyFile, "", "FilePath, its content is used as the cipher-key")
 
+	flags.Uint(flagMetadataDownloadBatchSize, defaultMetadataDownloadBatchSize,
+		"the batch size of downloading metadata, such as log restore metadata for truncate or restore")
+
+	_ = flags.MarkHidden(flagMetadataDownloadBatchSize)
+
 	storage.DefineFlags(flags)
 }
 
@@ -277,6 +332,16 @@ func HiddenFlagsForStream(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagSwitchModeInterval)
 
 	storage.HiddenFlagsForStream(flags)
+}
+
+func DefaultConfig() Config {
+	fs := pflag.NewFlagSet("dummy", pflag.ContinueOnError)
+	DefineCommonFlags(fs)
+	cfg := Config{}
+	if err := cfg.ParseFromFlags(fs); err != nil {
+		log.Panic("infallible operation failed.", zap.Error(err))
+	}
+	return cfg
 }
 
 // DefineDatabaseFlags defines the required --db flag for `db` subcommand.
@@ -465,6 +530,7 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	cfg.Tables = make(map[string]struct{})
 	var caseSensitive bool
 	if filterFlag := flags.Lookup(flagFilter); filterFlag != nil {
+		cfg.ExplicitFilter = flags.Changed(flagFilter)
 		cfg.FilterStr = filterFlag.Value.(pflag.SliceValue).GetSlice()
 		cfg.TableFilter, err = filter.Parse(cfg.FilterStr)
 		if err != nil {
@@ -550,6 +616,10 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
+	if cfg.MetadataDownloadBatchSize, err = flags.GetUint(flagMetadataDownloadBatchSize); err != nil {
+		return errors.Trace(err)
+	}
+
 	return cfg.normalizePDURLs()
 }
 
@@ -560,6 +630,7 @@ func NewMgr(ctx context.Context,
 	keepalive keepalive.ClientParameters,
 	checkRequirements bool,
 	needDomain bool,
+	versionCheckerType conn.VersionCheckerType,
 ) (*conn.Mgr, error) {
 	var (
 		tlsConf *tls.Config
@@ -583,8 +654,8 @@ func NewMgr(ctx context.Context,
 
 	// Is it necessary to remove `StoreBehavior`?
 	return conn.NewMgr(
-		ctx, g, pdAddress, tlsConf, securityOption, keepalive, conn.SkipTiFlash,
-		checkRequirements, needDomain,
+		ctx, g, pdAddress, tlsConf, securityOption, keepalive, util.SkipTiFlash,
+		checkRequirements, needDomain, versionCheckerType,
 	)
 }
 
@@ -710,6 +781,9 @@ func (cfg *Config) adjust() {
 	if cfg.ChecksumConcurrency == 0 {
 		cfg.ChecksumConcurrency = variable.DefChecksumTableConcurrency
 	}
+	if cfg.MetadataDownloadBatchSize == 0 {
+		cfg.MetadataDownloadBatchSize = defaultMetadataDownloadBatchSize
+	}
 }
 
 func normalizePDURL(pd string, useTLS bool) (string, error) {
@@ -735,4 +809,30 @@ func normalizePDURL(pd string, useTLS bool) (string, error) {
 // see details https://github.com/pingcap/br/issues/675#issuecomment-753780742
 func gcsObjectNotFound(err error) bool {
 	return errors.Cause(err) == gcs.ErrObjectNotExist // nolint:errorlint
+}
+
+// write progress in tmp file for tidb-operator, so tidb-operator can retrieve the
+// progress of ebs backup. and user can get the progress through `kubectl get job`
+// todo: maybe change to http api later
+func progressFileWriterRoutine(ctx context.Context, progress glue.Progress, total int64, progressFile string) {
+	// remove tmp file
+	defer func() {
+		_ = os.Remove(progressFile)
+	}()
+
+	for progress.GetCurrent() < total {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+			break
+		}
+		cur := progress.GetCurrent()
+		p := float64(cur) / float64(total)
+		p *= 100
+		err := os.WriteFile(progressFile, []byte(fmt.Sprintf("%.2f", p)), 0600)
+		if err != nil {
+			log.Warn("failed to update tmp progress file", zap.Error(err))
+		}
+	}
 }

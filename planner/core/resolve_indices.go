@@ -21,12 +21,8 @@ import (
 	"github.com/pingcap/tidb/util/disjointset"
 )
 
-// ResolveIndices implements Plan interface.
-func (p *PhysicalProjection) ResolveIndices() (err error) {
-	err = p.physicalSchemaProducer.ResolveIndices()
-	if err != nil {
-		return err
-	}
+// ResolveIndicesItself resolve indices for PhysicalPlan itself
+func (p *PhysicalProjection) ResolveIndicesItself() (err error) {
 	for i, expr := range p.Exprs {
 		p.Exprs[i], err = expr.ResolveIndices(p.children[0].Schema())
 		if err != nil {
@@ -39,6 +35,15 @@ func (p *PhysicalProjection) ResolveIndices() (err error) {
 	}
 	refine4NeighbourProj(p, childProj)
 	return
+}
+
+// ResolveIndices implements Plan interface.
+func (p *PhysicalProjection) ResolveIndices() (err error) {
+	err = p.physicalSchemaProducer.ResolveIndices()
+	if err != nil {
+		return err
+	}
+	return p.ResolveIndicesItself()
 }
 
 // refine4NeighbourProj refines the index for p.Exprs whose type is *Column when
@@ -74,12 +79,8 @@ func refine4NeighbourProj(p, childProj *PhysicalProjection) {
 	}
 }
 
-// ResolveIndices implements Plan interface.
-func (p *PhysicalHashJoin) ResolveIndices() (err error) {
-	err = p.physicalSchemaProducer.ResolveIndices()
-	if err != nil {
-		return err
-	}
+// ResolveIndicesItself resolve indices for PhyicalPlan itself
+func (p *PhysicalHashJoin) ResolveIndicesItself() (err error) {
 	lSchema := p.children[0].Schema()
 	rSchema := p.children[1].Schema()
 	for i, fun := range p.EqualConditions {
@@ -95,6 +96,19 @@ func (p *PhysicalHashJoin) ResolveIndices() (err error) {
 		p.RightJoinKeys[i] = rArg.(*expression.Column)
 		p.EqualConditions[i] = expression.NewFunctionInternal(fun.GetCtx(), fun.FuncName.L, fun.GetType(), lArg, rArg).(*expression.ScalarFunction)
 	}
+	for i, fun := range p.NAEqualConditions {
+		lArg, err := fun.GetArgs()[0].ResolveIndices(lSchema)
+		if err != nil {
+			return err
+		}
+		p.LeftNAJoinKeys[i] = lArg.(*expression.Column)
+		rArg, err := fun.GetArgs()[1].ResolveIndices(rSchema)
+		if err != nil {
+			return err
+		}
+		p.RightNAJoinKeys[i] = rArg.(*expression.Column)
+		p.NAEqualConditions[i] = expression.NewFunctionInternal(fun.GetCtx(), fun.FuncName.L, fun.GetType(), lArg, rArg).(*expression.ScalarFunction)
+	}
 	for i, expr := range p.LeftConditions {
 		p.LeftConditions[i], err = expr.ResolveIndices(lSchema)
 		if err != nil {
@@ -107,13 +121,56 @@ func (p *PhysicalHashJoin) ResolveIndices() (err error) {
 			return err
 		}
 	}
+
+	mergedSchema := expression.MergeSchema(lSchema, rSchema)
+
 	for i, expr := range p.OtherConditions {
-		p.OtherConditions[i], err = expr.ResolveIndices(expression.MergeSchema(lSchema, rSchema))
+		p.OtherConditions[i], err = expr.ResolveIndices(mergedSchema)
 		if err != nil {
 			return err
 		}
 	}
+
+	colsNeedResolving := p.schema.Len()
+	// The last output column of this two join is the generated column to indicate whether the row is matched or not.
+	if p.JoinType == LeftOuterSemiJoin || p.JoinType == AntiLeftOuterSemiJoin {
+		colsNeedResolving--
+	}
+	// To avoid that two plan shares the same column slice.
+	shallowColSlice := make([]*expression.Column, p.schema.Len())
+	copy(shallowColSlice, p.schema.Columns)
+	p.schema = expression.NewSchema(shallowColSlice...)
+	foundCnt := 0
+	// The two column sets are all ordered. And the colsNeedResolving is the subset of the mergedSchema.
+	// So we can just move forward j if there's no matching is found.
+	// We don't use the normal ResolvIndices here since there might be duplicate columns in the schema.
+	//   e.g. The schema of child_0 is [col0, col0, col1]
+	//        ResolveIndices will only resolve all col0 reference of the current plan to the first col0.
+	for i, j := 0, 0; i < colsNeedResolving && j < len(mergedSchema.Columns); {
+		if !p.schema.Columns[i].Equal(nil, mergedSchema.Columns[j]) {
+			j++
+			continue
+		}
+		p.schema.Columns[i] = p.schema.Columns[i].Clone().(*expression.Column)
+		p.schema.Columns[i].Index = j
+		i++
+		j++
+		foundCnt++
+	}
+	if foundCnt < colsNeedResolving {
+		return errors.Errorf("Some columns of %v cannot find the reference from its child(ren)", p.ExplainID().String())
+	}
+
 	return
+}
+
+// ResolveIndices implements Plan interface.
+func (p *PhysicalHashJoin) ResolveIndices() (err error) {
+	err = p.physicalSchemaProducer.ResolveIndices()
+	if err != nil {
+		return err
+	}
+	return p.ResolveIndicesItself()
 }
 
 // ResolveIndices implements Plan interface.
@@ -150,11 +207,44 @@ func (p *PhysicalMergeJoin) ResolveIndices() (err error) {
 			return err
 		}
 	}
+
+	mergedSchema := expression.MergeSchema(lSchema, rSchema)
+
 	for i, expr := range p.OtherConditions {
-		p.OtherConditions[i], err = expr.ResolveIndices(expression.MergeSchema(lSchema, rSchema))
+		p.OtherConditions[i], err = expr.ResolveIndices(mergedSchema)
 		if err != nil {
 			return err
 		}
+	}
+
+	colsNeedResolving := p.schema.Len()
+	// The last output column of this two join is the generated column to indicate whether the row is matched or not.
+	if p.JoinType == LeftOuterSemiJoin || p.JoinType == AntiLeftOuterSemiJoin {
+		colsNeedResolving--
+	}
+	// To avoid that two plan shares the same column slice.
+	shallowColSlice := make([]*expression.Column, p.schema.Len())
+	copy(shallowColSlice, p.schema.Columns)
+	p.schema = expression.NewSchema(shallowColSlice...)
+	foundCnt := 0
+	// The two column sets are all ordered. And the colsNeedResolving is the subset of the mergedSchema.
+	// So we can just move forward j if there's no matching is found.
+	// We don't use the normal ResolvIndices here since there might be duplicate columns in the schema.
+	//   e.g. The schema of child_0 is [col0, col0, col1]
+	//        ResolveIndices will only resolve all col0 reference of the current plan to the first col0.
+	for i, j := 0, 0; i < colsNeedResolving && j < len(mergedSchema.Columns); {
+		if !p.schema.Columns[i].Equal(nil, mergedSchema.Columns[j]) {
+			j++
+			continue
+		}
+		p.schema.Columns[i] = p.schema.Columns[i].Clone().(*expression.Column)
+		p.schema.Columns[i].Index = j
+		i++
+		j++
+		foundCnt++
+	}
+	if foundCnt < colsNeedResolving {
+		return errors.Errorf("Some columns of %v cannot find the reference from its child(ren)", p.ExplainID().String())
 	}
 	return
 }
@@ -222,6 +312,37 @@ func (p *PhysicalIndexJoin) ResolveIndices() (err error) {
 		}
 		p.OuterHashKeys[i], p.InnerHashKeys[i] = outerKey.(*expression.Column), innerKey.(*expression.Column)
 	}
+
+	colsNeedResolving := p.schema.Len()
+	// The last output column of this two join is the generated column to indicate whether the row is matched or not.
+	if p.JoinType == LeftOuterSemiJoin || p.JoinType == AntiLeftOuterSemiJoin {
+		colsNeedResolving--
+	}
+	// To avoid that two plan shares the same column slice.
+	shallowColSlice := make([]*expression.Column, p.schema.Len())
+	copy(shallowColSlice, p.schema.Columns)
+	p.schema = expression.NewSchema(shallowColSlice...)
+	foundCnt := 0
+	// The two column sets are all ordered. And the colsNeedResolving is the subset of the mergedSchema.
+	// So we can just move forward j if there's no matching is found.
+	// We don't use the normal ResolvIndices here since there might be duplicate columns in the schema.
+	//   e.g. The schema of child_0 is [col0, col0, col1]
+	//        ResolveIndices will only resolve all col0 reference of the current plan to the first col0.
+	for i, j := 0, 0; i < colsNeedResolving && j < len(mergedSchema.Columns); {
+		if !p.schema.Columns[i].Equal(nil, mergedSchema.Columns[j]) {
+			j++
+			continue
+		}
+		p.schema.Columns[i] = p.schema.Columns[i].Clone().(*expression.Column)
+		p.schema.Columns[i].Index = j
+		i++
+		j++
+		foundCnt++
+	}
+	if foundCnt < colsNeedResolving {
+		return errors.Errorf("Some columns of %v cannot find the reference from its child(ren)", p.ExplainID().String())
+	}
+
 	return
 }
 
@@ -367,12 +488,8 @@ func (p *PhysicalSelection) ResolveIndices() (err error) {
 	return nil
 }
 
-// ResolveIndices implements Plan interface.
-func (p *PhysicalExchangeSender) ResolveIndices() (err error) {
-	err = p.basePhysicalPlan.ResolveIndices()
-	if err != nil {
-		return err
-	}
+// ResolveIndicesItself resolve indices for PhyicalPlan itself
+func (p *PhysicalExchangeSender) ResolveIndicesItself() (err error) {
 	for i, col := range p.HashCols {
 		colExpr, err1 := col.Col.ResolveIndices(p.children[0].Schema())
 		if err1 != nil {
@@ -380,7 +497,16 @@ func (p *PhysicalExchangeSender) ResolveIndices() (err error) {
 		}
 		p.HashCols[i].Col, _ = colExpr.(*expression.Column)
 	}
-	return err
+	return
+}
+
+// ResolveIndices implements Plan interface.
+func (p *PhysicalExchangeSender) ResolveIndices() (err error) {
+	err = p.basePhysicalPlan.ResolveIndices()
+	if err != nil {
+		return err
+	}
+	return p.ResolveIndicesItself()
 }
 
 // ResolveIndices implements Plan interface.
@@ -531,6 +657,39 @@ func (p *PhysicalTopN) ResolveIndices() (err error) {
 			return err
 		}
 	}
+	return nil
+}
+
+// ResolveIndices implements Plan interface.
+func (p *PhysicalLimit) ResolveIndices() (err error) {
+	err = p.basePhysicalPlan.ResolveIndices()
+	if err != nil {
+		return err
+	}
+	// To avoid that two plan shares the same column slice.
+	shallowColSlice := make([]*expression.Column, p.schema.Len())
+	copy(shallowColSlice, p.schema.Columns)
+	p.schema = expression.NewSchema(shallowColSlice...)
+	foundCnt := 0
+	// The two column sets are all ordered. And the colsNeedResolving is the subset of the mergedSchema.
+	// So we can just move forward j if there's no matching is found.
+	// We don't use the normal ResolvIndices here since there might be duplicate columns in the schema.
+	//   e.g. The schema of child_0 is [col0, col0, col1]
+	//        ResolveIndices will only resolve all col0 reference of the current plan to the first col0.
+	for i, j := 0, 0; i < p.schema.Len() && j < p.children[0].Schema().Len(); {
+		if !p.schema.Columns[i].Equal(nil, p.children[0].Schema().Columns[j]) {
+			j++
+			continue
+		}
+		p.schema.Columns[i] = p.schema.Columns[i].Clone().(*expression.Column)
+		p.schema.Columns[i].Index = j
+		i++
+		j++
+		foundCnt++
+	}
+	if foundCnt < p.schema.Len() {
+		return errors.Errorf("Some columns of %v cannot find the reference from its child(ren)", p.ExplainID().String())
+	}
 	return
 }
 
@@ -566,6 +725,13 @@ func (p *PhysicalApply) ResolveIndices() (err error) {
 			return err
 		}
 		p.PhysicalHashJoin.EqualConditions[i] = newSf.(*expression.ScalarFunction)
+	}
+	for i, cond := range p.PhysicalHashJoin.NAEqualConditions {
+		newSf, err := cond.ResolveIndices(joinedSchema)
+		if err != nil {
+			return err
+		}
+		p.PhysicalHashJoin.NAEqualConditions[i] = newSf.(*expression.ScalarFunction)
 	}
 	return
 }

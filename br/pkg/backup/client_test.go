@@ -15,10 +15,12 @@ import (
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/tidb/br/pkg/backup"
 	"github.com/pingcap/tidb/br/pkg/conn"
+	"github.com/pingcap/tidb/br/pkg/gluetidb"
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/mock"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/storage"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/tablecodec"
@@ -31,6 +33,7 @@ import (
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
 	pd "github.com/tikv/pd/client"
+	"go.opencensus.io/stats/view"
 )
 
 type testBackup struct {
@@ -38,23 +41,24 @@ type testBackup struct {
 	cancel context.CancelFunc
 
 	mockPDClient pd.Client
+	mockGlue     *gluetidb.MockGlue
 	backupClient *backup.Client
 
 	cluster *mock.Cluster
 	storage storage.ExternalStorage
 }
 
-func createBackupSuite(t *testing.T) (s *testBackup, clean func()) {
+func createBackupSuite(t *testing.T) *testBackup {
 	tikvClient, _, pdClient, err := testutils.NewMockTiKV("", nil)
 	require.NoError(t, err)
-	s = new(testBackup)
+	s := new(testBackup)
+	s.mockGlue = &gluetidb.MockGlue{}
 	s.mockPDClient = pdClient
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	mockMgr := &conn.Mgr{PdController: &pdutil.PdController{}}
 	mockMgr.SetPDClient(s.mockPDClient)
 	mockMgr.SetHTTP([]string{"test"}, nil)
-	s.backupClient, err = backup.NewBackupClient(s.ctx, mockMgr)
-	require.NoError(t, err)
+	s.backupClient = backup.NewBackupClient(s.ctx, mockMgr)
 
 	s.cluster, err = mock.NewCluster()
 	require.NoError(t, err)
@@ -63,18 +67,18 @@ func createBackupSuite(t *testing.T) (s *testBackup, clean func()) {
 	require.NoError(t, err)
 	require.NoError(t, s.cluster.Start())
 
-	clean = func() {
+	t.Cleanup(func() {
 		mockMgr.Close()
 		s.cluster.Stop()
 		tikvClient.Close()
 		pdClient.Close()
-	}
-	return
+		view.Stop()
+	})
+	return s
 }
 
 func TestGetTS(t *testing.T) {
-	s, clean := createBackupSuite(t)
-	defer clean()
+	s := createBackupSuite(t)
 
 	// mockPDClient' physical ts and current ts will have deviation
 	// so make this deviation tolerance 100ms
@@ -82,7 +86,7 @@ func TestGetTS(t *testing.T) {
 
 	// timeago not work
 	expectedDuration := 0
-	currentTS := time.Now().UnixNano() / int64(time.Millisecond)
+	currentTS := time.Now().UnixMilli()
 	ts, err := s.backupClient.GetTS(s.ctx, 0, 0)
 	require.NoError(t, err)
 	pdTS := oracle.ExtractPhysical(ts)
@@ -92,7 +96,7 @@ func TestGetTS(t *testing.T) {
 
 	// timeago = "1.5m"
 	expectedDuration = 90000
-	currentTS = time.Now().UnixNano() / int64(time.Millisecond)
+	currentTS = time.Now().UnixMilli()
 	ts, err = s.backupClient.GetTS(s.ctx, 90*time.Second, 0)
 	require.NoError(t, err)
 	pdTS = oracle.ExtractPhysical(ts)
@@ -227,20 +231,20 @@ func TestOnBackupRegionErrorResponse(t *testing.T) {
 	}
 
 	cases := []Case{
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{NotLeader: &errorpb.NotLeader{}}), exceptedBackoffMs: 1000, exceptedErr: false},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{RegionNotFound: &errorpb.RegionNotFound{}}), exceptedBackoffMs: 1000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{NotLeader: &errorpb.NotLeader{}}), exceptedBackoffMs: 3000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{RegionNotFound: &errorpb.RegionNotFound{}}), exceptedBackoffMs: 3000, exceptedErr: false},
 		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{KeyNotInRegion: &errorpb.KeyNotInRegion{}}), exceptedBackoffMs: 0, exceptedErr: true},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{EpochNotMatch: &errorpb.EpochNotMatch{}}), exceptedBackoffMs: 1000, exceptedErr: false},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ServerIsBusy: &errorpb.ServerIsBusy{}}), exceptedBackoffMs: 1000, exceptedErr: false},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{StaleCommand: &errorpb.StaleCommand{}}), exceptedBackoffMs: 1000, exceptedErr: false},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{StoreNotMatch: &errorpb.StoreNotMatch{}}), exceptedBackoffMs: 1000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{EpochNotMatch: &errorpb.EpochNotMatch{}}), exceptedBackoffMs: 3000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ServerIsBusy: &errorpb.ServerIsBusy{}}), exceptedBackoffMs: 3000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{StaleCommand: &errorpb.StaleCommand{}}), exceptedBackoffMs: 3000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{StoreNotMatch: &errorpb.StoreNotMatch{}}), exceptedBackoffMs: 3000, exceptedErr: false},
 		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{RaftEntryTooLarge: &errorpb.RaftEntryTooLarge{}}), exceptedBackoffMs: 0, exceptedErr: true},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ReadIndexNotReady: &errorpb.ReadIndexNotReady{}}), exceptedBackoffMs: 1000, exceptedErr: false},
-		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ProposalInMergingMode: &errorpb.ProposalInMergingMode{}}), exceptedBackoffMs: 1000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ReadIndexNotReady: &errorpb.ReadIndexNotReady{}}), exceptedBackoffMs: 3000, exceptedErr: false},
+		{storeID: 1, backupTS: 421123291611137, resp: newBackupRegionErrorResp(&errorpb.Error{ProposalInMergingMode: &errorpb.ProposalInMergingMode{}}), exceptedBackoffMs: 3000, exceptedErr: false},
 	}
 	for _, cs := range cases {
 		t.Log(cs)
-		_, backoffMs, err := backup.OnBackupResponse(cs.storeID, cs.bo, cs.backupTS, cs.lockResolver, cs.resp)
+		_, backoffMs, err := backup.OnBackupResponse(cs.storeID, cs.bo, cs.backupTS, cs.lockResolver, cs.resp, utils.NewErrorContext("test", 1))
 		require.Equal(t, cs.exceptedBackoffMs, backoffMs)
 		if cs.exceptedErr {
 			require.Error(t, err)
@@ -250,52 +254,8 @@ func TestOnBackupRegionErrorResponse(t *testing.T) {
 	}
 }
 
-func TestSendCreds(t *testing.T) {
-	s, clean := createBackupSuite(t)
-	defer clean()
-
-	accessKey := "ab"
-	secretAccessKey := "cd"
-	backendOpt := storage.BackendOptions{
-		S3: storage.S3BackendOptions{
-			AccessKey:       accessKey,
-			SecretAccessKey: secretAccessKey,
-		},
-	}
-	backend, err := storage.ParseBackend("s3://bucket/prefix/", &backendOpt)
-	require.NoError(t, err)
-	opts := &storage.ExternalStorageOptions{
-		SendCredentials: true,
-	}
-	_, err = storage.New(s.ctx, backend, opts)
-	require.NoError(t, err)
-	access_key := backend.GetS3().AccessKey
-	require.Equal(t, "ab", access_key)
-	secret_access_key := backend.GetS3().SecretAccessKey
-	require.Equal(t, "cd", secret_access_key)
-
-	backendOpt = storage.BackendOptions{
-		S3: storage.S3BackendOptions{
-			AccessKey:       accessKey,
-			SecretAccessKey: secretAccessKey,
-		},
-	}
-	backend, err = storage.ParseBackend("s3://bucket/prefix/", &backendOpt)
-	require.NoError(t, err)
-	opts = &storage.ExternalStorageOptions{
-		SendCredentials: false,
-	}
-	_, err = storage.New(s.ctx, backend, opts)
-	require.NoError(t, err)
-	access_key = backend.GetS3().AccessKey
-	require.Equal(t, "", access_key)
-	secret_access_key = backend.GetS3().SecretAccessKey
-	require.Equal(t, "", secret_access_key)
-}
-
 func TestSkipUnsupportedDDLJob(t *testing.T) {
-	s, clean := createBackupSuite(t)
-	defer clean()
+	s := createBackupSuite(t)
 
 	tk := testkit.NewTestKit(t, s.cluster.Storage)
 	tk.MustExec("CREATE DATABASE IF NOT EXISTS test_db;")
@@ -323,7 +283,8 @@ func TestSkipUnsupportedDDLJob(t *testing.T) {
 	metaWriter := metautil.NewMetaWriter(s.storage, metautil.MetaFileSize, false, "", &cipher)
 	ctx := context.Background()
 	metaWriter.StartWriteMetasAsync(ctx, metautil.AppendDDL)
-	err = backup.WriteBackupDDLJobs(metaWriter, s.cluster.Storage, lastTS, ts)
+	s.mockGlue.SetSession(tk.Session())
+	err = backup.WriteBackupDDLJobs(metaWriter, s.mockGlue, s.cluster.Storage, lastTS, ts, false)
 	require.NoErrorf(t, err, "Error get ddl jobs: %s", err)
 	err = metaWriter.FinishWriteMetas(ctx, metautil.AppendDDL)
 	require.NoError(t, err, "Flush failed", err)
@@ -346,8 +307,7 @@ func TestSkipUnsupportedDDLJob(t *testing.T) {
 }
 
 func TestCheckBackupIsLocked(t *testing.T) {
-	s, clean := createBackupSuite(t)
-	defer clean()
+	s := createBackupSuite(t)
 
 	ctx := context.Background()
 

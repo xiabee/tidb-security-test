@@ -15,10 +15,9 @@
 package ddl
 
 import (
-	"context"
+	"encoding/hex"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/sessionctx/variable"
 )
 
@@ -51,14 +50,12 @@ func (d *ddl) Stats(vars *variable.SessionVars) (map[string]interface{}, error) 
 	m[serverID] = d.uuid
 	var ddlInfo *Info
 
-	err := kv.RunInNewTxn(context.Background(), d.store, false, func(ctx context.Context, txn kv.Transaction) error {
-		var err1 error
-		ddlInfo, err1 = GetDDLInfo(txn)
-		if err1 != nil {
-			return errors.Trace(err1)
-		}
-		return errors.Trace(err1)
-	})
+	s, err := d.sessPool.get()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	defer d.sessPool.put(s)
+	ddlInfo, err = GetDDLInfoWithNewTxn(s)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -84,7 +81,7 @@ func (d *ddl) Stats(vars *variable.SessionVars) (map[string]interface{}, error) 
 	m[ddlJobSchemaID] = job.SchemaID
 	m[ddlJobTableID] = job.TableID
 	m[ddlJobSnapshotVer] = job.SnapshotVer
-	m[ddlJobReorgHandle] = tryDecodeToHandleString(ddlInfo.ReorgHandle)
+	m[ddlJobReorgHandle] = hex.EncodeToString(ddlInfo.ReorgHandle)
 	m[ddlJobArgs] = job.Args
 	return m, nil
 }

@@ -22,12 +22,16 @@ import (
 	"time"
 
 	"github.com/opentracing/opentracing-go"
+	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -67,7 +71,6 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 		return err
 	}
 	setOptionForTopSQL(sessVars.StmtCtx, txn)
-	txnSize := txn.Size()
 	sessVars.StmtCtx.AddRecordRows(uint64(len(rows)))
 	// If you use the IGNORE keyword, duplicate-key error that occurs while executing the INSERT statement are ignored.
 	// For example, without IGNORE, a row that duplicates an existing UNIQUE index or PRIMARY KEY value in
@@ -110,7 +113,6 @@ func (e *InsertExec) exec(ctx context.Context, rows [][]types.Datum) error {
 			e.stats.CheckInsertTime += time.Since(start)
 		}
 	}
-	e.memTracker.Consume(int64(txn.Size() - txnSize))
 	return nil
 }
 
@@ -157,6 +159,12 @@ func prefetchConflictedOldRows(ctx context.Context, txn kv.Transaction, rows []t
 	for _, r := range rows {
 		for _, uk := range r.uniqueKeys {
 			if val, found := values[string(uk.newKey)]; found {
+				if tablecodec.IsTempIndexKey(uk.newKey) {
+					// If it is a temp index, the value cannot be decoded by DecodeHandleInUniqueIndexValue.
+					// Since this function is an optimization, we can skip prefetching the rows referenced by
+					// temp indexes.
+					continue
+				}
 				handle, err := tablecodec.DecodeHandleInUniqueIndexValue(val, uk.commonHandle)
 				if err != nil {
 					return err
@@ -254,18 +262,13 @@ func (e *InsertExec) batchUpdateDupRows(ctx context.Context, newRows [][]types.D
 		}
 
 		for _, uk := range r.uniqueKeys {
-			val, err := txn.Get(ctx, uk.newKey)
-			if err != nil {
-				if kv.IsErrNotFound(err) {
-					continue
-				}
-				return err
-			}
-			handle, err := tablecodec.DecodeHandleInUniqueIndexValue(val, uk.commonHandle)
+			_, handle, err := tables.FetchDuplicatedHandle(ctx, uk.newKey, true, txn, e.Table.Meta().ID, uk.commonHandle)
 			if err != nil {
 				return err
 			}
-
+			if handle == nil {
+				continue
+			}
 			err = e.updateDupRow(ctx, i, txn, r, handle, e.OnDuplicate)
 			if err != nil {
 				if kv.IsErrNotFound(err) {
@@ -310,11 +313,26 @@ func (e *InsertExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	if len(e.children) > 0 && e.children[0] != nil {
 		return insertRowsFromSelect(ctx, e)
 	}
-	return insertRows(ctx, e)
+	err := insertRows(ctx, e)
+	if err != nil {
+		terr, ok := errors.Cause(err).(*terror.Error)
+		if ok && len(e.OnDuplicate) == 0 &&
+			e.ctx.GetSessionVars().StmtCtx.ErrAutoincReadFailedAsWarning &&
+			terr.Code() == errno.ErrAutoincReadFailed {
+			e.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // Close implements the Executor Close interface.
 func (e *InsertExec) Close() error {
+	if e.runtimeStats != nil && e.stats != nil {
+		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
+	}
+	defer e.memTracker.ReplaceBytesUsed(0)
 	e.setMessage()
 	if e.SelectExec != nil {
 		return e.SelectExec.Close()
@@ -354,13 +372,13 @@ func (e *InsertExec) initEvalBuffer4Dup() {
 
 	// Append the old row before the new row, to be consistent with "Schema4OnDuplicate" in the "Insert" PhysicalPlan.
 	for _, col := range e.Table.WritableCols() {
-		evalBufferTypes = append(evalBufferTypes, &col.FieldType)
+		evalBufferTypes = append(evalBufferTypes, &(col.FieldType))
 	}
 	if extraLen > 0 {
 		evalBufferTypes = append(evalBufferTypes, e.SelectExec.base().retFieldTypes[e.rowLen:]...)
 	}
 	for _, col := range e.Table.Cols() {
-		evalBufferTypes = append(evalBufferTypes, &col.FieldType)
+		evalBufferTypes = append(evalBufferTypes, &(col.FieldType))
 	}
 	if e.hasExtraHandle {
 		evalBufferTypes = append(evalBufferTypes, types.NewFieldType(mysql.TypeLonglong))
@@ -417,7 +435,7 @@ func (e *InsertExec) doDupRowUpdate(ctx context.Context, handle kv.Handle, oldRo
 	}
 
 	newData := e.row4Update[:len(oldRow)]
-	_, err := updateRecord(ctx, e.ctx, handle, oldRow, newData, assignFlag, e.Table, true, e.memTracker)
+	_, err := updateRecord(ctx, e.ctx, handle, oldRow, newData, assignFlag, e.Table, true, e.memTracker, e.fkChecks, e.fkCascades)
 	if err != nil {
 		return err
 	}
@@ -444,4 +462,19 @@ func (e *InsertExec) setMessage() {
 		msg := fmt.Sprintf(mysql.MySQLErrName[mysql.ErrInsertInfo].Raw, numRecords, numDuplicates, numWarnings)
 		stmtCtx.SetMessage(msg)
 	}
+}
+
+// GetFKChecks implements WithForeignKeyTrigger interface.
+func (e *InsertExec) GetFKChecks() []*FKCheckExec {
+	return e.fkChecks
+}
+
+// GetFKCascades implements WithForeignKeyTrigger interface.
+func (e *InsertExec) GetFKCascades() []*FKCascadeExec {
+	return e.fkCascades
+}
+
+// HasFKCascades implements WithForeignKeyTrigger interface.
+func (e *InsertExec) HasFKCascades() bool {
+	return len(e.fkCascades) > 0
 }

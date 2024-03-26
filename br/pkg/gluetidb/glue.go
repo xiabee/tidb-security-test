@@ -3,9 +3,7 @@
 package gluetidb
 
 import (
-	"bytes"
 	"context"
-	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
@@ -17,9 +15,7 @@ import (
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/executor"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx"
 	pd "github.com/tikv/pd/client"
@@ -32,13 +28,8 @@ var (
 	_ glue.Glue        = Glue{}
 )
 
-const (
-	defaultCapOfCreateTable    = 512
-	defaultCapOfCreateDatabase = 64
-	brComment                  = `/*from(br)*/`
-)
+const brComment = `/*from(br)*/`
 
-// New makes a new tidb glue.
 func New() Glue {
 	log.Debug("enabling no register config")
 	config.UpdateGlobal(func(conf *config.Config) {
@@ -61,6 +52,10 @@ type tidbSession struct {
 
 // GetDomain implements glue.Glue.
 func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
+	initStatsSe, err := session.CreateSession(store)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	se, err := session.CreateSession(store)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -70,7 +65,7 @@ func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
 		return nil, errors.Trace(err)
 	}
 	// create stats handler for backup and restore.
-	err = dom.UpdateTableStatsLoop(se)
+	err = dom.UpdateTableStatsLoop(se, initStatsSe)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -159,20 +154,23 @@ func (gs *tidbSession) Execute(ctx context.Context, sql string) error {
 }
 
 func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	rs, err := gs.se.ExecuteInternal(ctx, sql, args...)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer func() {
-		// We need to manually clean the TxnCtx here.
-		// Or we may get stale information schema in the consequent calls.
-		gs.se.GetSessionVars().TxnCtx.InfoSchema = nil
+		vars := gs.se.GetSessionVars()
+		vars.TxnCtxMu.Lock()
+		vars.TxnCtx.InfoSchema = nil
+		vars.TxnCtxMu.Unlock()
 	}()
 	// Some of SQLs (like ADMIN RECOVER INDEX) may lazily take effect
 	// when we polling the result set.
 	// At least call `next` once for triggering theirs side effect.
 	// (Maybe we'd better drain all returned rows?)
 	if rs != nil {
+		//nolint: errcheck
 		defer rs.Close()
 		c := rs.NewChunk(nil)
 		if err := rs.Next(ctx, c); err != nil {
@@ -185,18 +183,7 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 
 // CreateDatabase implements glue.Session.
 func (gs *tidbSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
-	d := domain.GetDomain(gs.se).DDL()
-	query, err := gs.showCreateDatabase(schema)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	gs.se.SetValue(sessionctx.QueryString, query)
-	schema = schema.Clone()
-	if len(schema.Charset) == 0 {
-		schema.Charset = mysql.DefaultCharset
-	}
-	return d.CreateSchemaWithInfo(gs.se, schema, ddl.OnExistIgnore)
-
+	return errors.Trace(executor.BRIECreateDatabase(gs.se, schema, brComment))
 }
 
 // CreatePlacementPolicy implements glue.Session.
@@ -208,62 +195,15 @@ func (gs *tidbSession) CreatePlacementPolicy(ctx context.Context, policy *model.
 }
 
 // CreateTables implements glue.BatchCreateTableSession.
-func (gs *tidbSession) CreateTables(ctx context.Context, tables map[string][]*model.TableInfo) error {
-	d := domain.GetDomain(gs.se).DDL()
-	var dbName model.CIStr
-
-	for db, tablesInDB := range tables {
-		dbName = model.NewCIStr(db)
-		queryBuilder := strings.Builder{}
-		cloneTables := make([]*model.TableInfo, 0, len(tablesInDB))
-		for _, table := range tablesInDB {
-			query, err := gs.showCreateTable(table)
-			if err != nil {
-				return errors.Trace(err)
-			}
-
-			queryBuilder.WriteString(query)
-			queryBuilder.WriteString(";")
-
-			table = table.Clone()
-			// Clone() does not clone partitions yet :(
-			if table.Partition != nil {
-				newPartition := *table.Partition
-				newPartition.Definitions = append([]model.PartitionDefinition{}, table.Partition.Definitions...)
-				table.Partition = &newPartition
-			}
-			cloneTables = append(cloneTables, table)
-		}
-		gs.se.SetValue(sessionctx.QueryString, queryBuilder.String())
-		err := d.BatchCreateTableWithInfo(gs.se, dbName, cloneTables, ddl.OnExistIgnore)
-		if err != nil {
-			//It is possible to failure when TiDB does not support model.ActionCreateTables.
-			//In this circumstance, BatchCreateTableWithInfo returns errno.ErrInvalidDDLJob,
-			//we fall back to old way that creating table one by one
-			log.Warn("batch create table from tidb failure", zap.Error(err))
-			return err
-		}
-	}
-
-	return nil
+func (gs *tidbSession) CreateTables(_ context.Context,
+	tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+	return errors.Trace(executor.BRIECreateTables(gs.se, tables, brComment, cs...))
 }
 
 // CreateTable implements glue.Session.
-func (gs *tidbSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo) error {
-	d := domain.GetDomain(gs.se).DDL()
-	query, err := gs.showCreateTable(table)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	gs.se.SetValue(sessionctx.QueryString, query)
-	// Clone() does not clone partitions yet :(
-	table = table.Clone()
-	if table.Partition != nil {
-		newPartition := *table.Partition
-		newPartition.Definitions = append([]model.PartitionDefinition{}, table.Partition.Definitions...)
-		table.Partition = &newPartition
-	}
-	return d.CreateTableWithInfo(gs.se, dbName, table, ddl.OnExistIgnore)
+func (gs *tidbSession) CreateTable(_ context.Context, dbName model.CIStr,
+	table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+	return errors.Trace(executor.BRIECreateTable(gs.se, dbName, table, brComment, cs...))
 }
 
 // Close implements glue.Session.
@@ -274,30 +214,6 @@ func (gs *tidbSession) Close() {
 // GetGlobalVariables implements glue.Session.
 func (gs *tidbSession) GetGlobalVariable(name string) (string, error) {
 	return gs.se.GetSessionVars().GlobalVarsAccessor.GetTiDBTableValue(name)
-}
-
-// showCreateTable shows the result of SHOW CREATE TABLE from a TableInfo.
-func (gs *tidbSession) showCreateTable(tbl *model.TableInfo) (string, error) {
-	table := tbl.Clone()
-	table.AutoIncID = 0
-	result := bytes.NewBuffer(make([]byte, 0, defaultCapOfCreateTable))
-	// this can never fail.
-	_, _ = result.WriteString(brComment)
-	if err := executor.ConstructResultOfShowCreateTable(gs.se, tbl, autoid.Allocators{}, result); err != nil {
-		return "", errors.Trace(err)
-	}
-	return result.String(), nil
-}
-
-// showCreateDatabase shows the result of SHOW CREATE DATABASE from a dbInfo.
-func (gs *tidbSession) showCreateDatabase(db *model.DBInfo) (string, error) {
-	result := bytes.NewBuffer(make([]byte, 0, defaultCapOfCreateDatabase))
-	// this can never fail.
-	_, _ = result.WriteString(brComment)
-	if err := executor.ConstructResultOfShowCreateDatabase(gs.se, db, true, result); err != nil {
-		return "", errors.Trace(err)
-	}
-	return result.String(), nil
 }
 
 func (gs *tidbSession) showCreatePlacementPolicy(policy *model.PolicyInfo) string {
@@ -321,6 +237,23 @@ func (s *mockSession) Execute(ctx context.Context, sql string) error {
 }
 
 func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
+	rs, err := s.se.ExecuteInternal(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	// Some of SQLs (like ADMIN RECOVER INDEX) may lazily take effect
+	// when we polling the result set.
+	// At least call `next` once for triggering theirs side effect.
+	// (Maybe we'd better drain all returned rows?)
+	if rs != nil {
+		//nolint: errcheck
+		defer rs.Close()
+		c := rs.NewChunk(nil)
+		if err := rs.Next(ctx, c); err != nil {
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -337,13 +270,13 @@ func (s *mockSession) CreatePlacementPolicy(ctx context.Context, policy *model.P
 }
 
 // CreateTables implements glue.BatchCreateTableSession.
-func (s *mockSession) CreateTables(ctx context.Context, tables map[string][]*model.TableInfo) error {
+func (s *mockSession) CreateTables(ctx context.Context, tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreateTable implements glue.Session.
-func (s *mockSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo) error {
+func (s *mockSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }

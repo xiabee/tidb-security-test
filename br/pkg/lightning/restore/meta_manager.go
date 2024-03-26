@@ -11,14 +11,13 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/tidb"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	verify "github.com/pingcap/tidb/br/pkg/lightning/verification"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/redact"
+	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/parser/mysql"
 	"go.uber.org/zap"
 )
 
@@ -43,7 +42,7 @@ type dbMetaMgrBuilder struct {
 func (b *dbMetaMgrBuilder) Init(ctx context.Context) error {
 	exec := common.SQLWithRetry{
 		DB:           b.db,
-		Logger:       log.L(),
+		Logger:       log.FromContext(ctx),
 		HideQueryLog: redact.NeedRedact(),
 	}
 	metaDBSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", common.EscapeIdentifier(b.schema))
@@ -171,6 +170,7 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer conn.Close()
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
@@ -184,7 +184,8 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 	if err != nil {
 		return nil, 0, errors.Annotate(err, "enable pessimistic transaction failed")
 	}
-	needAutoID := common.TableHasAutoRowID(m.tr.tableInfo.Core) || m.tr.tableInfo.Core.GetAutoIncrementColInfo() != nil || m.tr.tableInfo.Core.ContainsAutoRandomBits()
+
+	needAutoID := common.TableHasAutoID(m.tr.tableInfo.Core)
 	tableChecksumingMsg := "Target table is calculating checksum. Please wait until the checksum is finished and try again."
 	doAllocTableRowIDsFn := func() error {
 		return exec.Transact(ctx, "init table allocator base", func(ctx context.Context, tx *sql.Tx) error {
@@ -245,50 +246,27 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 					maxRowIDMax = rowIDMax
 				}
 			}
-			if rows.Err() != nil {
-				return errors.Trace(rows.Err())
+			if err := rows.Err(); err != nil {
+				return errors.Trace(err)
 			}
 
 			// no enough info are available, fetch row_id max for table
 			if curStatus == metaStatusInitial {
-				if needAutoID && maxRowIDMax == 0 {
-					// NOTE: currently, if a table contains auto_incremental unique key and _tidb_rowid,
-					// the `show table next_row_id` will returns the unique key field only.
-					var autoIDField string
-					for _, col := range m.tr.tableInfo.Core.Columns {
-						if mysql.HasAutoIncrementFlag(col.GetFlag()) {
-							autoIDField = col.Name.L
-							break
-						} else if mysql.HasPriKeyFlag(col.GetFlag()) && m.tr.tableInfo.Core.AutoRandomBits > 0 {
-							autoIDField = col.Name.L
-							break
-						}
+				if needAutoID {
+					// maxRowIDMax is the max row_id that other tasks has allocated, we need to rebase the global autoid base first.
+					if err := rebaseGlobalAutoID(ctx, maxRowIDMax, m.tr, m.tr.dbInfo.ID, m.tr.tableInfo.Core); err != nil {
+						return errors.Trace(err)
 					}
-					if len(autoIDField) == 0 && common.TableHasAutoRowID(m.tr.tableInfo.Core) {
-						autoIDField = model.ExtraHandleName.L
-					}
-					if len(autoIDField) == 0 {
-						return common.ErrAllocTableRowIDs.GenWithStack("table %s contains auto increment id or _tidb_rowid, but target field not found", m.tr.tableName)
-					}
-
-					autoIDInfos, err := tidb.FetchTableAutoIDInfos(ctx, tx, m.tr.tableName)
+					newRowIDBase, newRowIDMax, err = allocGlobalAutoID(ctx, rawRowIDMax, m.tr, m.tr.dbInfo.ID, m.tr.tableInfo.Core)
 					if err != nil {
 						return errors.Trace(err)
 					}
-					found := false
-					for _, info := range autoIDInfos {
-						if strings.ToLower(info.Column) == autoIDField {
-							maxRowIDMax = info.NextID - 1
-							found = true
-							break
-						}
-					}
-					if !found {
-						return common.ErrAllocTableRowIDs.GenWithStack("can't fetch previous auto id base for table %s field '%s'", m.tr.tableName, autoIDField)
-					}
+				} else {
+					// Though we don't need auto ID, we still guarantee that the row ID is unique across all lightning instances.
+					newRowIDBase = maxRowIDMax
+					newRowIDMax = newRowIDBase + rawRowIDMax
 				}
-				newRowIDBase = maxRowIDMax
-				newRowIDMax = newRowIDBase + rawRowIDMax
+
 				// table contains no data, can skip checksum
 				if needAutoID && newRowIDBase == 0 && newStatus < metaStatusRestoreStarted {
 					newStatus = metaStatusRestoreStarted
@@ -316,7 +294,7 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 		}
 		// we only retry if it's tableChecksuming error, it happens during parallel import.
 		// for detail see https://docs.pingcap.com/tidb/stable/tidb-lightning-distributed-import
-		log.L().Warn("target table is doing checksum, will try again",
+		log.FromContext(ctx).Warn("target table is doing checksum, will try again",
 			zap.Int("retry time", i+1), log.ShortError(err))
 		backOffTime *= 2
 		if backOffTime > maxBackoffTime {
@@ -346,7 +324,6 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 				ck := verify.MakeKVChecksum(remoteCk.TotalBytes, remoteCk.TotalKVs, remoteCk.Checksum)
 				checksum = &ck
 			}
-
 		}
 
 		if checksum != nil {
@@ -363,10 +340,10 @@ func (m *dbTableMetaMgr) AllocTableRowIDs(ctx context.Context, rawRowIDMax int64
 		ck := verify.MakeKVChecksum(baseTotalBytes, baseTotalKvs, baseChecksum)
 		checksum = &ck
 	}
-	log.L().Info("allocate table row_id base", zap.String("table", m.tr.tableName),
+	log.FromContext(ctx).Info("allocate table row_id base", zap.String("table", m.tr.tableName),
 		zap.Int64("row_id_base", newRowIDBase))
 	if checksum != nil {
-		log.L().Info("checksum base", zap.Any("checksum", checksum))
+		log.FromContext(ctx).Info("checksum base", zap.Any("checksum", checksum))
 	}
 	return checksum, newRowIDBase, nil
 }
@@ -398,6 +375,7 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 	if err != nil {
 		return false, false, nil, errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer conn.Close()
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
@@ -479,8 +457,8 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 		}
 		rows.Close()
 		closed = true
-		if rows.Err() != nil {
-			return errors.Trace(rows.Err())
+		if err := rows.Err(); err != nil {
+			return errors.Trace(err)
 		}
 
 		// nolint:gosec
@@ -496,8 +474,7 @@ func (m *dbTableMetaMgr) CheckAndUpdateLocalChecksum(ctx context.Context, checks
 		ck := verify.MakeKVChecksum(totalBytes, totalKvs, totalChecksum)
 		baseTotalChecksum = &ck
 	}
-
-	log.L().Info("check table checksum", zap.String("table", m.tr.tableName),
+	log.FromContext(ctx).Info("check table checksum", zap.String("table", m.tr.tableName),
 		zap.Bool("otherHasDupe", otherHasDupe), zap.Bool("needRemoteDupe", needRemoteDupe),
 		zap.String("new_status", newStatus.String()))
 	return
@@ -515,7 +492,7 @@ func (m *dbTableMetaMgr) FinishTable(ctx context.Context) error {
 func RemoveTableMetaByTableName(ctx context.Context, db *sql.DB, metaTable, tableName string) error {
 	exec := &common.SQLWithRetry{
 		DB:     db,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	query := fmt.Sprintf("DELETE FROM %s", metaTable)
 	var args []interface{}
@@ -534,6 +511,8 @@ type taskMetaMgr interface {
 	// need to update or any new tasks. There is at most one lightning who can execute the action function at the same time.
 	// Note that action may be executed multiple times due to transaction retry, caller should make sure it's idempotent.
 	CheckTasksExclusively(ctx context.Context, action func(tasks []taskMeta) ([]taskMeta, error)) error
+	// CanPauseSchedulerByKeyRange returns whether the scheduler can pause by the key range.
+	CanPauseSchedulerByKeyRange() bool
 	CheckAndPausePdSchedulers(ctx context.Context) (pdutil.UndoFunc, error)
 	// CheckAndFinishRestore check task meta and return whether to switch cluster to normal state and clean up the metadata
 	// Return values: first boolean indicates whether switch back tidb cluster to normal state (restore schedulers, switch tikv to normal)
@@ -615,7 +594,7 @@ type storedCfgs struct {
 func (m *dbTaskMetaMgr) InitTask(ctx context.Context, source int64) error {
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	// avoid override existing metadata if the meta is already inserted.
 	stmt := fmt.Sprintf(`INSERT INTO %s (task_id, status, source_bytes) values (?, ?, ?) ON DUPLICATE KEY UPDATE state = ?`, m.tableName)
@@ -626,7 +605,7 @@ func (m *dbTaskMetaMgr) InitTask(ctx context.Context, source int64) error {
 func (m *dbTaskMetaMgr) CheckTaskExist(ctx context.Context) (bool, error) {
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	// avoid override existing metadata if the meta is already inserted.
 	exist := false
@@ -665,10 +644,11 @@ func (m *dbTaskMetaMgr) CheckTasksExclusively(ctx context.Context, action func(t
 	if err != nil {
 		return errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer conn.Close()
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	err = exec.Exec(ctx, "enable pessimistic transaction", "SET SESSION tidb_txn_mode = 'pessimistic';")
 	if err != nil {
@@ -723,10 +703,11 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 		cancel()
 		return nil, errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer conn.Close()
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	err = exec.Exec(ctx, "enable pessimistic transaction", "SET SESSION tidb_txn_mode = 'pessimistic';")
 	if err != nil {
@@ -809,7 +790,7 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 			// try to rollback the stopped schedulers
 			cancelFunc := m.pd.MakeUndoFunctionByConfig(pausedCfg.RestoreCfg)
 			if err1 := cancelFunc(ctx); err1 != nil {
-				log.L().Warn("undo remove schedulers failed", zap.Error(err1))
+				log.FromContext(ctx).Warn("undo remove schedulers failed", zap.Error(err1))
 			}
 			return errors.Trace(err)
 		}
@@ -846,6 +827,10 @@ func (m *dbTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.U
 	}, nil
 }
 
+func (m *dbTaskMetaMgr) CanPauseSchedulerByKeyRange() bool {
+	return m.pd.CanPauseSchedulerByKeyRange()
+}
+
 // CheckAndFinishRestore check task meta and return whether to switch cluster to normal state and clean up the metadata
 // Return values: first boolean indicates whether switch back tidb cluster to normal state (restore schedulers, switch tikv to normal)
 // the second boolean indicates whether to clean up the metadata in tidb
@@ -854,10 +839,11 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 	if err != nil {
 		return false, false, errors.Trace(err)
 	}
+	//nolint: errcheck
 	defer conn.Close()
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	err = exec.Exec(ctx, "enable pessimistic transaction", "SET SESSION tidb_txn_mode = 'pessimistic';")
 	if err != nil {
@@ -902,7 +888,7 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 				allFinished = false
 				// check if other task still running
 				if state == taskStateNormal {
-					log.L().Info("unfinished task found", zap.Int64("task_id", taskID),
+					log.FromContext(ctx).Info("unfinished task found", zap.Int64("task_id", taskID),
 						zap.Stringer("status", status))
 					switchBack = false
 				}
@@ -936,7 +922,7 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 
 		return nil
 	})
-	log.L().Info("check all task finish status", zap.Bool("task_finished", finished),
+	log.FromContext(ctx).Info("check all task finish status", zap.Bool("task_finished", finished),
 		zap.Bool("all_finished", allFinished), zap.Bool("switch_back", switchBack))
 
 	return switchBack, allFinished, err
@@ -945,7 +931,7 @@ func (m *dbTaskMetaMgr) CheckAndFinishRestore(ctx context.Context, finished bool
 func (m *dbTaskMetaMgr) Cleanup(ctx context.Context) error {
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	// avoid override existing metadata if the meta is already inserted.
 	stmt := fmt.Sprintf("DROP TABLE %s;", m.tableName)
@@ -958,7 +944,7 @@ func (m *dbTaskMetaMgr) Cleanup(ctx context.Context) error {
 func (m *dbTaskMetaMgr) CleanupTask(ctx context.Context) error {
 	exec := &common.SQLWithRetry{
 		DB:     m.session,
-		Logger: log.L(),
+		Logger: log.FromContext(ctx),
 	}
 	stmt := fmt.Sprintf("DELETE FROM %s WHERE task_id = %d;", m.tableName, m.taskID)
 	err := exec.Exec(ctx, "clean up task", stmt)
@@ -970,14 +956,20 @@ func (m *dbTaskMetaMgr) Close() {
 }
 
 func (m *dbTaskMetaMgr) CleanupAllMetas(ctx context.Context) error {
-	return MaybeCleanupAllMetas(ctx, m.session, m.schemaName, true)
+	return MaybeCleanupAllMetas(ctx, log.FromContext(ctx), m.session, m.schemaName, true)
 }
 
 // MaybeCleanupAllMetas remove the meta schema if there is no unfinished tables
-func MaybeCleanupAllMetas(ctx context.Context, db *sql.DB, schemaName string, tableMetaExist bool) error {
+func MaybeCleanupAllMetas(
+	ctx context.Context,
+	logger log.Logger,
+	db *sql.DB,
+	schemaName string,
+	tableMetaExist bool,
+) error {
 	exec := &common.SQLWithRetry{
 		DB:     db,
-		Logger: log.L(),
+		Logger: logger,
 	}
 
 	// check if all tables are finished
@@ -988,7 +980,7 @@ func MaybeCleanupAllMetas(ctx context.Context, db *sql.DB, schemaName string, ta
 			return errors.Trace(err)
 		}
 		if cnt > 0 {
-			log.L().Warn("there are unfinished table in table meta table, cleanup skipped.")
+			logger.Warn("there are unfinished table in table meta table, cleanup skipped.")
 			return nil
 		}
 	}
@@ -1029,6 +1021,10 @@ func (m noopTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdutil.
 	return func(ctx context.Context) error {
 		return nil
 	}, nil
+}
+
+func (m noopTaskMetaMgr) CanPauseSchedulerByKeyRange() bool {
+	return false
 }
 
 func (m noopTaskMetaMgr) CheckTaskExist(ctx context.Context) (bool, error) {
@@ -1135,6 +1131,10 @@ func (m *singleTaskMetaMgr) CheckAndPausePdSchedulers(ctx context.Context) (pdut
 	return m.pd.RemoveSchedulers(ctx)
 }
 
+func (m *singleTaskMetaMgr) CanPauseSchedulerByKeyRange() bool {
+	return m.pd.CanPauseSchedulerByKeyRange()
+}
+
 func (m *singleTaskMetaMgr) CheckTaskExist(ctx context.Context) (bool, error) {
 	return m.initialized, nil
 }
@@ -1156,4 +1156,84 @@ func (m *singleTaskMetaMgr) CleanupAllMetas(ctx context.Context) error {
 }
 
 func (m *singleTaskMetaMgr) Close() {
+}
+
+func allocGlobalAutoID(ctx context.Context, n int64, r autoid.Requirement, dbID int64, tblInfo *model.TableInfo) (autoIDBase, autoIDMax int64, err error) {
+	allocators, err := getGlobalAutoIDAlloc(r, dbID, tblInfo)
+	if err != nil {
+		return 0, 0, err
+	}
+	// there might be 2 allocators when tblInfo.SepAutoInc is true, and in this case
+	// RowIDAllocType will be the last one.
+	// we return the value of last Alloc as autoIDBase and autoIDMax, i.e. the value
+	// either comes from RowIDAllocType or AutoRandomType.
+	for _, alloc := range allocators {
+		autoIDBase, autoIDMax, err = alloc.Alloc(ctx, uint64(n), 1, 1)
+		if err != nil {
+			return 0, 0, err
+		}
+	}
+	return
+}
+
+func rebaseGlobalAutoID(ctx context.Context, newBase int64, r autoid.Requirement, dbID int64, tblInfo *model.TableInfo) error {
+	allocators, err := getGlobalAutoIDAlloc(r, dbID, tblInfo)
+	if err != nil {
+		return err
+	}
+	for _, alloc := range allocators {
+		err = alloc.Rebase(ctx, newBase, false)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getGlobalAutoIDAlloc(r autoid.Requirement, dbID int64, tblInfo *model.TableInfo) ([]autoid.Allocator, error) {
+	if r == nil || r.Store() == nil {
+		return nil, errors.New("internal error: kv store should not be nil")
+	}
+	if dbID == 0 {
+		return nil, errors.New("internal error: dbID should not be 0")
+	}
+
+	// We don't need autoid cache here because we allocate all IDs at once.
+	// The argument for CustomAutoIncCacheOption is the cache step. Step 1 means no cache,
+	// but step 1 will enable an experimental feature, so we use step 2 here.
+	//
+	// See https://github.com/pingcap/tidb/issues/38442 for more details.
+	noCache := autoid.CustomAutoIncCacheOption(2)
+	tblVer := autoid.AllocOptionTableInfoVersion(tblInfo.Version)
+
+	hasRowID := common.TableHasAutoRowID(tblInfo)
+	hasAutoIncID := tblInfo.GetAutoIncrementColInfo() != nil
+	hasAutoRandID := tblInfo.ContainsAutoRandomBits()
+
+	// TiDB version <= 6.4.0 has some limitations for auto ID.
+	// 1. Auto increment ID and auto row ID are using the same RowID allocator.
+	//    See https://github.com/pingcap/tidb/issues/982.
+	// 2. Auto random column must be a clustered primary key. That is to say,
+	//    there is no implicit row ID for tables with auto random column.
+	// 3. There is at most one auto column in a table.
+	// Therefore, we assume there is only one auto column in a table and use RowID allocator if possible.
+	//
+	// Since TiDB 6.5.0, row ID and auto ID are using different allocators when tblInfo.SepAutoInc is true
+	switch {
+	case hasRowID || hasAutoIncID:
+		allocators := make([]autoid.Allocator, 0, 2)
+		if tblInfo.SepAutoInc() && hasAutoIncID {
+			allocators = append(allocators, autoid.NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(),
+				autoid.AutoIncrementType, noCache, tblVer))
+		}
+		// this allocator is NOT used when SepAutoInc=true and auto increment column is clustered.
+		allocators = append(allocators, autoid.NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(),
+			autoid.RowIDAllocType, noCache, tblVer))
+		return allocators, nil
+	case hasAutoRandID:
+		return []autoid.Allocator{autoid.NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(),
+			autoid.AutoRandomType, noCache, tblVer)}, nil
+	default:
+		return nil, errors.Errorf("internal error: table %s has no auto ID", tblInfo.Name)
+	}
 }

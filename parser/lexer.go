@@ -98,6 +98,7 @@ func (s *Scanner) reset(sql string) {
 	s.stmtStartPos = 0
 	s.inBangComment = false
 	s.lastKeyword = 0
+	s.identifierDot = false
 }
 
 func (s *Scanner) stmtText() string {
@@ -193,6 +194,30 @@ func (s *Scanner) getNextToken() int {
 	return tok
 }
 
+func (s *Scanner) getNextTwoTokens() (tok1 int, tok2 int) {
+	r := s.r
+	tok1, pos, lit := s.scan()
+	if tok1 == identifier {
+		tok1 = s.handleIdent(&yySymType{})
+	}
+	if tok1 == identifier {
+		if tmpToken := s.isTokenIdentifier(lit, pos.Offset); tmpToken != 0 {
+			tok1 = tmpToken
+		}
+	}
+	tok2, pos, lit = s.scan()
+	if tok2 == identifier {
+		tok2 = s.handleIdent(&yySymType{})
+	}
+	if tok2 == identifier {
+		if tmpToken := s.isTokenIdentifier(lit, pos.Offset); tmpToken != 0 {
+			tok2 = tmpToken
+		}
+	}
+	s.r = r
+	return tok1, tok2
+}
+
 // Lex returns a token and store the token value in v.
 // Scanner satisfies yyLexer interface.
 // 0 and invalid are special token id this function would return:
@@ -235,6 +260,26 @@ func (s *Scanner) Lex(v *yySymType) int {
 		s.lastScanOffset = pos.Offset
 		v.offset = pos.Offset
 		return asof
+	}
+	if tok == to {
+		tok1, tok2 := s.getNextTwoTokens()
+		if tok1 == timestampType && tok2 == stringLit {
+			_, pos, lit = s.scan()
+			v.ident = fmt.Sprintf("%s %s", v.ident, lit)
+			s.lastKeyword = toTimestamp
+			s.lastScanOffset = pos.Offset
+			v.offset = pos.Offset
+			return toTimestamp
+		}
+
+		if tok1 == tsoType && tok2 == intLit {
+			_, pos, lit = s.scan()
+			v.ident = fmt.Sprintf("%s %s", v.ident, lit)
+			s.lastKeyword = toTSO
+			s.lastScanOffset = pos.Offset
+			v.offset = pos.Offset
+			return toTSO
+		}
 	}
 
 	switch tok {
@@ -306,7 +351,7 @@ func NewScanner(s string) *Scanner {
 	return lexer
 }
 
-func (s *Scanner) handleIdent(lval *yySymType) int {
+func (*Scanner) handleIdent(lval *yySymType) int {
 	str := lval.ident
 	// A character string literal may have an optional character set introducer and COLLATE clause:
 	// [_charset_name]'string' [COLLATE collation_name]
@@ -478,7 +523,6 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 		}
 	case 'M': // '/*M' maybe MariaDB-specific comments
 		// no special treatment for now.
-		break
 
 	case '+': // '/*+' optimizer hints
 		// See https://dev.mysql.com/doc/refman/5.7/en/optimizer-hints.html
@@ -502,7 +546,6 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 		currentCharIsStar = true
 
 	default:
-		break
 	}
 
 	// standard C-like comment. read until we see '*/' then drop it.
@@ -514,9 +557,8 @@ func startWithSlash(s *Scanner) (tok int, pos Pos, lit string) {
 				if isOptimizerHint {
 					s.lastHintPos = pos
 					return hintComment, pos, s.r.data(&pos)
-				} else {
-					return s.scan()
 				}
+				return s.scan()
 			case '*':
 				currentCharIsStar = true
 				continue
@@ -574,7 +616,7 @@ func startWithAt(s *Scanner) (tok int, pos Pos, lit string) {
 			tok, lit = doubleAtIdentifier, s.r.data(&pos)
 		}
 	case invalid:
-		break
+		return
 	default:
 		tok = singleAtIdentifier
 	}
@@ -714,7 +756,7 @@ func (s *Scanner) scanString() (tok int, pos Pos, lit string) {
 }
 
 // handleEscape handles the case in scanString when previous char is '\'.
-func (s *Scanner) handleEscape(b byte, buf *bytes.Buffer) {
+func (*Scanner) handleEscape(b byte, buf *bytes.Buffer) {
 	var ch0 byte
 	/*
 		\" \' \\ \n \0 \b \Z \r \t ==> escape to one char
@@ -979,7 +1021,7 @@ func (r *reader) inc() {
 		r.p.Line++
 		r.p.Col = 0
 	}
-	r.p.Offset += 1
+	r.p.Offset++
 	r.p.Col++
 }
 

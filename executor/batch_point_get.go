@@ -22,8 +22,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/kvproto/pkg/metapb"
-	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -31,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	driver "github.com/pingcap/tidb/store/driver/txn"
+	"github.com/pingcap/tidb/table"
 	"github.com/pingcap/tidb/table/tables"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/types"
@@ -40,36 +39,32 @@ import (
 	"github.com/pingcap/tidb/util/logutil/consistency"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/rowcodec"
-	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
+	"golang.org/x/exp/slices"
 )
 
 // BatchPointGetExec executes a bunch of point select queries.
 type BatchPointGetExec struct {
 	baseExecutor
 
-	tblInfo          *model.TableInfo
-	idxInfo          *model.IndexInfo
-	handles          []kv.Handle
-	physIDs          []int64
-	partExpr         *tables.PartitionExpr
-	partPos          int
-	singlePart       bool
-	partTblID        int64
-	idxVals          [][]types.Datum
-	startTS          uint64
-	readReplicaScope string
-	isStaleness      bool
-	snapshotTS       uint64
-	txn              kv.Transaction
-	lock             bool
-	waitTime         int64
-	inited           uint32
-	values           [][]byte
-	index            int
-	rowDecoder       *rowcodec.ChunkDecoder
-	keepOrder        bool
-	desc             bool
-	batchGetter      kv.BatchGetter
+	tblInfo     *model.TableInfo
+	idxInfo     *model.IndexInfo
+	handles     []kv.Handle
+	physIDs     []int64
+	partExpr    *tables.PartitionExpr
+	partPos     int
+	singlePart  bool
+	partTblID   int64
+	idxVals     [][]types.Datum
+	txn         kv.Transaction
+	lock        bool
+	waitTime    int64
+	inited      uint32
+	values      [][]byte
+	index       int
+	rowDecoder  *rowcodec.ChunkDecoder
+	keepOrder   bool
+	desc        bool
+	batchGetter kv.BatchGetter
 
 	columns []*model.ColumnInfo
 	// virtualColumnIndex records all the indices of virtual columns and sort them in definition
@@ -79,9 +74,8 @@ type BatchPointGetExec struct {
 	// virtualColumnRetFieldTypes records the RetFieldTypes of virtual columns.
 	virtualColumnRetFieldTypes []*types.FieldType
 
-	snapshot   kv.Snapshot
-	stats      *runtimeStatsWithSnapshot
-	cacheTable kv.MemBuffer
+	snapshot kv.Snapshot
+	stats    *runtimeStatsWithSnapshot
 }
 
 // buildVirtualColumnInfo saves virtual column indices and sort them in definition order
@@ -97,75 +91,26 @@ func (e *BatchPointGetExec) buildVirtualColumnInfo() {
 
 // Open implements the Executor interface.
 func (e *BatchPointGetExec) Open(context.Context) error {
-	e.snapshotTS = e.startTS
 	sessVars := e.ctx.GetSessionVars()
 	txnCtx := sessVars.TxnCtx
-	stmtCtx := sessVars.StmtCtx
-	if e.lock {
-		e.snapshotTS = txnCtx.GetForUpdateTS()
-	}
 	txn, err := e.ctx.Txn(false)
 	if err != nil {
 		return err
 	}
 	e.txn = txn
-	var snapshot kv.Snapshot
-	if txn.Valid() && txnCtx.StartTS == txnCtx.GetForUpdateTS() && txnCtx.StartTS == e.snapshotTS {
-		// We can safely reuse the transaction snapshot if startTS is equal to forUpdateTS.
-		// The snapshot may contains cache that can reduce RPC call.
-		snapshot = txn.GetSnapshot()
-	} else {
-		snapshot = e.ctx.GetSnapshotWithTS(e.snapshotTS)
-	}
-	if e.ctx.GetSessionVars().StmtCtx.RCCheckTS {
-		snapshot.SetOption(kv.IsolationLevel, kv.RCCheckTS)
-	}
-	if e.cacheTable != nil {
-		snapshot = cacheTableSnapshot{snapshot, e.cacheTable}
-	}
-	if e.runtimeStats != nil {
-		snapshotStats := &txnsnapshot.SnapshotRuntimeStats{}
-		e.stats = &runtimeStatsWithSnapshot{
-			SnapshotRuntimeStats: snapshotStats,
-		}
-		snapshot.SetOption(kv.CollectRuntimeStats, snapshotStats)
-		stmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
-	}
-	replicaReadType := e.ctx.GetSessionVars().GetReplicaRead()
-	if replicaReadType.IsFollowerRead() && !e.ctx.GetSessionVars().StmtCtx.RCCheckTS {
-		snapshot.SetOption(kv.ReplicaRead, replicaReadType)
-	}
-	snapshot.SetOption(kv.TaskID, stmtCtx.TaskID)
-	snapshot.SetOption(kv.ReadReplicaScope, e.readReplicaScope)
-	snapshot.SetOption(kv.IsStalenessReadOnly, e.isStaleness)
-	failpoint.Inject("assertBatchPointReplicaOption", func(val failpoint.Value) {
-		assertScope := val.(string)
-		if replicaReadType.IsClosestRead() && assertScope != e.readReplicaScope {
-			panic("batch point get replica option fail")
-		}
-	})
 
-	if replicaReadType.IsClosestRead() && e.readReplicaScope != kv.GlobalTxnScope {
-		snapshot.SetOption(kv.MatchStoreLabels, []*metapb.StoreLabel{
-			{
-				Key:   placement.DCLabelKey,
-				Value: e.readReplicaScope,
-			},
-		})
-	}
-	setOptionForTopSQL(stmtCtx, snapshot)
-	var batchGetter kv.BatchGetter = snapshot
+	setOptionForTopSQL(e.ctx.GetSessionVars().StmtCtx, e.snapshot)
+	var batchGetter kv.BatchGetter = e.snapshot
 	if txn.Valid() {
 		lock := e.tblInfo.Lock
 		if e.lock {
-			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), &PessimisticLockCacheGetter{txnCtx: txnCtx}, snapshot)
+			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), &PessimisticLockCacheGetter{txnCtx: txnCtx}, e.snapshot)
 		} else if lock != nil && (lock.Tp == model.TableLockRead || lock.Tp == model.TableLockReadOnly) && e.ctx.GetSessionVars().EnablePointGetCache {
-			batchGetter = newCacheBatchGetter(e.ctx, e.tblInfo.ID, snapshot)
+			batchGetter = newCacheBatchGetter(e.ctx, e.tblInfo.ID, e.snapshot)
 		} else {
-			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), nil, snapshot)
+			batchGetter = driver.NewBufferBatchGetter(txn.GetMemBuffer(), nil, e.snapshot)
 		}
 	}
-	e.snapshot = snapshot
 	e.batchGetter = batchGetter
 	return nil
 }
@@ -214,6 +159,9 @@ func MockNewCacheTableSnapShot(snapshot kv.Snapshot, memBuffer kv.MemBuffer) *ca
 
 // Close implements the Executor interface.
 func (e *BatchPointGetExec) Close() error {
+	if e.runtimeStats != nil {
+		defer e.ctx.GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.id, e.stats)
+	}
 	if e.runtimeStats != nil && e.snapshot != nil {
 		e.snapshot.SetOption(kv.CollectRuntimeStats, nil)
 	}
@@ -246,7 +194,7 @@ func (e *BatchPointGetExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		e.index++
 	}
 
-	err := FillVirtualColumnValue(e.virtualColumnRetFieldTypes, e.virtualColumnIndex, e.schema, e.columns, e.ctx, req)
+	err := table.FillVirtualColumnValue(e.virtualColumnRetFieldTypes, e.virtualColumnIndex, e.schema.Columns, e.columns, e.ctx, req)
 	if err != nil {
 		return err
 	}
@@ -302,11 +250,11 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			toFetchIndexKeys = append(toFetchIndexKeys, idxKey)
 		}
 		if e.keepOrder {
-			sort.Slice(toFetchIndexKeys, func(i int, j int) bool {
+			slices.SortFunc(toFetchIndexKeys, func(i, j kv.Key) bool {
 				if e.desc {
-					return toFetchIndexKeys[i].Cmp(toFetchIndexKeys[j]) > 0
+					return i.Cmp(j) > 0
 				}
-				return toFetchIndexKeys[i].Cmp(toFetchIndexKeys[j]) < 0
+				return i.Cmp(j) < 0
 			})
 		}
 
@@ -370,12 +318,11 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			failpoint.InjectContext(ctx, "batchPointGetRepeatableReadTest-step2", nil)
 		})
 	} else if e.keepOrder {
-		less := func(i int, j int) bool {
+		less := func(i, j kv.Handle) bool {
 			if e.desc {
-				return e.handles[i].Compare(e.handles[j]) > 0
+				return i.Compare(j) > 0
 			}
-			return e.handles[i].Compare(e.handles[j]) < 0
-
+			return i.Compare(j) < 0
 		}
 		if e.tblInfo.PKIsHandle && mysql.HasUnsignedFlag(e.tblInfo.GetPkColInfo().GetFlag()) {
 			uintComparator := func(i, h kv.Handle) int {
@@ -392,14 +339,14 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 				}
 				return 0
 			}
-			less = func(i int, j int) bool {
+			less = func(i, j kv.Handle) bool {
 				if e.desc {
-					return uintComparator(e.handles[i], e.handles[j]) > 0
+					return uintComparator(i, j) > 0
 				}
-				return uintComparator(e.handles[i], e.handles[j]) < 0
+				return uintComparator(i, j) < 0
 			}
 		}
-		sort.Slice(e.handles, less)
+		slices.SortFunc(e.handles, less)
 	}
 
 	keys := make([]kv.Key, 0, len(e.handles))
@@ -445,24 +392,6 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		// Change the unique index LOCK into PUT record.
-		if len(indexKeys) > 0 {
-			if !e.txn.Valid() {
-				return kv.ErrInvalidTxn
-			}
-			txn, ok := e.txn.(interface {
-				ChangeLockIntoPut(context.Context, kv.Key, []byte) bool
-			})
-			if ok {
-				for _, idxKey := range indexKeys {
-					handleVal := handleVals[string(idxKey)]
-					if len(handleVal) == 0 {
-						continue
-					}
-					txn.ChangeLockIntoPut(ctx, idxKey, handleVal)
-				}
-			}
-		}
 	}
 	// Fetch all values.
 	values, err = batchGetter.BatchGet(ctx, keys)
@@ -474,7 +403,6 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 	if e.lock && rc {
 		existKeys = make([]kv.Key, 0, 2*len(values))
 	}
-	changeLockToPutIdxKeys := make([]kv.Key, 0, len(indexKeys))
 	e.values = make([][]byte, 0, len(values))
 	for i, key := range keys {
 		val := values[string(key)]
@@ -509,7 +437,6 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 			// lock primary key for clustered index table is redundant
 			if len(indexKeys) != 0 {
 				existKeys = append(existKeys, indexKeys[i])
-				changeLockToPutIdxKeys = append(changeLockToPutIdxKeys, indexKeys[i])
 			}
 		}
 	}
@@ -519,35 +446,22 @@ func (e *BatchPointGetExec) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(changeLockToPutIdxKeys) > 0 {
-			if !e.txn.Valid() {
-				return kv.ErrInvalidTxn
-			}
-			for _, idxKey := range changeLockToPutIdxKeys {
-				membuf := e.txn.GetMemBuffer()
-				handleVal := handleVals[string(idxKey)]
-				if len(handleVal) == 0 {
-					return kv.ErrNotExist
-				}
-				err = membuf.Set(idxKey, handleVal)
-				if err != nil {
-					return err
-				}
-			}
-		}
 	}
 	e.handles = handles
 	return nil
 }
 
 // LockKeys locks the keys for pessimistic transaction.
-func LockKeys(ctx context.Context, seCtx sessionctx.Context, lockWaitTime int64, keys ...kv.Key) error {
-	txnCtx := seCtx.GetSessionVars().TxnCtx
-	lctx := newLockCtx(seCtx.GetSessionVars(), lockWaitTime, len(keys))
+func LockKeys(ctx context.Context, sctx sessionctx.Context, lockWaitTime int64, keys ...kv.Key) error {
+	txnCtx := sctx.GetSessionVars().TxnCtx
+	lctx, err := newLockCtx(sctx, lockWaitTime, len(keys))
+	if err != nil {
+		return err
+	}
 	if txnCtx.IsPessimistic {
 		lctx.InitReturnValues(len(keys))
 	}
-	err := doLockKeys(ctx, seCtx, lctx, keys...)
+	err = doLockKeys(ctx, sctx, lctx, keys...)
 	if err != nil {
 		return err
 	}

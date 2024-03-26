@@ -100,7 +100,7 @@ func (ec *ExecutableChecker) DropTable(context context.Context, tableName string
 
 // Close closes the ExecutableChecker
 func (ec *ExecutableChecker) Close() error {
-	if !ec.isClosed.CAS(false, true) {
+	if !ec.isClosed.CompareAndSwap(false, true) {
 		return errors.New("ExecutableChecker is already closed")
 	}
 	ec.session.Close()
@@ -109,7 +109,6 @@ func (ec *ExecutableChecker) Close() error {
 
 // Parse parses a query and returns an ast.StmtNode.
 func (ec *ExecutableChecker) Parse(sql string) (stmt ast.StmtNode, err error) {
-
 	charset, collation := ec.session.GetSessionVars().GetCharsetInfo()
 	stmt, err = ec.parser.ParseOneStmt(sql, charset, collation)
 	return

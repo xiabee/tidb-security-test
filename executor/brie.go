@@ -15,7 +15,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"strings"
 	"sync"
@@ -23,8 +22,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	backuppb "github.com/pingcap/kvproto/pkg/brpb"
-	"github.com/pingcap/kvproto/pkg/encryptionpb"
+	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/task"
@@ -33,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -77,6 +74,16 @@ func (p *brieTaskProgress) Inc() {
 	atomic.AddInt64(&p.current, 1)
 }
 
+// IncBy implements glue.Progress
+func (p *brieTaskProgress) IncBy(cnt int64) {
+	atomic.AddInt64(&p.current, cnt)
+}
+
+// GetCurrent implements glue.Progress
+func (p *brieTaskProgress) GetCurrent() int64 {
+	return atomic.LoadInt64(&p.current)
+}
+
 // Close implements glue.Progress
 func (p *brieTaskProgress) Close() {
 	p.lock.Lock()
@@ -92,6 +99,7 @@ type brieTaskInfo struct {
 	storage     string
 	connID      uint64
 	backupTS    uint64
+	restoreTS   uint64
 	archiveSize uint64
 	message     string
 }
@@ -208,21 +216,15 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 	}
 
 	tidbCfg := config.GetGlobalConfig()
-	cfg := task.Config{
-		TLS: task.TLSConfig{
-			CA:   tidbCfg.Security.ClusterSSLCA,
-			Cert: tidbCfg.Security.ClusterSSLCert,
-			Key:  tidbCfg.Security.ClusterSSLKey,
-		},
-		PD:          strings.Split(tidbCfg.Path, ","),
-		Concurrency: 4,
-		Checksum:    true,
-		SendCreds:   true,
-		LogProgress: true,
-		CipherInfo: backuppb.CipherInfo{
-			CipherType: encryptionpb.EncryptionMethod_PLAINTEXT,
-		},
+	tlsCfg := task.TLSConfig{
+		CA:   tidbCfg.Security.ClusterSSLCA,
+		Cert: tidbCfg.Security.ClusterSSLCert,
+		Key:  tidbCfg.Security.ClusterSSLKey,
 	}
+	pds := strings.Split(tidbCfg.Path, ",")
+	cfg := task.DefaultConfig()
+	cfg.PD = pds
+	cfg.TLS = tlsCfg
 
 	storageURL, err := storage.ParseRawURL(s.Storage)
 	if err != nil {
@@ -248,7 +250,6 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 			return nil
 		}
 	default:
-		break
 	}
 
 	if tidbCfg.Store != "tikv" {
@@ -291,7 +292,9 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 
 	switch s.Kind {
 	case ast.BRIEKindBackup:
-		e.backupCfg = &task.BackupConfig{Config: cfg}
+		bcfg := task.DefaultBackupConfig()
+		bcfg.Config = cfg
+		e.backupCfg = &bcfg
 
 		for _, opt := range s.Options {
 			switch opt.Tp {
@@ -319,7 +322,9 @@ func (b *executorBuilder) buildBRIE(s *ast.BRIEStmt, schema *expression.Schema) 
 		}
 
 	case ast.BRIEKindRestore:
-		e.restoreCfg = &task.RestoreConfig{Config: cfg}
+		rcfg := task.DefaultRestoreConfig()
+		rcfg.Config = cfg
+		e.restoreCfg = &rcfg
 		for _, opt := range s.Options {
 			switch opt.Tp {
 			case ast.BRIEOptionOnline:
@@ -383,7 +388,7 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	defer bq.releaseTask()
 
 	e.info.execTime = types.CurrentTime(mysql.TypeDatetime)
-	glue := &tidbGlueSession{se: e.ctx, progress: progress, info: e.info}
+	glue := &tidbGlue{se: e.ctx, progress: progress, info: e.info}
 
 	switch e.info.kind {
 	case ast.BRIEKindBackup:
@@ -402,9 +407,17 @@ func (e *BRIEExec) Next(ctx context.Context, req *chunk.Chunk) error {
 
 	req.AppendString(0, e.info.storage)
 	req.AppendUint64(1, e.info.archiveSize)
-	req.AppendUint64(2, e.info.backupTS)
-	req.AppendTime(3, e.info.queueTime)
-	req.AppendTime(4, e.info.execTime)
+	switch e.info.kind {
+	case ast.BRIEKindBackup:
+		req.AppendUint64(2, e.info.backupTS)
+		req.AppendTime(3, e.info.queueTime)
+		req.AppendTime(4, e.info.execTime)
+	case ast.BRIEKindRestore:
+		req.AppendUint64(2, e.info.backupTS)
+		req.AppendUint64(3, e.info.restoreTS)
+		req.AppendTime(4, e.info.queueTime)
+		req.AppendTime(5, e.info.execTime)
+	}
 	e.info = nil
 	return nil
 }
@@ -442,104 +455,39 @@ func (e *ShowExec) fetchShowBRIE(kind ast.BRIEKind) error {
 	return nil
 }
 
-type tidbGlueSession struct {
+type tidbGlue struct {
+	// the session context of the brie task
 	se       sessionctx.Context
 	progress *brieTaskProgress
 	info     *brieTaskInfo
 }
 
-// BootstrapSession implements glue.Glue
-func (gs *tidbGlueSession) GetDomain(store kv.Storage) (*domain.Domain, error) {
+// GetDomain implements glue.Glue
+func (gs *tidbGlue) GetDomain(_ kv.Storage) (*domain.Domain, error) {
 	return domain.GetDomain(gs.se), nil
 }
 
 // CreateSession implements glue.Glue
-func (gs *tidbGlueSession) CreateSession(store kv.Storage) (glue.Session, error) {
-	return gs, nil
-}
-
-// Execute implements glue.Session
-// These queries execute without privilege checking, since the calling statements
-// such as BACKUP and RESTORE have already been privilege checked.
-// NOTE: Maybe drain the restult too? See `gluetidb.tidbSession.ExecuteInternal` for more details.
-func (gs *tidbGlueSession) Execute(ctx context.Context, sql string) error {
-	_, _, err := gs.se.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(ctx, nil, sql)
-	return err
-}
-
-func (gs *tidbGlueSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
-	exec := gs.se.(sqlexec.SQLExecutor)
-	_, err := exec.ExecuteInternal(ctx, sql, args...)
-	return err
-}
-
-// CreateDatabase implements glue.Session
-func (gs *tidbGlueSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
-	d := domain.GetDomain(gs.se).DDL()
-	// 512 is defaultCapOfCreateTable.
-	result := bytes.NewBuffer(make([]byte, 0, 512))
-	if err := ConstructResultOfShowCreateDatabase(gs.se, schema, true, result); err != nil {
-		return err
+func (gs *tidbGlue) CreateSession(_ kv.Storage) (glue.Session, error) {
+	newSCtx, err := CreateSession(gs.se)
+	if err != nil {
+		return nil, err
 	}
-	gs.se.SetValue(sessionctx.QueryString, result.String())
-	schema = schema.Clone()
-	if len(schema.Charset) == 0 {
-		schema.Charset = mysql.DefaultCharset
-	}
-	return d.CreateSchemaWithInfo(gs.se, schema, ddl.OnExistIgnore)
-}
-
-// CreateTable implements glue.Session
-func (gs *tidbGlueSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo) error {
-	d := domain.GetDomain(gs.se).DDL()
-
-	// 512 is defaultCapOfCreateTable.
-	result := bytes.NewBuffer(make([]byte, 0, 512))
-	if err := ConstructResultOfShowCreateTable(gs.se, table, autoid.Allocators{}, result); err != nil {
-		return err
-	}
-	gs.se.SetValue(sessionctx.QueryString, result.String())
-
-	// Clone() does not clone partitions yet :(
-	table = table.Clone()
-	if table.Partition != nil {
-		newPartition := *table.Partition
-		newPartition.Definitions = append([]model.PartitionDefinition{}, table.Partition.Definitions...)
-		table.Partition = &newPartition
-	}
-
-	return d.CreateTableWithInfo(gs.se, dbName, table, ddl.OnExistIgnore)
-}
-
-// CreatePlacementPolicy implements glue.Session
-func (gs *tidbGlueSession) CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error {
-	gs.se.SetValue(sessionctx.QueryString, ConstructResultOfShowCreatePlacementPolicy(policy))
-	d := domain.GetDomain(gs.se).DDL()
-	// the default behaviour is ignoring duplicated policy during restore.
-	return d.CreatePlacementPolicyWithInfo(gs.se, policy, ddl.OnExistIgnore)
-}
-
-// Close implements glue.Session
-func (gs *tidbGlueSession) Close() {
-}
-
-// GetGlobalVariables implements glue.Session.
-func (gs *tidbGlueSession) GetGlobalVariable(name string) (string, error) {
-	return gs.se.GetSessionVars().GlobalVarsAccessor.GetTiDBTableValue(name)
+	return &tidbGlueSession{se: newSCtx}, nil
 }
 
 // Open implements glue.Glue
-func (gs *tidbGlueSession) Open(string, pd.SecurityOption) (kv.Storage, error) {
+func (gs *tidbGlue) Open(string, pd.SecurityOption) (kv.Storage, error) {
 	return gs.se.GetStore(), nil
 }
 
 // OwnsStorage implements glue.Glue
-func (gs *tidbGlueSession) OwnsStorage() bool {
+func (*tidbGlue) OwnsStorage() bool {
 	return false
 }
 
 // StartProgress implements glue.Glue
-func (gs *tidbGlueSession) StartProgress(ctx context.Context, cmdName string, total int64, redirectLog bool) glue.Progress {
+func (gs *tidbGlue) StartProgress(_ context.Context, cmdName string, total int64, _ bool) glue.Progress {
 	gs.progress.lock.Lock()
 	gs.progress.cmd = cmdName
 	gs.progress.total = total
@@ -549,21 +497,96 @@ func (gs *tidbGlueSession) StartProgress(ctx context.Context, cmdName string, to
 }
 
 // Record implements glue.Glue
-func (gs *tidbGlueSession) Record(name string, value uint64) {
+func (gs *tidbGlue) Record(name string, value uint64) {
 	switch name {
 	case "BackupTS":
 		gs.info.backupTS = value
+	case "RestoreTS":
+		gs.info.restoreTS = value
 	case "Size":
 		gs.info.archiveSize = value
 	}
 }
 
-func (gs *tidbGlueSession) GetVersion() string {
+func (*tidbGlue) GetVersion() string {
 	return "TiDB\n" + printer.GetTiDBInfo()
 }
 
 // UseOneShotSession implements glue.Glue
-func (gs *tidbGlueSession) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(se glue.Session) error) error {
-	// in SQL backup. we don't need to close domain.
-	return fn(gs)
+func (gs *tidbGlue) UseOneShotSession(_ kv.Storage, _ bool, fn func(se glue.Session) error) error {
+	// In SQL backup, we don't need to close domain,
+	// but need to create an new session.
+	newSCtx, err := CreateSession(gs.se)
+	if err != nil {
+		return err
+	}
+	glueSession := &tidbGlueSession{se: newSCtx}
+	defer func() {
+		CloseSession(newSCtx)
+		log.Info("one shot session from brie closed")
+	}()
+	return fn(glueSession)
+}
+
+type tidbGlueSession struct {
+	// the session context of the brie task's subtask, such as `CREATE TABLE`.
+	se sessionctx.Context
+}
+
+// Execute implements glue.Session
+// These queries execute without privilege checking, since the calling statements
+// such as BACKUP and RESTORE have already been privilege checked.
+// NOTE: Maybe drain the restult too? See `gluetidb.tidbSession.ExecuteInternal` for more details.
+func (gs *tidbGlueSession) Execute(ctx context.Context, sql string) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
+	_, _, err := gs.se.(sqlexec.RestrictedSQLExecutor).ExecRestrictedSQL(ctx, nil, sql)
+	return err
+}
+
+func (gs *tidbGlueSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
+	exec := gs.se.(sqlexec.SQLExecutor)
+	_, err := exec.ExecuteInternal(ctx, sql, args...)
+	return err
+}
+
+// CreateDatabase implements glue.Session
+func (gs *tidbGlueSession) CreateDatabase(_ context.Context, schema *model.DBInfo) error {
+	return BRIECreateDatabase(gs.se, schema, "")
+}
+
+// CreateTable implements glue.Session
+func (gs *tidbGlueSession) CreateTable(_ context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+	return BRIECreateTable(gs.se, dbName, table, "", cs...)
+}
+
+// CreateTables implements glue.BatchCreateTableSession.
+func (gs *tidbGlueSession) CreateTables(_ context.Context,
+	tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+	return BRIECreateTables(gs.se, tables, "", cs...)
+}
+
+// CreatePlacementPolicy implements glue.Session
+func (gs *tidbGlueSession) CreatePlacementPolicy(_ context.Context, policy *model.PolicyInfo) error {
+	originQueryString := gs.se.Value(sessionctx.QueryString)
+	defer gs.se.SetValue(sessionctx.QueryString, originQueryString)
+	gs.se.SetValue(sessionctx.QueryString, ConstructResultOfShowCreatePlacementPolicy(policy))
+	d := domain.GetDomain(gs.se).DDL()
+	// the default behaviour is ignoring duplicated policy during restore.
+	return d.CreatePlacementPolicyWithInfo(gs.se, policy, ddl.OnExistIgnore)
+}
+
+// Close implements glue.Session
+func (gs *tidbGlueSession) Close() {
+	CloseSession(gs.se)
+}
+
+// GetGlobalVariables implements glue.Session.
+func (gs *tidbGlueSession) GetGlobalVariable(name string) (string, error) {
+	return gs.se.GetSessionVars().GlobalVarsAccessor.GetTiDBTableValue(name)
+}
+
+// GetSessionCtx implements glue.Glue
+func (gs *tidbGlueSession) GetSessionCtx() sessionctx.Context {
+	return gs.se
 }

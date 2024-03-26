@@ -16,9 +16,13 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
+	"github.com/pingcap/tidb/meta/autoid"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/store/mockstore"
 	tmock "github.com/pingcap/tidb/util/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -30,56 +34,85 @@ type metaMgrSuite struct {
 	checksumMgr *testChecksumMgr
 }
 
-func newTableRestore(t *testing.T) *TableRestore {
+func newTableRestore(t *testing.T,
+	db, table string,
+	dbID, tableID int64,
+	createTableSQL string, kvStore kv.Storage,
+) *TableRestore {
 	p := parser.New()
 	se := tmock.NewContext()
 
-	node, err := p.ParseOneStmt("CREATE TABLE `t1` (`c1` varchar(5) NOT NULL)", "utf8mb4", "utf8mb4_bin")
+	node, err := p.ParseOneStmt(createTableSQL, "utf8mb4", "utf8mb4_bin")
 	require.NoError(t, err)
-	tableInfo, err := ddl.MockTableInfo(se, node.(*ast.CreateTableStmt), int64(1))
+	tableInfo, err := ddl.MockTableInfo(se, node.(*ast.CreateTableStmt), tableID)
 	require.NoError(t, err)
 	tableInfo.State = model.StatePublic
 
-	schema := "test"
-	tb := "t1"
 	ti := &checkpoints.TidbTableInfo{
 		ID:   tableInfo.ID,
-		DB:   schema,
-		Name: tb,
+		DB:   db,
+		Name: table,
 		Core: tableInfo,
 	}
+	dbInfo := &checkpoints.TidbDBInfo{
+		ID:   dbID,
+		Name: db,
+		Tables: map[string]*checkpoints.TidbTableInfo{
+			table: ti,
+		},
+	}
 
-	tableName := common.UniqueTable(schema, tb)
+	ctx := kv.WithInternalSourceType(context.Background(), "test")
+	err = kv.RunInNewTxn(ctx, kvStore, false, func(ctx context.Context, txn kv.Transaction) error {
+		m := meta.NewMeta(txn)
+		if err := m.CreateDatabase(&model.DBInfo{ID: dbInfo.ID}); err != nil && !errors.ErrorEqual(err, meta.ErrDBExists) {
+			return err
+		}
+		return m.CreateTableOrView(dbInfo.ID, ti.Core)
+	})
+	require.NoError(t, err)
+
+	tableName := common.UniqueTable(db, table)
 	logger := log.With(zap.String("table", tableName))
+
 	return &TableRestore{
+		dbInfo:    dbInfo,
 		tableName: tableName,
 		tableInfo: ti,
+		kvStore:   kvStore,
 		logger:    logger,
 	}
 }
 
-func newMetaMgrSuite(t *testing.T) (*metaMgrSuite, func()) {
+func newMetaMgrSuite(t *testing.T) *metaMgrSuite {
 	db, m, err := sqlmock.New()
+	require.NoError(t, err)
+
+	storePath := t.TempDir()
+	kvStore, err := mockstore.NewMockStore(mockstore.WithPath(storePath))
 	require.NoError(t, err)
 
 	var s metaMgrSuite
 	s.mgr = &dbTableMetaMgr{
-		session:      db,
-		taskID:       1,
-		tr:           newTableRestore(t),
+		session: db,
+		taskID:  1,
+		tr: newTableRestore(t, "test", "t1", 1, 1,
+			"CREATE TABLE `t1` (`c1` varchar(5) NOT NULL)", kvStore),
 		tableName:    common.UniqueTable("test", TableMetaTableName),
 		needChecksum: true,
 	}
 	s.mockDB = m
 	s.checksumMgr = &testChecksumMgr{}
-	return &s, func() {
+
+	t.Cleanup(func() {
 		require.NoError(t, s.mockDB.ExpectationsWereMet())
-	}
+		require.NoError(t, kvStore.Close())
+	})
+	return &s
 }
 
 func TestAllocTableRowIDsSingleTable(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
@@ -99,8 +132,7 @@ func TestAllocTableRowIDsSingleTable(t *testing.T) {
 }
 
 func TestAllocTableRowIDsSingleTableAutoIDNot0(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
 	rows := [][]driver.Value{
@@ -120,8 +152,7 @@ func TestAllocTableRowIDsSingleTableAutoIDNot0(t *testing.T) {
 }
 
 func TestAllocTableRowIDsSingleTableContainsData(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
@@ -141,8 +172,7 @@ func TestAllocTableRowIDsSingleTableContainsData(t *testing.T) {
 }
 
 func TestAllocTableRowIDsSingleTableSkipChecksum(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	s.mgr.needChecksum = false
 	defer func() {
@@ -167,8 +197,7 @@ func TestAllocTableRowIDsSingleTableSkipChecksum(t *testing.T) {
 }
 
 func TestAllocTableRowIDsAllocated(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
@@ -186,8 +215,7 @@ func TestAllocTableRowIDsAllocated(t *testing.T) {
 }
 
 func TestAllocTableRowIDsFinished(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
@@ -205,8 +233,7 @@ func TestAllocTableRowIDsFinished(t *testing.T) {
 }
 
 func TestAllocTableRowIDsMultiTasksInit(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
 	rows := [][]driver.Value{
@@ -226,8 +253,7 @@ func TestAllocTableRowIDsMultiTasksInit(t *testing.T) {
 }
 
 func TestAllocTableRowIDsMultiTasksAllocated(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 
 	rows := [][]driver.Value{
@@ -246,8 +272,7 @@ func TestAllocTableRowIDsMultiTasksAllocated(t *testing.T) {
 }
 
 func TestAllocTableRowIDsRetryOnTableInChecksum(t *testing.T) {
-	s, clean := newMetaMgrSuite(t)
-	defer clean()
+	s := newMetaMgrSuite(t)
 
 	ctx := context.WithValue(context.Background(), &checksumManagerKey, s.checksumMgr)
 	s.mockDB.ExpectExec("SET SESSION tidb_txn_mode = 'pessimistic';").
@@ -297,10 +322,11 @@ func (s *metaMgrSuite) prepareMockInner(rowsVal [][]driver.Value, nextRowID *int
 	s.mockDB.ExpectQuery("\\QSELECT task_id, row_id_base, row_id_max, total_kvs_base, total_bytes_base, checksum_base, status from `test`.`table_meta` WHERE table_id = ? FOR UPDATE\\E").
 		WithArgs(int64(1)).
 		WillReturnRows(rows)
+
 	if nextRowID != nil {
-		s.mockDB.ExpectQuery("SHOW TABLE `test`.`t1` NEXT_ROW_ID").
-			WillReturnRows(sqlmock.NewRows([]string{"DB_NAME", "TABLE_NAME", "COLUMN_NAME", "NEXT_GLOBAL_ROW_ID", "ID_TYPE"}).
-				AddRow("test", "t1", "_tidb_rowid", *nextRowID, "AUTO_INCREMENT"))
+		allocs := autoid.NewAllocatorsFromTblInfo(s.mgr.tr, s.mgr.tr.dbInfo.ID, s.mgr.tr.tableInfo.Core)
+		alloc := allocs.Get(autoid.RowIDAllocType)
+		alloc.ForceRebase(*nextRowID - 1)
 	}
 
 	if len(updateArgs) > 0 {
@@ -392,7 +418,6 @@ func TestCheckTasksExclusively(t *testing.T) {
 		return newTasks, nil
 	})
 	require.NoError(t, err)
-
 }
 
 type testChecksumMgr struct {
@@ -428,4 +453,144 @@ func TestSingleTaskMetaMgr(t *testing.T) {
 		return nil, nil
 	})
 	require.NoError(t, err)
+}
+
+func newTableInfo2(t *testing.T,
+	dbID, tableID int64,
+	createTableSql string, kvStore kv.Storage,
+) *model.TableInfo {
+	p := parser.New()
+	se := tmock.NewContext()
+
+	node, err := p.ParseOneStmt(createTableSql, "utf8mb4", "utf8mb4_bin")
+	require.NoError(t, err)
+	tableInfo, err := ddl.MockTableInfo(se, node.(*ast.CreateTableStmt), tableID)
+	require.NoError(t, err)
+	tableInfo.State = model.StatePublic
+
+	ctx := kv.WithInternalSourceType(context.Background(), "test")
+	err = kv.RunInNewTxn(ctx, kvStore, false, func(ctx context.Context, txn kv.Transaction) error {
+		m := meta.NewMeta(txn)
+		if err := m.CreateDatabase(&model.DBInfo{ID: dbID}); err != nil && !errors.ErrorEqual(err, meta.ErrDBExists) {
+			return err
+		}
+		return m.CreateTableOrView(dbID, tableInfo)
+	})
+	require.NoError(t, err)
+	return tableInfo
+}
+
+type mockRequirement struct {
+	kv.Storage
+}
+
+func (r mockRequirement) Store() kv.Storage {
+	return r.Storage
+}
+
+func (r mockRequirement) AutoIDClient() *autoid.ClientDiscover {
+	return nil
+}
+
+func TestAllocGlobalAutoID(t *testing.T) {
+	storePath := t.TempDir()
+	kvStore, err := mockstore.NewMockStore(mockstore.WithPath(storePath))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, kvStore.Close())
+	})
+
+	cases := []struct {
+		tableID              int64
+		createTableSQL       string
+		expectErrStr         string
+		expectAllocatorTypes []autoid.AllocatorType
+	}{
+		// autoID, autoIncrID = false, false
+		{
+			tableID:              11,
+			createTableSQL:       "create table t11 (a int primary key clustered)",
+			expectErrStr:         "has no auto ID",
+			expectAllocatorTypes: nil,
+		},
+		{
+			tableID:              12,
+			createTableSQL:       "create table t12 (a int primary key clustered) AUTO_ID_CACHE 1",
+			expectErrStr:         "has no auto ID",
+			expectAllocatorTypes: nil,
+		},
+		// autoID, autoIncrID = true, false
+		{
+			tableID:              21,
+			createTableSQL:       "create table t21 (a int)",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.RowIDAllocType},
+		},
+		{
+			tableID:              22,
+			createTableSQL:       "create table t22 (a int) AUTO_ID_CACHE 1",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.RowIDAllocType},
+		},
+		// autoID, autoIncrID = false, true
+		{
+			tableID:              31,
+			createTableSQL:       "create table t31 (a int primary key clustered auto_increment)",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.RowIDAllocType},
+		},
+		{
+			tableID:              32,
+			createTableSQL:       "create table t32 (a int primary key clustered auto_increment) AUTO_ID_CACHE 1",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.AutoIncrementType, autoid.RowIDAllocType},
+		},
+		// autoID, autoIncrID = true, true
+		{
+			tableID:              41,
+			createTableSQL:       "create table t41 (a int primary key nonclustered auto_increment)",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.RowIDAllocType},
+		},
+		{
+			tableID:              42,
+			createTableSQL:       "create table t42 (a int primary key nonclustered auto_increment) AUTO_ID_CACHE 1",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.AutoIncrementType, autoid.RowIDAllocType},
+		},
+		// autoRandomID
+		{
+			tableID:              51,
+			createTableSQL:       "create table t51 (a bigint primary key auto_random)",
+			expectErrStr:         "",
+			expectAllocatorTypes: []autoid.AllocatorType{autoid.AutoRandomType},
+		},
+	}
+	ctx := context.Background()
+	for _, c := range cases {
+		ti := newTableInfo2(t, 1, c.tableID, c.createTableSQL, kvStore)
+		allocators, err := getGlobalAutoIDAlloc(mockRequirement{kvStore}, 1, ti)
+		if c.expectErrStr == "" {
+			require.NoError(t, err, c.tableID)
+			require.NoError(t, rebaseGlobalAutoID(ctx, 123, mockRequirement{kvStore}, 1, ti))
+			base, idMax, err := allocGlobalAutoID(ctx, 100, mockRequirement{kvStore}, 1, ti)
+			require.NoError(t, err, c.tableID)
+			require.Equal(t, int64(123), base, c.tableID)
+			require.Equal(t, int64(223), idMax, c.tableID)
+			// all allocators are rebased and allocated
+			for _, alloc := range allocators {
+				base2, max2, err := alloc.Alloc(ctx, 100, 1, 1)
+				require.NoError(t, err, c.tableID)
+				require.Equal(t, int64(223), base2, c.tableID)
+				require.Equal(t, int64(323), max2, c.tableID)
+			}
+		} else {
+			require.ErrorContains(t, err, c.expectErrStr, c.tableID)
+		}
+		var allocatorTypes []autoid.AllocatorType
+		for _, alloc := range allocators {
+			allocatorTypes = append(allocatorTypes, alloc.GetType())
+		}
+		require.Equal(t, c.expectAllocatorTypes, allocatorTypes, c.tableID)
+	}
 }

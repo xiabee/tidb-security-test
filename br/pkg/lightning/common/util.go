@@ -36,7 +36,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	tmysql "github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/table/tables"
 	"go.uber.org/zap"
 )
@@ -302,7 +301,7 @@ func InterpolateMySQLString(s string) string {
 }
 
 // TableExists return whether table with specified name exists in target db
-func TableExists(ctx context.Context, db *sql.DB, schema, table string) (bool, error) {
+func TableExists(ctx context.Context, db utils.QueryExecutor, schema, table string) (bool, error) {
 	query := "SELECT 1 from INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"
 	var exist string
 	err := db.QueryRowContext(ctx, query, schema, table).Scan(&exist)
@@ -313,6 +312,21 @@ func TableExists(ctx context.Context, db *sql.DB, schema, table string) (bool, e
 		return false, nil
 	default:
 		return false, errors.Annotatef(err, "check table exists failed")
+	}
+}
+
+// SchemaExists return whether schema with specified name exists.
+func SchemaExists(ctx context.Context, db utils.QueryExecutor, schema string) (bool, error) {
+	query := "SELECT 1 from INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = ?"
+	var exist string
+	err := db.QueryRowContext(ctx, query, schema).Scan(&exist)
+	switch {
+	case err == nil:
+		return true, nil
+	case err == sql.ErrNoRows:
+		return false, nil
+	default:
+		return false, errors.Annotatef(err, "check schema exists failed")
 	}
 }
 
@@ -378,6 +392,11 @@ func TableHasAutoRowID(info *model.TableInfo) bool {
 	return !info.PKIsHandle && !info.IsCommonHandle
 }
 
+// TableHasAutoID return whether table has auto generated id.
+func TableHasAutoID(info *model.TableInfo) bool {
+	return TableHasAutoRowID(info) || info.GetAutoIncrementColInfo() != nil || info.ContainsAutoRandomBits()
+}
+
 // StringSliceEqual checks if two string slices are equal.
 func StringSliceEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -408,46 +427,4 @@ func GetAutoRandomColumn(tblInfo *model.TableInfo) *model.ColumnInfo {
 		return tblInfo.Columns[offset]
 	}
 	return nil
-}
-
-// GetBackoffWeightFromDB gets the backoff weight from database.
-func GetBackoffWeightFromDB(ctx context.Context, db *sql.DB) (int, error) {
-	val, err := getSessionVariable(ctx, db, variable.TiDBBackOffWeight)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(val)
-}
-
-// copy from dbutil to avoid import cycle
-func getSessionVariable(ctx context.Context, db *sql.DB, variable string) (value string, err error) {
-	query := fmt.Sprintf("SHOW VARIABLES LIKE '%s'", variable)
-	rows, err := db.QueryContext(ctx, query)
-
-	if err != nil {
-		return "", errors.Trace(err)
-	}
-	defer rows.Close()
-
-	// Show an example.
-	/*
-		mysql> SHOW VARIABLES LIKE "binlog_format";
-		+---------------+-------+
-		| Variable_name | Value |
-		+---------------+-------+
-		| binlog_format | ROW   |
-		+---------------+-------+
-	*/
-
-	for rows.Next() {
-		if err = rows.Scan(&variable, &value); err != nil {
-			return "", errors.Trace(err)
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return "", errors.Trace(err)
-	}
-
-	return value, nil
 }

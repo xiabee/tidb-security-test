@@ -31,6 +31,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	RunInGoTestChan = make(chan struct{})
 	testsetup.SetupForCommonTest()
 
 	RunInGoTest = true // flag for NewServer to known it is running in test environment
@@ -58,6 +59,7 @@ func TestMain(m *testing.M) {
 
 	opts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
+		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 		goleak.IgnoreTopFunction("time.Sleep"),
 		goleak.IgnoreTopFunction("database/sql.(*Tx).awaitDone"),
 		goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),

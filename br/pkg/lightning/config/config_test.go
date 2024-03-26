@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	"github.com/stretchr/testify/require"
 )
@@ -521,7 +522,7 @@ func TestInvalidTOML(t *testing.T) {
 		delimiter = '\'
 		backslash-escape = true
 	`))
-	require.EqualError(t, err, "Near line 0 (last key parsed ''): bare keys cannot contain '['")
+	require.EqualError(t, err, "toml: line 2: expected '.' or '=', but got '[' instead")
 }
 
 func TestTOMLUnusedKeys(t *testing.T) {
@@ -680,7 +681,7 @@ func TestLoadFromInvalidConfig(t *testing.T) {
 		ConfigFileContent: []byte("invalid toml"),
 	})
 	require.Error(t, err)
-	require.Regexp(t, "Near line 1.*", err.Error())
+	require.Regexp(t, "line 1.*", err.Error())
 }
 
 func TestTomlPostRestore(t *testing.T) {
@@ -751,7 +752,7 @@ func TestCronEncodeDecode(t *testing.T) {
 func TestAdjustWithLegacyBlackWhiteList(t *testing.T) {
 	cfg := config.NewConfig()
 	assignMinimalLegalValue(cfg)
-	require.Equal(t, config.DefaultFilter, cfg.Mydumper.Filter)
+	require.Equal(t, config.GetDefaultFilter(), cfg.Mydumper.Filter)
 	require.False(t, cfg.HasLegacyBlackWhiteList())
 
 	ctx := context.Background()
@@ -763,7 +764,7 @@ func TestAdjustWithLegacyBlackWhiteList(t *testing.T) {
 	cfg.BWList.DoDBs = []string{"test"}
 	require.EqualError(t, cfg.Adjust(ctx), "[Lightning:Config:ErrInvalidConfig]`mydumper.filter` and `black-white-list` cannot be simultaneously defined")
 
-	cfg.Mydumper.Filter = config.DefaultFilter
+	cfg.Mydumper.Filter = config.GetDefaultFilter()
 	require.NoError(t, cfg.Adjust(ctx))
 	require.True(t, cfg.HasLegacyBlackWhiteList())
 }
@@ -955,4 +956,42 @@ func TestCheckAndAdjustForLocalBackend(t *testing.T) {
 	// legal dir
 	cfg.TikvImporter.SortedKVDir = base
 	require.NoError(t, cfg.CheckAndAdjustForLocalBackend())
+}
+
+func TestCreateSeveralConfigsWithDifferentFilters(t *testing.T) {
+	originalDefaultCfg := append([]string{}, config.GetDefaultFilter()...)
+	cfg1 := config.NewConfig()
+	require.NoError(t, cfg1.LoadFromTOML([]byte(`
+		[mydumper]
+		filter = ["db1.tbl1", "db2.*", "!db2.tbl1"]
+	`)))
+	require.Equal(t, 3, len(cfg1.Mydumper.Filter))
+	require.True(t, common.StringSliceEqual(
+		cfg1.Mydumper.Filter,
+		[]string{"db1.tbl1", "db2.*", "!db2.tbl1"},
+	))
+	require.True(t, common.StringSliceEqual(config.GetDefaultFilter(), originalDefaultCfg))
+
+	cfg2 := config.NewConfig()
+	require.True(t, common.StringSliceEqual(
+		cfg2.Mydumper.Filter,
+		originalDefaultCfg,
+	))
+	require.True(t, common.StringSliceEqual(config.GetDefaultFilter(), originalDefaultCfg))
+
+	gCfg1, err := config.LoadGlobalConfig([]string{"-f", "db1.tbl1", "-f", "db2.*", "-f", "!db2.tbl1"}, nil)
+	require.NoError(t, err)
+	require.True(t, common.StringSliceEqual(
+		gCfg1.Mydumper.Filter,
+		[]string{"db1.tbl1", "db2.*", "!db2.tbl1"},
+	))
+	require.True(t, common.StringSliceEqual(config.GetDefaultFilter(), originalDefaultCfg))
+
+	gCfg2, err := config.LoadGlobalConfig([]string{}, nil)
+	require.NoError(t, err)
+	require.True(t, common.StringSliceEqual(
+		gCfg2.Mydumper.Filter,
+		originalDefaultCfg,
+	))
+	require.True(t, common.StringSliceEqual(config.GetDefaultFilter(), originalDefaultCfg))
 }

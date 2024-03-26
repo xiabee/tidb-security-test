@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util/collate"
@@ -48,8 +47,7 @@ func checkApplyPlan(t *testing.T, tk *testkit.TestKit, sql string, parallel int)
 }
 
 func TestParallelApplyPlan(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -75,8 +73,7 @@ func TestParallelApplyPlan(t *testing.T) {
 }
 
 func TestApplyColumnType(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -161,8 +158,7 @@ func TestApplyColumnType(t *testing.T) {
 }
 
 func TestApplyMultiColumnType(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -259,8 +255,7 @@ func TestApplyMultiColumnType(t *testing.T) {
 
 func TestSetTiDBEnableParallelApply(t *testing.T) {
 	// validate the tidb_enable_parallel_apply's value
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=0")
@@ -278,8 +273,7 @@ func TestSetTiDBEnableParallelApply(t *testing.T) {
 }
 
 func TestMultipleApply(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -326,8 +320,7 @@ func TestMultipleApply(t *testing.T) {
 }
 
 func TestApplyWithOtherOperators(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -412,8 +405,7 @@ func TestApplyWithOtherOperators(t *testing.T) {
 }
 
 func TestApplyWithOtherFeatures(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -434,8 +426,7 @@ func TestApplyWithOtherFeatures(t *testing.T) {
 	defer collate.SetNewCollationEnabledForTest(true)
 
 	// plan cache
-	orgEnable := core.PreparedPlanCacheEnabled()
-	core.SetPreparedPlanCache(true)
+	tk.MustExec(`set tidb_enable_prepared_plan_cache=1`)
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("create table t1(a int, b int)")
 	tk.MustExec("create table t2(a int, b int)")
@@ -447,7 +438,6 @@ func TestApplyWithOtherFeatures(t *testing.T) {
 	tk.MustExec("set @a=2")
 	tk.MustQuery("execute stmt using @a").Sort().Check(testkit.Rows("1 5", "2 3", "2 4"))
 	tk.MustQuery(" select @@last_plan_from_cache").Check(testkit.Rows("0")) // sub-queries are not cacheable
-	core.SetPreparedPlanCache(orgEnable)
 
 	// cluster index
 	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOn
@@ -471,8 +461,7 @@ func TestApplyWithOtherFeatures(t *testing.T) {
 }
 
 func TestApplyInDML(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -528,8 +517,7 @@ func TestApplyInDML(t *testing.T) {
 }
 
 func TestApplyConcurrency(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -564,8 +552,7 @@ func TestApplyConcurrency(t *testing.T) {
 }
 
 func TestApplyCacheRatio(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1, t2")
@@ -607,8 +594,7 @@ func TestApplyCacheRatio(t *testing.T) {
 }
 
 func TestApplyGoroutinePanic(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")
@@ -637,9 +623,24 @@ func TestApplyGoroutinePanic(t *testing.T) {
 	}
 }
 
+func TestParallelApplyCorrectness(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1;")
+	tk.MustExec("create table t1 (c1 bigint, c2 int, c3 int, c4 int, primary key(c1, c2), index (c3));")
+	tk.MustExec("insert into t1 values(1, 1, 1, 1), (1, 2, 3, 3), (2, 1, 4, 4), (2, 2, 2, 2);")
+
+	tk.MustExec("set tidb_enable_parallel_apply=true")
+	sql := "select (select /*+ NO_DECORRELATE() */ sum(c4) from t1 where t1.c3 = alias.c3) from t1 alias where alias.c1 = 1;"
+	tk.MustQuery(sql).Sort().Check(testkit.Rows("1", "3"))
+
+	tk.MustExec("set tidb_enable_parallel_apply=false")
+	tk.MustQuery(sql).Sort().Check(testkit.Rows("1", "3"))
+}
+
 func TestIssue24930(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_enable_parallel_apply=true")

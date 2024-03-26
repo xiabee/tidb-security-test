@@ -49,7 +49,7 @@ var (
 	ErrTooBigSet = dbterror.ClassTypes.NewStd(mysql.ErrTooBigSet)
 	// ErrTooBigScale is returned when type DECIMAL/NUMERIC scale is bigger than mysql.MaxDecimalScale.
 	ErrTooBigScale = dbterror.ClassTypes.NewStd(mysql.ErrTooBigScale)
-	// ErrTooBigPrecision is returned when type DECIMAL/NUMERIC precision is bigger than mysql.MaxDecimalWidth
+	// ErrTooBigPrecision is returned when type DECIMAL/NUMERIC or DATETIME precision is bigger than mysql.MaxDecimalWidth or types.MaxFsp
 	ErrTooBigPrecision = dbterror.ClassTypes.NewStd(mysql.ErrTooBigPrecision)
 	// ErrBadNumber is return when parsing an invalid binary decimal number.
 	ErrBadNumber = dbterror.ClassTypes.NewStd(mysql.ErrBadNumber)
@@ -82,6 +82,8 @@ var (
 	ErrSyntax = dbterror.ClassTypes.NewStdErr(mysql.ErrParse, mysql.MySQLErrName[mysql.ErrSyntax])
 	// ErrWrongValue is returned when the input value is in wrong format.
 	ErrWrongValue = dbterror.ClassTypes.NewStdErr(mysql.ErrTruncatedWrongValue, mysql.MySQLErrName[mysql.ErrWrongValue])
+	// ErrWrongValue2 is returned when the input value is in wrong format.
+	ErrWrongValue2 = dbterror.ClassTypes.NewStdErr(mysql.ErrWrongValue, mysql.MySQLErrName[mysql.ErrWrongValue])
 	// ErrWrongValueForType is returned when the input value is in wrong format for function.
 	ErrWrongValueForType = dbterror.ClassTypes.NewStdErr(mysql.ErrWrongValueForType, mysql.MySQLErrName[mysql.ErrWrongValueForType])
 	// ErrPartitionStatsMissing is returned when the partition-level stats is missing and the build global-level stats fails.

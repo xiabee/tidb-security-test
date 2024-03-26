@@ -79,6 +79,11 @@ func (c *index) Meta() *model.IndexInfo {
 	return c.idxInfo
 }
 
+// TableMeta returns table info.
+func (c *index) TableMeta() *model.TableInfo {
+	return c.tblInfo
+}
+
 // GenIndexKey generates storage key for index values. Returned distinct indicates whether the
 // indexed values should be distinct in storage (i.e. whether handle is encoded in the key).
 func (c *index) GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.Datum, h kv.Handle, buf []byte) (key []byte, distinct bool, err error) {
@@ -87,6 +92,14 @@ func (c *index) GenIndexKey(sc *stmtctx.StatementContext, indexedValues []types.
 		idxTblID = c.tblInfo.ID
 	}
 	return tablecodec.GenIndexKey(sc, c.tblInfo, c.idxInfo, idxTblID, indexedValues, h, buf)
+}
+
+// GenIndexValue generates the index value.
+func (c *index) GenIndexValue(sc *stmtctx.StatementContext, distinct bool, indexedValues []types.Datum, h kv.Handle, restoredData []types.Datum) ([]byte, error) {
+	c.initNeedRestoreData.Do(func() {
+		c.needRestoredData = NeedRestoredData(c.idxInfo.Columns, c.tblInfo.Columns)
+	})
+	return tablecodec.GenIndexValuePortal(sc, c.tblInfo, c.idxInfo, c.needRestoredData, distinct, false, indexedValues, h, c.phyTblID, restoredData)
 }
 
 // Create creates a new entry in the kvIndex data.
@@ -106,6 +119,19 @@ func (c *index) Create(sctx sessionctx.Context, txn kv.Transaction, indexedValue
 	key, distinct, err := c.GenIndexKey(vars.StmtCtx, indexedValues, h, writeBufs.IndexKeyBuf)
 	if err != nil {
 		return nil, err
+	}
+
+	var (
+		tempKey         []byte
+		keyVer          byte
+		keyIsTempIdxKey bool
+	)
+	if !opt.FromBackFill {
+		key, tempKey, keyVer = GenTempIdxKeyByState(c.idxInfo, key)
+		if keyVer == TempIndexKeyTypeBackfill || keyVer == TempIndexKeyTypeDelete {
+			key, tempKey = tempKey, nil
+			keyIsTempIdxKey = true
+		}
 	}
 
 	ctx := opt.Ctx
@@ -150,9 +176,27 @@ func (c *index) Create(sctx sessionctx.Context, txn kv.Transaction, indexedValue
 	opt.IgnoreAssertion = opt.IgnoreAssertion || c.idxInfo.State != model.StatePublic
 
 	if !distinct || skipCheck || opt.Untouched {
-		err = txn.GetMemBuffer().Set(key, idxVal)
+		val := idxVal
+		if opt.Untouched && (keyIsTempIdxKey || len(tempKey) > 0) {
+			// Untouched key-values never occur in the storage and the temp index is not public.
+			// It is unnecessary to write the untouched temp index key-values.
+			return nil, nil
+		}
+		if keyIsTempIdxKey {
+			tempVal := tablecodec.TempIndexValueElem{Value: idxVal, KeyVer: keyVer, Distinct: distinct}
+			val = tempVal.Encode(nil)
+		}
+		err = txn.GetMemBuffer().Set(key, val)
 		if err != nil {
 			return nil, err
+		}
+		if len(tempKey) > 0 {
+			tempVal := tablecodec.TempIndexValueElem{Value: idxVal, KeyVer: keyVer, Distinct: distinct}
+			val = tempVal.Encode(nil)
+			err = txn.GetMemBuffer().Set(tempKey, val)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if !opt.IgnoreAssertion && (!opt.Untouched) {
 			if sctx.GetSessionVars().LazyCheckKeyNotExists() && !txn.IsPessimistic() {
@@ -186,15 +230,53 @@ func (c *index) Create(sctx sessionctx.Context, txn kv.Transaction, indexedValue
 	if err != nil && !kv.IsErrNotFound(err) {
 		return nil, err
 	}
-	if err != nil || len(value) == 0 {
+	var tempIdxVal tablecodec.TempIndexValue
+	if len(value) > 0 && keyIsTempIdxKey {
+		tempIdxVal, err = tablecodec.DecodeTempIndexValue(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// The index key value is not found or deleted.
+	if err != nil || len(value) == 0 || (!tempIdxVal.IsEmpty() && tempIdxVal.Current().Delete) {
+		val := idxVal
 		lazyCheck := sctx.GetSessionVars().LazyCheckKeyNotExists() && err != nil
+		if keyIsTempIdxKey {
+			tempVal := tablecodec.TempIndexValueElem{Value: idxVal, KeyVer: keyVer, Distinct: true}
+			val = tempVal.Encode(value)
+		}
+		needPresumeNotExists, err := needPresumeKeyNotExistsFlag(ctx, txn, key, tempKey, h,
+			keyIsTempIdxKey, c.tblInfo.IsCommonHandle, c.tblInfo.ID)
+		if err != nil {
+			return nil, err
+		}
 		if lazyCheck {
-			err = txn.GetMemBuffer().SetWithFlags(key, idxVal, kv.SetPresumeKeyNotExists)
+			var flags []kv.FlagsOp
+			if needPresumeNotExists {
+				flags = []kv.FlagsOp{kv.SetPresumeKeyNotExists}
+			}
+			if !vars.ConstraintCheckInPlacePessimistic && vars.TxnCtx.IsPessimistic && vars.InTxn() &&
+				!vars.InRestrictedSQL && vars.ConnectionID > 0 {
+				flags = append(flags, kv.SetNeedConstraintCheckInPrewrite)
+			}
+			err = txn.GetMemBuffer().SetWithFlags(key, val, flags...)
 		} else {
-			err = txn.GetMemBuffer().Set(key, idxVal)
+			err = txn.GetMemBuffer().Set(key, val)
 		}
 		if err != nil {
 			return nil, err
+		}
+		if len(tempKey) > 0 {
+			tempVal := tablecodec.TempIndexValueElem{Value: idxVal, KeyVer: keyVer, Distinct: true}
+			val = tempVal.Encode(value)
+			if lazyCheck && needPresumeNotExists {
+				err = txn.GetMemBuffer().SetWithFlags(tempKey, val, kv.SetPresumeKeyNotExists)
+			} else {
+				err = txn.GetMemBuffer().Set(tempKey, val)
+			}
+			if err != nil {
+				return nil, err
+			}
 		}
 		if opt.IgnoreAssertion {
 			return nil, nil
@@ -207,11 +289,34 @@ func (c *index) Create(sctx sessionctx.Context, txn kv.Transaction, indexedValue
 		return nil, err
 	}
 
+	if keyIsTempIdxKey && !tempIdxVal.IsEmpty() {
+		value = tempIdxVal.Current().Value
+	}
 	handle, err := tablecodec.DecodeHandleInUniqueIndexValue(value, c.tblInfo.IsCommonHandle)
 	if err != nil {
 		return nil, err
 	}
 	return handle, kv.ErrKeyExists
+}
+
+func needPresumeKeyNotExistsFlag(ctx context.Context, txn kv.Transaction, key, tempKey kv.Key,
+	h kv.Handle, keyIsTempIdxKey bool, isCommon bool, tblID int64) (needFlag bool, err error) {
+	var uniqueTempKey kv.Key
+	if keyIsTempIdxKey {
+		uniqueTempKey = key
+	} else if len(tempKey) > 0 {
+		uniqueTempKey = tempKey
+	} else {
+		return true, nil
+	}
+	foundKey, dupHandle, err := FetchDuplicatedHandle(ctx, uniqueTempKey, true, txn, tblID, isCommon)
+	if err != nil {
+		return false, err
+	}
+	if foundKey && dupHandle != nil && !dupHandle.Equal(h) {
+		return false, kv.ErrKeyExists
+	}
+	return false, nil
 }
 
 // Delete removes the entry for handle h and indexedValues from KV index.
@@ -220,13 +325,48 @@ func (c *index) Delete(sc *stmtctx.StatementContext, txn kv.Transaction, indexed
 	if err != nil {
 		return err
 	}
-	if distinct {
-		err = txn.GetMemBuffer().DeleteWithFlags(key, kv.SetNeedLocked)
-	} else {
-		err = txn.GetMemBuffer().Delete(key)
+
+	key, tempKey, tempKeyVer := GenTempIdxKeyByState(c.idxInfo, key)
+	var originTempVal []byte
+	if len(tempKey) > 0 && c.idxInfo.Unique {
+		// Get the origin value of the unique temporary index key.
+		// Append the new delete operations to the end of the origin value.
+		originTempVal, err = getKeyInTxn(context.TODO(), txn, tempKey)
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
+	tempValElem := tablecodec.TempIndexValueElem{Handle: h, KeyVer: tempKeyVer, Delete: true, Distinct: distinct}
+
+	if distinct {
+		if len(key) > 0 {
+			err = txn.GetMemBuffer().DeleteWithFlags(key, kv.SetNeedLocked)
+			if err != nil {
+				return err
+			}
+		}
+		if len(tempKey) > 0 {
+			// Append to the end of the origin value for distinct value.
+			tempVal := tempValElem.Encode(originTempVal)
+			err = txn.GetMemBuffer().Set(tempKey, tempVal)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		if len(key) > 0 {
+			err = txn.GetMemBuffer().Delete(key)
+			if err != nil {
+				return err
+			}
+		}
+		if len(tempKey) > 0 {
+			tempVal := tempValElem.Encode(nil)
+			err = txn.GetMemBuffer().Set(tempKey, tempVal)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if c.idxInfo.State == model.StatePublic {
 		// If the index is in public state, delete this index means it must exists.
@@ -235,34 +375,155 @@ func (c *index) Delete(sc *stmtctx.StatementContext, txn kv.Transaction, indexed
 	return err
 }
 
+const (
+	// TempIndexKeyTypeNone means the key is not a temporary index key.
+	TempIndexKeyTypeNone byte = 0
+	// TempIndexKeyTypeDelete indicates this value is written in the delete-only stage.
+	TempIndexKeyTypeDelete byte = 'd'
+	// TempIndexKeyTypeBackfill indicates this value is written in the backfill stage.
+	TempIndexKeyTypeBackfill byte = 'b'
+	// TempIndexKeyTypeMerge indicates this value is written in the merge stage.
+	TempIndexKeyTypeMerge byte = 'm'
+)
+
+// GenTempIdxKeyByState is used to get the key version and the temporary key.
+// The tempKeyVer means the temp index key/value version.
+func GenTempIdxKeyByState(indexInfo *model.IndexInfo, indexKey kv.Key) (key, tempKey kv.Key, tempKeyVer byte) {
+	if indexInfo.State != model.StatePublic {
+		switch indexInfo.BackfillState {
+		case model.BackfillStateInapplicable:
+			return indexKey, nil, TempIndexKeyTypeNone
+		case model.BackfillStateRunning:
+			// Write to the temporary index.
+			tablecodec.IndexKey2TempIndexKey(indexKey)
+			if indexInfo.State == model.StateDeleteOnly {
+				return nil, indexKey, TempIndexKeyTypeDelete
+			}
+			return nil, indexKey, TempIndexKeyTypeBackfill
+		case model.BackfillStateReadyToMerge, model.BackfillStateMerging:
+			// Double write
+			tmp := make([]byte, len(indexKey))
+			copy(tmp, indexKey)
+			tablecodec.IndexKey2TempIndexKey(tmp)
+			return indexKey, tmp, TempIndexKeyTypeMerge
+		}
+	}
+	return indexKey, nil, TempIndexKeyTypeNone
+}
+
 func (c *index) Exist(sc *stmtctx.StatementContext, txn kv.Transaction, indexedValues []types.Datum, h kv.Handle) (bool, kv.Handle, error) {
 	key, distinct, err := c.GenIndexKey(sc, indexedValues, h, nil)
 	if err != nil {
 		return false, nil, err
 	}
-
-	value, err := txn.Get(context.TODO(), key)
-	if kv.IsErrNotFound(err) {
-		return false, nil, nil
+	// If index current is in creating status and using ingest mode, we need first
+	// check key exist status in temp index.
+	key, tempKey, _ := GenTempIdxKeyByState(c.idxInfo, key)
+	if len(tempKey) > 0 {
+		key = tempKey
 	}
+	foundKey, dupHandle, err := FetchDuplicatedHandle(context.TODO(), key, distinct, txn, c.tblInfo.ID, c.tblInfo.IsCommonHandle)
+	if err != nil || !foundKey {
+		return false, nil, err
+	}
+	if dupHandle != nil && !dupHandle.Equal(h) {
+		return false, nil, err
+	}
+	return true, h, nil
+}
+
+// FetchDuplicatedHandle is used to find the duplicated row's handle for a given unique index key.
+func FetchDuplicatedHandle(ctx context.Context, key kv.Key, distinct bool,
+	txn kv.Transaction, tableID int64, isCommon bool) (foundKey bool, dupHandle kv.Handle, err error) {
+	if tablecodec.IsTempIndexKey(key) {
+		return fetchDuplicatedHandleForTempIndexKey(ctx, key, distinct, txn, tableID, isCommon)
+	}
+	// The index key is not from temp index.
+	val, err := getKeyInTxn(ctx, txn, key)
+	if err != nil || len(val) == 0 {
+		return false, nil, err
+	}
+	if distinct {
+		h, err := tablecodec.DecodeHandleInUniqueIndexValue(val, isCommon)
+		return true, h, err
+	}
+	return true, nil, nil
+}
+
+func fetchDuplicatedHandleForTempIndexKey(ctx context.Context, tempKey kv.Key, distinct bool,
+	txn kv.Transaction, tableID int64, isCommon bool) (foundKey bool, dupHandle kv.Handle, err error) {
+	tempRawVal, err := getKeyInTxn(ctx, txn, tempKey)
 	if err != nil {
 		return false, nil, err
 	}
-
-	// For distinct index, the value of key is handle.
-	if distinct {
-		var handle kv.Handle
-		handle, err := tablecodec.DecodeHandleInUniqueIndexValue(value, c.tblInfo.IsCommonHandle)
-		if err != nil {
+	if tempRawVal == nil {
+		originKey := tempKey.Clone()
+		tablecodec.TempIndexKey2IndexKey(originKey)
+		originVal, err := getKeyInTxn(ctx, txn, originKey)
+		if err != nil || originVal == nil {
 			return false, nil, err
 		}
-		if !handle.Equal(h) {
-			return true, handle, kv.ErrKeyExists
+		if distinct {
+			originHandle, err := tablecodec.DecodeHandleInUniqueIndexValue(originVal, isCommon)
+			if err != nil {
+				return false, nil, err
+			}
+			return true, originHandle, err
 		}
-		return true, handle, nil
+		return false, nil, nil
 	}
+	tempVal, err := tablecodec.DecodeTempIndexValue(tempRawVal)
+	if err != nil {
+		return false, nil, err
+	}
+	curElem := tempVal.Current()
+	if curElem.Delete {
+		originKey := tempKey.Clone()
+		tablecodec.TempIndexKey2IndexKey(originKey)
+		originVal, err := getKeyInTxn(ctx, txn, originKey)
+		if err != nil || originVal == nil {
+			return false, nil, err
+		}
+		if distinct {
+			originHandle, err := tablecodec.DecodeHandleInUniqueIndexValue(originVal, isCommon)
+			if err != nil {
+				return false, nil, err
+			}
+			if originHandle.Equal(curElem.Handle) {
+				// The key has been deleted. This is not a duplicated key.
+				return false, nil, nil
+			}
+			// The inequality means multiple modifications happened in the same key.
+			// We use the handle in origin index value to check if the row exists.
+			recPrefix := tablecodec.GenTableRecordPrefix(tableID)
+			rowKey := tablecodec.EncodeRecordKey(recPrefix, originHandle)
+			rowVal, err := getKeyInTxn(ctx, txn, rowKey)
+			if err != nil || rowVal == nil {
+				return false, nil, err
+			}
+			// The row exists. This is the duplicated key.
+			return true, originHandle, nil
+		}
+		return false, nil, nil
+	}
+	// The value in temp index is not the delete marker.
+	if distinct {
+		h, err := tablecodec.DecodeHandleInUniqueIndexValue(curElem.Value, isCommon)
+		return true, h, err
+	}
+	return true, nil, nil
+}
 
-	return true, h, nil
+// getKeyInTxn gets the value of the key in the transaction, and ignore the ErrNotExist error.
+func getKeyInTxn(ctx context.Context, txn kv.Transaction, key kv.Key) ([]byte, error) {
+	val, err := txn.Get(ctx, key)
+	if err != nil {
+		if kv.IsErrNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return val, nil
 }
 
 func (c *index) FetchValues(r []types.Datum, vals []types.Datum) ([]types.Datum, error) {

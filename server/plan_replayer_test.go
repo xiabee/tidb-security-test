@@ -32,8 +32,7 @@ import (
 )
 
 func TestDumpPlanReplayerAPI(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	driver := NewTiDBDriver(store)
 	client := newTestServerClient()
@@ -41,17 +40,17 @@ func TestDumpPlanReplayerAPI(t *testing.T) {
 	cfg.Port = client.port
 	cfg.Status.StatusPort = client.statusPort
 	cfg.Status.ReportStatus = true
-
+	RunInGoTestChan = make(chan struct{})
 	server, err := NewServer(cfg, driver)
 	require.NoError(t, err)
 	defer server.Close()
-
-	client.port = getPortFromTCPAddr(server.listener.Addr())
-	client.statusPort = getPortFromTCPAddr(server.statusListener.Addr())
 	go func() {
-		err := server.Run()
+		err := server.Run(nil)
 		require.NoError(t, err)
 	}()
+	<-RunInGoTestChan
+	client.port = getPortFromTCPAddr(server.listener.Addr())
+	client.statusPort = getPortFromTCPAddr(server.statusListener.Addr())
 	client.waitUntilServerOnline()
 
 	dom, err := session.GetDomain(store)
@@ -137,5 +136,13 @@ func prepareData4PlanReplayer(t *testing.T, client *testServerClient, statHandle
 	var filename string
 	err = rows.Scan(&filename)
 	require.NoError(t, err)
+	rows.Close()
+	rows = tk.MustQuery("select @@tidb_last_plan_replayer_token")
+	require.True(t, rows.Next(), "unexpected data")
+	var filename2 string
+	err = rows.Scan(&filename2)
+	require.NoError(t, err)
+	rows.Close()
+	require.Equal(t, filename, filename2)
 	return filename
 }

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/pingcap/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +25,7 @@ func TestDeleteFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, false, ret)
 
-	_, err = store.Create(context.Background(), name)
+	_, err = store.Create(context.Background(), name, nil)
 	require.NoError(t, err)
 
 	ret, err = store.FileExists(context.Background(), name)
@@ -99,4 +100,64 @@ func TestWalkDirWithSoftLinkFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, i)
+
+	// test file not exists
+	exists, err := store.FileExists(context.TODO(), "/123/456")
+	require.NoError(t, err)
+	require.False(t, exists)
+
+	// test walk nonexistent directory
+	err = store.WalkDir(context.TODO(), &WalkOption{SubDir: "123/456"}, func(path string, size int64) error {
+		return errors.New("find file")
+	})
+	require.NoError(t, err)
+	// write file to a nonexistent directory
+	err = store.WriteFile(context.TODO(), "/123/456/789.txt", []byte(data))
+	require.NoError(t, err)
+	exists, err = store.FileExists(context.TODO(), "/123/456")
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	// test walk existent directory
+	err = store.WalkDir(context.TODO(), &WalkOption{SubDir: "123/456"}, func(path string, size int64) error {
+		if path == "123/456/789.txt" {
+			return nil
+		}
+		return errors.Errorf("find other file: %s", path)
+	})
+	require.NoError(t, err)
+}
+
+func TestLocalURI(t *testing.T) {
+	ctx := context.Background()
+
+	url := "file:///tmp/folder"
+	sb, err := ParseBackend(url, &BackendOptions{})
+	require.NoError(t, err)
+
+	store, err := Create(ctx, sb, true)
+	require.NoError(t, err)
+
+	obtained := store.URI()
+	require.Equal(t, url, obtained)
+}
+
+func TestWalkBrokenSymLink(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	err := os.Symlink(filepath.Join(dir, "non-existing-file"), filepath.Join(dir, "file-that-should-be-ignored"))
+	require.NoError(t, err)
+
+	sb, err := ParseBackend("file://"+filepath.ToSlash(dir), nil)
+	require.NoError(t, err)
+	store, err := New(ctx, sb, nil)
+	require.NoError(t, err)
+
+	files := map[string]int64{}
+	err = store.WalkDir(ctx, nil, func(path string, size int64) error {
+		files[path] = size
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, map[string]int64{"file-that-should-be-ignored": 0}, files)
 }

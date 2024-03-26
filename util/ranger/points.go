@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
@@ -83,10 +84,10 @@ func (rp *point) Clone(value types.Datum) *point {
 }
 
 type pointSorter struct {
-	points   []*point
 	err      error
-	sc       *stmtctx.StatementContext
 	collator collate.Collator
+	sc       *stmtctx.StatementContext
+	points   []*point
 }
 
 func (r *pointSorter) Len() int {
@@ -114,7 +115,7 @@ func rangePointLess(sc *stmtctx.StatementContext, a, b *point, collator collate.
 	return rangePointEqualValueLess(a, b), errors.Trace(err)
 }
 
-func rangePointEnumLess(sc *stmtctx.StatementContext, a, b *point) (bool, error) {
+func rangePointEnumLess(_ *stmtctx.StatementContext, a, b *point) (bool, error) {
 	cmp := types.CompareInt64(a.value.GetInt64(), b.value.GetInt64())
 	if cmp != 0 {
 		return cmp < 0, nil
@@ -157,26 +158,26 @@ func getNotNullFullRange() []*point {
 
 // FullIntRange is used for table range. Since table range cannot accept MaxValueDatum as the max value.
 // So we need to set it to MaxInt64.
-func FullIntRange(isUnsigned bool) []*Range {
+func FullIntRange(isUnsigned bool) Ranges {
 	if isUnsigned {
-		return []*Range{{LowVal: []types.Datum{types.NewUintDatum(0)}, HighVal: []types.Datum{types.NewUintDatum(math.MaxUint64)}, Collators: collate.GetBinaryCollatorSlice(1)}}
+		return Ranges{{LowVal: []types.Datum{types.NewUintDatum(0)}, HighVal: []types.Datum{types.NewUintDatum(math.MaxUint64)}, Collators: collate.GetBinaryCollatorSlice(1)}}
 	}
-	return []*Range{{LowVal: []types.Datum{types.NewIntDatum(math.MinInt64)}, HighVal: []types.Datum{types.NewIntDatum(math.MaxInt64)}, Collators: collate.GetBinaryCollatorSlice(1)}}
+	return Ranges{{LowVal: []types.Datum{types.NewIntDatum(math.MinInt64)}, HighVal: []types.Datum{types.NewIntDatum(math.MaxInt64)}, Collators: collate.GetBinaryCollatorSlice(1)}}
 }
 
 // FullRange is [null, +∞) for Range.
-func FullRange() []*Range {
-	return []*Range{{LowVal: []types.Datum{{}}, HighVal: []types.Datum{types.MaxValueDatum()}, Collators: collate.GetBinaryCollatorSlice(1)}}
+func FullRange() Ranges {
+	return Ranges{{LowVal: []types.Datum{{}}, HighVal: []types.Datum{types.MaxValueDatum()}, Collators: collate.GetBinaryCollatorSlice(1)}}
 }
 
 // FullNotNullRange is (-∞, +∞) for Range.
-func FullNotNullRange() []*Range {
-	return []*Range{{LowVal: []types.Datum{types.MinNotNullDatum()}, HighVal: []types.Datum{types.MaxValueDatum()}}}
+func FullNotNullRange() Ranges {
+	return Ranges{{LowVal: []types.Datum{types.MinNotNullDatum()}, HighVal: []types.Datum{types.MaxValueDatum()}, Collators: collate.GetBinaryCollatorSlice(1)}}
 }
 
 // NullRange is [null, null] for Range.
-func NullRange() []*Range {
-	return []*Range{{LowVal: []types.Datum{{}}, HighVal: []types.Datum{{}}, Collators: collate.GetBinaryCollatorSlice(1)}}
+func NullRange() Ranges {
+	return Ranges{{LowVal: []types.Datum{{}}, HighVal: []types.Datum{{}}, Collators: collate.GetBinaryCollatorSlice(1)}}
 }
 
 // builder is the range builder struct.
@@ -188,7 +189,7 @@ type builder struct {
 func (r *builder) build(expr expression.Expression, collator collate.Collator) []*point {
 	switch x := expr.(type) {
 	case *expression.Column:
-		return r.buildFromColumn(x)
+		return r.buildFromColumn()
 	case *expression.ScalarFunction:
 		return r.buildFromScalarFunc(x, collator)
 	case *expression.Constant:
@@ -220,7 +221,7 @@ func (r *builder) buildFromConstant(expr *expression.Constant) []*point {
 	return getFullRange()
 }
 
-func (r *builder) buildFromColumn(expr *expression.Column) []*point {
+func (*builder) buildFromColumn() []*point {
 	// column name expression is equivalent to column name is true.
 	startPoint1 := &point{value: types.MinNotNullDatum(), start: true}
 	endPoint1 := &point{excl: true}
@@ -504,7 +505,7 @@ func handleEnumFromBinOp(sc *stmtctx.StatementContext, ft *types.FieldType, val 
 	return res
 }
 
-func (r *builder) buildFromIsTrue(expr *expression.ScalarFunction, isNot int, keepNull bool) []*point {
+func (*builder) buildFromIsTrue(_ *expression.ScalarFunction, isNot int, keepNull bool) []*point {
 	if isNot == 1 {
 		if keepNull {
 			// Range is {[0, 0]}
@@ -533,7 +534,7 @@ func (r *builder) buildFromIsTrue(expr *expression.ScalarFunction, isNot int, ke
 	return []*point{startPoint1, endPoint1, startPoint2, endPoint2}
 }
 
-func (r *builder) buildFromIsFalse(expr *expression.ScalarFunction, isNot int) []*point {
+func (*builder) buildFromIsFalse(_ *expression.ScalarFunction, isNot int) []*point {
 	if isNot == 1 {
 		// NOT FALSE range is {[-inf, 0), (0, +inf], [null, null]}
 		startPoint1 := &point{start: true}
@@ -677,9 +678,15 @@ func (r *builder) newBuildFromPatternLike(expr *expression.ScalarFunction) []*po
 			break
 		} else if pattern[i] == '_' {
 			// Get the prefix, but exclude the prefix.
-			// e.g., "abc_x", the start point exclude "abc",
-			// because the string length is more than 3.
-			exclude = true
+			// e.g., "abc_x", the start point excludes "abc" because the string length is more than 3.
+			//
+			// However, like the similar check in (*conditionChecker).checkLikeFunc(), in tidb's implementation, for
+			// PAD SPACE collations, the trailing spaces are removed in the index key. So we are unable to distinguish
+			// 'xxx' from 'xxx   ' by a single index range scan. If we exclude the start point for PAD SPACE collation,
+			// we will actually miss 'xxx   ', which will cause wrong results.
+			if !isPadSpaceCollation(collation) {
+				exclude = true
+			}
 			isExactMatch = false
 			break
 		}
@@ -712,6 +719,14 @@ func (r *builder) newBuildFromPatternLike(expr *expression.ScalarFunction) []*po
 		}
 	}
 	return []*point{startPoint, endPoint}
+}
+
+// isPadSpaceCollation returns whether the collation is a PAD SPACE collation.
+// Since all collations, except for binary, implemented in tidb are PAD SPACE collations for now, we use a simple
+// collation != binary check here. We may also move it to collation related packages when NO PAD collations are
+// implemented in the future.
+func isPadSpaceCollation(collation string) bool {
+	return collation != charset.CollationBin
 }
 
 func (r *builder) buildFromNot(expr *expression.ScalarFunction) []*point {

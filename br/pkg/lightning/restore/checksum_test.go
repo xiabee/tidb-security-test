@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
+	"github.com/tikv/pd/client/errs"
 	"go.uber.org/atomic"
 )
 
@@ -55,7 +56,6 @@ func TestDoChecksum(t *testing.T) {
 	mock.ExpectExec("\\QUPDATE mysql.tidb SET VARIABLE_VALUE = ? WHERE VARIABLE_NAME = 'tikv_gc_life_time'\\E").
 		WithArgs("10m").
 		WillReturnResult(sqlmock.NewResult(2, 1))
-	mock.ExpectClose()
 	mock.ExpectClose()
 
 	ctx := MockDoChecksumCtx(db)
@@ -186,9 +186,8 @@ func TestDoChecksumWithTikv(t *testing.T) {
 		if i >= maxErrorRetryCount {
 			require.Equal(t, mockChecksumKVClientErr, errors.Cause(err))
 			continue
-		} else {
-			require.NoError(t, err)
 		}
+		require.NoError(t, err)
 
 		// after checksum, safepint should be small than start ts
 		ts := pdClient.currentSafePoint()
@@ -200,6 +199,18 @@ func TestDoChecksumWithTikv(t *testing.T) {
 		require.Zero(t, checksumExec.manager.currentTS)
 		require.Equal(t, 0, len(checksumExec.manager.tableGCSafeTS))
 	}
+
+	// test PD leader change error
+	backup := retryGetTSInterval
+	retryGetTSInterval = time.Millisecond
+	t.Cleanup(func() {
+		retryGetTSInterval = backup
+	})
+	pdClient.leaderChanging = true
+	kvClient.maxErrCount = 0
+	checksumExec := &tikvChecksumManager{manager: newGCTTLManager(pdClient), client: kvClient}
+	_, err = checksumExec.Checksum(ctx, &TidbTableInfo{DB: "test", Name: "t", Core: tableInfo})
+	require.NoError(t, err)
 }
 
 func TestDoChecksumWithErrorAndLongOriginalLifetime(t *testing.T) {
@@ -218,7 +229,6 @@ func TestDoChecksumWithErrorAndLongOriginalLifetime(t *testing.T) {
 		WithArgs("300h").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectClose()
-	mock.ExpectClose()
 
 	ctx := MockDoChecksumCtx(db)
 	_, err = DoChecksum(ctx, &TidbTableInfo{DB: "test", Name: "t"})
@@ -236,6 +246,7 @@ type testPDClient struct {
 	count            atomic.Int32
 	gcSafePoint      []safePointTTL
 	logicalTSCounter atomic.Uint64
+	leaderChanging   bool
 }
 
 func (c *testPDClient) currentSafePoint() uint64 {
@@ -251,8 +262,11 @@ func (c *testPDClient) currentSafePoint() uint64 {
 }
 
 func (c *testPDClient) GetTS(ctx context.Context) (int64, int64, error) {
-	physicalTS := time.Now().UnixNano() / 1e6
+	physicalTS := time.Now().UnixMilli()
 	logicalTS := oracle.ExtractLogical(c.logicalTSCounter.Inc())
+	if c.leaderChanging && physicalTS%2 == 0 {
+		return 0, 0, errors.WithStack(errs.ErrClientTSOStreamClosed)
+	}
 	return physicalTS, logicalTS, nil
 }
 

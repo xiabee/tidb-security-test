@@ -30,10 +30,14 @@ type panickingAllocator struct {
 	ty   autoid.AllocatorType
 }
 
-// NewPanickingAllocator creates a PanickingAllocator shared by all allocation types.
+// NewPanickingAllocators creates a PanickingAllocator shared by all allocation types.
+// we use this to collect the max id(either _tidb_rowid or auto_increment id or auto_random) used
+// during import, and we will use this info to do ALTER TABLE xxx AUTO_RANDOM_BASE or AUTO_INCREMENT
+// on post-process phase.
 func NewPanickingAllocators(base int64) autoid.Allocators {
 	sharedBase := &base
 	return autoid.NewAllocators(
+		false,
 		&panickingAllocator{base: sharedBase, ty: autoid.RowIDAllocType},
 		&panickingAllocator{base: sharedBase, ty: autoid.AutoIncrementType},
 		&panickingAllocator{base: sharedBase, ty: autoid.AutoRandomType},

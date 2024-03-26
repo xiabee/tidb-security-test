@@ -12,10 +12,8 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
-	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/spf13/pflag"
-	"go.uber.org/zap"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -90,24 +88,36 @@ func (options *GCSBackendOptions) parseFromFlags(flags *pflag.FlagSet) error {
 	return nil
 }
 
-type gcsStorage struct {
+// GCSStorage defines some standard operations for BR/Lightning on the GCS storage.
+// It implements the `ExternalStorage` interface.
+type GCSStorage struct {
 	gcs    *backuppb.GCS
 	bucket *storage.BucketHandle
 }
 
+// GetBucketHandle gets the handle to the GCS API on the bucket.
+func (s *GCSStorage) GetBucketHandle() *storage.BucketHandle {
+	return s.bucket
+}
+
+// GetOptions gets the external storage operations for the GCS.
+func (s *GCSStorage) GetOptions() *backuppb.GCS {
+	return s.gcs
+}
+
 // DeleteFile delete the file in storage
-func (s *gcsStorage) DeleteFile(ctx context.Context, name string) error {
+func (s *GCSStorage) DeleteFile(ctx context.Context, name string) error {
 	object := s.objectName(name)
 	err := s.bucket.Object(object).Delete(ctx)
 	return errors.Trace(err)
 }
 
-func (s *gcsStorage) objectName(name string) string {
+func (s *GCSStorage) objectName(name string) string {
 	return path.Join(s.gcs.Prefix, name)
 }
 
 // WriteFile writes data to a file to storage.
-func (s *gcsStorage) WriteFile(ctx context.Context, name string, data []byte) error {
+func (s *GCSStorage) WriteFile(ctx context.Context, name string, data []byte) error {
 	object := s.objectName(name)
 	wc := s.bucket.Object(object).NewWriter(ctx)
 	wc.StorageClass = s.gcs.StorageClass
@@ -120,7 +130,7 @@ func (s *gcsStorage) WriteFile(ctx context.Context, name string, data []byte) er
 }
 
 // ReadFile reads the file from the storage and returns the contents.
-func (s *gcsStorage) ReadFile(ctx context.Context, name string) ([]byte, error) {
+func (s *GCSStorage) ReadFile(ctx context.Context, name string) ([]byte, error) {
 	object := s.objectName(name)
 	rc, err := s.bucket.Object(object).NewReader(ctx)
 	if err != nil {
@@ -143,7 +153,7 @@ func (s *gcsStorage) ReadFile(ctx context.Context, name string) ([]byte, error) 
 }
 
 // FileExists return true if file exists.
-func (s *gcsStorage) FileExists(ctx context.Context, name string) (bool, error) {
+func (s *GCSStorage) FileExists(ctx context.Context, name string) (bool, error) {
 	object := s.objectName(name)
 	_, err := s.bucket.Object(object).Attrs(ctx)
 	if err != nil {
@@ -156,7 +166,7 @@ func (s *gcsStorage) FileExists(ctx context.Context, name string) (bool, error) 
 }
 
 // Open a Reader by file path.
-func (s *gcsStorage) Open(ctx context.Context, path string) (ExternalFileReader, error) {
+func (s *GCSStorage) Open(ctx context.Context, path string) (ExternalFileReader, error) {
 	object := s.objectName(path)
 	handle := s.bucket.Object(object)
 
@@ -182,16 +192,16 @@ func (s *gcsStorage) Open(ctx context.Context, path string) (ExternalFileReader,
 // The first argument is the file path that can be used in `Open`
 // function; the second argument is the size in byte of the file determined
 // by path.
-func (s *gcsStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(string, int64) error) error {
+func (s *GCSStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(string, int64) error) error {
 	if opt == nil {
 		opt = &WalkOption{}
-	}
-	if len(opt.ObjPrefix) != 0 {
-		return errors.New("gcs storage not support ObjPrefix for now")
 	}
 	prefix := path.Join(s.gcs.Prefix, opt.SubDir)
 	if len(prefix) > 0 && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
+	}
+	if len(opt.ObjPrefix) != 0 {
+		prefix += opt.ObjPrefix
 	}
 	query := &storage.Query{Prefix: prefix}
 	// only need each object's name and size
@@ -221,12 +231,12 @@ func (s *gcsStorage) WalkDir(ctx context.Context, opt *WalkOption, fn func(strin
 	return nil
 }
 
-func (s *gcsStorage) URI() string {
+func (s *GCSStorage) URI() string {
 	return "gcs://" + s.gcs.Bucket + "/" + s.gcs.Prefix
 }
 
 // Create implements ExternalStorage interface.
-func (s *gcsStorage) Create(ctx context.Context, name string) (ExternalFileWriter, error) {
+func (s *GCSStorage) Create(ctx context.Context, name string, _ *WriterOption) (ExternalFileWriter, error) {
 	object := s.objectName(name)
 	wc := s.bucket.Object(object).NewWriter(ctx)
 	wc.StorageClass = s.gcs.StorageClass
@@ -235,7 +245,7 @@ func (s *gcsStorage) Create(ctx context.Context, name string) (ExternalFileWrite
 }
 
 // Rename file name from oldFileName to newFileName.
-func (s *gcsStorage) Rename(ctx context.Context, oldFileName, newFileName string) error {
+func (s *GCSStorage) Rename(ctx context.Context, oldFileName, newFileName string) error {
 	data, err := s.ReadFile(ctx, oldFileName)
 	if err != nil {
 		return errors.Trace(err)
@@ -247,7 +257,8 @@ func (s *gcsStorage) Rename(ctx context.Context, oldFileName, newFileName string
 	return s.DeleteFile(ctx, oldFileName)
 }
 
-func newGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorageOptions) (*gcsStorage, error) {
+// NewGCSStorage creates a GCS external storage implementation.
+func NewGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorageOptions) (*GCSStorage, error) {
 	var clientOps []option.ClientOption
 	if opts.NoCredentials {
 		clientOps = append(clientOps, option.WithoutAuthentication())
@@ -258,12 +269,11 @@ func newGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorage
 				return nil, errors.Annotatef(berrors.ErrStorageInvalidConfig, "%v Or you should provide '--gcs.credentials_file'", err)
 			}
 			if opts.SendCredentials {
-				if len(creds.JSON) > 0 {
-					gcs.CredentialsBlob = string(creds.JSON)
-				} else {
+				if len(creds.JSON) <= 0 {
 					return nil, errors.Annotate(berrors.ErrStorageInvalidConfig,
 						"You should provide '--gcs.credentials_file' when '--send-credentials-to-tikv' is true")
 				}
+				gcs.CredentialsBlob = string(creds.JSON)
 			}
 			if creds != nil {
 				clientOps = append(clientOps, option.WithCredentials(creds))
@@ -276,6 +286,9 @@ func newGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorage
 	if gcs.Endpoint != "" {
 		clientOps = append(clientOps, option.WithEndpoint(gcs.Endpoint))
 	}
+	// the HTTPClient should has credential, currently the HTTPClient only has the http.Transport.
+	// So we remove the HTTPClient in the storage.New().
+	// Issue: https: //github.com/pingcap/tidb/issues/47022
 	if opts.HTTPClient != nil {
 		clientOps = append(clientOps, option.WithHTTPClient(opts.HTTPClient))
 	}
@@ -290,45 +303,12 @@ func newGCSStorage(ctx context.Context, gcs *backuppb.GCS, opts *ExternalStorage
 	}
 
 	bucket := client.Bucket(gcs.Bucket)
-	// check whether it's a bug before #647, to solve case #2
-	// If the storage is set as gcs://bucket/prefix/,
-	// the backupmeta is written correctly to gcs://bucket/prefix/backupmeta,
-	// but the SSTs are written wrongly to gcs://bucket/prefix//*.sst (note the extra slash).
-	// see details about case 2 at https://github.com/pingcap/br/issues/675#issuecomment-753780742
-	sstInPrefix := hasSSTFiles(ctx, bucket, gcs.Prefix)
-	sstInPrefixSlash := hasSSTFiles(ctx, bucket, gcs.Prefix+"//")
-	if sstInPrefixSlash && !sstInPrefix {
-		// This is a old bug, but we must make it compatible.
-		// so we need find sst in slash directory
-		gcs.Prefix += "//"
-	}
-	return &gcsStorage{gcs: gcs, bucket: bucket}, nil
-}
-
-func hasSSTFiles(ctx context.Context, bucket *storage.BucketHandle, prefix string) bool {
-	query := storage.Query{Prefix: prefix}
-	_ = query.SetAttrSelection([]string{"Name"})
-	it := bucket.Objects(ctx, &query)
-	for {
-		attrs, err := it.Next()
-		if err == iterator.Done { // nolint:errorlint
-			break
-		}
-		if err != nil {
-			log.Warn("failed to list objects on gcs, will use default value for `prefix`", zap.Error(err))
-			break
-		}
-		if strings.HasSuffix(attrs.Name, ".sst") {
-			log.Info("sst file found in prefix slash", zap.String("file", attrs.Name))
-			return true
-		}
-	}
-	return false
+	return &GCSStorage{gcs: gcs, bucket: bucket}, nil
 }
 
 // gcsObjectReader wrap storage.Reader and add the `Seek` method.
 type gcsObjectReader struct {
-	storage   *gcsStorage
+	storage   *GCSStorage
 	name      string
 	objHandle *storage.ObjectHandle
 	reader    io.ReadCloser

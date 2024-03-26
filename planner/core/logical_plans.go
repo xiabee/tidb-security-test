@@ -16,6 +16,7 @@ package core
 
 import (
 	"math"
+	"unsafe"
 
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/expression/aggregation"
@@ -33,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/ranger"
+	"github.com/pingcap/tidb/util/size"
 	"go.uber.org/zap"
 )
 
@@ -108,18 +110,40 @@ func (tp JoinType) String() string {
 }
 
 const (
-	preferLeftAsINLJInner uint = 1 << iota
+	// Hint flag for join
+	preferINLJ uint = 1 << iota
+	preferINLHJ
+	preferINLMJ
+	preferHJBuild
+	preferHJProbe
+	preferHashJoin
+	preferNoHashJoin
+	preferMergeJoin
+	preferNoMergeJoin
+	preferNoIndexJoin
+	preferNoIndexHashJoin
+	preferNoIndexMergeJoin
+	preferBCJoin
+	preferShuffleJoin
+	preferRewriteSemiJoin
+
+	// Hint flag to specify the join with direction
+	preferLeftAsINLJInner
 	preferRightAsINLJInner
 	preferLeftAsINLHJInner
 	preferRightAsINLHJInner
 	preferLeftAsINLMJInner
 	preferRightAsINLMJInner
-	preferHashJoin
-	preferMergeJoin
-	preferBCJoin
-	preferRewriteSemiJoin
+	preferLeftAsHJBuild
+	preferRightAsHJBuild
+	preferLeftAsHJProbe
+	preferRightAsHJProbe
+
+	// Hint flag for Agg
 	preferHashAgg
 	preferStreamAgg
+	preferMPP1PhaseAgg
+	preferMPP2PhaseAgg
 )
 
 const (
@@ -137,11 +161,14 @@ type LogicalJoin struct {
 	StraightJoin  bool
 
 	// hintInfo stores the join algorithm hint information specified by client.
-	hintInfo        *tableHintInfo
-	preferJoinType  uint
-	preferJoinOrder bool
+	hintInfo            *tableHintInfo
+	preferJoinType      uint
+	preferJoinOrder     bool
+	leftPreferJoinType  uint
+	rightPreferJoinType uint
 
 	EqualConditions []*expression.ScalarFunction
+	NAEQConditions  []*expression.ScalarFunction
 	LeftConditions  expression.CNFExprs
 	RightConditions expression.CNFExprs
 	OtherConditions expression.CNFExprs
@@ -174,6 +201,10 @@ type LogicalJoin struct {
 
 	// equalCondOutCnt indicates the estimated count of joined rows after evaluating `EqualConditions`.
 	equalCondOutCnt float64
+}
+
+func (p *LogicalJoin) isNAAJ() bool {
+	return len(p.NAEQConditions) > 0
 }
 
 // Shallow shallow copies a LogicalJoin struct.
@@ -359,6 +390,15 @@ func (p *LogicalJoin) GetJoinKeys() (leftKeys, rightKeys []*expression.Column, i
 		rightKeys = append(rightKeys, expr.GetArgs()[1].(*expression.Column))
 		isNullEQ = append(isNullEQ, expr.FuncName.L == ast.NullEQ)
 		hasNullEQ = hasNullEQ || expr.FuncName.L == ast.NullEQ
+	}
+	return
+}
+
+// GetNAJoinKeys extracts join keys(columns) from NAEqualCondition.
+func (p *LogicalJoin) GetNAJoinKeys() (leftKeys, rightKeys []*expression.Column) {
+	for _, expr := range p.NAEQConditions {
+		leftKeys = append(leftKeys, expr.GetArgs()[0].(*expression.Column))
+		rightKeys = append(rightKeys, expr.GetArgs()[1].(*expression.Column))
 	}
 	return
 }
@@ -1043,6 +1083,8 @@ type LogicalApply struct {
 	LogicalJoin
 
 	CorCols []*expression.CorrelatedColumn
+	// NoDecorrelate is from /*+ no_decorrelate() */ hint.
+	NoDecorrelate bool
 }
 
 // ExtractCorrelatedCols implements LogicalPlan interface.
@@ -1171,7 +1213,8 @@ type DataSource struct {
 	// handleCol represents the handle column for the datasource, either the
 	// int primary key column or extra handle column.
 	// handleCol *expression.Column
-	handleCols HandleCols
+	handleCols          HandleCols
+	unMutableHandleCols HandleCols
 	// TblCols contains the original columns of table before being pruned, and it
 	// is used for estimating table scan cost.
 	TblCols []*expression.Column
@@ -1195,6 +1238,10 @@ type DataSource struct {
 	// contain unique index and the first field is tidb_shard(),
 	// such as (tidb_shard(a), a ...), the fields are more than 2
 	containExprPrefixUk bool
+
+	// colsRequiringFullLen is the columns that must be fetched with full length.
+	// It is used to decide whether single scan is enough when reading from an index.
+	colsRequiringFullLen []*expression.Column
 }
 
 // ExtractCorrelatedCols implements LogicalPlan interface.
@@ -1318,13 +1365,38 @@ func (ds *DataSource) Convert2Gathers() (gathers []LogicalPlan) {
 			path.FullIdxCols, path.FullIdxColLens = expression.IndexInfo2Cols(ds.Columns, ds.schema.Columns, path.Index)
 			path.IdxCols, path.IdxColLens = expression.IndexInfo2PrefixCols(ds.Columns, ds.schema.Columns, path.Index)
 			// If index columns can cover all of the needed columns, we can use a IndexGather + IndexScan.
-			if ds.isCoveringIndex(ds.schema.Columns, path.FullIdxCols, path.FullIdxColLens, ds.tableInfo) {
+			if ds.isSingleScan(path.FullIdxCols, path.FullIdxColLens) {
 				gathers = append(gathers, ds.buildIndexGather(path))
 			}
 			// TODO: If index columns can not cover the schema, use IndexLookUpGather.
 		}
 	}
 	return gathers
+}
+
+func (ds *DataSource) detachCondAndBuildRangeForPath(path *util.AccessPath, conds []expression.Expression) error {
+	if len(path.IdxCols) == 0 {
+		path.TableFilters = conds
+		return nil
+	}
+	res, err := ranger.DetachCondAndBuildRangeForIndex(ds.ctx, conds, path.IdxCols, path.IdxColLens, ds.ctx.GetSessionVars().RangeMaxSize)
+	if err != nil {
+		return err
+	}
+	path.Ranges = res.Ranges
+	path.AccessConds = res.AccessConds
+	path.TableFilters = res.RemainedConds
+	path.EqCondCount = res.EqCondCount
+	path.EqOrInCondCount = res.EqOrInCount
+	path.IsDNFCond = res.IsDNFCond
+	path.ConstCols = make([]bool, len(path.IdxCols))
+	if res.ColumnValues != nil {
+		for i := range path.ConstCols {
+			path.ConstCols[i] = res.ColumnValues[i] != nil
+		}
+	}
+	path.CountAfterAccess, err = ds.tableStats.HistColl.GetRowCountByIndexRanges(ds.ctx, path.Index.ID, path.Ranges)
+	return err
 }
 
 func (ds *DataSource) deriveCommonHandleTablePathStats(path *util.AccessPath, conds []expression.Expression, isIm bool) error {
@@ -1335,29 +1407,8 @@ func (ds *DataSource) deriveCommonHandleTablePathStats(path *util.AccessPath, co
 	if len(conds) == 0 {
 		return nil
 	}
-	if len(path.IdxCols) != 0 {
-		res, err := ranger.DetachCondAndBuildRangeForIndex(ds.ctx, conds, path.IdxCols, path.IdxColLens)
-		if err != nil {
-			return err
-		}
-		path.Ranges = res.Ranges
-		path.AccessConds = res.AccessConds
-		path.TableFilters = res.RemainedConds
-		path.EqCondCount = res.EqCondCount
-		path.EqOrInCondCount = res.EqOrInCount
-		path.IsDNFCond = res.IsDNFCond
-		path.ConstCols = make([]bool, len(path.IdxCols))
-		if res.ColumnValues != nil {
-			for i := range path.ConstCols {
-				path.ConstCols[i] = res.ColumnValues[i] != nil
-			}
-		}
-		path.CountAfterAccess, err = ds.tableStats.HistColl.GetRowCountByIndexRanges(ds.ctx, path.Index.ID, path.Ranges)
-		if err != nil {
-			return err
-		}
-	} else {
-		path.TableFilters = conds
+	if err := ds.detachCondAndBuildRangeForPath(path, conds); err != nil {
+		return err
 	}
 	if path.EqOrInCondCount == len(path.AccessConds) {
 		accesses, remained := path.SplitCorColAccessCondFromFilters(ds.ctx, path.EqOrInCondCount)
@@ -1396,15 +1447,14 @@ func (ds *DataSource) deriveTablePathStats(path *util.AccessPath, conds []expres
 	path.CountAfterAccess = float64(ds.statisticTable.Count)
 	path.TableFilters = conds
 	var pkCol *expression.Column
-	columnLen := len(ds.schema.Columns)
 	isUnsigned := false
 	if ds.tableInfo.PKIsHandle {
 		if pkColInfo := ds.tableInfo.GetPkColInfo(); pkColInfo != nil {
 			isUnsigned = mysql.HasUnsignedFlag(pkColInfo.GetFlag())
 			pkCol = expression.ColInfo2Col(ds.schema.Columns, pkColInfo)
 		}
-	} else if columnLen > 0 && ds.schema.Columns[columnLen-1].ID == model.ExtraHandleID {
-		pkCol = ds.schema.Columns[columnLen-1]
+	} else {
+		pkCol = ds.schema.GetExtraHandleColumn()
 	}
 	if pkCol == nil {
 		path.Ranges = ranger.FullIntRange(isUnsigned)
@@ -1451,7 +1501,9 @@ func (ds *DataSource) deriveTablePathStats(path *util.AccessPath, conds []expres
 		path.CountAfterAccess = 1
 		return nil
 	}
-	path.Ranges, err = ranger.BuildTableRange(path.AccessConds, ds.ctx, pkCol.RetType)
+	var remainedConds []expression.Expression
+	path.Ranges, path.AccessConds, remainedConds, err = ranger.BuildTableRange(path.AccessConds, ds.ctx, pkCol.RetType, ds.ctx.GetSessionVars().RangeMaxSize)
+	path.TableFilters = append(path.TableFilters, remainedConds...)
 	if err != nil {
 		return err
 	}
@@ -1489,37 +1541,14 @@ func (ds *DataSource) fillIndexPath(path *util.AccessPath, conds []expression.Ex
 			}
 		}
 	}
-	if len(path.IdxCols) != 0 {
-		res, err := ranger.DetachCondAndBuildRangeForIndex(ds.ctx, conds, path.IdxCols, path.IdxColLens)
-		if err != nil {
-			return err
-		}
-		path.Ranges = res.Ranges
-		path.AccessConds = res.AccessConds
-		path.TableFilters = res.RemainedConds
-		path.EqCondCount = res.EqCondCount
-		path.EqOrInCondCount = res.EqOrInCount
-		path.IsDNFCond = res.IsDNFCond
-		path.ConstCols = make([]bool, len(path.IdxCols))
-		if res.ColumnValues != nil {
-			for i := range path.ConstCols {
-				path.ConstCols[i] = res.ColumnValues[i] != nil
-			}
-		}
-		path.CountAfterAccess, err = ds.tableStats.HistColl.GetRowCountByIndexRanges(ds.ctx, path.Index.ID, path.Ranges)
-		if err != nil {
-			return err
-		}
-	} else {
-		path.TableFilters = conds
-	}
-	return nil
+	err := ds.detachCondAndBuildRangeForPath(path, conds)
+	return err
 }
 
 // deriveIndexPathStats will fulfill the information that the AccessPath need.
 // conds is the conditions used to generate the DetachRangeResult for path.
 // isIm indicates whether this function is called to generate the partial path for IndexMerge.
-func (ds *DataSource) deriveIndexPathStats(path *util.AccessPath, conds []expression.Expression, isIm bool) {
+func (ds *DataSource) deriveIndexPathStats(path *util.AccessPath, _ []expression.Expression, isIm bool) {
 	if path.EqOrInCondCount == len(path.AccessConds) {
 		accesses, remained := path.SplitCorColAccessCondFromFilters(ds.ctx, path.EqOrInCondCount)
 		path.AccessConds = append(path.AccessConds, accesses...)
@@ -1540,7 +1569,7 @@ func (ds *DataSource) deriveIndexPathStats(path *util.AccessPath, conds []expres
 		}
 	}
 	var indexFilters []expression.Expression
-	indexFilters, path.TableFilters = ds.splitIndexFilterConditions(path.TableFilters, path.FullIdxCols, path.FullIdxColLens, ds.tableInfo)
+	indexFilters, path.TableFilters = ds.splitIndexFilterConditions(path.TableFilters, path.FullIdxCols, path.FullIdxColLens)
 	path.IndexFilters = append(path.IndexFilters, indexFilters...)
 	// If the `CountAfterAccess` is less than `stats.RowCount`, there must be some inconsistent stats info.
 	// We prefer the `stats.RowCount` because it could use more stats info to calculate the selectivity.
@@ -1723,7 +1752,7 @@ type LogicalWindow struct {
 }
 
 // EqualPartitionBy checks whether two LogicalWindow.Partitions are equal.
-func (p *LogicalWindow) EqualPartitionBy(ctx sessionctx.Context, newWindow *LogicalWindow) bool {
+func (p *LogicalWindow) EqualPartitionBy(_ sessionctx.Context, newWindow *LogicalWindow) bool {
 	if len(p.PartitionBy) != len(newWindow.PartitionBy) {
 		return false
 	}
@@ -1876,10 +1905,26 @@ type ShowContents struct {
 	User      *auth.UserIdentity   // Used for show grants.
 	Roles     []*auth.RoleIdentity // Used for show grants.
 
+	CountWarningsOrErrors bool // Used for showing count(*) warnings | errors
+
 	Full        bool
-	IfNotExists bool // Used for `show create database if not exists`.
-	GlobalScope bool // Used by show variables.
-	Extended    bool // Used for `show extended columns from ...`
+	IfNotExists bool       // Used for `show create database if not exists`.
+	GlobalScope bool       // Used by show variables.
+	Extended    bool       // Used for `show extended columns from ...`
+	Limit       *ast.Limit // Used for limit Result Set row number.
+}
+
+const emptyShowContentsSize = int64(unsafe.Sizeof(ShowContents{}))
+
+// MemoryUsage return the memory usage of ShowContents
+func (s *ShowContents) MemoryUsage() (sum int64) {
+	if s == nil {
+		return
+	}
+
+	sum = emptyShowContentsSize + int64(len(s.DBName)) + s.Partition.MemoryUsage() + s.IndexName.MemoryUsage() +
+		int64(cap(s.Roles))*size.SizeOfPointer
+	return
 }
 
 // LogicalShow represents a show plan.
@@ -1919,16 +1964,42 @@ type CTEClass struct {
 	// pushDownPredicates may be push-downed by different references.
 	pushDownPredicates []expression.Expression
 	ColumnMap          map[string]*expression.Column
+	isOuterMostCTE     bool
+}
+
+const emptyCTEClassSize = int64(unsafe.Sizeof(CTEClass{}))
+
+// MemoryUsage return the memory usage of CTEClass
+func (cc *CTEClass) MemoryUsage() (sum int64) {
+	if cc == nil {
+		return
+	}
+
+	sum = emptyCTEClassSize
+	if cc.seedPartPhysicalPlan != nil {
+		sum += cc.seedPartPhysicalPlan.MemoryUsage()
+	}
+	if cc.recursivePartPhysicalPlan != nil {
+		sum += cc.recursivePartPhysicalPlan.MemoryUsage()
+	}
+
+	for _, expr := range cc.pushDownPredicates {
+		sum += expr.MemoryUsage()
+	}
+	for key, val := range cc.ColumnMap {
+		sum += size.SizeOfString + int64(len(key)) + size.SizeOfPointer + val.MemoryUsage()
+	}
+	return
 }
 
 // LogicalCTE is for CTE.
 type LogicalCTE struct {
 	logicalSchemaProducer
 
-	cte            *CTEClass
-	cteAsName      model.CIStr
-	seedStat       *property.StatsInfo
-	isOuterMostCTE bool
+	cte       *CTEClass
+	cteAsName model.CIStr
+	cteName   model.CIStr
+	seedStat  *property.StatsInfo
 }
 
 // LogicalCTETable is for CTE table

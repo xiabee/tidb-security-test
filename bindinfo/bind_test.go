@@ -27,22 +27,18 @@ import (
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/terror"
-	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/util"
+	utilparser "github.com/pingcap/tidb/util/parser"
+	"github.com/pingcap/tidb/util/stmtsummary"
 	"github.com/stretchr/testify/require"
 )
 
 func TestPrepareCacheWithBinding(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-	orgEnable := plannercore.PreparedPlanCacheEnabled()
-	defer func() {
-		plannercore.SetPreparedPlanCache(orgEnable)
-	}()
-	plannercore.SetPreparedPlanCache(true)
-
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`set tidb_enable_prepared_plan_cache=1`)
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("create table t1(a int, b int, c int, key idx_b(b), key idx_c(c))")
@@ -247,7 +243,7 @@ func TestPrepareCacheWithBinding(t *testing.T) {
 	ps = []*util.ProcessInfo{tkProcess}
 	tk.Session().SetSessionManager(&testkit.MockSessionManager{PS: ps})
 	res = tk.MustQuery("explain for connection " + strconv.FormatUint(tkProcess.ID, 10))
-	require.False(t, tk.HasPlan4ExplainFor(res, "IndexReader"))
+	require.True(t, tk.HasPlan4ExplainFor(res, "IndexReader"))
 	tk.MustExec("execute stmt1;")
 	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
 
@@ -300,11 +296,11 @@ func TestPrepareCacheWithBinding(t *testing.T) {
 }
 
 func TestExplain(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t1")
 	tk.MustExec("drop table if exists t2")
 	tk.MustExec("create table t1(id int)")
@@ -321,7 +317,7 @@ func TestExplain(t *testing.T) {
 
 	// Add test for SetOprStmt
 	tk.MustExec("create index index_id on t1(id)")
-	require.False(t, tk.HasPlan("SELECT * from t1 union SELECT * from t1", "IndexReader"))
+	require.True(t, tk.HasPlan("SELECT * from t1 union SELECT * from t1", "IndexReader"))
 	require.True(t, tk.HasPlan("SELECT * from t1 use index(index_id) union SELECT * from t1", "IndexReader"))
 
 	tk.MustExec("create global binding for SELECT * from t1 union SELECT * from t1 using SELECT * from t1 use index(index_id) union SELECT * from t1")
@@ -332,8 +328,7 @@ func TestExplain(t *testing.T) {
 }
 
 func TestBindSemiJoinRewrite(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -354,10 +349,50 @@ using
 	require.True(t, tk.NotHasKeywordInOperatorInfo("select * from t1 where exists(select 1 from t2 where t1.id=t2.id)", "semi join"))
 }
 
+func TestBindCTEMerge(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec("create table t1(id int)")
+	require.True(t, tk.HasPlan("with cte as (select * from t1) select * from cte a, cte b", "CTEFullScan"))
+	require.False(t, tk.HasPlan("with cte as (select /*+ MERGE() */ * from t1) select * from cte a, cte b", "CTEFullScan"))
+	tk.MustExec(`
+create global binding for
+	with cte as (select * from t1) select * from cte
+using
+	with cte as (select /*+ MERGE() */ * from t1) select * from cte
+`)
+
+	require.False(t, tk.HasPlan("with cte as (select * from t1) select * from cte", "CTEFullScan"))
+}
+
+func TestBindNoDecorrelate(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec("drop table if exists t2")
+	tk.MustExec("create table t1(a int, b int)")
+	tk.MustExec("create table t2(a int, b int)")
+	require.False(t, tk.HasPlan("select exists (select t2.b from t2 where t2.a = t1.b limit 2) from t1", "Apply"))
+	require.True(t, tk.HasPlan("select exists (select /*+ no_decorrelate() */ t2.b from t2 where t2.a = t1.b limit 2) from t1", "Apply"))
+
+	tk.MustExec(`
+create global binding for
+	select exists (select t2.b from t2 where t2.a = t1.b limit 2) from t1
+using
+	select exists (select /*+ no_decorrelate() */ t2.b from t2 where t2.a = t1.b limit 2) from t1
+`)
+
+	require.True(t, tk.HasPlan("select exists (select t2.b from t2 where t2.a = t1.b limit 2) from t1", "Apply"))
+}
+
 // TestBindingSymbolList tests sql with "?, ?, ?, ?", fixes #13871
 func TestBindingSymbolList(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -394,8 +429,7 @@ func TestBindingSymbolList(t *testing.T) {
 }
 
 func TestDMLSQLBind(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -450,8 +484,7 @@ func TestDMLSQLBind(t *testing.T) {
 }
 
 func TestBestPlanInBaselines(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -490,8 +523,7 @@ func TestBestPlanInBaselines(t *testing.T) {
 }
 
 func TestErrorBind(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -519,12 +551,13 @@ func TestErrorBind(t *testing.T) {
 	require.NotNil(t, bind.UpdateTime)
 
 	tk.MustExec("drop index index_t on t")
-	_, err = tk.Exec("select * from t where i > 10")
+	rs, err := tk.Exec("select * from t where i > 10")
 	require.NoError(t, err)
+	rs.Close()
 
 	dom.BindHandle().DropInvalidBindRecord()
 
-	rs, err := tk.Exec("show global bindings")
+	rs, err = tk.Exec("show global bindings")
 	require.NoError(t, err)
 	chk := rs.NewChunk(nil)
 	err = rs.Next(context.TODO(), chk)
@@ -539,8 +572,7 @@ func TestDMLEvolveBaselines(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -607,8 +639,7 @@ func TestAddEvolveTasks(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -641,8 +672,7 @@ func TestRuntimeHintsInEvolveTasks(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -659,8 +689,7 @@ func TestRuntimeHintsInEvolveTasks(t *testing.T) {
 }
 
 func TestDefaultSessionVars(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustQuery(`show variables like "%baselines%"`).Sort().Check(testkit.Rows(
@@ -674,8 +703,7 @@ func TestDefaultSessionVars(t *testing.T) {
 }
 
 func TestCaptureBaselinesScope(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk2 := testkit.NewTestKit(t, store)
@@ -711,36 +739,34 @@ func TestCaptureBaselinesScope(t *testing.T) {
 }
 
 func TestStmtHints(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int, b int, index idx(a))")
-	tk.MustExec("create global binding for select * from t using select /*+ MAX_EXECUTION_TIME(100), MEMORY_QUOTA(1 GB) */ * from t use index(idx)")
+	tk.MustExec("create global binding for select * from t using select /*+ MAX_EXECUTION_TIME(100), MEMORY_QUOTA(2 GB) */ * from t use index(idx)")
 	tk.MustQuery("select * from t")
-	require.Equal(t, int64(1073741824), tk.Session().GetSessionVars().StmtCtx.MemQuotaQuery)
+	require.Equal(t, int64(2147483648), tk.Session().GetSessionVars().MemTracker.GetBytesLimit())
 	require.Equal(t, uint64(100), tk.Session().GetSessionVars().StmtCtx.MaxExecutionTime)
 	tk.MustQuery("select a, b from t")
-	require.Equal(t, int64(0), tk.Session().GetSessionVars().StmtCtx.MemQuotaQuery)
+	require.Equal(t, int64(1073741824), tk.Session().GetSessionVars().MemTracker.GetBytesLimit())
 	require.Equal(t, uint64(0), tk.Session().GetSessionVars().StmtCtx.MaxExecutionTime)
 }
 
 func TestPrivileges(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int, b int, index idx(a))")
 	tk.MustExec("create global binding for select * from t using select * from t use index(idx)")
-	require.True(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
 	rows := tk.MustQuery("show global bindings").Rows()
 	require.Len(t, rows, 1)
 	tk.MustExec("create user test@'%'")
-	require.True(t, tk.Session().Auth(&auth.UserIdentity{Username: "test", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "test", Hostname: "%"}, nil, nil))
 	rows = tk.MustQuery("show global bindings").Rows()
 	require.Len(t, rows, 0)
 }
@@ -752,8 +778,7 @@ func TestHintsSetEvolveTask(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -777,8 +802,7 @@ func TestHintsSetEvolveTask(t *testing.T) {
 }
 
 func TestHintsSetID(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -850,11 +874,11 @@ func TestNotEvolvePlanForReadStorageHint(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int, b int, index idx_a(a), index idx_b(b))")
 	tk.MustExec("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)")
@@ -874,16 +898,17 @@ func TestNotEvolvePlanForReadStorageHint(t *testing.T) {
 	}
 
 	// Make sure the best plan of the SQL is use TiKV index.
-	tk.MustExec("set @@session.tidb_executor_concurrency = 4;")
+	tk.MustExec("set @@session.tidb_executor_concurrency = 4; set @@tidb_allow_mpp=0;")
 	rows := tk.MustQuery("explain select * from t where a >= 11 and b >= 11").Rows()
 	require.Equal(t, "cop[tikv]", fmt.Sprintf("%v", rows[len(rows)-1][2]))
+	tk.MustExec("set @@tidb_allow_mpp=1")
 
 	tk.MustExec("create global binding for select * from t where a >= 1 and b >= 1 using select /*+ read_from_storage(tiflash[t]) */ * from t where a >= 1 and b >= 1")
 	tk.MustExec("set @@tidb_evolve_plan_baselines=1")
 
 	// Even if index of TiKV has lower cost, it chooses TiFlash.
 	rows = tk.MustQuery("explain select * from t where a >= 11 and b >= 11").Rows()
-	require.Equal(t, "cop[tiflash]", fmt.Sprintf("%v", rows[len(rows)-1][2]))
+	require.Equal(t, "mpp[tiflash]", fmt.Sprintf("%v", rows[len(rows)-1][2]))
 
 	tk.MustExec("admin flush bindings")
 	rows = tk.MustQuery("show global bindings").Rows()
@@ -894,11 +919,11 @@ func TestNotEvolvePlanForReadStorageHint(t *testing.T) {
 }
 
 func TestBindingWithIsolationRead(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(a int, b int, index idx_a(a), index idx_b(b))")
 	tk.MustExec("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5), (6,6), (7,7), (8,8), (9,9), (10,10)")
@@ -923,7 +948,7 @@ func TestBindingWithIsolationRead(t *testing.T) {
 	// Even if we build a binding use index for SQL, but after we set the isolation read for TiFlash, it choose TiFlash instead of index of TiKV.
 	tk.MustExec("set @@tidb_isolation_read_engines = \"tiflash\"")
 	rows = tk.MustQuery("explain select * from t where a >= 11 and b >= 11").Rows()
-	require.Equal(t, "cop[tiflash]", rows[len(rows)-1][2])
+	require.Equal(t, "mpp[tiflash]", rows[len(rows)-1][2])
 }
 
 func TestReCreateBindAfterEvolvePlan(t *testing.T) {
@@ -933,8 +958,7 @@ func TestReCreateBindAfterEvolvePlan(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -963,8 +987,7 @@ func TestReCreateBindAfterEvolvePlan(t *testing.T) {
 }
 
 func TestInvisibleIndex(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -998,8 +1021,7 @@ func TestInvisibleIndex(t *testing.T) {
 }
 
 func TestSPMHitInfo(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1026,8 +1048,7 @@ func TestSPMHitInfo(t *testing.T) {
 }
 
 func TestReCreateBind(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1059,8 +1080,7 @@ func TestReCreateBind(t *testing.T) {
 }
 
 func TestExplainShowBindSQL(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1078,8 +1098,7 @@ func TestExplainShowBindSQL(t *testing.T) {
 }
 
 func TestDMLIndexHintBind(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1101,8 +1120,7 @@ func TestForbidEvolvePlanBaseLinesBeforeGA(t *testing.T) {
 		config.CheckTableBeforeDrop = originalVal
 	}()
 
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	err := tk.ExecToErr("set @@tidb_evolve_plan_baselines=0")
@@ -1116,8 +1134,7 @@ func TestForbidEvolvePlanBaseLinesBeforeGA(t *testing.T) {
 }
 
 func TestExplainTableStmts(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1129,8 +1146,7 @@ func TestExplainTableStmts(t *testing.T) {
 }
 
 func TestSPMWithoutUseDatabase(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk1 := testkit.NewTestKit(t, store)
@@ -1155,8 +1171,7 @@ func TestSPMWithoutUseDatabase(t *testing.T) {
 }
 
 func TestBindingWithoutCharset(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1170,8 +1185,7 @@ func TestBindingWithoutCharset(t *testing.T) {
 }
 
 func TestBindingWithMultiParenthesis(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1193,8 +1207,7 @@ func TestGCBindRecord(t *testing.T) {
 		bindinfo.Lease = originLease
 	}()
 
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -1229,4 +1242,232 @@ func TestGCBindRecord(t *testing.T) {
 	require.NoError(t, h.GCBindRecord())
 	tk.MustQuery("show global bindings").Check(testkit.Rows())
 	tk.MustQuery("select status from mysql.bind_info where original_sql = 'select * from `test` . `t` where `a` = ?'").Check(testkit.Rows())
+}
+
+func TestBindSQLDigest(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(pk int primary key, a int, b int, key(a), key(b))")
+
+	cases := []struct {
+		origin string
+		hint   string
+	}{
+		// agg hints
+		{"select count(1) from t", "select /*+ hash_agg() */ count(1) from t"},
+		{"select count(1) from t", "select /*+ stream_agg() */ count(1) from t"},
+		// join hints
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ merge_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_smj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ hash_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_hj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ inl_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_inlj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ inl_hash_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		// index hints
+		{"select * from t", "select * from t use index(primary)"},
+		{"select * from t", "select /*+ use_index(primary) */ * from t"},
+		{"select * from t", "select * from t use index(a)"},
+		{"select * from t", "select /*+ use_index(a) */ * from t use index(a)"},
+		{"select * from t", "select * from t use index(b)"},
+		{"select * from t", "select /*+ use_index(b) */ * from t use index(b)"},
+		{"select a, b from t where a=1 or b=1", "select /*+ use_index_merge(t, a, b) */ a, b from t where a=1 or b=1"},
+		{"select * from t where a=1", "select /*+ ignore_index(t, a) */ * from t where a=1"},
+		// push-down hints
+		{"select * from t limit 10", "select /*+ limit_to_cop() */ * from t limit 10"},
+		{"select a, count(*) from t group by a", "select /*+ agg_to_cop() */ a, count(*) from t group by a"},
+		// index-merge hints
+		{"select a, b from t where a>1 or b>1", "select /*+ no_index_merge() */ a, b from t where a>1 or b>1"},
+		{"select a, b from t where a>1 or b>1", "select /*+ use_index_merge(t, a, b) */ a, b from t where a>1 or b>1"},
+		// runtime hints
+		{"select * from t", "select /*+ memory_quota(1024 MB) */ * from t"},
+		{"select * from t", "select /*+ max_execution_time(1000) */ * from t"},
+		// storage hints
+		{"select * from t", "select /*+ read_from_storage(tikv[t]) */ * from t"},
+		// others
+		{"select t1.a, t1.b from t t1 where t1.a in (select t2.a from t t2)", "select /*+ use_toja(true) */ t1.a, t1.b from t t1 where t1.a in (select t2.a from t t2)"},
+	}
+	for _, c := range cases {
+		stmtsummary.StmtSummaryByDigestMap.Clear()
+		utilCleanBindingEnv(tk, dom)
+		sql := "create global binding for " + c.origin + " using " + c.hint
+		tk.MustExec(sql)
+		res := tk.MustQuery(`show global bindings`).Rows()
+		require.Equal(t, len(res[0]), 11)
+
+		parser4binding := parser.New()
+		originNode, err := parser4binding.ParseOneStmt(c.origin, "utf8mb4", "utf8mb4_general_ci")
+		require.NoError(t, err)
+		_, sqlDigestWithDB := parser.NormalizeDigest(utilparser.RestoreWithDefaultDB(originNode, "test", c.origin))
+		require.Equal(t, res[0][9], sqlDigestWithDB.String())
+	}
+}
+
+func TestDropBindBySQLDigest(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(pk int primary key, a int, b int, key(a), key(b))")
+
+	cases := []struct {
+		origin string
+		hint   string
+	}{
+		// agg hints
+		{"select count(1) from t", "select /*+ hash_agg() */ count(1) from t"},
+		{"select count(1) from t", "select /*+ stream_agg() */ count(1) from t"},
+		// join hints
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ merge_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_smj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ hash_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_hj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ inl_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ tidb_inlj(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		{"select * from t t1, t t2 where t1.a=t2.a", "select /*+ inl_hash_join(t1, t2) */ * from t t1, t t2 where t1.a=t2.a"},
+		// index hints
+		{"select * from t", "select * from t use index(primary)"},
+		{"select * from t", "select /*+ use_index(primary) */ * from t"},
+		{"select * from t", "select * from t use index(a)"},
+		{"select * from t", "select /*+ use_index(a) */ * from t use index(a)"},
+		{"select * from t", "select * from t use index(b)"},
+		{"select * from t", "select /*+ use_index(b) */ * from t use index(b)"},
+		{"select a, b from t where a=1 or b=1", "select /*+ use_index_merge(t, a, b) */ a, b from t where a=1 or b=1"},
+		{"select * from t where a=1", "select /*+ ignore_index(t, a) */ * from t where a=1"},
+		// push-down hints
+		{"select * from t limit 10", "select /*+ limit_to_cop() */ * from t limit 10"},
+		{"select a, count(*) from t group by a", "select /*+ agg_to_cop() */ a, count(*) from t group by a"},
+		// index-merge hints
+		{"select a, b from t where a>1 or b>1", "select /*+ no_index_merge() */ a, b from t where a>1 or b>1"},
+		{"select a, b from t where a>1 or b>1", "select /*+ use_index_merge(t, a, b) */ a, b from t where a>1 or b>1"},
+		// runtime hints
+		{"select * from t", "select /*+ memory_quota(1024 MB) */ * from t"},
+		{"select * from t", "select /*+ max_execution_time(1000) */ * from t"},
+		// storage hints
+		{"select * from t", "select /*+ read_from_storage(tikv[t]) */ * from t"},
+		// others
+		{"select t1.a, t1.b from t t1 where t1.a in (select t2.a from t t2)", "select /*+ use_toja(true) */ t1.a, t1.b from t t1 where t1.a in (select t2.a from t t2)"},
+	}
+
+	h := dom.BindHandle()
+	// global scope
+	for _, c := range cases {
+		utilCleanBindingEnv(tk, dom)
+		sql := "create global binding for " + c.origin + " using " + c.hint
+		tk.MustExec(sql)
+		h.ReloadBindings()
+		res := tk.MustQuery(`show global bindings`).Rows()
+
+		require.Equal(t, len(res), 1)
+		require.Equal(t, len(res[0]), 11)
+		drop := fmt.Sprintf("drop global binding for sql digest '%s'", res[0][9])
+		tk.MustExec(drop)
+		require.NoError(t, h.GCBindRecord())
+		h.ReloadBindings()
+		tk.MustQuery("show global bindings").Check(testkit.Rows())
+	}
+
+	// session scope
+	for _, c := range cases {
+		utilCleanBindingEnv(tk, dom)
+		sql := "create binding for " + c.origin + " using " + c.hint
+		tk.MustExec(sql)
+		res := tk.MustQuery(`show bindings`).Rows()
+
+		require.Equal(t, len(res), 1)
+		require.Equal(t, len(res[0]), 11)
+		drop := fmt.Sprintf("drop binding for sql digest '%s'", res[0][9])
+		tk.MustExec(drop)
+		require.NoError(t, h.GCBindRecord())
+		tk.MustQuery("show bindings").Check(testkit.Rows())
+	}
+
+	// exception cases
+	tk.MustGetErrMsg(fmt.Sprintf("drop binding for sql digest '%s'", "1"), "can't find any binding for '1'")
+	tk.MustGetErrMsg(fmt.Sprintf("drop binding for sql digest '%s'", ""), "sql digest is empty")
+}
+
+func TestCreateBindingFromHistory(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t1(id int primary key, a int, b int, key(a))")
+	tk.MustExec("create table t2(id int primary key, a int, b int, key(a))")
+
+	var testCases = []struct {
+		sqls []string
+		hint string
+	}{
+		{
+			sqls: []string{
+				"select %s * from t1, t2 where t1.id = t2.id",
+				"select %s * from test.t1, t2 where t1.id = t2.id",
+				"select %s * from test.t1, test.t2 where t1.id = t2.id",
+				"select %s * from t1, test.t2 where t1.id = t2.id",
+			},
+			hint: "/*+ merge_join(t1, t2) */",
+		},
+		{
+			sqls: []string{
+				"select %s * from t1 where a = 1",
+				"select %s * from test.t1 where a = 1",
+			},
+			hint: "/*+ ignore_index(t, a) */",
+		},
+	}
+
+	for _, testCase := range testCases {
+		for _, bind := range testCase.sqls {
+			stmtsummary.StmtSummaryByDigestMap.Clear()
+			bindSQL := fmt.Sprintf(bind, testCase.hint)
+			tk.MustExec(bindSQL)
+			planDigest := tk.MustQuery(fmt.Sprintf("select plan_digest from information_schema.statements_summary where query_sample_text = '%s'", bindSQL)).Rows()
+			tk.MustExec(fmt.Sprintf("create session binding from history using plan digest '%s'", planDigest[0][0]))
+			showRes := tk.MustQuery("show bindings").Rows()
+			require.Equal(t, len(showRes), 1)
+			require.Equal(t, planDigest[0][0], showRes[0][10])
+			for _, sql := range testCase.sqls {
+				tk.MustExec(fmt.Sprintf(sql, ""))
+				tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("1"))
+			}
+		}
+		showRes := tk.MustQuery("show bindings").Rows()
+		require.Equal(t, len(showRes), 1)
+		tk.MustExec(fmt.Sprintf("drop binding for sql digest '%s'", showRes[0][9]))
+	}
+
+	// exception cases
+	tk.MustGetErrMsg(fmt.Sprintf("create binding from history using plan digest '%s'", "1"), "can't find any plans for '1'")
+	tk.MustGetErrMsg(fmt.Sprintf("create binding from history using plan digest '%s'", ""), "plan digest is empty")
+	tk.MustExec("create binding for select * from t1, t2 where t1.id = t2.id using select /*+ merge_join(t1, t2) */ * from t1, t2 where t1.id = t2.id")
+	showRes := tk.MustQuery("show bindings").Rows()
+	require.Equal(t, showRes[0][10], "") // plan digest should be nil by create for
+}
+
+func TestCreateBindingForPrepareFromHistory(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(id int primary key, a int, key(a))")
+
+	tk.MustExec("prepare stmt from 'select /*+ ignore_index(t,a) */ * from t where a = ?'")
+	tk.MustExec("set @a = 1")
+	tk.MustExec("execute stmt using @a")
+	planDigest := tk.MustQuery(fmt.Sprintf("select plan_digest from information_schema.statements_summary where query_sample_text = '%s'", "select /*+ ignore_index(t,a) */ * from t where a = ? [arguments: 1]")).Rows()
+	showRes := tk.MustQuery("show bindings").Rows()
+	require.Equal(t, len(showRes), 0)
+	tk.MustExec(fmt.Sprintf("create binding from history using plan digest '%s'", planDigest[0][0]))
+	showRes = tk.MustQuery("show bindings").Rows()
+	require.Equal(t, len(showRes), 1)
+	require.Equal(t, planDigest[0][0], showRes[0][10])
+	tk.MustExec("execute stmt using @a")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("1"))
 }

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pingcap/failpoint"
 	plannercore "github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
@@ -29,8 +30,9 @@ import (
 )
 
 func TestHashPartitionPruner(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("create database test_partition")
 	tk.MustExec("use test_partition")
@@ -53,7 +55,7 @@ func TestHashPartitionPruner(t *testing.T) {
 		Result []string
 	}
 	partitionPrunerData := plannercore.GetPartitionPrunerData()
-	partitionPrunerData.GetTestCases(t, &input, &output)
+	partitionPrunerData.LoadTestCases(t, &input, &output)
 	for i, tt := range input {
 		testdata.OnRecord(func() {
 			output[i].SQL = tt
@@ -64,9 +66,9 @@ func TestHashPartitionPruner(t *testing.T) {
 }
 
 func TestRangeColumnPartitionPruningForIn(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop database if exists test_range_col_in")
 	tk.MustExec("create database test_range_col_in")
 	tk.MustExec("use test_range_col_in")
@@ -77,7 +79,7 @@ func TestRangeColumnPartitionPruningForIn(t *testing.T) {
 	tk.MustExec(`CREATE TABLE t1 (
 		id bigint(20)  NOT NULL AUTO_INCREMENT,
 		dt date,
-		PRIMARY KEY (id,dt))
+		PRIMARY KEY (id,dt) NONCLUSTERED)
 		PARTITION BY RANGE COLUMNS(dt) (
 		PARTITION p20201125 VALUES LESS THAN ("20201126"),
 		PARTITION p20201126 VALUES LESS THAN ("20201127"),
@@ -144,8 +146,7 @@ func TestRangeColumnPartitionPruningForIn(t *testing.T) {
 }
 
 func TestRangeColumnPartitionPruningForInString(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("drop database if exists test_range_col_in_string")
 	tk.MustExec("create database test_range_col_in_string")
@@ -253,12 +254,14 @@ func TestRangeColumnPartitionPruningForInString(t *testing.T) {
 }
 
 func TestListPartitionPruner(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("drop database if exists test_partition;")
 	tk.MustExec("create database test_partition")
 	tk.MustExec("use test_partition")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.Session().GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeIntOnly
 	tk.MustExec("set @@session.tidb_enable_list_partition = ON")
 	tk.MustExec(`set @@session.tidb_regard_null_as_point=false`)
@@ -304,20 +307,20 @@ func TestListPartitionPruner(t *testing.T) {
 		Plan   []string
 	}
 	partitionPrunerData := plannercore.GetPartitionPrunerData()
-	partitionPrunerData.GetTestCases(t, &input, &output)
+	partitionPrunerData.LoadTestCases(t, &input, &output)
 	valid := false
 	for i, tt := range input {
 		testdata.OnRecord(func() {
 			output[i].SQL = tt
-			output[i].Result = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+			output[i].Result = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Sort().Rows())
 			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery("explain format = 'brief' " + tt).Rows())
 		})
 		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
-		result := tk.MustQuery(tt)
+		result := tk.MustQuery(tt).Sort()
 		result.Check(testkit.Rows(output[i].Result...))
 		// If the query doesn't specified the partition, compare the result with normal table
 		if !strings.Contains(tt, "partition(") {
-			result.Check(tk2.MustQuery(tt).Rows())
+			result.Check(tk.MustQuery(tt).Sort().Rows())
 			valid = true
 		}
 		require.True(t, valid)
@@ -325,9 +328,11 @@ func TestListPartitionPruner(t *testing.T) {
 }
 
 func TestListColumnsPartitionPruner(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("set @@session.tidb_enable_list_partition = ON")
 	tk.MustExec("drop database if exists test_partition;")
 	tk.MustExec("create database test_partition")
@@ -340,6 +345,7 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 
 	// tk1 use to test partition table with index.
 	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec("set tidb_cost_model_version=2")
 	tk1.MustExec("drop database if exists test_partition_1;")
 	tk1.MustExec(`set @@session.tidb_regard_null_as_point=false`)
 	tk1.MustExec("create database test_partition_1")
@@ -352,6 +358,7 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 
 	// tk2 use to compare the result with normal table.
 	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExec("set tidb_cost_model_version=2")
 	tk2.MustExec("drop database if exists test_partition_2;")
 	tk2.MustExec(`set @@session.tidb_regard_null_as_point=false`)
 	tk2.MustExec("create database test_partition_2")
@@ -360,6 +367,9 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 	tk2.MustExec("create table t2 (id int, a int, b int)")
 	tk2.MustExec("insert into t1 (id,a,b) values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7),(8,8,8),(9,9,9),(10,10,10),(null,10,null)")
 	tk2.MustExec("insert into t2 (id,a,b) values (1,1,1),(2,2,2),(3,3,3),(4,4,4),(5,5,5),(6,6,6),(7,7,7),(8,8,8),(9,9,9),(10,10,10),(null,null,null)")
+
+	// Default RPC encoding may cause statistics explain result differ and then the test unstable.
+	tk1.MustExec("set @@tidb_enable_chunk_rpc = on")
 
 	var input []struct {
 		SQL    string
@@ -372,7 +382,7 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 		IndexPlan []string
 	}
 	partitionPrunerData := plannercore.GetPartitionPrunerData()
-	partitionPrunerData.GetTestCases(t, &input, &output)
+	partitionPrunerData.LoadTestCases(t, &input, &output)
 	valid := false
 	for i, tt := range input {
 		// Test for table without index.
@@ -383,7 +393,7 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 		indexPlanTree := testdata.ConvertRowsToStrings(indexPlan.Rows())
 		testdata.OnRecord(func() {
 			output[i].SQL = tt.SQL
-			output[i].Result = testdata.ConvertRowsToStrings(tk.MustQuery(tt.SQL).Rows())
+			output[i].Result = testdata.ConvertRowsToStrings(tk.MustQuery(tt.SQL).Sort().Rows())
 			// Test for table without index.
 			output[i].Plan = planTree
 			// Test for table with index.
@@ -398,14 +408,14 @@ func TestListColumnsPartitionPruner(t *testing.T) {
 		checkPrunePartitionInfo(t, tt.SQL, tt.Pruner, indexPlanTree)
 
 		// compare the result.
-		result := tk.MustQuery(tt.SQL)
+		result := tk.MustQuery(tt.SQL).Sort()
 		idxResult := tk1.MustQuery(tt.SQL)
-		result.Check(idxResult.Rows())
+		result.Check(idxResult.Sort().Rows())
 		result.Check(testkit.Rows(output[i].Result...))
 
 		// If the query doesn't specified the partition, compare the result with normal table
 		if !strings.Contains(tt.SQL, "partition(") {
-			result.Check(tk2.MustQuery(tt.SQL).Rows())
+			result.Check(tk2.MustQuery(tt.SQL).Sort().Rows())
 			valid = true
 		}
 	}
@@ -480,8 +490,7 @@ func getFieldValue(prefix, row string) string {
 }
 
 func TestListColumnsPartitionPrunerRandom(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	valueNum := 10
 	// Create table.
@@ -535,8 +544,11 @@ func TestListColumnsPartitionPrunerRandom(t *testing.T) {
 }
 
 func TestIssue22635(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer func() {
+		failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	}()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("USE test;")
 	tk.MustExec("DROP TABLE IF EXISTS t1")
@@ -547,24 +559,23 @@ CREATE TABLE t1 (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
 PARTITION BY HASH( a )
 PARTITIONS 4`)
-	tk.MustQuery("SELECT (SELECT tt.a FROM t1  tt LIMIT 1) aa, COUNT(DISTINCT b) FROM t1  GROUP BY aa").Check(testkit.Rows()) // work fine without any error
+	tk.MustQuery("SELECT (SELECT tt.a FROM t1 tt ORDER BY a ASC LIMIT 1) aa, COUNT(DISTINCT b) FROM t1 GROUP BY aa").Check(testkit.Rows()) // work fine without any error
 
 	tk.MustExec("insert into t1 values (1, 1)")
-	tk.MustQuery("SELECT (SELECT tt.a FROM t1  tt LIMIT 1) aa, COUNT(DISTINCT b) FROM t1  GROUP BY aa").Check(testkit.Rows("1 1"))
+	tk.MustQuery("SELECT (SELECT tt.a FROM t1 tt ORDER BY a ASC LIMIT 1) aa, COUNT(DISTINCT b) FROM t1 GROUP BY aa").Check(testkit.Rows("1 1"))
 
 	tk.MustExec("insert into t1 values (2, 2), (2, 2)")
-	tk.MustQuery("SELECT (SELECT tt.a FROM t1  tt LIMIT 1) aa, COUNT(DISTINCT b) FROM t1  GROUP BY aa").Check(testkit.Rows("1 2"))
+	tk.MustQuery("SELECT (SELECT tt.a FROM t1 tt ORDER BY a ASC LIMIT 1) aa, COUNT(DISTINCT b) FROM t1 GROUP BY aa").Check(testkit.Rows("1 2"))
 
 	tk.MustExec("insert into t1 values (3, 3), (3, 3), (3, 3)")
-	tk.MustQuery("SELECT (SELECT tt.a FROM t1  tt LIMIT 1) aa, COUNT(DISTINCT b) FROM t1  GROUP BY aa").Check(testkit.Rows("1 3"))
+	tk.MustQuery("SELECT (SELECT tt.a FROM t1 tt ORDER BY a ASC LIMIT 1) aa, COUNT(DISTINCT b) FROM t1 GROUP BY aa").Check(testkit.Rows("1 3"))
 
 	tk.MustExec("insert into t1 values (4, 4), (4, 4), (4, 4), (4, 4)")
-	tk.MustQuery("SELECT (SELECT tt.a FROM t1  tt LIMIT 1) aa, COUNT(DISTINCT b) FROM t1  GROUP BY aa").Check(testkit.Rows("4 4"))
+	tk.MustQuery("SELECT (SELECT tt.a FROM t1 tt ORDER BY a DESC LIMIT 1) aa, COUNT(DISTINCT b) FROM t1 GROUP BY aa").Check(testkit.Rows("4 4"))
 }
 
 func TestIssue22898(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("USE test;")
 	tk.MustExec("DROP TABLE IF EXISTS test;")
@@ -576,8 +587,7 @@ func TestIssue22898(t *testing.T) {
 }
 
 func TestIssue23622(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("USE test;")
 	tk.MustExec("drop table if exists t2;")
@@ -587,8 +597,7 @@ func TestIssue23622(t *testing.T) {
 }
 
 func Test22396(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("USE test;")
 	tk.MustExec("DROP TABLE IF EXISTS test;")
@@ -601,8 +610,7 @@ func Test22396(t *testing.T) {
 }
 
 func TestIssue23608(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set @@tidb_partition_prune_mode='static'")
@@ -649,8 +657,7 @@ partition by range (a) (
 
 // issue 22079
 func TestRangePartitionPredicatePruner(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@tidb_partition_prune_mode='" + string(variable.Static) + "'")
 	tk.MustExec("drop database if exists test_partition;")
@@ -671,7 +678,7 @@ func TestRangePartitionPredicatePruner(t *testing.T) {
 		Result []string
 	}
 	partitionPrunerData := plannercore.GetPartitionPrunerData()
-	partitionPrunerData.GetTestCases(t, &input, &output)
+	partitionPrunerData.LoadTestCases(t, &input, &output)
 	for i, tt := range input {
 		testdata.OnRecord(func() {
 			output[i].SQL = tt
@@ -682,8 +689,7 @@ func TestRangePartitionPredicatePruner(t *testing.T) {
 }
 
 func TestIssue42135(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`create database issue42135`)
 	tk.MustExec(`use issue42135`)
@@ -696,12 +702,12 @@ func TestIssue42135(t *testing.T) {
 	tk.MustQuery(`select * from tx1 inner join tx2 on tx1.ID=tx2.ID and tx1.ltype=tx2.ltype where tx2.rid='1'`).Check(testkit.Rows("1 1 1 501 1 1 1 1 1 1 501"))
 	tk.MustQuery(`explain format='brief' select * from tx1 inner join tx2 on tx1.ID=tx2.ID and tx1.ltype=tx2.ltype where tx2.rid='1'`).Check(testkit.Rows(""+
 		"HashJoin 1.00 root  inner join, equal:[eq(issue42135.tx1.id, issue42135.tx2.id) eq(issue42135.tx1.ltype, issue42135.tx2.ltype)]",
-		`├─TableReader(Build) 1.00 root partition:all data:Selection`,
-		`│ └─Selection 1.00 cop[tikv]  eq(issue42135.tx2.rid, "1"), not(isnull(issue42135.tx2.id))`,
-		`│   └─TableFullScan 1.00 cop[tikv] table:tx2 keep order:false`,
-		`└─TableReader(Probe) 1.00 root  data:Selection`,
-		`  └─Selection 1.00 cop[tikv]  not(isnull(issue42135.tx1.id))`,
-		`    └─TableFullScan 1.00 cop[tikv] table:tx1 keep order:false`))
+		`├─TableReader(Build) 1.00 root  data:Selection`,
+		`│ └─Selection 1.00 cop[tikv]  not(isnull(issue42135.tx1.id))`,
+		`│   └─TableFullScan 1.00 cop[tikv] table:tx1 keep order:false`,
+		`└─TableReader(Probe) 1.00 root partition:all data:Selection`,
+		`  └─Selection 1.00 cop[tikv]  eq(issue42135.tx2.rid, "1"), not(isnull(issue42135.tx2.id))`,
+		`    └─TableFullScan 1.00 cop[tikv] table:tx2 keep order:false`))
 
 	tk.MustExec(`drop table tx2`)
 	tk.MustExec("CREATE TABLE `tx2` (`ID` varchar(13), `rid` varchar(12), `a` varchar(9), `b` varchar(8), `c` longtext, `d` varchar(12), `ltype` int(5) NOT NULL) PARTITION BY LIST COLUMNS (`ltype`,d) (PARTITION `p1` VALUES IN ((501,1)), PARTITION `p2` VALUES IN ((502,1)))")
@@ -710,17 +716,16 @@ func TestIssue42135(t *testing.T) {
 	tk.MustQuery(`select * from tx1 inner join tx2 on tx1.ID=tx2.ID and tx1.ltype=tx2.ltype where tx2.rid='1'`).Check(testkit.Rows("1 1 1 501 1 1 1 1 1 1 501"))
 	tk.MustQuery(`explain format='brief' select * from tx1 inner join tx2 on tx1.ID=tx2.ID and tx1.ltype=tx2.ltype where tx2.rid='1'`).Check(testkit.Rows(""+
 		"HashJoin 1.00 root  inner join, equal:[eq(issue42135.tx1.id, issue42135.tx2.id) eq(issue42135.tx1.ltype, issue42135.tx2.ltype)]",
-		"├─TableReader(Build) 1.00 root partition:all data:Selection",
-		"│ └─Selection 1.00 cop[tikv]  eq(issue42135.tx2.rid, \"1\"), not(isnull(issue42135.tx2.id))",
-		"│   └─TableFullScan 1.00 cop[tikv] table:tx2 keep order:false",
-		"└─TableReader(Probe) 1.00 root  data:Selection",
-		"  └─Selection 1.00 cop[tikv]  not(isnull(issue42135.tx1.id))",
-		"    └─TableFullScan 1.00 cop[tikv] table:tx1 keep order:false"))
+		"├─TableReader(Build) 1.00 root  data:Selection",
+		"│ └─Selection 1.00 cop[tikv]  not(isnull(issue42135.tx1.id))",
+		"│   └─TableFullScan 1.00 cop[tikv] table:tx1 keep order:false",
+		"└─TableReader(Probe) 1.00 root partition:all data:Selection",
+		"  └─Selection 1.00 cop[tikv]  eq(issue42135.tx2.rid, \"1\"), not(isnull(issue42135.tx2.id))",
+		"    └─TableFullScan 1.00 cop[tikv] table:tx2 keep order:false"))
 }
 
 func TestHashPartitionPruning(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@tidb_partition_prune_mode='static'")
 	tk.MustExec("USE test;")
@@ -739,9 +744,23 @@ func TestHashPartitionPruning(t *testing.T) {
 	tk.MustQuery("SELECT col1, COL3 FROM t WHERE COL1 IN (0,14158354938390,0) AND COL3 IN (3522101843073676459,-2846203247576845955,838395691793635638);").Check(testkit.Rows("0 3522101843073676459"))
 }
 
+func TestIssue32815(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("set @@tidb_partition_prune_mode='dynamic'")
+	tk.MustExec("USE test;")
+	tk.MustExec("DROP TABLE IF EXISTS t;")
+	tk.MustExec("create table t (a int primary key, b int, key (b)) partition by hash(a) (partition P0, partition p1, partition P2)")
+	tk.MustExec("insert into t values (1, 1),(2, 2),(3, 3)")
+	tk.MustQuery("explain select * from t where a IN (1, 2)").Check(testkit.Rows(
+		"Batch_Point_Get_1 2.00 root table:t, partition:p1,P2 handle:[1 2], keep order:false, desc:false"))
+	tk.MustQuery("explain select * from t where a IN (1, 2, 1)").Check(testkit.Rows(
+		"Batch_Point_Get_1 3.00 root table:t, partition:p1,P2 handle:[1 2 1], keep order:false, desc:false"))
+}
+
 func TestIssue32007(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("create database Issue32007")
 	tk.MustExec("USE Issue32007")
@@ -762,8 +781,7 @@ func TestIssue32007(t *testing.T) {
 }
 
 func TestIssue33231(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("create database issue33231")
 	tk.MustExec("use issue33231")
@@ -778,4 +796,27 @@ func TestIssue33231(t *testing.T) {
 	tk.MustQuery("select /*+ INL_JOIN(t2) */ * from t1, t2 where t1.c_int = t2.c_int and t1.c_str <= t2.c_str and t2.c_int in (6, 7, 6);").
 		Sort().
 		Check(testkit.Rows("6 beautiful curran 6 vigorous rhodes", "7 affectionate curie 7 sweet aryabhata", "7 epic kalam 7 sweet aryabhata"))
+}
+
+func TestIssue50082(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t;")
+	tk.MustExec("create table t(a bigint unsigned)" +
+		"PARTITION BY RANGE (`a`)" +
+		"(PARTITION `p0` VALUES LESS THAN (5086706)," +
+		" PARTITION `p1` VALUES LESS THAN (7268292)," +
+		" PARTITION `p2` VALUES LESS THAN (16545422)," +
+		" PARTITION `p3` VALUES LESS THAN (9223372036854775810));")
+	require.True(t, tk.HasNoPlan("select * from t where a BETWEEN -6895222 AND 3125507;", "TableDual"))
+
+	tk.MustExec("drop table if exists t;")
+	tk.MustExec("create table t(a bigint)" +
+		"PARTITION BY RANGE (`a`)" +
+		"(PARTITION `p0` VALUES LESS THAN (5086706)," +
+		" PARTITION `p1` VALUES LESS THAN (7268292)," +
+		" PARTITION `p2` VALUES LESS THAN (16545422)," +
+		" PARTITION `p3` VALUES LESS THAN (9223372036854775807));")
+	require.True(t, tk.HasNoPlan("select * from t where a BETWEEN -6895222 AND 3125507;", "TableDual"))
 }

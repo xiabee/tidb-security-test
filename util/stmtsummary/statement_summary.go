@@ -19,7 +19,6 @@ import (
 	"container/list"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +33,8 @@ import (
 	"github.com/pingcap/tidb/util/plancodec"
 	"github.com/tikv/client-go/v2/util"
 	atomic2 "go.uber.org/atomic"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
 // stmtSummaryByDigestKey defines key for stmtSummaryByDigestMap.summaryMap.
@@ -112,16 +113,17 @@ type stmtSummaryByDigestElement struct {
 	beginTime int64
 	endTime   int64
 	// basic
-	sampleSQL   string
-	charset     string
-	collation   string
-	prevSQL     string
-	samplePlan  string
-	planHint    string
-	indexNames  []string
-	execCount   int64
-	sumErrors   int
-	sumWarnings int
+	sampleSQL        string
+	charset          string
+	collation        string
+	prevSQL          string
+	samplePlan       string
+	sampleBinaryPlan string
+	planHint         string
+	indexNames       []string
+	execCount        int64
+	sumErrors        int
+	sumWarnings      int
 	// latency
 	sumLatency        time.Duration
 	maxLatency        time.Duration
@@ -211,33 +213,34 @@ type stmtSummaryByDigestElement struct {
 
 // StmtExecInfo records execution information of each statement.
 type StmtExecInfo struct {
-	SchemaName     string
-	OriginalSQL    string
-	Charset        string
-	Collation      string
-	NormalizedSQL  string
-	Digest         string
-	PrevSQL        string
-	PrevSQLDigest  string
-	PlanGenerator  func() (string, string)
-	PlanDigest     string
-	PlanDigestGen  func() string
-	User           string
-	TotalLatency   time.Duration
-	ParseLatency   time.Duration
-	CompileLatency time.Duration
-	StmtCtx        *stmtctx.StatementContext
-	CopTasks       *stmtctx.CopTasksDetails
-	ExecDetail     *execdetails.ExecDetails
-	MemMax         int64
-	DiskMax        int64
-	StartTime      time.Time
-	IsInternal     bool
-	Succeed        bool
-	PlanInCache    bool
-	PlanInBinding  bool
-	ExecRetryCount uint
-	ExecRetryTime  time.Duration
+	SchemaName          string
+	OriginalSQL         string
+	Charset             string
+	Collation           string
+	NormalizedSQL       string
+	Digest              string
+	PrevSQL             string
+	PrevSQLDigest       string
+	PlanGenerator       func() (string, string)
+	BinaryPlanGenerator func() string
+	PlanDigest          string
+	PlanDigestGen       func() string
+	User                string
+	TotalLatency        time.Duration
+	ParseLatency        time.Duration
+	CompileLatency      time.Duration
+	StmtCtx             *stmtctx.StatementContext
+	CopTasks            *stmtctx.CopTasksDetails
+	ExecDetail          *execdetails.ExecDetails
+	MemMax              int64
+	DiskMax             int64
+	StartTime           time.Time
+	IsInternal          bool
+	Succeed             bool
+	PlanInCache         bool
+	PlanInBinding       bool
+	ExecRetryCount      uint
+	ExecRetryTime       time.Duration
 	execdetails.StmtExecDetails
 	ResultRows      int64
 	TiKVExecDetails util.ExecDetails
@@ -246,7 +249,6 @@ type StmtExecInfo struct {
 
 // newStmtSummaryByDigestMap creates an empty stmtSummaryByDigestMap.
 func newStmtSummaryByDigestMap() *stmtSummaryByDigestMap {
-
 	ssbde := newStmtSummaryByDigestEvicted()
 
 	// This initializes the stmtSummaryByDigestMap with "compiled defaults"
@@ -402,8 +404,9 @@ func (ssMap *stmtSummaryByDigestMap) GetMoreThanCntBindableStmt(cnt int64) []*Bi
 							PlanHint:  ssElement.planHint,
 							Charset:   ssElement.charset,
 							Collation: ssElement.collation,
-							Users:     ssElement.authUsers,
+							Users:     make(map[string]struct{}),
 						}
+						maps.Copy(stmt.Users, ssElement.authUsers)
 						// If it is SQL command prepare / execute, the ssElement.sampleSQL is `execute ...`, we should get the original select query.
 						// If it is binary protocol prepare / execute, ssbd.normalizedSQL should be same as ssElement.sampleSQL.
 						if ssElement.prepared {
@@ -497,8 +500,53 @@ func (ssMap *stmtSummaryByDigestMap) maxSQLLength() int {
 	return int(ssMap.optMaxSQLLength.Load())
 }
 
+func getBindableStmtByPlanDigest(ssbd *stmtSummaryByDigest, planDigest string) *BindableStmt {
+	ssbd.Lock()
+	defer ssbd.Unlock()
+	if ssbd.initialized && ssbd.planDigest == planDigest && ssbd.history.Len() > 0 &&
+		(ssbd.stmtType == "Select" || ssbd.stmtType == "Delete" || ssbd.stmtType == "Update" || ssbd.stmtType == "Insert" || ssbd.stmtType == "Replace") {
+		ssElement := ssbd.history.Back().Value.(*stmtSummaryByDigestElement)
+		ssElement.Lock()
+		defer ssElement.Unlock()
+		// Empty auth users means that it is an internal queries.
+		if len(ssElement.authUsers) > 0 {
+			stmt := &BindableStmt{
+				Schema:    ssbd.schemaName,
+				Query:     ssElement.sampleSQL,
+				PlanHint:  ssElement.planHint,
+				Charset:   ssElement.charset,
+				Collation: ssElement.collation,
+				Users:     ssElement.authUsers,
+			}
+			// If it is SQL command prepare / execute, we should remove the arguments
+			// If it is binary protocol prepare / execute, ssbd.normalizedSQL should be same as ssElement.sampleSQL.
+			if ssElement.prepared {
+				if idx := strings.LastIndex(stmt.Query, "[arguments:"); idx != -1 {
+					stmt.Query = stmt.Query[:idx]
+				}
+			}
+			return stmt
+		}
+	}
+	return nil
+}
+
+// GetBindableStmtByPlanDigest gets users' select/update/delete SQL by plan digest.
+func (ssMap *stmtSummaryByDigestMap) GetBindableStmtByPlanDigest(planDigest string) *BindableStmt {
+	ssMap.Lock()
+	values := ssMap.summaryMap.Values()
+	ssMap.Unlock()
+
+	for _, value := range values {
+		if stmt := getBindableStmtByPlanDigest(value.(*stmtSummaryByDigest), planDigest); stmt != nil {
+			return stmt
+		}
+	}
+	return nil
+}
+
 // newStmtSummaryByDigest creates a stmtSummaryByDigest from StmtExecInfo.
-func (ssbd *stmtSummaryByDigest) init(sei *StmtExecInfo, beginTime int64, intervalSeconds int64, historySize int) {
+func (ssbd *stmtSummaryByDigest) init(sei *StmtExecInfo, _ int64, _ int64, _ int) {
 	// Use "," to separate table names to support FIND_IN_SET.
 	var buffer bytes.Buffer
 	for i, value := range sei.StmtCtx.Tables {
@@ -593,14 +641,22 @@ func (ssbd *stmtSummaryByDigest) collectHistorySummaries(checker *stmtSummaryChe
 	return ssElements
 }
 
-var maxEncodedPlanSizeInBytes = 1024 * 1024
+// MaxEncodedPlanSizeInBytes is the upper limit of the size of the plan and the binary plan in the stmt summary.
+var MaxEncodedPlanSizeInBytes = 1024 * 1024
 
 func newStmtSummaryByDigestElement(sei *StmtExecInfo, beginTime int64, intervalSeconds int64) *stmtSummaryByDigestElement {
 	// sampleSQL / authUsers(sampleUser) / samplePlan / prevSQL / indexNames store the values shown at the first time,
 	// because it compacts performance to update every time.
 	samplePlan, planHint := sei.PlanGenerator()
-	if len(samplePlan) > maxEncodedPlanSizeInBytes {
+	if len(samplePlan) > MaxEncodedPlanSizeInBytes {
 		samplePlan = plancodec.PlanDiscardedEncoded
+	}
+	binPlan := ""
+	if sei.BinaryPlanGenerator != nil {
+		binPlan = sei.BinaryPlanGenerator()
+		if len(binPlan) > MaxEncodedPlanSizeInBytes {
+			binPlan = plancodec.BinaryPlanDiscardedEncoded
+		}
 	}
 	ssElement := &stmtSummaryByDigestElement{
 		beginTime: beginTime,
@@ -610,19 +666,20 @@ func newStmtSummaryByDigestElement(sei *StmtExecInfo, beginTime int64, intervalS
 		// PrevSQL is already truncated to cfg.Log.QueryLogMaxLen.
 		prevSQL: sei.PrevSQL,
 		// samplePlan needs to be decoded so it can't be truncated.
-		samplePlan:    samplePlan,
-		planHint:      planHint,
-		indexNames:    sei.StmtCtx.IndexNames,
-		minLatency:    sei.TotalLatency,
-		firstSeen:     sei.StartTime,
-		lastSeen:      sei.StartTime,
-		backoffTypes:  make(map[string]int),
-		authUsers:     make(map[string]struct{}),
-		planInCache:   false,
-		planCacheHits: 0,
-		planInBinding: false,
-		prepared:      sei.Prepared,
-		minResultRows: math.MaxInt64,
+		samplePlan:       samplePlan,
+		sampleBinaryPlan: binPlan,
+		planHint:         planHint,
+		indexNames:       sei.StmtCtx.IndexNames,
+		minLatency:       sei.TotalLatency,
+		firstSeen:        sei.StartTime,
+		lastSeen:         sei.StartTime,
+		backoffTypes:     make(map[string]int),
+		authUsers:        make(map[string]struct{}),
+		planInCache:      false,
+		planCacheHits:    0,
+		planInBinding:    false,
+		prepared:         sei.Prepared,
+		minResultRows:    math.MaxInt64,
 	}
 	ssElement.add(sei, intervalSeconds)
 	return ssElement
@@ -659,7 +716,7 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 	ssElement.endTime = ssElement.beginTime + intervalSeconds
 	ssElement.execCount++
 	if !sei.Succeed {
-		ssElement.sumErrors += 1
+		ssElement.sumErrors++
 	}
 	ssElement.sumWarnings += int(sei.StmtCtx.WarningCount())
 
@@ -753,7 +810,7 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 		if commitDetails.GetCommitTsTime > ssElement.maxGetCommitTsTime {
 			ssElement.maxGetCommitTsTime = commitDetails.GetCommitTsTime
 		}
-		resolveLockTime := atomic.LoadInt64(&commitDetails.ResolveLockTime)
+		resolveLockTime := atomic.LoadInt64(&commitDetails.ResolveLock.ResolveLockTime)
 		ssElement.sumResolveLockTime += resolveLockTime
 		if resolveLockTime > ssElement.maxResolveLockTime {
 			ssElement.maxResolveLockTime = resolveLockTime
@@ -785,9 +842,13 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 		if commitBackoffTime > ssElement.maxCommitBackoffTime {
 			ssElement.maxCommitBackoffTime = commitBackoffTime
 		}
-		ssElement.sumBackoffTimes += int64(len(commitDetails.Mu.BackoffTypes))
-		for _, backoffType := range commitDetails.Mu.BackoffTypes {
-			ssElement.backoffTypes[backoffType] += 1
+		ssElement.sumBackoffTimes += int64(len(commitDetails.Mu.PrewriteBackoffTypes))
+		for _, backoffType := range commitDetails.Mu.PrewriteBackoffTypes {
+			ssElement.backoffTypes[backoffType]++
+		}
+		ssElement.sumBackoffTimes += int64(len(commitDetails.Mu.CommitBackoffTypes))
+		for _, backoffType := range commitDetails.Mu.CommitBackoffTypes {
+			ssElement.backoffTypes[backoffType]++
 		}
 		commitDetails.Mu.Unlock()
 	}
@@ -795,7 +856,7 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 	// plan cache
 	if sei.PlanInCache {
 		ssElement.planInCache = true
-		ssElement.planCacheHits += 1
+		ssElement.planCacheHits++
 	} else {
 		ssElement.planInCache = false
 	}
@@ -873,8 +934,8 @@ func formatBackoffTypes(backoffMap map[string]int) interface{} {
 	for backoffType, count := range backoffMap {
 		backoffArray = append(backoffArray, backoffStat{backoffType, count})
 	}
-	sort.Slice(backoffArray, func(i, j int) bool {
-		return backoffArray[i].count > backoffArray[j].count
+	slices.SortFunc(backoffArray, func(i, j backoffStat) bool {
+		return i.count > j.count
 	})
 
 	var buffer bytes.Buffer

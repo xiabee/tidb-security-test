@@ -35,7 +35,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/types/json"
+	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/timeutil"
@@ -300,6 +300,10 @@ func CastValue(ctx sessionctx.Context, val types.Datum, col *model.ColumnInfo, r
 	if returnErr && err != nil {
 		return casted, err
 	}
+	if err != nil {
+		logutil.BgLogger().Debug("[debug] ConvertTo FieldType failed", zap.Stringer("FieldType", &col.FieldType),
+			zap.Stringer("Datum", val), zap.Error(err))
+	}
 	if err != nil && types.ErrTruncated.Equal(err) && col.GetType() != mysql.TypeSet && col.GetType() != mysql.TypeEnum {
 		str, err1 := val.ToString()
 		if err1 != nil {
@@ -490,6 +494,22 @@ func GetColOriginDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo) (ty
 	return getColDefaultValue(ctx, col, col.GetOriginDefaultValue())
 }
 
+// CheckNoDefaultValueForInsert checks if the column has no default value before insert data.
+// CheckNoDefaultValueForInsert extracts the check logic from getColDefaultValueFromNil,
+// since getColDefaultValueFromNil function is public path and both read/write and other places use it.
+// But CheckNoDefaultValueForInsert logic should only check before insert.
+func CheckNoDefaultValueForInsert(sc *stmtctx.StatementContext, col *model.ColumnInfo) error {
+	if mysql.HasNoDefaultValueFlag(col.GetFlag()) && !col.DefaultIsExpr && col.GetDefaultValue() == nil && col.GetType() != mysql.TypeEnum {
+		if !sc.BadNullAsWarning {
+			return ErrNoDefaultValue.GenWithStackByArgs(col.Name)
+		}
+		if !mysql.HasNotNullFlag(col.GetFlag()) {
+			sc.AppendWarning(ErrNoDefaultValue.FastGenByArgs(col.Name))
+		}
+	}
+	return nil
+}
+
 // GetColDefaultValue gets default value of the column.
 func GetColDefaultValue(ctx sessionctx.Context, col *model.ColumnInfo) (types.Datum, error) {
 	defaultValue := col.GetDefaultValue()
@@ -589,7 +609,7 @@ func getColDefaultValueFromNil(ctx sessionctx.Context, col *model.ColumnInfo) (t
 		return types.NewCollateMysqlEnumDatum(defEnum, col.GetCollate()), nil
 	}
 	if mysql.HasAutoIncrementFlag(col.GetFlag()) {
-		// Auto increment column doesn't has default value and we should not return error.
+		// Auto increment column doesn't have default value and we should not return error.
 		return GetZeroValue(col), nil
 	}
 	vars := ctx.GetSessionVars()
@@ -599,7 +619,13 @@ func getColDefaultValueFromNil(ctx sessionctx.Context, col *model.ColumnInfo) (t
 		return GetZeroValue(col), nil
 	}
 	if sc.BadNullAsWarning {
-		sc.AppendWarning(ErrColumnCantNull.FastGenByArgs(col.Name))
+		var err error
+		if mysql.HasNoDefaultValueFlag(col.GetFlag()) {
+			err = ErrNoDefaultValue.FastGenByArgs(col.Name)
+		} else {
+			err = ErrColumnCantNull.FastGenByArgs(col.Name)
+		}
+		sc.AppendWarning(err)
 		return GetZeroValue(col), nil
 	}
 	return types.Datum{}, ErrNoDefaultValue.FastGenByArgs(col.Name)
@@ -648,7 +674,7 @@ func GetZeroValue(col *model.ColumnInfo) types.Datum {
 	case mysql.TypeEnum:
 		d.SetMysqlEnum(types.Enum{}, col.GetCollate())
 	case mysql.TypeJSON:
-		d.SetMysqlJSON(json.CreateBinary(nil))
+		d.SetMysqlJSON(types.CreateBinaryJSON(nil))
 	}
 	return d
 }
@@ -660,4 +686,37 @@ func OptionalFsp(fieldType *types.FieldType) string {
 		return ""
 	}
 	return "(" + strconv.Itoa(fsp) + ")"
+}
+
+// FillVirtualColumnValue will calculate the virtual column value by evaluating generated
+// expression using rows from a chunk, and then fill this value into the chunk.
+func FillVirtualColumnValue(virtualRetTypes []*types.FieldType, virtualColumnIndex []int,
+	expCols []*expression.Column, colInfos []*model.ColumnInfo, sctx sessionctx.Context, req *chunk.Chunk) error {
+	if len(virtualColumnIndex) == 0 {
+		return nil
+	}
+
+	virCols := chunk.NewChunkWithCapacity(virtualRetTypes, req.Capacity())
+	iter := chunk.NewIterator4Chunk(req)
+	for i, idx := range virtualColumnIndex {
+		for row := iter.Begin(); row != iter.End(); row = iter.Next() {
+			datum, err := expCols[idx].EvalVirtualColumn(row)
+			if err != nil {
+				return err
+			}
+			// Because the expression might return different type from
+			// the generated column, we should wrap a CAST on the result.
+			castDatum, err := CastValue(sctx, datum, colInfos[idx], false, true)
+			if err != nil {
+				return err
+			}
+			// Handle the bad null error.
+			if (mysql.HasNotNullFlag(colInfos[idx].GetFlag()) || mysql.HasPreventNullInsertFlag(colInfos[idx].GetFlag())) && castDatum.IsNull() {
+				castDatum = GetZeroValue(colInfos[idx])
+			}
+			virCols.AppendDatum(i, &castDatum)
+		}
+		req.SetCol(idx, virCols.Column(i))
+	}
+	return nil
 }

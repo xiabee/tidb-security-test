@@ -226,7 +226,7 @@ type traceLog struct {
 	ctx context.Context
 }
 
-func (t *traceLog) Enabled(_ zapcore.Level) bool {
+func (*traceLog) Enabled(_ zapcore.Level) bool {
 	return true
 }
 
@@ -235,7 +235,7 @@ func (t *traceLog) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-func (t *traceLog) Sync() error {
+func (*traceLog) Sync() error {
 	return nil
 }
 

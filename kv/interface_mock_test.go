@@ -152,8 +152,28 @@ func (t *mockTxn) SetDiskFullOpt(level kvrpcpb.DiskFullOpt) {
 	// TODO nothing
 }
 
+func (t *mockTxn) GetMemDBCheckpoint() *tikv.MemDBCheckpoint {
+	return nil
+}
+
+func (t *mockTxn) RollbackMemDBToCheckpoint(_ *tikv.MemDBCheckpoint) {
+	// TODO nothing
+}
+
 func (t *mockTxn) ClearDiskFullOpt() {
 	// TODO nothing
+}
+
+func (t *mockTxn) UpdateMemBufferFlags(_ []byte, _ ...FlagsOp) {
+
+}
+
+func (t *mockTxn) SetMemoryFootprintChangeHook(func(uint64)) {
+
+}
+
+func (t *mockTxn) Mem() uint64 {
+	return 0
 }
 
 // newMockTxn new a mockTxn.

@@ -20,6 +20,7 @@ import (
 	gplugin "plugin"
 	"strconv"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/pingcap/errors"
@@ -228,6 +229,15 @@ func Init(ctx context.Context, cfg Config) (err error) {
 					plugin:   &tiPlugins.plugins[kind][i],
 				}
 				tiPlugins.plugins[kind][i].flushWatcher = watcher
+				if err = watcher.refreshPluginState(); err != nil {
+					if cfg.SkipWhenFail {
+						tiPlugins.plugins[kind][i].State = Disable
+						err = nil
+						go util.WithRecovery(watcher.watchLoop, nil)
+						continue
+					}
+					return
+				}
 				go util.WithRecovery(watcher.watchLoop, nil)
 			}
 			tiPlugins.plugins[kind][i].State = Ready
@@ -245,26 +255,52 @@ type flushWatcher struct {
 	plugin   *Plugin
 }
 
+func (w *flushWatcher) refreshPluginState() error {
+	disabled, err := w.getPluginDisabledFlag()
+	if err != nil {
+		logutil.BgLogger().Error("get plugin disabled flag failure", zap.String("plugin", w.manifest.Name), zap.Error(err))
+		return err
+	}
+	if disabled {
+		atomic.StoreUint32(&w.manifest.flushWatcher.plugin.Disabled, 1)
+	} else {
+		atomic.StoreUint32(&w.manifest.flushWatcher.plugin.Disabled, 0)
+	}
+	err = w.manifest.OnFlush(w.ctx, w.manifest)
+	if err != nil {
+		logutil.BgLogger().Error("plugin flush event failed", zap.String("plugin", w.manifest.Name), zap.Error(err))
+		return err
+	}
+	return nil
+}
 func (w *flushWatcher) watchLoop() {
-	watchChan := w.etcd.Watch(w.ctx, w.path)
+	const reWatchInterval = time.Second * 5
+	logutil.BgLogger().Info("plugin flushWatcher loop started", zap.String("plugin", w.manifest.Name))
+	for w.ctx.Err() == nil {
+		ch := w.etcd.Watch(w.ctx, w.path)
+		if exit := w.watchLoopWithChan(ch); exit {
+			break
+		}
+
+		logutil.BgLogger().Info(
+			"plugin flushWatcher old chan closed, restart loop later",
+			zap.String("plugin", w.manifest.Name),
+			zap.Duration("after", reWatchInterval))
+		time.Sleep(reWatchInterval)
+	}
+}
+
+func (w *flushWatcher) watchLoopWithChan(ch clientv3.WatchChan) (exit bool) {
 	for {
 		select {
 		case <-w.ctx.Done():
-			return
-		case <-watchChan:
-			disabled, err := w.getPluginDisabledFlag()
-			if err != nil {
-				logutil.BgLogger().Error("get plugin disabled flag failure", zap.String("plugin", w.manifest.Name), zap.Error(err))
+			return true
+		case _, ok := <-ch:
+			if !ok {
+				return false
 			}
-			if disabled {
-				atomic.StoreUint32(&w.manifest.flushWatcher.plugin.Disabled, 1)
-			} else {
-				atomic.StoreUint32(&w.manifest.flushWatcher.plugin.Disabled, 0)
-			}
-			err = w.manifest.OnFlush(w.ctx, w.manifest)
-			if err != nil {
-				logutil.BgLogger().Error("notify plugin flush event failed", zap.String("plugin", w.manifest.Name), zap.Error(err))
-			}
+			logutil.BgLogger().Info("plugin flushWatcher detected event to reload plugin config", zap.String("plugin", w.manifest.Name))
+			_ = w.refreshPluginState()
 		}
 	}
 }

@@ -42,7 +42,7 @@ type exprPrefixAdder struct {
 	lengths   []int
 }
 
-func (s *ppdSolver) optimize(ctx context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (s *ppdSolver) optimize(_ context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
 	_, p := lp.PredicatePushDown(nil, opt)
 	return p, nil
 }
@@ -144,7 +144,7 @@ func (ds *DataSource) PredicatePushDown(predicates []expression.Expression, opt 
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
-func (p *LogicalTableDual) PredicatePushDown(predicates []expression.Expression, opt *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
+func (p *LogicalTableDual) PredicatePushDown(predicates []expression.Expression, _ *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
 	return predicates, p
 }
 
@@ -232,7 +232,6 @@ func (p *LogicalJoin) PredicatePushDown(predicates []expression.Expression, opt 
 		leftCond = leftPushCond
 		rightCond = append(p.RightConditions, rightPushCond...)
 		p.RightConditions = nil
-
 	}
 	leftCond = expression.RemoveDupExprs(p.ctx, leftCond)
 	rightCond = expression.RemoveDupExprs(p.ctx, rightCond)
@@ -249,6 +248,9 @@ func (p *LogicalJoin) PredicatePushDown(predicates []expression.Expression, opt 
 func (p *LogicalJoin) updateEQCond() {
 	lChild, rChild := p.children[0], p.children[1]
 	var lKeys, rKeys []expression.Expression
+	var lNAKeys, rNAKeys []expression.Expression
+	// We need two steps here:
+	// step1: try best to extract normal EQ condition from OtherCondition to join EqualConditions.
 	for i := len(p.OtherConditions) - 1; i >= 0; i-- {
 		need2Remove := false
 		if eqCond, ok := p.OtherConditions[i].(*expression.ScalarFunction); ok && eqCond.FuncName.L == ast.EQ {
@@ -273,33 +275,78 @@ func (p *LogicalJoin) updateEQCond() {
 			p.OtherConditions = append(p.OtherConditions[:i], p.OtherConditions[i+1:]...)
 		}
 	}
-	if len(lKeys) > 0 {
-		needLProj, needRProj := false, false
-		for i := range lKeys {
-			_, lOk := lKeys[i].(*expression.Column)
-			_, rOk := rKeys[i].(*expression.Column)
-			needLProj = needLProj || !lOk
-			needRProj = needRProj || !rOk
-		}
+	// eg: explain select * from t1, t3 where t1.a+1 = t3.a;
+	// tidb only accept the join key in EqualCondition as a normal column (join OP take granted for that)
+	// so once we found the left and right children's schema can supply the all columns in complicated EQ condition that used by left/right key.
+	// we will add a layer of projection here to convert the complicated expression of EQ's left or right side to be a normal column.
+	adjustKeyForm := func(leftKeys, rightKeys []expression.Expression, isNA bool) {
+		if len(leftKeys) > 0 {
+			needLProj, needRProj := false, false
+			for i := range leftKeys {
+				_, lOk := leftKeys[i].(*expression.Column)
+				_, rOk := rightKeys[i].(*expression.Column)
+				needLProj = needLProj || !lOk
+				needRProj = needRProj || !rOk
+			}
 
-		var lProj, rProj *LogicalProjection
-		if needLProj {
-			lProj = p.getProj(0)
-		}
-		if needRProj {
-			rProj = p.getProj(1)
-		}
-		for i := range lKeys {
-			lKey, rKey := lKeys[i], rKeys[i]
-			if lProj != nil {
-				lKey = lProj.appendExpr(lKey)
+			var lProj, rProj *LogicalProjection
+			if needLProj {
+				lProj = p.getProj(0)
 			}
-			if rProj != nil {
-				rKey = rProj.appendExpr(rKey)
+			if needRProj {
+				rProj = p.getProj(1)
 			}
-			eqCond := expression.NewFunctionInternal(p.ctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), lKey, rKey)
-			p.EqualConditions = append(p.EqualConditions, eqCond.(*expression.ScalarFunction))
+			for i := range leftKeys {
+				lKey, rKey := leftKeys[i], rightKeys[i]
+				if lProj != nil {
+					lKey = lProj.appendExpr(lKey)
+				}
+				if rProj != nil {
+					rKey = rProj.appendExpr(rKey)
+				}
+				eqCond := expression.NewFunctionInternal(p.ctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), lKey, rKey)
+				if isNA {
+					p.NAEQConditions = append(p.NAEQConditions, eqCond.(*expression.ScalarFunction))
+				} else {
+					p.EqualConditions = append(p.EqualConditions, eqCond.(*expression.ScalarFunction))
+				}
+			}
 		}
+	}
+	adjustKeyForm(lKeys, rKeys, false)
+
+	// Step2: when step1 is finished, then we can determine whether we need to extract NA-EQ from OtherCondition to NAEQConditions.
+	// when there are still no EqualConditions, let's try to be a NAAJ.
+	// todo: by now, when there is already a normal EQ condition, just keep NA-EQ as other-condition filters above it.
+	// eg: select * from stu where stu.name not in (select name from exam where exam.stu_id = stu.id);
+	// combination of <stu.name NAEQ exam.name> and <exam.stu_id EQ stu.id> for join key is little complicated for now.
+	canBeNAAJ := (p.JoinType == AntiSemiJoin || p.JoinType == AntiLeftOuterSemiJoin) && len(p.EqualConditions) == 0
+	if canBeNAAJ && p.SCtx().GetSessionVars().OptimizerEnableNAAJ {
+		for i := len(p.OtherConditions) - 1; i >= 0; i-- {
+			need2Remove := false
+			if eqCond, ok := p.OtherConditions[i].(*expression.ScalarFunction); ok && eqCond.FuncName.L == ast.EQ {
+				// not a naaj operator, continue.
+				if !expression.IsEQCondFromIn(eqCond) {
+					continue
+				}
+				// here must be a EQCondFromIn.
+				lExpr, rExpr := eqCond.GetArgs()[0], eqCond.GetArgs()[1]
+				if expression.ExprFromSchema(lExpr, lChild.Schema()) && expression.ExprFromSchema(rExpr, rChild.Schema()) {
+					lNAKeys = append(lNAKeys, lExpr)
+					rNAKeys = append(rNAKeys, rExpr)
+					need2Remove = true
+				} else if expression.ExprFromSchema(lExpr, rChild.Schema()) && expression.ExprFromSchema(rExpr, lChild.Schema()) {
+					lNAKeys = append(lNAKeys, rExpr)
+					rNAKeys = append(rNAKeys, lExpr)
+					need2Remove = true
+				}
+			}
+			if need2Remove {
+				p.OtherConditions = append(p.OtherConditions[:i], p.OtherConditions[i+1:]...)
+			}
+		}
+		// here is for cases like: select (a+1, b*3) not in (select a,b from t2) from t1.
+		adjustKeyForm(lNAKeys, rNAKeys, true)
 	}
 }
 
@@ -352,14 +399,6 @@ func simplifyOuterJoin(p *LogicalJoin, predicates []expression.Expression) {
 		innerTable, outerTable = outerTable, innerTable
 	}
 
-	// first simplify embedded outer join.
-	if innerPlan, ok := innerTable.(*LogicalJoin); ok {
-		simplifyOuterJoin(innerPlan, predicates)
-	}
-	if outerPlan, ok := outerTable.(*LogicalJoin); ok {
-		simplifyOuterJoin(outerPlan, predicates)
-	}
-
 	if p.JoinType == InnerJoin {
 		return
 	}
@@ -393,16 +432,65 @@ func isNullRejected(ctx sessionctx.Context, schema *expression.Schema, expr expr
 	}
 	sc := ctx.GetSessionVars().StmtCtx
 	sc.InNullRejectCheck = true
-	result := expression.EvaluateExprWithNull(ctx, schema, expr)
-	sc.InNullRejectCheck = false
-	x, ok := result.(*expression.Constant)
-	if !ok {
+	defer func() {
+		sc.InNullRejectCheck = false
+	}()
+	for _, cond := range expression.SplitCNFItems(expr) {
+		if isNullRejectedSpecially(ctx, schema, expr) {
+			return true
+		}
+
+		result := expression.EvaluateExprWithNull(ctx, schema, cond)
+		x, ok := result.(*expression.Constant)
+		if !ok {
+			continue
+		}
+		if x.Value.IsNull() {
+			return true
+		} else if isTrue, err := x.Value.ToBool(sc); err == nil && isTrue == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isNullRejectedSpecially handles some null-rejected cases specially, since the current in
+// EvaluateExprWithNull is too strict for some cases, e.g. #49616.
+func isNullRejectedSpecially(ctx sessionctx.Context, schema *expression.Schema, expr expression.Expression) bool {
+	return specialNullRejectedCase1(ctx, schema, expr) // only 1 case now
+}
+
+// specialNullRejectedCase1 is mainly for #49616.
+// Case1 specially handles `null-rejected OR (null-rejected AND {others})`, then no matter what the result
+// of `{others}` is (True, False or Null), the result of this predicate is null, so this predicate is null-rejected.
+func specialNullRejectedCase1(ctx sessionctx.Context, schema *expression.Schema, expr expression.Expression) bool {
+	isFunc := func(e expression.Expression, lowerFuncName string) *expression.ScalarFunction {
+		f, ok := e.(*expression.ScalarFunction)
+		if !ok {
+			return nil
+		}
+		if f.FuncName.L == lowerFuncName {
+			return f
+		}
+		return nil
+	}
+	orFunc := isFunc(expr, ast.LogicOr)
+	if orFunc == nil {
 		return false
 	}
-	if x.Value.IsNull() {
-		return true
-	} else if isTrue, err := x.Value.ToBool(sc); err == nil && isTrue == 0 {
-		return true
+	for i := 0; i < 2; i++ {
+		andFunc := isFunc(orFunc.GetArgs()[i], ast.LogicAnd)
+		if andFunc == nil {
+			continue
+		}
+		if !isNullRejected(ctx, schema, orFunc.GetArgs()[1-i]) {
+			continue // the other side should be null-rejected: null-rejected OR (... AND ...)
+		}
+		for _, andItem := range expression.SplitCNFItems(andFunc) {
+			if isNullRejected(ctx, schema, andItem) {
+				return true // hit the case in the comment: null-rejected OR (null-rejected AND ...)
+			}
+		}
 	}
 	return false
 }
@@ -415,6 +503,11 @@ func (p *LogicalProjection) PredicatePushDown(predicates []expression.Expression
 		if expression.HasAssignSetVarFunc(expr) {
 			_, child := p.baseLogicalPlan.PredicatePushDown(nil, opt)
 			return predicates, child
+		}
+	}
+	if len(p.children) == 1 {
+		if _, isDual := p.children[0].(*LogicalTableDual); isDual {
+			return predicates, p
 		}
 	}
 	for _, cond := range predicates {
@@ -570,7 +663,6 @@ func DeriveOtherConditions(
 	p *LogicalJoin, leftSchema *expression.Schema, rightSchema *expression.Schema,
 	deriveLeft bool, deriveRight bool) (
 	leftCond []expression.Expression, rightCond []expression.Expression) {
-
 	isOuterSemi := (p.JoinType == LeftOuterSemiJoin) || (p.JoinType == AntiLeftOuterSemiJoin)
 	for _, expr := range p.OtherConditions {
 		if deriveLeft {
@@ -727,7 +819,7 @@ func (p *LogicalWindow) PredicatePushDown(predicates []expression.Expression, op
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
-func (p *LogicalMemTable) PredicatePushDown(predicates []expression.Expression, opt *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
+func (p *LogicalMemTable) PredicatePushDown(predicates []expression.Expression, _ *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
 	if p.Extractor != nil {
 		predicates = p.Extractor.Extract(p.ctx, p.schema, p.names, predicates)
 	}
@@ -894,10 +986,7 @@ func (adder *exprPrefixAdder) addExprPrefix4CNFCond(conds []expression.Expressio
 // AddExprPrefix4DNFCond
 // add the prefix expression for DNF condition, e.g. `WHERE a = 1 OR a = 10`, ......
 // The condition returned is `WHERE (tidb_shard(a) = 214 AND a = 1) OR (tidb_shard(a) = 142 AND a = 10)`
-// @param[in] condition    the original condtion of the datasoure. e.g. `WHERE a = 1 OR a = 10`.
-//
-//	condtion is `a = 1 OR a = 10`
-//
+// @param[in] condition    the original condtion of the datasoure. e.g. `WHERE a = 1 OR a = 10`. condtion is `a = 1 OR a = 10`
 // @return 	 -          the new condition after adding expression prefix. It's still a LogicOr expression.
 func (adder *exprPrefixAdder) addExprPrefix4DNFCond(condition *expression.ScalarFunction) ([]expression.Expression, error) {
 	var err error
@@ -933,12 +1022,12 @@ func (adder *exprPrefixAdder) addExprPrefix4DNFCond(condition *expression.Scalar
 }
 
 // PredicatePushDown implements LogicalPlan PredicatePushDown interface.
-func (p *LogicalCTE) PredicatePushDown(predicates []expression.Expression, opt *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
+func (p *LogicalCTE) PredicatePushDown(predicates []expression.Expression, _ *logicalOptimizeOp) ([]expression.Expression, LogicalPlan) {
 	if p.cte.recursivePartLogicalPlan != nil {
 		// Doesn't support recursive CTE yet.
 		return predicates, p.self
 	}
-	if !p.isOuterMostCTE {
+	if !p.cte.isOuterMostCTE {
 		return predicates, p.self
 	}
 	pushedPredicates := make([]expression.Expression, len(predicates))

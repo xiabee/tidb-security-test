@@ -32,13 +32,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
-	tidbcfg "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/sessionctx/variable"
-	"github.com/pingcap/tidb/store/driver"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tipb/go-tipb"
-	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/atomic"
@@ -55,12 +51,6 @@ var (
 	serviceSafePointTTL int64 = 10 * 60 // 10 min in seconds
 
 	minDistSQLScanConcurrency = 4
-
-	// DefaultBackoffWeight is the default value of tidb_backoff_weight for checksum.
-	// when TiKV client encounters an error of "region not leader", it will keep retrying every 500 ms.
-	// If it still fails after 2 * 20 = 40 seconds, it will return "region unavailable".
-	// If we increase the BackOffWeight to 6, then the TiKV client will keep retrying for 120 seconds.
-	DefaultBackoffWeight = 3 * tikvstore.DefBackOffWeight
 )
 
 // RemoteChecksum represents a checksum result got from tidb.
@@ -76,7 +66,7 @@ type ChecksumManager interface {
 	Checksum(ctx context.Context, tableInfo *checkpoints.TidbTableInfo) (*RemoteChecksum, error)
 }
 
-func newChecksumManager(ctx context.Context, rc *Controller) (ChecksumManager, error) {
+func newChecksumManager(ctx context.Context, rc *Controller, store kv.Storage) (ChecksumManager, error) {
 	// if we don't need checksum, just return nil
 	if rc.cfg.TikvImporter.Backend == config.BackendTiDB || rc.cfg.PostRestore.Checksum == config.OpLevelOff {
 		return nil, nil
@@ -90,39 +80,14 @@ func newChecksumManager(ctx context.Context, rc *Controller) (ChecksumManager, e
 
 	// for v4.0.0 or upper, we can use the gc ttl api
 	var manager ChecksumManager
-	if pdVersion.Major >= 4 && !rc.cfg.PostRestore.ChecksumViaSQL {
+	if pdVersion.Major >= 4 {
 		tlsOpt := rc.tls.ToPDSecurityOption()
 		pdCli, err := pd.NewClientWithContext(ctx, []string{pdAddr}, tlsOpt)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 
-		// TODO: make tikv.Driver{}.Open use arguments instead of global variables
-		if tlsOpt.CAPath != "" {
-			conf := tidbcfg.GetGlobalConfig()
-			conf.Security.ClusterSSLCA = tlsOpt.CAPath
-			conf.Security.ClusterSSLCert = tlsOpt.CertPath
-			conf.Security.ClusterSSLKey = tlsOpt.KeyPath
-			tidbcfg.StoreGlobalConfig(conf)
-		}
-		store, err := driver.TiKVDriver{}.Open(fmt.Sprintf("tikv://%s?disableGC=true", pdAddr))
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-
-		db, err := rc.tidbGlue.GetDB()
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		backoffWeight, err := common.GetBackoffWeightFromDB(ctx, db)
-		// only set backoff weight when it's smaller than default value
-		if err == nil && backoffWeight >= DefaultBackoffWeight {
-			log.L().Info("get tidb_backoff_weight", zap.Int("backoff_weight", backoffWeight))
-		} else {
-			log.L().Info("set tidb_backoff_weight to default", zap.Int("backoff_weight", DefaultBackoffWeight))
-			backoffWeight = DefaultBackoffWeight
-		}
-		manager = newTiKVChecksumManager(store.GetClient(), pdCli, uint(rc.cfg.TiDB.DistSQLScanConcurrency), backoffWeight)
+		manager = newTiKVChecksumManager(store.GetClient(), pdCli, uint(rc.cfg.TiDB.DistSQLScanConcurrency))
 	} else {
 		db, err := rc.tidbGlue.GetDB()
 		if err != nil {
@@ -158,17 +123,8 @@ func (e *tidbChecksumExecutor) Checksum(ctx context.Context, tableInfo *checkpoi
 
 	tableName := common.UniqueTable(tableInfo.DB, tableInfo.Name)
 
-	task := log.With(zap.String("table", tableName)).Begin(zap.InfoLevel, "remote checksum")
+	task := log.FromContext(ctx).With(zap.String("table", tableName)).Begin(zap.InfoLevel, "remote checksum")
 
-	conn, err := e.db.Conn(ctx)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer func() {
-		if err := conn.Close(); err != nil {
-			task.Warn("close connection failed", zap.Error(err))
-		}
-	}()
 	// ADMIN CHECKSUM TABLE <table>,<table>  example.
 	// 	mysql> admin checksum table test.t;
 	// +---------+------------+---------------------+-----------+-------------+
@@ -176,27 +132,15 @@ func (e *tidbChecksumExecutor) Checksum(ctx context.Context, tableInfo *checkpoi
 	// +---------+------------+---------------------+-----------+-------------+
 	// | test    | t          | 8520875019404689597 |   7296873 |   357601387 |
 	// +---------+------------+---------------------+-----------+-------------+
-	backoffWeight, err := common.GetBackoffWeightFromDB(ctx, e.db)
-	if err == nil && backoffWeight < DefaultBackoffWeight {
-		task.Info("increase tidb_backoff_weight", zap.Int("original", backoffWeight), zap.Int("new", DefaultBackoffWeight))
-		// increase backoff weight
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION %s = '%d';", variable.TiDBBackOffWeight, DefaultBackoffWeight)); err != nil {
-			task.Warn("set tidb_backoff_weight failed", zap.Error(err))
-		} else {
-			defer func() {
-				if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION %s = '%d';", variable.TiDBBackOffWeight, backoffWeight)); err != nil {
-					task.Warn("recover tidb_backoff_weight failed", zap.Error(err))
-				}
-			}()
-		}
-	}
 
 	cs := RemoteChecksum{}
-	err = common.SQLWithRetry{DB: conn, Logger: task.Logger}.QueryRow(ctx, "compute remote checksum",
+	err = common.SQLWithRetry{DB: e.db, Logger: task.Logger}.QueryRow(ctx, "compute remote checksum",
 		"ADMIN CHECKSUM TABLE "+tableName, &cs.Schema, &cs.Table, &cs.Checksum, &cs.TotalKVs, &cs.TotalBytes,
 	)
 	dur := task.End(zap.ErrorLevel, err)
-	metric.ChecksumSecondsHistogram.Observe(dur.Seconds())
+	if m, ok := metric.FromContext(ctx); ok {
+		m.ChecksumSecondsHistogram.Observe(dur.Seconds())
+	}
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -212,11 +156,13 @@ func DoChecksum(ctx context.Context, table *checkpoints.TidbTableInfo) (*RemoteC
 		return nil, errors.New("No gcLifeTimeManager found in context, check context initialization")
 	}
 
-	task := log.With(zap.String("table", table.Name)).Begin(zap.InfoLevel, "remote checksum")
+	task := log.FromContext(ctx).With(zap.String("table", table.Name)).Begin(zap.InfoLevel, "remote checksum")
 
 	cs, err := manager.Checksum(ctx, table)
 	dur := task.End(zap.ErrorLevel, err)
-	metric.ChecksumSecondsHistogram.Observe(dur.Seconds())
+	if m, ok := metric.FromContext(ctx); ok {
+		m.ChecksumSecondsHistogram.Observe(dur.Seconds())
+	}
 
 	return cs, err
 }
@@ -271,7 +217,7 @@ func (m *gcLifeTimeManager) removeOneJob(ctx context.Context, db *sql.DB) {
 				"UPDATE mysql.tidb SET VARIABLE_VALUE = '%s' WHERE VARIABLE_NAME = 'tikv_gc_life_time'",
 				m.oriGCLifeTime,
 			)
-			log.L().Warn("revert GC lifetime failed, please reset the GC lifetime manually after Lightning completed",
+			log.FromContext(ctx).Warn("revert GC lifetime failed, please reset the GC lifetime manually after Lightning completed",
 				zap.String("query", query),
 				log.ShortError(err),
 			)
@@ -311,23 +257,20 @@ type tikvChecksumManager struct {
 	client                 kv.Client
 	manager                gcTTLManager
 	distSQLScanConcurrency uint
-	backoffWeight          int
 }
 
 // newTiKVChecksumManager return a new tikv checksum manager
-func newTiKVChecksumManager(client kv.Client, pdClient pd.Client, distSQLScanConcurrency uint, backoffWeight int) *tikvChecksumManager {
+func newTiKVChecksumManager(client kv.Client, pdClient pd.Client, distSQLScanConcurrency uint) *tikvChecksumManager {
 	return &tikvChecksumManager{
 		client:                 client,
 		manager:                newGCTTLManager(pdClient),
 		distSQLScanConcurrency: distSQLScanConcurrency,
-		backoffWeight:          backoffWeight,
 	}
 }
 
 func (e *tikvChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpoints.TidbTableInfo, ts uint64) (*RemoteChecksum, error) {
 	executor, err := checksum.NewExecutorBuilder(tableInfo.Core, ts).
 		SetConcurrency(e.distSQLScanConcurrency).
-		SetBackoffWeight(e.backoffWeight).
 		Build()
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -351,7 +294,7 @@ func (e *tikvChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpo
 			}, nil
 		}
 
-		log.L().Warn("remote checksum failed", zap.String("db", tableInfo.DB),
+		log.FromContext(ctx).Warn("remote checksum failed", zap.String("db", tableInfo.DB),
 			zap.String("table", tableInfo.Name), zap.Error(err),
 			zap.Int("concurrency", distSQLScanConcurrency), zap.Int("retry", i))
 
@@ -367,11 +310,32 @@ func (e *tikvChecksumManager) checksumDB(ctx context.Context, tableInfo *checkpo
 	return nil, err
 }
 
+var retryGetTSInterval = time.Second
+
 func (e *tikvChecksumManager) Checksum(ctx context.Context, tableInfo *checkpoints.TidbTableInfo) (*RemoteChecksum, error) {
 	tbl := common.UniqueTable(tableInfo.DB, tableInfo.Name)
-	physicalTS, logicalTS, err := e.manager.pdClient.GetTS(ctx)
-	if err != nil {
-		return nil, errors.Annotate(err, "fetch tso from pd failed")
+	var (
+		physicalTS, logicalTS int64
+		err                   error
+		retryTime             int
+	)
+	physicalTS, logicalTS, err = e.manager.pdClient.GetTS(ctx)
+	for err != nil {
+		if !pd.IsLeaderChange(errors.Cause(err)) {
+			return nil, errors.Annotate(err, "fetch tso from pd failed")
+		}
+		retryTime++
+		if retryTime%60 == 0 {
+			log.FromContext(ctx).Warn("fetch tso from pd failed and retrying",
+				zap.Int("retryTime", retryTime),
+				zap.Error(err))
+		}
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-time.After(retryGetTSInterval):
+			physicalTS, logicalTS, err = e.manager.pdClient.GetTS(ctx)
+		}
 	}
 	ts := oracle.ComposeTS(physicalTS, logicalTS)
 	if err := e.manager.addOneJob(ctx, tbl, ts); err != nil {
@@ -431,7 +395,7 @@ func newGCTTLManager(pdClient pd.Client) gcTTLManager {
 
 func (m *gcTTLManager) addOneJob(ctx context.Context, table string, ts uint64) error {
 	// start gc ttl loop if not started yet.
-	if m.started.CAS(false, true) {
+	if m.started.CompareAndSwap(false, true) {
 		m.start(ctx)
 	}
 	m.lock.Lock()
@@ -484,7 +448,7 @@ func (m *gcTTLManager) updateGCTTL(ctx context.Context) error {
 }
 
 func (m *gcTTLManager) doUpdateGCTTL(ctx context.Context, ts uint64) error {
-	log.L().Debug("update PD safePoint limit with TTL",
+	log.FromContext(ctx).Debug("update PD safePoint limit with TTL",
 		zap.Uint64("currnet_ts", ts))
 	var err error
 	if ts > 0 {
@@ -502,7 +466,7 @@ func (m *gcTTLManager) start(ctx context.Context) {
 
 	updateGCTTL := func() {
 		if err := m.updateGCTTL(ctx); err != nil {
-			log.L().Warn("failed to update service safe point, checksum may fail if gc triggered", zap.Error(err))
+			log.FromContext(ctx).Warn("failed to update service safe point, checksum may fail if gc triggered", zap.Error(err))
 		}
 	}
 
@@ -513,7 +477,7 @@ func (m *gcTTLManager) start(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.L().Info("service safe point keeper exited")
+				log.FromContext(ctx).Info("service safe point keeper exited")
 				return
 			case <-updateTick.C:
 				updateGCTTL()

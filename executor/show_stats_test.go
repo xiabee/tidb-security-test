@@ -27,8 +27,7 @@ import (
 )
 
 func TestShowStatsMeta(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -45,9 +44,26 @@ func TestShowStatsMeta(t *testing.T) {
 	require.Equal(t, "t", result.Rows()[0][1])
 }
 
+func TestShowStatsLocked(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t, t1")
+	tk.MustExec("create table t (a int, b int)")
+	tk.MustExec("create table t1 (a int, b int)")
+	tk.MustExec("lock stats t, t1")
+	result := tk.MustQuery("show stats_locked")
+	require.Len(t, result.Rows(), 2)
+	require.Equal(t, "t", result.Rows()[0][1])
+	require.Equal(t, "t1", result.Rows()[1][1])
+	result = tk.MustQuery("show stats_locked where table_name = 't'")
+	require.Len(t, result.Rows(), 1)
+	require.Equal(t, "t", result.Rows()[0][1])
+}
+
 func TestShowStatsHistograms(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -55,7 +71,7 @@ func TestShowStatsHistograms(t *testing.T) {
 	tk.MustExec("create table t (a int, b int)")
 	tk.MustExec("analyze table t")
 	result := tk.MustQuery("show stats_histograms")
-	require.Len(t, result.Rows(), 0)
+	require.Len(t, result.Rows(), 2)
 	tk.MustExec("insert into t values(1,1)")
 	tk.MustExec("analyze table t")
 	result = tk.MustQuery("show stats_histograms").Sort()
@@ -74,11 +90,11 @@ func TestShowStatsHistograms(t *testing.T) {
 	tk.MustExec("analyze table t index idx_b")
 	res = tk.MustQuery("show stats_histograms where table_name = 't' and column_name = 'idx_b'")
 	require.Len(t, res.Rows(), 1)
+	res.CheckAt([]int{10}, [][]interface{}{{"allLoaded"}})
 }
 
 func TestShowStatsBuckets(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -122,9 +138,26 @@ func TestShowStatsBuckets(t *testing.T) {
 	result.Check(testkit.Rows("test t  idx 1 0 1 1 (2020-01-01 00:00:00, 1) (2020-01-01 00:00:00, 1) 0"))
 }
 
+func TestShowStatsBucketWithDateNullValue(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a datetime, b int, index ia(a,b));")
+	tk.MustExec("insert into t value('2023-12-27',1),(null, 2),('2023-12-28',3),(null,4);")
+	tk.MustExec("analyze table t with 0 topn;")
+	tk.MustQuery("explain format=\"brief\" select * from t where a > 1;").Check(testkit.Rows(
+		"IndexReader 3.20 root  index:Selection",
+		"└─Selection 3.20 cop[tikv]  gt(cast(test.t.a, double BINARY), 1)",
+		"  └─IndexFullScan 4.00 cop[tikv] table:t, index:ia(a, b) keep order:false"))
+	tk.MustQuery("show stats_buckets where db_name = 'test' and Column_name = 'ia';").Check(testkit.Rows(
+		"test t  ia 1 0 1 1 (NULL, 4) (NULL, 4) 0",
+		"test t  ia 1 1 2 1 (2023-12-27 00:00:00, 1) (2023-12-27 00:00:00, 1) 0",
+		"test t  ia 1 2 3 1 (2023-12-28 00:00:00, 3) (2023-12-28 00:00:00, 3) 0"))
+}
+
 func TestShowStatsHasNullValue(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -188,8 +221,7 @@ func TestShowStatsHasNullValue(t *testing.T) {
 }
 
 func TestShowPartitionStats(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	testkit.WithPruneMode(tk, variable.Static, func() {
@@ -228,8 +260,7 @@ func TestShowPartitionStats(t *testing.T) {
 }
 
 func TestShowStatusSnapshot(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("drop database if exists test;")
@@ -256,8 +287,7 @@ func TestShowStatusSnapshot(t *testing.T) {
 }
 
 func TestShowStatsExtended(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	dom.StatsHandle().Clear()
@@ -310,8 +340,7 @@ func TestShowStatsExtended(t *testing.T) {
 }
 
 func TestShowColumnStatsUsage(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -342,21 +371,8 @@ func TestShowColumnStatsUsage(t *testing.T) {
 	require.Equal(t, rows[1], []interface{}{"test", "t2", p0.Name.O, t1.Meta().Columns[0].Name.O, "2021-10-20 09:00:00", "<nil>"})
 }
 
-func TestShowHistogramsInFlight(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	result := tk.MustQuery("show histograms_in_flight")
-	rows := result.Rows()
-	require.Len(t, rows, 1)
-	require.Equal(t, rows[0][0], "0")
-}
-
 func TestShowAnalyzeStatus(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("delete from mysql.analyze_jobs")
@@ -417,4 +433,19 @@ func TestShowAnalyzeStatus(t *testing.T) {
 	require.Equal(t, "<nil>", rows[1][8])
 	require.Equal(t, addr, rows[1][9])
 	require.Equal(t, "<nil>", rows[1][10])
+
+	tk.MustExec("delete from mysql.analyze_jobs")
+	tk.MustExec("create table t2 (a int, b int, primary key(a)) PARTITION BY RANGE ( a )(PARTITION p0 VALUES LESS THAN (6))")
+	tk.MustExec(`insert into t2 values (1, 1), (2, 2)`)
+	tk.MustExec("analyze table t2")
+	rows = tk.MustQuery("show analyze status").Rows()
+	require.Len(t, rows, 2)
+	require.Equal(t, "merge global stats for test.t2 columns", rows[0][3])
+
+	tk.MustExec("delete from mysql.analyze_jobs")
+	tk.MustExec("alter table t2 add index idx(b)")
+	tk.MustExec("analyze table t2 index idx")
+	rows = tk.MustQuery("show analyze status").Rows()
+	require.Len(t, rows, 2)
+	require.Equal(t, "merge global stats for test.t2's index idx", rows[0][3])
 }

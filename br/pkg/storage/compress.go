@@ -8,7 +8,6 @@ import (
 	"io"
 
 	"github.com/pingcap/errors"
-
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 )
 
@@ -25,7 +24,7 @@ func WithCompression(inner ExternalStorage, compressionType CompressType) Extern
 	return &withCompression{ExternalStorage: inner, compressType: compressionType}
 }
 
-func (w *withCompression) Create(ctx context.Context, name string) (ExternalFileWriter, error) {
+func (w *withCompression) Create(ctx context.Context, name string, _ *WriterOption) (ExternalFileWriter, error) {
 	var (
 		writer ExternalFileWriter
 		err    error
@@ -33,7 +32,7 @@ func (w *withCompression) Create(ctx context.Context, name string) (ExternalFile
 	if s3Storage, ok := w.ExternalStorage.(*S3Storage); ok {
 		writer, err = s3Storage.CreateUploader(ctx, name)
 	} else {
-		writer, err = w.ExternalStorage.Create(ctx, name)
+		writer, err = w.ExternalStorage.Create(ctx, name, nil)
 	}
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -81,8 +80,11 @@ func (w *withCompression) ReadFile(ctx context.Context, name string) ([]byte, er
 	return io.ReadAll(compressBf)
 }
 
+// compressReader is a wrapper for compress.Reader
 type compressReader struct {
-	io.ReadCloser
+	io.Reader
+	io.Seeker
+	io.Closer
 }
 
 // nolint:interfacer
@@ -95,12 +97,23 @@ func newInterceptReader(fileReader ExternalFileReader, compressType CompressType
 		return nil, errors.Trace(err)
 	}
 	return &compressReader{
-		ReadCloser: r,
+		Reader: r,
+		Closer: fileReader,
+		Seeker: fileReader,
 	}, nil
 }
 
-func (r *compressReader) Seek(_ int64, _ int) (int64, error) {
-	return int64(0), errors.Annotatef(berrors.ErrStorageInvalidConfig, "compressReader doesn't support Seek now")
+func (c *compressReader) Seek(offset int64, whence int) (int64, error) {
+	// only support get original reader's current offset
+	if offset == 0 && whence == io.SeekCurrent {
+		return c.Seeker.Seek(offset, whence)
+	}
+	return int64(0), errors.Annotatef(berrors.ErrStorageInvalidConfig, "compressReader doesn't support Seek now, offset %d, whence %d", offset, whence)
+}
+
+func (c *compressReader) Close() error {
+	err := c.Closer.Close()
+	return err
 }
 
 type flushStorageWriter struct {
@@ -109,12 +122,12 @@ type flushStorageWriter struct {
 	closer  io.Closer
 }
 
-func (w *flushStorageWriter) Write(ctx context.Context, data []byte) (int, error) {
+func (w *flushStorageWriter) Write(_ context.Context, data []byte) (int, error) {
 	n, err := w.writer.Write(data)
 	return n, errors.Trace(err)
 }
 
-func (w *flushStorageWriter) Close(ctx context.Context) error {
+func (w *flushStorageWriter) Close(_ context.Context) error {
 	err := w.flusher.Flush()
 	if err != nil {
 		return errors.Trace(err)

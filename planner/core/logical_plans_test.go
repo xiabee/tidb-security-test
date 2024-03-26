@@ -20,10 +20,13 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/infoschema"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/planner/util"
+	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +35,26 @@ func newTypeWithFlen(typeByte byte, flen int) *types.FieldType {
 	tp := types.NewFieldType(typeByte)
 	tp.SetFlen(flen)
 	return tp
+}
+
+func (p *plannerSuite) GetParser() *parser.Parser {
+	return p.p
+}
+
+func (p *plannerSuite) GetIS() infoschema.InfoSchema {
+	return p.is
+}
+
+func (p *plannerSuite) GetCtx() sessionctx.Context {
+	return p.ctx
+}
+
+func CreatePlannerSuite(sctx sessionctx.Context, is infoschema.InfoSchema) (s *plannerSuite) {
+	s = new(plannerSuite)
+	s.is = is
+	s.p = parser.New()
+	s.ctx = sctx
+	return s
 }
 
 func SubstituteCol2CorCol(expr expression.Expression, colIDs map[int64]struct{}) (expression.Expression, error) {
@@ -113,8 +136,8 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 			corColIDs:  []int64{5},
 			idxColIDs:  []int64{2, 1},
 			idxColLens: []int{types.UnspecifiedLength, types.UnspecifiedLength},
-			access:     "[eq(Column#2, 1) eq(Column#1, Column#5)]",
-			remained:   "[]",
+			access:     "[]",
+			remained:   "[eq(Column#1, Column#5) eq(Column#2, 1)]",
 		},
 		{
 			expr:       "col1 = col5 and col2 = 1",
@@ -157,11 +180,11 @@ func TestIndexPathSplitCorColCond(t *testing.T) {
 			remained:   "[]",
 		},
 		{
-			expr:       "col3 = CHAR(1 COLLATE 'binary')",
-			corColIDs:  []int64{},
-			idxColIDs:  []int64{3},
-			idxColLens: []int{types.UnspecifiedLength},
-			access:     "[eq(Column#3, \x01)]",
+			expr:       "col1 = col5 and col3 = CHAR(1 COLLATE 'binary')",
+			corColIDs:  []int64{5},
+			idxColIDs:  []int64{1, 3},
+			idxColLens: []int{types.UnspecifiedLength, types.UnspecifiedLength},
+			access:     "[eq(Column#1, Column#5) eq(Column#3, \x01)]",
 			remained:   "[]",
 		},
 	}

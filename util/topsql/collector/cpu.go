@@ -54,12 +54,11 @@ type SQLCPUTimeRecord struct {
 // SQLCPUCollector uses to consume cpu profile from globalCPUProfiler, then parse the SQL CPU usage from the cpu profile data.
 // It is not thread-safe, should only be used in one goroutine.
 type SQLCPUCollector struct {
-	started bool
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-
+	ctx        context.Context
 	collector  Collector
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	started    bool
 	registered bool
 }
 
@@ -192,7 +191,7 @@ func (sp *SQLCPUCollector) parseCPUProfileBySQLLabels(p *profile.Profile) []SQLC
 	return sp.createSQLStats(sqlMap)
 }
 
-func (sp *SQLCPUCollector) createSQLStats(sqlMap map[string]*sqlStats) []SQLCPUTimeRecord {
+func (*SQLCPUCollector) createSQLStats(sqlMap map[string]*sqlStats) []SQLCPUTimeRecord {
 	stats := make([]SQLCPUTimeRecord, 0, len(sqlMap))
 	for sqlDigest, stmt := range sqlMap {
 		stmt.tune()

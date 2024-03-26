@@ -20,19 +20,21 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/testdata"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 )
 
 func TestChangeVerTo2Behavior(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	originalVal1 := tk.MustQuery("select @@tidb_persist_analyze_options").Rows()[0][0].(string)
 	defer func() {
@@ -111,8 +113,7 @@ func TestChangeVerTo2Behavior(t *testing.T) {
 }
 
 func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	originalVal1 := tk.MustQuery("select @@tidb_persist_analyze_options").Rows()[0][0].(string)
 	defer func() {
@@ -193,8 +194,7 @@ func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
 }
 
 func TestFastAnalyzeOnVer2(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int, b int, index idx(a))")
@@ -241,8 +241,7 @@ func TestFastAnalyzeOnVer2(t *testing.T) {
 }
 
 func TestIncAnalyzeOnVer2(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int, b int, index idx(a))")
@@ -268,10 +267,10 @@ func TestIncAnalyzeOnVer2(t *testing.T) {
 }
 
 func TestExpBackoffEstimation(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("create table exp_backoff(a int, b int, c int, d int, index idx(a, b, c, d))")
 	tk.MustExec("insert into exp_backoff values(1, 1, 1, 1), (1, 1, 1, 2), (1, 1, 2, 3), (1, 2, 2, 4), (1, 2, 3, 5)")
 	tk.MustExec("set @@session.tidb_analyze_version=2")
@@ -281,7 +280,7 @@ func TestExpBackoffEstimation(t *testing.T) {
 		output [][]string
 	)
 	integrationSuiteData := statistics.GetIntegrationSuiteData()
-	integrationSuiteData.GetTestCases(t, &input, &output)
+	integrationSuiteData.LoadTestCases(t, &input, &output)
 	inputLen := len(input)
 	// The test cases are:
 	// Query a = 1, b = 1, c = 1, d >= 3 and d <= 5 separately. We got 5, 3, 2, 3.
@@ -304,8 +303,9 @@ func TestExpBackoffEstimation(t *testing.T) {
 }
 
 func TestGlobalStats(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t;")
@@ -400,8 +400,7 @@ func TestGlobalStats(t *testing.T) {
 }
 
 func TestNULLOnFullSampling(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t;")
@@ -424,7 +423,7 @@ func TestNULLOnFullSampling(t *testing.T) {
 		require.Equal(t, int64(3), col.NullCount)
 	}
 	integrationSuiteData := statistics.GetIntegrationSuiteData()
-	integrationSuiteData.GetTestCases(t, &input, &output)
+	integrationSuiteData.LoadTestCases(t, &input, &output)
 	// Check the topn and buckets contains no null values.
 	for i := 0; i < len(input); i++ {
 		testdata.OnRecord(func() {
@@ -435,8 +434,7 @@ func TestNULLOnFullSampling(t *testing.T) {
 }
 
 func TestAnalyzeSnapshot(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -464,8 +462,7 @@ func TestAnalyzeSnapshot(t *testing.T) {
 }
 
 func TestHistogramsWithSameTxnTS(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -485,8 +482,7 @@ func TestHistogramsWithSameTxnTS(t *testing.T) {
 }
 
 func TestAnalyzeLongString(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -498,8 +494,7 @@ func TestAnalyzeLongString(t *testing.T) {
 }
 
 func TestOutdatedStatsCheck(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
@@ -512,6 +507,7 @@ func TestOutdatedStatsCheck(t *testing.T) {
 	}()
 	tk.MustExec("set global tidb_auto_analyze_start_time='00:00 +0000'")
 	tk.MustExec("set global tidb_auto_analyze_end_time='23:59 +0000'")
+	tk.MustExec("set session tidb_enable_pseudo_for_outdated_stats=1")
 
 	h := dom.StatsHandle()
 	tk.MustExec("use test")
@@ -561,8 +557,7 @@ func hasPseudoStats(rows [][]interface{}) bool {
 // TestNotLoadedStatsOnAllNULLCol makes sure that stats on a column that only contains NULLs can be used even when it's
 // not loaded. This is reasonable because it makes no difference whether it's loaded or not.
 func TestNotLoadedStatsOnAllNULLCol(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	h := dom.StatsHandle()
 	oriLease := h.Lease()
 	h.SetLease(1000)
@@ -625,8 +620,7 @@ func TestNotLoadedStatsOnAllNULLCol(t *testing.T) {
 }
 
 func TestCrossValidationSelectivity(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	h := dom.StatsHandle()
 	tk.MustExec("use test")
@@ -643,9 +637,58 @@ func TestCrossValidationSelectivity(t *testing.T) {
 		"  └─TableRangeScan 2.00 cop[tikv] table:t range:(1 0,1 1000), keep order:false"))
 }
 
+func TestShowHistogramsLoadStatus(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	origLease := h.Lease()
+	h.SetLease(time.Second)
+	defer func() { h.SetLease(origLease) }()
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int primary key, b int, c int, index idx(b, c))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	tk.MustExec("insert into t values (1,2,3), (4,5,6)")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	tk.MustExec("analyze table t")
+	require.NoError(t, h.Update(dom.InfoSchema()))
+	rows := tk.MustQuery("show stats_histograms where db_name = 'test' and table_name = 't'").Rows()
+	for _, row := range rows {
+		if row[3] == "a" || row[3] == "idx" {
+			require.Equal(t, "allLoaded", row[10].(string))
+		} else {
+			require.Equal(t, "allEvicted", row[10].(string))
+		}
+	}
+}
+
+func TestColumnStatsLazyLoad(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	originLease := h.Lease()
+	defer h.SetLease(originLease)
+	// Set `Lease` to `Millisecond` to enable column stats lazy load.
+	h.SetLease(time.Millisecond)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int, b int)")
+	tk.MustExec("insert into t values (1,2), (3,4), (5,6), (7,8)")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	tk.MustExec("analyze table t")
+	is := dom.InfoSchema()
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tbl.Meta()
+	c1 := tblInfo.Columns[0]
+	c2 := tblInfo.Columns[1]
+	require.True(t, h.GetTableStats(tblInfo).Columns[c1.ID].IsAllEvicted())
+	require.True(t, h.GetTableStats(tblInfo).Columns[c2.ID].IsAllEvicted())
+	tk.MustExec("analyze table t")
+	require.True(t, h.GetTableStats(tblInfo).Columns[c1.ID].IsAllEvicted())
+	require.True(t, h.GetTableStats(tblInfo).Columns[c2.ID].IsAllEvicted())
+}
+
 func TestUpdateNotLoadIndexFMSketch(t *testing.T) {
-	store, dom, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	h := dom.StatsHandle()
 	tk.MustExec("use test")
@@ -666,4 +709,102 @@ func TestUpdateNotLoadIndexFMSketch(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	require.Nil(t, h.GetPartitionStats(tblInfo, p0.ID).Indices[idxInfo.ID].FMSketch)
 	require.Nil(t, h.GetPartitionStats(tblInfo, p1.ID).Indices[idxInfo.ID].FMSketch)
+}
+
+func TestIndexJoinInnerRowCountUpperBound(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+
+	testKit.MustExec("use test")
+	testKit.MustExec("drop table if exists t")
+	testKit.MustExec("create table t(a int, b int, index idx(b))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	is := dom.InfoSchema()
+	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tb.Meta()
+
+	// Mock the stats:
+	// The two columns are the same.
+	// From 0 to 499, each value has 1000 rows. Therefore, NDV is 500 and total row count is 500000.
+	mockStatsTbl := mockStatsTable(tblInfo, 500000)
+	colValues, err := generateIntDatum(1, 500)
+	require.NoError(t, err)
+	for i := 1; i <= 2; i++ {
+		mockStatsTbl.Columns[int64(i)] = &statistics.Column{
+			Histogram:         *mockStatsHistogram(int64(i), colValues, 1000, types.NewFieldType(mysql.TypeLonglong)),
+			Info:              tblInfo.Columns[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	generateMapsForMockStatsTbl(mockStatsTbl)
+	stat := h.GetTableStats(tblInfo)
+	stat.HistColl = mockStatsTbl.HistColl
+
+	query := "explain format = 'brief' " +
+		"select /*+ inl_join(t2) */ * from (select * from t where t.a < 1) as t1 join t t2 where t2.a = 0 and t1.a = t2.b"
+
+	testKit.MustQuery(query).Check(testkit.Rows(
+		"IndexJoin 1000000.00 root  inner join, inner:IndexLookUp, outer key:test.t.a, inner key:test.t.b, equal cond:eq(test.t.a, test.t.b)",
+		"├─TableReader(Build) 1000.00 root  data:Selection",
+		"│ └─Selection 1000.00 cop[tikv]  lt(test.t.a, 1), not(isnull(test.t.a))",
+		"│   └─TableFullScan 500000.00 cop[tikv] table:t keep order:false, stats:pseudo",
+		"└─IndexLookUp(Probe) 1000000.00 root  ",
+		"  ├─Selection(Build) 500000000.00 cop[tikv]  not(isnull(test.t.b))",
+		"  │ └─IndexRangeScan 500000000.00 cop[tikv] table:t2, index:idx(b) range: decided by [eq(test.t.b, test.t.a)], keep order:false, stats:pseudo",
+		"  └─Selection(Probe) 1000000.00 cop[tikv]  eq(test.t.a, 0)",
+		"    └─TableRowIDScan 500000000.00 cop[tikv] table:t2 keep order:false, stats:pseudo",
+	))
+
+	testKit.MustExec("set @@tidb_opt_fix_control = '44855:ON'")
+	testKit.MustQuery(query).Check(testkit.Rows(
+		"IndexJoin 1000000.00 root  inner join, inner:IndexLookUp, outer key:test.t.a, inner key:test.t.b, equal cond:eq(test.t.a, test.t.b)",
+		"├─TableReader(Build) 1000.00 root  data:Selection",
+		"│ └─Selection 1000.00 cop[tikv]  lt(test.t.a, 1), not(isnull(test.t.a))",
+		"│   └─TableFullScan 500000.00 cop[tikv] table:t keep order:false, stats:pseudo",
+		"└─IndexLookUp(Probe) 1000000.00 root  ",
+		"  ├─Selection(Build) 1000000.00 cop[tikv]  not(isnull(test.t.b))",
+		"  │ └─IndexRangeScan 1000000.00 cop[tikv] table:t2, index:idx(b) range: decided by [eq(test.t.b, test.t.a)], keep order:false, stats:pseudo",
+		"  └─Selection(Probe) 1000000.00 cop[tikv]  eq(test.t.a, 0)",
+		"    └─TableRowIDScan 1000000.00 cop[tikv] table:t2 keep order:false, stats:pseudo",
+	))
+}
+
+func TestIssue44369(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	h := dom.StatsHandle()
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int, b int, index iab(a,b));")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	tk.MustExec("insert into t value(1,1);")
+	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
+	tk.MustExec("analyze table t;")
+	is := dom.InfoSchema()
+	require.NoError(t, h.Update(is))
+	tk.MustExec("alter table t rename column b to bb;")
+	tk.MustExec("select * from t where a = 10 and bb > 20;")
+}
+
+func TestIssue49986(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("drop table if exists test.t;")
+	tk.MustExec("create table if not exists test.ast (i varchar(20));")
+	tk.MustExec("create table if not exists test.acc (j varchar(20), k varchar(20), l varchar(20), m varchar(20));")
+	tk.MustQuery("explain format='brief' with t as(select i, (case when b.j = '20001' then b.l else b.k end) an from test.ast a inner join test.acc b on (a.i = b.m) and a.i = 'astp2019121731703151'), t1 as (select i, group_concat(an order by an separator '; ') an from t group by i) select * from t1;").Check(
+		testkit.Rows("Projection 8.00 root  test.ast.i, Column#32",
+			"└─HashAgg 8.00 root  group by:Column#37, funcs:group_concat(Column#34 order by Column#35 separator \"; \")->Column#32, funcs:firstrow(Column#36)->test.ast.i",
+			"  └─Projection 100.00 root  case(eq(test.acc.j, 20001), test.acc.l, test.acc.k)->Column#34, case(eq(test.acc.j, 20001), test.acc.l, test.acc.k)->Column#35, test.ast.i, test.ast.i",
+			"    └─HashJoin 100.00 root  CARTESIAN inner join",
+			"      ├─TableReader(Build) 10.00 root  data:Selection",
+			"      │ └─Selection 10.00 cop[tikv]  eq(test.ast.i, \"astp2019121731703151\")",
+			"      │   └─TableFullScan 10000.00 cop[tikv] table:a keep order:false, stats:pseudo",
+			"      └─TableReader(Probe) 10.00 root  data:Selection",
+			"        └─Selection 10.00 cop[tikv]  eq(\"astp2019121731703151\", test.acc.m)",
+			"          └─TableFullScan 10000.00 cop[tikv] table:b keep order:false, stats:pseudo"))
 }

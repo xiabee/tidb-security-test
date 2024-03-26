@@ -28,6 +28,8 @@ import (
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/codec"
+	"golang.org/x/exp/slices"
+	"gopkg.in/yaml.v2"
 )
 
 // Refer to https://github.com/tikv/pd/issues/2701 .
@@ -62,68 +64,74 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 	}
 
 	constraints := options.Constraints
-	leaderConstraints := options.LeaderConstraints
+	leaderConst := options.LeaderConstraints
 	learnerConstraints := options.LearnerConstraints
 	followerConstraints := options.FollowerConstraints
 	followerCount := options.Followers
 	learnerCount := options.Learners
 
-	CommonConstraints, err := NewConstraintsFromYaml([]byte(constraints))
+	commonConstraints, err := NewConstraintsFromYaml([]byte(constraints))
 	if err != nil {
 		return nil, fmt.Errorf("%w: 'Constraints' should be [constraint1, ...] or any yaml compatible array representation", err)
 	}
 
-	Rules := []*Rule{}
+	rules := []*Rule{}
 
-	LeaderConstraints, err := NewConstraintsFromYaml([]byte(leaderConstraints))
+	leaderConstraints, err := NewConstraintsFromYaml([]byte(leaderConst))
 	if err != nil {
 		return nil, fmt.Errorf("%w: 'LeaderConstraints' should be [constraint1, ...] or any yaml compatible array representation", err)
 	}
-	for _, cnst := range CommonConstraints {
-		if err := LeaderConstraints.Add(cnst); err != nil {
+	for _, cnst := range commonConstraints {
+		if err := leaderConstraints.Add(cnst); err != nil {
 			return nil, fmt.Errorf("%w: LeaderConstraints conflicts with Constraints", err)
 		}
 	}
-	Rules = append(Rules, NewRule(Leader, 1, LeaderConstraints))
+	rules = append(rules, NewRule(Leader, 1, leaderConstraints))
 
-	FollowerRules, err := NewRules(Voter, followerCount, followerConstraints)
+	followerRules, err := NewRules(Voter, followerCount, followerConstraints)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid FollowerConstraints", err)
 	}
-	for _, rule := range FollowerRules {
+	for _, rule := range followerRules {
 		// give a default of 2 followers
 		if rule.Count == 0 {
 			rule.Count = 2
 		}
-		for _, cnst := range CommonConstraints {
+		for _, cnst := range commonConstraints {
 			if err := rule.Constraints.Add(cnst); err != nil {
 				return nil, fmt.Errorf("%w: FollowerConstraints conflicts with Constraints", err)
 			}
 		}
 	}
-	Rules = append(Rules, FollowerRules...)
+	rules = append(rules, followerRules...)
 
-	LearnerRules, err := NewRules(Learner, learnerCount, learnerConstraints)
+	learnerRules, err := NewRules(Learner, learnerCount, learnerConstraints)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid LearnerConstraints", err)
 	}
-	for _, rule := range LearnerRules {
+	for _, rule := range learnerRules {
 		if rule.Count == 0 {
 			if len(rule.Constraints) > 0 {
 				return nil, fmt.Errorf("%w: specify learner constraints without specify how many learners to be placed", ErrInvalidPlacementOptions)
 			}
 		}
-		for _, cnst := range CommonConstraints {
+		for _, cnst := range commonConstraints {
 			if err := rule.Constraints.Add(cnst); err != nil {
 				return nil, fmt.Errorf("%w: LearnerConstraints conflicts with Constraints", err)
 			}
 		}
 		if rule.Count > 0 {
-			Rules = append(Rules, rule)
+			rules = append(rules, rule)
 		}
 	}
-
-	return &Bundle{Rules: Rules}, nil
+	labels, err := newLocationLabelsFromSurvivalPreferences(options.SurvivalPreferences)
+	if err != nil {
+		return nil, err
+	}
+	for _, rule := range rules {
+		rule.LocationLabels = labels
+	}
+	return &Bundle{Rules: rules}, nil
 }
 
 // NewBundleFromSugarOptions will transform syntax sugar options into the bundle.
@@ -152,16 +160,24 @@ func NewBundleFromSugarOptions(options *model.PlacementSettings) (*Bundle, error
 	}
 	schedule := options.Schedule
 
-	var Rules []*Rule
+	var rules []*Rule
+
+	locationLabels, err := newLocationLabelsFromSurvivalPreferences(options.SurvivalPreferences)
+	if err != nil {
+		return nil, err
+	}
 
 	// in case empty primaryRegion and regions, just return an empty bundle
 	if primaryRegion == "" && len(regions) == 0 {
-		Rules = append(Rules, NewRule(Voter, followers+1, NewConstraintsDirect()))
-		return &Bundle{Rules: Rules}, nil
+		rules = append(rules, NewRule(Voter, followers+1, NewConstraintsDirect()))
+		for _, rule := range rules {
+			rule.LocationLabels = locationLabels
+		}
+		return &Bundle{Rules: rules}, nil
 	}
 
 	// regions must include the primary
-	sort.Strings(regions)
+	slices.Sort(regions)
 	primaryIndex := sort.SearchStrings(regions, primaryRegion)
 	if primaryIndex >= len(regions) || regions[primaryIndex] != primaryRegion {
 		return nil, fmt.Errorf("%w: primary region must be included in regions", ErrInvalidPlacementOptions)
@@ -180,19 +196,26 @@ func NewBundleFromSugarOptions(options *model.PlacementSettings) (*Bundle, error
 		return nil, fmt.Errorf("%w: unsupported schedule %s", ErrInvalidPlacementOptions, schedule)
 	}
 
-	Rules = append(Rules, NewRule(Voter, primaryCount, NewConstraintsDirect(NewConstraintDirect("region", In, primaryRegion))))
-	if followers+1 > primaryCount {
+	rules = append(rules, NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, primaryRegion))))
+	if primaryCount > 1 {
+		rules = append(rules, NewRule(Voter, primaryCount-1, NewConstraintsDirect(NewConstraintDirect("region", In, primaryRegion))))
+	}
+	if cnt := followers + 1 - primaryCount; cnt > 0 {
 		// delete primary from regions
 		regions = regions[:primaryIndex+copy(regions[primaryIndex:], regions[primaryIndex+1:])]
-
 		if len(regions) > 0 {
-			Rules = append(Rules, NewRule(Follower, followers+1-primaryCount, NewConstraintsDirect(NewConstraintDirect("region", In, regions...))))
+			rules = append(rules, NewRule(Voter, cnt, NewConstraintsDirect(NewConstraintDirect("region", In, regions...))))
 		} else {
-			Rules = append(Rules, NewRule(Follower, followers+1-primaryCount, NewConstraintsDirect()))
+			rules = append(rules, NewRule(Voter, cnt, NewConstraintsDirect()))
 		}
 	}
 
-	return &Bundle{Rules: Rules}, nil
+	// set location labels
+	for _, rule := range rules {
+		rule.LocationLabels = locationLabels
+	}
+
+	return &Bundle{Rules: rules}, nil
 }
 
 // Non-Exported functionality function, do not use it directly but NewBundleFromOptions
@@ -218,6 +241,19 @@ func newBundleFromOptions(options *model.PlacementSettings) (bundle *Bundle, err
 		bundle, err = NewBundleFromConstraintsOptions(options)
 	}
 	return bundle, err
+}
+
+// newLocationLabelsFromSurvivalPreferences will parse the survival preferences into location labels.
+func newLocationLabelsFromSurvivalPreferences(survivalPreferenceStr string) ([]string, error) {
+	if len(survivalPreferenceStr) > 0 {
+		labels := []string{}
+		err := yaml.UnmarshalStrict([]byte(survivalPreferenceStr), &labels)
+		if err != nil {
+			return nil, ErrInvalidSurvivalPreferenceFormat
+		}
+		return labels, nil
+	}
+	return nil, nil
 }
 
 // NewBundleFromOptions will transform options into the bundle.
@@ -254,6 +290,15 @@ func (b *Bundle) String() string {
 func (b *Bundle) Tidy() error {
 	extraCnt := map[PeerRoleType]int{}
 	newRules := b.Rules[:0]
+
+	// One Bundle is from one PlacementSettings, rule share same location labels, so we can use the first rule's location labels.
+	var locationLabels []string
+	for _, rule := range b.Rules {
+		if len(rule.LocationLabels) > 0 {
+			locationLabels = rule.LocationLabels
+			break
+		}
+	}
 	for i, rule := range b.Rules {
 		// useless Rule
 		if rule.Count <= 0 {
@@ -297,6 +342,8 @@ func (b *Bundle) Tidy() error {
 				Key:    EngineLabelKey,
 				Values: []string{EngineLabelTiFlash},
 			}},
+			// the merged rule should have the same location labels with the original rules.
+			LocationLabels: locationLabels,
 		})
 	}
 	b.Rules = newRules

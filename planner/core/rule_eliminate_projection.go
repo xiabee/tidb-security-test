@@ -144,16 +144,7 @@ func eliminatePhysicalProjection(p PhysicalPlan) PhysicalPlan {
 		}
 	})
 
-	oldSchema := p.Schema()
 	newRoot := doPhysicalProjectionElimination(p)
-	newCols := newRoot.Schema().Columns
-	for i, oldCol := range oldSchema.Columns {
-		oldCol.Index = newCols[i].Index
-		oldCol.ID = newCols[i].ID
-		oldCol.UniqueID = newCols[i].UniqueID
-		oldCol.VirtualExpr = newCols[i].VirtualExpr
-		newRoot.Schema().Columns[i] = oldCol
-	}
 	return newRoot
 }
 
@@ -161,7 +152,7 @@ type projectionEliminator struct {
 }
 
 // optimize implements the logicalOptRule interface.
-func (pe *projectionEliminator) optimize(ctx context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (pe *projectionEliminator) optimize(_ context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
 	root := pe.eliminate(lp, make(map[string]*expression.Column), false, opt)
 	return root, nil
 }
@@ -258,6 +249,9 @@ func (la *LogicalAggregation) replaceExprColumns(replace map[string]*expression.
 	for _, agg := range la.AggFuncs {
 		for _, aggExpr := range agg.Args {
 			ResolveExprAndReplace(aggExpr, replace)
+		}
+		for _, orderExpr := range agg.OrderByItems {
+			ResolveExprAndReplace(orderExpr.Expr, replace)
 		}
 	}
 	for _, gbyItem := range la.GroupByItems {

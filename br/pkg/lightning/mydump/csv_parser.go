@@ -16,11 +16,14 @@ package mydump
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/config"
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
+	"github.com/pingcap/tidb/br/pkg/lightning/metric"
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
 	tidbconfig "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/types"
@@ -79,7 +82,9 @@ type CSVParser struct {
 	shouldParseHeader bool
 }
 
+// NewCSVParser creates a CSV parser.
 func NewCSVParser(
+	ctx context.Context,
 	cfg *config.CSVConfig,
 	reader ReadSeekCloser,
 	blockBufSize int64,
@@ -125,9 +130,9 @@ func NewCSVParser(
 			escFlavor = backslashEscapeFlavorMySQLWithNull
 		}
 	}
-
+	metrics, _ := metric.FromContext(ctx)
 	return &CSVParser{
-		blockParser:       makeBlockParser(reader, blockBufSize, ioWorkers),
+		blockParser:       makeBlockParser(reader, blockBufSize, ioWorkers, metrics, log.FromContext(ctx)),
 		cfg:               cfg,
 		charsetConvertor:  charsetConvertor,
 		comma:             []byte(separator),
@@ -555,6 +560,7 @@ func (parser *CSVParser) ReadRow() error {
 	return nil
 }
 
+// ReadColumns reads the columns of this CSV file.
 func (parser *CSVParser) ReadColumns() error {
 	columns, err := parser.readRecord(nil)
 	if err != nil {

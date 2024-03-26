@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/domain/infosync"
+	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
 )
@@ -36,7 +37,6 @@ type PlanReplayerHandler struct {
 	infoGetter *infosync.InfoSyncer
 	address    string
 	statusPort uint
-	scheme     string
 }
 
 func (s *Server) newPlanReplayerHandler() *PlanReplayerHandler {
@@ -44,13 +44,9 @@ func (s *Server) newPlanReplayerHandler() *PlanReplayerHandler {
 	prh := &PlanReplayerHandler{
 		address:    cfg.AdvertiseAddress,
 		statusPort: cfg.Status.StatusPort,
-		scheme:     "http",
 	}
 	if s.dom != nil && s.dom.InfoSyncer() != nil {
 		prh.infoGetter = s.dom.InfoSyncer()
-	}
-	if len(cfg.Security.ClusterSSLCA) > 0 {
-		prh.scheme = "https"
 	}
 	return prh
 }
@@ -64,9 +60,9 @@ func (prh PlanReplayerHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 		infoGetter:         prh.infoGetter,
 		address:            prh.address,
 		statusPort:         prh.statusPort,
-		urlPath:            fmt.Sprintf("plan_replyaer/dump/%s", name),
+		urlPath:            fmt.Sprintf("plan_replayer/dump/%s", name),
 		downloadedFilename: "plan_replayer",
-		scheme:             prh.scheme,
+		scheme:             util.InternalHTTPSchema(),
 	}
 	handleDownloadFile(handler, w, req)
 }
@@ -83,6 +79,7 @@ func handleDownloadFile(handler downloadFileHandler, w http.ResponseWriter, req 
 		return
 	}
 	if exist {
+		//nolint: gosec
 		file, err := os.Open(path)
 		if err != nil {
 			writeError(w, err)
@@ -123,6 +120,7 @@ func handleDownloadFile(handler downloadFileHandler, w http.ResponseWriter, req 
 		writeError(w, err)
 		return
 	}
+	client := util.InternalHTTPClient()
 	// transfer each remote tidb-server and try to find dump file
 	for _, topo := range topos {
 		if topo.IP == handler.address && topo.StatusPort == handler.statusPort {
@@ -130,7 +128,7 @@ func handleDownloadFile(handler downloadFileHandler, w http.ResponseWriter, req 
 		}
 		remoteAddr := net.JoinHostPort(topo.IP, strconv.Itoa(int(topo.StatusPort)))
 		url := fmt.Sprintf("%s://%s/%s?forward=true", handler.scheme, remoteAddr, handler.urlPath)
-		resp, err := http.Get(url) // #nosec G107
+		resp, err := client.Get(url)
 		if err != nil {
 			logutil.BgLogger().Error("forward request failed",
 				zap.String("remote-addr", remoteAddr), zap.Error(err))

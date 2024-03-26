@@ -16,6 +16,7 @@ package mydump
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"regexp"
@@ -31,6 +32,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/lightning/worker"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/types"
+	"github.com/spkg/bom"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -55,21 +57,29 @@ type blockParser struct {
 	appendBuf *bytes.Buffer
 
 	// the Logger associated with this parser for reporting failure
-	Logger log.Logger
+	Logger  log.Logger
+	metrics *metric.Metrics
 }
 
-func makeBlockParser(reader ReadSeekCloser, blockBufSize int64, ioWorkers *worker.Pool) blockParser {
+func makeBlockParser(
+	reader ReadSeekCloser,
+	blockBufSize int64,
+	ioWorkers *worker.Pool,
+	metrics *metric.Metrics,
+	logger log.Logger,
+) blockParser {
 	return blockParser{
 		reader:    MakePooledReader(reader, ioWorkers),
 		blockBuf:  make([]byte, blockBufSize*config.BufferSizeScale),
 		remainBuf: &bytes.Buffer{},
 		appendBuf: &bytes.Buffer{},
-		Logger:    log.L(),
+		Logger:    logger,
 		rowPool: &sync.Pool{
 			New: func() interface{} {
 				return make([]types.Datum, 0, 16)
 			},
 		},
+		metrics: metrics,
 	}
 }
 
@@ -85,6 +95,7 @@ type ChunkParser struct {
 type Chunk struct {
 	Offset       int64
 	EndOffset    int64
+	RealOffset   int64
 	PrevRowIDMax int64
 	RowIDMax     int64
 	Columns      []string
@@ -113,9 +124,11 @@ const (
 	backslashEscapeFlavorMySQLWithNull
 )
 
+// Parser provides some methods to parse a source data file.
 type Parser interface {
 	Pos() (pos int64, rowID int64)
 	SetPos(pos int64, rowID int64) error
+	RealPos() (int64, error)
 	Close() error
 	ReadRow() error
 	LastRow() Row
@@ -128,10 +141,13 @@ type Parser interface {
 	SetColumns([]string)
 
 	SetLogger(log.Logger)
+
+	SetRowID(rowID int64)
 }
 
 // NewChunkParser creates a new parser which can read chunks out of a file.
 func NewChunkParser(
+	ctx context.Context,
 	sqlMode mysql.SQLMode,
 	reader ReadSeekCloser,
 	blockBufSize int64,
@@ -141,9 +157,9 @@ func NewChunkParser(
 	if sqlMode.HasNoBackslashEscapesMode() {
 		escFlavor = backslashEscapeFlavorNone
 	}
-
+	metrics, _ := metric.FromContext(ctx)
 	return &ChunkParser{
-		blockParser: makeBlockParser(reader, blockBufSize, ioWorkers),
+		blockParser: makeBlockParser(reader, blockBufSize, ioWorkers, metrics, log.FromContext(ctx)),
 		escFlavor:   escFlavor,
 	}
 }
@@ -162,8 +178,14 @@ func (parser *blockParser) SetPos(pos int64, rowID int64) error {
 	return nil
 }
 
+// RealPos gets the read position of current reader.
+func (parser *blockParser) RealPos() (int64, error) {
+	return parser.reader.Seek(0, io.SeekCurrent)
+}
+
 // Pos returns the current file offset.
-func (parser *blockParser) Pos() (int64, int64) {
+// Attention: for compressed sql/csv files, pos is the position in uncompressed files
+func (parser *blockParser) Pos() (pos int64, lastRowID int64) {
 	return parser.pos, parser.lastRow.RowID
 }
 
@@ -192,6 +214,11 @@ func (parser *blockParser) logSyntaxError() {
 
 func (parser *blockParser) SetLogger(logger log.Logger) {
 	parser.Logger = logger
+}
+
+// SetRowID changes the reported row ID when we firstly read compressed files.
+func (parser *blockParser) SetRowID(rowID int64) {
+	parser.lastRow.RowID = rowID
 }
 
 type token byte
@@ -259,9 +286,17 @@ func (parser *blockParser) readBlock() error {
 		parser.remainBuf.Write(parser.buf)
 		parser.appendBuf.Reset()
 		parser.appendBuf.Write(parser.remainBuf.Bytes())
-		parser.appendBuf.Write(parser.blockBuf[:n])
+		blockData := parser.blockBuf[:n]
+		if parser.pos == 0 {
+			bomCleanedData := bom.Clean(blockData)
+			parser.pos += int64(n - len(bomCleanedData))
+			blockData = bomCleanedData
+		}
+		parser.appendBuf.Write(blockData)
 		parser.buf = parser.appendBuf.Bytes()
-		metric.ChunkParserReadBlockSecondsHistogram.Observe(time.Since(startTime).Seconds())
+		if parser.metrics != nil {
+			parser.metrics.ChunkParserReadBlockSecondsHistogram.Observe(time.Since(startTime).Seconds())
+		}
 		return nil
 	default:
 		return errors.Trace(err)
@@ -538,7 +573,11 @@ func (parser *blockParser) RecycleRow(row Row) {
 
 // acquireDatumSlice allocates an empty []types.Datum
 func (parser *blockParser) acquireDatumSlice() []types.Datum {
-	return parser.rowPool.Get().([]types.Datum)
+	datum, ok := parser.rowPool.Get().([]types.Datum)
+	if !ok {
+		return []types.Datum{}
+	}
+	return datum
 }
 
 // ReadChunks parses the entire file and splits it into continuous chunks of
@@ -574,4 +613,23 @@ func ReadChunks(parser Parser, minSize int64) ([]Chunk, error) {
 			return nil, errors.Trace(err)
 		}
 	}
+}
+
+// ReadUntil parses the entire file and splits it into continuous chunks of
+// size >= minSize.
+func ReadUntil(parser Parser, pos int64) error {
+	var curOffset int64
+	for curOffset < pos {
+		switch err := parser.ReadRow(); errors.Cause(err) {
+		case nil:
+			curOffset, _ = parser.Pos()
+
+		case io.EOF:
+			return nil
+
+		default:
+			return errors.Trace(err)
+		}
+	}
+	return nil
 }

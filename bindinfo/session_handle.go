@@ -15,6 +15,8 @@
 package bindinfo
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -22,20 +24,21 @@ import (
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/hack"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
 )
 
 // SessionHandle is used to handle all session sql bind operations.
 type SessionHandle struct {
-	ch     *bindCache
-	parser *parser.Parser
+	ch *bindCache
 }
 
 // NewSessionBindHandle creates a new SessionBindHandle.
-func NewSessionBindHandle(parser *parser.Parser) *SessionHandle {
-	sessionHandle := &SessionHandle{parser: parser}
+func NewSessionBindHandle() *SessionHandle {
+	sessionHandle := &SessionHandle{}
 	sessionHandle.ch = newBindCache()
 	return sessionHandle
 }
@@ -94,14 +97,61 @@ func (h *SessionHandle) DropBindRecord(originalSQL, db string, binding *Binding)
 	return nil
 }
 
+// DropBindRecordByDigest drop BindRecord in the cache.
+func (h *SessionHandle) DropBindRecordByDigest(sqlDigest string) error {
+	oldRecord, err := h.GetBindRecordBySQLDigest(sqlDigest)
+	if err != nil {
+		return err
+	}
+	return h.DropBindRecord(oldRecord.OriginalSQL, strings.ToLower(oldRecord.Db), nil)
+}
+
 // GetBindRecord return the BindMeta of the (normdOrigSQL,db) if BindMeta exist.
 func (h *SessionHandle) GetBindRecord(hash, normdOrigSQL, db string) *BindRecord {
 	return h.ch.GetBindRecord(hash, normdOrigSQL, db)
 }
 
+// GetBindRecordBySQLDigest return all BindMeta corresponding to sqlDigest.
+func (h *SessionHandle) GetBindRecordBySQLDigest(sqlDigest string) (*BindRecord, error) {
+	return h.ch.GetBindRecordBySQLDigest(sqlDigest)
+}
+
 // GetAllBindRecord return all session bind info.
 func (h *SessionHandle) GetAllBindRecord() (bindRecords []*BindRecord) {
 	return h.ch.GetAllBindRecords()
+}
+
+// EncodeSessionStates implements SessionStatesHandler.EncodeSessionStates interface.
+func (h *SessionHandle) EncodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+	bindRecords := h.ch.GetAllBindRecords()
+	if len(bindRecords) == 0 {
+		return nil
+	}
+	bytes, err := json.Marshal(bindRecords)
+	if err != nil {
+		return err
+	}
+	sessionStates.Bindings = string(hack.String(bytes))
+	return nil
+}
+
+// DecodeSessionStates implements SessionStatesHandler.DecodeSessionStates interface.
+func (h *SessionHandle) DecodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+	if len(sessionStates.Bindings) == 0 {
+		return nil
+	}
+	var records []*BindRecord
+	if err := json.Unmarshal(hack.Slice(sessionStates.Bindings), &records); err != nil {
+		return err
+	}
+	for _, record := range records {
+		// Restore hints and ID because hints are hard to encode.
+		if err := record.prepareHints(sctx); err != nil {
+			return err
+		}
+		h.appendBindRecord(parser.DigestNormalized(record.OriginalSQL).String(), record)
+	}
+	return nil
 }
 
 // Close closes the session handle.

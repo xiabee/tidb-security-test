@@ -15,6 +15,7 @@
 package expression
 
 import (
+	"context"
 	"math"
 	"strings"
 	"time"
@@ -24,9 +25,11 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/sessionctx"
-	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
 	driver "github.com/pingcap/tidb/types/parser_driver"
+	"github.com/pingcap/tidb/util/logutil"
+	"github.com/tikv/client-go/v2/oracle"
+	"go.uber.org/zap"
 )
 
 func boolToInt64(v bool) int64 {
@@ -158,6 +161,15 @@ func getStmtTimestamp(ctx sessionctx.Context) (time.Time, error) {
 		failpoint.Return(v, nil)
 	})
 
+	if ctx != nil {
+		staleTSO, err := ctx.GetSessionVars().StmtCtx.GetStaleTSO()
+		if staleTSO != 0 && err == nil {
+			return oracle.GetTimeFromTS(staleTSO), nil
+		} else if err != nil {
+			logutil.BgLogger().Error("get stale tso failed", zap.Error(err))
+		}
+	}
+
 	now := time.Now()
 
 	if ctx == nil {
@@ -165,7 +177,7 @@ func getStmtTimestamp(ctx sessionctx.Context) (time.Time, error) {
 	}
 
 	sessionVars := ctx.GetSessionVars()
-	timestampStr, err := variable.GetSessionOrGlobalSystemVar(sessionVars, "timestamp")
+	timestampStr, err := sessionVars.GetSessionOrGlobalSystemVar(context.Background(), "timestamp")
 	if err != nil {
 		return now, err
 	}

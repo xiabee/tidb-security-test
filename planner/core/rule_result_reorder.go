@@ -39,7 +39,7 @@ This rule reorders results by modifying or injecting a Sort operator:
 type resultReorder struct {
 }
 
-func (rs *resultReorder) optimize(ctx context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
+func (rs *resultReorder) optimize(_ context.Context, lp LogicalPlan, _ *logicalOptimizeOp) (LogicalPlan, error) {
 	ordered := rs.completeSort(lp)
 	if !ordered {
 		lp = rs.injectSort(lp)
@@ -106,6 +106,9 @@ func (rs *resultReorder) extractHandleCol(lp LogicalPlan) *expression.Column {
 	switch x := lp.(type) {
 	case *LogicalSelection, *LogicalLimit:
 		handleCol := rs.extractHandleCol(lp.Children()[0])
+		if handleCol == nil {
+			return nil // fail to extract handle column from the child, just return nil.
+		}
 		if x.Schema().Contains(handleCol) {
 			// some Projection Operator might be inlined, so check the column again here
 			return handleCol

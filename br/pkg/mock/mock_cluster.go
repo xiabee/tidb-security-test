@@ -24,6 +24,7 @@ import (
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
 	pd "github.com/tikv/pd/client"
+	"go.opencensus.io/stats/view"
 	"go.uber.org/zap"
 )
 
@@ -84,6 +85,7 @@ func NewCluster() (*Cluster, error) {
 // Start runs a mock cluster.
 func (mock *Cluster) Start() error {
 	server.RunInGoTest = true
+	server.RunInGoTestChan = make(chan struct{})
 	mock.TiDBDriver = server.NewTiDBDriver(mock.Storage)
 	cfg := config.NewConfig()
 	// let tidb random select a port
@@ -99,10 +101,11 @@ func (mock *Cluster) Start() error {
 	}
 	mock.Server = svr
 	go func() {
-		if err1 := svr.Run(); err1 != nil {
+		if err1 := svr.Run(nil); err1 != nil {
 			panic(err1)
 		}
 	}()
+	<-server.RunInGoTestChan
 	mock.DSN = waitUntilServerOnline("127.0.0.1", cfg.Status.StatusPort)
 	return nil
 }
@@ -121,6 +124,7 @@ func (mock *Cluster) Stop() {
 	if mock.HttpServer != nil {
 		_ = mock.HttpServer.Close()
 	}
+	view.Stop()
 }
 
 type configOverrider func(*mysql.Config)
@@ -176,7 +180,8 @@ func waitUntilServerOnline(addr string, statusPort uint) string {
 	}
 	if retry == retryTime {
 		log.Panic("failed to connect HTTP status in every 10 ms",
-			zap.Int("retryTime", retryTime))
+			zap.Int("retryTime", retryTime),
+			zap.String("url", statusURL))
 	}
 	return strings.SplitAfter(dsn, "/")[0]
 }

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +41,7 @@ import (
 	"github.com/pingcap/tidb/util/stringutil"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 // MemTablePredicateExtractor is used to extract some predicates from `WHERE` clause
@@ -68,7 +68,7 @@ type MemTablePredicateExtractor interface {
 // to avoid polluting the global scope of current package.
 type extractHelper struct{}
 
-func (helper extractHelper) extractColInConsExpr(extractCols map[int64]*types.FieldName, expr *expression.ScalarFunction) (string, []types.Datum) {
+func (extractHelper) extractColInConsExpr(extractCols map[int64]*types.FieldName, expr *expression.ScalarFunction) (string, []types.Datum) {
 	args := expr.GetArgs()
 	col, isCol := args[0].(*expression.Column)
 	if !isCol {
@@ -95,7 +95,7 @@ func (helper extractHelper) extractColInConsExpr(extractCols map[int64]*types.Fi
 	return name.ColName.L, results
 }
 
-func (helper extractHelper) extractColBinaryOpConsExpr(extractCols map[int64]*types.FieldName, expr *expression.ScalarFunction) (string, []types.Datum) {
+func (extractHelper) extractColBinaryOpConsExpr(extractCols map[int64]*types.FieldName, expr *expression.ScalarFunction) (string, []types.Datum) {
 	args := expr.GetArgs()
 	var col *expression.Column
 	var colIdx int
@@ -170,7 +170,7 @@ func (helper extractHelper) extractColOrExpr(extractCols map[int64]*types.FieldN
 // merges `lhs` and `datums` with CNF logic
 // 1. Returns `datums` set if the `lhs` is an empty set
 // 2. Returns the intersection of `datums` and `lhs` if the `lhs` is not an empty set
-func (helper extractHelper) merge(lhs set.StringSet, datums []types.Datum, toLower bool) set.StringSet {
+func (extractHelper) merge(lhs set.StringSet, datums []types.Datum, toLower bool) set.StringSet {
 	tmpNodeTypes := set.NewStringSet()
 	for _, datum := range datums {
 		s, err := datum.ToString()
@@ -210,6 +210,7 @@ func (helper extractHelper) extractCol(
 	for _, expr := range predicates {
 		fn, ok := expr.(*expression.ScalarFunction)
 		if !ok {
+			remained = append(remained, expr)
 			continue
 		}
 		var colName string
@@ -333,7 +334,7 @@ func (helper extractHelper) extractLikePattern(
 	var colName string
 	var datums []types.Datum
 	switch fn.FuncName.L {
-	case ast.EQ, ast.Like, ast.Regexp:
+	case ast.EQ, ast.Like, ast.Regexp, ast.RegexpLike:
 		colName, datums = helper.extractColBinaryOpConsExpr(extractCols, fn)
 	}
 	if colName == extractColName {
@@ -345,7 +346,7 @@ func (helper extractHelper) extractLikePattern(
 				return true, stringutil.CompileLike2Regexp(datums[0].GetString())
 			}
 			return true, datums[0].GetString()
-		case ast.Regexp:
+		case ast.Regexp, ast.RegexpLike:
 			return true, datums[0].GetString()
 		default:
 			return false, ""
@@ -355,7 +356,7 @@ func (helper extractHelper) extractLikePattern(
 	}
 }
 
-func (helper extractHelper) findColumn(schema *expression.Schema, names []*types.FieldName, colName string) map[int64]*types.FieldName {
+func (extractHelper) findColumn(schema *expression.Schema, names []*types.FieldName, colName string) map[int64]*types.FieldName {
 	extractCols := make(map[int64]*types.FieldName)
 	for i, name := range names {
 		if name.ColName.L == colName {
@@ -369,7 +370,7 @@ func (helper extractHelper) findColumn(schema *expression.Schema, names []*types
 // For the expression that push down to the coprocessor, the function name is different with normal compare function,
 // Then getTimeFunctionName will do a sample function name convert.
 // Currently, this is used to support query `CLUSTER_SLOW_QUERY` at any time.
-func (helper extractHelper) getTimeFunctionName(fn *expression.ScalarFunction) string {
+func (extractHelper) getTimeFunctionName(fn *expression.ScalarFunction) string {
 	switch fn.Function.PbCode() {
 	case tipb.ScalarFuncSig_GTTime:
 		return ast.GT
@@ -390,7 +391,7 @@ func (helper extractHelper) getTimeFunctionName(fn *expression.ScalarFunction) s
 // For the expression that push down to the coprocessor, the function name is different with normal compare function,
 // Then getStringFunctionName will do a sample function name convert.
 // Currently, this is used to support query `CLUSTER_STMT_SUMMARY` at any string.
-func (helper extractHelper) getStringFunctionName(fn *expression.ScalarFunction) string {
+func (extractHelper) getStringFunctionName(fn *expression.ScalarFunction) string {
 	switch fn.Function.PbCode() {
 	case tipb.ScalarFuncSig_GTString:
 		return ast.GT
@@ -499,7 +500,7 @@ func (helper extractHelper) extractTimeRange(
 	return
 }
 
-func (helper extractHelper) parseQuantiles(quantileSet set.StringSet) []float64 {
+func (extractHelper) parseQuantiles(quantileSet set.StringSet) []float64 {
 	quantiles := make([]float64, 0, len(quantileSet))
 	for k := range quantileSet {
 		v, err := strconv.ParseFloat(k, 64)
@@ -509,11 +510,11 @@ func (helper extractHelper) parseQuantiles(quantileSet set.StringSet) []float64 
 		}
 		quantiles = append(quantiles, v)
 	}
-	sort.Float64s(quantiles)
+	slices.Sort(quantiles)
 	return quantiles
 }
 
-func (helper extractHelper) parseUint64(uint64Set set.StringSet) []uint64 {
+func (extractHelper) parseUint64(uint64Set set.StringSet) []uint64 {
 	uint64s := make([]uint64, 0, len(uint64Set))
 	for k := range uint64Set {
 		v, err := strconv.ParseUint(k, 10, 64)
@@ -523,7 +524,7 @@ func (helper extractHelper) parseUint64(uint64Set set.StringSet) []uint64 {
 		}
 		uint64s = append(uint64s, v)
 	}
-	sort.Slice(uint64s, func(i, j int) bool { return uint64s[i] < uint64s[j] })
+	slices.Sort(uint64s)
 	return uint64s
 }
 
@@ -554,14 +555,14 @@ func (helper extractHelper) extractCols(
 	return remained, skipRequest, cols
 }
 
-func (helper extractHelper) convertToTime(t int64) time.Time {
+func (extractHelper) convertToTime(t int64) time.Time {
 	if t == 0 || t == math.MaxInt64 {
 		return time.Now()
 	}
 	return time.Unix(0, t)
 }
 
-func (helper extractHelper) convertToBoolSlice(uint64Slice []uint64) []bool {
+func (extractHelper) convertToBoolSlice(uint64Slice []uint64) []bool {
 	if len(uint64Slice) == 0 {
 		return []bool{false, true}
 	}
@@ -569,7 +570,7 @@ func (helper extractHelper) convertToBoolSlice(uint64Slice []uint64) []bool {
 	// use to keep res unique
 	b := make(map[bool]struct{}, 2)
 	for _, l := range uint64Slice {
-		tmpBool := (l == 1)
+		tmpBool := l == 1
 		_, ok := b[tmpBool]
 		if !ok {
 			b[tmpBool] = struct{}{}
@@ -613,7 +614,7 @@ func (e *ClusterTableExtractor) Extract(_ sessionctx.Context,
 	return remained
 }
 
-func (e *ClusterTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *ClusterTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request:true"
 	}
@@ -710,11 +711,11 @@ func (e *ClusterLogTableExtractor) explainInfo(p *PhysicalMemTable) string {
 	r := new(bytes.Buffer)
 	st, et := e.StartTime, e.EndTime
 	if st > 0 {
-		st := time.Unix(0, st*1e6)
+		st := time.UnixMilli(st)
 		r.WriteString(fmt.Sprintf("start_time:%v, ", st.In(p.ctx.GetSessionVars().StmtCtx.TimeZone).Format(MetricTableTimeFormat)))
 	}
 	if et > 0 {
-		et := time.Unix(0, et*1e6)
+		et := time.UnixMilli(et)
 		r.WriteString(fmt.Sprintf("end_time:%v, ", et.In(p.ctx.GetSessionVars().StmtCtx.TimeZone).Format(MetricTableTimeFormat)))
 	}
 	if len(e.NodeTypes) > 0 {
@@ -845,11 +846,11 @@ func (e *HotRegionsHistoryTableExtractor) explainInfo(p *PhysicalMemTable) strin
 	r := new(bytes.Buffer)
 	st, et := e.StartTime, e.EndTime
 	if st > 0 {
-		st := time.Unix(0, st*1e6)
+		st := time.UnixMilli(st)
 		r.WriteString(fmt.Sprintf("start_time:%v, ", st.In(p.ctx.GetSessionVars().StmtCtx.TimeZone).Format("2006-01-02 15:04:05")))
 	}
 	if et > 0 {
-		et := time.Unix(0, et*1e6)
+		et := time.UnixMilli(et)
 		r.WriteString(fmt.Sprintf("end_time:%v, ", et.In(p.ctx.GetSessionVars().StmtCtx.TimeZone).Format("2006-01-02 15:04:05")))
 	}
 	if len(e.RegionIDs) > 0 {
@@ -1014,7 +1015,7 @@ func (e *MetricSummaryTableExtractor) Extract(
 	return remained
 }
 
-func (e *MetricSummaryTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (*MetricSummaryTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	return ""
 }
 
@@ -1047,7 +1048,7 @@ func (e *InspectionResultTableExtractor) Extract(
 	return remained
 }
 
-func (e *InspectionResultTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *InspectionResultTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipInspection {
 		return "skip_inspection:true"
 	}
@@ -1089,7 +1090,7 @@ func (e *InspectionSummaryTableExtractor) Extract(
 	return remained
 }
 
-func (e *InspectionSummaryTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *InspectionSummaryTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipInspection {
 		return "skip_inspection: true"
 	}
@@ -1142,7 +1143,7 @@ func (e *InspectionRuleTableExtractor) Extract(
 	return remained
 }
 
-func (e *InspectionRuleTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *InspectionRuleTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request: true"
 	}
@@ -1241,7 +1242,7 @@ func (e *SlowQueryExtractor) decodeBytesToTime(bs []byte) (int64, error) {
 	return 0, nil
 }
 
-func (e *SlowQueryExtractor) decodeToTime(handle kv.Handle) (int64, error) {
+func (*SlowQueryExtractor) decodeToTime(handle kv.Handle) (int64, error) {
 	tp := types.NewFieldType(mysql.TypeDatetime)
 	col := rowcodec.ColInfo{ID: 0, Ft: tp}
 	chk := chunk.NewChunkWithCapacity([]*types.FieldType{tp}, 1)
@@ -1297,7 +1298,7 @@ func (e *TableStorageStatsExtractor) Extract(
 	return remained
 }
 
-func (e *TableStorageStatsExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *TableStorageStatsExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request: true"
 	}
@@ -1370,7 +1371,7 @@ func (e *TiFlashSystemTableExtractor) Extract(_ sessionctx.Context,
 	return remained
 }
 
-func (e *TiFlashSystemTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *TiFlashSystemTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request:true"
 	}
@@ -1426,7 +1427,7 @@ func (e *StatementsSummaryExtractor) Extract(
 	return remained
 }
 
-func (e *StatementsSummaryExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *StatementsSummaryExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request: true"
 	}
@@ -1470,7 +1471,7 @@ func (e *TikvRegionPeersExtractor) Extract(_ sessionctx.Context,
 	return remained
 }
 
-func (e *TikvRegionPeersExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *TikvRegionPeersExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request:true"
 	}
@@ -1535,7 +1536,7 @@ func (e *ColumnsTableExtractor) Extract(_ sessionctx.Context,
 	return remained
 }
 
-func (e *ColumnsTableExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *ColumnsTableExtractor) explainInfo(_ *PhysicalMemTable) string {
 	if e.SkipRequest {
 		return "skip_request:true"
 	}
@@ -1596,7 +1597,7 @@ func (e *TiKVRegionStatusExtractor) Extract(_ sessionctx.Context,
 	return remained
 }
 
-func (e *TiKVRegionStatusExtractor) explainInfo(p *PhysicalMemTable) string {
+func (e *TiKVRegionStatusExtractor) explainInfo(_ *PhysicalMemTable) string {
 	r := new(bytes.Buffer)
 	if len(e.tablesID) > 0 {
 		r.WriteString("table_id in {")

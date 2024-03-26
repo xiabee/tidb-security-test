@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/util"
+	"github.com/pingcap/tidb/util/promutil"
 	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
@@ -80,7 +81,6 @@ const (
 // Config is the dump config for dumpling
 type Config struct {
 	storage.BackendOptions
-	ExtStorage storage.ExternalStorage `json:"-"`
 
 	specifiedTables          bool
 	AllowCleartextPasswords  bool
@@ -137,9 +137,13 @@ type Config struct {
 	FileSize            uint64
 	StatementSize       uint64
 	SessionParams       map[string]interface{}
-	Labels              prometheus.Labels `json:"-"`
 	Tables              DatabaseTables
 	CollationCompatible string
+
+	Labels       prometheus.Labels       `json:"-"`
+	PromFactory  promutil.Factory        `json:"-"`
+	PromRegistry promutil.Registry       `json:"-"`
+	ExtStorage   storage.ExternalStorage `json:"-"`
 }
 
 // ServerInfoUnknown is the unknown database type to dumpling
@@ -167,7 +171,7 @@ func DefaultConfig() *Config {
 		SortByPk:            true,
 		Tables:              nil,
 		Snapshot:            "",
-		Consistency:         consistencyTypeAuto,
+		Consistency:         ConsistencyTypeAuto,
 		NoViews:             true,
 		NoSequences:         true,
 		Rows:                UnspecifiedSize,
@@ -185,6 +189,8 @@ func DefaultConfig() *Config {
 		PosAfterConnect:     false,
 		CollationCompatible: LooseCollationCompatible,
 		specifiedTables:     false,
+		PromFactory:         promutil.NewDefaultFactory(),
+		PromRegistry:        promutil.NewDefaultRegistry(),
 	}
 }
 
@@ -195,25 +201,6 @@ func (conf *Config) String() string {
 		conf.Logger.Error("fail to marshal config to json", zap.Error(err))
 	}
 	return string(cfg)
-}
-
-// GetDSN generates DSN from Config
-func (conf *Config) GetDSN(db string) string {
-	// maxAllowedPacket=0 can be used to automatically fetch the max_allowed_packet variable from server on every connection.
-	// https://github.com/go-sql-driver/mysql#maxallowedpacket
-	hostPort := net.JoinHostPort(conf.Host, strconv.Itoa(conf.Port))
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?collation=utf8mb4_general_ci&readTimeout=%s&writeTimeout=30s&interpolateParams=true&maxAllowedPacket=0",
-		conf.User, conf.Password, hostPort, db, conf.ReadTimeout)
-	if conf.Security.DriveTLSName != "" {
-		dsn += "&tls=" + conf.Security.DriveTLSName
-	}
-	if conf.AllowCleartextPasswords {
-		dsn += "&allowCleartextPasswords=1"
-	}
-	failpoint.Inject("SetWaitTimeout", func(val failpoint.Value) {
-		dsn += "&wait_timeout=" + strconv.Itoa(val.(int))
-	})
-	return dsn
 }
 
 // GetDriverConfig returns the MySQL driver config from Config.
@@ -238,6 +225,11 @@ func (conf *Config) GetDriverConfig(db string) *mysql.Config {
 	if conf.AllowCleartextPasswords {
 		driverCfg.AllowCleartextPasswords = true
 	}
+	failpoint.Inject("SetWaitTimeout", func(val failpoint.Value) {
+		driverCfg.Params = map[string]string{
+			"wait_timeout": strconv.Itoa(val.(int)),
+		}
+	})
 	return driverCfg
 }
 
@@ -246,7 +238,7 @@ func timestampDirName() string {
 }
 
 // DefineFlags defines flags of dumpling's configuration
-func (conf *Config) DefineFlags(flags *pflag.FlagSet) {
+func (*Config) DefineFlags(flags *pflag.FlagSet) {
 	storage.DefineFlags(flags)
 	flags.StringSliceP(flagDatabase, "B", nil, "Databases to dump")
 	flags.StringSliceP(flagTablesList, "T", nil, "Comma delimited table list to dump; must be qualified table names")
@@ -262,7 +254,7 @@ func (conf *Config) DefineFlags(flags *pflag.FlagSet) {
 	flags.String(flagLoglevel, "info", "Log level: {debug|info|warn|error|dpanic|panic|fatal}")
 	flags.StringP(flagLogfile, "L", "", "Log file `path`, leave empty to write to console")
 	flags.String(flagLogfmt, "text", "Log `format`: {text|json}")
-	flags.String(flagConsistency, consistencyTypeAuto, "Consistency level during dumping: {auto|none|flush|lock|snapshot}")
+	flags.String(flagConsistency, ConsistencyTypeAuto, "Consistency level during dumping: {auto|none|flush|lock|snapshot}")
 	flags.String(flagSnapshot, "", "Snapshot position (uint64 or MySQL style string timestamp). Valid only when consistency=snapshot")
 	flags.BoolP(flagNoViews, "W", true, "Do not dump views")
 	flags.Bool(flagNoSequences, true, "Do not dump sequences")
@@ -296,7 +288,7 @@ func (conf *Config) DefineFlags(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagReadTimeout)
 	flags.Bool(flagTransactionalConsistency, true, "Only support transactional consistency")
 	_ = flags.MarkHidden(flagTransactionalConsistency)
-	flags.StringP(flagCompress, "c", "", "Compress output file type, support 'gzip', 'no-compression' now")
+	flags.StringP(flagCompress, "c", "", "Compress output file type, support 'gzip', 'snappy', 'zstd', 'no-compression' now")
 }
 
 // ParseFromFlags parses dumpling's export.Config from flags
@@ -513,7 +505,7 @@ func (conf *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	}
 	tmpl, err := ParseOutputFileTemplate(outputFilenameFormat)
 	if err != nil {
-		return errors.Errorf("failed to parse output filename template (--output-filename-template '%s')\n", outputFilenameFormat)
+		return errors.Errorf("failed to parse output filename template (--output-filename-template '%s')", outputFilenameFormat)
 	}
 	conf.OutputFileTemplate = tmpl
 
@@ -574,6 +566,7 @@ func ParseTableFilter(tablesList, filters []string) (filter.Filter, error) {
 	return filter.NewTablesFilter(tableNames...), nil
 }
 
+// GetConfTables parses tables from tables-list and filter arguments
 func GetConfTables(tablesList []string) (DatabaseTables, error) {
 	dbTables := DatabaseTables{}
 	var (
@@ -600,6 +593,10 @@ func ParseCompressType(compressType string) (storage.CompressType, error) {
 		return storage.NoCompression, nil
 	case "gzip", "gz":
 		return storage.Gzip, nil
+	case "snappy":
+		return storage.Snappy, nil
+	case "zstd", "zst":
+		return storage.Zstd, nil
 	default:
 		return storage.NoCompression, errors.Errorf("unknown compress type %s", compressType)
 	}
@@ -628,11 +625,13 @@ const (
 	// DefaultTableFilter is the default exclude table filter. It will exclude all system databases
 	DefaultTableFilter = "!/^(mysql|sys|INFORMATION_SCHEMA|PERFORMANCE_SCHEMA|METRICS_SCHEMA|INSPECTION_SCHEMA)$/.*"
 
-	defaultDumpThreads        = 128
-	defaultDumpGCSafePointTTL = 5 * 60
-	defaultEtcdDialTimeOut    = 3 * time.Second
+	defaultTaskChannelCapacity = 128
+	defaultDumpGCSafePointTTL  = 5 * 60
+	defaultEtcdDialTimeOut     = 3 * time.Second
 
-	LooseCollationCompatible  = "loose"
+	// LooseCollationCompatible is used in DM, represents a collation setting for best compatibility.
+	LooseCollationCompatible = "loose"
+	// StrictCollationCompatible is used in DM, represents a collation setting for correctness.
 	StrictCollationCompatible = "strict"
 
 	dumplingServiceSafePointPrefix = "dumpling"
@@ -669,7 +668,7 @@ func registerTLSConfig(conf *Config) error {
 		return nil
 	}
 
-	conf.Security.DriveTLSName = "dumpling" + uuid.New().String()
+	conf.Security.DriveTLSName = "dumpling" + uuid.NewString()
 	err = mysql.RegisterTLSConfig(conf.Security.DriveTLSName, tlsConfig)
 	return errors.Trace(err)
 }

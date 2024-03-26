@@ -27,8 +27,7 @@ import (
 
 func TestTheSessionIsoation(t *testing.T) {
 	req := require.New(t)
-	store, _, clean := testkit.CreateMockStoreAndDomain(t)
-	defer clean()
+	store, _ := testkit.CreateMockStoreAndDomain(t)
 	ctx := context.Background()
 
 	g := Glue{}

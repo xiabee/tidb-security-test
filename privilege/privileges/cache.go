@@ -20,12 +20,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -66,7 +66,7 @@ const (
 	References_priv,Alter_priv,Execute_priv,Index_priv,Create_view_priv,Show_view_priv,
 	Create_role_priv,Drop_role_priv,Create_tmp_table_priv,Lock_tables_priv,Create_routine_priv,
 	Alter_routine_priv,Event_priv,Shutdown_priv,Reload_priv,File_priv,Config_priv,Repl_client_priv,Repl_slave_priv,
-	account_locked,plugin FROM mysql.user`
+	Account_locked,Plugin,Token_issuer,User_attributes,password_expired,password_last_changed,password_lifetime FROM mysql.user`
 	sqlLoadGlobalGrantsTable = `SELECT HIGH_PRIORITY Host,User,Priv,With_Grant_Option FROM mysql.global_grants`
 )
 
@@ -92,14 +92,30 @@ type baseRecord struct {
 	hostIPNet *net.IPNet
 }
 
+// MetadataInfo is the User_attributes->>"$.metadata".
+type MetadataInfo struct {
+	Email string
+}
+
+// UserAttributesInfo is the 'User_attributes' in privilege cache.
+type UserAttributesInfo struct {
+	MetadataInfo
+	PasswordLocking
+}
+
 // UserRecord is used to represent a user record in privilege cache.
 type UserRecord struct {
 	baseRecord
+	UserAttributesInfo
 
 	AuthenticationString string
 	Privileges           mysql.PrivilegeType
 	AccountLocked        bool // A role record when this field is true
 	AuthPlugin           string
+	AuthTokenIssuer      string
+	PasswordExpired      bool
+	PasswordLastChanged  time.Time
+	PasswordLifeTime     int64
 }
 
 // NewUserRecord return a UserRecord, only use for unit test.
@@ -302,7 +318,7 @@ func (p *MySQLPrivilege) FindAllRole(activeRoles []*auth.RoleIdentity) []*auth.R
 				}
 			}
 		}
-		head += 1
+		head++
 	}
 	return ret
 }
@@ -567,7 +583,7 @@ func (p *MySQLPrivilege) LoadDefaultRoles(ctx sessionctx.Context) error {
 
 func (p *MySQLPrivilege) loadTable(sctx sessionctx.Context, sql string,
 	decodeTableRow func(chunk.Row, []*ast.ResultField) error) error {
-	ctx := context.Background()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnPrivilege)
 	rs, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, sql)
 	if err != nil {
 		return errors.Trace(err)
@@ -654,6 +670,50 @@ func (p *MySQLPrivilege) decodeUserTableRow(row chunk.Row, fs []*ast.ResultField
 			} else {
 				value.AuthPlugin = mysql.AuthNativePassword
 			}
+		case f.ColumnAsName.L == "token_issuer":
+			value.AuthTokenIssuer = row.GetString(i)
+		case f.ColumnAsName.L == "user_attributes":
+			if row.IsNull(i) {
+				continue
+			}
+			bj := row.GetJSON(i)
+			pathExpr, err := types.ParseJSONPathExpr("$.metadata.email")
+			if err != nil {
+				return err
+			}
+			if emailBJ, found := bj.Extract([]types.JSONPathExpression{pathExpr}); found {
+				email, err := emailBJ.Unquote()
+				if err != nil {
+					return err
+				}
+				value.Email = email
+			}
+			passwordLocking := PasswordLocking{}
+			if err := passwordLocking.ParseJSON(bj); err != nil {
+				return err
+			}
+			value.FailedLoginAttempts = passwordLocking.FailedLoginAttempts
+			value.PasswordLockTimeDays = passwordLocking.PasswordLockTimeDays
+			value.FailedLoginCount = passwordLocking.FailedLoginCount
+			value.AutoLockedLastChanged = passwordLocking.AutoLockedLastChanged
+			value.AutoAccountLocked = passwordLocking.AutoAccountLocked
+		case f.ColumnAsName.L == "password_expired":
+			if row.GetEnum(i).String() == "Y" {
+				value.PasswordExpired = true
+			}
+		case f.ColumnAsName.L == "password_last_changed":
+			t := row.GetTime(i)
+			gotime, err := t.GoTime(time.Local)
+			if err != nil {
+				return err
+			}
+			value.PasswordLastChanged = gotime
+		case f.ColumnAsName.L == "password_lifetime":
+			if row.IsNull(i) {
+				value.PasswordLifeTime = -1
+				continue
+			}
+			value.PasswordLifeTime = row.GetInt64(i)
 		case f.Column.GetType() == mysql.TypeEnum:
 			if row.GetEnum(i).String() != "Y" {
 				continue
@@ -1169,7 +1229,7 @@ func (p *MySQLPrivilege) DBIsVisible(user, host, db string) bool {
 }
 
 func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentity) []string {
-	var gs []string // nolint: prealloc
+	var gs []string //nolint: prealloc
 	var sortFromIdx int
 	var hasGlobalGrant = false
 	// Some privileges may granted from role inheritance.
@@ -1211,7 +1271,6 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 			s = fmt.Sprintf(`GRANT %s ON *.* TO '%s'@'%s' WITH GRANT OPTION`, g, user, host)
 		} else {
 			s = fmt.Sprintf(`GRANT %s ON *.* TO '%s'@'%s'`, g, user, host)
-
 		}
 		gs = append(gs, s)
 	}
@@ -1258,7 +1317,7 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 			gs = append(gs, s)
 		}
 	}
-	sort.Strings(gs[sortFromIdx:])
+	slices.Sort(gs[sortFromIdx:])
 
 	// Show table scope grants.
 	sortFromIdx = len(gs)
@@ -1292,7 +1351,7 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 			gs = append(gs, s)
 		}
 	}
-	sort.Strings(gs[sortFromIdx:])
+	slices.Sort(gs[sortFromIdx:])
 
 	// Show column scope grants, column and table are combined.
 	// A map of "DB.Table" => Priv(col1, col2 ...)
@@ -1311,7 +1370,7 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 		s := fmt.Sprintf(`GRANT %s ON %s TO '%s'@'%s'`, privCols, k, user, host)
 		gs = append(gs, s)
 	}
-	sort.Strings(gs[sortFromIdx:])
+	slices.Sort(gs[sortFromIdx:])
 
 	// Show role grants.
 	graphKey := user + "@" + host
@@ -1325,7 +1384,7 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 			tmp := fmt.Sprintf("'%s'@'%s'", roleName, roleHost)
 			sortedRes = append(sortedRes, tmp)
 		}
-		sort.Strings(sortedRes)
+		slices.Sort(sortedRes)
 		for i, r := range sortedRes {
 			g += r
 			if i != len(sortedRes)-1 {
@@ -1371,12 +1430,12 @@ func (p *MySQLPrivilege) showGrants(user, host string, roles []*auth.RoleIdentit
 
 	// Merge the DYNAMIC privs into a line for non-grantable and then grantable.
 	if len(dynamicPrivs) > 0 {
-		sort.Strings(dynamicPrivs)
+		slices.Sort(dynamicPrivs)
 		s := fmt.Sprintf("GRANT %s ON *.* TO '%s'@'%s'", strings.Join(dynamicPrivs, ","), user, host)
 		gs = append(gs, s)
 	}
 	if len(grantableDynamicPrivs) > 0 {
-		sort.Strings(grantableDynamicPrivs)
+		slices.Sort(grantableDynamicPrivs)
 		s := fmt.Sprintf("GRANT %s ON *.* TO '%s'@'%s' WITH GRANT OPTION", strings.Join(grantableDynamicPrivs, ","), user, host)
 		gs = append(gs, s)
 	}

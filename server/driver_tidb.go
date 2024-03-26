@@ -17,9 +17,13 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/expression"
+	"github.com/pingcap/tidb/extension"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
@@ -27,6 +31,8 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/planner/core"
 	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util/chunk"
@@ -50,8 +56,7 @@ func NewTiDBDriver(store kv.Storage) *TiDBDriver {
 // TiDBContext implements QueryCtx.
 type TiDBContext struct {
 	session.Session
-	currentDB string
-	stmts     map[int]*TiDBStatement
+	stmts map[int]*TiDBStatement
 }
 
 // TiDBStatement implements PreparedStatement.
@@ -61,11 +66,14 @@ type TiDBStatement struct {
 	boundParams [][]byte
 	paramsType  []byte
 	ctx         *TiDBContext
-	// this result set should have been closed before stored here. Only the `fetchedRows` are used here. This field is
+	// this result set should have been closed before stored here. Only the `rowIterator` are used here. This field is
 	// not moved out to reuse the logic inside functions `writeResultSet...`
 	// TODO: move the `fetchedRows` into the statement, and remove the `ResultSet` from statement.
-	rs  ResultSet
-	sql string
+	rs cursorResultSet
+	// the `rowContainer` should contain all pre-fetched results of the statement in `EXECUTE` command.
+	// it's stored here to be closed in RESET and CLOSE command
+	rowContainer *chunk.RowContainer
+	sql          string
 
 	hasActiveCursor bool
 }
@@ -76,7 +84,7 @@ func (ts *TiDBStatement) ID() int {
 }
 
 // Execute implements PreparedStatement Execute method.
-func (ts *TiDBStatement) Execute(ctx context.Context, args []types.Datum) (rs ResultSet, err error) {
+func (ts *TiDBStatement) Execute(ctx context.Context, args []expression.Expression) (rs ResultSet, err error) {
 	tidbRecordset, err := ts.ctx.ExecutePreparedStmt(ctx, ts.id, args)
 	if err != nil {
 		return nil, err
@@ -86,7 +94,7 @@ func (ts *TiDBStatement) Execute(ctx context.Context, args []types.Datum) (rs Re
 	}
 	rs = &tidbResultSet{
 		recordSet:    tidbRecordset,
-		preparedStmt: ts.ctx.GetSessionVars().PreparedStmts[ts.id].(*core.CachedPrepareStmt),
+		preparedStmt: ts.ctx.GetSessionVars().PreparedStmts[ts.id].(*core.PlanCacheStmt),
 	}
 	return
 }
@@ -126,32 +134,61 @@ func (ts *TiDBStatement) GetParamsType() []byte {
 }
 
 // StoreResultSet stores ResultSet for stmt fetching
-func (ts *TiDBStatement) StoreResultSet(rs ResultSet) {
-	// refer to https://dev.mysql.com/doc/refman/5.7/en/cursor-restrictions.html
-	// You can have open only a single cursor per prepared statement.
-	// closing previous ResultSet before associating a new ResultSet with this statement
-	// if it exists
-	if ts.rs != nil {
-		terror.Call(ts.rs.Close)
-	}
+func (ts *TiDBStatement) StoreResultSet(rs cursorResultSet) {
+	// the original reset set should have been closed, and it's only used to store the iterator through the rowContainer
+	// so it's fine to just overwrite it.
 	ts.rs = rs
 }
 
 // GetResultSet gets ResultSet associated this statement
-func (ts *TiDBStatement) GetResultSet() ResultSet {
+func (ts *TiDBStatement) GetResultSet() cursorResultSet {
 	return ts.rs
 }
 
 // Reset implements PreparedStatement Reset method.
-func (ts *TiDBStatement) Reset() {
+func (ts *TiDBStatement) Reset() error {
 	for i := range ts.boundParams {
 		ts.boundParams[i] = nil
 	}
 	ts.hasActiveCursor = false
+
+	if ts.rs != nil && ts.rs.GetRowContainerReader() != nil {
+		ts.rs.GetRowContainerReader().Close()
+	}
+	ts.rs = nil
+
+	if ts.rowContainer != nil {
+		ts.rowContainer.GetMemTracker().Detach()
+		ts.rowContainer.GetDiskTracker().Detach()
+
+		rc := ts.rowContainer
+		ts.rowContainer = nil
+
+		err := rc.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Close implements PreparedStatement Close method.
 func (ts *TiDBStatement) Close() error {
+	if ts.rs != nil && ts.rs.GetRowContainerReader() != nil {
+		ts.rs.GetRowContainerReader().Close()
+	}
+
+	if ts.rowContainer != nil {
+		ts.rowContainer.GetMemTracker().Detach()
+		ts.rowContainer.GetDiskTracker().Detach()
+
+		err := ts.rowContainer.Close()
+		if err != nil {
+			return err
+		}
+	}
+
 	// TODO close at tidb level
 	if ts.ctx.GetSessionVars().TxnCtx != nil && ts.ctx.GetSessionVars().TxnCtx.CouldRetry {
 		err := ts.ctx.DropPreparedStmt(ts.id)
@@ -159,18 +196,20 @@ func (ts *TiDBStatement) Close() error {
 			return err
 		}
 	} else {
-		if core.PreparedPlanCacheEnabled() {
+		if ts.ctx.GetSessionVars().EnablePreparedPlanCache {
 			preparedPointer := ts.ctx.GetSessionVars().PreparedStmts[ts.id]
-			preparedObj, ok := preparedPointer.(*core.CachedPrepareStmt)
+			preparedObj, ok := preparedPointer.(*core.PlanCacheStmt)
 			if !ok {
-				return errors.Errorf("invalid CachedPrepareStmt type")
+				return errors.Errorf("invalid PlanCacheStmt type")
 			}
-			cacheKey, err := core.NewPlanCacheKey(ts.ctx.GetSessionVars(), preparedObj.StmtText, preparedObj.StmtDB, preparedObj.PreparedAst.SchemaVersion)
+			bindSQL, _ := core.GetBindSQL4PlanCache(ts.ctx, preparedObj)
+			cacheKey, err := core.NewPlanCacheKey(ts.ctx.GetSessionVars(), preparedObj.StmtText, preparedObj.StmtDB,
+				preparedObj.PreparedAst.SchemaVersion, 0, bindSQL)
 			if err != nil {
 				return err
 			}
 			if !ts.ctx.GetSessionVars().IgnorePreparedCacheCloseStmt { // keep the plan in cache
-				ts.ctx.PreparedPlanCache().Delete(cacheKey)
+				ts.ctx.GetPlanCache(false).Delete(cacheKey)
 			}
 		}
 		ts.ctx.GetSessionVars().RemovePreparedStmt(ts.id)
@@ -179,8 +218,28 @@ func (ts *TiDBStatement) Close() error {
 	return nil
 }
 
+// GetCursorActive implements PreparedStatement GetCursorActive method.
+func (ts *TiDBStatement) GetCursorActive() bool {
+	return ts.hasActiveCursor
+}
+
+// SetCursorActive implements PreparedStatement SetCursorActive method.
+func (ts *TiDBStatement) SetCursorActive(fetchEnd bool) {
+	ts.hasActiveCursor = fetchEnd
+}
+
+// StoreRowContainer stores a row container into the prepared statement
+func (ts *TiDBStatement) StoreRowContainer(c *chunk.RowContainer) {
+	ts.rowContainer = c
+}
+
+// GetRowContainer returns the row container of the statement
+func (ts *TiDBStatement) GetRowContainer() *chunk.RowContainer {
+	return ts.rowContainer
+}
+
 // OpenCtx implements IDriver.
-func (qd *TiDBDriver) OpenCtx(connID uint64, capability uint32, collation uint8, dbname string, tlsState *tls.ConnectionState) (*TiDBContext, error) {
+func (qd *TiDBDriver) OpenCtx(connID uint64, capability uint32, collation uint8, dbname string, tlsState *tls.ConnectionState, extensions *extension.SessionExtensions) (*TiDBContext, error) {
 	se, err := session.CreateSession(qd.store)
 	if err != nil {
 		return nil, err
@@ -193,10 +252,11 @@ func (qd *TiDBDriver) OpenCtx(connID uint64, capability uint32, collation uint8,
 	se.SetClientCapability(capability)
 	se.SetConnectionID(connID)
 	tc := &TiDBContext{
-		Session:   se,
-		currentDB: dbname,
-		stmts:     make(map[int]*TiDBStatement),
+		Session: se,
+		stmts:   make(map[int]*TiDBStatement),
 	}
+	se.SetSessionStatesHandler(sessionstates.StatePrepareStmt, tc)
+	se.SetExtensions(extensions)
 	return tc, nil
 }
 
@@ -205,22 +265,31 @@ func (tc *TiDBContext) GetWarnings() []stmtctx.SQLWarn {
 	return tc.GetSessionVars().StmtCtx.GetWarnings()
 }
 
-// CurrentDB implements QueryCtx CurrentDB method.
-func (tc *TiDBContext) CurrentDB() string {
-	return tc.currentDB
-}
-
 // WarningCount implements QueryCtx WarningCount method.
 func (tc *TiDBContext) WarningCount() uint16 {
 	return tc.GetSessionVars().StmtCtx.WarningCount()
+}
+
+func (tc *TiDBContext) checkSandBoxMode(stmt ast.StmtNode) error {
+	if !tc.Session.GetSessionVars().InRestrictedSQL && tc.InSandBoxMode() {
+		switch stmt.(type) {
+		case *ast.SetPwdStmt, *ast.AlterUserStmt:
+		default:
+			return errMustChangePassword.GenWithStackByArgs()
+		}
+	}
+	return nil
 }
 
 // ExecuteStmt implements QueryCtx interface.
 func (tc *TiDBContext) ExecuteStmt(ctx context.Context, stmt ast.StmtNode) (ResultSet, error) {
 	var rs sqlexec.RecordSet
 	var err error
-	if s, ok := stmt.(*ast.NonTransactionalDeleteStmt); ok {
-		rs, err = session.HandleNonTransactionalDelete(ctx, s, tc.Session)
+	if err = tc.checkSandBoxMode(stmt); err != nil {
+		return nil, err
+	}
+	if s, ok := stmt.(*ast.NonTransactionalDMLStmt); ok {
+		rs, err = session.HandleNonTransactionalDML(ctx, s, tc.Session)
 	} else {
 		rs, err = tc.Session.ExecuteStmt(ctx, stmt)
 	}
@@ -302,12 +371,94 @@ func (tc *TiDBContext) GetStmtStats() *stmtstats.StatementStats {
 	return tc.Session.GetStmtStats()
 }
 
+// EncodeSessionStates implements SessionStatesHandler.EncodeSessionStates interface.
+func (tc *TiDBContext) EncodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+	sessionVars := tc.Session.GetSessionVars()
+	sessionStates.PreparedStmts = make(map[uint32]*sessionstates.PreparedStmtInfo, len(sessionVars.PreparedStmts))
+	for preparedID, preparedObj := range sessionVars.PreparedStmts {
+		preparedStmt, ok := preparedObj.(*core.PlanCacheStmt)
+		if !ok {
+			return errors.Errorf("invalid CachedPreparedStmt type")
+		}
+		sessionStates.PreparedStmts[preparedID] = &sessionstates.PreparedStmtInfo{
+			StmtText: preparedStmt.StmtText,
+			StmtDB:   preparedStmt.StmtDB,
+		}
+	}
+	for name, id := range sessionVars.PreparedStmtNameToID {
+		// Only text protocol statements have names.
+		if preparedStmtInfo, ok := sessionStates.PreparedStmts[id]; ok {
+			preparedStmtInfo.Name = name
+		}
+	}
+	for id, stmt := range tc.stmts {
+		// Only binary protocol statements have paramTypes.
+		preparedStmtInfo, ok := sessionStates.PreparedStmts[uint32(id)]
+		if !ok {
+			return errors.Errorf("prepared statement %d not found", id)
+		}
+		// Bound params are sent by CMD_STMT_SEND_LONG_DATA, the proxy can wait for COM_STMT_EXECUTE.
+		for _, boundParam := range stmt.BoundParams() {
+			if boundParam != nil {
+				return sessionstates.ErrCannotMigrateSession.GenWithStackByArgs("prepared statements have bound params")
+			}
+		}
+		if stmt.GetCursorActive() {
+			return sessionstates.ErrCannotMigrateSession.GenWithStackByArgs("prepared statements have unfetched rows")
+		}
+		preparedStmtInfo.ParamTypes = stmt.GetParamsType()
+	}
+	return nil
+}
+
+// DecodeSessionStates implements SessionStatesHandler.DecodeSessionStates interface.
+func (tc *TiDBContext) DecodeSessionStates(ctx context.Context, sctx sessionctx.Context, sessionStates *sessionstates.SessionStates) error {
+	if len(sessionStates.PreparedStmts) == 0 {
+		return nil
+	}
+	sessionVars := tc.Session.GetSessionVars()
+	savedPreparedStmtID := sessionVars.GetNextPreparedStmtID()
+	savedCurrentDB := sessionVars.CurrentDB
+	defer func() {
+		sessionVars.SetNextPreparedStmtID(savedPreparedStmtID - 1)
+		sessionVars.CurrentDB = savedCurrentDB
+	}()
+
+	for id, preparedStmtInfo := range sessionStates.PreparedStmts {
+		// Set the next id and currentDB manually.
+		sessionVars.SetNextPreparedStmtID(id - 1)
+		sessionVars.CurrentDB = preparedStmtInfo.StmtDB
+		if preparedStmtInfo.Name == "" {
+			// Binary protocol: add to sessionVars.PreparedStmts and TiDBContext.stmts.
+			stmt, _, _, err := tc.Prepare(preparedStmtInfo.StmtText)
+			if err != nil {
+				return err
+			}
+			// Only binary protocol uses paramsType, which is passed from the first COM_STMT_EXECUTE.
+			stmt.SetParamsType(preparedStmtInfo.ParamTypes)
+		} else {
+			// Text protocol: add to sessionVars.PreparedStmts and sessionVars.PreparedStmtNameToID.
+			stmtText := strings.ReplaceAll(preparedStmtInfo.StmtText, "\\", "\\\\")
+			stmtText = strings.ReplaceAll(stmtText, "'", "\\'")
+			// Add single quotes because the sql_mode might contain ANSI_QUOTES.
+			sql := fmt.Sprintf("PREPARE `%s` FROM '%s'", preparedStmtInfo.Name, stmtText)
+			stmts, err := tc.Parse(ctx, sql)
+			if err != nil {
+				return err
+			}
+			if _, err = tc.ExecuteStmt(ctx, stmts[0]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 type tidbResultSet struct {
 	recordSet    sqlexec.RecordSet
 	columns      []*ColumnInfo
-	rows         []chunk.Row
 	closed       int32
-	preparedStmt *core.CachedPrepareStmt
+	preparedStmt *core.PlanCacheStmt
 }
 
 func (trs *tidbResultSet) NewChunk(alloc chunk.Allocator) *chunk.Chunk {
@@ -318,17 +469,6 @@ func (trs *tidbResultSet) Next(ctx context.Context, req *chunk.Chunk) error {
 	return trs.recordSet.Next(ctx, req)
 }
 
-func (trs *tidbResultSet) StoreFetchedRows(rows []chunk.Row) {
-	trs.rows = rows
-}
-
-func (trs *tidbResultSet) GetFetchedRows() []chunk.Row {
-	if trs.rows == nil {
-		trs.rows = make([]chunk.Row, 0, 1024)
-	}
-	return trs.rows
-}
-
 func (trs *tidbResultSet) Close() error {
 	if !atomic.CompareAndSwapInt32(&trs.closed, 0, 1) {
 		return nil
@@ -336,6 +476,11 @@ func (trs *tidbResultSet) Close() error {
 	err := trs.recordSet.Close()
 	trs.recordSet = nil
 	return err
+}
+
+// IsClosed implements ResultSet.IsClosed interface.
+func (trs *tidbResultSet) IsClosed() bool {
+	return atomic.LoadInt32(&trs.closed) == 1
 }
 
 // OnFetchReturned implements fetchNotifier#OnFetchReturned
@@ -368,6 +513,30 @@ func (trs *tidbResultSet) Columns() []*ColumnInfo {
 		}
 	}
 	return trs.columns
+}
+
+func (trs *tidbResultSet) FieldTypes() []*types.FieldType {
+	fts := make([]*types.FieldType, 0, len(trs.recordSet.Fields()))
+	for _, f := range trs.recordSet.Fields() {
+		fts = append(fts, &f.Column.FieldType)
+	}
+	return fts
+}
+
+var _ cursorResultSet = &tidbCursorResultSet{}
+
+type tidbCursorResultSet struct {
+	ResultSet
+
+	reader chunk.RowContainerReader
+}
+
+func (tcrs *tidbCursorResultSet) StoreRowContainerReader(reader chunk.RowContainerReader) {
+	tcrs.reader = reader
+}
+
+func (tcrs *tidbCursorResultSet) GetRowContainerReader() chunk.RowContainerReader {
+	return tcrs.reader
 }
 
 func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {

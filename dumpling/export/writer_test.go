@@ -12,9 +12,10 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/stretchr/testify/require"
-
+	"github.com/pingcap/failpoint"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
+	"github.com/pingcap/tidb/util/promutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteDatabaseMeta(t *testing.T) {
@@ -22,8 +23,7 @@ func TestWriteDatabaseMeta(t *testing.T) {
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	err := writer.WriteDatabaseMeta("test", "CREATE DATABASE `test`")
 	require.NoError(t, err)
@@ -42,8 +42,7 @@ func TestWritePolicyMeta(t *testing.T) {
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	err := writer.WritePolicyMeta("testpolicy", "create placement policy `y` followers=2")
 	require.NoError(t, err)
@@ -63,8 +62,7 @@ func TestWriteTableMeta(t *testing.T) {
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	err := writer.WriteTableMeta("test", "t", "CREATE TABLE t (a INT)")
 	require.NoError(t, err)
@@ -74,6 +72,12 @@ func TestWriteTableMeta(t *testing.T) {
 	bytes, err := ioutil.ReadFile(p)
 	require.NoError(t, err)
 	require.Equal(t, "/*!40101 SET NAMES binary*/;\nCREATE TABLE t (a INT);\n", string(bytes))
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/dumpling/export/FailToCloseMetaFile", "return(true)"))
+	defer failpoint.Disable("github.com/pingcap/tidb/dumpling/export/FailToCloseMetaFile")
+
+	err = writer.WriteTableMeta("test", "t", "CREATE TABLE t (a INT)")
+	require.ErrorContains(t, err, "injected error: fail to close meta file")
 }
 
 func TestWriteViewMeta(t *testing.T) {
@@ -81,8 +85,7 @@ func TestWriteViewMeta(t *testing.T) {
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	specCmt := "/*!40101 SET NAMES binary*/;\n"
 	createTableSQL := "CREATE TABLE `v`(\n`a` int\n)ENGINE=MyISAM;\n"
@@ -110,8 +113,7 @@ func TestWriteTableData(t *testing.T) {
 	config := defaultConfigForTest(t)
 	config.OutputDirPath = dir
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -142,6 +144,13 @@ func TestWriteTableData(t *testing.T) {
 		"(3,'male','john@mail.com','020-1256','healthy'),\n" +
 		"(4,'female','sarah@mail.com','020-1235','healthy');\n"
 	require.Equal(t, expected, string(bytes))
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/dumpling/export/FailToCloseDataFile", "return(true)"))
+	defer failpoint.Disable("github.com/pingcap/tidb/dumpling/export/FailToCloseDataFile")
+
+	tableIR = newMockTableIR("test", "employee", data, specCmts, colTypes)
+	err = writer.WriteTableData(tableIR, tableIR, 0)
+	require.ErrorContains(t, err, "injected error: fail to close data file")
 }
 
 func TestWriteTableDataWithFileSize(t *testing.T) {
@@ -157,8 +166,7 @@ func TestWriteTableDataWithFileSize(t *testing.T) {
 	config.FileSize += uint64(len(specCmts[1]) + 1)
 	config.FileSize += uint64(len("INSERT INTO `employees` VALUES\n"))
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -208,8 +216,7 @@ func TestWriteTableDataWithFileSizeAndRows(t *testing.T) {
 	config.FileSize += uint64(len(specCmts[1]) + 1)
 	config.FileSize += uint64(len("INSERT INTO `employees` VALUES\n"))
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -255,8 +262,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 	config.OutputFileTemplate, err = ParseOutputFileTemplate("specified-name")
 	require.NoError(t, err)
 
-	writer, clean := createTestWriter(config, t)
-	defer clean()
+	writer := createTestWriter(config, t)
 
 	data := [][]driver.Value{
 		{"1", "male", "bob@mail.com", "020-1234", nil},
@@ -307,8 +313,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 	require.NoError(t, err)
 	config.OutputDirPath, err = ioutil.TempDir("", "dumpling")
 
-	writer, clean = createTestWriter(config, t)
-	defer clean()
+	writer = createTestWriter(config, t)
 
 	cases = map[string]string{
 		"000000000-employee-te%25%2Fst.sql": "/*!40101 SET NAMES binary*/;\n" +
@@ -339,7 +344,7 @@ func TestWriteTableDataWithStatementSize(t *testing.T) {
 
 var mu sync.Mutex
 
-func createTestWriter(conf *Config, t *testing.T) (w *Writer, clean func()) {
+func createTestWriter(conf *Config, t *testing.T) *Writer {
 	mu.Lock()
 	extStore, err := conf.createExternalStorage(context.Background())
 	mu.Unlock()
@@ -350,10 +355,10 @@ func createTestWriter(conf *Config, t *testing.T) (w *Writer, clean func()) {
 	conn, err := db.Conn(context.Background())
 	require.NoError(t, err)
 
-	w = NewWriter(tcontext.Background(), 0, conf, conn, extStore)
-	clean = func() {
+	metrics := newMetrics(promutil.NewDefaultFactory(), nil)
+	w := NewWriter(tcontext.Background(), 0, conf, conn, extStore, metrics)
+	t.Cleanup(func() {
 		require.NoError(t, db.Close())
-	}
-
-	return
+	})
+	return w
 }

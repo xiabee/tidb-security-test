@@ -23,14 +23,13 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"unsafe"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
-
 	"github.com/pingcap/tidb/br/pkg/lightning/backend"
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
+	"github.com/stretchr/testify/require"
 )
 
 func makePebbleDB(t *testing.T, opt *pebble.Options) (*pebble.DB, string) {
@@ -63,8 +62,9 @@ func TestGetEngineSizeWhenImport(t *testing.T) {
 		cancel:       cancel,
 		sstMetasChan: make(chan metaOrFlush, 64),
 		keyAdapter:   noopKeyAdapter{},
+		logger:       log.L(),
 	}
-	f.db.Store(unsafe.Pointer(db))
+	f.db.Store(db)
 	// simulate import
 	f.lock(importMutexStateImport)
 	wg := sync.WaitGroup{}
@@ -81,7 +81,6 @@ func TestGetEngineSizeWhenImport(t *testing.T) {
 }
 
 func TestIngestSSTWithClosedEngine(t *testing.T) {
-	dir := t.TempDir()
 	opt := &pebble.Options{
 		MemTableSize:             1024 * 1024,
 		MaxConcurrentCompactions: 16,
@@ -90,11 +89,7 @@ func TestIngestSSTWithClosedEngine(t *testing.T) {
 		DisableWAL:               true,
 		ReadOnly:                 false,
 	}
-	db, err := pebble.Open(filepath.Join(dir, "test"), opt)
-	require.NoError(t, err)
-	tmpPath := filepath.Join(dir, "test.sst")
-	err = os.Mkdir(tmpPath, 0o755)
-	require.NoError(t, err)
+	db, tmpPath := makePebbleDB(t, opt)
 
 	_, engineUUID := backend.MakeUUID("ww", 0)
 	engineCtx, cancel := context.WithCancel(context.Background())
@@ -105,8 +100,9 @@ func TestIngestSSTWithClosedEngine(t *testing.T) {
 		cancel:       cancel,
 		sstMetasChan: make(chan metaOrFlush, 64),
 		keyAdapter:   noopKeyAdapter{},
+		logger:       log.L(),
 	}
-	f.db.Store(unsafe.Pointer(db))
+	f.db.Store(db)
 	f.sstIngester = dbSSTIngester{e: f}
 	sstPath := path.Join(tmpPath, uuid.New().String()+".sst")
 	file, err := os.Create(sstPath)

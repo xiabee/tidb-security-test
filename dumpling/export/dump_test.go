@@ -9,16 +9,18 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/stretchr/testify/require"
-	"golang.org/x/sync/errgroup"
-
+	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/util/promutil"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 )
 
-func TestDumpBlock(t *testing.T) {
+func TestDumpExit(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() {
@@ -56,7 +58,6 @@ func TestDumpBlock(t *testing.T) {
 	})
 
 	writerCtx := tctx.WithContext(writingCtx)
-	// simulate taskChan is full
 	taskChan := make(chan Task, 1)
 	taskChan <- &TaskDatabaseMeta{}
 	d.conf.Tables = DatabaseTables{}.AppendTable(database, nil)
@@ -113,16 +114,16 @@ func TestGetListTableTypeByConf(t *testing.T) {
 		consistency string
 		expected    listTableType
 	}{
-		{version.ParseServerInfo("5.7.25-TiDB-3.0.6"), consistencyTypeSnapshot, listTableByShowTableStatus},
+		{version.ParseServerInfo("5.7.25-TiDB-3.0.6"), ConsistencyTypeSnapshot, listTableByShowTableStatus},
 		// no bug version
-		{version.ParseServerInfo("8.0.2"), consistencyTypeLock, listTableByInfoSchema},
-		{version.ParseServerInfo("8.0.2"), consistencyTypeFlush, listTableByShowTableStatus},
-		{version.ParseServerInfo("8.0.23"), consistencyTypeNone, listTableByShowTableStatus},
+		{version.ParseServerInfo("8.0.2"), ConsistencyTypeLock, listTableByInfoSchema},
+		{version.ParseServerInfo("8.0.2"), ConsistencyTypeFlush, listTableByShowTableStatus},
+		{version.ParseServerInfo("8.0.23"), ConsistencyTypeNone, listTableByShowTableStatus},
 
 		// bug version
-		{version.ParseServerInfo("8.0.3"), consistencyTypeLock, listTableByInfoSchema},
-		{version.ParseServerInfo("8.0.3"), consistencyTypeFlush, listTableByShowFullTables},
-		{version.ParseServerInfo("8.0.3"), consistencyTypeNone, listTableByShowTableStatus},
+		{version.ParseServerInfo("8.0.3"), ConsistencyTypeLock, listTableByInfoSchema},
+		{version.ParseServerInfo("8.0.3"), ConsistencyTypeFlush, listTableByShowFullTables},
+		{version.ParseServerInfo("8.0.3"), ConsistencyTypeNone, listTableByShowTableStatus},
 	}
 
 	for _, x := range cases {
@@ -208,5 +209,81 @@ func TestAdjustTableCollation(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, expectedSQLs[i], newSQL)
 	}
+}
 
+func TestUnregisterMetrics(t *testing.T) {
+	ctx := context.Background()
+	conf := &Config{
+		SQL:          "not empty",
+		Where:        "not empty",
+		PromFactory:  promutil.NewDefaultFactory(),
+		PromRegistry: promutil.NewDefaultRegistry(),
+	}
+
+	_, err := NewDumper(ctx, conf)
+	require.Error(t, err)
+	_, err = NewDumper(ctx, conf)
+	// should not panic
+	require.Error(t, err)
+}
+
+func TestSetSessionParams(t *testing.T) {
+	// case 1: fail to set tidb_snapshot, should return error with hint
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, db.Close())
+	}()
+
+	mock.ExpectQuery("SELECT @@tidb_config").
+		WillReturnError(errors.New("mock error"))
+	mock.ExpectQuery("SELECT COUNT\\(1\\) as c FROM MYSQL.TiDB WHERE VARIABLE_NAME='tikv_gc_safe_point'").
+		WillReturnError(errors.New("mock error"))
+	tikvErr := &mysql.MySQLError{
+		Number:  1105,
+		Message: "can not get 'tikv_gc_safe_point'",
+	}
+	mock.ExpectExec("SET SESSION tidb_snapshot").
+		WillReturnError(tikvErr)
+
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/dumpling/export/SkipResetDB", "return(true)"))
+	defer failpoint.Disable("github.com/pingcap/tidb/dumpling/export/SkipResetDB=return(true)")
+
+	tctx, cancel := tcontext.Background().WithLogger(appLogger).WithCancel()
+	defer cancel()
+
+	conf := DefaultConfig()
+	conf.ServerInfo = version.ServerInfo{
+		ServerType: version.ServerTypeTiDB,
+		HasTiKV:    false,
+	}
+	conf.Snapshot = "439153276059648000"
+	conf.Consistency = ConsistencyTypeSnapshot
+	d := &Dumper{
+		tctx:      tctx,
+		conf:      conf,
+		cancelCtx: cancel,
+		dbHandle:  db,
+	}
+	err = setSessionParam(d)
+	require.ErrorContains(t, err, "consistency=none")
+
+	// case 2: fail to set other
+	conf.ServerInfo = version.ServerInfo{
+		ServerType: version.ServerTypeMySQL,
+		HasTiKV:    false,
+	}
+	conf.Snapshot = ""
+	conf.Consistency = ConsistencyTypeFlush
+	conf.SessionParams = map[string]interface{}{
+		"mock": "UTC",
+	}
+	d.dbHandle = db
+	mock.ExpectExec("SET SESSION mock").
+		WillReturnError(errors.New("Unknown system variable mock"))
+	mock.ExpectClose()
+	mock.ExpectClose()
+
+	err = setSessionParam(d)
+	require.NoError(t, err)
 }

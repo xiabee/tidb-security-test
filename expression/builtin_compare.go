@@ -25,10 +25,10 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/types"
-	"github.com/pingcap/tidb/types/json"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/collate"
 	"github.com/pingcap/tipb/go-tipb"
+	"github.com/pkg/errors"
 )
 
 var (
@@ -135,11 +135,6 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		fieldEvalTps = append(fieldEvalTps, retEvalTp)
 	}
 
-	fsp, err := getExpressionFsp(ctx, args[0])
-	if err != nil {
-		return nil, err
-	}
-
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, retEvalTp, fieldEvalTps...)
 	if err != nil {
 		return nil, err
@@ -152,6 +147,8 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	// Set retType to BINARY(0) if all arguments are of type NULL.
 	if resultFieldType.GetType() == mysql.TypeNull {
 		types.SetBinChsClnFlag(bf.tp)
+		resultFieldType.SetFlen(0)
+		resultFieldType.SetDecimal(0)
 	} else {
 		maxIntLen := 0
 		maxFlen := 0
@@ -160,7 +157,7 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		// and max integer-part length in `maxIntLen`.
 		for _, argTp := range fieldTps {
 			if argTp.GetDecimal() > resultFieldType.GetDecimal() {
-				resultFieldType.SetDecimal(argTp.GetDecimal())
+				resultFieldType.SetDecimalUnderLimit(argTp.GetDecimal())
 			}
 			argIntLen := argTp.GetFlen()
 			if argTp.GetDecimal() > 0 {
@@ -181,12 +178,12 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		// For integer, field length = maxIntLen + (1/0 for sign bit)
 		// For decimal, field length = maxIntLen + maxDecimal + (1/0 for sign bit)
 		if resultEvalType == types.ETInt || resultEvalType == types.ETDecimal {
-			resultFieldType.SetFlen(maxIntLen + resultFieldType.GetDecimal())
+			resultFieldType.SetFlenUnderLimit(maxIntLen + resultFieldType.GetDecimal())
 			if resultFieldType.GetDecimal() > 0 {
-				resultFieldType.SetFlen(resultFieldType.GetFlen() + 1)
+				resultFieldType.SetFlenUnderLimit(resultFieldType.GetFlen() + 1)
 			}
 			if !mysql.HasUnsignedFlag(resultFieldType.GetFlag()) {
-				resultFieldType.SetFlen(resultFieldType.GetFlen() + 1)
+				resultFieldType.SetFlenUnderLimit(resultFieldType.GetFlen() + 1)
 			}
 			bf.tp = resultFieldType
 		} else {
@@ -212,10 +209,11 @@ func (c *coalesceFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 		sig = &builtinCoalesceStringSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceString)
 	case types.ETDatetime, types.ETTimestamp:
+		bf.tp.SetDecimal(resultFieldType.GetDecimal())
 		sig = &builtinCoalesceTimeSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceTime)
 	case types.ETDuration:
-		bf.tp.SetDecimal(fsp)
+		bf.tp.SetDecimal(resultFieldType.GetDecimal())
 		sig = &builtinCoalesceDurationSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_CoalesceDuration)
 	case types.ETJson:
@@ -327,8 +325,10 @@ func (b *builtinCoalesceTimeSig) Clone() builtinFunc {
 }
 
 func (b *builtinCoalesceTimeSig) evalTime(row chunk.Row) (res types.Time, isNull bool, err error) {
+	fsp := b.tp.GetDecimal()
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalTime(b.ctx, row)
+		res.SetFsp(fsp)
 		if err != nil || !isNull {
 			break
 		}
@@ -351,6 +351,7 @@ func (b *builtinCoalesceDurationSig) Clone() builtinFunc {
 func (b *builtinCoalesceDurationSig) evalDuration(row chunk.Row) (res types.Duration, isNull bool, err error) {
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalDuration(b.ctx, row)
+		res.Fsp = b.tp.GetDecimal()
 		if err != nil || !isNull {
 			break
 		}
@@ -370,7 +371,7 @@ func (b *builtinCoalesceJSONSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinCoalesceJSONSig) evalJSON(row chunk.Row) (res json.BinaryJSON, isNull bool, err error) {
+func (b *builtinCoalesceJSONSig) evalJSON(row chunk.Row) (res types.BinaryJSON, isNull bool, err error) {
 	for _, a := range b.getArgs() {
 		res, isNull, err = a.EvalJSON(b.ctx, row)
 		if err != nil || !isNull {
@@ -551,8 +552,8 @@ func (c *greatestFunctionClass) getFunction(ctx sessionctx.Context, args []Expre
 	}
 
 	flen, decimal := fixFlenAndDecimalForGreatestAndLeast(args)
-	sig.getRetTp().SetFlen(flen)
-	sig.getRetTp().SetDecimal(decimal)
+	sig.getRetTp().SetFlenUnderLimit(flen)
+	sig.getRetTp().SetDecimalUnderLimit(decimal)
 
 	return sig, nil
 }
@@ -863,8 +864,8 @@ func (c *leastFunctionClass) getFunction(ctx sessionctx.Context, args []Expressi
 		}
 	}
 	flen, decimal := fixFlenAndDecimalForGreatestAndLeast(args)
-	sig.getRetTp().SetFlen(flen)
-	sig.getRetTp().SetDecimal(decimal)
+	sig.getRetTp().SetFlenUnderLimit(flen)
+	sig.getRetTp().SetDecimalUnderLimit(decimal)
 	return sig, nil
 }
 
@@ -1339,8 +1340,7 @@ func GetAccurateCmpType(lhs, rhs Expression) types.EvalType {
 	lhsFieldType, rhsFieldType := lhs.GetType(), rhs.GetType()
 	lhsEvalType, rhsEvalType := lhsFieldType.EvalType(), rhsFieldType.EvalType()
 	cmpType := getBaseCmpType(lhsEvalType, rhsEvalType, lhsFieldType, rhsFieldType)
-	if (lhsEvalType.IsStringKind() && rhsFieldType.GetType() == mysql.TypeJSON) ||
-		(lhsFieldType.GetType() == mysql.TypeJSON && rhsEvalType.IsStringKind()) {
+	if (lhsEvalType.IsStringKind() && lhsFieldType.GetType() == mysql.TypeJSON) || (rhsEvalType.IsStringKind() && rhsFieldType.GetType() == mysql.TypeJSON) {
 		cmpType = types.ETJson
 	} else if cmpType == types.ETString && (types.IsTypeTime(lhsFieldType.GetType()) || types.IsTypeTime(rhsFieldType.GetType())) {
 		// date[time] <cmp> date[time]
@@ -1556,6 +1556,11 @@ func RefineComparedConstant(ctx sessionctx.Context, targetFieldType types.FieldT
 	return con, false
 }
 
+func matchRefineRule3Pattern(conEvalType types.EvalType, exprType *types.FieldType) bool {
+	return (exprType.GetType() == mysql.TypeTimestamp || exprType.GetType() == mysql.TypeDatetime) &&
+		(conEvalType == types.ETReal || conEvalType == types.ETDecimal || conEvalType == types.ETInt)
+}
+
 // Since the argument refining of cmp functions can bring some risks to the plan-cache, the optimizer
 // needs to decide to whether to skip the refining or skip plan-cache for safety.
 // For example, `unsigned_int_col > ?(-1)` can be refined to `True`, but the validation of this result
@@ -1565,9 +1570,10 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		return true // plan-cache disabled or no parameter in these args
 	}
 
-	// For these 2 cases below, we skip the refining:
+	// For these 3 cases below, we apply the refining:
 	// 1. year-expr <cmp> const
 	// 2. int-expr <cmp> string/float/double/decimal-const
+	// 3. datetime/timestamp column <cmp> int/float/double/decimal-const
 	for conIdx := 0; conIdx < 2; conIdx++ {
 		if _, isCon := args[conIdx].(*Constant); !isCon {
 			continue // not a constant
@@ -1577,15 +1583,30 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		// refine `year < 12` to `year < 2012` to guarantee the correctness.
 		// see https://github.com/pingcap/tidb/issues/41626 for more details.
 		exprType := args[1-conIdx].GetType()
+		exprEvalType := exprType.EvalType()
 		if exprType.GetType() == mysql.TypeYear {
-			ctx.GetSessionVars().StmtCtx.SkipPlanCache = true
+			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
 
-		conType := args[conIdx].GetType().EvalType()
-		if exprType.EvalType() == types.ETInt &&
-			(conType == types.ETString || conType == types.ETReal || conType == types.ETDecimal) {
-			ctx.GetSessionVars().StmtCtx.SkipPlanCache = true
+		// case 2: int-expr <cmp> string/float/double/decimal-const
+		// refine `int_key < 1.1` to `int_key < 2` to generate RangeScan instead of FullScan.
+		conEvalType := args[conIdx].GetType().EvalType()
+		if exprEvalType == types.ETInt &&
+			(conEvalType == types.ETString || conEvalType == types.ETReal || conEvalType == types.ETDecimal) {
+			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
+			return true
+		}
+
+		// case 3: datetime/timestamp column <cmp> int/float/double/decimal-const
+		// try refine numeric-const to timestamp const
+		// see https://github.com/pingcap/tidb/issues/38361 for more details
+		_, exprIsCon := args[1-conIdx].(*Constant)
+		if !exprIsCon && matchRefineRule3Pattern(conEvalType, exprType) {
+			reason := errors.Errorf("'%v' may be converted to datetime", args[conIdx].String())
+			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
 	}
@@ -1593,15 +1614,17 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 	return false
 }
 
-// refineArgs will rewrite the arguments if the compare expression is `int column <cmp> non-int constant` or
-// `non-int constant <cmp> int column`. E.g., `a < 1.1` will be rewritten to `a < 2`. It also handles comparing year type
-// with int constant if the int constant falls into a sensible year representation.
-// This refine operation depends on the values of these args, but these values can change when using plan-cache.
+// refineArgs will rewrite the arguments if the compare expression is
+// 1. `int column <cmp> non-int constant` or `non-int constant <cmp> int column`. E.g., `a < 1.1` will be rewritten to `a < 2`.
+// 2. It also handles comparing year type with int constant if the int constant falls into a sensible year representation.
+// 3. It also handles comparing datetime/timestamp column with numeric constant, try to cast numeric constant as timestamp type, do nothing if failed.
+// This refining operation depends on the values of these args, but these values can change when using plan-cache.
 // So we have to skip this operation or mark the plan as over-optimized when using plan-cache.
 func (c *compareFunctionClass) refineArgs(ctx sessionctx.Context, args []Expression) []Expression {
 	arg0Type, arg1Type := args[0].GetType(), args[1].GetType()
-	arg0IsInt := arg0Type.EvalType() == types.ETInt
-	arg1IsInt := arg1Type.EvalType() == types.ETInt
+	arg0EvalType, arg1EvalType := arg0Type.EvalType(), arg1Type.EvalType()
+	arg0IsInt := arg0EvalType == types.ETInt
+	arg1IsInt := arg1EvalType == types.ETInt
 	arg0, arg0IsCon := args[0].(*Constant)
 	arg1, arg1IsCon := args[1].(*Constant)
 	isExceptional, finalArg0, finalArg1 := false, args[0], args[1]
@@ -1612,6 +1635,14 @@ func (c *compareFunctionClass) refineArgs(ctx sessionctx.Context, args []Express
 	}
 	// We should remove the mutable constant for correctness, because its value may be changed.
 	RemoveMutableConst(ctx, args)
+
+	if arg0IsCon && !arg1IsCon && matchRefineRule3Pattern(arg0EvalType, arg1Type) {
+		return c.refineNumericConstantCmpDatetime(ctx, args, arg0, 0)
+	}
+
+	if !arg0IsCon && arg1IsCon && matchRefineRule3Pattern(arg1EvalType, arg0Type) {
+		return c.refineNumericConstantCmpDatetime(ctx, args, arg1, 1)
+	}
 
 	// int non-constant [cmp] non-int constant
 	if arg0IsInt && !arg0IsCon && !arg1IsInt && arg1IsCon {
@@ -1657,6 +1688,7 @@ func (c *compareFunctionClass) refineArgs(ctx sessionctx.Context, args []Express
 			}
 		}
 	}
+
 	// int constant [cmp] year type
 	if arg0IsCon && arg0IsInt && arg1Type.GetType() == mysql.TypeYear && !arg0.Value.IsNull() {
 		adjusted, failed := types.AdjustYear(arg0.Value.GetInt64(), false)
@@ -1693,6 +1725,31 @@ func (c *compareFunctionClass) refineArgs(ctx sessionctx.Context, args []Express
 	}
 
 	return c.refineArgsByUnsignedFlag(ctx, []Expression{finalArg0, finalArg1})
+}
+
+// see https://github.com/pingcap/tidb/issues/38361 for more details
+func (c *compareFunctionClass) refineNumericConstantCmpDatetime(ctx sessionctx.Context, args []Expression, constArg *Constant, constArgIdx int) []Expression {
+	dt, err := constArg.Eval(chunk.Row{})
+	if err != nil || dt.IsNull() {
+		return args
+	}
+	sc := ctx.GetSessionVars().StmtCtx
+	var datetimeDatum types.Datum
+	targetFieldType := types.NewFieldType(mysql.TypeDatetime)
+	datetimeDatum, err = dt.ConvertTo(sc, targetFieldType)
+	if err != nil || datetimeDatum.IsNull() {
+		return args
+	}
+	finalArg := Constant{
+		Value:        datetimeDatum,
+		RetType:      targetFieldType,
+		DeferredExpr: nil,
+		ParamMarker:  nil,
+	}
+	if constArgIdx == 0 {
+		return []Expression{&finalArg, args[1]}
+	}
+	return []Expression{args[0], &finalArg}
 }
 
 func (c *compareFunctionClass) refineArgsByUnsignedFlag(ctx sessionctx.Context, args []Expression) []Expression {
@@ -2569,23 +2626,9 @@ func (b *builtinNullEQIntSig) evalInt(row chunk.Row) (val int64, isNull bool, er
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
-	case isUnsigned0 && isUnsigned1 && types.CompareUint64(uint64(arg0), uint64(arg1)) == 0:
-		res = 1
-	case !isUnsigned0 && !isUnsigned1 && types.CompareInt64(arg0, arg1) == 0:
-		res = 1
-	case isUnsigned0 && !isUnsigned1:
-		if arg1 < 0 {
-			break
-		}
-		if types.CompareInt64(arg0, arg1) == 0 {
-			res = 1
-		}
-	case !isUnsigned0 && isUnsigned1:
-		if arg0 < 0 {
-			break
-		}
-		if types.CompareInt64(arg0, arg1) == 0 {
+		return res, false, nil
+	default:
+		if types.CompareInt(arg0, isUnsigned0, arg1, isUnsigned1) == 0 {
 			res = 1
 		}
 	}
@@ -2616,7 +2659,7 @@ func (b *builtinNullEQRealSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case types.CompareFloat64(arg0, arg1) == 0:
 		res = 1
 	}
@@ -2647,7 +2690,7 @@ func (b *builtinNullEQDecimalSig) evalInt(row chunk.Row) (val int64, isNull bool
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2678,7 +2721,7 @@ func (b *builtinNullEQStringSig) evalInt(row chunk.Row) (val int64, isNull bool,
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case types.CompareString(arg0, arg1, b.collation) == 0:
 		res = 1
 	}
@@ -2709,7 +2752,7 @@ func (b *builtinNullEQDurationSig) evalInt(row chunk.Row) (val int64, isNull boo
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2740,7 +2783,7 @@ func (b *builtinNullEQTimeSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	case arg0.Compare(arg1) == 0:
 		res = 1
 	}
@@ -2771,9 +2814,9 @@ func (b *builtinNullEQJSONSig) evalInt(row chunk.Row) (val int64, isNull bool, e
 	case isNull0 && isNull1:
 		res = 1
 	case isNull0 != isNull1:
-		break
+		return res, false, nil
 	default:
-		cmpRes := json.CompareBinary(arg0, arg1)
+		cmpRes := types.CompareBinaryJSON(arg0, arg1)
 		if cmpRes == 0 {
 			res = 1
 		}
@@ -2888,26 +2931,7 @@ func CompareInt(sctx sessionctx.Context, lhsArg, rhsArg Expression, lhsRow, rhsR
 	}
 
 	isUnsigned0, isUnsigned1 := mysql.HasUnsignedFlag(lhsArg.GetType().GetFlag()), mysql.HasUnsignedFlag(rhsArg.GetType().GetFlag())
-	var res int
-	switch {
-	case isUnsigned0 && isUnsigned1:
-		res = types.CompareUint64(uint64(arg0), uint64(arg1))
-	case isUnsigned0 && !isUnsigned1:
-		if arg1 < 0 || uint64(arg0) > math.MaxInt64 {
-			res = 1
-		} else {
-			res = types.CompareInt64(arg0, arg1)
-		}
-	case !isUnsigned0 && isUnsigned1:
-		if arg0 < 0 || uint64(arg1) > math.MaxInt64 {
-			res = -1
-		} else {
-			res = types.CompareInt64(arg0, arg1)
-		}
-	case !isUnsigned0 && !isUnsigned1:
-		res = types.CompareInt64(arg0, arg1)
-	}
-	return int64(res), false, nil
+	return int64(types.CompareInt(arg0, isUnsigned0, arg1, isUnsigned1)), false, nil
 }
 
 func genCompareString(collation string) func(sctx sessionctx.Context, lhsArg Expression, rhsArg Expression, lhsRow chunk.Row, rhsRow chunk.Row) (int64, bool, error) {
@@ -3021,5 +3045,5 @@ func CompareJSON(sctx sessionctx.Context, lhsArg, rhsArg Expression, lhsRow, rhs
 	if isNull0 || isNull1 {
 		return compareNull(isNull0, isNull1), true, nil
 	}
-	return int64(json.CompareBinary(arg0, arg1)), false, nil
+	return int64(types.CompareBinaryJSON(arg0, arg1)), false, nil
 }

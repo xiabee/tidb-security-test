@@ -26,8 +26,7 @@ import (
 )
 
 func TestIfNullEliminateColName(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -51,8 +50,7 @@ func TestIfNullEliminateColName(t *testing.T) {
 }
 
 func TestBinaryOpFunction(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -63,8 +61,7 @@ func TestBinaryOpFunction(t *testing.T) {
 }
 
 func TestDefaultFunction(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1")
@@ -145,8 +142,7 @@ func TestDefaultFunction(t *testing.T) {
 }
 
 func TestCompareSubquery(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -243,8 +239,7 @@ func TestCompareSubquery(t *testing.T) {
 }
 
 func TestCheckFullGroupBy(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -255,8 +250,7 @@ func TestCheckFullGroupBy(t *testing.T) {
 }
 
 func TestPatternLikeToExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustQuery("select 0 like 'a string';").Check(testkit.Rows("0"))
 	tk.MustQuery("select 0.0 like 'a string';").Check(testkit.Rows("0"))
@@ -268,8 +262,7 @@ func TestPatternLikeToExpression(t *testing.T) {
 }
 
 func TestIssue20007(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t1, t2;")
@@ -285,8 +278,7 @@ func TestIssue20007(t *testing.T) {
 }
 
 func TestIssue9869(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t1;")
@@ -297,8 +289,7 @@ func TestIssue9869(t *testing.T) {
 }
 
 func TestIssue17652(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t;")
@@ -308,8 +299,7 @@ func TestIssue17652(t *testing.T) {
 }
 
 func TestCompareMultiFieldsInSubquery(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t1, t2, t3, t4;")
@@ -336,8 +326,7 @@ func TestCompareMultiFieldsInSubquery(t *testing.T) {
 }
 
 func TestIssue22818(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t;")
@@ -347,8 +336,7 @@ func TestIssue22818(t *testing.T) {
 }
 
 func TestIssue24705(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	tk.MustExec("drop table if exists t1,t2;")
@@ -359,8 +347,7 @@ func TestIssue24705(t *testing.T) {
 }
 
 func TestBetweenExprCollation(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t1;")
@@ -373,8 +360,7 @@ func TestBetweenExprCollation(t *testing.T) {
 }
 
 func TestInsertOnDuplicateLazyMoreThan1Row(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("DROP TABLE if exists t1, t2, source;")
@@ -392,10 +378,10 @@ func TestInsertOnDuplicateLazyMoreThan1Row(t *testing.T) {
 }
 
 func TestMultiColInExpression(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t1, t2")
 	tk.MustExec("create table t1(a int, b int)")
 	tk.MustExec("insert into t1 values(1,1),(2,null),(null,3),(4,4)")
@@ -409,8 +395,12 @@ func TestMultiColInExpression(t *testing.T) {
 		Plan []string
 		Res  []string
 	}
+
+	// Default RPC encoding may cause statistics explain result differ and then the test unstable.
+	tk.MustExec("set @@tidb_enable_chunk_rpc = on")
+
 	expressionRewriterSuiteData := plannercore.GetExpressionRewriterSuiteData()
-	expressionRewriterSuiteData.GetTestCases(t, &input, &output)
+	expressionRewriterSuiteData.LoadTestCases(t, &input, &output)
 	for i, tt := range input {
 		testdata.OnRecord(func() {
 			output[i].SQL = tt
@@ -420,4 +410,70 @@ func TestMultiColInExpression(t *testing.T) {
 		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
 		tk.MustQuery(tt).Sort().Check(testkit.Rows(output[i].Res...))
 	}
+}
+
+func TestBitFuncsReturnType(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("create table t (a timestamp, b varbinary(32))")
+	tk.MustExec("insert into t values ('2006-08-27 21:57:57', 0x373037343631313230)")
+	tk.MustExec("analyze table t")
+	var input []string
+	var output []struct {
+		Plan []string
+	}
+
+	expressionRewriterSuiteData := plannercore.GetExpressionRewriterSuiteData()
+	expressionRewriterSuiteData.LoadTestCases(t, &input, &output)
+	for i, tt := range input {
+		testdata.OnRecord(func() {
+			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery("explain format = 'brief' " + tt).Rows())
+		})
+		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
+	}
+}
+
+func TestCompareIssue38361(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("drop database if exists TEST1")
+	tk.MustExec("create database TEST1")
+	tk.MustExec("use TEST1")
+	tk.MustExec("create table t(a datetime, b bigint, c bigint)")
+	tk.MustExec("insert into t values(cast('2023-08-09 00:00:00' as datetime), 20230809, 20231310)")
+
+	tk.MustQuery("select a > 20230809 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a = 20230809 from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select a < 20230810 from t").Check(testkit.Rows("1"))
+	// 20231310 can't be converted to valid datetime, thus should be compared using real date type,and datetime will be
+	// converted to something like 'YYYYMMDDHHMMSS', bigger than 20231310
+	tk.MustQuery("select a < 20231310 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 < a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 = a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20230810 > a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20231310 > a from t").Check(testkit.Rows("0"))
+
+	// constant datetime cmp numeric constant should be compared as real data type
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) > 20230809 from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) = 20230809 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) < 20230810 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select cast('2023-08-09 00:00:00' as datetime) < 20231310 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230809 < cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select 20230809 = cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20230810 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select 20231310 > cast('2023-08-09 00:00:00' as datetime) from t").Check(testkit.Rows("0"))
+
+	// datetime column cmp numeric column should be compared as real data type
+	tk.MustQuery("select a > b from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select a = b from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a < b + 1 from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select a < c from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select b < a from t").Check(testkit.Rows("1"))
+	tk.MustQuery("select b = a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select b > a from t").Check(testkit.Rows("0"))
+	tk.MustQuery("select c > a from t").Check(testkit.Rows("0"))
 }

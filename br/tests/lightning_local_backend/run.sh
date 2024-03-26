@@ -20,6 +20,8 @@ check_cluster_version 4 0 0 'local backend' || exit 0
 
 ENGINE_COUNT=6
 
+res_file="$TEST_DIR/sql_res.$TEST_NAME.txt"
+
 # Test check table contains data
 rm -f "/tmp/tidb_lightning_checkpoint_local_backend_test.pb"
 rm -rf $TEST_DIR/lightning.log
@@ -34,7 +36,7 @@ grep -Fq 'table(s) [`cpeng`.`a`, `cpeng`.`b`] are not empty' $TEST_DIR/lightning
 
 
 # First, verify that inject with not leader error is fine.
-export GO_FAILPOINTS='github.com/pingcap/tidb/br/pkg/lightning/backend/local/FailIngestMeta=1*return("notleader");github.com/pingcap/tidb/br/pkg/lightning/backend/local/failToSplit=2*return("")'
+export GO_FAILPOINTS='github.com/pingcap/tidb/br/pkg/lightning/backend/local/FailIngestMeta=1*return("notleader");github.com/pingcap/tidb/br/pkg/lightning/backend/local/failToSplit=5*return("")'
 rm -f "$TEST_DIR/lightning-local.log"
 run_sql 'DROP DATABASE IF EXISTS cpeng;'
 run_lightning --backend local --enable-checkpoint=1 --log-file "$TEST_DIR/lightning-local.log" --config "tests/$TEST_NAME/config.toml" -L debug
@@ -53,7 +55,7 @@ check_contains 'sum(c): 46'
 run_sql 'DROP DATABASE cpeng;'
 rm -f "/tmp/tidb_lightning_checkpoint_local_backend_test.pb"
 
-export GO_FAILPOINTS='github.com/pingcap/tidb/br/pkg/lightning/backend/local/FailIngestMeta=2*return("epochnotmatch")'
+export GO_FAILPOINTS='github.com/pingcap/tidb/br/pkg/lightning/backend/local/FailIngestMeta=2*return("epochnotmatch");github.com/pingcap/tidb/br/pkg/lightning/backend/local/NoLeader=1*return()'
 
 run_lightning --backend local --enable-checkpoint=1 --log-file "$TEST_DIR/lightning-local.log" --config "tests/$TEST_NAME/config.toml"
 
@@ -81,7 +83,11 @@ set -e
 
 export GO_FAILPOINTS=''
 echo "******** Verify checkpoint no-op ********"
-run_lightning --backend local --enable-checkpoint=1 --log-file "$TEST_DIR/lightning-local.log" --config "tests/$TEST_NAME/config.toml"
+run_lightning --backend local --enable-checkpoint=1 --config "tests/$TEST_NAME/config.toml" --log-file $res_file -L debug
+check_not_contains "failed to set system var"
+check_not_contains "unknown system var"
+check_contains "skip read-only variable"
+check_contains "lc_time_names"
 
 run_sql 'SELECT count(*), sum(c) FROM cpeng.a'
 check_contains 'count(*): 4'

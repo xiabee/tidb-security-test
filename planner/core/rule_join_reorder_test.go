@@ -17,6 +17,7 @@ package core_test
 import (
 	"testing"
 
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/domain"
 	"github.com/pingcap/tidb/parser/model"
 	plannercore "github.com/pingcap/tidb/planner/core"
@@ -33,7 +34,7 @@ func runJoinReorderTestData(t *testing.T, tk *testkit.TestKit, name string) {
 		Warning []string
 	}
 	joinReorderSuiteData := plannercore.GetJoinReorderSuiteData()
-	joinReorderSuiteData.GetTestCasesByName(name, t, &input, &output)
+	joinReorderSuiteData.LoadTestCasesByName(name, t, &input, &output)
 	require.Equal(t, len(input), len(output))
 	for i := range input {
 		testdata.OnRecord(func() {
@@ -47,11 +48,11 @@ func runJoinReorderTestData(t *testing.T, tk *testkit.TestKit, name string) {
 }
 
 func TestStraightJoinHint(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t, t1, t2, t3, t4;")
 	tk.MustExec("create table t(a int, b int, key(a));")
 	tk.MustExec("create table t1(a int, b int, key(a));")
@@ -61,12 +62,59 @@ func TestStraightJoinHint(t *testing.T) {
 	runJoinReorderTestData(t, tk, "TestStraightJoinHint")
 }
 
+func TestNoHashJoinHint(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t1(a int, b int, key(a));")
+	tk.MustExec("create table t2(a int, b int, key(a));")
+	tk.MustExec("create table t3(a int, b int, key(a));")
+	tk.MustExec("create table t4(a int, b int, key(a));")
+	runJoinReorderTestData(t, tk, "TestNoHashJoinHint")
+}
+
+// test the global/session variable tidb_opt_enable_hash_join being set to no
+func TestOptEnableHashJoin(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_opt_enable_hash_join=off")
+	tk.MustExec("create table t1(a int, b int, key(a));")
+	tk.MustExec("create table t2(a int, b int, key(a));")
+	tk.MustExec("create table t3(a int, b int, key(a));")
+	tk.MustExec("create table t4(a int, b int, key(a));")
+	runJoinReorderTestData(t, tk, "TestOptEnableHashJoin")
+}
+
+func TestNoMergeJoinHint(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t1(a int, key(a));")
+	tk.MustExec("create table t2(a int, key(a));")
+	tk.MustExec("create table t3(a int, key(a));")
+	tk.MustExec("create table t4(a int, key(a));")
+	runJoinReorderTestData(t, tk, "TestNoMergeJoinHint")
+}
+
+func TestNoIndexJoinHint(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`set tidb_enable_index_merge_join=true`)
+	tk.MustExec("use test")
+	tk.MustExec("create table t1(a int, key(a));")
+	tk.MustExec("create table t2(a int, key(a));")
+	tk.MustExec("create table t3(a int, key(a));")
+	tk.MustExec("create table t4(a int, key(a));")
+	runJoinReorderTestData(t, tk, "TestNoIndexJoinHint")
+}
+
 func TestLeadingJoinHint(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t, t1, t2, t3, t4, t5, t6, t7, t8;")
 	tk.MustExec("create table t(a int, b int, key(a));")
 	tk.MustExec("create table t1(a int, b int, key(a));")
@@ -77,24 +125,7 @@ func TestLeadingJoinHint(t *testing.T) {
 	tk.MustExec("create table t6(a int, b int, key(a));")
 	tk.MustExec("create table t7(a int, b int, key(a));")
 	tk.MustExec("create table t8(a int, b int, key(a));")
-	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
 	runJoinReorderTestData(t, tk, "TestLeadingJoinHint")
-
-	// test cases for outer join
-	tk.MustExec("select /*+ leading(t1, t3) */ * from t1 left join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t2) */ * from t1 left join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t2, t3) */ * from t1 left join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t1, t2, t3) */ * from t1 left join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t1, t3) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t1, t2) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-	tk.MustExec("select /*+ leading(t3) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
 
 	// test cases for multiple leading hints
 	tk.MustExec("select /*+ leading(t1) leading(t2) */ * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
@@ -102,8 +133,7 @@ func TestLeadingJoinHint(t *testing.T) {
 }
 
 func TestJoinOrderHint(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -117,8 +147,6 @@ func TestJoinOrderHint(t *testing.T) {
 	tk.MustExec("create table t6(a int, b int, key(a));")
 	tk.MustExec("create table t7(a int, b int, key(a));")
 	tk.MustExec("create table t8(a int, b int, key(a));")
-
-	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
 
 	// test cases for using the leading hint and straight_join hint at the same time
 	tk.MustExec("select /*+ leading(t1) straight_join() */ * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
@@ -169,13 +197,6 @@ func TestJoinOrderHint(t *testing.T) {
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 There are no matching table names for (t1) in optimizer hint /*+ LEADING(t2, t1) */. Maybe you can use the table alias name",
 		"Warning 1815 leading hint is inapplicable, check if the leading hint table is valid"))
 
-	// conflict between table names
-	tk.MustExec("select /*+ leading(t3) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-
-	tk.MustExec("select /*+ leading(t1, t3) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
-	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1815 leading hint is inapplicable when we have outer join"))
-
 	// table name in leading hint cross query block
 	// Todo: Can not handle this case yet. Because when we extract the join group, it will get the join group {t1, t2, t3}.
 	// So the table 't4' can not be used.
@@ -195,8 +216,7 @@ func TestJoinOrderHint(t *testing.T) {
 }
 
 func TestJoinOrderHintWithBinding(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -227,19 +247,36 @@ func TestJoinOrderHintWithBinding(t *testing.T) {
 	require.Equal(t, res[0][0], "select * from ( `test` . `t1` join `test` . `t2` on `t1` . `a` = `t2` . `a` ) join `test` . `t3` on `t2` . `b` = `t3` . `b`")
 
 	tk.MustExec("drop global binding for select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+
+	// test for outer join
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("0"))
+	res = tk.MustQuery("show global bindings").Rows()
+	require.Equal(t, len(res), 0)
+
+	tk.MustExec("create global binding for select * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b using select /*+ leading(t2) */ * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a left join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("1"))
+	res = tk.MustQuery("show global bindings").Rows()
+	require.Equal(t, res[0][0], "select * from ( `test` . `t1` join `test` . `t2` on `t1` . `a` = `t2` . `a` ) left join `test` . `t3` on `t2` . `b` = `t3` . `b`")
+
+	tk.MustExec("drop global binding for select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
 }
 
 func TestJoinOrderHint4StaticPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t, t1, t2, t3;")
 	tk.MustExec(`create table t(a int, b int) partition by hash(a) partitions 3`)
 	tk.MustExec(`create table t1(a int, b int) partition by hash(a) partitions 4`)
 	tk.MustExec(`create table t2(a int, b int) partition by hash(a) partitions 5`)
 	tk.MustExec(`create table t3(a int, b int) partition by hash(b) partitions 3`)
+	tk.MustExec(`create table t4(a int, b int) partition by hash(a) partitions 4`)
+	tk.MustExec(`create table t5(a int, b int) partition by hash(a) partitions 5`)
+	tk.MustExec(`create table t6(a int, b int) partition by hash(b) partitions 3`)
 
 	tk.MustExec(`set @@tidb_partition_prune_mode="static"`)
 	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
@@ -247,8 +284,9 @@ func TestJoinOrderHint4StaticPartitionTable(t *testing.T) {
 }
 
 func TestJoinOrderHint4DynamicPartitionTable(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -257,6 +295,9 @@ func TestJoinOrderHint4DynamicPartitionTable(t *testing.T) {
 	tk.MustExec(`create table t1(a int, b int) partition by hash(a) partitions 4`)
 	tk.MustExec(`create table t2(a int, b int) partition by hash(a) partitions 5`)
 	tk.MustExec(`create table t3(a int, b int) partition by hash(b) partitions 3`)
+	tk.MustExec(`create table t4(a int, b int) partition by hash(a) partitions 4`)
+	tk.MustExec(`create table t5(a int, b int) partition by hash(a) partitions 5`)
+	tk.MustExec(`create table t6(a int, b int) partition by hash(b) partitions 3`)
 
 	tk.MustExec(`set @@tidb_partition_prune_mode="dynamic"`)
 	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
@@ -264,11 +305,11 @@ func TestJoinOrderHint4DynamicPartitionTable(t *testing.T) {
 }
 
 func TestJoinOrderHint4DifferentJoinType(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t, t1, t2, t3, t4, t5, t6, t7, t8;")
 	tk.MustExec("create table t(a int, b int, key(a));")
 	tk.MustExec("create table t1(a int, b int, key(a));")
@@ -285,8 +326,7 @@ func TestJoinOrderHint4DifferentJoinType(t *testing.T) {
 }
 
 func TestJoinOrderHint4TiFlash(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t, t1, t2, t3;")
@@ -294,6 +334,9 @@ func TestJoinOrderHint4TiFlash(t *testing.T) {
 	tk.MustExec("create table t1(a int, b int, key(a));")
 	tk.MustExec("create table t2(a int, b int, key(a));")
 	tk.MustExec("create table t3(a int, b int, key(a));")
+	tk.MustExec("create table t4(a int, b int, key(a));")
+	tk.MustExec("create table t5(a int, b int, key(a));")
+	tk.MustExec("create table t6(a int, b int, key(a));")
 	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
 
 	// Create virtual tiflash replica info.
@@ -303,7 +346,7 @@ func TestJoinOrderHint4TiFlash(t *testing.T) {
 	require.True(t, exists)
 	for _, tblInfo := range db.Tables {
 		tableName := tblInfo.Name.L
-		if tableName == "t" || tableName == "t1" || tableName == "t2" || tableName == "t3" {
+		if tableName == "t" || tableName == "t1" || tableName == "t2" || tableName == "t3" || tableName == "t4" || tableName == "t5" || tableName == "t6" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
 				Available: true,
@@ -316,11 +359,11 @@ func TestJoinOrderHint4TiFlash(t *testing.T) {
 }
 
 func TestJoinOrderHint4Subquery(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t, t1, t2, t3, t4, t5, t6, t7, t8;")
 	tk.MustExec("create table t(a int, b int, key(a));")
 	tk.MustExec("create table t1(a int, b int, key(a));")
@@ -337,9 +380,65 @@ func TestJoinOrderHint4Subquery(t *testing.T) {
 	runJoinReorderTestData(t, tk, "TestJoinOrderHint4Subquery")
 }
 
+func TestLeadingJoinHint4OuterJoin(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("drop table if exists t, t1, t2, t3, t4, t5, t6, t7, t8;")
+	tk.MustExec("create table t(a int, b int, key(a));")
+	tk.MustExec("create table t1(a int, b int, key(a));")
+	tk.MustExec("create table t2(a int, b int, key(a));")
+	tk.MustExec("create table t3(a int, b int, key(a));")
+	tk.MustExec("create table t4(a int, b int, key(a));")
+	tk.MustExec("create table t5(a int, b int, key(a));")
+	tk.MustExec("create table t6(a int, b int, key(a));")
+	tk.MustExec("create table t7(a int, b int, key(a));")
+	tk.MustExec("create table t8(a int, b int, key(a));")
+	tk.MustExec("set @@tidb_enable_outer_join_reorder=true")
+	runJoinReorderTestData(t, tk, "TestLeadingJoinHint4OuterJoin")
+}
+
+func TestAdditionOtherConditionsRemained4OuterJoin(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustExec("use test")
+	tk.MustExec("CREATE TABLE `queries_identifier` (\n   `id` int(11) NOT NULL AUTO_INCREMENT,\n   `name` varchar(100) COLLATE utf8mb4_general_ci NOT NULL,\n   PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */\n ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;")
+	tk.MustExec("CREATE TABLE `queries_program` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `identifier_id` int(11) NOT NULL,\n  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,\n  UNIQUE KEY `identifier_id` (`identifier_id`),\n  CONSTRAINT `queries_program_identifier_id_70ff12a6_fk_queries_identifier_id` FOREIGN KEY (`identifier_id`) REFERENCES `test`.`queries_identifier` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;")
+	tk.MustExec("CREATE TABLE `queries_channel` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `identifier_id` int(11) NOT NULL,\n  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,\n  UNIQUE KEY `identifier_id` (`identifier_id`),\n  CONSTRAINT `queries_channel_identifier_id_06ac3513_fk_queries_identifier_id` FOREIGN KEY (`identifier_id`) REFERENCES `test`.`queries_identifier` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;")
+
+	tk.MustExec("INSERT  INTO queries_identifier(`id`, `name`) values(13, 'i1'), (14, 'i2'), (15, 'i3');")
+	tk.MustExec("INSERT  INTO queries_program(`id`, `identifier_id`) values(8, 13), (9, 14);")
+	tk.MustExec("INSERT  INTO queries_channel(`id`, `identifier_id`) values(5, 13);")
+
+	tk.MustExec("create table t(a int)")
+	tk.MustExec("create table t1(a int, b int)")
+	tk.MustExec("create table t2(a int, b int, c int)")
+	tk.MustExec("create table t3(a int, b int)")
+	tk.MustExec("create table t4(a int, b int)")
+
+	testData := plannercore.GetJoinReorderData()
+	var (
+		input  []string
+		output []struct {
+			SQL    string
+			Output []string
+		}
+	)
+	testData.LoadTestCases(t, &input, &output)
+	for i, sql := range input {
+		testdata.OnRecord(func() {
+			output[i].SQL = sql
+			output[i].Output = testdata.ConvertRowsToStrings(tk.MustQuery(sql).Rows())
+		})
+		tk.MustQuery(sql).Check(testkit.Rows(output[i].Output...))
+	}
+}
+
 func TestOuterJoinWIthEqCondCrossInnerJoin(t *testing.T) {
-	store, clean := testkit.CreateMockStore(t)
-	defer clean()
+	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
 

@@ -31,37 +31,51 @@ import (
 )
 
 const (
-	tableRegionSizeWarningThreshold int64 = 1024 * 1024 * 1024
+	tableRegionSizeWarningThreshold           int64 = 1024 * 1024 * 1024
+	compressedTableRegionSizeWarningThreshold int64 = 410 * 1024 * 1024 // 0.4 * tableRegionSizeWarningThreshold
 	// the increment ratio of large CSV file size threshold by `region-split-size`
 	largeCSVLowerThresholdRation = 10
+	// TableFileSizeINF for compressed size, for lightning 10TB is a relatively big value and will strongly affect efficiency
+	// It's used to make sure compressed files can be read until EOF. Because we can't get the exact decompressed size of the compressed files.
+	TableFileSizeINF = 10 * 1024 * tableRegionSizeWarningThreshold
+	// compressDataRatio is a relatively maximum compress ratio for normal compressed data
+	// It's used to estimate rowIDMax, we use a large value to try to avoid overlapping
+	compressDataRatio = 500
 )
 
+// TableRegion contains information for a table region during import.
 type TableRegion struct {
 	EngineID int32
 
-	DB       string
-	Table    string
-	FileMeta SourceFileMeta
+	DB         string
+	Table      string
+	FileMeta   SourceFileMeta
+	ExtendData ExtendColumnData
 
 	Chunk Chunk
 }
 
+// RowIDMin returns the minimum row ID of this table region.
 func (reg *TableRegion) RowIDMin() int64 {
 	return reg.Chunk.PrevRowIDMax + 1
 }
 
+// Rows returns the row counts of this table region.
 func (reg *TableRegion) Rows() int64 {
 	return reg.Chunk.RowIDMax - reg.Chunk.PrevRowIDMax
 }
 
+// Offset gets the offset in the file of this table region.
 func (reg *TableRegion) Offset() int64 {
 	return reg.Chunk.Offset
 }
 
+// Size gets the size of this table region.
 func (reg *TableRegion) Size() int64 {
 	return reg.Chunk.EndOffset - reg.Chunk.Offset
 }
 
+// AllocateEngineIDs allocates the table engine IDs.
 func AllocateEngineIDs(
 	filesRegions []*TableRegion,
 	dataFileSizes []float64,
@@ -133,6 +147,7 @@ func AllocateEngineIDs(
 	}
 }
 
+// MakeTableRegions create a new table region.
 func MakeTableRegions(
 	ctx context.Context,
 	meta *MDTableMeta,
@@ -161,19 +176,19 @@ func MakeTableRegions(
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for info := range fileChan {
-				regions, sizes, err := makeSourceFileRegion(execCtx, meta, info, columns, cfg, ioWorkers, store)
+				regions, sizes, err := MakeSourceFileRegion(execCtx, meta, info, columns, cfg, ioWorkers, store)
 				select {
 				case resultChan <- fileRegionRes{info: info, regions: regions, sizes: sizes, err: err}:
 				case <-ctx.Done():
-					break
+					return
 				}
 				if err != nil {
-					log.L().Error("make source file region error", zap.Error(err), zap.String("file_path", info.FileMeta.Path))
+					log.FromContext(ctx).Error("make source file region error", zap.Error(err), zap.String("file_path", info.FileMeta.Path))
 					break
 				}
 			}
-			wg.Done()
 		}()
 	}
 
@@ -239,7 +254,7 @@ func MakeTableRegions(
 		}
 	}
 
-	log.L().Info("makeTableRegions", zap.Int("filesCount", len(meta.DataFiles)),
+	log.FromContext(ctx).Info("makeTableRegions", zap.Int("filesCount", len(meta.DataFiles)),
 		zap.Int64("MaxRegionSize", int64(cfg.Mydumper.MaxRegionSize)),
 		zap.Int("RegionsCount", len(filesRegions)),
 		zap.Float64("BatchSize", batchSize),
@@ -248,7 +263,8 @@ func MakeTableRegions(
 	return filesRegions, nil
 }
 
-func makeSourceFileRegion(
+// MakeSourceFileRegion create a new source file region.
+func MakeSourceFileRegion(
 	ctx context.Context,
 	meta *MDTableMeta,
 	fi FileInfo,
@@ -276,25 +292,44 @@ func makeSourceFileRegion(
 	// We increase the check threshold by 1/10 of the `max-region-size` because the source file size dumped by tools
 	// like dumpling might be slight exceed the threshold when it is equal `max-region-size`, so we can
 	// avoid split a lot of small chunks.
-	if isCsvFile && cfg.Mydumper.StrictFormat && dataFileSize > int64(cfg.Mydumper.MaxRegionSize+cfg.Mydumper.MaxRegionSize/largeCSVLowerThresholdRation) {
+	// If a csv file is compressed, we can't split it now because we can't get the exact size of a row.
+	if isCsvFile && cfg.Mydumper.StrictFormat && fi.FileMeta.Compression == CompressionNone &&
+		dataFileSize > int64(cfg.Mydumper.MaxRegionSize+cfg.Mydumper.MaxRegionSize/largeCSVLowerThresholdRation) {
 		_, regions, subFileSizes, err := SplitLargeFile(ctx, meta, cfg, fi, divisor, 0, ioWorkers, store)
 		return regions, subFileSizes, err
 	}
 
+	fileSize := fi.FileMeta.FileSize
+	rowIDMax := fileSize / divisor
+	// for compressed files, suggest the compress ratio is 1% to calculate the rowIDMax.
+	// set fileSize to INF to make sure compressed files can be read until EOF. Because we can't get the exact size of the compressed files.
+	// TODO: update progress bar calculation for compressed files.
+	if fi.FileMeta.Compression != CompressionNone {
+		// FIXME: this is not accurate. Need sample ratio in the future and use sampled ratio to compute rowIDMax
+		//  currently we use 500 here. It's a relatively large value for most data.
+		rowIDMax = fileSize * compressDataRatio / divisor
+		fileSize = TableFileSizeINF
+	}
 	tableRegion := &TableRegion{
 		DB:       meta.DB,
 		Table:    meta.Name,
 		FileMeta: fi.FileMeta,
 		Chunk: Chunk{
 			Offset:       0,
-			EndOffset:    fi.FileMeta.FileSize,
+			EndOffset:    fileSize,
 			PrevRowIDMax: 0,
-			RowIDMax:     fi.FileMeta.FileSize / divisor,
+			RowIDMax:     rowIDMax,
 		},
 	}
 
-	if tableRegion.Size() > tableRegionSizeWarningThreshold {
-		log.L().Warn(
+	regionTooBig := false
+	if fi.FileMeta.Compression == CompressionNone {
+		regionTooBig = tableRegion.Size() > tableRegionSizeWarningThreshold
+	} else {
+		regionTooBig = fi.FileMeta.FileSize > compressedTableRegionSizeWarningThreshold
+	}
+	if regionTooBig {
+		log.FromContext(ctx).Warn(
 			"file is too big to be processed efficiently; we suggest splitting it at 256 MB each",
 			zap.String("file", fi.FileMeta.Path),
 			zap.Int64("size", dataFileSize))
@@ -365,7 +400,7 @@ func SplitLargeFile(
 		if err != nil {
 			return 0, nil, nil, err
 		}
-		parser, err := NewCSVParser(&cfg.Mydumper.CSV, r, int64(cfg.Mydumper.ReadBlockSize), ioWorker, true, charsetConvertor)
+		parser, err := NewCSVParser(ctx, &cfg.Mydumper.CSV, r, int64(cfg.Mydumper.ReadBlockSize), ioWorker, true, charsetConvertor)
 		if err != nil {
 			return 0, nil, nil, err
 		}
@@ -392,7 +427,7 @@ func SplitLargeFile(
 			if err != nil {
 				return 0, nil, nil, err
 			}
-			parser, err := NewCSVParser(&cfg.Mydumper.CSV, r, int64(cfg.Mydumper.ReadBlockSize), ioWorker, false, charsetConvertor)
+			parser, err := NewCSVParser(ctx, &cfg.Mydumper.CSV, r, int64(cfg.Mydumper.ReadBlockSize), ioWorker, false, charsetConvertor)
 			if err != nil {
 				return 0, nil, nil, err
 			}
@@ -404,7 +439,7 @@ func SplitLargeFile(
 				if !errors.ErrorEqual(err, io.EOF) {
 					return 0, nil, nil, err
 				}
-				log.L().Warn("file contains no terminator at end",
+				log.FromContext(ctx).Warn("file contains no terminator at end",
 					zap.String("path", dataFile.FileMeta.Path),
 					zap.String("terminator", cfg.Mydumper.CSV.Terminator))
 				pos = dataFile.FileMeta.FileSize

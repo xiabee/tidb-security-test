@@ -52,6 +52,14 @@ var (
 			Help:      "Counter of queries.",
 		}, []string{LblType, LblResult})
 
+	AffectedRowsCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "affected_rows",
+			Help:      "Counters of server affected rows.",
+		}, []string{LblSQLType})
+
 	ConnGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: "tidb",
@@ -136,6 +144,22 @@ var (
 			Help:      "Counter of plan cache miss.",
 		}, []string{LblType})
 
+	PlanCacheInstanceMemoryUsage = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "plan_cache_instance_memory_usage",
+			Help:      "Total plan cache memory usage of all sessions in a instance",
+		}, []string{LblType})
+
+	PlanCacheInstancePlanNumCounter = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "plan_cache_instance_plan_num_total",
+			Help:      "Counter of plan of all prepared plan cache in a instance",
+		}, []string{LblType})
+
 	ReadFromTableCacheCounter = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: "tidb",
@@ -163,6 +187,15 @@ var (
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 30), // 1us ~ 528s
 		})
 
+	NumOfMultiQueryHistogram = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "multi_query_num",
+			Help:      "The number of queries contained in a multi-query statement.",
+			Buckets:   prometheus.ExponentialBuckets(1, 2, 20), // 1 ~ 1048576
+		})
+
 	TotalQueryProcHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "tidb",
@@ -186,6 +219,15 @@ var (
 			Name:      "slow_query_wait_duration_seconds",
 			Help:      "Bucketed histogram of all cop waiting time (s) of of slow queries.",
 			Buckets:   prometheus.ExponentialBuckets(0.001, 2, 28), // 1ms ~ 1.5days
+		}, []string{LblSQLType})
+
+	CopMVCCRatioHistogram = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "slow_query_cop_mvcc_ratio",
+			Help:      "Bucketed histogram of all cop total keys / processed keys in slow queries.",
+			Buckets:   prometheus.ExponentialBuckets(0.5, 2, 21), // 0.5 ~ 262144
 		}, []string{LblSQLType})
 
 	MaxProcs = prometheus.NewGauge(
@@ -246,6 +288,14 @@ var (
 			Help:      "Counter of TiFlash queries.",
 		}, []string{LblType, LblResult})
 
+	TiFlashFailedMPPStoreState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "tiflash_failed_store",
+			Help:      "Statues of failed tiflash mpp store,-1 means detector heartbeat,0 means reachable,1 means abnormal.",
+		}, []string{LblAddress})
+
 	PDAPIExecutionHistogram = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "tidb",
@@ -279,6 +329,14 @@ var (
 			Help:      "Duration (us) for loading table cache.",
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 30), // 1us ~ 528s
 		})
+
+	RCCheckTSWriteConfilictCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "tidb",
+			Subsystem: "server",
+			Name:      "rc_check_ts_conflict_total",
+			Help:      "Counter of WriteConflict caused by RCCheckTS.",
+		}, []string{LblType})
 )
 
 // ExecuteErrorToLabel converts an execute error to label.

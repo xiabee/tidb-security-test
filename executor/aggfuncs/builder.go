@@ -15,6 +15,7 @@
 package aggfuncs
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -143,6 +144,21 @@ func buildApproxCountDistinct(aggFuncDesc *aggregation.AggFuncDesc, ordinal int)
 	return nil
 }
 
+func getEvalTypeForApproxPercentile(aggFuncDesc *aggregation.AggFuncDesc) types.EvalType {
+	evalType := aggFuncDesc.Args[0].GetType().EvalType()
+	argType := aggFuncDesc.Args[0].GetType().GetType()
+
+	// Sometimes `mysql.EnumSetAsIntFlag` may be set to true, such as when join,
+	// which is unexpected for `buildApproxPercentile` and `mysql.TypeEnum` and `mysql.TypeSet` will return unexpected `ETInt` here,
+	// so here `evalType` are forcibly set to `ETString`.
+	// For mysql.TypeBit, just same as other aggregate function.
+	if argType == mysql.TypeEnum || argType == mysql.TypeSet || argType == mysql.TypeBit {
+		evalType = types.ETString
+	}
+
+	return evalType
+}
+
 func buildApproxPercentile(sctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDesc, ordinal int) AggFunc {
 	if aggFuncDesc.Mode == aggregation.DedupMode {
 		return nil
@@ -158,10 +174,7 @@ func buildApproxPercentile(sctx sessionctx.Context, aggFuncDesc *aggregation.Agg
 
 	base := basePercentile{percent: int(percent), baseAggFunc: baseAggFunc{args: aggFuncDesc.Args, ordinal: ordinal}}
 
-	evalType := aggFuncDesc.Args[0].GetType().EvalType()
-	if aggFuncDesc.Args[0].GetType().GetType() == mysql.TypeBit {
-		evalType = types.ETString // same as other aggregate function
-	}
+	evalType := getEvalTypeForApproxPercentile(aggFuncDesc)
 	switch aggFuncDesc.Mode {
 	case aggregation.CompleteMode, aggregation.Partial1Mode, aggregation.FinalMode:
 		switch evalType {
@@ -462,7 +475,7 @@ func buildGroupConcat(ctx sessionctx.Context, aggFuncDesc *aggregation.AggFuncDe
 			panic(fmt.Sprintf("Error happened when buildGroupConcat: %s", err.Error()))
 		}
 		var s string
-		s, err = variable.GetSessionOrGlobalSystemVar(ctx.GetSessionVars(), variable.GroupConcatMaxLen)
+		s, err = ctx.GetSessionVars().GetSessionOrGlobalSystemVar(context.Background(), variable.GroupConcatMaxLen)
 		if err != nil {
 			panic(fmt.Sprintf("Error happened when buildGroupConcat: no system variable named '%s'", variable.GroupConcatMaxLen))
 		}

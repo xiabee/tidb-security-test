@@ -75,7 +75,11 @@ func TestMiscVisitorCover(t *testing.T) {
 		&ast.PrivElem{},
 		&ast.VariableAssignment{Value: valueExpr},
 		&ast.KillStmt{},
-		&ast.DropStatsStmt{Table: &ast.TableName{}},
+		&ast.DropStatsStmt{
+			Tables: []*ast.TableName{
+				{},
+			},
+		},
 		&ast.ShutdownStmt{},
 	}
 
@@ -224,6 +228,18 @@ func TestTableOptimizerHintRestore(t *testing.T) {
 		{"IGNORE_INDEX(@sel_1 t1 c1)", "IGNORE_INDEX(@`sel_1` `t1` `c1`)"},
 		{"IGNORE_INDEX(t1@sel_1 c1)", "IGNORE_INDEX(`t1`@`sel_1` `c1`)"},
 		{"IGNORE_INDEX(t1@sel_1 partition(p0, p1) c1)", "IGNORE_INDEX(`t1`@`sel_1` PARTITION(`p0`, `p1`) `c1`)"},
+		{"ORDER_INDEX(t1 c1)", "ORDER_INDEX(`t1` `c1`)"},
+		{"ORDER_INDEX(test.t1 c1)", "ORDER_INDEX(`test`.`t1` `c1`)"},
+		{"ORDER_INDEX(@sel_1 t1 c1)", "ORDER_INDEX(@`sel_1` `t1` `c1`)"},
+		{"ORDER_INDEX(t1@sel_1 c1)", "ORDER_INDEX(`t1`@`sel_1` `c1`)"},
+		{"ORDER_INDEX(test.t1@sel_1 c1)", "ORDER_INDEX(`test`.`t1`@`sel_1` `c1`)"},
+		{"ORDER_INDEX(test.t1@sel_1 partition(p0) c1)", "ORDER_INDEX(`test`.`t1`@`sel_1` PARTITION(`p0`) `c1`)"},
+		{"NO_ORDER_INDEX(t1 c1)", "NO_ORDER_INDEX(`t1` `c1`)"},
+		{"NO_ORDER_INDEX(test.t1 c1)", "NO_ORDER_INDEX(`test`.`t1` `c1`)"},
+		{"NO_ORDER_INDEX(@sel_1 t1 c1)", "NO_ORDER_INDEX(@`sel_1` `t1` `c1`)"},
+		{"NO_ORDER_INDEX(t1@sel_1 c1)", "NO_ORDER_INDEX(`t1`@`sel_1` `c1`)"},
+		{"NO_ORDER_INDEX(test.t1@sel_1 c1)", "NO_ORDER_INDEX(`test`.`t1`@`sel_1` `c1`)"},
+		{"NO_ORDER_INDEX(test.t1@sel_1 partition(p0) c1)", "NO_ORDER_INDEX(`test`.`t1`@`sel_1` PARTITION(`p0`) `c1`)"},
 		{"TIDB_SMJ(`t1`)", "TIDB_SMJ(`t1`)"},
 		{"TIDB_SMJ(t1)", "TIDB_SMJ(`t1`)"},
 		{"TIDB_SMJ(t1,t2)", "TIDB_SMJ(`t1`, `t2`)"},
@@ -241,6 +257,8 @@ func TestTableOptimizerHintRestore(t *testing.T) {
 		{"INL_MERGE_JOIN(t1,t2)", "INL_MERGE_JOIN(`t1`, `t2`)"},
 		{"INL_JOIN(t1,t2)", "INL_JOIN(`t1`, `t2`)"},
 		{"HASH_JOIN(t1,t2)", "HASH_JOIN(`t1`, `t2`)"},
+		{"HASH_JOIN_BUILD(t1)", "HASH_JOIN_BUILD(`t1`)"},
+		{"HASH_JOIN_PROBE(t1)", "HASH_JOIN_PROBE(`t1`)"},
 		{"LEADING(t1)", "LEADING(`t1`)"},
 		{"LEADING(t1, c1)", "LEADING(`t1`, `c1`)"},
 		{"LEADING(t1, c1, t2)", "LEADING(`t1`, `c1`, `t2`)"},
@@ -275,6 +293,7 @@ func TestTableOptimizerHintRestore(t *testing.T) {
 		{"AGG_TO_COP()", "AGG_TO_COP()"},
 		{"AGG_TO_COP(@sel_1)", "AGG_TO_COP(@`sel_1`)"},
 		{"LIMIT_TO_COP()", "LIMIT_TO_COP()"},
+		{"MERGE()", "MERGE()"},
 		{"STRAIGHT_JOIN()", "STRAIGHT_JOIN()"},
 		{"NO_INDEX_MERGE()", "NO_INDEX_MERGE()"},
 		{"NO_INDEX_MERGE(@sel1)", "NO_INDEX_MERGE(@`sel1`)"},
@@ -336,13 +355,14 @@ func TestBRIESecureText(t *testing.T) {
 		n, ok := node.(ast.SensitiveStmtNode)
 		require.True(t, ok, comment)
 		require.Regexp(t, tc.secured, n.SecureText(), comment)
-
 	}
 }
 
 func TestCompactTableStmtRestore(t *testing.T) {
 	testCases := []NodeRestoreTestCase{
 		{"alter table abc compact tiflash replica", "ALTER TABLE `abc` COMPACT TIFLASH REPLICA"},
+		{"alter table abc compact", "ALTER TABLE `abc` COMPACT"},
+		{"alter table test.abc compact", "ALTER TABLE `test`.`abc` COMPACT"},
 	}
 	extractNodeFunc := func(node ast.Node) ast.Node {
 		return node.(*ast.CompactTableStmt)

@@ -277,7 +277,7 @@ var convertActionMap = map[funcProp][]string{
 		ast.ASCII, ast.BitLength, ast.Hex, ast.Length, ast.OctetLength, ast.ToBase64,
 		/* encrypt functions */
 		ast.AesDecrypt, ast.Decode, ast.Encode, ast.PasswordFunc, ast.MD5, ast.SHA, ast.SHA1,
-		ast.SHA2, ast.Compress, ast.AesEncrypt,
+		ast.SHA2, ast.SM3, ast.Compress, ast.AesEncrypt,
 	},
 	funcPropAuto: {
 		/* string functions */ ast.Concat, ast.ConcatWS, ast.ExportSet, ast.Field, ast.FindInSet,
@@ -289,7 +289,7 @@ var convertActionMap = map[funcProp][]string{
 		/* string comparing */
 		ast.Like, ast.Strcmp,
 		/* regex */
-		ast.Regexp,
+		ast.Regexp, ast.RegexpLike, ast.RegexpInStr, ast.RegexpSubstr, ast.RegexpReplace,
 		/* math */
 		ast.CRC32,
 	},
@@ -322,7 +322,8 @@ func HandleBinaryLiteral(ctx sessionctx.Context, expr Expression, ec *ExprCollat
 				return expr
 			}
 			return BuildToBinaryFunction(ctx, expr)
-		} else if argChs == charset.CharsetBin && dstChs != charset.CharsetBin {
+		} else if argChs == charset.CharsetBin && dstChs != charset.CharsetBin &&
+			expr.GetType().GetType() != mysql.TypeNull {
 			ft := expr.GetType().Clone()
 			ft.SetCharset(ec.Charset)
 			ft.SetCollate(ec.Collation)

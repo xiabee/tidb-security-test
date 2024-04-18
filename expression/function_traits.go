@@ -17,30 +17,33 @@ package expression
 import (
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/opcode"
+	"github.com/pingcap/tidb/sessionctx"
 )
-
-// GeneralPlanCacheableOp stores function which can be cached to general plan cache.
-var GeneralPlanCacheableOp = map[string]struct{}{
-	ast.LogicAnd: {},
-	ast.LogicOr:  {},
-	ast.GE:       {},
-	ast.LE:       {},
-	ast.EQ:       {},
-	ast.LT:       {},
-	ast.GT:       {},
-}
 
 // UnCacheableFunctions stores functions which can not be cached to plan cache.
 var UnCacheableFunctions = map[string]struct{}{
-	ast.Database:     {},
-	ast.CurrentUser:  {},
-	ast.CurrentRole:  {},
-	ast.User:         {},
-	ast.ConnectionID: {},
-	ast.LastInsertId: {},
-	ast.RowCount:     {},
-	ast.Version:      {},
-	ast.Like:         {},
+	ast.Database:             {},
+	ast.CurrentUser:          {},
+	ast.CurrentRole:          {},
+	ast.CurrentResourceGroup: {},
+	ast.User:                 {},
+	ast.ConnectionID:         {},
+	ast.LastInsertId:         {},
+	ast.RowCount:             {},
+	ast.Version:              {},
+	ast.Like:                 {},
+
+	// functions below are incompatible with (non-prep) plan cache, we'll fix them one by one later.
+	ast.JSONExtract:      {}, // cannot pass TestFuncJSON
+	ast.JSONObject:       {},
+	ast.JSONArray:        {},
+	ast.Coalesce:         {},
+	ast.Convert:          {},
+	ast.TimeLiteral:      {},
+	ast.DateLiteral:      {},
+	ast.TimestampLiteral: {},
+	ast.AesEncrypt:       {}, // affected by @@block_encryption_mode
+	ast.AesDecrypt:       {},
 }
 
 // unFoldableFunctions stores functions which can not be folded duration constant folding stage.
@@ -131,9 +134,21 @@ var IllegalFunctions4GeneratedColumns = map[string]struct{}{
 	ast.ReleaseAllLocks:  {},
 }
 
+// IsDeferredFunctions checks whether the function is in DeferredFunctions.
 // DeferredFunctions stores functions which are foldable but should be deferred as well when plan cache is enabled.
 // Note that, these functions must be foldable at first place, i.e, they are not in `unFoldableFunctions`.
-var DeferredFunctions = map[string]struct{}{
+func IsDeferredFunctions(ctx sessionctx.Context, fn string) bool {
+	_, ok := deferredFunctions[fn]
+	if ok {
+		return ok
+	}
+	if fn == ast.Sysdate && ctx.GetSessionVars().SysdateIsNow {
+		return true
+	}
+	return ok
+}
+
+var deferredFunctions = map[string]struct{}{
 	ast.Now:              {},
 	ast.RandomBytes:      {},
 	ast.CurrentTimestamp: {},

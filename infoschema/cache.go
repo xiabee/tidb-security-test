@@ -18,19 +18,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/pingcap/tidb/metrics"
+	infoschema_metrics "github.com/pingcap/tidb/infoschema/metrics"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
-)
-
-var (
-	getLatestCounter  = metrics.InfoCacheCounters.WithLabelValues("get", "latest")
-	getTSCounter      = metrics.InfoCacheCounters.WithLabelValues("get", "ts")
-	getVersionCounter = metrics.InfoCacheCounters.WithLabelValues("get", "version")
-
-	hitLatestCounter  = metrics.InfoCacheCounters.WithLabelValues("hit", "latest")
-	hitTSCounter      = metrics.InfoCacheCounters.WithLabelValues("hit", "ts")
-	hitVersionCounter = metrics.InfoCacheCounters.WithLabelValues("hit", "version")
 )
 
 // InfoCache handles information schema, including getting and setting.
@@ -65,17 +55,12 @@ func (h *InfoCache) Reset(capacity int) {
 func (h *InfoCache) GetLatest() InfoSchema {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	getLatestCounter.Inc()
+	infoschema_metrics.GetLatestCounter.Inc()
 	if len(h.cache) > 0 {
-		hitLatestCounter.Inc()
+		infoschema_metrics.HitLatestCounter.Inc()
 		return h.cache[0].infoschema
 	}
 	return nil
-}
-
-// Len returns the size of the cache
-func (h *InfoCache) Len() int {
-	return len(h.cache)
 }
 
 func (h *InfoCache) getSchemaByTimestampNoLock(ts uint64) (InfoSchema, bool) {
@@ -108,7 +93,7 @@ func (h *InfoCache) GetByVersion(version int64) InfoSchema {
 }
 
 func (h *InfoCache) getByVersionNoLock(version int64) InfoSchema {
-	getVersionCounter.Inc()
+	infoschema_metrics.GetVersionCounter.Inc()
 	i := sort.Search(len(h.cache), func(i int) bool {
 		return h.cache[i].infoschema.SchemaMetaVersion() <= version
 	})
@@ -132,7 +117,7 @@ func (h *InfoCache) getByVersionNoLock(version int64) InfoSchema {
 	// ```
 
 	if i < len(h.cache) && (i != 0 || h.cache[i].infoschema.SchemaMetaVersion() == version) {
-		hitVersionCounter.Inc()
+		infoschema_metrics.HitVersionCounter.Inc()
 		return h.cache[i].infoschema
 	}
 	return nil
@@ -145,9 +130,9 @@ func (h *InfoCache) GetBySnapshotTS(snapshotTS uint64) InfoSchema {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	getTSCounter.Inc()
+	infoschema_metrics.GetTSCounter.Inc()
 	if schema, ok := h.getSchemaByTimestampNoLock(snapshotTS); ok {
-		hitTSCounter.Inc()
+		infoschema_metrics.HitTSCounter.Inc()
 		return schema
 	}
 	return nil

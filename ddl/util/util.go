@@ -55,6 +55,8 @@ const (
 	DDLAllSchemaVersionsByJob = "/tidb/ddl/all_schema_by_job_versions"
 	// DDLGlobalSchemaVersion is the path on etcd that is used to store the latest schema versions.
 	DDLGlobalSchemaVersion = "/tidb/ddl/global_schema_version"
+	// ServerGlobalState is the path on etcd that is used to store the server global state.
+	ServerGlobalState = "/tidb/server/global_state"
 	// SessionTTL is the etcd session's TTL in seconds.
 	SessionTTL = 90
 )
@@ -123,16 +125,19 @@ func loadDeleteRangesFromTable(ctx context.Context, sctx sessionctx.Context, tab
 }
 
 // CompleteDeleteRange moves a record from gc_delete_range table to gc_delete_range_done table.
-func CompleteDeleteRange(sctx sessionctx.Context, dr DelRangeTask) error {
+func CompleteDeleteRange(sctx sessionctx.Context, dr DelRangeTask, needToRecordDone bool) error {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
 	_, err := sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, "BEGIN")
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	_, err = sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, recordDoneDeletedRangeSQL, dr.JobID, dr.ElementID)
-	if err != nil {
-		return errors.Trace(err)
+	if needToRecordDone {
+		_, err = sctx.(sqlexec.SQLExecutor).ExecuteInternal(ctx, recordDoneDeletedRangeSQL, dr.JobID, dr.ElementID)
+		if err != nil {
+			return errors.Trace(err)
+		}
 	}
 
 	err = RemoveFromGCDeleteRange(sctx, dr.JobID, dr.ElementID)
@@ -274,6 +279,54 @@ func DeleteKeyFromEtcd(key string, etcdCli *clientv3.Client, retryCnt int, timeo
 			return nil
 		}
 		logutil.BgLogger().Warn("[ddl] etcd-cli delete key failed", zap.String("key", key), zap.Error(err), zap.Int("retryCnt", i))
+	}
+	return errors.Trace(err)
+}
+
+// PutKVToEtcdMono puts key value to etcd monotonously.
+// etcdCli is client of etcd.
+// retryCnt is retry time when an error occurs.
+// opts are configures of etcd Operations.
+func PutKVToEtcdMono(ctx context.Context, etcdCli *clientv3.Client, retryCnt int, key, val string,
+	opts ...clientv3.OpOption) error {
+	var err error
+	for i := 0; i < retryCnt; i++ {
+		if err = ctx.Err(); err != nil {
+			return errors.Trace(err)
+		}
+
+		childCtx, cancel := context.WithTimeout(ctx, KeyOpDefaultTimeout)
+		var resp *clientv3.GetResponse
+		resp, err = etcdCli.Get(childCtx, key)
+		if err != nil {
+			cancel()
+			logutil.BgLogger().Warn("etcd-cli put kv failed", zap.String("category", "ddl"), zap.String("key", key), zap.String("value", val), zap.Error(err), zap.Int("retryCnt", i))
+			time.Sleep(KeyOpRetryInterval)
+			continue
+		}
+		prevRevision := int64(0)
+		if len(resp.Kvs) > 0 {
+			prevRevision = resp.Kvs[0].ModRevision
+		}
+
+		var txnResp *clientv3.TxnResponse
+		txnResp, err = etcdCli.Txn(childCtx).
+			If(clientv3.Compare(clientv3.ModRevision(key), "=", prevRevision)).
+			Then(clientv3.OpPut(key, val, opts...)).
+			Commit()
+
+		cancel()
+
+		if err == nil && txnResp.Succeeded {
+			return nil
+		}
+
+		if err == nil {
+			err = errors.New("performing compare-and-swap during PutKVToEtcd failed")
+		}
+
+		logutil.BgLogger().Warn("etcd-cli put kv failed", zap.String("category", "ddl"), zap.String("key", key), zap.String("value", val), zap.Error(err), zap.Int("retryCnt", i))
+		time.Sleep(KeyOpRetryInterval)
 	}
 	return errors.Trace(err)
 }

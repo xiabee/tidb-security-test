@@ -414,6 +414,9 @@ metrics-interval = 15
 # Record statements qps by database name if it is enabled.
 record-db-qps = false
 
+# Record database name label if it is enabled.
+record-db-label = false
+
 [performance]
 # Max CPUs to use, 0 use number of CPUs in the machine.
 max-procs = 0
@@ -732,10 +735,13 @@ enable-forwarding = true
 enable-global-kill = true
 tidb-max-reuse-chunk = 10
 tidb-max-reuse-column = 20
+tidb-enable-exit-check = false
 [performance]
 txn-total-size-limit=2000
 tcp-no-delay = false
 enable-load-fmsketch = true
+plan-replayer-dump-worker-concurrency = 1
+lite-init-stats = true
 force-init-stats = true
 [tikv-client]
 commit-timeout="41s"
@@ -828,6 +834,7 @@ max_connections = 200
 	require.Equal(t, 10240, conf.Status.GRPCInitialWindowSize)
 	require.Equal(t, 40960, conf.Status.GRPCMaxSendMsgSize)
 	require.True(t, conf.Performance.EnableLoadFMSketch)
+	require.True(t, conf.Performance.LiteInitStats)
 	require.True(t, conf.Performance.ForceInitStats)
 
 	err = f.Truncate(0)
@@ -1289,4 +1296,58 @@ func TestStatsLoadLimit(t *testing.T) {
 	checkQueueSizeValid(DefStatsLoadQueueSizeLimit-1, false)
 	checkQueueSizeValid(DefMaxOfStatsLoadQueueSizeLimit, true)
 	checkQueueSizeValid(DefMaxOfStatsLoadQueueSizeLimit+1, false)
+}
+
+func TestGetGlobalKeyspaceName(t *testing.T) {
+	conf := NewConfig()
+	require.Empty(t, conf.KeyspaceName)
+
+	UpdateGlobal(func(conf *Config) {
+		conf.KeyspaceName = "test"
+	})
+
+	require.Equal(t, "test", GetGlobalKeyspaceName())
+
+	UpdateGlobal(func(conf *Config) {
+		conf.KeyspaceName = ""
+	})
+}
+
+func TestAutoScalerConfig(t *testing.T) {
+	conf := NewConfig()
+	require.False(t, conf.UseAutoScaler)
+
+	conf = GetGlobalConfig()
+	require.False(t, conf.UseAutoScaler)
+
+	UpdateGlobal(func(conf *Config) {
+		conf.UseAutoScaler = true
+	})
+	require.True(t, GetGlobalConfig().UseAutoScaler)
+
+	UpdateGlobal(func(conf *Config) {
+		conf.UseAutoScaler = false
+	})
+}
+
+func TestInvalidConfigWithDeprecatedConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.toml")
+
+	f, err := os.Create(configFile)
+	require.NoError(t, err)
+
+	_, err = f.WriteString(`
+[log]
+slow-threshold = 1000
+[performance]
+enforce-mpp = 1
+	`)
+	require.NoError(t, err)
+	require.NoError(t, f.Sync())
+
+	var conf Config
+	err = conf.Load(configFile)
+	require.Error(t, err)
+	require.Equal(t, err.Error(), "toml: line 5 (last key \"performance.enforce-mpp\"): incompatible types: TOML value has type int64; destination has type boolean")
 }

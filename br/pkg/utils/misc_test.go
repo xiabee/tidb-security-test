@@ -146,10 +146,8 @@ func TestWithCleanUp(t *testing.T) {
 	err2 := errors.New("nya?")
 
 	case1 := func() (err error) {
-		// NOTE: the `return` is in a clousure which is an argument.
-		// I guess this should be a bug of the linter.
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint: all_revive,revive
+			//nolint:all_revive
 			return err1
 		})
 		return nil
@@ -158,7 +156,7 @@ func TestWithCleanUp(t *testing.T) {
 
 	case2 := func() (err error) {
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint: all_revive,revive
+			//nolint:all_revive
 			return err1
 		})
 		return err2
@@ -167,7 +165,7 @@ func TestWithCleanUp(t *testing.T) {
 
 	case3 := func() (err error) {
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint: all_revive,revive
+			//nolint:all_revive
 			return nil
 		})
 		return nil

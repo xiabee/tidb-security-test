@@ -56,6 +56,7 @@ type ProcessInfo struct {
 	User                  string
 	Info                  string
 	Port                  string
+	ResourceGroupName     string
 	PlanExplainRows       [][]string
 	TableIDs              []int64
 	IndexNames            []string
@@ -129,7 +130,7 @@ func (pi *ProcessInfo) ToRow(tz *time.Location) []interface{} {
 			diskConsumed = pi.DiskTracker.BytesConsumed()
 		}
 	}
-	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed, pi.txnStartTs(tz))
+	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed, pi.txnStartTs(tz), pi.ResourceGroupName)
 }
 
 // ascServerStatus is a slice of all defined server status in ascending order.

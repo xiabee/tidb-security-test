@@ -460,7 +460,6 @@ func (ts *basicHTTPHandlerTestSuite) startServer(t *testing.T) {
 	RunInGoTestChan = make(chan struct{})
 	server, err := NewServer(cfg, ts.tidbdrv)
 	require.NoError(t, err)
-	ts.server = server
 	go func() {
 		err := server.Run(ts.domain)
 		require.NoError(t, err)
@@ -468,6 +467,7 @@ func (ts *basicHTTPHandlerTestSuite) startServer(t *testing.T) {
 	<-RunInGoTestChan
 	ts.port = getPortFromTCPAddr(server.listener.Addr())
 	ts.statusPort = getPortFromTCPAddr(server.statusListener.Addr())
+	ts.server = server
 	ts.waitUntilServerOnline()
 
 	do, err := session.GetDomain(ts.store)
@@ -1304,4 +1304,89 @@ func TestSetLabelsConcurrentWithGetLabel(t *testing.T) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Labels = map[string]string{}
 	})
+}
+
+func TestUpgrade(t *testing.T) {
+	ts := createBasicHTTPHandlerTestSuite()
+	ts.startServer(t)
+	defer ts.stopServer(t)
+
+	resp, err := ts.fetchStatus("/upgrade/start")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	// test upgrade start
+	resp, err = ts.postStatus("/upgrade/start", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err := httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"success!\"", string(body))
+	// check the result
+	se, err := session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err := session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.True(t, isUpgrading)
+
+	// Do start upgrade again.
+	resp, err = ts.postStatus("/upgrade/start", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"It's a duplicated operation and the cluster is already in upgrading state.\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.True(t, isUpgrading)
+
+	// test upgrade finish
+	resp, err = ts.postStatus("/upgrade/finish", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"success!\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.False(t, isUpgrading)
+
+	// Do finish upgrade again.
+	resp, err = ts.postStatus("/upgrade/finish", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"It's a duplicated operation and the cluster is already in normal state.\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.False(t, isUpgrading)
 }

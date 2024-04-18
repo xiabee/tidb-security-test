@@ -35,6 +35,7 @@ import (
 	logbackupconf "github.com/pingcap/tidb/br/pkg/streamhelper/config"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/tiflashcompute"
 	"github.com/pingcap/tidb/util/tikvutil"
 	"github.com/pingcap/tidb/util/versioninfo"
 	tikvcfg "github.com/tikv/client-go/v2/config"
@@ -91,6 +92,8 @@ const (
 	DefTempDir = "/tmp/tidb"
 	// DefAuthTokenRefreshInterval is the default time interval to refresh tidb auth token.
 	DefAuthTokenRefreshInterval = time.Hour
+	// EnvVarKeyspaceName is the system env name for keyspace name.
+	EnvVarKeyspaceName = "KEYSPACE_NAME"
 )
 
 // Valid config maps
@@ -185,6 +188,7 @@ type Config struct {
 	VersionComment             string                  `toml:"version-comment" json:"version-comment"`
 	TiDBEdition                string                  `toml:"tidb-edition" json:"tidb-edition"`
 	TiDBReleaseVersion         string                  `toml:"tidb-release-version" json:"tidb-release-version"`
+	KeyspaceName               string                  `toml:"keyspace-name" json:"keyspace-name"`
 	Log                        Log                     `toml:"log" json:"log"`
 	Instance                   Instance                `toml:"instance" json:"instance"`
 	Security                   Security                `toml:"security" json:"security"`
@@ -284,10 +288,21 @@ type Config struct {
 	Plugin                     Plugin     `toml:"plugin" json:"plugin"`
 	MaxServerConnections       uint32     `toml:"max-server-connections" json:"max-server-connections"`
 	RunDDL                     bool       `toml:"run-ddl" json:"run-ddl"`
+
+	// These configs are related to disaggregated-tiflash mode.
+	DisaggregatedTiFlash         bool   `toml:"disaggregated-tiflash" json:"disaggregated-tiflash"`
+	TiFlashComputeAutoScalerType string `toml:"autoscaler-type" json:"autoscaler-type"`
+	TiFlashComputeAutoScalerAddr string `toml:"autoscaler-addr" json:"autoscaler-addr"`
+	IsTiFlashComputeFixedPool    bool   `toml:"is-tiflashcompute-fixed-pool" json:"is-tiflashcompute-fixed-pool"`
+	AutoScalerClusterID          string `toml:"autoscaler-cluster-id" json:"autoscaler-cluster-id"`
+	UseAutoScaler                bool   `toml:"use-autoscaler" json:"use-autoscaler"`
+
 	// TiDBMaxReuseChunk indicates max cached chunk num
 	TiDBMaxReuseChunk uint32 `toml:"tidb-max-reuse-chunk" json:"tidb-max-reuse-chunk"`
 	// TiDBMaxReuseColumn indicates max cached column num
 	TiDBMaxReuseColumn uint32 `toml:"tidb-max-reuse-column" json:"tidb-max-reuse-column"`
+	// TiDBEnableExitCheck indicates whether exit-checking in domain for background process
+	TiDBEnableExitCheck bool `toml:"tidb-enable-exit-check" json:"tidb-enable-exit-check"`
 }
 
 // UpdateTempStoragePath is to update the `TempStoragePath` if port/statusPort was changed
@@ -472,6 +487,9 @@ type Log struct {
 	EnableSlowLog       AtomicBool `toml:"enable-slow-log" json:"enable-slow-log"`
 	SlowThreshold       uint64     `toml:"slow-threshold" json:"slow-threshold"`
 	RecordPlanInSlowLog uint32     `toml:"record-plan-in-slow-log" json:"record-plan-in-slow-log"`
+
+	// Make tidb panic if write log operation hang in `Timeout` seconds
+	Timeout int `toml:"timeout" json:"timeout"`
 }
 
 // Instance is the section of instance scope system variables.
@@ -486,6 +504,20 @@ type Instance struct {
 	DDLSlowOprThreshold uint32 `toml:"ddl_slow_threshold" json:"ddl_slow_threshold"`
 	// ExpensiveQueryTimeThreshold indicates the time threshold of expensive query.
 	ExpensiveQueryTimeThreshold uint64 `toml:"tidb_expensive_query_time_threshold" json:"tidb_expensive_query_time_threshold"`
+	// StmtSummaryEnablePersistent indicates whether to enable file persistence for stmtsummary.
+	StmtSummaryEnablePersistent bool `toml:"tidb_stmt_summary_enable_persistent" json:"tidb_stmt_summary_enable_persistent"`
+	// StmtSummaryFilename indicates the file name written by stmtsummary
+	// when StmtSummaryEnablePersistent is true.
+	StmtSummaryFilename string `toml:"tidb_stmt_summary_filename" json:"tidb_stmt_summary_filename"`
+	// StmtSummaryFileMaxDays indicates how many days the files written by
+	// stmtsummary will be kept when StmtSummaryEnablePersistent is true.
+	StmtSummaryFileMaxDays int `toml:"tidb_stmt_summary_file_max_days" json:"tidb_stmt_summary_file_max_days"`
+	// StmtSummaryFileMaxSize indicates the maximum size (in mb) of a single file
+	// written by stmtsummary when StmtSummaryEnablePersistent is true.
+	StmtSummaryFileMaxSize int `toml:"tidb_stmt_summary_file_max_size" json:"tidb_stmt_summary_file_max_size"`
+	// StmtSummaryFileMaxBackups indicates the maximum number of files written
+	// by stmtsummary when StmtSummaryEnablePersistent is true.
+	StmtSummaryFileMaxBackups int `toml:"tidb_stmt_summary_file_max_backups" json:"tidb_stmt_summary_file_max_backups"`
 
 	// These variables exist in both 'instance' section and another place.
 	// The configuration in 'instance' section takes precedence.
@@ -627,6 +659,7 @@ type Status struct {
 	MetricsInterval uint   `toml:"metrics-interval" json:"metrics-interval"`
 	ReportStatus    bool   `toml:"report-status" json:"report-status"`
 	RecordQPSbyDB   bool   `toml:"record-db-qps" json:"record-db-qps"`
+	RecordDBLabel   bool   `toml:"record-db-label" json:"record-db-label"`
 	// After a duration of this time in seconds if the server doesn't see any activity it pings
 	// the client to see if the transport is still alive.
 	GRPCKeepAliveTime uint `toml:"grpc-keepalive-time" json:"grpc-keepalive-time"`
@@ -663,14 +696,15 @@ type Performance struct {
 	// Deprecated
 	MemProfileInterval string `toml:"-" json:"-"`
 
-	IndexUsageSyncLease              string `toml:"index-usage-sync-lease" json:"index-usage-sync-lease"`
-	PlanReplayerGCLease              string `toml:"plan-replayer-gc-lease" json:"plan-replayer-gc-lease"`
-	GOGC                             int    `toml:"gogc" json:"gogc"`
-	EnforceMPP                       bool   `toml:"enforce-mpp" json:"enforce-mpp"`
-	StatsLoadConcurrency             uint   `toml:"stats-load-concurrency" json:"stats-load-concurrency"`
-	StatsLoadQueueSize               uint   `toml:"stats-load-queue-size" json:"stats-load-queue-size"`
-	AnalyzePartitionConcurrencyQuota uint   `toml:"analyze-partition-concurrency-quota" json:"analyze-partition-concurrency-quota"`
-	EnableStatsCacheMemQuota         bool   `toml:"enable-stats-cache-mem-quota" json:"enable-stats-cache-mem-quota"`
+	IndexUsageSyncLease               string `toml:"index-usage-sync-lease" json:"index-usage-sync-lease"`
+	PlanReplayerGCLease               string `toml:"plan-replayer-gc-lease" json:"plan-replayer-gc-lease"`
+	GOGC                              int    `toml:"gogc" json:"gogc"`
+	EnforceMPP                        bool   `toml:"enforce-mpp" json:"enforce-mpp"`
+	StatsLoadConcurrency              uint   `toml:"stats-load-concurrency" json:"stats-load-concurrency"`
+	StatsLoadQueueSize                uint   `toml:"stats-load-queue-size" json:"stats-load-queue-size"`
+	AnalyzePartitionConcurrencyQuota  uint   `toml:"analyze-partition-concurrency-quota" json:"analyze-partition-concurrency-quota"`
+	PlanReplayerDumpWorkerConcurrency uint   `toml:"plan-replayer-dump-worker-concurrency" json:"plan-replayer-dump-worker-concurrency"`
+	EnableStatsCacheMemQuota          bool   `toml:"enable-stats-cache-mem-quota" json:"enable-stats-cache-mem-quota"`
 	// The following items are deprecated. We need to keep them here temporarily
 	// to support the upgrade process. They can be removed in future.
 
@@ -683,6 +717,8 @@ type Performance struct {
 	MemoryUsageAlarmRatio float64 `toml:"memory-usage-alarm-ratio" json:"memory-usage-alarm-ratio"`
 
 	EnableLoadFMSketch bool `toml:"enable-load-fmsketch" json:"enable-load-fmsketch"`
+
+	LiteInitStats bool `toml:"lite-init-stats" json:"lite-init-stats"`
 
 	// If ForceInitStats is true, when tidb starts up, it doesn't provide service until init stats is finished.
 	// If ForceInitStats is false, tidb can provide service before init stats is finished. Note that during the period
@@ -892,6 +928,11 @@ var defaultConf = Config{
 		EnablePProfSQLCPU:           false,
 		DDLSlowOprThreshold:         DefDDLSlowOprThreshold,
 		ExpensiveQueryTimeThreshold: DefExpensiveQueryTimeThreshold,
+		StmtSummaryEnablePersistent: false,
+		StmtSummaryFilename:         "tidb-statements.log",
+		StmtSummaryFileMaxDays:      3,
+		StmtSummaryFileMaxSize:      64,
+		StmtSummaryFileMaxBackups:   0,
 		EnableSlowLog:               *NewAtomicBool(logutil.DefaultTiDBEnableSlowLog),
 		SlowThreshold:               logutil.DefaultSlowThreshold,
 		RecordPlanInSlowLog:         logutil.DefaultRecordPlanInSlowLog,
@@ -911,6 +952,7 @@ var defaultConf = Config{
 		StatusPort:            DefStatusPort,
 		MetricsInterval:       15,
 		RecordQPSbyDB:         false,
+		RecordDBLabel:         false,
 		GRPCKeepAliveTime:     10,
 		GRPCKeepAliveTimeout:  3,
 		GRPCConcurrentStreams: 1024,
@@ -936,17 +978,19 @@ var defaultConf = Config{
 		CommitterConcurrency:  defTiKVCfg.CommitterConcurrency,
 		MaxTxnTTL:             defTiKVCfg.MaxTxnTTL, // 1hour
 		// TODO: set indexUsageSyncLease to 60s.
-		IndexUsageSyncLease:              "0s",
-		GOGC:                             100,
-		EnforceMPP:                       false,
-		PlanReplayerGCLease:              "10m",
-		StatsLoadConcurrency:             5,
-		StatsLoadQueueSize:               1000,
-		AnalyzePartitionConcurrencyQuota: 16,
-		EnableStatsCacheMemQuota:         false,
-		RunAutoAnalyze:                   true,
-		EnableLoadFMSketch:               false,
-		ForceInitStats:                   false,
+		IndexUsageSyncLease:               "0s",
+		GOGC:                              100,
+		EnforceMPP:                        false,
+		PlanReplayerGCLease:               "10m",
+		StatsLoadConcurrency:              5,
+		StatsLoadQueueSize:                1000,
+		AnalyzePartitionConcurrencyQuota:  16,
+		PlanReplayerDumpWorkerConcurrency: 1,
+		EnableStatsCacheMemQuota:          false,
+		RunAutoAnalyze:                    true,
+		EnableLoadFMSketch:                false,
+		LiteInitStats:                     false,
+		ForceInitStats:                    false,
 	},
 	ProxyProtocol: ProxyProtocol{
 		Networks:      "",
@@ -1001,8 +1045,15 @@ var defaultConf = Config{
 	NewCollationsEnabledOnFirstBootstrap: true,
 	EnableGlobalKill:                     true,
 	TrxSummary:                           DefaultTrxSummary(),
+	DisaggregatedTiFlash:                 false,
+	TiFlashComputeAutoScalerType:         tiflashcompute.DefASStr,
+	TiFlashComputeAutoScalerAddr:         tiflashcompute.DefAWSAutoScalerAddr,
+	IsTiFlashComputeFixedPool:            false,
+	AutoScalerClusterID:                  "",
+	UseAutoScaler:                        false,
 	TiDBMaxReuseChunk:                    64,
 	TiDBMaxReuseColumn:                   256,
+	TiDBEnableExitCheck:                  false,
 }
 
 var (
@@ -1186,13 +1237,16 @@ func (c *Config) RemovedVariableCheck(confFile string) error {
 // Load loads config options from a toml file.
 func (c *Config) Load(confFile string) error {
 	metaData, err := toml.DecodeFile(confFile, c)
+	if err != nil {
+		return err
+	}
 	if c.TokenLimit == 0 {
 		c.TokenLimit = 1000
 	}
 	// If any items in confFile file are not mapped into the Config struct, issue
 	// an error and stop the server from starting.
 	undecoded := metaData.Undecoded()
-	if len(undecoded) > 0 && err == nil {
+	if len(undecoded) > 0 {
 		var undecodedItems []string
 		for _, item := range undecoded {
 			undecodedItems = append(undecodedItems, item.String())
@@ -1315,6 +1369,17 @@ func (c *Config) Valid() error {
 		return fmt.Errorf("stats-load-queue-size should be [%d, %d]", DefStatsLoadQueueSizeLimit, DefMaxOfStatsLoadQueueSizeLimit)
 	}
 
+	// Check tiflash_compute topo fetch is valid.
+	if c.DisaggregatedTiFlash && c.UseAutoScaler {
+		if !tiflashcompute.IsValidAutoScalerConfig(c.TiFlashComputeAutoScalerType) {
+			return fmt.Errorf("invalid AutoScaler type, expect %s, %s or %s, got %s",
+				tiflashcompute.MockASStr, tiflashcompute.AWSASStr, tiflashcompute.GCPASStr, c.TiFlashComputeAutoScalerType)
+		}
+		if c.TiFlashComputeAutoScalerAddr == "" {
+			return fmt.Errorf("autoscaler-addr cannot be empty when disaggregated-tiflash mode is true")
+		}
+	}
+
 	// test log level
 	l := zap.NewAtomicLevel()
 	return l.UnmarshalText([]byte(c.Log.Level))
@@ -1352,7 +1417,10 @@ var TableLockDelayClean = func() uint64 {
 
 // ToLogConfig converts *Log to *logutil.LogConfig.
 func (l *Log) ToLogConfig() *logutil.LogConfig {
-	return logutil.NewLogConfig(l.Level, l.Format, l.SlowQueryFile, l.File, l.getDisableTimestamp(), func(config *zaplog.Config) { config.DisableErrorVerbose = l.getDisableErrorStack() })
+	return logutil.NewLogConfig(l.Level, l.Format, l.SlowQueryFile, l.File, l.getDisableTimestamp(),
+		func(config *zaplog.Config) { config.DisableErrorVerbose = l.getDisableErrorStack() },
+		func(config *zaplog.Config) { config.Timeout = l.Timeout },
+	)
 }
 
 // ToTracingConfig converts *OpenTracing to *tracing.Configuration.
@@ -1464,4 +1532,10 @@ func ContainHiddenConfig(s string) bool {
 		}
 	}
 	return false
+}
+
+// GetGlobalKeyspaceName is used to get global keyspace name
+// from config file or command line.
+func GetGlobalKeyspaceName() string {
+	return GetGlobalConfig().KeyspaceName
 }

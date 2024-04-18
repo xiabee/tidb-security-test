@@ -30,6 +30,7 @@ import (
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/memory"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/exp/slices"
 )
 
 func TestSingleTableRead(t *testing.T) {
@@ -721,13 +722,11 @@ func TestIntersectionWithDifferentConcurrency(t *testing.T) {
 					require.True(t, tk.HasNoPlan(sql, "PartitionUnion"))
 				} else {
 					tk.MustExec("set tidb_partition_prune_mode = 'static'")
-					res := tk.MustQuery("explain select /*+ use_index_merge(t1, primary, c2, c3) */ c1 from t1 where c2 < 1024 and c3 > 1024")
 					if tblIdx == 0 {
 						// partition table
 						require.True(t, tk.HasPlan(sql, "IndexMerge"))
 						require.True(t, tk.HasPlan(sql, "PartitionUnion"))
 					} else {
-						require.Contains(t, res.Rows()[1][0], "IndexMerge")
 						require.True(t, tk.HasPlan(sql, "IndexMerge"))
 						require.True(t, tk.HasNoPlan(sql, "PartitionUnion"))
 					}
@@ -947,6 +946,168 @@ func TestIndexMergeCoprGoroutinesLeak(t *testing.T) {
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/executor/testIndexMergePartialIndexWorkerCoprLeak"))
 }
 
+type valueStruct struct {
+	a int
+	b int
+	c int
+}
+
+func getResult(values []*valueStruct, a int, b int, limit int, desc bool) []*valueStruct {
+	ret := make([]*valueStruct, 0)
+	for _, value := range values {
+		if value.a == a || value.b == b {
+			ret = append(ret, value)
+		}
+	}
+	slices.SortFunc(ret, func(a, b *valueStruct) bool {
+		if desc {
+			return a.c > b.c
+		}
+		return a.c < b.c
+	})
+	if len(ret) > limit {
+		return ret[:limit]
+	}
+	return ret
+}
+
+func TestOrderByWithLimit(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	tk.MustExec("drop table if exists thandle, tpk, tcommon, thash, tcommonhash, tpkhash")
+	tk.MustExec("create table thandle(a int, b int, c int, index idx_ac(a, c), index idx_bc(b, c))")
+	tk.MustExec("create table tpk(a int, b int, c int, d int auto_increment, primary key(d), index idx_ac(a, c), index idx_bc(b, c))")
+	tk.MustExec("create table tcommon(a int, b int, c int, d int auto_increment, primary key(a, c, d), index idx_ac(a, c), index idx_bc(b, c))")
+	tk.MustExec("create table thash(a int, b int, c int, index idx_ac(a, c), index idx_bc(b, c)) PARTITION BY HASH (`a`) PARTITIONS 4")
+	tk.MustExec("create table tcommonhash(a int, b int, c int, d int auto_increment, primary key(a, c, d), index idx_bc(b, c)) PARTITION BY HASH (`c`) PARTITIONS 4")
+	tk.MustExec("create table tpkhash(a int, b int, c int, d int auto_increment, primary key(d), index idx_ac(a, c), index idx_bc(b, c)) PARTITION BY HASH (`d`) PARTITIONS 4")
+
+	valueSlice := make([]*valueStruct, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		a := rand.Intn(32)
+		b := rand.Intn(32)
+		c := rand.Intn(32)
+		tk.MustExec(fmt.Sprintf("insert into thandle values (%v, %v, %v)", a, b, c))
+		tk.MustExec(fmt.Sprintf("insert into tpk(a,b,c) values (%v, %v, %v)", a, b, c))
+		tk.MustExec(fmt.Sprintf("insert into tcommon(a,b,c) values (%v, %v, %v)", a, b, c))
+		tk.MustExec(fmt.Sprintf("insert into thash(a,b,c) values (%v, %v, %v)", a, b, c))
+		tk.MustExec(fmt.Sprintf("insert into tcommonhash(a,b,c) values (%v, %v, %v)", a, b, c))
+		tk.MustExec(fmt.Sprintf("insert into tpkhash(a,b,c) values (%v, %v, %v)", a, b, c))
+		valueSlice = append(valueSlice, &valueStruct{a, b, c})
+	}
+
+	tk.MustExec("analyze table thandle")
+	tk.MustExec("analyze table tpk")
+	tk.MustExec("analyze table tcommon")
+	tk.MustExec("analyze table thash")
+	tk.MustExec("analyze table tcommonhash")
+	tk.MustExec("analyze table tpkhash")
+
+	for i := 0; i < 100; i++ {
+		if i%2 == 0 {
+			tk.MustExec("set tidb_partition_prune_mode = `static-only`")
+		} else {
+			tk.MustExec("set tidb_partition_prune_mode = `dynamic-only`")
+		}
+		a := rand.Intn(32)
+		b := rand.Intn(32)
+		limit := rand.Intn(10) + 1
+		queryHandle := fmt.Sprintf("select /*+ use_index_merge(thandle, idx_ac, idx_bc) */ * from thandle where a = %v or b = %v order by c limit %v", a, b, limit)
+		resHandle := tk.MustQuery(queryHandle).Rows()
+		require.True(t, tk.HasPlan(queryHandle, "IndexMerge"))
+		require.False(t, tk.HasPlan(queryHandle, "TopN"))
+
+		queryPK := fmt.Sprintf("select /*+ use_index_merge(tpk, idx_ac, idx_bc) */ * from tpk where a = %v or b = %v order by c limit %v", a, b, limit)
+		resPK := tk.MustQuery(queryPK).Rows()
+		require.True(t, tk.HasPlan(queryPK, "IndexMerge"))
+		require.False(t, tk.HasPlan(queryPK, "TopN"))
+
+		queryCommon := fmt.Sprintf("select /*+ use_index_merge(tcommon, idx_ac, idx_bc) */ * from tcommon where a = %v or b = %v order by c limit %v", a, b, limit)
+		resCommon := tk.MustQuery(queryCommon).Rows()
+		require.True(t, tk.HasPlan(queryCommon, "IndexMerge"))
+		require.False(t, tk.HasPlan(queryCommon, "TopN"))
+
+		queryTableScan := fmt.Sprintf("select /*+ use_index_merge(tcommon, primary, idx_bc) */ * from tcommon where a = %v or b = %v order by c limit %v", a, b, limit)
+		resTableScan := tk.MustQuery(queryTableScan).Rows()
+		require.True(t, tk.HasPlan(queryTableScan, "IndexMerge"))
+		require.True(t, tk.HasPlan(queryTableScan, "TableRangeScan"))
+		require.False(t, tk.HasPlan(queryTableScan, "TopN"))
+
+		queryHash := fmt.Sprintf("select /*+ use_index_merge(thash, idx_ac, idx_bc) */ * from thash where a = %v or b = %v order by c limit %v", a, b, limit)
+		resHash := tk.MustQuery(queryHash).Rows()
+		require.True(t, tk.HasPlan(queryHash, "IndexMerge"))
+		if i%2 == 1 {
+			require.False(t, tk.HasPlan(queryHash, "TopN"))
+		}
+
+		queryCommonHash := fmt.Sprintf("select /*+ use_index_merge(tcommonhash, primary, idx_bc) */ * from tcommonhash where a = %v or b = %v order by c limit %v", a, b, limit)
+		resCommonHash := tk.MustQuery(queryCommonHash).Rows()
+		require.True(t, tk.HasPlan(queryCommonHash, "IndexMerge"))
+		if i%2 == 1 {
+			require.False(t, tk.HasPlan(queryCommonHash, "TopN"))
+		}
+
+		queryPKHash := fmt.Sprintf("select /*+ use_index_merge(tpkhash, idx_ac, idx_bc) */ * from tpkhash where a = %v or b = %v order by c limit %v", a, b, limit)
+		resPKHash := tk.MustQuery(queryPKHash).Rows()
+		require.True(t, tk.HasPlan(queryPKHash, "IndexMerge"))
+		if i%2 == 1 {
+			require.False(t, tk.HasPlan(queryPKHash, "TopN"))
+		}
+
+		sliceRes := getResult(valueSlice, a, b, limit, false)
+
+		require.Equal(t, len(sliceRes), len(resHandle))
+		require.Equal(t, len(sliceRes), len(resPK))
+		require.Equal(t, len(sliceRes), len(resCommon))
+		require.Equal(t, len(sliceRes), len(resTableScan))
+		require.Equal(t, len(sliceRes), len(resHash))
+		require.Equal(t, len(sliceRes), len(resCommonHash))
+		require.Equal(t, len(sliceRes), len(resPKHash))
+
+		for i := range sliceRes {
+			expectValue := fmt.Sprintf("%v", sliceRes[i].c)
+			// Only check column `c`
+			require.Equal(t, expectValue, resHandle[i][2])
+			require.Equal(t, expectValue, resPK[i][2])
+			require.Equal(t, expectValue, resCommon[i][2])
+			require.Equal(t, expectValue, resTableScan[i][2])
+			require.Equal(t, expectValue, resHash[i][2])
+			require.Equal(t, expectValue, resCommonHash[i][2])
+			require.Equal(t, expectValue, resPKHash[i][2])
+		}
+	}
+}
+
+func TestIndexMergeIssue49605(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test;")
+	tk.MustExec("drop table if exists t;")
+	tk.MustExec("CREATE TABLE `t` (`a` mediumint(9) NOT NULL,`b` year(4) NOT NULL,`c` varbinary(62) NOT NULL,`d` text COLLATE utf8mb4_unicode_ci NOT NULL,`e` tinyint(4) NOT NULL DEFAULT '115',`f` smallint(6) DEFAULT '2675',`g` date DEFAULT '1981-09-17',`h` mediumint(8) unsigned NOT NULL,`i` varchar(384) CHARACTER SET gbk COLLATE gbk_bin DEFAULT NULL,UNIQUE KEY `idx_23` (`h`,`f`),PRIMARY KEY (`h`,`a`) /*T![clustered_index] CLUSTERED */,UNIQUE KEY `idx_25` (`h`,`i`(5),`e`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin PARTITION BY HASH (`h`) PARTITIONS 1;")
+	tk.MustExec("INSERT INTO `t` VALUES (2065948,1999,_binary '8jxN','rf',-54,-5656,'1987-07-03',259254,'7me坨'),(-8248164,2024,_binary 'zA5A','s)DAkX3',-93,-12983,'2027-12-18',299573,'LUf咲'),(-6131509,2023,_binary 'xdex#Y2','1th%h',-51,19149,'2013-10-28',428279,'矷莒X'),(7545837,1998,_binary 'PCVO','&(lJw6',30,4093,'1987-07-03',736235,'腏@TOIJ'),(-7449472,2029,_binary 'B7&jrl','EjbFfX!',80,-7590,'2011-11-03',765580,'堮ZQF_'),(-7176200,1988,_binary 'tiPglv7mX_#','CnCtNb',-25,NULL,'1987-07-03',842956,'Gq羣嗳殓'),(-115168,2036,_binary 'BqmX$-4It','!8#dvH',82,18787,'1991-09-20',921706,'椉2庘v'),(6665100,1987,_binary '4IJgk0fr4','(D',-73,28628,'1987-07-03',1149668,'摔玝S渉'),(-4065661,2021,_binary '8G%','xDO39xw#',-107,17356,'1970-12-20',1316239,'+0c35掬-阗'),(7622462,1990,_binary '&o+)s)D0','kjoS9Dzld',84,688,'1987-07-03',1403663,'$H鍿_M~'),(5269354,2018,_binary 'wq9hC8','s8XPrN+',-2,-31272,'2008-05-26',1534517,'y椁n躁Q'),(2065948,1982,_binary '8jxNjbksV','g$+i4dg',11,19800,'1987-07-03',1591457,'z^+H~薼A'),(4076971,2024,_binary '&!RrsH','7Mpvk',-63,-632,'2032-10-28',1611011,'鬰+EXmx'),(3522062,1981,_binary ')nq#!UiHKk8','j~wFe77ai',50,6951,'1987-07-03',1716854,'J'),(7859777,2012,_binary 'PBA5xgJ&G&','UM7o!u',18,-5978,'1987-07-03',1967012,'e)浢L獹'),(2065948,2028,_binary '8jxNjbk','JmsEki9t4',51,12002,'2017-12-23',1981288,'mp氏襚');")
+	tk.MustQuery("explain format='brief' SELECT /*+ AGG_TO_COP() STREAM_AGG()*/ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`;").Check(
+		testkit.Rows("Projection 2666.67 root  istrue(or(not(ge(test.t.i, j筧8)), not(eq(test.t.i, 暈lH忧ll6))))->Column#11, Column#10, quote(test.t.i)->Column#12",
+			"└─StreamAgg 2666.67 root  group by:test.t.i, funcs:max(test.t.e)->Column#10, funcs:firstrow(test.t.i)->test.t.i",
+			"  └─Sort 3333.33 root  test.t.i",
+			"    └─IndexMerge 3333.33 root  type: union",
+			"      ├─TableRangeScan(Build) 3333.33 cop[tikv] table:t, partition:p0 range:(240817,+inf], keep order:false, stats:pseudo",
+			"      ├─IndexFullScan(Build) 0.00 cop[tikv] table:t, partition:p0, index:idx_25(h, i, e) keep order:false, stats:pseudo",
+			"      └─TableRowIDScan(Probe) 3333.33 cop[tikv] table:t, partition:p0 keep order:false, stats:pseudo"))
+	tk.MustQuery("select count(*) from (SELECT /*+ AGG_TO_COP() STREAM_AGG()*/ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`) derived;").Check(
+		testkit.Rows("16"))
+	tk.MustQuery("explain format='brief' SELECT /*+ AGG_TO_COP() */ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`;").Check(
+		testkit.Rows("Projection 2666.67 root  istrue(or(not(ge(test.t.i, j筧8)), not(eq(test.t.i, 暈lH忧ll6))))->Column#11, Column#10, quote(test.t.i)->Column#12",
+			"└─HashAgg 2666.67 root  group by:test.t.i, funcs:max(test.t.e)->Column#10, funcs:firstrow(test.t.i)->test.t.i",
+			"  └─IndexMerge 3333.33 root  type: union",
+			"    ├─TableRangeScan(Build) 3333.33 cop[tikv] table:t, partition:p0 range:(240817,+inf], keep order:false, stats:pseudo",
+			"    ├─IndexFullScan(Build) 0.00 cop[tikv] table:t, partition:p0, index:idx_25(h, i, e) keep order:false, stats:pseudo",
+			"    └─TableRowIDScan(Probe) 3333.33 cop[tikv] table:t, partition:p0 keep order:false, stats:pseudo"))
+	tk.MustQuery("select count(*) from (SELECT /*+ AGG_TO_COP() */ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`) derived;").Check(
+		testkit.Rows("16"))
+}
+
 func TestProcessInfoRaceWithIndexScan(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -976,33 +1137,4 @@ func TestProcessInfoRaceWithIndexScan(t *testing.T) {
 		tk.MustQuery("select /*+ use_index(t1, c1) */ c1 from t1 where c1 = 0 union all select /*+ use_index(t1, c2) */ c2 from t1 where c2 = 0 union all select /*+ use_index(t1, c3) */ c3 from t1 where c3 = 0 ")
 	}
 	wg.Wait()
-}
-
-func TestIndexMergeIssue49605(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test;")
-	tk.MustExec("drop table if exists t;")
-	tk.MustExec("CREATE TABLE `t` (`a` mediumint(9) NOT NULL,`b` year(4) NOT NULL,`c` varbinary(62) NOT NULL,`d` text COLLATE utf8mb4_unicode_ci NOT NULL,`e` tinyint(4) NOT NULL DEFAULT '115',`f` smallint(6) DEFAULT '2675',`g` date DEFAULT '1981-09-17',`h` mediumint(8) unsigned NOT NULL,`i` varchar(384) CHARACTER SET gbk COLLATE gbk_bin DEFAULT NULL,UNIQUE KEY `idx_23` (`h`,`f`),PRIMARY KEY (`h`,`a`) /*T![clustered_index] CLUSTERED */,UNIQUE KEY `idx_25` (`h`,`i`(5),`e`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin PARTITION BY HASH (`h`) PARTITIONS 1;")
-	tk.MustExec("INSERT INTO `t` VALUES (2065948,1999,_binary '8jxN','rf',-54,-5656,'1987-07-03',259254,'7me坨'),(-8248164,2024,_binary 'zA5A','s)DAkX3',-93,-12983,'2027-12-18',299573,'LUf咲'),(-6131509,2023,_binary 'xdex#Y2','1th%h',-51,19149,'2013-10-28',428279,'矷莒X'),(7545837,1998,_binary 'PCVO','&(lJw6',30,4093,'1987-07-03',736235,'腏@TOIJ'),(-7449472,2029,_binary 'B7&jrl','EjbFfX!',80,-7590,'2011-11-03',765580,'堮ZQF_'),(-7176200,1988,_binary 'tiPglv7mX_#','CnCtNb',-25,NULL,'1987-07-03',842956,'Gq羣嗳殓'),(-115168,2036,_binary 'BqmX$-4It','!8#dvH',82,18787,'1991-09-20',921706,'椉2庘v'),(6665100,1987,_binary '4IJgk0fr4','(D',-73,28628,'1987-07-03',1149668,'摔玝S渉'),(-4065661,2021,_binary '8G%','xDO39xw#',-107,17356,'1970-12-20',1316239,'+0c35掬-阗'),(7622462,1990,_binary '&o+)s)D0','kjoS9Dzld',84,688,'1987-07-03',1403663,'$H鍿_M~'),(5269354,2018,_binary 'wq9hC8','s8XPrN+',-2,-31272,'2008-05-26',1534517,'y椁n躁Q'),(2065948,1982,_binary '8jxNjbksV','g$+i4dg',11,19800,'1987-07-03',1591457,'z^+H~薼A'),(4076971,2024,_binary '&!RrsH','7Mpvk',-63,-632,'2032-10-28',1611011,'鬰+EXmx'),(3522062,1981,_binary ')nq#!UiHKk8','j~wFe77ai',50,6951,'1987-07-03',1716854,'J'),(7859777,2012,_binary 'PBA5xgJ&G&','UM7o!u',18,-5978,'1987-07-03',1967012,'e)浢L獹'),(2065948,2028,_binary '8jxNjbk','JmsEki9t4',51,12002,'2017-12-23',1981288,'mp氏襚');")
-
-	tk.MustQuery("explain format='brief' SELECT /*+ AGG_TO_COP() STREAM_AGG()*/ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`;").Check(
-		testkit.Rows("Projection 2666.67 root  istrue(or(not(ge(test.t.i, j筧8)), not(eq(test.t.i, 暈lH忧ll6))))->Column#11, Column#10, quote(test.t.i)->Column#12",
-			"└─StreamAgg 2666.67 root  group by:test.t.i, funcs:max(test.t.e)->Column#10, funcs:firstrow(test.t.i)->test.t.i",
-			"  └─Sort 3333.33 root  test.t.i",
-			"    └─IndexMerge 3333.33 root  type: union",
-			"      ├─TableRangeScan(Build) 3333.33 cop[tikv] table:t, partition:p0 range:(240817,+inf], keep order:false, stats:pseudo",
-			"      ├─IndexFullScan(Build) 0.00 cop[tikv] table:t, partition:p0, index:idx_25(h, i, e) keep order:false, stats:pseudo",
-			"      └─TableRowIDScan(Probe) 3333.33 cop[tikv] table:t, partition:p0 keep order:false, stats:pseudo"))
-	tk.MustQuery("select count(*) from (SELECT /*+ AGG_TO_COP() STREAM_AGG()*/ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`) derived;").Check(
-		testkit.Rows("16"))
-	tk.MustQuery("explain format='brief' SELECT /*+ AGG_TO_COP() */ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`;").Check(
-		testkit.Rows("Projection 2666.67 root  istrue(or(not(ge(test.t.i, j筧8)), not(eq(test.t.i, 暈lH忧ll6))))->Column#11, Column#10, quote(test.t.i)->Column#12",
-			"└─HashAgg 2666.67 root  group by:test.t.i, funcs:max(test.t.e)->Column#10, funcs:firstrow(test.t.i)->test.t.i",
-			"  └─IndexMerge 3333.33 root  type: union",
-			"    ├─TableRangeScan(Build) 3333.33 cop[tikv] table:t, partition:p0 range:(240817,+inf], keep order:false, stats:pseudo",
-			"    ├─IndexFullScan(Build) 0.00 cop[tikv] table:t, partition:p0, index:idx_25(h, i, e) keep order:false, stats:pseudo",
-			"    └─TableRowIDScan(Probe) 3333.33 cop[tikv] table:t, partition:p0 keep order:false, stats:pseudo"))
-	tk.MustQuery("select count(*) from (SELECT /*+ AGG_TO_COP() */ (NOT (`t`.`i`>=_UTF8MB4'j筧8') OR NOT (`t`.`i`=_UTF8MB4'暈lH忧ll6')) IS TRUE,MAX(`t`.`e`) AS `r0`,QUOTE(`t`.`i`) AS `r1` FROM `t` WHERE `t`.`h`>240817 OR `t`.`i` BETWEEN _UTF8MB4'WVz' AND _UTF8MB4'G#駧褉ZC領*lov' GROUP BY `t`.`i`) derived;").Check(
-		testkit.Rows("16"))
 }

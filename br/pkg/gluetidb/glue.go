@@ -30,6 +30,7 @@ var (
 
 const brComment = `/*from(br)*/`
 
+// New makes a new tidb glue.
 func New() Glue {
 	log.Debug("enabling no register config")
 	config.UpdateGlobal(func(conf *config.Config) {
@@ -63,6 +64,10 @@ func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
 	dom, err := session.GetDomain(store)
 	if err != nil {
 		return nil, errors.Trace(err)
+	}
+	err = session.InitMDLVariable(store)
+	if err != nil {
+		return nil, err
 	}
 	// create stats handler for backup and restore.
 	err = dom.UpdateTableStatsLoop(se, initStatsSe)
@@ -127,6 +132,10 @@ func (g Glue) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(glue
 	if err != nil {
 		return errors.Trace(err)
 	}
+	if err = session.InitMDLVariable(store); err != nil {
+		return errors.Trace(err)
+	}
+
 	// because domain was created during the whole program exists.
 	// and it will register br info to info syncer.
 	// we'd better close it as soon as possible.
@@ -174,7 +183,8 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 		defer rs.Close()
 		c := rs.NewChunk(nil)
 		if err := rs.Next(ctx, c); err != nil {
-			log.Warn("Error during draining result of internal sql.", logutil.Redact(zap.String("sql", sql)), logutil.ShortError(err))
+			log.Warn("Error during draining result of internal sql.",
+				logutil.Redact(zap.String("sql", sql)), logutil.ShortError(err))
 			return nil
 		}
 	}
@@ -258,25 +268,27 @@ func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...i
 }
 
 // CreateDatabase implements glue.Session.
-func (s *mockSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
+func (*mockSession) CreateDatabase(_ context.Context, _ *model.DBInfo) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreatePlacementPolicy implements glue.Session.
-func (s *mockSession) CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error {
+func (*mockSession) CreatePlacementPolicy(_ context.Context, _ *model.PolicyInfo) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreateTables implements glue.BatchCreateTableSession.
-func (s *mockSession) CreateTables(ctx context.Context, tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+func (*mockSession) CreateTables(_ context.Context, _ map[string][]*model.TableInfo,
+	_ ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreateTable implements glue.Session.
-func (s *mockSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
+func (*mockSession) CreateTable(_ context.Context, _ model.CIStr,
+	_ *model.TableInfo, _ ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }

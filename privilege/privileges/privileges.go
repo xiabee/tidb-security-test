@@ -32,7 +32,10 @@ import (
 	"github.com/pingcap/tidb/parser/auth"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/privilege"
+	"github.com/pingcap/tidb/privilege/conn"
+	"github.com/pingcap/tidb/privilege/privileges/ldap"
 	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/sessionstates"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
@@ -62,6 +65,7 @@ var dynamicPrivs = []string{
 	"RESTRICTED_USER_ADMIN",           // User can not have their access revoked by SUPER users.
 	"RESTRICTED_CONNECTION_ADMIN",     // Can not be killed by PROCESS/CONNECTION_ADMIN privilege
 	"RESTRICTED_REPLICA_WRITER_ADMIN", // Can write to the sever even when tidb_restriced_read_only is turned on.
+	"RESOURCE_GROUP_ADMIN",            // Create/Drop/Alter RESOURCE GROUP
 }
 var dynamicPrivLock sync.Mutex
 var defaultTokenLife = 15 * time.Minute
@@ -139,6 +143,7 @@ func (p *UserPrivileges) RequestVerification(activeRoles []*auth.RoleIdentity, d
 	// See https://dev.mysql.com/doc/refman/5.7/en/information-schema.html
 	dbLowerName := strings.ToLower(db)
 	tblLowerName := strings.ToLower(table)
+
 	// If SEM is enabled and the user does not have the RESTRICTED_TABLES_ADMIN privilege
 	// There are some hard rules which overwrite system tables and schemas as read-only at most.
 	semEnabled := sem.IsEnabled()
@@ -233,6 +238,8 @@ func (p *UserPrivileges) isValidHash(record *UserRecord) bool {
 		return true
 	case mysql.AuthTiDBAuthToken:
 		return true
+	case mysql.AuthLDAPSimple, mysql.AuthLDAPSASL:
+		return true
 	}
 
 	logutil.BgLogger().Error("user password from the mysql.user table not like a known hash format", zap.String("user", record.User), zap.String("plugin", record.AuthPlugin), zap.Int("hash_length", len(pwd)))
@@ -265,9 +272,11 @@ func (p *UserPrivileges) GetAuthPluginForConnection(user, host string) (string, 
 	if record == nil {
 		return "", errors.New("Failed to get user record")
 	}
-	if record.AuthPlugin == mysql.AuthTiDBAuthToken {
+	switch record.AuthPlugin {
+	case mysql.AuthTiDBAuthToken, mysql.AuthLDAPSASL, mysql.AuthLDAPSimple:
 		return record.AuthPlugin, nil
 	}
+
 	// zero-length auth string means no password for native and caching_sha2 auth.
 	// but for auth_socket it means there should be a 1-to-1 mapping between the TiDB user
 	// and the OS user.
@@ -307,6 +316,16 @@ func (p *UserPrivileges) MatchIdentity(user, host string, skipNameResolve bool) 
 		return record.User, record.Host, true
 	}
 	return "", "", false
+}
+
+// MatchUserResourceGroupName implements the Manager interface.
+func (p *UserPrivileges) MatchUserResourceGroupName(resourceGroupName string) (u string, success bool) {
+	mysqlPriv := p.Handle.Get()
+	record := mysqlPriv.matchResoureGroup(resourceGroupName)
+	if record != nil {
+		return record.User, true
+	}
+	return "", false
 }
 
 // GetAuthWithoutVerification implements the Manager interface.
@@ -492,19 +511,23 @@ func BuildPasswordLockingJSON(failedLoginAttempts int64,
 }
 
 // ConnectionVerification implements the Manager interface.
-func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUser, authHost string, authentication, salt []byte, sessionVars *variable.SessionVars) (info privilege.VerificationInfo, err error) {
+func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUser, authHost string, authentication, salt []byte, sessionVars *variable.SessionVars, authConn conn.AuthConn) (info privilege.VerificationInfo, err error) {
+	if SkipWithGrant {
+		p.user = authUser
+		p.host = authHost
+		// special handling to existing users or root user initialized with insecure
+		info.ResourceGroupName = "default"
+		return
+	}
+
 	hasPassword := "YES"
 	if len(authentication) == 0 {
 		hasPassword = "NO"
 	}
-	if SkipWithGrant {
-		p.user = authUser
-		p.host = authHost
-		return
-	}
 
 	mysqlPriv := p.Handle.Get()
 	record := mysqlPriv.connectionVerification(authUser, authHost)
+
 	if record == nil {
 		logutil.BgLogger().Error("get authUser privilege record fail",
 			zap.String("authUser", authUser), zap.String("authHost", authHost))
@@ -525,19 +548,39 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 		return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 	}
 
-	if record.AuthPlugin == mysql.AuthTiDBAuthToken {
+	// If the user uses session token to log in, skip checking record.AuthPlugin.
+	if user.AuthPlugin == mysql.AuthTiDBSessionToken {
+		if err = sessionstates.ValidateSessionToken(authentication, user.Username); err != nil {
+			logutil.BgLogger().Warn("verify session token failed", zap.String("username", user.Username), zap.Error(err))
+			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
+		}
+	} else if record.AuthPlugin == mysql.AuthTiDBAuthToken {
 		if len(authentication) == 0 {
 			logutil.BgLogger().Error("empty authentication")
 			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 		}
 		tokenString := string(hack.String(authentication[:len(authentication)-1]))
-		var claims map[string]interface{}
+		var (
+			claims map[string]interface{}
+		)
 		if claims, err = GlobalJWKS.checkSigWithRetry(tokenString, 1); err != nil {
 			logutil.BgLogger().Error("verify JWT failed", zap.Error(err))
 			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 		}
 		if err = checkAuthTokenClaims(claims, record, defaultTokenLife); err != nil {
 			logutil.BgLogger().Error("check claims failed", zap.Error(err))
+			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
+		}
+	} else if record.AuthPlugin == mysql.AuthLDAPSASL {
+		if err = ldap.LDAPSASLAuthImpl.AuthLDAPSASL(authUser, pwd, authentication, authConn); err != nil {
+			// though the pwd stores only `dn` for LDAP SASL, it could be unsafe to print it out.
+			// for example, someone may alter the auth plugin name but forgot to change the password...
+			logutil.BgLogger().Warn("verify through LDAP SASL failed", zap.String("username", user.Username), zap.Error(err))
+			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
+		}
+	} else if record.AuthPlugin == mysql.AuthLDAPSimple {
+		if err = ldap.LDAPSimpleAuthImpl.AuthLDAPSimple(authUser, pwd, authentication); err != nil {
+			logutil.BgLogger().Warn("verify through LDAP Simple failed", zap.String("username", user.Username), zap.Error(err))
 			return info, ErrAccessDenied.FastGenByArgs(user.Username, user.Hostname, hasPassword)
 		}
 	} else if len(pwd) > 0 && len(authentication) > 0 {
@@ -590,7 +633,17 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 		return info, errAccountHasBeenLocked.FastGenByArgs(user.Username, user.Hostname)
 	}
 
-	info.InSandBoxMode, err = p.CheckPasswordExpired(sessionVars, record)
+	// special handling to existing users or root user initialized with insecure
+	if record.ResourceGroup == "" {
+		info.ResourceGroupName = "default"
+	} else {
+		info.ResourceGroupName = record.ResourceGroup
+	}
+	// Skip checking password expiration if the session is migrated from another session.
+	// Otherwise, the user cannot log in or execute statements after migration.
+	if user.AuthPlugin != mysql.AuthTiDBSessionToken {
+		info.InSandBoxMode, err = p.CheckPasswordExpired(sessionVars, record)
+	}
 	return
 }
 

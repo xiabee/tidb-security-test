@@ -36,6 +36,7 @@ type InfoSchemaCache struct {
 func NewInfoSchemaCache(updateInterval time.Duration) *InfoSchemaCache {
 	return &InfoSchemaCache{
 		baseCache: newBaseCache(updateInterval),
+		Tables:    make(map[int64]*PhysicalTable),
 	}
 }
 
@@ -55,7 +56,9 @@ func (isc *InfoSchemaCache) Update(se session.Session) error {
 				continue
 			}
 
-			logger := logutil.BgLogger().With(zap.String("schema", db.Name.L), zap.Int64("tableID", tblInfo.ID), zap.String("tableName", tblInfo.Name.L))
+			logger := logutil.BgLogger().
+				With(zap.String("schema", db.Name.L),
+					zap.Int64("tableID", tblInfo.ID), zap.String("tableName", tblInfo.Name.L))
 
 			if tblInfo.Partition == nil {
 				ttlTable, err := isc.newTable(db.Name, tblInfo, nil)
@@ -71,7 +74,9 @@ func (isc *InfoSchemaCache) Update(se session.Session) error {
 				par := par
 				ttlTable, err := isc.newTable(db.Name, tblInfo, &par)
 				if err != nil {
-					logger.Warn("fail to build info schema cache", zap.Int64("partitionID", par.ID), zap.String("partition", par.Name.L), zap.Error(err))
+					logger.Warn("fail to build info schema cache",
+						zap.Int64("partitionID", par.ID),
+						zap.String("partition", par.Name.L), zap.Error(err))
 					continue
 				}
 				newTables[par.ID] = ttlTable
@@ -85,7 +90,8 @@ func (isc *InfoSchemaCache) Update(se session.Session) error {
 	return nil
 }
 
-func (isc *InfoSchemaCache) newTable(schema model.CIStr, tblInfo *model.TableInfo, par *model.PartitionDefinition) (*PhysicalTable, error) {
+func (isc *InfoSchemaCache) newTable(schema model.CIStr, tblInfo *model.TableInfo,
+	par *model.PartitionDefinition) (*PhysicalTable, error) {
 	id := tblInfo.ID
 	if par != nil {
 		id = par.ID

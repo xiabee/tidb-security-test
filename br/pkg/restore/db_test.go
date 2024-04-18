@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/types"
 	"github.com/pingcap/tidb/testkit"
-	"github.com/pingcap/tidb/ttl/ttlworker"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -369,12 +368,9 @@ func TestFilterDDLJobByRules(t *testing.T) {
 }
 
 func TestGetExistedUserDBs(t *testing.T) {
-	ttlworker.SkipTTLJobManager4Test = true
-
 	m, err := mock.NewCluster()
 	require.Nil(t, err)
 	defer m.Stop()
-
 	dom := m.Domain
 
 	dbs := restore.GetExistedUserDBs(dom)
@@ -385,7 +381,7 @@ func TestGetExistedUserDBs(t *testing.T) {
 			{Name: model.NewCIStr("mysql")},
 			{Name: model.NewCIStr("test")},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)
@@ -397,7 +393,7 @@ func TestGetExistedUserDBs(t *testing.T) {
 			{Name: model.NewCIStr("test")},
 			{Name: model.NewCIStr("d1")},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)
@@ -413,7 +409,7 @@ func TestGetExistedUserDBs(t *testing.T) {
 				State:  model.StatePublic,
 			},
 		},
-		nil, 1)
+		nil, nil, 1)
 	require.Nil(t, err)
 	dom.MockInfoCacheAndLoadInfoSchema(builder.Build())
 	dbs = restore.GetExistedUserDBs(dom)

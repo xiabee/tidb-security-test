@@ -20,8 +20,14 @@ import (
 	"math"
 	"sort"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,8 +40,9 @@ func randBytes(n int) []byte {
 func TestNoopKeyAdapter(t *testing.T) {
 	keyAdapter := noopKeyAdapter{}
 	key := randBytes(32)
-	require.Len(t, key, keyAdapter.EncodedLen(key))
-	encodedKey := keyAdapter.Encode(nil, key, 0)
+	rowID := randBytes(8)
+	require.Len(t, key, keyAdapter.EncodedLen(key, rowID))
+	encodedKey := keyAdapter.Encode(nil, key, rowID)
 	require.Equal(t, key, encodedKey)
 
 	decodedKey, err := keyAdapter.Decode(nil, encodedKey)
@@ -68,8 +75,9 @@ func TestDupDetectKeyAdapter(t *testing.T) {
 
 	keyAdapter := dupDetectKeyAdapter{}
 	for _, input := range inputs {
-		result := keyAdapter.Encode(nil, input.key, input.rowID)
-		require.Equal(t, keyAdapter.EncodedLen(input.key), len(result))
+		encodedRowID := common.EncodeIntRowID(input.rowID)
+		result := keyAdapter.Encode(nil, input.key, encodedRowID)
+		require.Equal(t, keyAdapter.EncodedLen(input.key, encodedRowID), len(result))
 
 		// Decode the result.
 		key, err := keyAdapter.Decode(nil, result)
@@ -89,7 +97,7 @@ func TestDupDetectKeyOrder(t *testing.T) {
 	keyAdapter := dupDetectKeyAdapter{}
 	encodedKeys := make([][]byte, 0, len(keys))
 	for _, key := range keys {
-		encodedKeys = append(encodedKeys, keyAdapter.Encode(nil, key, 1))
+		encodedKeys = append(encodedKeys, keyAdapter.Encode(nil, key, common.EncodeIntRowID(1)))
 	}
 	sorted := sort.SliceIsSorted(encodedKeys, func(i, j int) bool {
 		return bytes.Compare(encodedKeys[i], encodedKeys[j]) < 0
@@ -100,8 +108,8 @@ func TestDupDetectKeyOrder(t *testing.T) {
 func TestDupDetectEncodeDupKey(t *testing.T) {
 	keyAdapter := dupDetectKeyAdapter{}
 	key := randBytes(32)
-	result1 := keyAdapter.Encode(nil, key, 10)
-	result2 := keyAdapter.Encode(nil, key, 20)
+	result1 := keyAdapter.Encode(nil, key, common.EncodeIntRowID(10))
+	result2 := keyAdapter.Encode(nil, key, common.EncodeIntRowID(20))
 	require.NotEqual(t, result1, result2)
 }
 
@@ -114,7 +122,7 @@ func TestEncodeKeyToPreAllocatedBuf(t *testing.T) {
 	for _, keyAdapter := range keyAdapters {
 		key := randBytes(32)
 		buf := make([]byte, 256)
-		buf2 := keyAdapter.Encode(buf[:4], key, 1)
+		buf2 := keyAdapter.Encode(buf[:4], key, common.EncodeIntRowID(1))
 		require.True(t, startWithSameMemory(buf, buf2))
 		// Verify the encoded result first.
 		key2, err := keyAdapter.Decode(nil, buf2[4:])
@@ -126,7 +134,7 @@ func TestEncodeKeyToPreAllocatedBuf(t *testing.T) {
 func TestDecodeKeyToPreAllocatedBuf(t *testing.T) {
 	data := []byte{
 		0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf7,
-		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf,
+		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0x0, 0x8,
 	}
 	keyAdapters := []KeyAdapter{noopKeyAdapter{}, dupDetectKeyAdapter{}}
 	for _, keyAdapter := range keyAdapters {
@@ -143,7 +151,7 @@ func TestDecodeKeyToPreAllocatedBuf(t *testing.T) {
 func TestDecodeKeyDstIsInsufficient(t *testing.T) {
 	data := []byte{
 		0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0xff, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xf7,
-		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf,
+		0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0x0, 0x8,
 	}
 	keyAdapters := []KeyAdapter{noopKeyAdapter{}, dupDetectKeyAdapter{}}
 	for _, keyAdapter := range keyAdapters {
@@ -156,5 +164,52 @@ func TestDecodeKeyDstIsInsufficient(t *testing.T) {
 		require.False(t, startWithSameMemory(buf, buf2))
 		require.Equal(t, buf[:4], buf2[:4])
 		require.Equal(t, key, buf2[4:])
+	}
+}
+
+func TestMinRowID(t *testing.T) {
+	keyApapter := dupDetectKeyAdapter{}
+	key := []byte("key")
+	val := []byte("val")
+	shouldBeMin := keyApapter.Encode(key, val, MinRowID)
+
+	rowIDs := make([][]byte, 0, 20)
+
+	// DDL
+
+	rowIDs = append(rowIDs, kv.IntHandle(math.MinInt64).Encoded())
+	rowIDs = append(rowIDs, kv.IntHandle(-1).Encoded())
+	rowIDs = append(rowIDs, kv.IntHandle(0).Encoded())
+	rowIDs = append(rowIDs, kv.IntHandle(math.MaxInt64).Encoded())
+	handleData := []types.Datum{
+		types.NewIntDatum(math.MinInt64),
+		types.NewIntDatum(-1),
+		types.NewIntDatum(0),
+		types.NewIntDatum(math.MaxInt64),
+		types.NewBytesDatum(make([]byte, 1)),
+		types.NewBytesDatum(make([]byte, 7)),
+		types.NewBytesDatum(make([]byte, 8)),
+		types.NewBytesDatum(make([]byte, 9)),
+		types.NewBytesDatum(make([]byte, 100)),
+	}
+	for _, d := range handleData {
+		sc := &stmtctx.StatementContext{TimeZone: time.Local}
+		encodedKey, err := codec.EncodeKey(sc, nil, d)
+		require.NoError(t, err)
+		ch, err := kv.NewCommonHandle(encodedKey)
+		require.NoError(t, err)
+		rowIDs = append(rowIDs, ch.Encoded())
+	}
+
+	// lightning, IMPORT INTO, ...
+
+	numRowIDs := []int64{math.MinInt64, -1, 0, math.MaxInt64}
+	for _, id := range numRowIDs {
+		rowIDs = append(rowIDs, codec.EncodeComparableVarint(nil, id))
+	}
+
+	for _, id := range rowIDs {
+		bs := keyApapter.Encode(key, val, id)
+		require.True(t, bytes.Compare(bs, shouldBeMin) >= 0)
 	}
 }

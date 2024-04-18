@@ -21,20 +21,22 @@ import (
 	"os"
 	"runtime"
 	"strings"
-)
 
-// CPUShares returns the number of CPUs this cgroup can be expected to
-// max out. If there's no limit, NumCPU is returned.
-func (c CPUUsage) CPUShares() float64 {
-	if c.Period <= 0 || c.Quota <= 0 {
-		return float64(c.NumCPU)
-	}
-	return float64(c.Quota) / float64(c.Period)
-}
+	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
+)
 
 // GetCgroupCPU returns the CPU usage and quota for the current cgroup.
 func GetCgroupCPU() (CPUUsage, error) {
+	failpoint.Inject("GetCgroupCPUErr", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		if val.(bool) {
+			var cpuUsage CPUUsage
+			failpoint.Return(cpuUsage, errors.Errorf("mockAddBatchDDLJobsErr"))
+		}
+	})
 	cpuusage, err := getCgroupCPU("/")
+
 	cpuusage.NumCPU = runtime.NumCPU()
 	return cpuusage, err
 }
@@ -55,7 +57,12 @@ func CPUQuotaToGOMAXPROCS(minValue int) (int, CPUQuotaStatus, error) {
 
 // InContainer returns true if the process is running in a container.
 func InContainer() bool {
-	v, err := os.ReadFile(procPathCGroup)
+	// for cgroup V1, check /proc/self/cgroup, for V2, check /proc/self/mountinfo
+	return inContainer(procPathCGroup) || inContainer(procPathMountInfo)
+}
+
+func inContainer(path string) bool {
+	v, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}

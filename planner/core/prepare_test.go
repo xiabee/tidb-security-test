@@ -60,7 +60,7 @@ func TestPointGetPreparedPlan4PlanCache(t *testing.T) {
 
 	pspk1Id, _, _, err := tk1.Session().PrepareStmt("select * from t where a = ?")
 	require.NoError(t, err)
-	tk1.Session().GetSessionVars().PreparedStmts[pspk1Id].(*core.PlanCacheStmt).PreparedAst.UseCache = false
+	tk1.Session().GetSessionVars().PreparedStmts[pspk1Id].(*core.PlanCacheStmt).StmtCacheable = false
 
 	ctx := context.Background()
 	// first time plan generated
@@ -435,7 +435,7 @@ func TestPrepareCache(t *testing.T) {
 
 	// user u_tp
 	userSess := newSession(t, store, "test")
-	require.NoError(t, userSess.Auth(&auth.UserIdentity{Username: "u_tp", Hostname: "localhost"}, nil, nil))
+	require.NoError(t, userSess.Auth(&auth.UserIdentity{Username: "u_tp", Hostname: "localhost"}, nil, nil, nil))
 	mustExec(t, userSess, `prepare ps_stp_r from 'select * from tp where c1 > ?'`)
 	mustExec(t, userSess, `set @p2 = 2`)
 	tk.SetSession(userSess)
@@ -668,7 +668,7 @@ func TestPrepareCacheDeferredFunction(t *testing.T) {
 	tk.MustExec("prepare sel1 from 'select id, c1 from t1 where c1 < now(3)'")
 
 	sql1 := "execute sel1"
-	expectedPattern := `IndexReader\(Index\(t1.idx1\)\[\[-inf,[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) (2[0-3]|[01][0-9]):[0-5][0-9]:[0-5][0-9].[0-9][0-9][0-9]\)\]\)->Sel\(\[lt\(test.t1.c1, now\(3\)\)\]\)`
+	expectedPattern := `IndexReader\(Index\(t1.idx1\)\[\[-inf,[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) (2[0-3]|[01][0-9]):[0-5][0-9]:[0-5][0-9].[0-9][0-9][0-9]\)\]\)`
 
 	var cnt [2]float64
 	var planStr [2]string
@@ -717,6 +717,16 @@ func TestPrepareCacheNow(t *testing.T) {
 	require.Equal(t, rs[0][6].(string), rs[0][1].(string))
 	require.Equal(t, rs[0][7].(string), rs[0][2].(string))
 	require.Equal(t, rs[0][8].(string), rs[0][3].(string))
+
+	tk.MustExec("create table t (a int);")
+	tk.MustExec("insert into t values(1);")
+	tk.MustExec("set @@tidb_enable_prepared_plan_cache=0;")
+	tk.MustExec("set global tidb_sysdate_is_now=0;")
+	tk.MustExec("prepare s from 'select sleep(a), now(6), sysdate(6),sysdate(6)=now(6) from t';")
+	t1 := tk.MustQuery("execute s").Rows()
+	tk.MustExec("set global tidb_sysdate_is_now=1;")
+	t2 := tk.MustQuery("execute s").Rows()
+	require.NotEqual(t, t1, t2)
 }
 
 func TestPrepareOverMaxPreparedStmtCount(t *testing.T) {
@@ -1237,6 +1247,7 @@ func TestPlanCacheUnionScan(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`set tidb_enable_prepared_plan_cache=1`)
+	tk.MustExec(`set tidb_enable_non_prepared_plan_cache=0`) // insert-tmt can hit the cache and affect hit counter in this UT
 	pb := &dto.Metric{}
 	metrics.ResettablePlanCacheCounterFortTest = true
 	metrics.PlanCacheCounter.Reset()
@@ -1339,7 +1350,7 @@ func TestPlanCacheSwitchDB(t *testing.T) {
 
 	// DB is not specified
 	se2, err := session.CreateSession4TestWithOpt(store, &session.Opt{
-		PreparedPlanCache: core.NewLRUPlanCache(100, 0.1, math.MaxUint64, core.PickPlanFromBucket, tk.Session()),
+		PreparedPlanCache: core.NewLRUPlanCache(100, 0.1, math.MaxUint64, tk.Session(), false),
 	})
 	require.NoError(t, err)
 	tk2 := testkit.NewTestKitWithSession(t, store, se2)
@@ -1373,7 +1384,6 @@ func TestPlanCacheSwitchDB(t *testing.T) {
 }
 
 func TestPlanCacheHitInfo(t *testing.T) {
-	t.Skip("unstable, skip it and fix it before 20210705")
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`set tidb_enable_prepared_plan_cache=1`)
@@ -1420,7 +1430,7 @@ func TestIssue29303(t *testing.T) {
 	tk.MustQuery(`execute stmt using @a,@b,@c,@d`).Check(testkit.Rows())
 	tk.MustExec(`set @a="龂", @b="龂", @c="龂", @d="龂"`)
 	tk.MustQuery(`execute stmt using @a,@b,@c,@d`).Check(testkit.Rows("� 龂 � 龂"))
-	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("1"))
+	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0")) // unsafe range
 }
 
 func TestIssue34725(t *testing.T) {
@@ -1709,7 +1719,7 @@ func TestParamMarker4FastPlan(t *testing.T) {
 	tk.MustQuery("execute stmt using @a2, @a3;").Sort().Check(testkit.Rows("1 7", "1 8", "1 9"))
 	tk.MustExec(`set @a2=4, @a3=2`)
 	tk.MustQuery("execute stmt using @a2, @a3;").Sort().Check(testkit.Rows("1 10", "1 7", "1 8"))
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
+	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0")) // unsafe range
 }
 
 func TestIssue29565(t *testing.T) {
@@ -1811,7 +1821,7 @@ func TestIssue18066(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`set tidb_enable_prepared_plan_cache=1`)
 	tk.RefreshConnectionID()
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
 
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
@@ -1968,11 +1978,10 @@ func TestPlanCachePointGetAndTableDual(t *testing.T) {
 	tk.MustExec("insert into t2 values(1,'7777')")
 	tk.MustExec("prepare s2 from 'select * from t2 where c1>=? and c1<=?'")
 	tk.MustExec("set @a2=0, @b2=9")
-	// TableReader plan would be built, we should cache it.
 	tk.MustQuery("execute s2 using @a2, @a2").Check(testkit.Rows())
 	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
 	tk.MustQuery("execute s2 using @a2, @b2").Check(testkit.Rows("1 7777"))
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
+	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0")) // PointPlan
 
 	tk.MustExec("create table t3(c1 int, c2 int, c3 int, unique key(c1), key(c2))")
 	tk.MustExec("insert into t3 values(2,1,1)")
@@ -2004,7 +2013,7 @@ func TestPlanCachePointGetAndTableDual(t *testing.T) {
 	tk.MustQuery("execute s4 using @b4,@a4").Check(testkit.Rows())
 	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
 	tk.MustQuery("execute s4 using @a4,@b4").Check(testkit.Rows("2 1 1"))
-	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("1"))
+	tk.MustQuery("select @@last_plan_from_cache").Check(testkit.Rows("0"))
 }
 
 func TestIssue26873(t *testing.T) {
@@ -2813,7 +2822,7 @@ func TestIssue42739(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 
 	tk.MustExec(`use test`)
-	tk.MustExec(`drop table if exists t0;`)
+	tk.MustExec(`drop table if exists t0`)
 	tk.MustExec(`CREATE TABLE t0 (c1 double, c2 double);`)
 	tk.MustExec(`select
   exists (

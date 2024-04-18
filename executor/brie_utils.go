@@ -107,13 +107,7 @@ func BRIECreateTable(
 		sctx.GetSessionVars().ForeignKeyChecks = originForeignKeyChecks
 	}()
 
-	// Clone() does not clone partitions yet :(
 	table = table.Clone()
-	if table.Partition != nil {
-		newPartition := *table.Partition
-		newPartition.Definitions = append([]model.PartitionDefinition{}, table.Partition.Definitions...)
-		table.Partition = &newPartition
-	}
 
 	return d.CreateTableWithInfo(sctx, dbName, table, append(cs, ddl.OnExistIgnore)...)
 }
@@ -146,14 +140,7 @@ func BRIECreateTables(
 			queryBuilder.WriteString(query)
 			queryBuilder.WriteString(";")
 
-			table = table.Clone()
-			// Clone() does not clone partitions yet :(
-			if table.Partition != nil {
-				newPartition := *table.Partition
-				newPartition.Definitions = append([]model.PartitionDefinition{}, table.Partition.Definitions...)
-				table.Partition = &newPartition
-			}
-			cloneTables = append(cloneTables, table)
+			cloneTables = append(cloneTables, table.Clone())
 		}
 		sctx.SetValue(sessionctx.QueryString, queryBuilder.String())
 		if err := splitBatchCreateTable(sctx, dbName, cloneTables, cs...); err != nil {

@@ -70,7 +70,8 @@ func decodeCharacterSet(data []byte, characterSet string) ([]byte, error) {
 }
 
 // ExportStatement exports the SQL statement in the schema file.
-func ExportStatement(ctx context.Context, store storage.ExternalStorage, sqlFile FileInfo, characterSet string) ([]byte, error) {
+func ExportStatement(ctx context.Context, store storage.ExternalStorage,
+	sqlFile FileInfo, characterSet string) ([]byte, error) {
 	if sqlFile.FileMeta.Compression != CompressionNone {
 		compressType, err := ToStorageCompressType(sqlFile.FileMeta.Compression)
 		if err != nil {
@@ -163,15 +164,19 @@ func MakePooledReader(reader ReadSeekCloser, ioWorkers *worker.Pool) PooledReade
 
 // Read implements io.Reader
 func (pr PooledReader) Read(p []byte) (n int, err error) {
-	w := pr.ioWorkers.Apply()
-	defer pr.ioWorkers.Recycle(w)
+	if pr.ioWorkers != nil {
+		w := pr.ioWorkers.Apply()
+		defer pr.ioWorkers.Recycle(w)
+	}
 	return pr.reader.Read(p)
 }
 
 // Seek implements io.Seeker
 func (pr PooledReader) Seek(offset int64, whence int) (int64, error) {
-	w := pr.ioWorkers.Apply()
-	defer pr.ioWorkers.Recycle(w)
+	if pr.ioWorkers != nil {
+		w := pr.ioWorkers.Apply()
+		defer pr.ioWorkers.Recycle(w)
+	}
 	return pr.reader.Seek(offset, whence)
 }
 
@@ -182,7 +187,9 @@ func (pr PooledReader) Close() error {
 
 // ReadFull is same as `io.ReadFull(pr)` with less worker recycling
 func (pr PooledReader) ReadFull(buf []byte) (n int, err error) {
-	w := pr.ioWorkers.Apply()
-	defer pr.ioWorkers.Recycle(w)
+	if pr.ioWorkers != nil {
+		w := pr.ioWorkers.Apply()
+		defer pr.ioWorkers.Recycle(w)
+	}
 	return io.ReadFull(pr.reader, buf)
 }

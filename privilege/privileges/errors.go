@@ -26,6 +26,6 @@ var (
 	errLoadPrivilege                                      = dbterror.ClassPrivilege.NewStd(mysql.ErrLoadPrivilege)
 	ErrAccessDenied                                       = dbterror.ClassPrivilege.NewStd(mysql.ErrAccessDenied)
 	errAccountHasBeenLocked                               = dbterror.ClassPrivilege.NewStd(mysql.ErrAccountHasBeenLocked)
-	ErrMustChangePasswordLogin                            = dbterror.ClassPrivilege.NewStd(mysql.ErrMustChangePasswordLogin)
 	ErUserAccessDeniedForUserAccountBlockedByPasswordLock = dbterror.ClassPrivilege.NewStd(mysql.ErUserAccessDeniedForUserAccountBlockedByPasswordLock)
+	ErrMustChangePasswordLogin                            = dbterror.ClassPrivilege.NewStd(mysql.ErrMustChangePasswordLogin)
 )

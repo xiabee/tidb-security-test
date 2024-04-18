@@ -56,7 +56,7 @@ func (push *pushDown) pushBackup(
 	req backuppb.BackupRequest,
 	pr *rtree.ProgressRange,
 	stores []*metapb.Store,
-	checkpointRunner *checkpoint.CheckpointRunner,
+	checkpointRunner *checkpoint.CheckpointRunner[checkpoint.BackupKeyType, checkpoint.BackupValueType],
 	progressCallBack func(ProgressUnit),
 ) error {
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
@@ -164,8 +164,9 @@ func (push *pushDown) pushBackup(
 			if resp.GetError() == nil {
 				// None error means range has been backuped successfully.
 				if checkpointRunner != nil {
-					if err := checkpointRunner.Append(
+					if err := checkpoint.AppendForBackup(
 						ctx,
+						checkpointRunner,
 						pr.GroupKey,
 						resp.StartKey,
 						resp.EndKey,

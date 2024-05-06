@@ -31,21 +31,20 @@ import (
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/metautil"
-	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/ddl"
-	"github.com/pingcap/tidb/distsql"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/meta"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/util"
-	"github.com/pingcap/tidb/util/codec"
-	"github.com/pingcap/tidb/util/ranger"
-	filter "github.com/pingcap/tidb/util/table-filter"
+	"github.com/pingcap/tidb/pkg/ddl"
+	"github.com/pingcap/tidb/pkg/distsql"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/meta"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/redact"
+	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -443,55 +442,6 @@ func CheckBackupStorageIsLocked(ctx context.Context, s storage.ExternalStorage) 
 	return nil
 }
 
-// BuildTableRanges returns the key ranges encompassing the entire table,
-// and its partitions if exists.
-func BuildTableRanges(tbl *model.TableInfo) ([]kv.KeyRange, error) {
-	pis := tbl.GetPartitionInfo()
-	if pis == nil {
-		// Short path, no partition.
-		return appendRanges(tbl, tbl.ID)
-	}
-
-	ranges := make([]kv.KeyRange, 0, len(pis.Definitions)*(len(tbl.Indices)+1)+1)
-	for _, def := range pis.Definitions {
-		rgs, err := appendRanges(tbl, def.ID)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		ranges = append(ranges, rgs...)
-	}
-	return ranges, nil
-}
-
-func appendRanges(tbl *model.TableInfo, tblID int64) ([]kv.KeyRange, error) {
-	var ranges []*ranger.Range
-	if tbl.IsCommonHandle {
-		ranges = ranger.FullNotNullRange()
-	} else {
-		ranges = ranger.FullIntRange(false)
-	}
-
-	retRanges := make([]kv.KeyRange, 0, 1+len(tbl.Indices))
-	kvRanges, err := distsql.TableHandleRangesToKVRanges(nil, []int64{tblID}, tbl.IsCommonHandle, ranges, nil)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	retRanges = kvRanges.AppendSelfTo(retRanges)
-
-	for _, index := range tbl.Indices {
-		if index.State != model.StatePublic {
-			continue
-		}
-		ranges = ranger.FullRange()
-		idxRanges, err := distsql.IndexRangesToKVRanges(nil, tblID, index.ID, ranges, nil)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		retRanges = idxRanges.AppendSelfTo(retRanges)
-	}
-	return retRanges, nil
-}
-
 // BuildBackupRangeAndSchema gets KV range and schema of tables.
 // KV ranges are separated by Table IDs.
 // Also, KV ranges are separated by Index IDs in the same table.
@@ -555,7 +505,7 @@ func BuildBackupRangeAndInitSchema(
 			schemasNum += 1
 			hasTable = true
 			if buildRange {
-				tableRanges, err := BuildTableRanges(tableInfo)
+				tableRanges, err := distsql.BuildTableRanges(tableInfo)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -788,7 +738,7 @@ func WriteBackupDDLJobs(metaWriter *metautil.MetaWriter, g glue.Glue, store kv.S
 	newestMeta := meta.NewSnapshotMeta(store.GetSnapshot(kv.NewVersion(version.Ver)))
 	allJobs := make([]*model.Job, 0)
 	err = g.UseOneShotSession(store, !needDomain, func(se glue.Session) error {
-		allJobs, err = ddl.GetAllDDLJobs(se.GetSessionCtx(), newestMeta)
+		allJobs, err = ddl.GetAllDDLJobs(se.GetSessionCtx())
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -861,7 +811,7 @@ func (bc *Client) BackupRanges(
 	}
 
 	// we collect all files in a single goroutine to avoid thread safety issues.
-	workerPool := utils.NewWorkerPool(concurrency, "Ranges")
+	workerPool := util.NewWorkerPool(concurrency, "Ranges")
 	eg, ectx := errgroup.WithContext(ctx)
 	for id, r := range ranges {
 		id := id
@@ -911,8 +861,7 @@ func (bc *Client) BackupRange(
 	}()
 	logutil.CL(ctx).Info("backup range started",
 		logutil.Key("startKey", progressRange.Origin.StartKey), logutil.Key("endKey", progressRange.Origin.EndKey),
-		zap.Uint64("rateLimit", request.RateLimit),
-		zap.Uint32("concurrency", request.Concurrency))
+		zap.Uint64("rateLimit", request.RateLimit))
 
 	allStores, err := conn.GetAllTiKVStoresWithRetry(ctx, bc.mgr.GetPDClient(), connutil.SkipTiFlash)
 	if err != nil {
@@ -1011,23 +960,74 @@ func (bc *Client) BackupRange(
 	return nil
 }
 
-func (bc *Client) findTargetPeer(ctx context.Context, key []byte, isRawKv bool, targetStoreIds map[uint64]struct{}) (*metapb.Peer, error) {
+func (bc *Client) FindTargetPeer(ctx context.Context, key []byte, isRawKv bool, targetStoreIds map[uint64]struct{}) (*metapb.Peer, error) {
 	// Keys are saved in encoded format in TiKV, so the key must be encoded
 	// in order to find the correct region.
+	var leader *metapb.Peer
 	key = codec.EncodeBytesExt([]byte{}, key, isRawKv)
-	for i := 0; i < 5; i++ {
-		// better backoff.
+	state := utils.InitialRetryState(60, 100*time.Millisecond, 2*time.Second)
+	failpoint.Inject("retry-state-on-find-target-peer", func(v failpoint.Value) {
+		logutil.CL(ctx).Info("reset state for FindTargetPeer")
+		state = utils.InitialRetryState(v.(int), 100*time.Millisecond, 100*time.Millisecond)
+	})
+	err := utils.WithRetry(ctx, func() error {
 		region, err := bc.mgr.GetPDClient().GetRegion(ctx, key)
+		failpoint.Inject("return-region-on-find-target-peer", func(v failpoint.Value) {
+			switch v.(string) {
+			case "nil":
+				{
+					region = nil
+				}
+			case "hasLeader":
+				{
+					region = &pd.Region{
+						Leader: &metapb.Peer{
+							Id: 42,
+						},
+					}
+				}
+			case "hasPeer":
+				{
+					region = &pd.Region{
+						Meta: &metapb.Region{
+							Peers: []*metapb.Peer{
+								{
+									Id:      43,
+									StoreId: 42,
+								},
+							},
+						},
+					}
+				}
+
+			case "noLeader":
+				{
+					region = &pd.Region{
+						Leader: nil,
+					}
+				}
+			case "noPeer":
+				{
+					{
+						region = &pd.Region{
+							Meta: &metapb.Region{
+								Peers: nil,
+							},
+						}
+					}
+				}
+			}
+		})
 		if err != nil || region == nil {
 			logutil.CL(ctx).Error("find region failed", zap.Error(err), zap.Reflect("region", region))
-			time.Sleep(time.Millisecond * time.Duration(100*i))
-			continue
+			return errors.Annotate(berrors.ErrPDLeaderNotFound, "cannot find region from pd client")
 		}
 		if len(targetStoreIds) == 0 {
 			if region.Leader != nil {
 				logutil.CL(ctx).Info("find leader",
 					zap.Reflect("Leader", region.Leader), logutil.Key("key", key))
-				return region.Leader, nil
+				leader = region.Leader
+				return nil
 			}
 		} else {
 			candidates := make([]*metapb.Peer, 0, len(region.Meta.Peers))
@@ -1040,19 +1040,18 @@ func (bc *Client) findTargetPeer(ctx context.Context, key []byte, isRawKv bool, 
 				peer := candidates[rand.Intn(len(candidates))]
 				logutil.CL(ctx).Info("find target peer for backup",
 					zap.Reflect("Peer", peer), logutil.Key("key", key))
-				return peer, nil
+				leader = peer
+				return nil
 			}
 		}
-
-		logutil.CL(ctx).Warn("fail to find a target peer", logutil.Key("key", key))
-		time.Sleep(time.Millisecond * time.Duration(1000*i))
-		continue
+		return errors.Annotate(berrors.ErrPDLeaderNotFound, "cannot find leader or candidate from pd client")
+	}, &state)
+	if err != nil {
+		logutil.CL(ctx).Error("can not find a valid target peer after retry", logutil.Key("key", key))
+		return nil, err
 	}
-	logutil.CL(ctx).Error("can not find a valid target peer", logutil.Key("key", key))
-	if len(targetStoreIds) == 0 {
-		return nil, errors.Annotatef(berrors.ErrBackupNoLeader, "can not find a valid leader for key %s", key)
-	}
-	return nil, errors.Errorf("can not find a valid target peer for key %s", key)
+	// leader cannot be nil if err is nil
+	return leader, nil
 }
 
 func (bc *Client) fineGrainedBackup(
@@ -1226,7 +1225,7 @@ func (bc *Client) handleFineGrained(
 	targetStoreIds map[uint64]struct{},
 	respCh chan<- *backuppb.BackupResponse,
 ) (int, error) {
-	targetPeer, pderr := bc.findTargetPeer(ctx, req.StartKey, req.IsRawKv, targetStoreIds)
+	targetPeer, pderr := bc.FindTargetPeer(ctx, req.StartKey, req.IsRawKv, targetStoreIds)
 	if pderr != nil {
 		return 0, errors.Trace(pderr)
 	}

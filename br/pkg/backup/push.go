@@ -15,9 +15,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/utils"
+	"github.com/pingcap/tidb/pkg/util/redact"
 	"go.uber.org/zap"
 )
 
@@ -130,7 +130,7 @@ func (push *pushDown) pushBackup(
 			}
 			failpoint.Inject("backup-timeout-error", func(val failpoint.Value) {
 				msg := val.(string)
-				logutil.CL(ctx).Debug("failpoint backup-timeout-error injected.", zap.String("msg", msg))
+				logutil.CL(ctx).Info("failpoint backup-timeout-error injected.", zap.String("msg", msg))
 				resp.Error = &backuppb.Error{
 					Msg: msg,
 				}
@@ -192,7 +192,7 @@ func (push *pushDown) pushBackup(
 					}
 					return errors.Annotatef(berrors.ErrKVStorage, "error happen in store %v at %s: %s",
 						store.GetId(),
-						redact.String(store.GetAddress()),
+						redact.Value(store.GetAddress()),
 						errMsg,
 					)
 				default:

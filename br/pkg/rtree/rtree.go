@@ -9,8 +9,8 @@ import (
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/tablecodec"
 )
 
 // Range represents a backup response.
@@ -18,6 +18,7 @@ type Range struct {
 	StartKey []byte
 	EndKey   []byte
 	Files    []*backuppb.File
+	Size     uint64
 }
 
 // BytesAndKeys returns total bytes and keys in a range.
@@ -220,6 +221,7 @@ func (rangeTree *RangeTree) MergedRanges(splitSizeBytes, splitKeyCount uint64) [
 		} else {
 			// need to merge from rg to sortedRages[mergeTargetIndex]
 			sortedRanges[mergeTargetIndex].EndKey = rg.EndKey
+			sortedRanges[mergeTargetIndex].Size += rg.Size
 			sortedRanges[mergeTargetIndex].Files = append(sortedRanges[mergeTargetIndex].Files, rg.Files...)
 		}
 

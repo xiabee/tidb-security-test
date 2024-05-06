@@ -26,8 +26,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/util/codec"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
@@ -101,6 +101,7 @@ type fakeCluster struct {
 	testCtx   *testing.T
 
 	onGetClient        func(uint64) error
+	onClearCache       func(uint64) error
 	serviceGCSafePoint uint64
 	currentTS          uint64
 }
@@ -165,11 +166,11 @@ func (t trivialFlushStream) Context() context.Context {
 	return t.cx
 }
 
-func (t trivialFlushStream) SendMsg(m interface{}) error {
+func (t trivialFlushStream) SendMsg(m any) error {
 	return nil
 }
 
-func (t trivialFlushStream) RecvMsg(m interface{}) error {
+func (t trivialFlushStream) RecvMsg(m any) error {
 	return nil
 }
 
@@ -326,8 +327,8 @@ func (f *fakeCluster) GetLogBackupClient(ctx context.Context, storeID uint64) (l
 }
 
 func (f *fakeCluster) ClearCache(ctx context.Context, storeID uint64) error {
-	if f.onGetClient != nil {
-		err := f.onGetClient(storeID)
+	if f.onClearCache != nil {
+		err := f.onClearCache(storeID)
 		if err != nil {
 			return err
 		}
@@ -772,7 +773,7 @@ type mockPDClient struct {
 	fakeRegions []*region
 }
 
-func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
+func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
 	sort.Slice(p.fakeRegions, func(i, j int) bool {
 		return bytes.Compare(p.fakeRegions[i].rng.StartKey, p.fakeRegions[j].rng.StartKey) < 0
 	})
@@ -794,6 +795,10 @@ func (p *mockPDClient) GetStore(_ context.Context, storeID uint64) (*metapb.Stor
 		Id:      storeID,
 		Address: fmt.Sprintf("127.0.0.%d", storeID),
 	}, nil
+}
+
+func (p *mockPDClient) GetClusterID(ctx context.Context) uint64 {
+	return 1
 }
 
 func newMockRegion(regionID uint64, startKey []byte, endKey []byte) *pd.Region {

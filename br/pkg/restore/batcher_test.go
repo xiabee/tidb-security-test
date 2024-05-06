@@ -15,7 +15,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/rtree"
-	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -39,7 +39,9 @@ func (sender *drySender) RestoreBatch(ranges restore.DrainResult) {
 	defer sender.mu.Unlock()
 	log.Info("fake restore range", rtree.ZapRanges(ranges.Ranges))
 	sender.nBatch++
-	sender.rewriteRules.Append(*ranges.RewriteRules)
+	for _, r := range ranges.RewriteRulesMap {
+		sender.rewriteRules.Append(*r)
+	}
 	sender.ranges = append(sender.ranges, ranges.Ranges...)
 	sender.sink.EmitTables(ranges.BlankTablesAfterSend...)
 }

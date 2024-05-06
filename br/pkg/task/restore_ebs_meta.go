@@ -18,7 +18,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -116,8 +115,7 @@ func (h *restoreEBSMetaHelper) preRestore(ctx context.Context) error {
 	var (
 		tlsConf *tls.Config
 	)
-	pdAddress := strings.Join(h.cfg.PD, ",")
-	if len(pdAddress) == 0 {
+	if len(h.cfg.PD) == 0 {
 		return errors.Annotate(berrors.ErrInvalidArgument, "pd address can not be empty")
 	}
 
@@ -132,7 +130,7 @@ func (h *restoreEBSMetaHelper) preRestore(ctx context.Context) error {
 		}
 	}
 
-	controller, err := pdutil.NewPdController(ctx, pdAddress, tlsConf, securityOption)
+	controller, err := pdutil.NewPdController(ctx, h.cfg.PD, tlsConf, securityOption)
 	if err != nil {
 		log.Error("fail to create pd controller", zap.Error(err))
 		return errors.Trace(err)
@@ -241,6 +239,7 @@ func (h *restoreEBSMetaHelper) restoreVolumes(progress glue.Progress) (map[strin
 			log.Error("failed to create all volumes, cleaning up created volume")
 			ec2Session.DeleteVolumes(volumeIDMap)
 		}
+
 		if h.cfg.UseFSR {
 			err = ec2Session.DisableDataFSR(snapshotsIDsMap)
 			if err != nil {

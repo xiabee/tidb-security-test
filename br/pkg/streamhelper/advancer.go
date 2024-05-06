@@ -20,8 +20,9 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper/config"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/metrics"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/metrics"
+	"github.com/pingcap/tidb/pkg/util"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
@@ -224,7 +225,7 @@ func (c *CheckpointAdvancer) tryAdvance(ctx context.Context, length int,
 	defer utils.PanicToErr(&err)
 
 	ranges := spans.Collapse(length, getRange)
-	workers := utils.NewWorkerPool(uint(config.DefaultMaxConcurrencyAdvance)*4, "sub ranges")
+	workers := util.NewWorkerPool(uint(config.DefaultMaxConcurrencyAdvance)*4, "sub ranges")
 	eg, cx := errgroup.WithContext(ctx)
 	collector := NewClusterCollector(ctx, c.env)
 	collector.SetOnSuccessHook(func(u uint64, kr kv.KeyRange) {
@@ -289,7 +290,7 @@ func (c *CheckpointAdvancer) fetchRegionHint(ctx context.Context, startKey []byt
 	metrics.LogBackupCurrentLastRegionLeaderStoreID.Set(float64(l.StoreId))
 	return fmt.Sprintf("ID=%d,Leader=%d,ConfVer=%d,Version=%d,Peers=%v,RealRange=%s",
 		r.GetId(), l.GetStoreId(), r.GetRegionEpoch().GetConfVer(), r.GetRegionEpoch().GetVersion(),
-		prs, logutil.StringifyRange{StartKey: r.GetStartKey(), EndKey: r.GetEndKey()})
+		prs, logutil.StringifyRangeOf(r.GetStartKey(), r.GetEndKey()))
 }
 
 func (c *CheckpointAdvancer) CalculateGlobalCheckpointLight(ctx context.Context,
@@ -390,16 +391,16 @@ func (c *CheckpointAdvancer) StartTaskListener(ctx context.Context) {
 				return
 			case e, ok := <-ch:
 				if !ok {
-					log.Info("[log backup advancer] Task watcher exits due to stream ends.")
+					log.Info("Task watcher exits due to stream ends.", zap.String("category", "log backup advancer"))
 					return
 				}
-				log.Info("[log backup advancer] Meet task event", zap.Stringer("event", &e))
+				log.Info("Meet task event", zap.String("category", "log backup advancer"), zap.Stringer("event", &e))
 				if err := c.onTaskEvent(ctx, e); err != nil {
 					if errors.Cause(e.Err) != context.Canceled {
 						log.Error("listen task meet error, would reopen.", logutil.ShortError(err))
 						time.AfterFunc(c.cfg.BackoffTime, func() { c.StartTaskListener(ctx) })
 					}
-					log.Info("[log backup advancer] Task watcher exits due to some error.",
+					log.Info("Task watcher exits due to some error.", zap.String("category", "log backup advancer"),
 						logutil.ShortError(err))
 					return
 				}
@@ -546,7 +547,8 @@ func (c *CheckpointAdvancer) subscribeTick(ctx context.Context) error {
 	}
 	failpoint.Inject("get_subscriber", nil)
 	if err := c.subscriber.UpdateStoreTopology(ctx); err != nil {
-		log.Warn("[log backup advancer] Error when updating store topology.", logutil.ShortError(err))
+		log.Warn("Error when updating store topology.",
+			zap.String("category", "log backup advancer"), logutil.ShortError(err))
 	}
 	c.subscriber.HandleErrors(ctx)
 	return c.subscriber.PendingErrors()
@@ -631,7 +633,7 @@ func (c *CheckpointAdvancer) optionalTick(cx context.Context) error {
 	}
 	threshold := c.Config().GetDefaultStartPollThreshold()
 	if err := c.subscribeTick(cx); err != nil {
-		log.Warn("[log backup advancer] Subscriber meet error, would polling the checkpoint.",
+		log.Warn("Subscriber meet error, would polling the checkpoint.", zap.String("category", "log backup advancer"),
 			logutil.ShortError(err))
 		threshold = c.Config().GetSubscriberErrorStartPollThreshold()
 	}
@@ -655,13 +657,13 @@ func (c *CheckpointAdvancer) tick(ctx context.Context) error {
 	defer cancel()
 	err := c.optionalTick(cx)
 	if err != nil {
-		log.Warn("[log backup advancer] option tick failed.", logutil.ShortError(err))
+		log.Warn("option tick failed.", zap.String("category", "log backup advancer"), logutil.ShortError(err))
 		errs = multierr.Append(errs, err)
 	}
 
 	err = c.importantTick(ctx)
 	if err != nil {
-		log.Warn("[log backup advancer] important tick failed.", logutil.ShortError(err))
+		log.Warn("important tick failed.", zap.String("category", "log backup advancer"), logutil.ShortError(err))
 		errs = multierr.Append(errs, err)
 	}
 
@@ -678,7 +680,7 @@ func (c *CheckpointAdvancer) asyncResolveLocksForRanges(ctx context.Context, tar
 			return tikv.ResolveLocksForRange(
 				ctx, c.env, math.MaxUint64, r.StartKey, r.EndKey, tikv.NewGcResolveLockMaxBackoffer, tikv.GCScanLockLimit)
 		}
-		workerPool := utils.NewWorkerPool(uint(config.DefaultMaxConcurrencyAdvance), "advancer resolve locks")
+		workerPool := util.NewWorkerPool(uint(config.DefaultMaxConcurrencyAdvance), "advancer resolve locks")
 		var wg sync.WaitGroup
 		for _, r := range targets {
 			targetRange := r
@@ -711,13 +713,4 @@ func (c *CheckpointAdvancer) asyncResolveLocksForRanges(ctx context.Context, tar
 		c.lastCheckpointMu.Unlock()
 		c.inResolvingLock.Store(false)
 	}()
-}
-
-func (c *CheckpointAdvancer) TEST_registerCallbackForSubscriptions(f func()) int {
-	cnt := 0
-	for _, sub := range c.subscriber.subscriptions {
-		sub.onDaemonExit = f
-		cnt += 1
-	}
-	return cnt
 }

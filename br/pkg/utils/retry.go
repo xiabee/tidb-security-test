@@ -4,17 +4,18 @@ package utils
 
 import (
 	"context"
+	stderrs "errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/cznic/mathutil"
+	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
-	tmysql "github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/parser/terror"
+	tmysql "github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -237,11 +238,38 @@ func WithRetryV2[T any](
 		allErrors = multierr.Append(allErrors, err)
 		select {
 		case <-ctx.Done():
+			// allErrors must not be `nil` here, so ignore the context error.
 			return *new(T), allErrors
 		case <-time.After(backoffer.NextBackoff(err)):
 		}
 	}
 	return *new(T), allErrors // nolint:wrapcheck
+}
+
+// WithRetryReturnLastErr is like WithRetry but the returned error is the last
+// error during retry rather than a multierr.
+func WithRetryReturnLastErr(
+	ctx context.Context,
+	retryableFunc RetryableFunc,
+	backoffer Backoffer,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var lastErr error
+	for backoffer.Attempt() > 0 {
+		lastErr = retryableFunc()
+		if lastErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(backoffer.NextBackoff(lastErr)):
+		}
+	}
+
+	return lastErr
 }
 
 // MessageIsRetryableStorageError checks whether the message returning from TiKV is retryable ExternalStorageError.
@@ -328,11 +356,85 @@ func (r *RetryWithBackoffer) BackOff() error {
 // That intent will be fulfilled when calling `BackOff`.
 func (r *RetryWithBackoffer) RequestBackOff(ms int) {
 	r.mu.Lock()
-	r.nextBackoff = mathutil.Max(r.nextBackoff, ms)
+	r.nextBackoff = max(r.nextBackoff, ms)
 	r.mu.Unlock()
 }
 
 // Inner returns the reference to the inner `backoffer`.
 func (r *RetryWithBackoffer) Inner() *tikv.Backoffer {
 	return r.bo
+}
+
+type verboseBackoffer struct {
+	inner   Backoffer
+	logger  *zap.Logger
+	groupID uuid.UUID
+}
+
+func (v *verboseBackoffer) NextBackoff(err error) time.Duration {
+	nextBackoff := v.inner.NextBackoff(err)
+	v.logger.Warn("Encountered err, retrying.",
+		zap.Stringer("nextBackoff", nextBackoff),
+		zap.String("err", err.Error()),
+		zap.Stringer("gid", v.groupID))
+	return nextBackoff
+}
+
+// Attempt returns the remain attempt times
+func (v *verboseBackoffer) Attempt() int {
+	attempt := v.inner.Attempt()
+	if attempt > 0 {
+		v.logger.Debug("Retry attempt hint.", zap.Int("attempt", attempt), zap.Stringer("gid", v.groupID))
+	} else {
+		v.logger.Warn("Retry limit exceeded.", zap.Stringer("gid", v.groupID))
+	}
+	return attempt
+}
+
+func VerboseRetry(bo Backoffer, logger *zap.Logger) Backoffer {
+	if logger == nil {
+		logger = log.L()
+	}
+	vlog := &verboseBackoffer{
+		inner:   bo,
+		logger:  logger,
+		groupID: uuid.New(),
+	}
+	return vlog
+}
+
+type failedOnErr struct {
+	inner    Backoffer
+	failed   bool
+	failedOn []error
+}
+
+// NextBackoff returns a duration to wait before retrying again
+func (f *failedOnErr) NextBackoff(err error) time.Duration {
+	for _, fatalErr := range f.failedOn {
+		if stderrs.Is(errors.Cause(err), fatalErr) {
+			f.failed = true
+			return 0
+		}
+	}
+	if !f.failed {
+		return f.inner.NextBackoff(err)
+	}
+	return 0
+}
+
+// Attempt returns the remain attempt times
+func (f *failedOnErr) Attempt() int {
+	if f.failed {
+		return 0
+	}
+	return f.inner.Attempt()
+}
+
+func GiveUpRetryOn(bo Backoffer, errs ...error) Backoffer {
+	return &failedOnErr{
+		inner:    bo,
+		failed:   false,
+		failedOn: errs,
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -49,16 +50,14 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper/daemon"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/kv"
-	"github.com/pingcap/tidb/parser/model"
-	"github.com/pingcap/tidb/util/mathutil"
-	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/util/cdcutil"
 	"github.com/spf13/pflag"
 	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/oracle"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -136,11 +135,7 @@ func (cfg *StreamConfig) makeStorage(ctx context.Context) (storage.ExternalStora
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	opts := storage.ExternalStorageOptions{
-		NoCredentials:   cfg.NoCreds,
-		SendCredentials: cfg.SendCreds,
-		HTTPClient:      storage.GetDefaultHttpClient(cfg.MetadataDownloadBatchSize),
-	}
+	opts := getExternalStorageOptions(&cfg.Config, u)
 	storage, err := storage.New(ctx, u, &opts)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -322,8 +317,9 @@ func NewStreamMgr(ctx context.Context, cfg *StreamConfig, g glue.Glue, isStreamS
 		}
 
 		opts := storage.ExternalStorageOptions{
-			NoCredentials:   cfg.NoCreds,
-			SendCredentials: cfg.SendCreds,
+			NoCredentials:            cfg.NoCreds,
+			SendCredentials:          cfg.SendCreds,
+			CheckS3ObjectLockOptions: true,
 		}
 		if err = client.SetStorage(ctx, backend, &opts); err != nil {
 			return nil, errors.Trace(err)
@@ -419,8 +415,8 @@ func (s *streamMgr) buildObserveRanges(ctx context.Context) ([]kv.KeyRange, erro
 
 	mRange := stream.BuildObserveMetaRange()
 	rs := append([]kv.KeyRange{*mRange}, dRanges...)
-	slices.SortFunc(rs, func(i, j kv.KeyRange) bool {
-		return bytes.Compare(i.StartKey, j.StartKey) < 0
+	slices.SortFunc(rs, func(i, j kv.KeyRange) int {
+		return bytes.Compare(i.StartKey, j.StartKey)
 	})
 
 	return rs, nil
@@ -463,7 +459,7 @@ func (s *streamMgr) checkStreamStartEnable(g glue.Glue) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	execCtx := se.GetSessionCtx().(sqlexec.RestrictedSQLExecutor)
+	execCtx := se.GetSessionCtx().GetRestrictedSQLExecutor()
 	supportStream, err := utils.IsLogBackupEnabled(execCtx)
 	if err != nil {
 		return errors.Trace(err)
@@ -486,7 +482,7 @@ func KeepGcDisabled(g glue.Glue, store kv.Storage) (RestoreFunc, string, error) 
 		return nil, "", errors.Trace(err)
 	}
 
-	execCtx := se.GetSessionCtx().(sqlexec.RestrictedSQLExecutor)
+	execCtx := se.GetSessionCtx().GetRestrictedSQLExecutor()
 	oldRatio, err := utils.GetGcRatio(execCtx)
 	if err != nil {
 		return nil, "", errors.Trace(err)
@@ -973,7 +969,6 @@ func RunStreamTruncate(c context.Context, g glue.Glue, cmdName string, cfg *Stre
 		return err
 	}
 	defer utils.WithCleanUp(&err, 10*time.Second, func(ctx context.Context) error {
-		//nolint:all_revive
 		return storage.UnlockRemote(ctx, extStorage, truncateLockPath)
 	})
 
@@ -1084,12 +1079,12 @@ func checkTaskExists(ctx context.Context, cfg *RestoreConfig, etcdCLI *clientv3.
 
 	// check cdc changefeed
 	if cfg.CheckRequirements {
-		nameSet, err := utils.GetCDCChangefeedNameSet(ctx, etcdCLI)
+		nameSet, err := cdcutil.GetCDCChangefeedNameSet(ctx, etcdCLI)
 		if err != nil {
 			return err
 		}
 		if !nameSet.Empty() {
-			return errors.Errorf("%splease stop changefeed(s) before restore", nameSet.MessageToUser())
+			return errors.Errorf("%splease remove changefeed(s) before restore", nameSet.MessageToUser())
 		}
 	}
 	return nil
@@ -1462,7 +1457,13 @@ func createRestoreClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, m
 	var err error
 	keepaliveCfg := GetKeepalive(&cfg.Config)
 	keepaliveCfg.PermitWithoutStream = true
-	client := restore.NewRestoreClient(mgr.GetPDClient(), mgr.GetTLSConfig(), keepaliveCfg, false)
+	client := restore.NewRestoreClient(
+		mgr.GetPDClient(),
+		mgr.GetPDHTTPClient(),
+		mgr.GetTLSConfig(),
+		keepaliveCfg,
+		false,
+	)
 	err = client.Init(g, mgr.GetStorage())
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -1478,11 +1479,7 @@ func createRestoreClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, m
 		return nil, errors.Trace(err)
 	}
 
-	opts := storage.ExternalStorageOptions{
-		NoCredentials:   cfg.NoCreds,
-		SendCredentials: cfg.SendCreds,
-		HTTPClient:      storage.GetDefaultHttpClient(cfg.MetadataDownloadBatchSize),
-	}
+	opts := getExternalStorageOptions(&cfg.Config, u)
 	if err = client.SetStorage(ctx, u, &opts); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -1490,7 +1487,7 @@ func createRestoreClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, m
 	client.SetCrypter(&cfg.CipherInfo)
 	client.SetConcurrency(uint(cfg.Concurrency))
 	client.SetSwitchModeInterval(cfg.SwitchModeInterval)
-	client.InitClients(u, false, false)
+	client.InitClients(ctx, u, false, false)
 
 	rawKVClient, err := newRawBatchClient(ctx, cfg.PD, cfg.TLS)
 	if err != nil {
@@ -1504,6 +1501,18 @@ func createRestoreClient(ctx context.Context, g glue.Glue, cfg *RestoreConfig, m
 	}
 
 	return client, nil
+}
+
+func getExternalStorageOptions(cfg *Config, u *backuppb.StorageBackend) storage.ExternalStorageOptions {
+	var httpClient *http.Client
+	if u.GetGcs() == nil {
+		httpClient = storage.GetDefaultHttpClient(cfg.MetadataDownloadBatchSize)
+	}
+	return storage.ExternalStorageOptions{
+		NoCredentials:   cfg.NoCreds,
+		SendCredentials: cfg.SendCreds,
+		HTTPClient:      httpClient,
+	}
 }
 
 func checkLogRange(restoreFrom, restoreTo, logMinTS, logMaxTS uint64) error {
@@ -1582,14 +1591,14 @@ func getLogRangeWithStorage(
 	if err != nil {
 		return backupLogInfo{}, errors.Trace(err)
 	}
-	logMinTS := mathutil.Max(logStartTS, truncateTS)
+	logMinTS := max(logStartTS, truncateTS)
 
 	// get max global resolved ts from metas.
 	logMaxTS, err := getGlobalCheckpointFromStorage(ctx, s)
 	if err != nil {
 		return backupLogInfo{}, errors.Trace(err)
 	}
-	logMaxTS = mathutil.Max(logMinTS, logMaxTS)
+	logMaxTS = max(logMinTS, logMaxTS)
 
 	return backupLogInfo{
 		logMaxTS:  logMaxTS,
@@ -1611,7 +1620,7 @@ func getGlobalCheckpointFromStorage(ctx context.Context, s storage.ExternalStora
 			return errors.Trace(err)
 		}
 		ts := binary.LittleEndian.Uint64(buff)
-		globalCheckPointTS = mathutil.Max(ts, globalCheckPointTS)
+		globalCheckPointTS = max(ts, globalCheckPointTS)
 		return nil
 	})
 	return globalCheckPointTS, errors.Trace(err)

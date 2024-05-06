@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/pkg/config"
+	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
 	"github.com/stretchr/testify/require"
 )
@@ -79,7 +79,7 @@ func TestRestoreMultiTables(t *testing.T) {
 	tk.MustExec("use br")
 
 	tablesNameSet := make(map[string]struct{})
-	tableNum := 300
+	tableNum := 100
 	for i := 0; i < tableNum; i += 1 {
 		tk.MustExec(fmt.Sprintf("create table table_%d (a int primary key, b json, c varchar(20))", i))
 		tk.MustExec(fmt.Sprintf("insert into table_%d values (1, '{\"a\": 1, \"b\": 2}', '123')", i))

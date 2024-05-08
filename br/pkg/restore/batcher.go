@@ -36,6 +36,7 @@ const (
 type Batcher struct {
 	cachedTables   []TableWithRange
 	cachedTablesMu *sync.Mutex
+	rewriteRules   *RewriteRules
 
 	// autoCommitJoiner is for joining the background batch sender.
 	autoCommitJoiner chan<- struct{}
@@ -113,6 +114,7 @@ func NewBatcher(
 	outCh := DefaultOutputTableChan()
 	sendChan := make(chan SendType, 2)
 	b := &Batcher{
+		rewriteRules:       EmptyRewriteRule(),
 		sendErr:            errCh,
 		outCh:              outCh,
 		sender:             sender,
@@ -225,10 +227,8 @@ type DrainResult struct {
 	TablesToSend []CreatedTable
 	// BlankTablesAfterSend are tables that will be full-restored after this batch send.
 	BlankTablesAfterSend []CreatedTable
-	// RewriteRules are the rewrite rules for the tables.
-	// the key is the table id after rewritten.
-	RewriteRulesMap map[int64]*RewriteRules
-	Ranges          []rtree.Range
+	RewriteRules         *RewriteRules
+	Ranges               []rtree.Range
 	// Record which part of ranges belongs to the table
 	TableEndOffsetInRanges []int
 }
@@ -240,19 +240,14 @@ func (result DrainResult) Files() []TableIDWithFiles {
 	for i, endOffset := range result.TableEndOffsetInRanges {
 		tableID := result.TablesToSend[i].Table.ID
 		ranges := result.Ranges[startOffset:endOffset]
-		// each range has at least a default file + a write file
-		files := make([]*backuppb.File, 0, len(ranges)*2)
+		files := make([]*backuppb.File, 0, len(result.Ranges)*2)
 		for _, rg := range ranges {
 			files = append(files, rg.Files...)
 		}
-		var rules *RewriteRules
-		if r, ok := result.RewriteRulesMap[tableID]; ok {
-			rules = r
-		}
+
 		tableIDWithFiles = append(tableIDWithFiles, TableIDWithFiles{
-			TableID:      tableID,
-			Files:        files,
-			RewriteRules: rules,
+			TableID: tableID,
+			Files:   files,
 		})
 
 		// update start offset
@@ -266,7 +261,7 @@ func newDrainResult() DrainResult {
 	return DrainResult{
 		TablesToSend:           make([]CreatedTable, 0),
 		BlankTablesAfterSend:   make([]CreatedTable, 0),
-		RewriteRulesMap:        EmptyRewriteRulesMap(),
+		RewriteRules:           EmptyRewriteRule(),
 		Ranges:                 make([]rtree.Range, 0),
 		TableEndOffsetInRanges: make([]int, 0),
 	}
@@ -334,7 +329,7 @@ func (b *Batcher) drainRanges() DrainResult {
 		thisTableLen := len(thisTable.Range)
 		collected := len(result.Ranges)
 
-		result.RewriteRulesMap[thisTable.Table.ID] = thisTable.RewriteRule
+		result.RewriteRules.Append(*thisTable.RewriteRule)
 		result.TablesToSend = append(result.TablesToSend, thisTable.CreatedTable)
 
 		// the batch is full, we should stop here!
@@ -428,6 +423,7 @@ func (b *Batcher) Add(tbs TableWithRange) {
 		zap.Int("batch size", b.Len()),
 	)
 	b.cachedTables = append(b.cachedTables, tbs)
+	b.rewriteRules.Append(*tbs.RewriteRule)
 	atomic.AddInt32(&b.size, int32(len(tbs.Range)))
 	b.cachedTablesMu.Unlock()
 

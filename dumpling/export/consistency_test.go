@@ -11,9 +11,9 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/tidb/br/pkg/version"
+	dbconfig "github.com/pingcap/tidb/config"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
-	dbconfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/errno"
 	"github.com/stretchr/testify/require"
 )
 

@@ -11,12 +11,12 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/distsql"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/util/ranger"
+	"github.com/pingcap/tidb/distsql"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/util/ranger"
 	"github.com/pingcap/tipb/go-tipb"
 	"go.uber.org/zap"
 )
@@ -33,9 +33,6 @@ type ExecutorBuilder struct {
 
 	oldKeyspace []byte
 	newKeyspace []byte
-
-	resourceGroupName         string
-	explicitRequestSourceType string
 }
 
 // NewExecutorBuilder returns a new executor builder.
@@ -76,16 +73,6 @@ func (builder *ExecutorBuilder) SetNewKeyspace(keyspace []byte) *ExecutorBuilder
 	return builder
 }
 
-func (builder *ExecutorBuilder) SetResourceGroupName(name string) *ExecutorBuilder {
-	builder.resourceGroupName = name
-	return builder
-}
-
-func (builder *ExecutorBuilder) SetExplicitRequestSourceType(name string) *ExecutorBuilder {
-	builder.explicitRequestSourceType = name
-	return builder
-}
-
 // Build builds a checksum executor.
 func (builder *ExecutorBuilder) Build() (*Executor, error) {
 	reqs, err := buildChecksumRequest(
@@ -95,8 +82,6 @@ func (builder *ExecutorBuilder) Build() (*Executor, error) {
 		builder.concurrency,
 		builder.oldKeyspace,
 		builder.newKeyspace,
-		builder.resourceGroupName,
-		builder.explicitRequestSourceType,
 	)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -111,7 +96,6 @@ func buildChecksumRequest(
 	concurrency uint,
 	oldKeyspace []byte,
 	newKeyspace []byte,
-	resourceGroupName, explicitRequestSourceType string,
 ) ([]*kv.Request, error) {
 	var partDefs []model.PartitionDefinition
 	if part := newTable.Partition; part != nil {
@@ -123,8 +107,7 @@ func buildChecksumRequest(
 	if oldTable != nil {
 		oldTableID = oldTable.Info.ID
 	}
-	rs, err := buildRequest(newTable, newTable.ID, oldTable, oldTableID, startTS, concurrency,
-		oldKeyspace, newKeyspace, resourceGroupName, explicitRequestSourceType)
+	rs, err := buildRequest(newTable, newTable.ID, oldTable, oldTableID, startTS, concurrency, oldKeyspace, newKeyspace)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -139,8 +122,7 @@ func buildChecksumRequest(
 				}
 			}
 		}
-		rs, err := buildRequest(newTable, partDef.ID, oldTable, oldPartID, startTS, concurrency,
-			oldKeyspace, newKeyspace, resourceGroupName, explicitRequestSourceType)
+		rs, err := buildRequest(newTable, partDef.ID, oldTable, oldPartID, startTS, concurrency, oldKeyspace, newKeyspace)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -159,11 +141,9 @@ func buildRequest(
 	concurrency uint,
 	oldKeyspace []byte,
 	newKeyspace []byte,
-	resourceGroupName, explicitRequestSourceType string,
 ) ([]*kv.Request, error) {
 	reqs := make([]*kv.Request, 0)
-	req, err := buildTableRequest(tableInfo, tableID, oldTable, oldTableID, startTS, concurrency,
-		oldKeyspace, newKeyspace, resourceGroupName, explicitRequestSourceType)
+	req, err := buildTableRequest(tableInfo, tableID, oldTable, oldTableID, startTS, concurrency, oldKeyspace, newKeyspace)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -192,8 +172,7 @@ func buildRequest(
 			}
 		}
 		req, err = buildIndexRequest(
-			tableID, indexInfo, oldTableID, oldIndexInfo, startTS, concurrency,
-			oldKeyspace, newKeyspace, resourceGroupName, explicitRequestSourceType)
+			tableID, indexInfo, oldTableID, oldIndexInfo, startTS, concurrency, oldKeyspace, newKeyspace)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -212,7 +191,6 @@ func buildTableRequest(
 	concurrency uint,
 	oldKeyspace []byte,
 	newKeyspace []byte,
-	resourceGroupName, explicitRequestSourceType string,
 ) (*kv.Request, error) {
 	var rule *tipb.ChecksumRewriteRule
 	if oldTable != nil {
@@ -238,12 +216,10 @@ func buildTableRequest(
 	var builder distsql.RequestBuilder
 	// Use low priority to reducing impact to other requests.
 	builder.Request.Priority = kv.PriorityLow
-	return builder.SetHandleRanges(nil, tableID, tableInfo.IsCommonHandle, ranges).
+	return builder.SetHandleRanges(nil, tableID, tableInfo.IsCommonHandle, ranges, nil).
 		SetStartTS(startTS).
 		SetChecksumRequest(checksum).
 		SetConcurrency(int(concurrency)).
-		SetResourceGroupName(resourceGroupName).
-		SetExplicitRequestSourceType(explicitRequestSourceType).
 		Build()
 }
 
@@ -256,7 +232,6 @@ func buildIndexRequest(
 	concurrency uint,
 	oldKeyspace []byte,
 	newKeyspace []byte,
-	resourceGroupName, ExplicitRequestSourceType string,
 ) (*kv.Request, error) {
 	var rule *tipb.ChecksumRewriteRule
 	if oldIndexInfo != nil {
@@ -282,8 +257,6 @@ func buildIndexRequest(
 		SetStartTS(startTS).
 		SetChecksumRequest(checksum).
 		SetConcurrency(int(concurrency)).
-		SetResourceGroupName(resourceGroupName).
-		SetExplicitRequestSourceType(ExplicitRequestSourceType).
 		Build()
 }
 

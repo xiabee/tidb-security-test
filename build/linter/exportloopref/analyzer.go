@@ -14,14 +14,7 @@
 
 package exportloopref
 
-import (
-	"github.com/kyoh86/exportloopref"
-	"github.com/pingcap/tidb/build/linter/util"
-)
+import "github.com/kyoh86/exportloopref"
 
 // Analyzer is the analyzer struct of exportloopref.
 var Analyzer = exportloopref.Analyzer
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
-}

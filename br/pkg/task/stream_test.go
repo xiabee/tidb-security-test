@@ -155,7 +155,7 @@ func fakeCheckpointFiles(
 		filename := fmt.Sprintf("%v.ts", info.storeID)
 		buff := make([]byte, 8)
 		binary.LittleEndian.PutUint64(buff, info.global_checkpoint)
-		if _, err := s.Create(ctx, filename, nil); err != nil {
+		if _, err := s.Create(ctx, filename); err != nil {
 			return errors.Trace(err)
 		}
 		if err := s.WriteFile(ctx, filename, buff); err != nil {
@@ -247,17 +247,4 @@ func TestGetLogRangeWithLogBackupDir(t *testing.T) {
 	logInfo, err := getLogRange(context.TODO(), &cfg)
 	require.Nil(t, err)
 	require.Equal(t, logInfo.logMinTS, startLogBackupTS)
-}
-
-func TestGetExternalStorageOptions(t *testing.T) {
-	cfg := Config{}
-	u, err := storage.ParseBackend("s3://bucket/path", nil)
-	require.NoError(t, err)
-	options := getExternalStorageOptions(&cfg, u)
-	require.NotNil(t, options.HTTPClient)
-
-	u, err = storage.ParseBackend("gs://bucket/path", nil)
-	require.NoError(t, err)
-	options = getExternalStorageOptions(&cfg, u)
-	require.Nil(t, options.HTTPClient)
 }

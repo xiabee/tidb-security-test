@@ -38,7 +38,7 @@ func WithTimeCost() ExtraField {
 }
 
 // WithConstExtraField adds an extra field with constant values.
-func WithConstExtraField(key string, value any) ExtraField {
+func WithConstExtraField(key string, value interface{}) ExtraField {
 	return func() [2]string {
 		return [2]string{key, fmt.Sprint(value)}
 	}
@@ -114,7 +114,7 @@ func (ops ConsoleOperations) IsInteractive() bool {
 	return term.IsTerminal(int(f.Fd()))
 }
 
-func (ops ConsoleOperations) Scanln(args ...any) (int, error) {
+func (ops ConsoleOperations) Scanln(args ...interface{}) (int, error) {
 	return fmt.Fscanln(ops.In(), args...)
 }
 
@@ -136,15 +136,15 @@ func (ops ConsoleOperations) CreateTable() *Table {
 	}
 }
 
-func (ops ConsoleOperations) Print(args ...any) {
+func (ops ConsoleOperations) Print(args ...interface{}) {
 	_, _ = fmt.Fprint(ops.Out(), args...)
 }
 
-func (ops ConsoleOperations) Println(args ...any) {
+func (ops ConsoleOperations) Println(args ...interface{}) {
 	_, _ = fmt.Fprintln(ops.Out(), args...)
 }
 
-func (ops ConsoleOperations) Printf(format string, args ...any) {
+func (ops ConsoleOperations) Printf(format string, args ...interface{}) {
 	_, _ = fmt.Fprintf(ops.Out(), format, args...)
 }
 
@@ -313,11 +313,12 @@ func (ps PrettyString) slicePointOf(s int) (realSlicePoint, endAt int) {
 	for i, m := range ps.escapeSequencePlace {
 		start, end := m[0], m[1]
 		length := end - start
-		if realSlicePoint <= start {
+		if realSlicePoint > start {
+			realSlicePoint += length
+		} else {
 			endAt = i
 			return
 		}
-		realSlicePoint += length
 	}
 	return
 }

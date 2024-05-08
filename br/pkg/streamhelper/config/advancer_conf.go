@@ -14,11 +14,9 @@ const (
 	flagFullScanDiffTick    = "full-scan-tick"
 	flagAdvancingByCache    = "advancing-by-cache"
 	flagTryAdvanceThreshold = "try-advance-threshold"
-	flagCheckPointLagLimit  = "check-point-lag-limit"
 
 	DefaultConsistencyCheckTick = 5
 	DefaultTryAdvanceThreshold  = 4 * time.Minute
-	DefaultCheckPointLagLimit   = 48 * time.Hour
 	DefaultBackOffTime          = 5 * time.Second
 	DefaultTickInterval         = 12 * time.Second
 	DefaultFullScanTick         = 4
@@ -36,8 +34,6 @@ type Config struct {
 	TickDuration time.Duration `toml:"tick-interval" json:"tick-interval"`
 	// The threshold for polling TiKV for checkpoint of some range.
 	TryAdvanceThreshold time.Duration `toml:"try-advance-threshold" json:"try-advance-threshold"`
-	// The maximum lag could be tolerated for the checkpoint lag.
-	CheckPointLagLimit time.Duration `toml:"check-point-lag-limit" json:"check-point-lag-limit"`
 }
 
 func DefineFlagsForCheckpointAdvancerConfig(f *pflag.FlagSet) {
@@ -47,8 +43,6 @@ func DefineFlagsForCheckpointAdvancerConfig(f *pflag.FlagSet) {
 		"From how long we trigger the tick (advancing the checkpoint).")
 	f.Duration(flagTryAdvanceThreshold, DefaultTryAdvanceThreshold,
 		"If the checkpoint lag is greater than how long, we would try to poll TiKV for checkpoints.")
-	f.Duration(flagCheckPointLagLimit, DefaultCheckPointLagLimit,
-		"The maximum lag could be tolerated for the checkpoint lag.")
 }
 
 func Default() Config {
@@ -56,7 +50,6 @@ func Default() Config {
 		BackoffTime:         DefaultBackOffTime,
 		TickDuration:        DefaultTickInterval,
 		TryAdvanceThreshold: DefaultTryAdvanceThreshold,
-		CheckPointLagLimit:  DefaultCheckPointLagLimit,
 	}
 }
 
@@ -74,10 +67,6 @@ func (conf *Config) GetFromFlags(f *pflag.FlagSet) error {
 	if err != nil {
 		return err
 	}
-	conf.CheckPointLagLimit, err = f.GetDuration(flagCheckPointLagLimit)
-	if err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -85,11 +74,6 @@ func (conf *Config) GetFromFlags(f *pflag.FlagSet) error {
 // in the normal condition (the subscribe manager is available.)
 func (conf Config) GetDefaultStartPollThreshold() time.Duration {
 	return conf.TryAdvanceThreshold
-}
-
-// GetCheckPointLagLimit returns the maximum lag could be tolerated for the checkpoint lag.
-func (conf Config) GetCheckPointLagLimit() time.Duration {
-	return conf.CheckPointLagLimit
 }
 
 // GetSubscriberErrorStartPollThreshold returns the threshold of begin polling the checkpoint

@@ -29,7 +29,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -77,10 +76,7 @@ ut build xxx
 ut run --junitfile xxx
 
 // test with race flag
-ut run --race
-
-// test with test.short flag
-ut run --short`
+ut run --race`
 
 	fmt.Println(msg)
 	return true
@@ -98,7 +94,6 @@ func (t *task) String() string {
 }
 
 var p int
-var buildParallel int
 var workDir string
 
 func cmdList(args ...string) bool {
@@ -311,7 +306,7 @@ func cmdRun(args ...string) bool {
 		tasks = tmp
 	}
 
-	fmt.Printf("building task finish, parallelism=%d, count=%d, takes=%v\n", buildParallel, len(tasks), time.Since(start))
+	fmt.Printf("building task finish, maxproc=%d, count=%d, takes=%v\n", p, len(tasks), time.Since(start))
 
 	taskCh := make(chan task, 100)
 	works := make([]numa, p)
@@ -338,15 +333,10 @@ func cmdRun(args ...string) bool {
 			fmt.Println("create junit file fail:", err)
 			return false
 		}
-		defer f.Close()
 		if err := write(f, out); err != nil {
 			fmt.Println("write junit file error:", err)
 			return false
 		}
-	}
-
-	if coverprofile != "" {
-		collectCoverProfileFile()
 	}
 
 	for _, work := range works {
@@ -354,22 +344,21 @@ func cmdRun(args ...string) bool {
 			return false
 		}
 	}
+	if coverprofile != "" {
+		collectCoverProfileFile()
+	}
 	return true
 }
 
 func parseCaseListFromFile(fileName string) (map[string]struct{}, error) {
-	ret := make(map[string]struct{})
-
 	f, err := os.Open(filepath.Clean(fileName))
-	if os.IsNotExist(err) {
-		return ret, nil
-	}
 	if err != nil {
 		return nil, withTrace(err)
 	}
 	//nolint: errcheck
 	defer f.Close()
 
+	ret := make(map[string]struct{})
 	s := bufio.NewScanner(f)
 	for s.Scan() {
 		line := s.Bytes()
@@ -413,10 +402,10 @@ func handleFlags(flag string) string {
 	return res
 }
 
-func handleFlag(f string) (found bool) {
+func handleRaceFlag() (found bool) {
 	tmp := os.Args[:0]
 	for i := 0; i < len(os.Args); i++ {
-		if os.Args[i] == f {
+		if os.Args[i] == "--race" {
 			found = true
 			continue
 		}
@@ -430,7 +419,6 @@ var junitfile string
 var coverprofile string
 var coverFileTempDir string
 var race bool
-var short bool
 
 var except string
 var only string
@@ -441,8 +429,7 @@ func main() {
 	coverprofile = handleFlags("--coverprofile")
 	except = handleFlags("--except")
 	only = handleFlags("--only")
-	race = handleFlag("--race")
-	short = handleFlag("--short")
+	race = handleRaceFlag()
 
 	if coverprofile != "" {
 		var err error
@@ -456,8 +443,7 @@ func main() {
 
 	// Get the correct count of CPU if it's in docker.
 	p = runtime.GOMAXPROCS(0)
-	// We use 2 * p for `go build` to make it faster.
-	buildParallel = p * 2
+	rand.Seed(time.Now().Unix())
 	var err error
 	workDir, err = os.Getwd()
 	if err != nil {
@@ -840,7 +826,7 @@ func (n *numa) testCommand(pkg string, fn string) *exec.Cmd {
 }
 
 func skipDIR(pkg string) bool {
-	skipDir := []string{"br", "lightning", "pkg/lightning", "cmd", "dumpling", "tests", "tools/check", "build"}
+	skipDir := []string{"br", "cmd", "dumpling", "tests", "tools/check"}
 	for _, ignore := range skipDir {
 		if strings.HasPrefix(pkg, ignore) {
 			return true
@@ -858,9 +844,6 @@ func buildTestBinary(pkg string) error {
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
 	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
-	}
 	cmd.Dir = path.Join(workDir, pkg)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -870,26 +853,8 @@ func buildTestBinary(pkg string) error {
 	return nil
 }
 
-func generateBuildCache() error {
-	// cd cmd/tidb-server && go test -tags intest -exec true -vet off -toolexec=go-compile-without-link
-	cmd := exec.Command("go", "test", "-tags=intest", "-exec=true", "-vet=off")
-	goCompileWithoutLink := fmt.Sprintf("-toolexec=%s/tools/check/go-compile-without-link.sh", workDir)
-	cmd.Args = append(cmd.Args, goCompileWithoutLink)
-	cmd.Dir = path.Join(workDir, "cmd/tidb-server")
-	if err := cmd.Run(); err != nil {
-		return withTrace(err)
-	}
-	return nil
-}
-
 // buildTestBinaryMulti is much faster than build the test packages one by one.
 func buildTestBinaryMulti(pkgs []string) error {
-	// staged build, generate the build cache for all the tests first, then generate the test binary.
-	// This way is faster than generating test binaries directly, because the cache can be used.
-	if err := generateBuildCache(); err != nil {
-		return withTrace(err)
-	}
-
 	// go test --exec=xprog -cover -vet=off --count=0 $(pkgs)
 	xprogPath := path.Join(workDir, "tools/bin/xprog")
 	packages := make([]string, 0, len(pkgs))
@@ -898,15 +863,12 @@ func buildTestBinaryMulti(pkgs []string) error {
 	}
 
 	var cmd *exec.Cmd
-	cmd = exec.Command("go", "test", "--tags=intest", "-p", strconv.Itoa(buildParallel), "--exec", xprogPath, "-vet", "off", "-count", "0")
+	cmd = exec.Command("go", "test", "--tags=intest", "--exec", xprogPath, "-vet", "off", "-count", "0")
 	if coverprofile != "" {
 		cmd.Args = append(cmd.Args, "-cover")
 	}
 	if race {
 		cmd.Args = append(cmd.Args, "-race")
-	}
-	if short {
-		cmd.Args = append(cmd.Args, "--test.short")
 	}
 	cmd.Args = append(cmd.Args, packages...)
 	cmd.Dir = workDir
@@ -980,6 +942,7 @@ func filter(input []string, f func(string) bool) []string {
 }
 
 func shuffle(tasks []task) {
+	rand.Seed(time.Now().UnixNano())
 	for i := 0; i < len(tasks); i++ {
 		pos := rand.Intn(len(tasks))
 		tasks[i], tasks[pos] = tasks[pos], tasks[i]

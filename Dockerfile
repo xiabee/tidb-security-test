@@ -12,20 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The current dockerfile is only used for development purposes. If used in a 
-# production environment, please refer to https://github.com/PingCAP-QE/artifacts/blob/main/dockerfiles/cd/builders/tidb/Dockerfile.
-
 # Builder image
-FROM golang:1.21 as builder
-WORKDIR /tidb
+FROM rockylinux:9 as builder
 
-COPY . .
+ENV GOLANG_VERSION 1.20.5
+ENV ARCH amd64
+ENV GOLANG_DOWNLOAD_URL https://dl.google.com/go/go$GOLANG_VERSION.linux-$ARCH.tar.gz
+ENV GOPATH /go
+ENV GOROOT /usr/local/go
+ENV PATH $GOPATH/bin:$GOROOT/bin:$PATH
+RUN yum update -y && yum groupinstall 'Development Tools' -y \
+    && curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz \
+	&& tar -C /usr/local -xzf golang.tar.gz \
+	&& rm golang.tar.gz
 
+COPY . /tidb
 ARG GOPROXY
-ENV GOPROXY ${GOPROXY}
-
-RUN make server
-
+RUN export GOPROXY=${GOPROXY} && cd /tidb && make server
 
 FROM rockylinux:9-minimal
 

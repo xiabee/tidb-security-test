@@ -12,12 +12,10 @@ import (
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/task"
 	"github.com/pingcap/tidb/br/pkg/trace"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version/build"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/util/gctuner"
-	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/metricsutil"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/util/metricsutil"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"sourcegraph.com/sourcegraph/appdash"
@@ -39,9 +37,6 @@ func runRestoreCommand(command *cobra.Command, cmdName string) error {
 			return errors.Trace(err)
 		}
 	}
-
-	// have to skip grant table, in order to NotifyUpdatePrivilege in binary mode
-	config.GetGlobalConfig().Security.SkipGrantTable = true
 
 	ctx := GetDefaultContext()
 	if cfg.EnableOpenTracing {
@@ -65,13 +60,6 @@ func runRestoreCommand(command *cobra.Command, cmdName string) error {
 		return nil
 	}
 
-	// No need to cache the coproceesor result
-	config.GetGlobalConfig().TiKVClient.CoprCache.CapacityMB = 0
-
-	// Disable the memory limit tuner. That's because the server memory is get from TiDB node instead of BR node.
-	gctuner.GlobalMemoryLimitTuner.DisableAdjustMemoryLimit()
-	defer gctuner.GlobalMemoryLimitTuner.EnableAdjustMemoryLimit()
-
 	if err := task.RunRestore(GetDefaultContext(), tidbGlue, cmdName, &cfg); err != nil {
 		log.Error("failed to restore", zap.Error(err))
 		printWorkaroundOnFullRestoreError(command, err)
@@ -89,12 +77,12 @@ func printWorkaroundOnFullRestoreError(command *cobra.Command, err error) {
 	fmt.Println("#######################################################################")
 	switch {
 	case errors.ErrorEqual(err, berrors.ErrRestoreNotFreshCluster):
-		fmt.Println("# the target cluster is not fresh, cannot restore.")
-		fmt.Println("# you can drop existing databases and tables and start restore again")
+		fmt.Println("# the target cluster is not fresh, br cannot restore system tables.")
 	case errors.ErrorEqual(err, berrors.ErrRestoreIncompatibleSys):
 		fmt.Println("# the target cluster is not compatible with the backup data,")
-		fmt.Println("# you can use '--with-sys-table=false' to skip restoring system tables")
+		fmt.Println("# br cannot restore system tables.")
 	}
+	fmt.Println("# you can remove 'with-sys-table' flag to skip restoring system tables")
 	fmt.Println("#######################################################################")
 }
 
@@ -151,7 +139,7 @@ func NewRestoreCommand() *cobra.Command {
 				return errors.Trace(err)
 			}
 			build.LogInfo(build.BR)
-			logutil.LogEnvVariables()
+			utils.LogEnvVariables()
 			task.LogArguments(c)
 			session.DisableStats4Test()
 

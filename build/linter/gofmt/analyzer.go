@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"github.com/golangci/gofmt/gofmt"
-	"github.com/pingcap/tidb/build/linter/util"
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -45,12 +44,9 @@ func run(pass *analysis.Pass) (any, error) {
 			fileNames = append(fileNames, pos.Filename)
 		}
 	}
-	rules := []gofmt.RewriteRule{{
-		Pattern:     "interface{}",
-		Replacement: "any",
-	}}
+
 	for _, f := range fileNames {
-		diff, err := gofmt.RunRewrite(f, needSimplify, rules)
+		diff, err := gofmt.Run(f, needSimplify)
 		if err != nil {
 			return nil, fmt.Errorf("could not run gofmt: %w (%s)", err, f)
 		}
@@ -66,8 +62,4 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	return nil, nil
-}
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 }

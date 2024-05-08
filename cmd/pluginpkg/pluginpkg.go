@@ -38,7 +38,7 @@ const codeTemplate = `
 package main
 
 import (
-	"github.com/pingcap/tidb/pkg/plugin"
+	"github.com/pingcap/tidb/plugin"
 )
 
 func PluginManifest() *plugin.Manifest {
@@ -99,7 +99,7 @@ func main() {
 		flag.Usage()
 	}
 
-	var manifest map[string]any
+	var manifest map[string]interface{}
 	_, err = toml.DecodeFile(filepath.Join(pkgDir, "manifest.toml"), &manifest)
 	if err != nil {
 		log.Printf("read pkg %s's manifest failure, %+v\n", pkgDir, err)

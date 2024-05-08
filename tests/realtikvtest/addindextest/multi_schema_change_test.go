@@ -1,4 +1,4 @@
-// Copyright 2023 PingCAP, Inc.
+// Copyright 2022 PingCAP, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,19 +16,22 @@ package addindextest
 
 import (
 	"testing"
-
-	"github.com/pingcap/tidb/tests/realtikvtest/addindextestutil"
 )
 
+func initCompCtx(t *testing.T) *suiteContext {
+	ctx := initTest(t)
+	initCompCtxParams(ctx)
+	return ctx
+}
 func TestMultiSchemaChangeCreateNonUniqueIndex(t *testing.T) {
 	var colIDs = [][]int{
 		{1, 4, 7},
 		{2, 5, 8},
 		{3, 6, 9},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsMultiSchemaChange = true
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexNonUnique)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isMultiSchemaChange = true
+	testOneColFrame(ctx, colIDs, addIndexNonUnique)
 }
 
 func TestMultiSchemaChangeCreateUniqueIndex(t *testing.T) {
@@ -37,21 +40,21 @@ func TestMultiSchemaChangeCreateUniqueIndex(t *testing.T) {
 		{2, 19},
 		{11},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsMultiSchemaChange = true
-	addindextestutil.TestOneColFrame(ctx, colIDs, addindextestutil.AddIndexUnique)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isMultiSchemaChange = true
+	testOneColFrame(ctx, colIDs, addIndexUnique)
 }
 
 func TestMultiSchemaChangeCreatePrimaryKey(t *testing.T) {
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsMultiSchemaChange = true
-	addindextestutil.TestOneIndexFrame(ctx, 0, addindextestutil.AddIndexPK)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isMultiSchemaChange = true
+	testOneIndexFrame(ctx, 0, addIndexPK)
 }
 
 func TestMultiSchemaChangeCreateGenColIndex(t *testing.T) {
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsMultiSchemaChange = true
-	addindextestutil.TestOneIndexFrame(ctx, 29, addindextestutil.AddIndexGenCol)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isMultiSchemaChange = true
+	testOneIndexFrame(ctx, 29, addIndexGenCol)
 }
 
 func TestMultiSchemaChangeMultiColsIndex(t *testing.T) {
@@ -65,7 +68,7 @@ func TestMultiSchemaChangeMultiColsIndex(t *testing.T) {
 		{14},
 		{18},
 	}
-	ctx := addindextestutil.InitCompCtx(t)
-	ctx.CompCtx.IsMultiSchemaChange = true
-	addindextestutil.TestTwoColsFrame(ctx, coliIDs, coljIDs, addindextestutil.AddIndexMultiCols)
+	ctx := initCompCtx(t)
+	ctx.CompCtx.isMultiSchemaChange = true
+	testTwoColsFrame(ctx, coliIDs, coljIDs, addIndexMultiCols)
 }

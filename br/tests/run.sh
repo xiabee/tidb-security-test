@@ -15,17 +15,9 @@
 # limitations under the License.
 
 set -eu
-CUR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export UTILS_DIR="$CUR/../../tests/_utils"
-export PATH="$PATH:$CUR/../../bin:$CUR/../bin:$UTILS_DIR"
+export PATH="tests/_utils:bin:$PATH"
 export TEST_DIR=/tmp/backup_restore_test
 export COV_DIR="/tmp/group_cover"
-mkdir -p $COV_DIR || true
-export TIDB_CONFIG="$CUR/config/tidb.toml"
-export TIKV_CONFIG="$CUR/config/tikv.toml"
-export PD_CONFIG="$CUR/config/pd.toml"
-export TESTS_ROOT="$CUR"
-source $UTILS_DIR/run_services
 
 # Create COV_DIR if not exists
 if [ -d "$COV_DIR" ]; then
@@ -36,9 +28,10 @@ fi
 rm -rf $TEST_DIR && mkdir -p $TEST_DIR
 
 # Generate TLS certs
-generate_certs &> /dev/null
+tests/_utils/generate_certs &> /dev/null
 
 SELECTED_TEST_NAME="${TEST_NAME-$(find tests -mindepth 2 -maxdepth 2 -name run.sh | cut -d/ -f2 | sort)}"
+source tests/_utils/run_services
 
 trap stop_services EXIT
 start_services $@
@@ -55,13 +48,15 @@ fi
 
 echo "selected test cases: $SELECTED_TEST_NAME"
 
-run_case() {
-    local case=$1
-    local script=$2
+# wait for global variable cache invalid
+sleep 2
+
+for casename in $SELECTED_TEST_NAME; do
+    script=tests/$casename/run.sh
     echo "*===== Running test $script... =====*"
     INTEGRATION_TEST=1 \
     TEST_DIR="$TEST_DIR" \
-    TEST_NAME="$case" \
+    TEST_NAME="$casename" \
     CLUSTER_VERSION_MAJOR="${CLUSTER_VERSION_MAJOR#v}" \
     CLUSTER_VERSION_MINOR="$CLUSTER_VERSION_MINOR" \
     CLUSTER_VERSION_REVISION="$CLUSTER_VERSION_REVISION" \
@@ -72,13 +67,5 @@ run_case() {
     TIDB_STATUS_ADDR="$TIDB_STATUS_ADDR" \
     TIKV_ADDR="$TIKV_ADDR" \
     BR_LOG_TO_TERM=1 \
-    bash "$script" && echo "TEST: [$case] success!"
-}
-
-# wait for global variable cache invalid
-sleep 2
-
-for casename in $SELECTED_TEST_NAME; do
-    script="$CUR/$casename/run.sh"
-    run_case "$casename" "$script"
+    bash "$script" && echo "TEST: [$casename] success!"
 done

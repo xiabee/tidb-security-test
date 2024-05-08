@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"strings"
 
@@ -11,20 +12,42 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util/sqlexec"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/util/sqlexec"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
 const (
-	TidbNewCollationEnabled = "new_collation_enabled"
+	tidbNewCollationEnabled = "new_collation_enabled"
 )
 
 var (
+	// check sql.DB and sql.Conn implement QueryExecutor and DBExecutor
+	_ DBExecutor = &sql.DB{}
+	_ DBExecutor = &sql.Conn{}
+
 	logBackupTaskCount = atomic.NewInt32(0)
 )
+
+// QueryExecutor is a interface for exec query
+type QueryExecutor interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+// StmtExecutor define both query and exec methods
+type StmtExecutor interface {
+	QueryExecutor
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+// DBExecutor is a interface for statements and txn
+type DBExecutor interface {
+	StmtExecutor
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
 
 // CheckLogBackupEnabled checks if LogBackup is enabled in cluster.
 // this mainly used in three places.
@@ -33,14 +56,19 @@ var (
 // 3. Telemetry of log backup feature usage (every 6 hours).
 // NOTE: this result shouldn't be cached by caller. because it may change every time in one cluster.
 func CheckLogBackupEnabled(ctx sessionctx.Context) bool {
-	executor := ctx.GetRestrictedSQLExecutor()
+	executor, ok := ctx.(sqlexec.RestrictedSQLExecutor)
+	if !ok {
+		// shouldn't happen
+		log.Error("[backup] unable to translate executor from sessionctx")
+		return false
+	}
 	enabled, err := IsLogBackupEnabled(executor)
 	if err != nil {
 		// if it failed by any reason. we can simply return true this time.
 		// for GC worker it will scan more locks in one tick.
 		// for Add index it will skip using lightning this time.
 		// for Telemetry it will get a false positive usage count.
-		log.Warn("check log backup config failed, ignore it", zap.String("category", "backup"), zap.Error(err))
+		log.Warn("[backup] check log backup config failed, ignore it", zap.Error(err))
 		return true
 	}
 	return enabled
@@ -198,5 +226,5 @@ func IsLogBackupInUse(ctx sessionctx.Context) bool {
 
 // GetTidbNewCollationEnabled returns the variable name of NewCollationEnabled.
 func GetTidbNewCollationEnabled() string {
-	return TidbNewCollationEnabled
+	return tidbNewCollationEnabled
 }

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/util/hack"
+	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/rawkv"
 	pd "github.com/tikv/pd/client"
@@ -28,8 +28,7 @@ func NewRawkvClient(ctx context.Context, pdAddrs []string, security config.Secur
 		ctx,
 		pdAddrs,
 		security,
-		pd.WithCustomTimeoutOption(10*time.Second),
-		pd.WithMaxErrorRetry(5))
+		pd.WithCustomTimeoutOption(10*time.Second))
 }
 
 type KVPair struct {

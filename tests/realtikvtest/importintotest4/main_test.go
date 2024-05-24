@@ -19,11 +19,12 @@ import (
 	"testing"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
+	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/disttask/framework/testutil"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/tests/realtikvtest"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -44,14 +45,12 @@ var (
 	gcsEndpoint       = fmt.Sprintf(gcsEndpointFormat, gcsHost, gcsPort)
 )
 
-func TestImportInto(t *testing.T) {
+func TestLoadRemote(t *testing.T) {
 	suite.Run(t, &mockGCSSuite{})
 }
 
 func (s *mockGCSSuite) SetupSuite() {
-	testkit.EnableFailPoint(s.T(), "github.com/pingcap/tidb/pkg/util/cpu/mockNumCpu", `return(16)`)
 	s.Require().True(*realtikvtest.WithRealTiKV)
-	testutil.ReduceCheckInterval(s.T())
 	var err error
 	opt := fakestorage.Options{
 		Scheme:     "http",
@@ -67,6 +66,13 @@ func (s *mockGCSSuite) SetupSuite() {
 
 func (s *mockGCSSuite) TearDownSuite() {
 	s.server.Stop()
+}
+
+func (s *mockGCSSuite) enableFailpoint(path, term string) {
+	require.NoError(s.T(), failpoint.Enable(path, term))
+	s.T().Cleanup(func() {
+		_ = failpoint.Disable(path)
+	})
 }
 
 func (s *mockGCSSuite) cleanupSysTables() {

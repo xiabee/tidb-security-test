@@ -18,27 +18,37 @@ import (
 	"bytes"
 	"cmp"
 	"fmt"
-	"math/rand"
 	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/executor/aggfuncs"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/memory"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/zap"
 )
+
+// getPartialResultBatch fetches a batch of partial results from HashAggIntermData.
+func (d *HashAggIntermData) getPartialResultBatch(_ *stmtctx.StatementContext, prs [][]aggfuncs.PartialResult, _ []aggfuncs.AggFunc, maxChunkSize int) (_ [][]aggfuncs.PartialResult, groupKeys []string, reachEnd bool) {
+	keyStart := d.cursor
+	for ; d.cursor < len(d.groupKeys) && len(prs) < maxChunkSize; d.cursor++ {
+		prs = append(prs, d.partialResultMap[d.groupKeys[d.cursor]])
+	}
+	if d.cursor == len(d.groupKeys) {
+		reachEnd = true
+	}
+	return prs, d.groupKeys[keyStart:d.cursor], reachEnd
+}
 
 func closeBaseExecutor(b *exec.BaseExecutor) {
 	if r := recover(); r != nil {
@@ -49,9 +59,9 @@ func closeBaseExecutor(b *exec.BaseExecutor) {
 	}
 }
 
-func recoveryHashAgg(output chan *AfFinalResult, r any) {
-	err := util.GetRecoverError(r)
-	output <- &AfFinalResult{err: err}
+func recoveryHashAgg(output chan *AfFinalResult, r interface{}) {
+	err := errors.Errorf("%v", r)
+	output <- &AfFinalResult{err: errors.Errorf("%v", r)}
 	logutil.BgLogger().Error("parallel hash aggregation panicked", zap.Error(err), zap.Stack("stack"))
 }
 
@@ -67,7 +77,7 @@ func getGroupKeyMemUsage(groupKey [][]byte) int64 {
 // GetGroupKey evaluates the group items and args of aggregate functions.
 func GetGroupKey(ctx sessionctx.Context, input *chunk.Chunk, groupKey [][]byte, groupByItems []expression.Expression) ([][]byte, error) {
 	numRows := input.NumRows()
-	avlGroupKeyLen := min(len(groupKey), numRows)
+	avlGroupKeyLen := mathutil.Min(len(groupKey), numRows)
 	for i := 0; i < avlGroupKeyLen; i++ {
 		groupKey[i] = groupKey[i][:0]
 	}
@@ -75,8 +85,6 @@ func GetGroupKey(ctx sessionctx.Context, input *chunk.Chunk, groupKey [][]byte, 
 		groupKey = append(groupKey, make([]byte, 0, 10*len(groupByItems)))
 	}
 
-	errCtx := ctx.GetSessionVars().StmtCtx.ErrCtx()
-	exprCtx := ctx.GetExprCtx()
 	for _, item := range groupByItems {
 		tp := item.GetType()
 
@@ -97,7 +105,7 @@ func GetGroupKey(ctx sessionctx.Context, input *chunk.Chunk, groupKey [][]byte, 
 			tp = &newTp
 		}
 
-		if err := expression.EvalExpr(exprCtx.GetEvalCtx(), ctx.GetSessionVars().EnableVectorizedExpression, item, tp.EvalType(), input, buf); err != nil {
+		if err := expression.EvalExpr(ctx, item, tp.EvalType(), input, buf); err != nil {
 			expression.PutColumn(buf)
 			return nil, err
 		}
@@ -108,15 +116,14 @@ func GetGroupKey(ctx sessionctx.Context, input *chunk.Chunk, groupKey [][]byte, 
 			tp = &newTp
 		}
 
-		groupKey, err = codec.HashGroupKey(ctx.GetSessionVars().StmtCtx.TimeZone(), input.NumRows(), buf, groupKey, tp)
-		err = errCtx.HandleError(err)
+		groupKey, err = codec.HashGroupKey(ctx.GetSessionVars().StmtCtx, input.NumRows(), buf, groupKey, tp)
 		if err != nil {
 			expression.PutColumn(buf)
 			return nil, err
 		}
 		expression.PutColumn(buf)
 	}
-	return groupKey[:numRows], nil
+	return groupKey, nil
 }
 
 // HashAggRuntimeStats record the HashAggExec runtime stat
@@ -218,57 +225,12 @@ func (w *AggWorkerStat) Clone() *AggWorkerStat {
 	}
 }
 
-func (e *HashAggExec) actionSpillForUnparallel() memory.ActionOnExceed {
-	e.spillAction = &AggSpillDiskAction{
-		e: e,
+// ActionSpill returns a AggSpillDiskAction for spilling intermediate data for hashAgg.
+func (e *HashAggExec) ActionSpill() *AggSpillDiskAction {
+	if e.spillAction == nil {
+		e.spillAction = &AggSpillDiskAction{
+			e: e,
+		}
 	}
 	return e.spillAction
-}
-
-func (e *HashAggExec) actionSpillForParallel() memory.ActionOnExceed {
-	e.parallelAggSpillAction = &ParallelAggSpillDiskAction{
-		e:           e,
-		spillHelper: e.spillHelper,
-	}
-	return e.parallelAggSpillAction
-}
-
-// ActionSpill returns an action for spilling intermediate data for hashAgg.
-func (e *HashAggExec) ActionSpill() memory.ActionOnExceed {
-	if e.IsUnparallelExec {
-		return e.actionSpillForUnparallel()
-	}
-	return e.actionSpillForParallel()
-}
-
-func failpointError() error {
-	var err error
-	failpoint.Inject("enableAggSpillIntest", func(val failpoint.Value) {
-		if val.(bool) {
-			num := rand.Intn(1000)
-			if num < 3 {
-				err = errors.Errorf("Random fail is triggered in ParallelAggSpillDiskAction")
-			}
-		}
-	})
-	return err
-}
-
-func updateWaitTime(stats *AggWorkerStat, startTime time.Time) {
-	if stats != nil {
-		stats.WaitTime += int64(time.Since(startTime))
-	}
-}
-
-func updateWorkerTime(stats *AggWorkerStat, startTime time.Time) {
-	if stats != nil {
-		stats.WorkerTime += int64(time.Since(startTime))
-	}
-}
-
-func updateExecTime(stats *AggWorkerStat, startTime time.Time) {
-	if stats != nil {
-		stats.ExecTime += int64(time.Since(startTime))
-		stats.TaskNum++
-	}
 }

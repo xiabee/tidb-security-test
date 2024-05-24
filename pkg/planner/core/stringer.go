@@ -210,9 +210,7 @@ func toString(in Plan, strs []string, idxs []int) ([]string, []int) {
 		str = name + "{" + strings.Join(children, ",") + "}"
 		idxs = idxs[:last]
 	case *DataSource:
-		if x.partitionDefIdx != nil {
-			// TODO: Change this to:
-			//str = fmt.Sprintf("Partition(%d)", x.tableInfo.Partition.Definitions[*x.partitionDefIdx].Name.O)
+		if x.isPartition {
 			str = fmt.Sprintf("Partition(%d)", x.physicalTableID)
 		} else {
 			if x.TableAsName != nil && x.TableAsName.L != "" {

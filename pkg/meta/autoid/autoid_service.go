@@ -132,7 +132,6 @@ func (sp *singlePointAlloc) Alloc(ctx context.Context, n uint64, increment, offs
 		return 0, 0, errInvalidIncrementAndOffset.GenWithStackByArgs(increment, offset)
 	}
 
-	var bo backoffer
 retry:
 	cli, ver, err := sp.GetClient(ctx)
 	if err != nil {
@@ -153,12 +152,11 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			sp.resetConn(ver, err)
-			bo.Backoff()
+			time.Sleep(backoffDuration)
 			goto retry
 		}
 		return 0, 0, errors.Trace(err)
 	}
-	bo.Reset()
 	if len(resp.Errmsg) != 0 {
 		return 0, 0, errors.Trace(errors.New(string(resp.Errmsg)))
 	}
@@ -169,27 +167,7 @@ retry:
 	return resp.Min, resp.Max, err
 }
 
-const backoffMin = 200 * time.Millisecond
-const backoffMax = 5 * time.Second
-
-type backoffer struct {
-	time.Duration
-}
-
-func (b *backoffer) Reset() {
-	b.Duration = backoffMin
-}
-
-func (b *backoffer) Backoff() {
-	if b.Duration == 0 {
-		b.Duration = backoffMin
-	}
-	b.Duration *= 2
-	if b.Duration > backoffMax {
-		b.Duration = backoffMax
-	}
-	time.Sleep(b.Duration)
-}
+const backoffDuration = 200 * time.Millisecond
 
 func (d *ClientDiscover) resetConn(version uint64, reason error) {
 	// Avoid repeated Reset operation
@@ -206,8 +184,6 @@ func (d *ClientDiscover) ResetConn(reason error) {
 		logutil.BgLogger().Info("reset grpc connection", zap.String("category", "autoid client"),
 			zap.String("reason", reason.Error()))
 	}
-
-	metrics.ResetAutoIDConnCounter.Add(1)
 	var grpcConn *grpc.ClientConn
 	d.mu.Lock()
 	grpcConn = d.mu.ClientConn
@@ -248,7 +224,6 @@ func (sp *singlePointAlloc) Rebase(ctx context.Context, newBase int64, _ bool) e
 }
 
 func (sp *singlePointAlloc) rebase(ctx context.Context, newBase int64, force bool) error {
-	var bo backoffer
 retry:
 	cli, ver, err := sp.GetClient(ctx)
 	if err != nil {
@@ -265,12 +240,11 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			sp.resetConn(ver, err)
-			bo.Backoff()
+			time.Sleep(backoffDuration)
 			goto retry
 		}
 		return errors.Trace(err)
 	}
-	bo.Reset()
 	if len(resp.Errmsg) != 0 {
 		return errors.Trace(errors.New(string(resp.Errmsg)))
 	}

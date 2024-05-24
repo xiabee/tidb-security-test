@@ -34,7 +34,6 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
@@ -44,7 +43,7 @@ type Misspell struct {
 	IgnoreWords []string `mapstructure:"ignore-words"`
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	r := misspell.Replacer{
 		Replacements: misspell.DictMain,
 	}

@@ -179,7 +179,7 @@ func NewStmtRecord(info *stmtsummary.StmtExecInfo) *StmtRecord {
 	}
 	// sampleSQL / authUsers(sampleUser) / samplePlan / prevSQL / indexNames store the values shown at the first time,
 	// because it compacts performance to update every time.
-	samplePlan, planHint, _ := info.PlanGenerator()
+	samplePlan, planHint := info.PlanGenerator()
 	if len(samplePlan) > MaxEncodedPlanSizeInBytes {
 		samplePlan = plancodec.PlanDiscardedEncoded
 	}
@@ -603,12 +603,12 @@ func GenerateStmtExecInfo4Test(digest string) *stmtsummary.StmtExecInfo {
 		NormalizedSQL:  "normalized_sql",
 		Digest:         digest,
 		PlanDigest:     "plan_digest",
-		PlanGenerator:  func() (string, string, any) { return "", "", nil },
+		PlanGenerator:  func() (string, string) { return "", "" },
 		User:           "user",
 		TotalLatency:   10000,
 		ParseLatency:   100,
 		CompileLatency: 1000,
-		CopTasks: &execdetails.CopTasksDetails{
+		CopTasks: &stmtctx.CopTasksDetails{
 			NumCopTasks:       10,
 			AvgProcessTime:    1000,
 			P90ProcessTime:    10000,

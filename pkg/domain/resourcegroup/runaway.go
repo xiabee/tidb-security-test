@@ -23,11 +23,8 @@ import (
 
 	"github.com/jellydator/ttlcache/v3"
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
-	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
-	"github.com/pingcap/tidb/pkg/util/generic"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	rmclient "github.com/tikv/pd/client/resource_group/controller"
@@ -86,9 +83,9 @@ type RunawayRecord struct {
 }
 
 // GenRunawayQueriesStmt generates statement with given RunawayRecords.
-func GenRunawayQueriesStmt(records []*RunawayRecord) (string, []any) {
+func GenRunawayQueriesStmt(records []*RunawayRecord) (string, []interface{}) {
 	var builder strings.Builder
-	params := make([]any, 0, len(records)*7)
+	params := make([]interface{}, 0, len(records)*7)
 	builder.WriteString("insert into mysql.tidb_runaway_queries VALUES ")
 	for count, r := range records {
 		if count > 0 {
@@ -130,9 +127,9 @@ func writeInsert(builder *strings.Builder, tableName string) {
 }
 
 // GenInsertionStmt is used to generate insertion sql.
-func (r *QuarantineRecord) GenInsertionStmt() (string, []any) {
+func (r *QuarantineRecord) GenInsertionStmt() (string, []interface{}) {
 	var builder strings.Builder
-	params := make([]any, 0, 6)
+	params := make([]interface{}, 0, 6)
 	writeInsert(&builder, RunawayWatchTableName)
 	builder.WriteString("(null, %?, %?, %?, %?, %?, %?, %?)")
 	params = append(params, r.ResourceGroupName)
@@ -150,9 +147,9 @@ func (r *QuarantineRecord) GenInsertionStmt() (string, []any) {
 }
 
 // GenInsertionDoneStmt is used to generate insertion sql for runaway watch done record.
-func (r *QuarantineRecord) GenInsertionDoneStmt() (string, []any) {
+func (r *QuarantineRecord) GenInsertionDoneStmt() (string, []interface{}) {
 	var builder strings.Builder
-	params := make([]any, 0, 9)
+	params := make([]interface{}, 0, 9)
 	writeInsert(&builder, RunawayWatchDoneTableName)
 	builder.WriteString("(null, %?, %?, %?, %?, %?, %?, %?, %?, %?)")
 	params = append(params, r.ID)
@@ -172,9 +169,9 @@ func (r *QuarantineRecord) GenInsertionDoneStmt() (string, []any) {
 }
 
 // GenDeletionStmt is used to generate deletion sql.
-func (r *QuarantineRecord) GenDeletionStmt() (string, []any) {
+func (r *QuarantineRecord) GenDeletionStmt() (string, []interface{}) {
 	var builder strings.Builder
-	params := make([]any, 0, 1)
+	params := make([]interface{}, 0, 1)
 	builder.WriteString("delete from ")
 	builder.WriteString(RunawayWatchTableName)
 	builder.WriteString(" where id = %?")
@@ -192,7 +189,6 @@ type RunawayManager struct {
 	// activeGroup is used to manage the active runaway watches of resource group
 	activeGroup map[string]int64
 	activeLock  sync.RWMutex
-	metricsMap  generic.SyncMap[string, prometheus.Counter]
 
 	resourceGroupCtl   *rmclient.ResourceGroupsController
 	serverID           string
@@ -226,14 +222,13 @@ func NewRunawayManager(resourceGroupCtl *rmclient.ResourceGroupsController, serv
 		quarantineChan:        make(chan *QuarantineRecord, maxWatchRecordChannelSize),
 		staleQuarantineRecord: staleQuarantineChan,
 		activeGroup:           make(map[string]int64),
-		metricsMap:            generic.NewSyncMap[string, prometheus.Counter](8),
 	}
-	m.insertionCancel = watchList.OnInsertion(func(_ context.Context, i *ttlcache.Item[string, *QuarantineRecord]) {
+	m.insertionCancel = watchList.OnInsertion(func(ctx context.Context, i *ttlcache.Item[string, *QuarantineRecord]) {
 		m.activeLock.Lock()
 		m.activeGroup[i.Value().ResourceGroupName]++
 		m.activeLock.Unlock()
 	})
-	m.evictionCancel = watchList.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, i *ttlcache.Item[string, *QuarantineRecord]) {
+	m.evictionCancel = watchList.OnEviction(func(ctx context.Context, er ttlcache.EvictionReason, i *ttlcache.Item[string, *QuarantineRecord]) {
 		m.activeLock.Lock()
 		m.activeGroup[i.Value().ResourceGroupName]--
 		m.activeLock.Unlock()
@@ -257,12 +252,6 @@ func (rm *RunawayManager) DeriveChecker(resourceGroupName, originalSQL, sqlDiges
 	if group.RunawaySettings == nil && rm.activeGroup[resourceGroupName] == 0 {
 		return nil
 	}
-	counter, ok := rm.metricsMap.Load(resourceGroupName)
-	if !ok {
-		counter = metrics.RunawayCheckerCounter.WithLabelValues(resourceGroupName, "hit", "")
-		rm.metricsMap.Store(resourceGroupName, counter)
-	}
-	counter.Inc()
 	return newRunawayChecker(rm, resourceGroupName, group.RunawaySettings, originalSQL, sqlDigest, planDigest)
 }
 
@@ -396,7 +385,7 @@ func (rm *RunawayManager) markRunaway(resourceGroupName, originalSQL, planDigest
 }
 
 // FlushThreshold specifies the threshold for the number of records in trigger flush
-func (*RunawayManager) FlushThreshold() int {
+func (rm *RunawayManager) FlushThreshold() int {
 	return maxWatchRecordChannelSize / 2
 }
 
@@ -561,9 +550,7 @@ func (r *RunawayChecker) markQuarantine(now *time.Time) {
 }
 
 func (r *RunawayChecker) markRunaway(matchType RunawayMatchType, action rmpb.RunawayAction, now *time.Time) {
-	actionStr := strings.ToLower(rmpb.RunawayAction_name[int32(action)])
-	metrics.RunawayCheckerCounter.WithLabelValues(r.resourceGroupName, matchType.String(), actionStr).Inc()
-	r.manager.markRunaway(r.resourceGroupName, r.originalSQL, r.planDigest, actionStr, matchType, now)
+	r.manager.markRunaway(r.resourceGroupName, r.originalSQL, r.planDigest, strings.ToLower(rmpb.RunawayAction_name[int32(action)]), matchType, now)
 }
 
 func (r *RunawayChecker) getSettingConvictIdentifier() string {

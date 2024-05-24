@@ -319,7 +319,6 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 // HiddenFlagsForStream temporary hidden flags that stream cmd not support.
 func HiddenFlagsForStream(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagChecksum)
-	_ = flags.MarkHidden(flagLoadStats)
 	_ = flags.MarkHidden(flagChecksumConcurrency)
 	_ = flags.MarkHidden(flagRateLimit)
 	_ = flags.MarkHidden(flagRateLimitUnit)
@@ -632,7 +631,8 @@ func NewMgr(ctx context.Context,
 		tlsConf *tls.Config
 		err     error
 	)
-	if len(pds) == 0 {
+	pdAddress := strings.Join(pds, ",")
+	if len(pdAddress) == 0 {
 		return nil, errors.Annotate(berrors.ErrInvalidArgument, "pd address can not be empty")
 	}
 
@@ -649,7 +649,7 @@ func NewMgr(ctx context.Context,
 
 	// Is it necessary to remove `StoreBehavior`?
 	return conn.NewMgr(
-		ctx, g, pds, tlsConf, securityOption, keepalive, util.SkipTiFlash,
+		ctx, g, pdAddress, tlsConf, securityOption, keepalive, util.SkipTiFlash,
 		checkRequirements, needDomain, versionCheckerType,
 	)
 }

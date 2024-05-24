@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 )
@@ -32,12 +33,12 @@ type jsonArrayagg struct {
 }
 
 type partialResult4JsonArrayagg struct {
-	entries []any
+	entries []interface{}
 }
 
 func (*jsonArrayagg) AllocPartialResult() (pr PartialResult, memDelta int64) {
 	p := partialResult4JsonArrayagg{}
-	p.entries = make([]any, 0)
+	p.entries = make([]interface{}, 0)
 	return PartialResult(&p), DefPartialResult4JsonArrayagg + DefSliceSize
 }
 
@@ -46,7 +47,7 @@ func (*jsonArrayagg) ResetPartialResult(pr PartialResult) {
 	p.entries = p.entries[:0]
 }
 
-func (e *jsonArrayagg) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr PartialResult, chk *chunk.Chunk) error {
+func (e *jsonArrayagg) AppendFinalResult2Chunk(_ sessionctx.Context, pr PartialResult, chk *chunk.Chunk) error {
 	p := (*partialResult4JsonArrayagg)(pr)
 	if len(p.entries) == 0 {
 		chk.AppendNull(e.ordinal)
@@ -61,10 +62,10 @@ func (e *jsonArrayagg) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr Partia
 	return nil
 }
 
-func (e *jsonArrayagg) UpdatePartialResult(ctx AggFuncUpdateContext, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
+func (e *jsonArrayagg) UpdatePartialResult(_ sessionctx.Context, rowsInGroup []chunk.Row, pr PartialResult) (memDelta int64, err error) {
 	p := (*partialResult4JsonArrayagg)(pr)
 	for _, row := range rowsInGroup {
-		item, err := e.args[0].Eval(ctx, row)
+		item, err := e.args[0].Eval(row)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -85,28 +86,8 @@ func (e *jsonArrayagg) UpdatePartialResult(ctx AggFuncUpdateContext, rowsInGroup
 	return memDelta, nil
 }
 
-func (*jsonArrayagg) MergePartialResult(_ AggFuncUpdateContext, src, dst PartialResult) (memDelta int64, err error) {
+func (*jsonArrayagg) MergePartialResult(_ sessionctx.Context, src, dst PartialResult) (memDelta int64, err error) {
 	p1, p2 := (*partialResult4JsonArrayagg)(src), (*partialResult4JsonArrayagg)(dst)
 	p2.entries = append(p2.entries, p1.entries...)
 	return 0, nil
-}
-
-func (e *jsonArrayagg) SerializePartialResult(partialResult PartialResult, chk *chunk.Chunk, spillHelper *SerializeHelper) {
-	pr := (*partialResult4JsonArrayagg)(partialResult)
-	resBuf := spillHelper.serializePartialResult4JsonArrayagg(*pr)
-	chk.AppendBytes(e.ordinal, resBuf)
-}
-
-func (e *jsonArrayagg) DeserializePartialResult(src *chunk.Chunk) ([]PartialResult, int64) {
-	return deserializePartialResultCommon(src, e.ordinal, e.deserializeForSpill)
-}
-
-func (e *jsonArrayagg) deserializeForSpill(helper *deserializeHelper) (PartialResult, int64) {
-	pr, memDelta := e.AllocPartialResult()
-	result := (*partialResult4JsonArrayagg)(pr)
-	success := helper.deserializePartialResult4JsonArrayagg(result)
-	if !success {
-		return nil, 0
-	}
-	return pr, memDelta
 }

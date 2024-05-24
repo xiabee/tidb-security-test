@@ -37,7 +37,6 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/profile"
-	pd "github.com/tikv/pd/client/http"
 )
 
 const (
@@ -242,17 +241,18 @@ func (vt *perfSchemaTable) getRows(ctx context.Context, sctx sessionctx.Context,
 		interval := fmt.Sprintf("%d", profile.CPUProfileInterval/time.Second)
 		fullRows, err = dataForRemoteProfile(sctx, "tikv", "/debug/pprof/profile?seconds="+interval, false)
 	case tableNamePDProfileCPU:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfProfileAPIWithInterval(profile.CPUProfileInterval), false)
+		interval := fmt.Sprintf("%d", profile.CPUProfileInterval/time.Second)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/profile?seconds="+interval, false)
 	case tableNamePDProfileMemory:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfHeap, false)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/heap", false)
 	case tableNamePDProfileMutex:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfMutex, false)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/mutex", false)
 	case tableNamePDProfileAllocs:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfAllocs, false)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/allocs", false)
 	case tableNamePDProfileBlock:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfBlock, false)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/block", false)
 	case tableNamePDProfileGoroutines:
-		fullRows, err = dataForRemoteProfile(sctx, "pd", pd.PProfGoroutineWithDebugLevel(2), true)
+		fullRows, err = dataForRemoteProfile(sctx, "pd", "/pd/api/v1/debug/pprof/goroutine?debug=2", true)
 	case tableNameSessionVariables:
 		fullRows, err = infoschema.GetDataFromSessionVariables(ctx, sctx)
 	case tableNameSessionConnectAttrs:
@@ -302,7 +302,7 @@ func dataForRemoteProfile(ctx sessionctx.Context, nodeType, uri string, isGorout
 	)
 	switch nodeType {
 	case "tikv":
-		servers, err = infoschema.GetStoreServerInfo(ctx.GetStore())
+		servers, err = infoschema.GetStoreServerInfo(ctx)
 	case "pd":
 		servers, err = infoschema.GetPDServerInfo(ctx)
 	default:
@@ -343,7 +343,7 @@ func dataForRemoteProfile(ctx sessionctx.Context, nodeType, uri string, isGorout
 	for _, server := range servers {
 		statusAddr := server.StatusAddr
 		if len(statusAddr) == 0 {
-			ctx.GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf("TiKV node %s does not contain status address", server.Address))
+			ctx.GetSessionVars().StmtCtx.AppendWarning(errors.Errorf("TiKV node %s does not contain status address", server.Address))
 			continue
 		}
 

@@ -98,7 +98,7 @@ func (p *WorkerPool[T, R]) Start(ctx context.Context) {
 
 	if p.resChan == nil {
 		var zero R
-		var r any = zero
+		var r interface{} = zero
 		if _, ok := r.(None); !ok {
 			p.resChan = make(chan R)
 		}

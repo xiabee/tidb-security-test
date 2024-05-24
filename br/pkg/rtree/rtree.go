@@ -18,7 +18,6 @@ type Range struct {
 	StartKey []byte
 	EndKey   []byte
 	Files    []*backuppb.File
-	Size     uint64
 }
 
 // BytesAndKeys returns total bytes and keys in a range.
@@ -221,7 +220,6 @@ func (rangeTree *RangeTree) MergedRanges(splitSizeBytes, splitKeyCount uint64) [
 		} else {
 			// need to merge from rg to sortedRages[mergeTargetIndex]
 			sortedRanges[mergeTargetIndex].EndKey = rg.EndKey
-			sortedRanges[mergeTargetIndex].Size += rg.Size
 			sortedRanges[mergeTargetIndex].Files = append(sortedRanges[mergeTargetIndex].Files, rg.Files...)
 		}
 

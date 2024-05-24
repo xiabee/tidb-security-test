@@ -78,8 +78,7 @@ func TestJoinOrderHint4TiFlash(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		tableName := tblInfo.Name.L
 		if tableName == "t" || tableName == "t1" || tableName == "t2" || tableName == "t3" || tableName == "t4" || tableName == "t5" || tableName == "t6" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{

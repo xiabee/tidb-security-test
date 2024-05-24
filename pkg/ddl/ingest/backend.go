@@ -19,18 +19,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend/local"
+	lightning "github.com/pingcap/tidb/br/pkg/lightning/config"
+	"github.com/pingcap/tidb/br/pkg/lightning/errormanager"
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	tikv "github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/lightning/backend"
-	"github.com/pingcap/tidb/pkg/lightning/backend/encode"
-	"github.com/pingcap/tidb/pkg/lightning/backend/local"
-	"github.com/pingcap/tidb/pkg/lightning/common"
-	lightning "github.com/pingcap/tidb/pkg/lightning/config"
-	"github.com/pingcap/tidb/pkg/lightning/errormanager"
-	"github.com/pingcap/tidb/pkg/lightning/log"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/generic"
@@ -63,14 +60,14 @@ type BackendCtx interface {
 type FlushMode byte
 
 const (
-	// FlushModeAuto means caller does not enforce any flush, the implementation can
-	// decide it.
+	// FlushModeAuto means flush when the memory table size reaches the threshold.
 	FlushModeAuto FlushMode = iota
-	// FlushModeForceFlushNoImport means flush all data to local storage, but don't
-	// import the data to TiKV.
-	FlushModeForceFlushNoImport
-	// FlushModeForceFlushAndImport means flush and import all data to TiKV.
-	FlushModeForceFlushAndImport
+	// FlushModeForceLocal means flush all data to local storage.
+	FlushModeForceLocal
+	// FlushModeForceLocalAndCheckDiskQuota means flush all data to local storage and check disk quota.
+	FlushModeForceLocalAndCheckDiskQuota
+	// FlushModeForceGlobal means import all data in local storage to global storage.
+	FlushModeForceGlobal
 )
 
 // litBackendCtx store a backend info for add index reorg task.
@@ -92,44 +89,28 @@ type litBackendCtx struct {
 	etcdClient      *clientv3.Client
 }
 
-func (bc *litBackendCtx) handleErrorAfterCollectRemoteDuplicateRows(err error, indexID int64, tbl table.Table, hasDupe bool) error {
-	if err != nil && !common.ErrFoundIndexConflictRecords.Equal(err) {
-		logutil.Logger(bc.ctx).Error(LitInfoRemoteDupCheck, zap.Error(err),
-			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
-		return errors.Trace(err)
-	} else if hasDupe {
-		logutil.Logger(bc.ctx).Error(LitErrRemoteDupExistErr,
-			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
-
-		if common.ErrFoundIndexConflictRecords.Equal(err) {
-			tErr, ok := errors.Cause(err).(*terror.Error)
-			if !ok {
-				return errors.Trace(tikv.ErrKeyExists)
-			}
-			if len(tErr.Args()) != 4 {
-				return errors.Trace(tikv.ErrKeyExists)
-			}
-			indexName := tErr.Args()[1]
-			valueStr := tErr.Args()[2]
-
-			return errors.Trace(tikv.ErrKeyExists.FastGenByArgs(valueStr, indexName))
-		}
-		return errors.Trace(tikv.ErrKeyExists)
-	}
-	return nil
-}
-
 // CollectRemoteDuplicateRows collects duplicate rows from remote TiKV.
 func (bc *litBackendCtx) CollectRemoteDuplicateRows(indexID int64, tbl table.Table) error {
 	errorMgr := errormanager.New(nil, bc.cfg, log.Logger{Logger: logutil.Logger(bc.ctx)})
 	// backend must be a local backend.
+	// todo: when we can separate local backend completely from tidb backend, will remove this cast.
+	//nolint:forcetypeassert
 	dupeController := bc.backend.GetDupeController(bc.cfg.TikvImporter.RangeConcurrency*2, errorMgr)
 	hasDupe, err := dupeController.CollectRemoteDuplicateRows(bc.ctx, tbl, tbl.Meta().Name.L, &encode.SessionOptions{
 		SQLMode: mysql.ModeStrictAllTables,
 		SysVars: bc.sysVars,
 		IndexID: indexID,
-	}, lightning.ErrorOnDup)
-	return bc.handleErrorAfterCollectRemoteDuplicateRows(err, indexID, tbl, hasDupe)
+	})
+	if err != nil {
+		logutil.Logger(bc.ctx).Error(LitInfoRemoteDupCheck, zap.Error(err),
+			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
+		return err
+	} else if hasDupe {
+		logutil.Logger(bc.ctx).Error(LitErrRemoteDupExistErr,
+			zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
+		return tikv.ErrKeyExists
+	}
+	return nil
 }
 
 // FinishImport imports all the key-values in engine into the storage, collects the duplicate errors if any, and
@@ -160,8 +141,16 @@ func (bc *litBackendCtx) FinishImport(indexID int64, unique bool, tbl table.Tabl
 			SQLMode: mysql.ModeStrictAllTables,
 			SysVars: bc.sysVars,
 			IndexID: ei.indexID,
-		}, lightning.ErrorOnDup)
-		return bc.handleErrorAfterCollectRemoteDuplicateRows(err, indexID, tbl, hasDupe)
+		})
+		if err != nil {
+			logutil.Logger(bc.ctx).Error(LitInfoRemoteDupCheck, zap.Error(err),
+				zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
+			return err
+		} else if hasDupe {
+			logutil.Logger(bc.ctx).Error(LitErrRemoteDupExistErr,
+				zap.String("table", tbl.Meta().Name.O), zap.Int64("index ID", indexID))
+			return tikv.ErrKeyExists
+		}
 	}
 	return nil
 }
@@ -183,7 +172,7 @@ func (bc *litBackendCtx) Flush(indexID int64, mode FlushMode) (flushed, imported
 		return false, false, dbterror.ErrIngestFailed.FastGenByArgs("ingest engine not found")
 	}
 
-	shouldFlush, shouldImport := bc.checkFlush(mode)
+	shouldFlush, shouldImport := bc.ShouldSync(mode)
 	if !shouldFlush {
 		return false, false, nil
 	}
@@ -210,7 +199,7 @@ func (bc *litBackendCtx) Flush(indexID int64, mode FlushMode) (flushed, imported
 		se, _ := concurrency.NewSession(bc.etcdClient)
 		mu, err := acquireLock(bc.ctx, se, distLockKey)
 		if err != nil {
-			return true, false, errors.Trace(err)
+			return true, false, err
 		}
 		logutil.Logger(bc.ctx).Info("acquire distributed flush lock success", zap.Int64("jobID", bc.jobID))
 		defer func() {
@@ -250,17 +239,7 @@ func (bc *litBackendCtx) unsafeImportAndReset(ei *engineInfo) error {
 		return err
 	}
 
-	resetFn := bc.backend.ResetEngineSkipAllocTS
-	mgr := bc.GetCheckpointManager()
-	if mgr == nil {
-		// disttask case, no need to refresh TS.
-		//
-		// TODO(lance6716): for disttask local sort case, we need to use a fixed TS. But
-		// it doesn't have checkpoint, so we need to find a way to save TS.
-		resetFn = bc.backend.ResetEngine
-	}
-
-	err := resetFn(bc.ctx, ei.uuid)
+	err := bc.backend.ResetEngine(bc.ctx, ei.uuid)
 	if err != nil {
 		logutil.Logger(bc.ctx).Error(LitErrResetEngineFail, zap.Int64("index ID", ei.indexID))
 		err1 := ei.closedEngine.Cleanup(bc.ctx)
@@ -272,50 +251,27 @@ func (bc *litBackendCtx) unsafeImportAndReset(ei *engineInfo) error {
 		ei.closedEngine = nil
 		return err
 	}
-
-	if mgr == nil {
-		return nil
-	}
-
-	// for local disk case, we need to refresh TS because duplicate detection
-	// requires each ingest to have a unique TS.
-	//
-	// TODO(lance6716): there's still a chance that data is imported but because of
-	// checkpoint is low-watermark, the data will still be imported again with
-	// another TS after failover. Need to refine the checkpoint mechanism.
-	newTS, err := mgr.refreshTSAndUpdateCP()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ei.openedEngine.SetTS(newTS)
 	return nil
 }
 
 // ForceSyncFlagForTest is a flag to force sync only for test.
 var ForceSyncFlagForTest = false
 
-func (bc *litBackendCtx) checkFlush(mode FlushMode) (shouldFlush bool, shouldImport bool) {
-	failpoint.Inject("forceSyncFlagForTest", func() {
-		// used in a manual test
-		ForceSyncFlagForTest = true
-	})
-	if mode == FlushModeForceFlushAndImport || ForceSyncFlagForTest {
+func (bc *litBackendCtx) ShouldSync(mode FlushMode) (shouldFlush bool, shouldImport bool) {
+	if mode == FlushModeForceGlobal || ForceSyncFlagForTest {
 		return true, true
 	}
-	if mode == FlushModeForceFlushNoImport {
+	if mode == FlushModeForceLocal {
 		return true, false
 	}
 	bc.diskRoot.UpdateUsage()
 	shouldImport = bc.diskRoot.ShouldImport()
-	interval := bc.updateInterval
-	// This failpoint will be manually set through HTTP status port.
-	failpoint.Inject("mockSyncIntervalMs", func(val failpoint.Value) {
-		if v, ok := val.(int); ok {
-			interval = time.Duration(v) * time.Millisecond
-		}
-	})
-	shouldFlush = shouldImport ||
-		time.Since(bc.timeOfLastFlush.Load()) >= interval
+	if mode == FlushModeForceLocalAndCheckDiskQuota {
+		shouldFlush = true
+	} else {
+		shouldFlush = shouldImport ||
+			time.Since(bc.timeOfLastFlush.Load()) >= bc.updateInterval
+	}
 	return shouldFlush, shouldImport
 }
 

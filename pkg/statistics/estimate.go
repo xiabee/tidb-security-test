@@ -16,6 +16,8 @@ package statistics
 
 import (
 	"math"
+
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 // calculateEstimateNDV calculates the estimate ndv of a sampled data from a multisize with size total.
@@ -43,7 +45,7 @@ func calculateEstimateNDV(h *topNHelper, rowCount uint64) (ndv uint64, scaleRati
 	d := float64(sampleNDV)
 
 	ndv = uint64(math.Sqrt(rowCountN/n)*f1 + d - f1 + 0.5)
-	ndv = max(ndv, sampleNDV)
-	ndv = min(ndv, rowCount)
+	ndv = mathutil.Max(ndv, sampleNDV)
+	ndv = mathutil.Min(ndv, rowCount)
 	return ndv, scaleRatio
 }

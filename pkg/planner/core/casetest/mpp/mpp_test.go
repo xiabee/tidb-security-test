@@ -54,8 +54,7 @@ func TestMPPJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "fact_t" || tblInfo.Name.L == "d1_t" || tblInfo.Name.L == "d2_t" || tblInfo.Name.L == "d3_t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -97,8 +96,7 @@ func TestMPPLeftSemiJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -152,8 +150,7 @@ func TestMPPOuterJoinBuildSideForBroadcastJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "a" || tblInfo.Name.L == "b" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -200,8 +197,7 @@ func TestMPPOuterJoinBuildSideForShuffleJoinWithFixedBuildSide(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "a" || tblInfo.Name.L == "b" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -248,8 +244,7 @@ func TestMPPOuterJoinBuildSideForShuffleJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "a" || tblInfo.Name.L == "b" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -311,8 +306,7 @@ func TestMPPShuffledJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "fact_t" || tblInfo.Name.L == "d1_t" || tblInfo.Name.L == "d2_t" || tblInfo.Name.L == "d3_t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -362,8 +356,7 @@ func TestMPPJoinWithCanNotFoundColumnInSchemaColumnsError(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t1" || tblInfo.Name.L == "t2" || tblInfo.Name.L == "t3" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -413,8 +406,7 @@ func TestMPPWithHashExchangeUnderNewCollation(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "table_1" || tblInfo.Name.L == "table_2" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -459,8 +451,7 @@ func TestMPPWithBroadcastExchangeUnderNewCollation(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "table_1" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -502,8 +493,7 @@ func TestMPPAvgRewrite(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "table_1" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -546,8 +536,7 @@ func TestMppUnionAll(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "t1" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -590,8 +579,7 @@ func TestMppJoinDecimal(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "tt" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -637,8 +625,7 @@ func TestMppJoinExchangeColumnPrune(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "tt" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -696,8 +683,7 @@ func TestMppFineGrainedJoinAndAgg(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "tt" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -741,8 +727,7 @@ func TestMppAggTopNWithJoin(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -784,8 +769,7 @@ func TestRejectSortForMPP(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -827,8 +811,7 @@ func TestPushDownSelectionForMPP(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -871,8 +854,7 @@ func TestPushDownProjectionForMPP(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -914,8 +896,7 @@ func TestPushDownAggForMPP(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -956,8 +937,7 @@ func TestMppVersion(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,

@@ -61,7 +61,7 @@ var (
 )
 
 var decoderPool = sync.Pool{
-	New: func() any {
+	New: func() interface{} {
 		return &planDecoder{}
 	},
 }

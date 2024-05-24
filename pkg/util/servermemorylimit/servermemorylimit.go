@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
@@ -158,7 +157,7 @@ func killSessIfNeeded(s *sessionToBeKilled, bt uint64, sm util.SessionManager) {
 				s.sqlStartTime = info.Time
 				s.isKilling = true
 				s.sessionTracker = t
-				t.Killer.SendKillSignal(sqlkiller.ServerMemoryExceeded)
+				t.NeedKill.Store(true)
 
 				killTime := time.Now()
 				SessionKillTotal.Add(1)

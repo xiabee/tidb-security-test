@@ -15,15 +15,12 @@
 package importintotest
 
 import (
-	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
-	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
+	"github.com/pingcap/tidb/pkg/executor"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/util"
 )
 
 type detachedCase struct {
@@ -43,6 +40,11 @@ var detachedCases = []detachedCase{
 }
 
 func (s *mockGCSSuite) TestSameBehaviourDetachedOrNot() {
+	s.T().Cleanup(func() {
+		executor.TestDetachedTaskFinished.Store(false)
+	})
+
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/executor/testDetachedTaskFinished", "return(true)")
 	s.tk.MustExec("SET SESSION TIME_ZONE = '+08:00';")
 	for _, ca := range detachedCases {
 		s.tk.MustExec("DROP DATABASE IF EXISTS test_detached;")
@@ -57,18 +59,14 @@ func (s *mockGCSSuite) TestSameBehaviourDetachedOrNot() {
 			},
 			Content: []byte(ca.physicalModeData),
 		})
+		executor.TestDetachedTaskFinished.Store(false)
 		s.tk.MustQuery(fmt.Sprintf(`IMPORT INTO test_detached.t1 FROM 'gs://test-detached/1.txt?endpoint=%s' WITH thread=1;`,
 			gcsEndpoint))
 		rows := s.tk.MustQuery(fmt.Sprintf(`IMPORT INTO test_detached.t2 FROM 'gs://test-detached/1.txt?endpoint=%s' WITH DETACHED, thread=1;`,
 			gcsEndpoint)).Rows()
 		require.Len(s.T(), rows, 1)
-		jobID, err := strconv.Atoi(rows[0][0].(string))
-		s.NoError(err)
-		ctx := context.Background()
-		ctx = util.WithInternalSourceType(ctx, "taskManager")
 		require.Eventually(s.T(), func() bool {
-			task := s.getTaskByJobID(ctx, int64(jobID))
-			return task.State == proto.TaskStateSucceed
+			return executor.TestDetachedTaskFinished.Load()
 		}, maxWaitTime, time.Second)
 
 		r1 := s.tk.MustQuery("SELECT * FROM test_detached.t1").Sort().Rows()

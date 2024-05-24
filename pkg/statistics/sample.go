@@ -61,17 +61,20 @@ func CopySampleItems(items []*SampleItem) []*SampleItem {
 	return n
 }
 
-func sortSampleItems(sc *stmtctx.StatementContext, items []*SampleItem) error {
+// SortSampleItems shallow copies and sorts a slice of SampleItem.
+func SortSampleItems(sc *stmtctx.StatementContext, items []*SampleItem) ([]*SampleItem, error) {
+	sortedItems := make([]*SampleItem, len(items))
+	copy(sortedItems, items)
 	var err error
-	slices.SortStableFunc(items, func(i, j *SampleItem) int {
+	slices.SortStableFunc(sortedItems, func(i, j *SampleItem) int {
 		var cmp int
-		cmp, err = i.Value.Compare(sc.TypeCtx(), &j.Value, collate.GetBinaryCollator())
+		cmp, err = i.Value.Compare(sc, &j.Value, collate.GetBinaryCollator())
 		if err != nil {
 			return -1
 		}
 		return cmp
 	})
-	return err
+	return sortedItems, err
 }
 
 // SampleCollector will collect Samples and calculate the count and ndv of an attribute.
@@ -256,8 +259,7 @@ func (s SampleBuilder) CollectColumnStats() ([]*SampleCollector, *SortedBuilder,
 						return nil, nil, err
 					}
 					decodedVal.SetBytesAsString(s.Collators[i].Key(decodedVal.GetString()), decodedVal.Collation(), uint32(decodedVal.Length()))
-					encodedKey, err := tablecodec.EncodeValue(s.Sc.TimeZone(), nil, decodedVal)
-					err = s.Sc.HandleError(err)
+					encodedKey, err := tablecodec.EncodeValue(s.Sc, nil, decodedVal)
 					if err != nil {
 						return nil, nil, err
 					}
@@ -304,8 +306,7 @@ func (c *SampleCollector) ExtractTopN(numTop uint32, sc *stmtctx.StatementContex
 		if err != nil {
 			return err
 		}
-		data, err := tablecodec.EncodeValue(sc.TimeZone(), nil, d)
-		err = sc.HandleError(err)
+		data, err := tablecodec.EncodeValue(sc, nil, d)
 		if err != nil {
 			return err
 		}

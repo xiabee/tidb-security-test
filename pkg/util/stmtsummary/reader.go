@@ -322,45 +322,45 @@ const (
 	ResourceGroupName                 = "RESOURCE_GROUP"
 )
 
-type columnValueFactory func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any
+type columnValueFactory func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{}
 
 var columnValueFactoryMap = map[string]columnValueFactory{
-	ClusterTableInstanceColumnNameStr: func(reader *stmtSummaryReader, _ *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	ClusterTableInstanceColumnNameStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return reader.instanceAddr
 	},
-	SummaryBeginTimeStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SummaryBeginTimeStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		beginTime := time.Unix(ssElement.beginTime, 0)
 		if beginTime.Location() != reader.tz {
 			beginTime = beginTime.In(reader.tz)
 		}
 		return types.NewTime(types.FromGoTime(beginTime), mysql.TypeTimestamp, 0)
 	},
-	SummaryEndTimeStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SummaryEndTimeStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		endTime := time.Unix(ssElement.endTime, 0)
 		if endTime.Location() != reader.tz {
 			endTime = endTime.In(reader.tz)
 		}
 		return types.NewTime(types.FromGoTime(endTime), mysql.TypeTimestamp, 0)
 	},
-	StmtTypeStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	StmtTypeStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return ssbd.stmtType
 	},
-	SchemaNameStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	SchemaNameStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(ssbd.schemaName)
 	},
-	DigestStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	DigestStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(ssbd.digest)
 	},
-	DigestTextStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	DigestTextStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return ssbd.normalizedSQL
 	},
-	TableNamesStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	TableNamesStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(ssbd.tableNames)
 	},
-	IndexNamesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	IndexNamesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(strings.Join(ssElement.indexNames, ","))
 	},
-	SampleUserStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SampleUserStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		sampleUser := ""
 		for key := range ssElement.authUsers {
 			sampleUser = key
@@ -368,258 +368,258 @@ var columnValueFactoryMap = map[string]columnValueFactory{
 		}
 		return convertEmptyToNil(sampleUser)
 	},
-	ExecCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	ExecCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.execCount
 	},
-	SumErrorsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumErrorsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sumErrors
 	},
-	SumWarningsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumWarningsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sumWarnings
 	},
-	SumLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.sumLatency)
 	},
-	MaxLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxLatency)
 	},
-	MinLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MinLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.minLatency)
 	},
-	AvgLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumLatency), ssElement.execCount)
 	},
-	AvgParseLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgParseLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumParseLatency), ssElement.execCount)
 	},
-	MaxParseLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxParseLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxParseLatency)
 	},
-	AvgCompileLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgCompileLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumCompileLatency), ssElement.execCount)
 	},
-	MaxCompileLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCompileLatencyStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxCompileLatency)
 	},
-	SumCopTaskNumStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumCopTaskNumStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sumNumCopTasks
 	},
-	MaxCopProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCopProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxCopProcessTime)
 	},
-	MaxCopProcessAddressStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCopProcessAddressStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(ssElement.maxCopProcessAddress)
 	},
-	MaxCopWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCopWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxCopWaitTime)
 	},
-	MaxCopWaitAddressStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCopWaitAddressStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return convertEmptyToNil(ssElement.maxCopWaitAddress)
 	},
-	AvgProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumProcessTime), ssElement.execCount)
 	},
-	MaxProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxProcessTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxProcessTime)
 	},
-	AvgWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumWaitTime), ssElement.execCount)
 	},
-	MaxWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxWaitTime)
 	},
-	AvgBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumBackoffTime), ssElement.execCount)
 	},
-	MaxBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxBackoffTime)
 	},
-	AvgTotalKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgTotalKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumTotalKeys, ssElement.execCount)
 	},
-	MaxTotalKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxTotalKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxTotalKeys
 	},
-	AvgProcessedKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgProcessedKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumProcessedKeys, ssElement.execCount)
 	},
-	MaxProcessedKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxProcessedKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxProcessedKeys
 	},
-	AvgRocksdbDeleteSkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRocksdbDeleteSkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumRocksdbDeleteSkippedCount), ssElement.execCount)
 	},
-	MaxRocksdbDeleteSkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRocksdbDeleteSkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxRocksdbDeleteSkippedCount
 	},
-	AvgRocksdbKeySkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRocksdbKeySkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumRocksdbKeySkippedCount), ssElement.execCount)
 	},
-	MaxRocksdbKeySkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRocksdbKeySkippedCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxRocksdbKeySkippedCount
 	},
-	AvgRocksdbBlockCacheHitCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRocksdbBlockCacheHitCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumRocksdbBlockCacheHitCount), ssElement.execCount)
 	},
-	MaxRocksdbBlockCacheHitCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRocksdbBlockCacheHitCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxRocksdbBlockCacheHitCount
 	},
-	AvgRocksdbBlockReadCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRocksdbBlockReadCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumRocksdbBlockReadCount), ssElement.execCount)
 	},
-	MaxRocksdbBlockReadCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRocksdbBlockReadCountStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxRocksdbBlockReadCount
 	},
-	AvgRocksdbBlockReadByteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRocksdbBlockReadByteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumRocksdbBlockReadByte), ssElement.execCount)
 	},
-	MaxRocksdbBlockReadByteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRocksdbBlockReadByteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxRocksdbBlockReadByte
 	},
-	AvgPrewriteTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgPrewriteTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumPrewriteTime), ssElement.commitCount)
 	},
-	MaxPrewriteTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxPrewriteTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxPrewriteTime)
 	},
-	AvgCommitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgCommitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumCommitTime), ssElement.commitCount)
 	},
-	MaxCommitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCommitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxCommitTime)
 	},
-	AvgGetCommitTsTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgGetCommitTsTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumGetCommitTsTime), ssElement.commitCount)
 	},
-	MaxGetCommitTsTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxGetCommitTsTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxGetCommitTsTime)
 	},
-	AvgCommitBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgCommitBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumCommitBackoffTime, ssElement.commitCount)
 	},
-	MaxCommitBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxCommitBackoffTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxCommitBackoffTime
 	},
-	AvgResolveLockTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgResolveLockTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumResolveLockTime, ssElement.commitCount)
 	},
-	MaxResolveLockTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxResolveLockTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxResolveLockTime
 	},
-	AvgLocalLatchWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgLocalLatchWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumLocalLatchTime), ssElement.commitCount)
 	},
-	MaxLocalLatchWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxLocalLatchWaitTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.maxLocalLatchTime)
 	},
-	AvgWriteKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgWriteKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgFloat(ssElement.sumWriteKeys, ssElement.commitCount)
 	},
-	MaxWriteKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxWriteKeysStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxWriteKeys
 	},
-	AvgWriteSizeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgWriteSizeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgFloat(ssElement.sumWriteSize, ssElement.commitCount)
 	},
-	MaxWriteSizeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxWriteSizeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxWriteSize
 	},
-	AvgPrewriteRegionsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgPrewriteRegionsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgFloat(ssElement.sumPrewriteRegionNum, ssElement.commitCount)
 	},
-	MaxPrewriteRegionsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxPrewriteRegionsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int(ssElement.maxPrewriteRegionNum)
 	},
-	AvgTxnRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgTxnRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgFloat(ssElement.sumTxnRetry, ssElement.commitCount)
 	},
-	MaxTxnRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxTxnRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxTxnRetry
 	},
-	SumExecRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumExecRetryStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int(ssElement.execRetryCount)
 	},
-	SumExecRetryTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumExecRetryTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.execRetryTime)
 	},
-	SumBackoffTimesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	SumBackoffTimesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sumBackoffTimes
 	},
-	BackoffTypesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	BackoffTypesStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return formatBackoffTypes(ssElement.backoffTypes)
 	},
-	AvgMemStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgMemStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumMem, ssElement.execCount)
 	},
-	MaxMemStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxMemStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxMem
 	},
-	AvgDiskStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgDiskStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumDisk, ssElement.execCount)
 	},
-	MaxDiskStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxDiskStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxDisk
 	},
-	AvgKvTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgKvTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumKVTotal), ssElement.commitCount)
 	},
-	AvgPdTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgPdTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumPDTotal), ssElement.commitCount)
 	},
-	AvgBackoffTotalTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgBackoffTotalTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumBackoffTotal), ssElement.commitCount)
 	},
-	AvgWriteSQLRespTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgWriteSQLRespTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.sumWriteSQLRespTotal), ssElement.commitCount)
 	},
-	MaxResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.maxResultRows
 	},
-	MinResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MinResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.minResultRows
 	},
-	AvgResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgResultRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(ssElement.sumResultRows, ssElement.execCount)
 	},
-	PreparedStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PreparedStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.prepared
 	},
-	AvgAffectedRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgAffectedRowsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgFloat(int64(ssElement.sumAffectedRows), ssElement.execCount)
 	},
-	FirstSeenStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	FirstSeenStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		firstSeen := ssElement.firstSeen
 		if firstSeen.Location() != reader.tz {
 			firstSeen = firstSeen.In(reader.tz)
 		}
 		return types.NewTime(types.FromGoTime(firstSeen), mysql.TypeTimestamp, 0)
 	},
-	LastSeenStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	LastSeenStr: func(reader *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		lastSeen := ssElement.lastSeen
 		if lastSeen.Location() != reader.tz {
 			lastSeen = lastSeen.In(reader.tz)
 		}
 		return types.NewTime(types.FromGoTime(lastSeen), mysql.TypeTimestamp, 0)
 	},
-	PlanInCacheStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PlanInCacheStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.planInCache
 	},
-	PlanCacheHitsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PlanCacheHitsStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.planCacheHits
 	},
-	PlanInBindingStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PlanInBindingStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.planInBinding
 	},
-	QuerySampleTextStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	QuerySampleTextStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sampleSQL
 	},
-	PrevSampleTextStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PrevSampleTextStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.prevSQL
 	},
-	PlanDigestStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) any {
+	PlanDigestStr: func(_ *stmtSummaryReader, _ *stmtSummaryByDigestElement, ssbd *stmtSummaryByDigest) interface{} {
 		return ssbd.planDigest
 	},
-	PlanStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PlanStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		plan, err := plancodec.DecodePlan(ssElement.samplePlan)
 		if err != nil {
 			logutil.BgLogger().Error("decode plan in statement summary failed", zap.String("plan", ssElement.samplePlan), zap.String("query", ssElement.sampleSQL), zap.Error(err))
@@ -627,37 +627,37 @@ var columnValueFactoryMap = map[string]columnValueFactory{
 		}
 		return plan
 	},
-	BinaryPlan: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	BinaryPlan: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.sampleBinaryPlan
 	},
-	Charset: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	Charset: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.charset
 	},
-	Collation: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	Collation: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.collation
 	},
-	PlanHint: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	PlanHint: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.planHint
 	},
-	AvgRequestUnitReadStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRequestUnitReadStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgSumFloat(ssElement.SumRRU, ssElement.execCount)
 	},
-	MaxRequestUnitReadStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRequestUnitReadStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.MaxRRU
 	},
-	AvgRequestUnitWriteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgRequestUnitWriteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgSumFloat(ssElement.SumWRU, ssElement.execCount)
 	},
-	MaxRequestUnitWriteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxRequestUnitWriteStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.MaxWRU
 	},
-	AvgQueuedRcTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	AvgQueuedRcTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return avgInt(int64(ssElement.SumRUWaitDuration), ssElement.execCount)
 	},
-	MaxQueuedRcTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	MaxQueuedRcTimeStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return int64(ssElement.MaxRUWaitDuration)
 	},
-	ResourceGroupName: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+	ResourceGroupName: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) interface{} {
 		return ssElement.resourceGroupName
 	},
 }

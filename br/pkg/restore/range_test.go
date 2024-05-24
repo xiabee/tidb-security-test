@@ -1,11 +1,12 @@
 // Copyright 2020 PingCAP, Inc. Licensed under Apache-2.0.
 
-package restore
+package restore_test
 
 import (
 	"testing"
 
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
+	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/stretchr/testify/require"
@@ -24,7 +25,7 @@ func TestSortRange(t *testing.T) {
 		{OldKeyPrefix: tablecodec.GenTableRecordPrefix(1), NewKeyPrefix: tablecodec.GenTableRecordPrefix(4)},
 		{OldKeyPrefix: tablecodec.GenTableRecordPrefix(2), NewKeyPrefix: tablecodec.GenTableRecordPrefix(5)},
 	}
-	rewriteRules := &RewriteRules{
+	rewriteRules := &restore.RewriteRules{
 		Data: dataRules,
 	}
 	ranges1 := []rtree.Range{
@@ -33,11 +34,7 @@ func TestSortRange(t *testing.T) {
 			EndKey:   append(tablecodec.GenTableRecordPrefix(1), []byte("bbb")...), Files: nil,
 		},
 	}
-	for i, rg := range ranges1 {
-		tmp, _ := RewriteRange(&rg, rewriteRules)
-		ranges1[i] = *tmp
-	}
-	rs1, err := SortRanges(ranges1)
+	rs1, err := restore.SortRanges(ranges1, rewriteRules)
 	require.NoErrorf(t, err, "sort range1 failed: %v", err)
 	rangeEquals(t, rs1, []rtree.Range{
 		{
@@ -52,19 +49,13 @@ func TestSortRange(t *testing.T) {
 			EndKey:   append(tablecodec.GenTableRecordPrefix(2), []byte("bbb")...), Files: nil,
 		},
 	}
-	for _, rg := range ranges2 {
-		_, err := RewriteRange(&rg, rewriteRules)
-		require.Error(t, err)
-		require.Regexp(t, "table id mismatch.*", err.Error())
-	}
+	_, err = restore.SortRanges(ranges2, rewriteRules)
+	require.Error(t, err)
+	require.Regexp(t, "table id mismatch.*", err.Error())
 
 	ranges3 := initRanges()
 	rewriteRules1 := initRewriteRules()
-	for i, rg := range ranges3 {
-		tmp, _ := RewriteRange(&rg, rewriteRules1)
-		ranges3[i] = *tmp
-	}
-	rs3, err := SortRanges(ranges3)
+	rs3, err := restore.SortRanges(ranges3, rewriteRules1)
 	require.NoErrorf(t, err, "sort range1 failed: %v", err)
 	rangeEquals(t, rs3, []rtree.Range{
 		{StartKey: []byte("bbd"), EndKey: []byte("bbf"), Files: nil},

@@ -72,7 +72,7 @@ func (l *List) FieldTypes() []*types.FieldType {
 	return l.fieldTypes
 }
 
-// NumRowsOfChunk returns the number of rows of a chunk in the DataInDiskByRows.
+// NumRowsOfChunk returns the number of rows of a chunk in the ListInDisk.
 func (l *List) NumRowsOfChunk(chkID int) int {
 	return l.chunks[chkID].NumRows()
 }

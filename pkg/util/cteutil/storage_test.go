@@ -109,7 +109,7 @@ func TestSpillToDisk(t *testing.T) {
 	fields := []*types.FieldType{types.NewFieldType(mysql.TypeLong)}
 	chkSize := 10
 	storage := NewStorageRowContainer(fields, chkSize)
-	var tmp any = storage
+	var tmp interface{} = storage
 
 	inChk := chunk.NewChunkWithCapacity(fields, chkSize)
 	for i := 0; i < chkSize; i++ {

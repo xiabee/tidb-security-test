@@ -57,7 +57,7 @@ func TestBackfillOperators(t *testing.T) {
 	var opTasks []ddl.TableScanTask
 	{
 		ctx := context.Background()
-		opCtx := ddl.NewOperatorCtx(ctx, 1, 1)
+		opCtx := ddl.NewOperatorCtx(ctx)
 		pTbl := tbl.(table.PhysicalTable)
 		src := ddl.NewTableScanTaskSource(opCtx, store, pTbl, startKey, endKey)
 		sink := newTestSink[ddl.TableScanTask]()
@@ -92,7 +92,7 @@ func TestBackfillOperators(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		opCtx := ddl.NewOperatorCtx(ctx, 1, 1)
+		opCtx := ddl.NewOperatorCtx(ctx)
 		src := newTestSource(opTasks...)
 		scanOp := ddl.NewTableScanOperator(opCtx, sessPool, copCtx, srcChkPool, 3)
 		sink := newTestSink[ddl.IndexRecordChunk]()
@@ -125,7 +125,7 @@ func TestBackfillOperators(t *testing.T) {
 	// Test IndexIngestOperator.
 	{
 		ctx := context.Background()
-		opCtx := ddl.NewOperatorCtx(ctx, 1, 1)
+		opCtx := ddl.NewOperatorCtx(ctx)
 		var keys, values [][]byte
 		onWrite := func(key, val []byte) {
 			keys = append(keys, key)
@@ -176,7 +176,7 @@ func TestBackfillOperatorPipeline(t *testing.T) {
 	sessPool := newSessPoolForTest(t, store)
 
 	ctx := context.Background()
-	opCtx := ddl.NewOperatorCtx(ctx, 1, 1)
+	opCtx := ddl.NewOperatorCtx(ctx)
 	mockBackendCtx := &ingest.MockBackendCtx{}
 	mockEngine := ingest.NewMockEngineInfo(nil)
 	mockEngine.SetHook(func(key, val []byte) {})
@@ -189,7 +189,6 @@ func TestBackfillOperatorPipeline(t *testing.T) {
 		mockBackendCtx,
 		[]ingest.Engine{mockEngine},
 		tk.Session(),
-		1, // job id
 		tbl.(table.PhysicalTable),
 		[]*model.IndexInfo{idxInfo},
 		startKey,
@@ -197,8 +196,6 @@ func TestBackfillOperatorPipeline(t *testing.T) {
 		totalRowCount,
 		nil,
 		ddl.NewDDLReorgMeta(tk.Session()),
-		0,
-		2,
 	)
 	require.NoError(t, err)
 	err = pipeline.Execute()
@@ -259,14 +256,13 @@ func TestBackfillOperatorPipelineException(t *testing.T) {
 		ddl.OperatorCallBackForTest = func() {
 			cancel()
 		}
-		opCtx := ddl.NewOperatorCtx(ctx, 1, 1)
+		opCtx := ddl.NewOperatorCtx(ctx)
 		pipeline, err := ddl.NewAddIndexIngestPipeline(
 			opCtx, store,
 			sessPool,
 			mockBackendCtx,
 			[]ingest.Engine{mockEngine},
 			tk.Session(),
-			1, // job id
 			tbl.(table.PhysicalTable),
 			[]*model.IndexInfo{idxInfo},
 			startKey,
@@ -274,8 +270,6 @@ func TestBackfillOperatorPipelineException(t *testing.T) {
 			&atomic.Int64{},
 			nil,
 			ddl.NewDDLReorgMeta(tk.Session()),
-			0,
-			2,
 		)
 		require.NoError(t, err)
 		err = pipeline.Execute()

@@ -24,19 +24,18 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/memo"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGroupStringer(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandSelection: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandSelection: {
 			NewRulePushSelDownTiKVSingleGather(),
 			NewRulePushSelDownTableScan(),
 		},
-		pattern.OperandDataSource: {
+		memo.OperandDataSource: {
 			NewRuleEnumeratePaths(),
 		},
 	})
@@ -62,7 +61,7 @@ func TestGroupStringer(t *testing.T) {
 		stmt, err := p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
 
-		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
+		plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
 		logic, ok := plan.(plannercore.LogicalPlan)

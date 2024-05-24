@@ -79,7 +79,7 @@ func WriteError(w http.ResponseWriter, err error) {
 }
 
 // WriteData writes data to response.
-func WriteData(w http.ResponseWriter, data any) {
+func WriteData(w http.ResponseWriter, data interface{}) {
 	js, err := json.MarshalIndent(data, "", " ")
 	if err != nil {
 		WriteError(w, err)

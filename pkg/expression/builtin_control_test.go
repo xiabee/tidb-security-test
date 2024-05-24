@@ -29,48 +29,48 @@ import (
 func TestCaseWhen(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		Arg []any
-		Ret any
+		Arg []interface{}
+		Ret interface{}
 	}{
-		{[]any{true, 1, true, 2, 3}, 1},
-		{[]any{false, 1, true, 2, 3}, 2},
-		{[]any{nil, 1, true, 2, 3}, 2},
-		{[]any{false, 1, false, 2, 3}, 3},
-		{[]any{nil, 1, nil, 2, 3}, 3},
-		{[]any{false, 1, nil, 2, 3}, 3},
-		{[]any{nil, 1, false, 2, 3}, 3},
-		{[]any{1, jsonInt.GetMysqlJSON(), nil}, 3},
-		{[]any{0, jsonInt.GetMysqlJSON(), nil}, nil},
-		{[]any{0.1, 1, 2}, 1},
-		{[]any{0.0, 1, 0.1, 2}, 2},
+		{[]interface{}{true, 1, true, 2, 3}, 1},
+		{[]interface{}{false, 1, true, 2, 3}, 2},
+		{[]interface{}{nil, 1, true, 2, 3}, 2},
+		{[]interface{}{false, 1, false, 2, 3}, 3},
+		{[]interface{}{nil, 1, nil, 2, 3}, 3},
+		{[]interface{}{false, 1, nil, 2, 3}, 3},
+		{[]interface{}{nil, 1, false, 2, 3}, 3},
+		{[]interface{}{1, jsonInt.GetMysqlJSON(), nil}, 3},
+		{[]interface{}{0, jsonInt.GetMysqlJSON(), nil}, nil},
+		{[]interface{}{0.1, 1, 2}, 1},
+		{[]interface{}{0.0, 1, 0.1, 2}, 2},
 	}
 	fc := funcs[ast.Case]
 	for _, tt := range tbl {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(tt.Arg...)))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.Ret), d)
 	}
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(errors.New("can't convert string to bool"), 1, true)))
 	require.NoError(t, err)
-	_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	_, err = evalBuiltinFunc(f, chunk.Row{})
 	require.Error(t, err)
 }
 
 func TestIf(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := stmtCtx.TypeFlags()
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.SetTypeFlags(oldTypeFlags)
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
-	stmtCtx.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 	tbl := []struct {
-		Arg1 any
-		Arg2 any
-		Arg3 any
-		Ret  any
+		Arg1 interface{}
+		Arg2 interface{}
+		Arg3 interface{}
+		Ret  interface{}
 	}{
 		{1, 1, 2, 1},
 		{nil, 1, 2, 2},
@@ -94,13 +94,13 @@ func TestIf(t *testing.T) {
 	for _, tt := range tbl {
 		f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(tt.Arg1, tt.Arg2, tt.Arg3)))
 		require.NoError(t, err)
-		d, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		d, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.Ret), d)
 	}
 	f, err := fc.getFunction(ctx, datumsToConstants(types.MakeDatums(errors.New("must error"), 1, 2)))
 	require.NoError(t, err)
-	_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	_, err = evalBuiltinFunc(f, chunk.Row{})
 	require.Error(t, err)
 	_, err = fc.getFunction(ctx, datumsToConstants(types.MakeDatums(1, 2)))
 	require.Error(t, err)
@@ -109,9 +109,9 @@ func TestIf(t *testing.T) {
 func TestIfNull(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		arg1     any
-		arg2     any
-		expected any
+		arg1     interface{}
+		arg2     interface{}
+		expected interface{}
 		isNil    bool
 		getErr   bool
 	}{
@@ -129,9 +129,9 @@ func TestIfNull(t *testing.T) {
 	}
 
 	for _, tt := range tbl {
-		f, err := newFunctionForTest(ctx, ast.Ifnull, primitiveValsToConstants(ctx, []any{tt.arg1, tt.arg2})...)
+		f, err := newFunctionForTest(ctx, ast.Ifnull, primitiveValsToConstants(ctx, []interface{}{tt.arg1, tt.arg2})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if tt.getErr {
 			require.Error(t, err)
 		} else {

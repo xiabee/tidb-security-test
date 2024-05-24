@@ -15,6 +15,7 @@
 package aggfuncs
 
 import (
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 )
 
@@ -22,7 +23,7 @@ type varSamp4Float64 struct {
 	varPop4Float64
 }
 
-func (e *varSamp4Float64) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr PartialResult, chk *chunk.Chunk) error {
+func (e *varSamp4Float64) AppendFinalResult2Chunk(_ sessionctx.Context, pr PartialResult, chk *chunk.Chunk) error {
 	p := (*partialResult4VarPopFloat64)(pr)
 	if p.count <= 1 {
 		chk.AppendNull(e.ordinal)
@@ -37,7 +38,7 @@ type varSamp4DistinctFloat64 struct {
 	varPop4DistinctFloat64
 }
 
-func (e *varSamp4DistinctFloat64) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr PartialResult, chk *chunk.Chunk) error {
+func (e *varSamp4DistinctFloat64) AppendFinalResult2Chunk(_ sessionctx.Context, pr PartialResult, chk *chunk.Chunk) error {
 	p := (*partialResult4VarPopDistinctFloat64)(pr)
 	if p.count <= 1 {
 		chk.AppendNull(e.ordinal)

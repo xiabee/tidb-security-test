@@ -351,7 +351,7 @@ func (p *UserPrivileges) GetAuthWithoutVerification(user, host string) (success 
 	return
 }
 
-func checkAuthTokenClaims(claims map[string]any, record *UserRecord, tokenLife time.Duration) error {
+func checkAuthTokenClaims(claims map[string]interface{}, record *UserRecord, tokenLife time.Duration) error {
 	if sub, ok := claims[jwtRepo.SubjectKey]; !ok {
 		return errors.New("lack 'sub'")
 	} else if sub != record.User {
@@ -559,7 +559,7 @@ func (p *UserPrivileges) ConnectionVerification(user *auth.UserIdentity, authUse
 		}
 		tokenString := string(hack.String(authentication[:len(authentication)-1]))
 		var (
-			claims map[string]any
+			claims map[string]interface{}
 		)
 		if claims, err = GlobalJWKS.checkSigWithRetry(tokenString, 1); err != nil {
 			logutil.BgLogger().Error("verify JWT failed", zap.Error(err))
@@ -984,7 +984,7 @@ func (passwordLocking *PasswordLocking) ParseJSON(passwordLockingJSON types.Bina
 	if err != nil {
 		return err
 	}
-	passwordLocking.FailedLoginAttempts = min(passwordLocking.FailedLoginAttempts, math.MaxInt16)
+	passwordLocking.FailedLoginAttempts = mathutil.Min(passwordLocking.FailedLoginAttempts, math.MaxInt16)
 	passwordLocking.FailedLoginAttempts = mathutil.Max(passwordLocking.FailedLoginAttempts, 0)
 
 	passwordLocking.PasswordLockTimeDays, err =
@@ -992,7 +992,7 @@ func (passwordLocking *PasswordLocking) ParseJSON(passwordLockingJSON types.Bina
 	if err != nil {
 		return err
 	}
-	passwordLocking.PasswordLockTimeDays = min(passwordLocking.PasswordLockTimeDays, math.MaxInt16)
+	passwordLocking.PasswordLockTimeDays = mathutil.Min(passwordLocking.PasswordLockTimeDays, math.MaxInt16)
 	passwordLocking.PasswordLockTimeDays = mathutil.Max(passwordLocking.PasswordLockTimeDays, -1)
 
 	passwordLocking.FailedLoginCount, err =

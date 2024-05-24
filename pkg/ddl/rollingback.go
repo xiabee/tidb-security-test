@@ -82,7 +82,7 @@ func convertAddIdxJob2RollbackJob(
 	}
 
 	// the second and the third args will be used in onDropIndex.
-	job.Args = []any{idxNames, ifExists, getPartitionIDs(tblInfo)}
+	job.Args = []interface{}{idxNames, ifExists, getPartitionIDs(tblInfo)}
 	job.SchemaState = model.StateDeleteOnly
 	ver, err1 := updateVersionAndTableInfo(d, t, job, tblInfo, originalState != model.StateDeleteOnly)
 	if err1 != nil {
@@ -197,7 +197,7 @@ func rollingbackAddColumn(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, e
 	columnInfo.State = model.StateDeleteOnly
 	job.SchemaState = model.StateDeleteOnly
 
-	job.Args = []any{col.Name}
+	job.Args = []interface{}{col.Name}
 	ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, originalState != columnInfo.State)
 	if err != nil {
 		return ver, errors.Trace(err)

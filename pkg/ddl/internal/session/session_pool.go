@@ -20,12 +20,13 @@ import (
 
 	"github.com/ngaut/pools"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/mock"
+	"go.uber.org/zap"
 )
 
 // Pool is used to new Session.
@@ -95,7 +96,7 @@ func (sg *Pool) Close() {
 	if sg.mu.closed || sg.resPool == nil {
 		return
 	}
-	logutil.DDLLogger().Info("closing session pool")
+	logutil.BgLogger().Info("closing session pool", zap.String("category", "ddl"))
 	sg.resPool.Close()
 	sg.mu.closed = true
 }

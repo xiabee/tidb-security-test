@@ -76,8 +76,8 @@ var (
 )
 
 type tableScanAndPartitionInfo struct {
-	tableScan        *PhysicalTableScan
-	physPlanPartInfo PhysPlanPartInfo
+	tableScan     *PhysicalTableScan
+	partitionInfo PartitionInfo
 }
 
 // MemoryUsage return the memory usage of tableScanAndPartitionInfo
@@ -86,7 +86,7 @@ func (t *tableScanAndPartitionInfo) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum += t.physPlanPartInfo.MemoryUsage()
+	sum += t.partitionInfo.MemoryUsage()
 	if t.tableScan != nil {
 		sum += t.tableScan.MemoryUsage()
 	}
@@ -136,23 +136,23 @@ type PhysicalTableReader struct {
 	IsCommonHandle bool
 
 	// Used by partition table.
-	PlanPartInfo PhysPlanPartInfo
+	PartitionInfo PartitionInfo
 	// Used by MPP, because MPP plan may contain join/union/union all, it is possible that a physical table reader contains more than 1 table scan
-	TableScanAndPartitionInfos []tableScanAndPartitionInfo
+	PartitionInfos []tableScanAndPartitionInfo
 }
 
-// PhysPlanPartInfo indicates partition helper info in physical plan.
-type PhysPlanPartInfo struct {
+// PartitionInfo indicates partition helper info in physical plan.
+type PartitionInfo struct {
 	PruningConds   []expression.Expression
 	PartitionNames []model.CIStr
 	Columns        []*expression.Column
 	ColumnNames    types.NameSlice
 }
 
-const emptyPartitionInfoSize = int64(unsafe.Sizeof(PhysPlanPartInfo{}))
+const emptyPartitionInfoSize = int64(unsafe.Sizeof(PartitionInfo{}))
 
-// MemoryUsage return the memory usage of PhysPlanPartInfo
-func (pi *PhysPlanPartInfo) MemoryUsage() (sum int64) {
+// MemoryUsage return the memory usage of PartitionInfo
+func (pi *PartitionInfo) MemoryUsage() (sum int64) {
 	if pi == nil {
 		return
 	}
@@ -210,12 +210,12 @@ func (p *PhysicalTableReader) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.physicalSchemaProducer.MemoryUsage() + size.SizeOfUint8*2 + size.SizeOfBool + p.PlanPartInfo.MemoryUsage()
+	sum = p.physicalSchemaProducer.MemoryUsage() + size.SizeOfUint8*2 + size.SizeOfBool + p.PartitionInfo.MemoryUsage()
 	if p.tablePlan != nil {
 		sum += p.tablePlan.MemoryUsage()
 	}
 	// since TablePlans is the flats of tablePlan, so we don't count it
-	for _, pInfo := range p.TableScanAndPartitionInfos {
+	for _, pInfo := range p.PartitionInfos {
 		sum += pInfo.MemoryUsage()
 	}
 	return
@@ -234,8 +234,8 @@ func setMppOrBatchCopForTableScan(curPlan PhysicalPlan) {
 
 // GetPhysicalTableReader returns PhysicalTableReader for logical TiKVSingleGather.
 func (sg *TiKVSingleGather) GetPhysicalTableReader(schema *expression.Schema, stats *property.StatsInfo, props ...*property.PhysicalProperty) *PhysicalTableReader {
-	reader := PhysicalTableReader{}.Init(sg.SCtx(), sg.QueryBlockOffset())
-	reader.PlanPartInfo = PhysPlanPartInfo{
+	reader := PhysicalTableReader{}.Init(sg.SCtx(), sg.SelectBlockOffset())
+	reader.PartitionInfo = PartitionInfo{
 		PruningConds:   sg.Source.allConds,
 		PartitionNames: sg.Source.partitionNames,
 		Columns:        sg.Source.TblCols,
@@ -249,7 +249,7 @@ func (sg *TiKVSingleGather) GetPhysicalTableReader(schema *expression.Schema, st
 
 // GetPhysicalIndexReader returns PhysicalIndexReader for logical TiKVSingleGather.
 func (sg *TiKVSingleGather) GetPhysicalIndexReader(schema *expression.Schema, stats *property.StatsInfo, props ...*property.PhysicalProperty) *PhysicalIndexReader {
-	reader := PhysicalIndexReader{}.Init(sg.SCtx(), sg.QueryBlockOffset())
+	reader := PhysicalIndexReader{}.Init(sg.SCtx(), sg.SelectBlockOffset())
 	reader.SetStats(stats)
 	reader.SetSchema(schema)
 	reader.childrenReqProps = props
@@ -315,7 +315,7 @@ type PhysicalIndexReader struct {
 	OutputColumns []*expression.Column
 
 	// Used by partition table.
-	PlanPartInfo PhysPlanPartInfo
+	PartitionInfo PartitionInfo
 }
 
 // Clone implements PhysicalPlan interface.
@@ -387,7 +387,7 @@ func (p *PhysicalIndexReader) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.physicalSchemaProducer.MemoryUsage() + p.PlanPartInfo.MemoryUsage()
+	sum = p.physicalSchemaProducer.MemoryUsage() + p.PartitionInfo.MemoryUsage()
 	if p.indexPlan != nil {
 		p.indexPlan.MemoryUsage()
 	}
@@ -399,12 +399,6 @@ func (p *PhysicalIndexReader) MemoryUsage() (sum int64) {
 		sum += col.MemoryUsage()
 	}
 	return
-}
-
-// LoadTableStats preloads the stats data for the physical table
-func (p *PhysicalIndexReader) LoadTableStats(ctx sessionctx.Context) {
-	is := p.IndexPlans[0].(*PhysicalIndexScan)
-	loadTableStats(ctx, is.Table, is.physicalTableID)
 }
 
 // PushedDownLimit is the limit operator pushed down into PhysicalIndexLookUpReader.
@@ -450,7 +444,7 @@ type PhysicalIndexLookUpReader struct {
 	CommonHandleCols []*expression.Column
 
 	// Used by partition table.
-	PlanPartInfo PhysPlanPartInfo
+	PartitionInfo PartitionInfo
 
 	// required by cost calculation
 	expectedCnt uint64
@@ -541,7 +535,7 @@ func (p *PhysicalIndexLookUpReader) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.physicalSchemaProducer.MemoryUsage() + size.SizeOfBool*2 + p.PlanPartInfo.MemoryUsage() + size.SizeOfUint64
+	sum = p.physicalSchemaProducer.MemoryUsage() + size.SizeOfBool*2 + p.PartitionInfo.MemoryUsage() + size.SizeOfUint64
 
 	if p.indexPlan != nil {
 		sum += p.indexPlan.MemoryUsage()
@@ -561,12 +555,6 @@ func (p *PhysicalIndexLookUpReader) MemoryUsage() (sum int64) {
 		sum += col.MemoryUsage()
 	}
 	return
-}
-
-// LoadTableStats preloads the stats data for the physical table
-func (p *PhysicalIndexLookUpReader) LoadTableStats(ctx sessionctx.Context) {
-	ts := p.TablePlans[0].(*PhysicalTableScan)
-	loadTableStats(ctx, ts.Table, ts.physicalTableID)
 }
 
 // PhysicalIndexMergeReader is the reader using multiple indexes in tidb.
@@ -594,7 +582,7 @@ type PhysicalIndexMergeReader struct {
 	tablePlan PhysicalPlan
 
 	// Used by partition table.
-	PlanPartInfo PhysPlanPartInfo
+	PartitionInfo PartitionInfo
 
 	KeepOrder bool
 
@@ -650,7 +638,7 @@ func (p *PhysicalIndexMergeReader) MemoryUsage() (sum int64) {
 		return
 	}
 
-	sum = p.physicalSchemaProducer.MemoryUsage() + p.PlanPartInfo.MemoryUsage()
+	sum = p.physicalSchemaProducer.MemoryUsage() + p.PartitionInfo.MemoryUsage()
 	if p.tablePlan != nil {
 		sum += p.tablePlan.MemoryUsage()
 	}
@@ -667,12 +655,6 @@ func (p *PhysicalIndexMergeReader) MemoryUsage() (sum int64) {
 		sum += plan.MemoryUsage()
 	}
 	return
-}
-
-// LoadTableStats preloads the stats data for the physical table
-func (p *PhysicalIndexMergeReader) LoadTableStats(ctx sessionctx.Context) {
-	ts := p.TablePlans[0].(*PhysicalTableScan)
-	loadTableStats(ctx, ts.Table, ts.physicalTableID)
 }
 
 // PhysicalIndexScan represents an index scan plan.
@@ -810,7 +792,7 @@ func (p *PhysicalIndexScan) MemoryUsage() (sum int64) {
 // For keepOrder with partition table,
 // we need use partitionHandle to distinct two handles,
 // the `_tidb_rowid` in different partitions can have the same value.
-func AddExtraPhysTblIDColumn(sctx PlanContext, columns []*model.ColumnInfo, schema *expression.Schema) ([]*model.ColumnInfo, *expression.Schema, bool) {
+func AddExtraPhysTblIDColumn(sctx sessionctx.Context, columns []*model.ColumnInfo, schema *expression.Schema) ([]*model.ColumnInfo, *expression.Schema, bool) {
 	// Not adding the ExtraPhysTblID if already exists
 	if FindColumnInfoByID(columns, model.ExtraPhysTblID) != nil {
 		return columns, schema, false
@@ -889,7 +871,7 @@ type PhysicalTableScan struct {
 
 	isChildOfIndexLookUp bool
 
-	PlanPartInfo PhysPlanPartInfo
+	PartitionInfo PartitionInfo
 
 	SampleInfo *TableSampleInfo
 
@@ -962,19 +944,18 @@ func (ts *PhysicalTableScan) IsPartition() (bool, int64) {
 // mem usage when rebuilding ranges during the execution phase.
 func (ts *PhysicalTableScan) ResolveCorrelatedColumns() ([]*ranger.Range, error) {
 	access := ts.AccessCondition
-	ctx := ts.SCtx()
 	if ts.Table.IsCommonHandle {
 		pkIdx := tables.FindPrimaryIndex(ts.Table)
 		idxCols, idxColLens := expression.IndexInfo2PrefixCols(ts.Columns, ts.Schema().Columns, pkIdx)
 		for _, cond := range access {
-			newCond, err := expression.SubstituteCorCol2Constant(ctx.GetExprCtx(), cond)
+			newCond, err := expression.SubstituteCorCol2Constant(cond)
 			if err != nil {
 				return nil, err
 			}
 			access = append(access, newCond)
 		}
 		// All of access conditions must be used to build ranges, so we don't limit range memory usage.
-		res, err := ranger.DetachCondAndBuildRangeForIndex(ctx, access, idxCols, idxColLens, 0)
+		res, err := ranger.DetachCondAndBuildRangeForIndex(ts.SCtx(), access, idxCols, idxColLens, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -983,7 +964,7 @@ func (ts *PhysicalTableScan) ResolveCorrelatedColumns() ([]*ranger.Range, error)
 		var err error
 		pkTP := ts.Table.GetPkColInfo().FieldType
 		// All of access conditions must be used to build ranges, so we don't limit range memory usage.
-		ts.Ranges, _, _, err = ranger.BuildTableRange(access, ctx, &pkTP, 0)
+		ts.Ranges, _, _, err = ranger.BuildTableRange(access, ts.SCtx(), &pkTP, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -1039,7 +1020,7 @@ func (ts *PhysicalTableScan) MemoryUsage() (sum int64) {
 	}
 
 	sum = emptyPhysicalTableScanSize + ts.physicalSchemaProducer.MemoryUsage() + ts.DBName.MemoryUsage() +
-		int64(cap(ts.HandleIdx))*size.SizeOfInt + ts.PlanPartInfo.MemoryUsage() + int64(len(ts.rangeInfo))
+		int64(cap(ts.HandleIdx))*size.SizeOfInt + ts.PartitionInfo.MemoryUsage() + int64(len(ts.rangeInfo))
 	if ts.TableAsName != nil {
 		sum += ts.TableAsName.MemoryUsage()
 	}
@@ -1451,7 +1432,7 @@ func NewPhysicalHashJoin(p *LogicalJoin, innerIdx int, useOuterToBuild bool, new
 		NAEqualConditions: p.NAEQConditions,
 		Concurrency:       uint(p.SCtx().GetSessionVars().HashJoinConcurrency()),
 		UseOuterToBuild:   useOuterToBuild,
-	}.Init(p.SCtx(), newStats, p.QueryBlockOffset(), prop...)
+	}.Init(p.SCtx(), newStats, p.SelectBlockOffset(), prop...)
 	return hashJoin
 }
 
@@ -1630,7 +1611,7 @@ type PhysicalExpand struct {
 }
 
 // Init only assigns type and context.
-func (p PhysicalExpand) Init(ctx PlanContext, stats *property.StatsInfo, offset int, props ...*property.PhysicalProperty) *PhysicalExpand {
+func (p PhysicalExpand) Init(ctx sessionctx.Context, stats *property.StatsInfo, offset int, props ...*property.PhysicalProperty) *PhysicalExpand {
 	p.basePhysicalPlan = newBasePhysicalPlan(ctx, plancodec.TypeExpand, &p, offset)
 	p.childrenReqProps = props
 	p.SetStats(stats)
@@ -2005,7 +1986,7 @@ func NewPhysicalHashAgg(la *LogicalAggregation, newStats *property.StatsInfo, pr
 	agg := basePhysicalAgg{
 		GroupByItems: newGbyItems,
 		AggFuncs:     newAggFuncs,
-	}.initForHash(la.SCtx(), newStats, la.QueryBlockOffset(), prop)
+	}.initForHash(la.SCtx(), newStats, la.SelectBlockOffset(), prop)
 	return agg
 }
 
@@ -2152,11 +2133,11 @@ func (p *PhysicalIndexScan) IsPartition() (bool, int64) {
 }
 
 // IsPointGetByUniqueKey checks whether is a point get by unique key.
-func (p *PhysicalIndexScan) IsPointGetByUniqueKey(tc types.Context) bool {
+func (p *PhysicalIndexScan) IsPointGetByUniqueKey(sctx sessionctx.Context) bool {
 	return len(p.Ranges) == 1 &&
 		p.Index.Unique &&
 		len(p.Ranges[0].LowVal) == len(p.Index.Columns) &&
-		p.Ranges[0].IsPointNonNullable(tc)
+		p.Ranges[0].IsPointNonNullable(sctx)
 }
 
 // PhysicalSelection represents a filter.
@@ -2494,7 +2475,7 @@ func (p *PhysicalShowDDLJobs) MemoryUsage() (sum int64) {
 }
 
 // BuildMergeJoinPlan builds a PhysicalMergeJoin from the given fields. Currently, it is only used for test purpose.
-func BuildMergeJoinPlan(ctx PlanContext, joinType JoinType, leftKeys, rightKeys []*expression.Column) *PhysicalMergeJoin {
+func BuildMergeJoinPlan(ctx sessionctx.Context, joinType JoinType, leftKeys, rightKeys []*expression.Column) *PhysicalMergeJoin {
 	baseJoin := basePhysicalJoin{
 		JoinType:      joinType,
 		DefaultValues: []types.Datum{types.NewDatum(1), types.NewDatum(1)},
@@ -2520,7 +2501,6 @@ type PhysicalTableSample struct {
 	physicalSchemaProducer
 	TableSampleInfo *TableSampleInfo
 	TableInfo       table.Table
-	PhysicalTableID int64
 	Desc            bool
 }
 
@@ -2554,7 +2534,7 @@ func NewTableSampleInfo(node *ast.TableSample, fullSchema *expression.Schema, pt
 	}
 	return &TableSampleInfo{
 		AstNode:    node,
-		FullSchema: fullSchema.Clone(),
+		FullSchema: fullSchema,
 		Partitions: pt,
 	}
 }

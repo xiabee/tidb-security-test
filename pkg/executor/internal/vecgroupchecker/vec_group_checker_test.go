@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -37,7 +38,7 @@ func TestVecGroupCheckerDATARACE(t *testing.T) {
 			RetType: types.NewFieldTypeBuilder().SetType(mType).BuildP(),
 			Index:   0,
 		}
-		vgc := NewVecGroupChecker(ctx, ctx.GetSessionVars().EnableVectorizedExpression, exprs)
+		vgc := NewVecGroupChecker(ctx, exprs)
 
 		fts := []*types.FieldType{types.NewFieldType(mType)}
 		chk := chunk.New(fts, 1, 1)
@@ -108,6 +109,7 @@ func genTestChunk4VecGroupChecker(chkRows []int, sameNum int) (expr []expression
 		numGroups = numRows/sameNum + 1
 	}
 
+	rand.Seed(time.Now().Unix())
 	nullPos := rand.Intn(numGroups)
 	cnt := 0
 	val := rand.Int63()
@@ -186,7 +188,7 @@ func TestVecGroupChecker4GroupCount(t *testing.T) {
 	ctx := mock.NewContext()
 	for _, testCase := range testCases {
 		expr, inputChks := genTestChunk4VecGroupChecker(testCase.chunkRows, testCase.sameNum)
-		groupChecker := NewVecGroupChecker(ctx, ctx.GetSessionVars().EnableVectorizedExpression, expr)
+		groupChecker := NewVecGroupChecker(ctx, expr)
 		groupNum := 0
 		for i, inputChk := range inputChks {
 			flag, err := groupChecker.SplitIntoGroups(inputChk)
@@ -209,7 +211,7 @@ func TestVecGroupChecker(t *testing.T) {
 		Index:   0,
 	}
 	ctx := mock.NewContext()
-	groupChecker := NewVecGroupChecker(ctx, ctx.GetSessionVars().EnableVectorizedExpression, []expression.Expression{col0})
+	groupChecker := NewVecGroupChecker(ctx, []expression.Expression{col0})
 
 	chk := chunk.New([]*types.FieldType{tp}, 6, 6)
 	chk.Reset()

@@ -111,7 +111,7 @@ func buildDropPartitionJob(dbInfo *model.DBInfo, tblInfo *model.TableInfo, partN
 		SchemaState: model.StatePublic,
 		Type:        model.ActionDropTablePartition,
 		BinlogInfo:  &model.HistoryInfo{},
-		Args:        []any{partNames},
+		Args:        []interface{}{partNames},
 	}
 }
 
@@ -132,7 +132,7 @@ func buildTruncatePartitionJob(dbInfo *model.DBInfo, tblInfo *model.TableInfo, p
 		Type:        model.ActionTruncateTablePartition,
 		SchemaState: model.StatePublic,
 		BinlogInfo:  &model.HistoryInfo{},
-		Args:        []any{pids, newIDs},
+		Args:        []interface{}{pids, newIDs},
 	}
 }
 

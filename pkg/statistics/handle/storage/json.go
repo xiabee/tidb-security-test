@@ -18,12 +18,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/types"
@@ -101,24 +104,24 @@ func GenJSONTableFromStats(sctx sessionctx.Context, dbName string, tableInfo *mo
 		Version:      tbl.Version,
 	}
 	for _, col := range tbl.Columns {
-		hist, err := col.ConvertTo(statistics.UTCWithAllowInvalidDateCtx, types.NewFieldType(mysql.TypeBlob))
+		sc := stmtctx.NewStmtCtxWithTimeZone(time.UTC)
+		hist, err := col.ConvertTo(sc, types.NewFieldType(mysql.TypeBlob))
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		proto := dumpJSONCol(hist, col.CMSketch, col.TopN, col.FMSketch, &col.StatsVer)
 		tracker.Consume(proto.TotalMemoryUsage())
-		if err := sctx.GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			return nil, err
+		if atomic.LoadUint32(&sctx.GetSessionVars().Killed) == 1 {
+			return nil, errors.Trace(statistics.ErrQueryInterrupted)
 		}
 		jsonTbl.Columns[col.Info.Name.L] = proto
 		col.FMSketch.DestroyAndPutToPool()
-		hist.DestroyAndPutToPool()
 	}
 	for _, idx := range tbl.Indices {
 		proto := dumpJSONCol(&idx.Histogram, idx.CMSketch, idx.TopN, nil, &idx.StatsVer)
 		tracker.Consume(proto.TotalMemoryUsage())
-		if err := sctx.GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			return nil, err
+		if atomic.LoadUint32(&sctx.GetSessionVars().Killed) == 1 {
+			return nil, errors.Trace(statistics.ErrQueryInterrupted)
 		}
 		jsonTbl.Indices[idx.Info.Name.L] = proto
 	}
@@ -137,8 +140,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *u
 		Indices:        make(map[int64]*statistics.Index, len(jsonTbl.Indices)),
 	}
 	tbl := &statistics.Table{
-		HistColl:              newHistColl,
-		ColAndIdxExistenceMap: statistics.NewColAndIndexExistenceMap(len(tableInfo.Columns), len(tableInfo.Indices)),
+		HistColl: newHistColl,
 	}
 	for id, jsonIdx := range jsonTbl.Indices {
 		for _, idxInfo := range tableInfo.Indices {
@@ -165,12 +167,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *u
 				PhysicalID:        physicalID,
 				StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
 			}
-			// All the objects in the table shares the same stats version.
-			if statsVer != statistics.Version0 {
-				tbl.StatsVer = int(statsVer)
-			}
 			tbl.Indices[idx.ID] = idx
-			tbl.ColAndIdxExistenceMap.InsertIndex(idxInfo.ID, idxInfo, true)
 		}
 	}
 
@@ -180,6 +177,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *u
 				continue
 			}
 			hist := statistics.HistogramFromProto(jsonCol.Histogram)
+			sc := stmtctx.NewStmtCtxWithTimeZone(time.UTC)
 			tmpFT := colInfo.FieldType
 			// For new collation data, when storing the bounds of the histogram, we store the collate key instead of the
 			// original value.
@@ -191,7 +189,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *u
 			if colInfo.FieldType.EvalType() == types.ETString && colInfo.FieldType.GetType() != mysql.TypeEnum && colInfo.FieldType.GetType() != mysql.TypeSet {
 				tmpFT = *types.NewFieldType(mysql.TypeBlob)
 			}
-			hist, err := hist.ConvertTo(statistics.UTCWithAllowInvalidDateCtx, &tmpFT)
+			hist, err := hist.ConvertTo(sc, &tmpFT)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -217,12 +215,7 @@ func TableStatsFromJSON(tableInfo *model.TableInfo, physicalID int64, jsonTbl *u
 				StatsVer:          statsVer,
 				StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
 			}
-			// All the objects in the table shares the same stats version.
-			if statsVer != statistics.Version0 {
-				tbl.StatsVer = int(statsVer)
-			}
 			tbl.Columns[col.ID] = col
-			tbl.ColAndIdxExistenceMap.InsertCol(colInfo.ID, colInfo, true)
 		}
 	}
 	tbl.ExtendedStats = extendedStatsFromJSON(jsonTbl.ExtStats)

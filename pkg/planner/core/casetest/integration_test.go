@@ -57,8 +57,7 @@ func TestVerboseExplain(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t1" || tblInfo.Name.L == "t2" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -97,8 +96,7 @@ func TestIsolationReadTiFlashNotChoosePointGet(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 			Count:     1,
 			Available: true,
@@ -145,6 +143,62 @@ func TestIsolationReadDoNotFilterSystemDB(t *testing.T) {
 	}
 }
 
+func TestPartitionPruningForInExpr(t *testing.T) {
+	failpoint.Enable("github.com/pingcap/tidb/pkg/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/pkg/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int(11) not null, b int) partition by range (a) (partition p0 values less than (4), partition p1 values less than(10), partition p2 values less than maxvalue);")
+	tk.MustExec("insert into t values (1, 1),(10, 10),(11, 11)")
+
+	var input []string
+	var output []struct {
+		SQL  string
+		Plan []string
+	}
+	integrationSuiteData := GetIntegrationSuiteData()
+	integrationSuiteData.LoadTestCases(t, &input, &output)
+	for i, tt := range input {
+		testdata.OnRecord(func() {
+			output[i].SQL = tt
+			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery(tt).Rows())
+		})
+		tk.MustQuery(tt).Check(testkit.Rows(output[i].Plan...))
+	}
+}
+
+func TestPartitionExplain(t *testing.T) {
+	failpoint.Enable("github.com/pingcap/tidb/pkg/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/pkg/planner/core/forceDynamicPrune")
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec(`create table pt (id int, c int, key i_id(id), key i_c(c)) partition by range (c) (
+partition p0 values less than (4),
+partition p1 values less than (7),
+partition p2 values less than (10))`)
+
+	tk.MustExec("set @@tidb_enable_index_merge = 1;")
+
+	var input []string
+	var output []struct {
+		SQL  string
+		Plan []string
+	}
+	integrationSuiteData := GetIntegrationSuiteData()
+	integrationSuiteData.LoadTestCases(t, &input, &output)
+	for i, tt := range input {
+		testdata.OnRecord(func() {
+			output[i].SQL = tt
+			output[i].Plan = testdata.ConvertRowsToStrings(tk.MustQuery("explain " + tt).Rows())
+		})
+		tk.MustQuery("explain " + tt).Check(testkit.Rows(output[i].Plan...))
+	}
+}
+
 func TestMergeContinuousSelections(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -157,8 +211,7 @@ func TestMergeContinuousSelections(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "ts" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -430,37 +483,10 @@ func TestIssue49438(t *testing.T) {
 	tk.MustExec(`select 1 from tx where a in (1)`) // no error
 }
 
-func TestIssue52023(t *testing.T) {
+func TestIssue41957(t *testing.T) {
 	store := testkit.CreateMockStore(t)
-
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec(`use test`)
-	tk.MustExec(`CREATE TABLE t (
-			a binary(1) NOT NULL,
-			PRIMARY KEY (a)
-		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin
-		PARTITION BY RANGE COLUMNS(a)
-		(PARTITION P0 VALUES LESS THAN (_binary 0x03),
-		PARTITION P4 VALUES LESS THAN (_binary 0xc0),
-		PARTITION PMX VALUES LESS THAN (MAXVALUE))`)
-	tk.MustExec(`insert into t values (0x5)`)
-	tk.MustExec(`analyze table t`)
-	tk.MustQuery(`select * from t`).Check(testkit.Rows("\u0005"))
-	tk.MustQuery(`select * from t where a = 0x5`).Check(testkit.Rows("\u0005"))
-	tk.MustQuery(`select * from t where a = 5`).Check(testkit.Rows())
-	tk.MustQuery(`select * from t where a IN (5,55)`).Check(testkit.Rows())
-	tk.MustQuery(`select * from t where a IN (0x5,55)`).Check(testkit.Rows("\u0005"))
-	tk.MustQuery(`explain select * from t where a = 0x5`).Check(testkit.Rows("Point_Get_1 1.00 root table:t, partition:P4, clustered index:PRIMARY(a) "))
-	tk.MustQuery(`explain format='brief' select * from t where a = 5`).Check(testkit.Rows(""+
-		"TableReader 0.80 root partition:all data:Selection",
-		"└─Selection 0.80 cop[tikv]  eq(cast(test.t.a, double BINARY), 5)",
-		"  └─TableFullScan 1.00 cop[tikv] table:t keep order:false"))
-	tk.MustQuery(`explain format='brief' select * from t where a IN (5,55)`).Check(testkit.Rows(""+
-		"TableReader 0.96 root partition:all data:Selection",
-		"└─Selection 0.96 cop[tikv]  or(eq(cast(test.t.a, double BINARY), 5), eq(cast(test.t.a, double BINARY), 55))",
-		"  └─TableFullScan 1.00 cop[tikv] table:t keep order:false"))
-	tk.MustQuery(`explain format='brief' select * from t where a IN (0x5,55)`).Check(testkit.Rows(""+
-		"TableReader 1.00 root partition:all data:Selection",
-		"└─Selection 1.00 cop[tikv]  or(eq(test.t.a, \"0x05\"), eq(cast(test.t.a, double BINARY), 55))",
-		"  └─TableFullScan 1.00 cop[tikv] table:t keep order:false"))
+	tk.MustExec("CREATE TABLE `github_events` (\n  `id` bigint(20) NOT NULL DEFAULT '0',\n  `type` varchar(29) NOT NULL DEFAULT 'Event',\n  `created_at` datetime NOT NULL DEFAULT '1970-01-01 00:00:00',\n  `repo_id` bigint(20) NOT NULL DEFAULT '0',\n  `repo_name` varchar(140) NOT NULL DEFAULT '',\n  `actor_id` bigint(20) NOT NULL DEFAULT '0',\n  `actor_login` varchar(40) NOT NULL DEFAULT '',\n  `language` varchar(26) NOT NULL DEFAULT '',\n  `additions` bigint(20) NOT NULL DEFAULT '0',\n  `deletions` bigint(20) NOT NULL DEFAULT '0',\n  `action` varchar(11) NOT NULL DEFAULT '',\n  `number` int(11) NOT NULL DEFAULT '0',\n  `commit_id` varchar(40) NOT NULL DEFAULT '',\n  `comment_id` bigint(20) NOT NULL DEFAULT '0',\n  `org_login` varchar(40) NOT NULL DEFAULT '',\n  `org_id` bigint(20) NOT NULL DEFAULT '0',\n  `state` varchar(6) NOT NULL DEFAULT '',\n  `closed_at` datetime NOT NULL DEFAULT '1970-01-01 00:00:00',\n  `comments` int(11) NOT NULL DEFAULT '0',\n  `pr_merged_at` datetime NOT NULL DEFAULT '1970-01-01 00:00:00',\n  `pr_merged` tinyint(1) NOT NULL DEFAULT '0',\n  `pr_changed_files` int(11) NOT NULL DEFAULT '0',\n  `pr_review_comments` int(11) NOT NULL DEFAULT '0',\n  `pr_or_issue_id` bigint(20) NOT NULL DEFAULT '0',\n  `event_day` date NOT NULL,\n  `event_month` date NOT NULL,\n  `event_year` int(11) NOT NULL,\n  `push_size` int(11) NOT NULL DEFAULT '0',\n  `push_distinct_size` int(11) NOT NULL DEFAULT '0',\n  `creator_user_login` varchar(40) NOT NULL DEFAULT '',\n  `creator_user_id` bigint(20) NOT NULL DEFAULT '0',\n  `pr_or_issue_created_at` datetime NOT NULL DEFAULT '1970-01-01 00:00:00',\n  KEY `index_github_events_on_id` (`id`),\n  KEY `index_github_events_on_created_at` (`created_at`),\n  KEY `index_github_events_on_repo_id_type_action_month_actor_login` (`repo_id`,`type`,`action`,`event_month`,`actor_login`),\n  KEY `index_ge_on_repo_id_type_action_pr_merged_created_at_add_del` (`repo_id`,`type`,`action`,`pr_merged`,`created_at`,`additions`,`deletions`),\n  KEY `index_ge_on_creator_id_type_action_merged_created_at_add_del` (`creator_user_id`,`type`,`action`,`pr_merged`,`created_at`,`additions`,`deletions`),\n  KEY `index_ge_on_actor_id_type_action_created_at_repo_id_commits` (`actor_id`,`type`,`action`,`created_at`,`repo_id`,`push_distinct_size`),\n  KEY `index_ge_on_repo_id_type_action_created_at_number_pdsize_psize` (`repo_id`,`type`,`action`,`created_at`,`number`,`push_distinct_size`,`push_size`),\n  KEY `index_ge_on_repo_id_type_action_created_at_actor_login` (`repo_id`,`type`,`action`,`created_at`,`actor_login`),\n  KEY `index_ge_on_repo_name_type` (`repo_name`,`type`),\n  KEY `index_ge_on_actor_login_type` (`actor_login`,`type`),\n  KEY `index_ge_on_org_login_type` (`org_login`,`type`),\n  KEY `index_ge_on_language` (`language`),\n  KEY `index_ge_on_org_id_type` (`org_id`,`type`),\n  KEY `index_ge_on_actor_login_lower` ((lower(`actor_login`))),\n  KEY `index_ge_on_repo_name_lower` ((lower(`repo_name`))),\n  KEY `index_ge_on_language_lower` ((lower(`language`))),\n  KEY `index_ge_on_type_action` (`type`,`action`) /*!80000 INVISIBLE */,\n  KEY `index_ge_on_repo_id_type_created_at` (`repo_id`,`type`,`created_at`),\n  KEY `index_ge_on_repo_id_created_at` (`repo_id`,`created_at`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin\nPARTITION BY LIST COLUMNS(`type`)\n(PARTITION `push_event` VALUES IN ('PushEvent'),\n PARTITION `create_event` VALUES IN ('CreateEvent'),\n PARTITION `pull_request_event` VALUES IN ('PullRequestEvent'),\n PARTITION `watch_event` VALUES IN ('WatchEvent'),\n PARTITION `issue_comment_event` VALUES IN ('IssueCommentEvent'),\n PARTITION `issues_event` VALUES IN ('IssuesEvent'),\n PARTITION `delete_event` VALUES IN ('DeleteEvent'),\n PARTITION `fork_event` VALUES IN ('ForkEvent'),\n PARTITION `pull_request_review_comment_event` VALUES IN ('PullRequestReviewCommentEvent'),\n PARTITION `pull_request_review_event` VALUES IN ('PullRequestReviewEvent'),\n PARTITION `gollum_event` VALUES IN ('GollumEvent'),\n PARTITION `release_event` VALUES IN ('ReleaseEvent'),\n PARTITION `member_event` VALUES IN ('MemberEvent'),\n PARTITION `commit_comment_event` VALUES IN ('CommitCommentEvent'),\n PARTITION `public_event` VALUES IN ('PublicEvent'),\n PARTITION `gist_event` VALUES IN ('GistEvent'),\n PARTITION `follow_event` VALUES IN ('FollowEvent'),\n PARTITION `event` VALUES IN ('Event'),\n PARTITION `download_event` VALUES IN ('DownloadEvent'),\n PARTITION `team_add_event` VALUES IN ('TeamAddEvent'),\n PARTITION `fork_apply_event` VALUES IN ('ForkApplyEvent'))\n")
+	tk.MustQuery("SELECT\n    repo_id, GROUP_CONCAT(\n      DISTINCT actor_login\n      ORDER BY cnt DESC\n      SEPARATOR ','\n    ) AS actor_logins\nFROM (\n    SELECT\n        ge.repo_id AS repo_id,\n        ge.actor_login AS actor_login,\n        COUNT(*) AS cnt\n    FROM github_events ge\n    WHERE\n        type = 'PullRequestEvent' AND action = 'opened'\n        AND (ge.created_at >= DATE_SUB(NOW(), INTERVAL 1 DAY) AND ge.created_at <= NOW())\n    GROUP BY ge.repo_id, ge.actor_login\n    ORDER BY cnt DESC\n) sub\nGROUP BY repo_id").Check(testkit.Rows())
 }

@@ -229,7 +229,7 @@ type StmtExecInfo struct {
 	Digest              string
 	PrevSQL             string
 	PrevSQLDigest       string
-	PlanGenerator       func() (string, string, any)
+	PlanGenerator       func() (string, string)
 	BinaryPlanGenerator func() string
 	PlanDigest          string
 	PlanDigestGen       func() string
@@ -238,7 +238,7 @@ type StmtExecInfo struct {
 	ParseLatency        time.Duration
 	CompileLatency      time.Duration
 	StmtCtx             *stmtctx.StatementContext
-	CopTasks            *execdetails.CopTasksDetails
+	CopTasks            *stmtctx.CopTasksDetails
 	ExecDetail          *execdetails.ExecDetails
 	MemMax              int64
 	DiskMax             int64
@@ -298,8 +298,9 @@ func (ssMap *stmtSummaryByDigestMap) AddStatement(sei *StmtExecInfo) {
 			unixTime, err := strconv.ParseInt(unixTimeStr, 10, 64)
 			if err != nil {
 				panic(err.Error())
+			} else {
+				now = unixTime
 			}
-			now = unixTime
 		}
 	})
 
@@ -597,9 +598,6 @@ func (ssbd *stmtSummaryByDigest) add(sei *StmtExecInfo, beginTime int64, interva
 		if isElementNew {
 			// If the element is new created, `ssElement.add(sei)` should be done inside the lock of `ssbd`.
 			ssElement = newStmtSummaryByDigestElement(sei, beginTime, intervalSeconds)
-			if ssElement == nil {
-				return nil, isElementNew
-			}
 			ssbd.history.PushBack(ssElement)
 		}
 
@@ -644,10 +642,7 @@ var MaxEncodedPlanSizeInBytes = 1024 * 1024
 func newStmtSummaryByDigestElement(sei *StmtExecInfo, beginTime int64, intervalSeconds int64) *stmtSummaryByDigestElement {
 	// sampleSQL / authUsers(sampleUser) / samplePlan / prevSQL / indexNames store the values shown at the first time,
 	// because it compacts performance to update every time.
-	samplePlan, planHint, e := sei.PlanGenerator()
-	if e != nil {
-		return nil
-	}
+	samplePlan, planHint := sei.PlanGenerator()
 	if len(samplePlan) > MaxEncodedPlanSizeInBytes {
 		samplePlan = plancodec.PlanDiscardedEncoded
 	}
@@ -923,7 +918,7 @@ func formatSQL(sql string) string {
 }
 
 // Format the backoffType map to a string or nil.
-func formatBackoffTypes(backoffMap map[string]int) any {
+func formatBackoffTypes(backoffMap map[string]int) interface{} {
 	type backoffStat struct {
 		backoffType string
 		count       int
@@ -975,7 +970,7 @@ func avgSumFloat(sum float64, count int64) float64 {
 	return 0
 }
 
-func convertEmptyToNil(str string) any {
+func convertEmptyToNil(str string) interface{} {
 	if str == "" {
 		return nil
 	}

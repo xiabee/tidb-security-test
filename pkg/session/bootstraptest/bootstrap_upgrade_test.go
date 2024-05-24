@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/server/handler"
 	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit"
 	tidb_util "github.com/pingcap/tidb/pkg/util"
@@ -96,14 +95,6 @@ func TestUpgradeVersion83AndVersion84(t *testing.T) {
 	}
 }
 
-func revertVersionAndVariables(t *testing.T, se sessiontypes.Session, ver int) {
-	session.MustExec(t, se, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", ver))
-	if ver <= 195 {
-		// for version <= version195, tidb_enable_dist_task should be disabled before upgrade
-		session.MustExec(t, se, "update mysql.global_variables set variable_value='off' where variable_name='tidb_enable_dist_task'")
-	}
-}
-
 func TestUpgradeVersion66(t *testing.T) {
 	ctx := context.Background()
 	store, dom := session.CreateStoreAndBootstrap(t)
@@ -116,7 +107,7 @@ func TestUpgradeVersion66(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV65, 65)
+	session.MustExec(t, seV65, "update mysql.tidb set variable_value='65' where variable_name='tidb_server_version'")
 	session.MustExec(t, seV65, "set @@global.tidb_track_aggregate_memory_usage = 0")
 	session.MustExec(t, seV65, "commit")
 	session.UnsetStoreBootstrapped(store.UUID())
@@ -166,7 +157,7 @@ func TestUpgradeVersion74(t *testing.T) {
 			require.NoError(t, err)
 			err = txn.Commit(context.Background())
 			require.NoError(t, err)
-			revertVersionAndVariables(t, seV73, 72)
+			session.MustExec(t, seV73, "update mysql.tidb set variable_value='72' where variable_name='tidb_server_version'")
 			session.MustExec(t, seV73, "set @@global.tidb_stmt_summary_max_stmt_count = "+strconv.Itoa(ca.oldValue))
 			session.MustExec(t, seV73, "commit")
 			session.UnsetStoreBootstrapped(store.UUID())
@@ -205,7 +196,7 @@ func TestUpgradeVersion75(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV74, 74)
+	session.MustExec(t, seV74, "update mysql.tidb set variable_value='74' where variable_name='tidb_server_version'")
 	session.MustExec(t, seV74, "commit")
 	session.MustExec(t, seV74, "ALTER TABLE mysql.user DROP PRIMARY KEY")
 	session.MustExec(t, seV74, "ALTER TABLE mysql.user MODIFY COLUMN Host CHAR(64)")
@@ -237,8 +228,7 @@ func TestUpgradeVersion75(t *testing.T) {
 }
 
 func TestUpgradeVersionMockLatest(t *testing.T) {
-	mock := true
-	session.WithMockUpgrade = &mock
+	session.WithMockUpgrade = true
 
 	store, dom := session.CreateStoreAndBootstrap(t)
 	defer func() { require.NoError(t, store.Close()) }()
@@ -251,7 +241,7 @@ func TestUpgradeVersionMockLatest(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.CurrentBootstrapVersion-1))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.CurrentBootstrapVersion-1))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -301,8 +291,7 @@ func TestUpgradeVersionMockLatest(t *testing.T) {
 
 // TestUpgradeVersionWithUpgradeHTTPOp tests SupportUpgradeHTTPOpVer upgrade SupportUpgradeHTTPOpVer++ with HTTP op.
 func TestUpgradeVersionWithUpgradeHTTPOp(t *testing.T) {
-	mock := true
-	session.WithMockUpgrade = &mock
+	session.WithMockUpgrade = true
 	session.MockUpgradeToVerLatestKind = session.MockSimpleUpgradeToVerLatest
 
 	store, dom := session.CreateStoreAndBootstrap(t)
@@ -316,7 +305,7 @@ func TestUpgradeVersionWithUpgradeHTTPOp(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.SupportUpgradeHTTPOpVer))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.SupportUpgradeHTTPOpVer))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -350,8 +339,7 @@ func TestUpgradeVersionWithUpgradeHTTPOp(t *testing.T) {
 
 // TestUpgradeVersionWithoutUpgradeHTTPOp tests SupportUpgradeHTTPOpVer upgrade SupportUpgradeHTTPOpVer++ without HTTP op.
 func TestUpgradeVersionWithoutUpgradeHTTPOp(t *testing.T) {
-	mock := true
-	session.WithMockUpgrade = &mock
+	session.WithMockUpgrade = true
 	session.MockUpgradeToVerLatestKind = session.MockSimpleUpgradeToVerLatest
 
 	store, dom := session.CreateStoreAndBootstrap(t)
@@ -365,7 +353,7 @@ func TestUpgradeVersionWithoutUpgradeHTTPOp(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.SupportUpgradeHTTPOpVer))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.SupportUpgradeHTTPOpVer))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -408,7 +396,7 @@ func TestUpgradeVersionForPausedJob(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.CurrentBootstrapVersion-1))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.CurrentBootstrapVersion-1))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -452,7 +440,7 @@ func TestUpgradeVersionForPausedJob(t *testing.T) {
 }
 
 // checkDDLJobExecSucc is used to make sure the DDL operation is successful.
-func checkDDLJobExecSucc(t *testing.T, se sessiontypes.Session, jobID int64) {
+func checkDDLJobExecSucc(t *testing.T, se session.Session, jobID int64) {
 	sql := fmt.Sprintf(" admin show ddl jobs where job_id=%d", jobID)
 	suc := false
 	for i := 0; i < 20; i++ {
@@ -475,8 +463,7 @@ func checkDDLJobExecSucc(t *testing.T, se sessiontypes.Session, jobID int64) {
 // Then we do re-upgrade(This operation will pause all DDL jobs by the system).
 func TestUpgradeVersionForSystemPausedJob(t *testing.T) {
 	// Mock a general and a reorg job in boostrap.
-	mock := true
-	session.WithMockUpgrade = &mock
+	session.WithMockUpgrade = true
 	session.MockUpgradeToVerLatestKind = session.MockSimpleUpgradeToVerLatest
 
 	store, dom := session.CreateStoreAndBootstrap(t)
@@ -490,7 +477,7 @@ func TestUpgradeVersionForSystemPausedJob(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.CurrentBootstrapVersion-1))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.CurrentBootstrapVersion-1))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -547,7 +534,7 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.CurrentBootstrapVersion-1))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.CurrentBootstrapVersion-1))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)
@@ -562,6 +549,24 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 	ch := make(chan struct{})
 	hook := &callback.TestDDLCallback{}
 	var jobID int64
+	doOnce := true
+	hook.OnGetJobBeforeExported = func(str string) {
+		if jobID == 0 || !doOnce {
+			return
+		}
+
+		for i := 0; i < 50; i++ {
+			sql := fmt.Sprintf("admin show ddl jobs where job_id=%d or job_id=%d", jobID, jobID+1)
+			se := session.CreateSessionAndSetID(t, store)
+			rows, err := execute(context.Background(), se, sql)
+			require.NoError(t, err)
+			if len(rows) == 2 {
+				doOnce = false
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	times := 0
@@ -628,7 +633,7 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 
 func execute(ctx context.Context, s sessionctx.Context, query string) ([]chunk.Row, error) {
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnDDL)
-	rs, err := s.GetSQLExecutor().ExecuteInternal(ctx, query)
+	rs, err := s.(sqlexec.SQLExecutor).ExecuteInternal(ctx, query)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -677,7 +682,7 @@ func TestUpgradeWithPauseDDL(t *testing.T) {
 
 	tc := session.TestCallback{Cnt: atomicutil.NewInt32(0)}
 	sql := "select job_meta, processing from mysql.tidb_ddl_job where job_id in (select min(job_id) from mysql.tidb_ddl_job group by schema_ids, table_ids, processing) order by processing desc, job_id"
-	tc.OnBootstrapBeforeExported = func(s sessiontypes.Session) {
+	tc.OnBootstrapBeforeExported = func(s session.Session) {
 		rows, err := execute(context.Background(), s, sql)
 		require.NoError(t, err)
 		require.Len(t, rows, 0)
@@ -700,7 +705,7 @@ func TestUpgradeWithPauseDDL(t *testing.T) {
 		}()
 		<-ch
 	}
-	checkDDLJobState := func(s sessiontypes.Session) {
+	checkDDLJobState := func(s session.Session) {
 		rows, err := execute(context.Background(), s, sql)
 		require.NoError(t, err)
 		for _, row := range rows {
@@ -718,7 +723,7 @@ func TestUpgradeWithPauseDDL(t *testing.T) {
 		}
 	}
 	// Before every test bootstrap(DDL operation), we add a user and a system DB's DDL operations.
-	tc.OnBootstrapExported = func(s sessiontypes.Session) {
+	tc.OnBootstrapExported = func(s session.Session) {
 		var query1, query2 string
 		switch tc.Cnt.Load() % 2 {
 		case 0:
@@ -736,13 +741,12 @@ func TestUpgradeWithPauseDDL(t *testing.T) {
 		checkDDLJobState(s)
 	}
 
-	tc.OnBootstrapAfterExported = func(s sessiontypes.Session) {
+	tc.OnBootstrapAfterExported = func(s session.Session) {
 		checkDDLJobState(s)
 	}
 	session.TestHook = tc
 
-	mock := true
-	session.WithMockUpgrade = &mock
+	session.WithMockUpgrade = true
 	seV := session.CreateSessionAndSetID(t, store)
 	txn, err := store.Begin()
 	require.NoError(t, err)
@@ -751,7 +755,7 @@ func TestUpgradeWithPauseDDL(t *testing.T) {
 	require.NoError(t, err)
 	err = txn.Commit(context.Background())
 	require.NoError(t, err)
-	revertVersionAndVariables(t, seV, int(session.CurrentBootstrapVersion-1))
+	session.MustExec(t, seV, fmt.Sprintf("update mysql.tidb set variable_value='%d' where variable_name='tidb_server_version'", session.CurrentBootstrapVersion-1))
 	session.UnsetStoreBootstrapped(store.UUID())
 	ver, err := session.GetBootstrapVersion(seV)
 	require.NoError(t, err)

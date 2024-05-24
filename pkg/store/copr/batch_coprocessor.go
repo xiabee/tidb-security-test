@@ -655,6 +655,7 @@ func buildBatchCopTasksConsistentHash(
 	fetchTopoStart := time.Now()
 	for {
 		retryNum++
+		// todo: use AssureAndGetTopo() after SNS is done.
 		storesStr, err = tiflashcompute.GetGlobalTopoFetcher().FetchAndGetTopo()
 		if err != nil {
 			return nil, err
@@ -978,7 +979,7 @@ func buildBatchCopTasksCore(bo *backoff.Backoffer, store *kvStore, rangesForEach
 				regionIDErrMsg += fmt.Sprintf("%d, ", regionIDsInOtherZones[i])
 			}
 			warningMsg += regionIDErrMsg + "etc"
-			appendWarning(errors.NewNoStackErrorf(warningMsg))
+			appendWarning(errors.Errorf(warningMsg))
 		}
 
 		for _, task := range storeTaskMap {
@@ -1266,14 +1267,12 @@ func (b *batchCopIterator) handleTaskOnce(ctx context.Context, bo *backoff.Backo
 	}
 
 	copReq := coprocessor.BatchRequest{
-		Tp:              b.req.Tp,
-		StartTs:         b.req.StartTs,
-		Data:            b.req.Data,
-		SchemaVer:       b.req.SchemaVar,
-		Regions:         regionInfos,
-		TableRegions:    task.PartitionTableRegions,
-		ConnectionId:    b.req.ConnID,
-		ConnectionAlias: b.req.ConnAlias,
+		Tp:           b.req.Tp,
+		StartTs:      b.req.StartTs,
+		Data:         b.req.Data,
+		SchemaVer:    b.req.SchemaVar,
+		Regions:      regionInfos,
+		TableRegions: task.PartitionTableRegions,
 	}
 
 	rgName := b.req.ResourceGroupName

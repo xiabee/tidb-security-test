@@ -19,9 +19,10 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/executor/importer"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,7 +38,7 @@ func TestJobHappyPath(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	ctx := context.Background()
-	conn := tk.Session().GetSQLExecutor()
+	conn := tk.Session().(sqlexec.SQLExecutor)
 
 	cases := []struct {
 		action          func(jobID int64)
@@ -73,7 +74,7 @@ func TestJobHappyPath(t *testing.T) {
 				ColumnsAndVars: "(a, b, c)",
 				SetClause:      "d = 1",
 				Format:         importer.DataFormatCSV,
-				Options: map[string]any{
+				Options: map[string]interface{}{
 					"skip_rows": float64(1), // json unmarshal will convert number to float64
 					"detached":  nil,
 				},
@@ -93,7 +94,7 @@ func TestJobHappyPath(t *testing.T) {
 		require.True(t, gotJobInfo.StartTime.IsZero())
 		require.True(t, gotJobInfo.EndTime.IsZero())
 		jobInfoEqual(t, jobInfo, gotJobInfo)
-		cnt, err := importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+		cnt, err := importer.GetActiveJobCnt(ctx, conn)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), cnt)
 
@@ -113,13 +114,13 @@ func TestJobHappyPath(t *testing.T) {
 		jobInfo.Status = "running"
 		jobInfo.Step = importer.JobStepImporting
 		jobInfoEqual(t, jobInfo, gotJobInfo)
-		cnt, err = importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+		cnt, err = importer.GetActiveJobCnt(ctx, conn)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), cnt)
 
 		// change job step
 		require.NoError(t, importer.Job2Step(ctx, conn, jobID, importer.JobStepValidating))
-		cnt, err = importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+		cnt, err = importer.GetActiveJobCnt(ctx, conn)
 		require.NoError(t, err)
 		require.Equal(t, int64(1), cnt)
 
@@ -135,7 +136,7 @@ func TestJobHappyPath(t *testing.T) {
 		jobInfo.Summary = c.expectedSummary
 		jobInfo.ErrorMessage = c.expectedErrMsg
 		jobInfoEqual(t, jobInfo, gotJobInfo)
-		cnt, err = importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+		cnt, err = importer.GetActiveJobCnt(ctx, conn)
 		require.NoError(t, err)
 		require.Equal(t, int64(0), cnt)
 
@@ -152,7 +153,7 @@ func TestGetAndCancelJob(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	ctx := context.Background()
-	conn := tk.Session().GetSQLExecutor()
+	conn := tk.Session().(sqlexec.SQLExecutor)
 	jobInfo := &importer.JobInfo{
 		TableSchema: "test",
 		TableName:   "t",
@@ -162,7 +163,7 @@ func TestGetAndCancelJob(t *testing.T) {
 			ColumnsAndVars: "(a, b, c)",
 			SetClause:      "d = 1",
 			Format:         importer.DataFormatCSV,
-			Options: map[string]any{
+			Options: map[string]interface{}{
 				"skip_rows": float64(1), // json unmarshal will convert number to float64
 				"detached":  nil,
 			},
@@ -182,7 +183,7 @@ func TestGetAndCancelJob(t *testing.T) {
 	require.True(t, gotJobInfo.StartTime.IsZero())
 	require.True(t, gotJobInfo.EndTime.IsZero())
 	jobInfoEqual(t, jobInfo, gotJobInfo)
-	cnt, err := importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+	cnt, err := importer.GetActiveJobCnt(ctx, conn)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), cnt)
 
@@ -197,7 +198,7 @@ func TestGetAndCancelJob(t *testing.T) {
 	jobInfo.Status = "cancelled"
 	jobInfo.ErrorMessage = "cancelled by user"
 	jobInfoEqual(t, jobInfo, gotJobInfo)
-	cnt, err = importer.GetActiveJobCnt(ctx, conn, gotJobInfo.TableSchema, gotJobInfo.TableName)
+	cnt, err = importer.GetActiveJobCnt(ctx, conn)
 	require.NoError(t, err)
 	require.Equal(t, int64(0), cnt)
 
@@ -245,7 +246,7 @@ func TestGetAndCancelJob(t *testing.T) {
 	_, err = importer.GetJob(ctx, conn, 999999999, jobInfo.CreatedBy, false)
 	require.ErrorIs(t, err, exeerrors.ErrLoadDataJobNotFound)
 	_, err = importer.GetJob(ctx, conn, jobID2, "aaa", false)
-	require.ErrorIs(t, err, plannererrors.ErrSpecificAccessDenied)
+	require.ErrorIs(t, err, core.ErrSpecificAccessDenied)
 	_, err = importer.GetJob(ctx, conn, jobID2, "aaa", true)
 	require.NoError(t, err)
 
@@ -283,7 +284,7 @@ func TestGetJobInfoNullField(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	ctx := context.Background()
-	conn := tk.Session().GetSQLExecutor()
+	conn := tk.Session().(sqlexec.SQLExecutor)
 	jobInfo := &importer.JobInfo{
 		TableSchema: "test",
 		TableName:   "t",
@@ -293,7 +294,7 @@ func TestGetJobInfoNullField(t *testing.T) {
 			ColumnsAndVars: "(a, b, c)",
 			SetClause:      "d = 1",
 			Format:         importer.DataFormatCSV,
-			Options: map[string]any{
+			Options: map[string]interface{}{
 				"skip_rows": float64(1), // json unmarshal will convert number to float64
 				"detached":  nil,
 			},

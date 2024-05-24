@@ -37,7 +37,6 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
@@ -89,7 +88,7 @@ var allRules = append([]lint.Rule{
 	&rule.ConstantLogicalExprRule{},
 	&rule.BoolLiteralRule{},
 	//&rule.RedefinesBuiltinIDRule{},
-	&rule.BlankImportsRule{},
+	&rule.ImportsBlacklistRule{},
 	//&rule.FunctionResultsLimitRule{},
 	//&rule.MaxPublicStructsRule{},
 	&rule.RangeValInClosureRule{},
@@ -141,7 +140,7 @@ func run(pass *analysis.Pass) (any, error) {
 		conf.Rules[r.Name()] = lint.RuleConfig{}
 	}
 	conf.Rules["defer"] = lint.RuleConfig{
-		Arguments: []any{[]any{"loop", "method-call", "immediate-recover", "return"}},
+		Arguments: []interface{}{[]interface{}{"loop", "method-call", "immediate-recover", "return"}},
 	}
 
 	lintingRules, err := config.GetLintingRules(&conf, []lint.Rule{})

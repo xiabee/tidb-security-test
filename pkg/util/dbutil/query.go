@@ -21,15 +21,15 @@ import (
 )
 
 // ScanRowsToInterfaces scans rows to interface array.
-func ScanRowsToInterfaces(rows *sql.Rows) ([][]any, error) {
-	var rowsData [][]any
+func ScanRowsToInterfaces(rows *sql.Rows) ([][]interface{}, error) {
+	var rowsData [][]interface{}
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
 	for rows.Next() {
-		colVals := make([]any, len(cols))
+		colVals := make([]interface{}, len(cols))
 
 		err = rows.Scan(colVals...)
 		if err != nil {
@@ -55,7 +55,7 @@ func ScanRow(rows *sql.Rows) (map[string]*ColumnData, error) {
 	}
 
 	colVals := make([][]byte, len(cols))
-	colValsI := make([]any, len(colVals))
+	colValsI := make([]interface{}, len(colVals))
 	for i := range colValsI {
 		colValsI[i] = &colVals[i]
 	}

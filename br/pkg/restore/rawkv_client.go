@@ -28,7 +28,8 @@ func NewRawkvClient(ctx context.Context, pdAddrs []string, security config.Secur
 		ctx,
 		pdAddrs,
 		security,
-		pd.WithCustomTimeoutOption(10*time.Second))
+		pd.WithCustomTimeoutOption(10*time.Second),
+		pd.WithMaxErrorRetry(5))
 }
 
 type KVPair struct {

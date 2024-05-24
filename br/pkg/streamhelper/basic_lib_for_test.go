@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -103,7 +102,6 @@ type fakeCluster struct {
 	onGetClient        func(uint64) error
 	onClearCache       func(uint64) error
 	serviceGCSafePoint uint64
-	currentTS          uint64
 }
 
 func (r *region) splitAt(newID uint64, k string) *region {
@@ -166,11 +164,11 @@ func (t trivialFlushStream) Context() context.Context {
 	return t.cx
 }
 
-func (t trivialFlushStream) SendMsg(m any) error {
+func (t trivialFlushStream) SendMsg(m interface{}) error {
 	return nil
 }
 
-func (t trivialFlushStream) RecvMsg(m any) error {
+func (t trivialFlushStream) RecvMsg(m interface{}) error {
 	return nil
 }
 
@@ -273,10 +271,6 @@ func (f *fakeCluster) BlockGCUntil(ctx context.Context, at uint64) (uint64, erro
 	}
 	f.serviceGCSafePoint = at
 	return at, nil
-}
-
-func (f *fakeCluster) FetchCurrentTS(ctx context.Context) (uint64, error) {
-	return f.currentTS, nil
 }
 
 // RegionScan gets a list of regions, starts from the region that contains key.
@@ -496,29 +490,6 @@ func (f *fakeCluster) advanceCheckpoints() uint64 {
 	return minCheckpoint
 }
 
-func (f *fakeCluster) advanceCheckpointBy(duration time.Duration) uint64 {
-	minCheckpoint := uint64(math.MaxUint64)
-	for _, r := range f.regions {
-		f.updateRegion(r.id, func(r *region) {
-			newCheckpointTime := oracle.GetTimeFromTS(r.checkpoint.Load()).Add(duration)
-			newCheckpoint := oracle.GoTimeToTS(newCheckpointTime)
-			r.checkpoint.Store(newCheckpoint)
-			if newCheckpoint < minCheckpoint {
-				minCheckpoint = newCheckpoint
-			}
-			r.fsim.flushedEpoch.Store(0)
-		})
-	}
-	log.Info("checkpoint updated", zap.Uint64("to", minCheckpoint))
-	return minCheckpoint
-}
-
-func (f *fakeCluster) advanceClusterTimeBy(duration time.Duration) uint64 {
-	newTime := oracle.GoTimeToTS(oracle.GetTimeFromTS(f.currentTS).Add(duration))
-	f.currentTS = newTime
-	return newTime
-}
-
 func createFakeCluster(t *testing.T, n int, simEnabled bool) *fakeCluster {
 	c := &fakeCluster{
 		stores:  map[uint64]*fakeStore{},
@@ -683,22 +654,6 @@ func (t *testEnv) ClearV3GlobalCheckpointForTask(ctx context.Context, taskName s
 	return nil
 }
 
-func (t *testEnv) PauseTask(ctx context.Context, taskName string) error {
-	t.taskCh <- streamhelper.TaskEvent{
-		Type: streamhelper.EventPause,
-		Name: taskName,
-	}
-	return nil
-}
-
-func (t *testEnv) ResumeTask(ctx context.Context) error {
-	t.taskCh <- streamhelper.TaskEvent{
-		Type: streamhelper.EventResume,
-		Name: "whole",
-	}
-	return nil
-}
-
 func (t *testEnv) getCheckpoint() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -711,22 +666,6 @@ func (t *testEnv) unregisterTask() {
 		Type: streamhelper.EventDel,
 		Name: "whole",
 	}
-}
-
-func (t *testEnv) putTask() {
-	rngs := t.ranges
-	if len(rngs) == 0 {
-		rngs = []kv.KeyRange{{}}
-	}
-	tsk := streamhelper.TaskEvent{
-		Type: streamhelper.EventAdd,
-		Name: "whole",
-		Info: &backup.StreamBackupTaskInfo{
-			Name: "whole",
-		},
-		Ranges: rngs,
-	}
-	t.taskCh <- tsk
 }
 
 func (t *testEnv) ScanLocksInOneRegion(bo *tikv.Backoffer, key []byte, maxVersion uint64, limit uint32) ([]*txnlock.Lock, *tikv.KeyLocation, error) {
@@ -789,7 +728,7 @@ type mockPDClient struct {
 	fakeRegions []*region
 }
 
-func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	sort.Slice(p.fakeRegions, func(i, j int) bool {
 		return bytes.Compare(p.fakeRegions[i].rng.StartKey, p.fakeRegions[j].rng.StartKey) < 0
 	})
@@ -811,10 +750,6 @@ func (p *mockPDClient) GetStore(_ context.Context, storeID uint64) (*metapb.Stor
 		Id:      storeID,
 		Address: fmt.Sprintf("127.0.0.%d", storeID),
 	}, nil
-}
-
-func (p *mockPDClient) GetClusterID(ctx context.Context) uint64 {
-	return 1
 }
 
 func newMockRegion(regionID uint64, startKey []byte, endKey []byte) *pd.Region {

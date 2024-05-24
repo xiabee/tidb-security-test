@@ -115,7 +115,7 @@ func (c *copReqSender) run() {
 		if !ok {
 			return
 		}
-		if p.checkpointMgr != nil && p.checkpointMgr.IsKeyProcessed(task.endKey) {
+		if p.checkpointMgr != nil && p.checkpointMgr.IsComplete(task.endKey) {
 			logutil.Logger(p.ctx).Info("checkpoint detected, skip a cop-request task",
 				zap.Int("task ID", task.id),
 				zap.String("task end key", hex.EncodeToString(task.endKey)))
@@ -157,7 +157,7 @@ func scanRecords(p *copReqSenderPool, task *reorgBackfillTask, se *sess.Session)
 				return err
 			}
 			if p.checkpointMgr != nil {
-				p.checkpointMgr.UpdateTotalKeys(task.id, srcChk.NumRows(), done)
+				p.checkpointMgr.UpdateTotal(task.id, srcChk.NumRows(), done)
 			}
 			idxRs := IndexRecordChunk{ID: task.id, Chunk: srcChk, Done: done}
 			rate := float64(srcChk.MemoryUsage()) / 1024.0 / 1024.0 / time.Since(startTime).Seconds()
@@ -274,7 +274,7 @@ func buildTableScan(ctx context.Context, c *copr.CopContextBase, startTS uint64,
 		SetStartTS(startTS).
 		SetKeyRanges([]kv.KeyRange{{StartKey: start, EndKey: end}}).
 		SetKeepOrder(true).
-		SetFromSessionVars(c.SessionContext.GetDistSQLCtx()).
+		SetFromSessionVars(c.SessionContext.GetSessionVars()).
 		SetFromInfoSchema(c.SessionContext.GetDomainInfoSchema()).
 		SetConcurrency(1).
 		Build()
@@ -284,7 +284,7 @@ func buildTableScan(ctx context.Context, c *copr.CopContextBase, startTS uint64,
 	if err != nil {
 		return nil, err
 	}
-	return distsql.Select(ctx, c.SessionContext.GetDistSQLCtx(), kvReq, c.FieldTypes)
+	return distsql.Select(ctx, c.SessionContext, kvReq, c.FieldTypes)
 }
 
 func fetchTableScanResult(
@@ -302,7 +302,7 @@ func fetchTableScanResult(
 	}
 	err = table.FillVirtualColumnValue(
 		copCtx.VirtualColumnsFieldTypes, copCtx.VirtualColumnsOutputOffsets,
-		copCtx.ExprColumnInfos, copCtx.ColumnInfos, copCtx.SessionContext.GetExprCtx(), chk)
+		copCtx.ExprColumnInfos, copCtx.ColumnInfos, copCtx.SessionContext, chk)
 	return false, err
 }
 
@@ -353,14 +353,14 @@ func buildDAGPB(sCtx sessionctx.Context, tblInfo *model.TableInfo, colInfos []*m
 		return nil, err
 	}
 	dagReq.Executors = append(dagReq.Executors, execPB)
-	distsql.SetEncodeType(sCtx.GetDistSQLCtx(), dagReq)
+	distsql.SetEncodeType(sCtx, dagReq)
 	return dagReq, nil
 }
 
 func constructTableScanPB(sCtx sessionctx.Context, tblInfo *model.TableInfo, colInfos []*model.ColumnInfo) (*tipb.Executor, error) {
 	tblScan := tables.BuildTableScanFromInfos(tblInfo, colInfos)
 	tblScan.TableId = tblInfo.ID
-	err := tables.SetPBColumnsDefaultValue(sCtx.GetExprCtx(), tblScan.Columns, colInfos)
+	err := tables.SetPBColumnsDefaultValue(sCtx, tblScan.Columns, colInfos)
 	return &tipb.Executor{Tp: tipb.ExecType_TypeTableScan, TblScan: tblScan}, err
 }
 
@@ -376,8 +376,7 @@ func buildHandle(pkDts []types.Datum, tblInfo *model.TableInfo,
 	pkInfo *model.IndexInfo, stmtCtx *stmtctx.StatementContext) (kv.Handle, error) {
 	if tblInfo.IsCommonHandle {
 		tablecodec.TruncateIndexValues(tblInfo, pkInfo, pkDts)
-		handleBytes, err := codec.EncodeKey(stmtCtx.TimeZone(), nil, pkDts...)
-		err = stmtCtx.HandleError(err)
+		handleBytes, err := codec.EncodeKey(stmtCtx, nil, pkDts...)
 		if err != nil {
 			return nil, err
 		}

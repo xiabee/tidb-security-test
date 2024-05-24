@@ -207,12 +207,12 @@ func (s *schemaValidator) isRelatedTablesChanged(currVer int64, tableIDs []int64
 		}
 	}
 	if len(changedTblMap) > 0 {
-		tblIDs := make([]int64, 0, len(changedTblMap))
+		tblIds := make([]int64, 0, len(changedTblMap))
 		for id := range changedTblMap {
-			tblIDs = append(tblIDs, id)
+			tblIds = append(tblIds, id)
 		}
-		slices.Sort(tblIDs)
-		logutil.BgLogger().Info("schema of tables in the transaction are changed", zap.Int64s("conflicted table IDs", tblIDs),
+		slices.Sort(tblIds)
+		logutil.BgLogger().Info("schema of tables in the transaction are changed", zap.Int64s("conflicted table IDs", tblIds),
 			zap.Int64("transaction schema", currVer), zap.Int64s("schema versions that changed the tables", changedSchemaVers))
 		return true
 	}

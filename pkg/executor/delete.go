@@ -144,11 +144,6 @@ func (e *DeleteExec) deleteSingleTableByChunk(ctx context.Context) error {
 			rowCount++
 		}
 		chk = chunk.Renew(chk, e.MaxChunkSize())
-		if txn, _ := e.Ctx().Txn(false); txn != nil {
-			if err := txn.MayFlush(); err != nil {
-				return err
-			}
-		}
 	}
 
 	return nil
@@ -227,11 +222,6 @@ func (e *DeleteExec) deleteMultiTablesByChunk(ctx context.Context) error {
 			}
 		}
 		chk = exec.TryNewCacheChunk(e.Children(0))
-		if txn, _ := e.Ctx().Txn(false); txn != nil {
-			if err := txn.MayFlush(); err != nil {
-				return err
-			}
-		}
 	}
 
 	return e.removeRowsInTblRowMap(tblRowMap)
@@ -253,7 +243,7 @@ func (e *DeleteExec) removeRowsInTblRowMap(tblRowMap tableRowMapType) error {
 }
 
 func (e *DeleteExec) removeRow(ctx sessionctx.Context, t table.Table, h kv.Handle, data []types.Datum) error {
-	err := t.RemoveRecord(ctx.GetTableCtx(), h, data)
+	err := t.RemoveRecord(ctx, h, data)
 	if err != nil {
 		return err
 	}
@@ -286,7 +276,7 @@ func onRemoveRowForFK(ctx sessionctx.Context, data []types.Datum, fkChecks []*FK
 // Close implements the Executor Close interface.
 func (e *DeleteExec) Close() error {
 	defer e.memTracker.ReplaceBytesUsed(0)
-	return exec.Close(e.Children(0))
+	return e.Children(0).Close()
 }
 
 // Open implements the Executor Open interface.
@@ -294,7 +284,7 @@ func (e *DeleteExec) Open(ctx context.Context) error {
 	e.memTracker = memory.NewTracker(e.ID(), -1)
 	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
 
-	return exec.Open(ctx, e.Children(0))
+	return e.Children(0).Open(ctx)
 }
 
 // GetFKChecks implements WithForeignKeyTrigger interface.

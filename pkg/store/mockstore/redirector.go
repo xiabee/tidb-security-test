@@ -71,7 +71,3 @@ func (c *clientRedirector) SendRequest(ctx context.Context, addr string, req *ti
 	}
 	return c.mockClient.SendRequest(ctx, addr, req, timeout)
 }
-
-func (c *clientRedirector) SetEventListener(listener tikv.ClientEventListener) {
-	c.mockClient.SetEventListener(listener)
-}

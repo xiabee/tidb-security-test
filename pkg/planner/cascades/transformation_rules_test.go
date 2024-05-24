@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/memo"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/stretchr/testify/require"
 )
@@ -45,7 +44,7 @@ func testGroupToString(t *testing.T, input []string, output []struct {
 		stmt, err := p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
 
-		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
+		plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
 		logic, ok := plan.(plannercore.LogicalPlan)
@@ -68,10 +67,10 @@ func testGroupToString(t *testing.T, input []string, output []struct {
 func TestAggPushDownGather(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
-		pattern.OperandAggregation: {
+		memo.OperandAggregation: {
 			NewRulePushAggDownGather(),
 		},
-		pattern.OperandDataSource: {
+		memo.OperandDataSource: {
 			NewRuleEnumeratePaths(),
 		},
 	})
@@ -97,7 +96,7 @@ func TestAggPushDownGather(t *testing.T) {
 		stmt, err := p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
 
-		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
+		plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
 		logic, ok := plan.(plannercore.LogicalPlan)
@@ -124,7 +123,7 @@ func TestPredicatePushDown(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(
 		TransformationRuleBatch{ // TiDB layer
-			pattern.OperandSelection: {
+			memo.OperandSelection: {
 				NewRulePushSelDownSort(),
 				NewRulePushSelDownProjection(),
 				NewRulePushSelDownAggregation(),
@@ -133,17 +132,17 @@ func TestPredicatePushDown(t *testing.T) {
 				NewRulePushSelDownWindow(),
 				NewRuleMergeAdjacentSelection(),
 			},
-			pattern.OperandJoin: {
+			memo.OperandJoin: {
 				NewRuleTransformJoinCondToSel(),
 			},
 		},
 		TransformationRuleBatch{ // TiKV layer
-			pattern.OperandSelection: {
+			memo.OperandSelection: {
 				NewRulePushSelDownTableScan(),
 				NewRulePushSelDownTiKVSingleGather(),
 				NewRulePushSelDownIndexScan(),
 			},
-			pattern.OperandDataSource: {
+			memo.OperandDataSource: {
 				NewRuleEnumeratePaths(),
 			},
 		},
@@ -165,27 +164,27 @@ func TestTopNRules(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(
 		TransformationRuleBatch{ // TiDB layer
-			pattern.OperandLimit: {
+			memo.OperandLimit: {
 				NewRuleTransformLimitToTopN(),
 				NewRulePushLimitDownProjection(),
 				NewRulePushLimitDownUnionAll(),
 				NewRulePushLimitDownOuterJoin(),
 				NewRuleMergeAdjacentLimit(),
 			},
-			pattern.OperandTopN: {
+			memo.OperandTopN: {
 				NewRulePushTopNDownProjection(),
 				NewRulePushTopNDownOuterJoin(),
 				NewRulePushTopNDownUnionAll(),
 			},
 		},
 		TransformationRuleBatch{ // TiKV layer
-			pattern.OperandLimit: {
+			memo.OperandLimit: {
 				NewRulePushLimitDownTiKVSingleGather(),
 			},
-			pattern.OperandTopN: {
+			memo.OperandTopN: {
 				NewRulePushTopNDownTiKVSingleGather(),
 			},
-			pattern.OperandDataSource: {
+			memo.OperandDataSource: {
 				NewRuleEnumeratePaths(),
 			},
 		},
@@ -203,7 +202,7 @@ func TestTopNRules(t *testing.T) {
 func TestProjectionElimination(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
-		pattern.OperandProjection: {
+		memo.OperandProjection: {
 			NewRuleEliminateProjection(),
 			NewRuleMergeAdjacentProjection(),
 		},
@@ -222,8 +221,8 @@ func TestProjectionElimination(t *testing.T) {
 
 func TestEliminateMaxMin(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleEliminateSingleMaxMin(),
 		},
 	})
@@ -241,8 +240,8 @@ func TestEliminateMaxMin(t *testing.T) {
 
 func TestMergeAggregationProjection(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleMergeAggregationProjection(),
 		},
 	})
@@ -260,15 +259,15 @@ func TestMergeAggregationProjection(t *testing.T) {
 
 func TestMergeAdjacentTopN(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandLimit: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandLimit: {
 			NewRuleTransformLimitToTopN(),
 		},
-		pattern.OperandTopN: {
+		memo.OperandTopN: {
 			NewRulePushTopNDownProjection(),
 			NewRuleMergeAdjacentTopN(),
 		},
-		pattern.OperandProjection: {
+		memo.OperandProjection: {
 			NewRuleMergeAdjacentProjection(),
 		},
 	})
@@ -287,7 +286,7 @@ func TestMergeAdjacentTopN(t *testing.T) {
 func TestMergeAdjacentLimit(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
-		pattern.OperandLimit: {
+		memo.OperandLimit: {
 			NewRulePushLimitDownProjection(),
 			NewRuleMergeAdjacentLimit(),
 		},
@@ -307,7 +306,7 @@ func TestMergeAdjacentLimit(t *testing.T) {
 func TestTransformLimitToTableDual(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
-		pattern.OperandLimit: {
+		memo.OperandLimit: {
 			NewRuleTransformLimitToTableDual(),
 		},
 	})
@@ -326,7 +325,7 @@ func TestTransformLimitToTableDual(t *testing.T) {
 func TestPostTransformationRules(t *testing.T) {
 	optimizer := NewOptimizer()
 	optimizer.ResetTransformationRules(TransformationRuleBatch{
-		pattern.OperandLimit: {
+		memo.OperandLimit: {
 			NewRuleTransformLimitToTopN(),
 		},
 	}, PostTransformationBatch)
@@ -344,14 +343,14 @@ func TestPostTransformationRules(t *testing.T) {
 
 func TestPushLimitDownTiKVSingleGather(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandLimit: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandLimit: {
 			NewRulePushLimitDownTiKVSingleGather(),
 		},
-		pattern.OperandProjection: {
+		memo.OperandProjection: {
 			NewRuleEliminateProjection(),
 		},
-		pattern.OperandDataSource: {
+		memo.OperandDataSource: {
 			NewRuleEnumeratePaths(),
 		},
 	})
@@ -369,11 +368,11 @@ func TestPushLimitDownTiKVSingleGather(t *testing.T) {
 
 func TestEliminateOuterJoin(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleEliminateOuterJoinBelowAggregation(),
 		},
-		pattern.OperandProjection: {
+		memo.OperandProjection: {
 			NewRuleEliminateOuterJoinBelowProjection(),
 		},
 	})
@@ -391,8 +390,8 @@ func TestEliminateOuterJoin(t *testing.T) {
 
 func TestTransformAggregateCaseToSelection(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleTransformAggregateCaseToSelection(),
 		},
 	})
@@ -410,11 +409,11 @@ func TestTransformAggregateCaseToSelection(t *testing.T) {
 
 func TestTransformAggToProj(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleTransformAggToProj(),
 		},
-		pattern.OperandProjection: {
+		memo.OperandProjection: {
 			NewRuleMergeAdjacentProjection(),
 		},
 	})
@@ -432,8 +431,8 @@ func TestTransformAggToProj(t *testing.T) {
 
 func TestDecorrelate(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandApply: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandApply: {
 			NewRulePullSelectionUpApply(),
 			NewRuleTransformApplyToJoin(),
 		},
@@ -452,15 +451,15 @@ func TestDecorrelate(t *testing.T) {
 
 func TestInjectProj(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandLimit: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandLimit: {
 			NewRuleTransformLimitToTopN(),
 		},
-	}, map[pattern.Operand][]Transformation{
-		pattern.OperandAggregation: {
+	}, map[memo.Operand][]Transformation{
+		memo.OperandAggregation: {
 			NewRuleInjectProjectionBelowAgg(),
 		},
-		pattern.OperandTopN: {
+		memo.OperandTopN: {
 			NewRuleInjectProjectionBelowTopN(),
 		},
 	})
@@ -478,12 +477,12 @@ func TestInjectProj(t *testing.T) {
 
 func TestMergeAdjacentWindow(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandProjection: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandProjection: {
 			NewRuleMergeAdjacentProjection(),
 			NewRuleEliminateProjection(),
 		},
-		pattern.OperandWindow: {
+		memo.OperandWindow: {
 			NewRuleMergeAdjacentWindow(),
 		},
 	})

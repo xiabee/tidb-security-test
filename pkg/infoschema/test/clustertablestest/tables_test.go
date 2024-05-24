@@ -46,7 +46,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/gctuner"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/oracle"
 )
 
 func newTestKitWithRoot(t *testing.T, store kv.Storage) *testkit.TestKit {
@@ -304,7 +303,7 @@ func TestTableRowIDShardingInfo(t *testing.T) {
 	tk.MustExec("DROP DATABASE IF EXISTS `sharding_info_test_db`")
 	tk.MustExec("CREATE DATABASE `sharding_info_test_db`")
 
-	assertShardingInfo := func(tableName string, expectInfo any) {
+	assertShardingInfo := func(tableName string, expectInfo interface{}) {
 		querySQL := fmt.Sprintf("select tidb_row_id_sharding_info from information_schema.tables where table_schema = 'sharding_info_test_db' and table_name = '%s'", tableName)
 		info := tk.MustQuery(querySQL).Rows()[0][0]
 		if expectInfo == nil {
@@ -325,10 +324,11 @@ func TestTableRowIDShardingInfo(t *testing.T) {
 	tk.MustExec("CREATE VIEW `sharding_info_test_db`.`tv` AS select 1")
 	assertShardingInfo("tv", nil)
 
-	testFunc := func(dbName string, expectInfo any) {
+	testFunc := func(dbName string, expectInfo interface{}) {
+		dbInfo := model.DBInfo{Name: model.NewCIStr(dbName)}
 		tableInfo := model.TableInfo{}
 
-		info := infoschema.GetShardingInfo(model.NewCIStr(dbName), &tableInfo)
+		info := infoschema.GetShardingInfo(&dbInfo, &tableInfo)
 		require.Equal(t, expectInfo, info)
 	}
 
@@ -360,7 +360,7 @@ func TestSlowQuery(t *testing.T) {
 	slowLogFileName := "tidb_slow.log"
 	internal.PrepareSlowLogfile(t, slowLogFileName)
 	defer func() { require.NoError(t, os.Remove(slowLogFileName)) }()
-	expectedRes := [][]any{
+	expectedRes := [][]interface{}{
 		{"2019-02-12 19:33:56.571953",
 			"406315658548871171",
 			"root",
@@ -1010,6 +1010,39 @@ func TestStmtSummaryInternalQuery(t *testing.T) {
 	// Disable refreshing summary.
 	tk.MustExec("set global tidb_stmt_summary_refresh_interval = 999999999")
 	tk.MustQuery("select @@global.tidb_stmt_summary_refresh_interval").Check(testkit.Rows("999999999"))
+
+	// Test Internal
+
+	// Create a new session to test.
+	tk = newTestKitWithRoot(t, store)
+
+	tk.MustExec("select * from t where t.a = 1")
+	tk.MustQuery(`select exec_count, digest_text
+		from information_schema.statements_summary
+		where digest_text like "select original_sql , bind_sql , default_db , status%"`).Check(testkit.Rows())
+
+	// Enable internal query and evolve baseline.
+	tk.MustExec("set global tidb_stmt_summary_internal_query = 1")
+	defer tk.MustExec("set global tidb_stmt_summary_internal_query = false")
+
+	// Create a new session to test.
+	tk = newTestKitWithRoot(t, store)
+
+	tk.MustExec("admin flush bindings")
+	tk.MustExec("admin evolve bindings")
+
+	// `exec_count` may be bigger than 1 because other cases are also running.
+	sql := "select digest_text " +
+		"from information_schema.statements_summary " +
+		"where digest_text like \"select `original_sql` , `bind_sql` , `default_db` , status%\""
+	tk.MustQuery(sql).Check(testkit.Rows(
+		"select `original_sql` , `bind_sql` , `default_db` , status , `create_time` , `update_time` , charset , " +
+			"collation , source , `sql_digest` , `plan_digest` from `mysql` . `bind_info` where `update_time` > ? order by `update_time` , `create_time`"))
+
+	// Test for issue #21642.
+	tk.MustQuery(`select tidb_version()`)
+	rows := tk.MustQuery("select plan from information_schema.statements_summary where digest_text like \"select `tidb_version`%\"").Rows()
+	require.Contains(t, rows[0][0].(string), "Projection")
 }
 
 // TestSimpleStmtSummaryEvictedCount test stmtSummaryEvictedCount
@@ -1181,12 +1214,8 @@ func TestTiDBTrx(t *testing.T) {
 	memDBTracker := memory.NewTracker(memory.LabelForMemDB, -1)
 	memDBTracker.Consume(19)
 	tk.Session().GetSessionVars().MemDBFootprint = memDBTracker
-
-	t1 := time.Date(2021, 5, 7, 4, 56, 48, 1000000, time.UTC)
-	t2 := time.Date(2021, 5, 20, 13, 16, 35, 778000000, time.UTC)
-
 	sm.TxnInfo[0] = &txninfo.TxnInfo{
-		StartTS:          oracle.GoTimeToTS(t1),
+		StartTS:          424768545227014155,
 		CurrentSQLDigest: digest.String(),
 		State:            txninfo.TxnIdle,
 		EntriesCount:     1,
@@ -1197,7 +1226,7 @@ func TestTiDBTrx(t *testing.T) {
 
 	blockTime2 := time.Date(2021, 05, 20, 13, 18, 30, 123456000, time.Local)
 	sm.TxnInfo[1] = &txninfo.TxnInfo{
-		StartTS:          oracle.GoTimeToTS(t2),
+		StartTS:          425070846483628033,
 		CurrentSQLDigest: "",
 		AllSQLDigests:    []string{"sql1", "sql2", digest.String()},
 		State:            txninfo.TxnLockAcquiring,
@@ -1223,11 +1252,8 @@ func TestTiDBTrx(t *testing.T) {
 	ALL_SQL_DIGESTS,
 	RELATED_TABLE_IDS
 	from information_schema.TIDB_TRX`).Check(testkit.Rows(
-		"424768545227014144 "+t1.Local().Format(types.TimeFSPFormat)+" "+digest.String()+" update `test_tidb_trx` set `i` = `i` + ? Idle <nil> 1 19 2 root test [] ",
-		"425070846483628032 "+t2.Local().Format(types.TimeFSPFormat)+" <nil> <nil> LockWaiting "+
-			// `WAITING_START_TIME` will not be affected by time_zone, it is in memory and we assume that the system time zone will not change.
-			blockTime2.Format(types.TimeFSPFormat)+
-			" 0 19 10 user1 db1 [\"sql1\",\"sql2\",\""+digest.String()+"\"] "))
+		"424768545227014155 2021-05-07 12:56:48.001000 "+digest.String()+" update `test_tidb_trx` set `i` = `i` + ? Idle <nil> 1 19 2 root test [] ",
+		"425070846483628033 2021-05-20 21:16:35.778000 <nil> <nil> LockWaiting 2021-05-20 13:18:30.123456 0 19 10 user1 db1 [\"sql1\",\"sql2\",\""+digest.String()+"\"] "))
 
 	rows := tk.MustQuery(`select WAITING_TIME from information_schema.TIDB_TRX where WAITING_TIME is not null`)
 	require.Len(t, rows.Rows(), 1)
@@ -1297,7 +1323,7 @@ func TestMemoryUsageAndOpsHistory(t *testing.T) {
 	}()
 	gctuner.GlobalMemoryLimitTuner.Start()
 	defer func() {
-		time.Sleep(1200 * time.Millisecond) // Wait tuning finished.
+		time.Sleep(1 * time.Second) // Wait tuning finished.
 	}()
 	tk.MustExec("set global tidb_mem_oom_action = 'CANCEL'")
 	tk.MustExec("set global tidb_server_memory_limit=512<<20")
@@ -1399,12 +1425,4 @@ func TestAddFieldsForBinding(t *testing.T) {
 	require.Equal(t, rows[0][6], "utf8mb4_bin")
 	require.Equal(t, rows[0][7], "use_index(@`sel_1` `test`.`t` ), ignore_index(`t` `a`)")
 	require.Equal(t, rows[0][8], "select * from `t` where `a` = ?")
-}
-
-func TestClusterInfoTime(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustQuery("SELECT START_TIME+1 FROM information_schema.CLUSTER_INFO")
-	warnings := tk.Session().GetSessionVars().StmtCtx.GetWarnings()
-	require.Nil(t, warnings)
 }

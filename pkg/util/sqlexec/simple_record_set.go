@@ -25,7 +25,7 @@ import (
 // SimpleRecordSet is a simple implementation of RecordSet. All values are known when creating SimpleRecordSet.
 type SimpleRecordSet struct {
 	ResultFields []*ast.ResultField
-	Rows         [][]any
+	Rows         [][]interface{}
 	MaxChunkSize int
 	idx          int
 }

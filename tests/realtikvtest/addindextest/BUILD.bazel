@@ -1,4 +1,23 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "addindextest",
+    srcs = [
+        "common.go",
+        "compatibility.go",
+        "workload.go",
+    ],
+    importpath = "github.com/pingcap/tidb/tests/realtikvtest/addindextest",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/kv",
+        "//pkg/testkit",
+        "//pkg/util/logutil",
+        "@com_github_pingcap_failpoint//:failpoint",
+        "@com_github_stretchr_testify//require",
+        "@org_uber_go_zap//:zap",
+    ],
+)
 
 go_test(
     name = "addindextest_test",
@@ -11,13 +30,11 @@ go_test(
         "multi_schema_change_test.go",
         "pitr_test.go",
     ],
+    embed = [":addindextest"],
     deps = [
         "//pkg/config",
-        "//pkg/ddl/ingest",
         "//pkg/testkit",
         "//tests/realtikvtest",
-        "//tests/realtikvtest/addindextestutil",
         "@com_github_stretchr_testify//require",
-        "@com_github_tikv_client_go_v2//tikv",
     ],
 )

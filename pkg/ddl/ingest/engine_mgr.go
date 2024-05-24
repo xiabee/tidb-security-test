@@ -18,14 +18,11 @@ import (
 	"fmt"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/lightning/backend"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
 )
-
-// maxWriterCount is the max number of writers that can be created for a single engine.
-const maxWriterCount = 16
 
 // Register create a new engineInfo and register it to the backend context.
 func (bc *litBackendCtx) Register(jobID, indexID int64, schemaName, tableName string) (Engine, error) {
@@ -54,11 +51,7 @@ func (bc *litBackendCtx) Register(jobID, indexID int64, schemaName, tableName st
 		}
 
 		mgr := backend.MakeEngineManager(bc.backend)
-		ts := uint64(0)
-		if c := bc.checkpointMgr; c != nil {
-			ts = c.GetTS()
-		}
-		cfg := generateLocalEngineConfig(jobID, schemaName, tableName, ts)
+		cfg := generateLocalEngineConfig(jobID, schemaName, tableName)
 		openedEn, err := mgr.OpenEngine(bc.ctx, cfg, tableName, int32(indexID))
 		if err != nil {
 			logutil.Logger(bc.ctx).Warn(LitErrCreateEngineFail, zap.Int64("job ID", jobID),
@@ -72,7 +65,7 @@ func (bc *litBackendCtx) Register(jobID, indexID int64, schemaName, tableName st
 		bc.MemRoot.ConsumeWithTag(encodeEngineTag(jobID, indexID), engineCacheSize)
 		info = LitInfoOpenEngine
 	} else {
-		if en.writerCount+1 > maxWriterCount {
+		if en.writerCount+1 > bc.cfg.TikvImporter.RangeConcurrency {
 			logutil.Logger(bc.ctx).Warn(LitErrExceedConcurrency, zap.Int64("job ID", jobID),
 				zap.Int64("index ID", indexID),
 				zap.Int("concurrency", bc.cfg.TikvImporter.RangeConcurrency))

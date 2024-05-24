@@ -17,6 +17,7 @@ package schematracker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -35,7 +36,6 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics/handle"
-	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/table"
 	pumpcli "github.com/pingcap/tidb/pkg/tidb-binlog/pump_client"
@@ -226,6 +226,7 @@ func (d *Checker) CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt)
 	// some unit test will also check warnings, we reset the warnings after SchemaTracker use session context again.
 	count := ctx.GetSessionVars().StmtCtx.WarningCount()
 	// backup old session variables because CreateTable will change them.
+	strictSQLMode := ctx.GetSessionVars().StrictSQLMode
 	enableClusteredIndex := ctx.GetSessionVars().EnableClusteredIndex
 
 	err = d.tracker.CreateTable(ctx, stmt)
@@ -233,6 +234,7 @@ func (d *Checker) CreateTable(ctx sessionctx.Context, stmt *ast.CreateTableStmt)
 		panic(err)
 	}
 
+	ctx.GetSessionVars().StrictSQLMode = strictSQLMode
 	ctx.GetSessionVars().EnableClusteredIndex = enableClusteredIndex
 	ctx.GetSessionVars().StmtCtx.TruncateWarnings(int(count))
 
@@ -491,7 +493,7 @@ func (d *Checker) GetLease() time.Duration {
 }
 
 // Stats implements the DDL interface.
-func (d *Checker) Stats(vars *variable.SessionVars) (map[string]any, error) {
+func (d *Checker) Stats(vars *variable.SessionVars) (map[string]interface{}, error) {
 	return d.realDDL.Stats(vars)
 }
 
@@ -560,24 +562,38 @@ func (d *Checker) DoDDLJob(ctx sessionctx.Context, job *model.Job) error {
 	return d.realDDL.DoDDLJob(ctx, job)
 }
 
-type storageAndMore interface {
-	kv.Storage
-	kv.EtcdBackend
-	helper.Storage
-}
-
 // StorageDDLInjector wraps kv.Storage to inject checker to domain's DDL in bootstrap time.
 type StorageDDLInjector struct {
-	storageAndMore
+	kv.Storage
+	kv.EtcdBackend
 	Injector func(ddl.DDL) *Checker
+}
+
+var _ kv.EtcdBackend = StorageDDLInjector{}
+
+// EtcdAddrs implements the kv.EtcdBackend interface.
+func (s StorageDDLInjector) EtcdAddrs() ([]string, error) {
+	return s.EtcdBackend.EtcdAddrs()
+}
+
+// TLSConfig implements the kv.EtcdBackend interface.
+func (s StorageDDLInjector) TLSConfig() *tls.Config {
+	return s.EtcdBackend.TLSConfig()
+}
+
+// StartGCWorker implements the kv.EtcdBackend interface.
+func (s StorageDDLInjector) StartGCWorker() error {
+	return s.EtcdBackend.StartGCWorker()
 }
 
 // NewStorageDDLInjector creates a new StorageDDLInjector to inject Checker.
 func NewStorageDDLInjector(s kv.Storage) kv.Storage {
-	raw := s.(storageAndMore)
 	ret := StorageDDLInjector{
-		storageAndMore: raw,
-		Injector:       NewChecker,
+		Storage:  s,
+		Injector: NewChecker,
+	}
+	if ebd, ok := s.(kv.EtcdBackend); ok {
+		ret.EtcdBackend = ebd
 	}
 	return ret
 }
@@ -588,5 +604,5 @@ func UnwrapStorage(s kv.Storage) kv.Storage {
 	if !ok {
 		return s
 	}
-	return injector.storageAndMore
+	return injector.Storage
 }

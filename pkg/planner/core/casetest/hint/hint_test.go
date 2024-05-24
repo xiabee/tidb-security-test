@@ -45,8 +45,7 @@ func TestReadFromStorageHint(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 			Count:     1,
 			Available: true,
@@ -95,8 +94,7 @@ func TestAllViewHintType(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -166,8 +164,7 @@ func TestJoinHintCompatibility(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		name := tblInfo.Name.L
 		if name == "t4" || name == "t5" || name == "t6" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
@@ -216,8 +213,7 @@ func TestReadFromStorageHintAndIsolationRead(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 			Count:     1,
 			Available: true,
@@ -258,8 +254,7 @@ func TestIsolationReadTiFlashUseIndexHint(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 			Count:     1,
 			Available: true,
@@ -311,8 +306,7 @@ func TestOptimizeHintOnPartitionTable(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -371,4 +365,12 @@ func TestHints(t *testing.T) {
 		tk.MustQuery("explain format = 'brief' " + tt).Check(testkit.Rows(output[i].Plan...))
 		tk.MustQuery("show warnings").Check(testkit.Rows(output[i].Warn...))
 	}
+}
+
+func TestHintInReplace(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(d date)")
+	tk.MustExec("replace /*+ SET_VAR(sql_mode='ALLOW_INVALID_DATES') */ into t values ('2004-04-31');")
 }

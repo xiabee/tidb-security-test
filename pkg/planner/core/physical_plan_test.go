@@ -36,7 +36,6 @@ import (
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/require"
 )
@@ -216,7 +215,7 @@ func TestIndexLookupCartesianJoin(t *testing.T) {
 
 	warnings := tk.Session().GetSessionVars().StmtCtx.GetWarnings()
 	lastWarn := warnings[len(warnings)-1]
-	err = plannererrors.ErrInternal.GenWithStack("TIDB_INLJ hint is inapplicable without column equal ON condition")
+	err = core.ErrInternal.GenWithStack("TIDB_INLJ hint is inapplicable without column equal ON condition")
 	require.True(t, terror.ErrorEqual(err, lastWarn.Err))
 }
 
@@ -426,6 +425,39 @@ func testDAGPlanBuilderSplitAvg(t *testing.T, root core.PhysicalPlan) {
 	}
 }
 
+func TestHJBuildAndProbeHintWithBinding(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("set tidb_cost_model_version=2")
+	tk.MustExec("drop table if exists t, t1, t2, t3;")
+	tk.MustExec("create table t(a int, b int, key(a));")
+	tk.MustExec("create table t1(a int, b int, key(a));")
+	tk.MustExec("create table t2(a int, b int, key(a));")
+	tk.MustExec("create table t3(a int, b int, key(a));")
+
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("0"))
+	tk.MustExec("create global binding for select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b using select /*+ hash_join_build(t1) */ * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("1"))
+	res := tk.MustQuery("show global bindings").Rows()
+	require.Equal(t, res[0][0], "select * from ( `test` . `t1` join `test` . `t2` on `t1` . `a` = `t2` . `a` ) join `test` . `t3` on `t2` . `b` = `t3` . `b`", "SELECT /*+ hash_join_build(t1)*/ * FROM (`test`.`t1` JOIN `test`.`t2` ON `t1`.`a` = `t2`.`a`) JOIN `test`.`t3` ON `t2`.`b` = `t3`.`b`")
+
+	tk.MustExec("create global binding for select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b using select /*+ hash_join_probe(t1) */ * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("1"))
+	res = tk.MustQuery("show global bindings").Rows()
+	require.Equal(t, res[0][0], "select * from ( `test` . `t1` join `test` . `t2` on `t1` . `a` = `t2` . `a` ) join `test` . `t3` on `t2` . `b` = `t3` . `b`", "SELECT /*+ hash_join_probe(t1)*/ * FROM (`test`.`t1` JOIN `test`.`t2` ON `t1`.`a` = `t2`.`a`) JOIN `test`.`t3` ON `t2`.`b` = `t3`.`b`")
+
+	tk.MustExec("drop global binding for select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustExec("select * from t1 join t2 on t1.a=t2.a join t3 on t2.b=t3.b")
+	tk.MustQuery("select @@last_plan_from_binding").Check(testkit.Rows("0"))
+	res = tk.MustQuery("show global bindings").Rows()
+	require.Equal(t, len(res), 0)
+}
+
 func TestPhysicalPlanMemoryTrace(t *testing.T) {
 	// PhysicalSort
 	ls := core.PhysicalSort{}
@@ -506,7 +538,7 @@ func TestPhysicalTableScanExtractCorrelatedCols(t *testing.T) {
 		core.PushedDown(sel, ts, []expression.Expression{selected}, 0.1)
 	}
 
-	pb, err := ts.ToPB(tk.Session().GetPlanCtx(), kv.TiFlash)
+	pb, err := ts.ToPB(tk.Session(), kv.TiFlash)
 	require.NoError(t, err)
 	// make sure the pushed down filter condition is correct
 	require.Equal(t, 1, len(pb.TblScan.PushedDownFilterConditions))

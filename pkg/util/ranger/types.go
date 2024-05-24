@@ -18,13 +18,12 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 	"unsafe"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
-	planctx "github.com/pingcap/tidb/pkg/planner/context"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
@@ -96,11 +95,11 @@ func (ran *Range) Clone() *Range {
 }
 
 // IsPoint returns if the range is a point.
-func (ran *Range) IsPoint(sctx planctx.PlanContext) bool {
-	return ran.isPoint(sctx.GetSessionVars().StmtCtx.TypeCtx(), sctx.GetSessionVars().RegardNULLAsPoint)
+func (ran *Range) IsPoint(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, sctx.GetSessionVars().RegardNULLAsPoint)
 }
 
-func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
+func (ran *Range) isPoint(stmtCtx *stmtctx.StatementContext, regardNullAsPoint bool) bool {
 	if len(ran.LowVal) != len(ran.HighVal) {
 		return false
 	}
@@ -110,7 +109,7 @@ func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
 		if a.Kind() == types.KindMinNotNull || b.Kind() == types.KindMaxValue {
 			return false
 		}
-		cmp, err := a.Compare(tc, &b, ran.Collators[i])
+		cmp, err := a.Compare(stmtCtx, &b, ran.Collators[i])
 		if err != nil {
 			return false
 		}
@@ -128,14 +127,14 @@ func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
 }
 
 // IsPointNonNullable returns if the range is a point without NULL.
-func (ran *Range) IsPointNonNullable(tc types.Context) bool {
-	return ran.isPoint(tc, false)
+func (ran *Range) IsPointNonNullable(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, false)
 }
 
 // IsPointNullable returns if the range is a point.
 // TODO: unify the parameter type with IsPointNullable and IsPoint
-func (ran *Range) IsPointNullable(tc types.Context) bool {
-	return ran.isPoint(tc, true)
+func (ran *Range) IsPointNullable(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, true)
 }
 
 // IsFullRange check if the range is full scan range
@@ -194,18 +193,16 @@ func (ran *Range) String() string {
 }
 
 // Encode encodes the range to its encoded value.
-func (ran *Range) Encode(ec errctx.Context, loc *time.Location, lowBuffer, highBuffer []byte) ([]byte, []byte, error) {
+func (ran *Range) Encode(sc *stmtctx.StatementContext, lowBuffer, highBuffer []byte) ([]byte, []byte, error) {
 	var err error
-	lowBuffer, err = codec.EncodeKey(loc, lowBuffer[:0], ran.LowVal...)
-	err = ec.HandleError(err)
+	lowBuffer, err = codec.EncodeKey(sc, lowBuffer[:0], ran.LowVal...)
 	if err != nil {
 		return nil, nil, err
 	}
 	if ran.LowExclude {
 		lowBuffer = kv.Key(lowBuffer).PrefixNext()
 	}
-	highBuffer, err = codec.EncodeKey(loc, highBuffer[:0], ran.HighVal...)
-	err = ec.HandleError(err)
+	highBuffer, err = codec.EncodeKey(sc, highBuffer[:0], ran.HighVal...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -217,10 +214,10 @@ func (ran *Range) Encode(ec errctx.Context, loc *time.Location, lowBuffer, highB
 
 // PrefixEqualLen tells you how long the prefix of the range is a point.
 // e.g. If this range is (1 2 3, 1 2 +inf), then the return value is 2.
-func (ran *Range) PrefixEqualLen(tc types.Context) (int, error) {
+func (ran *Range) PrefixEqualLen(sc *stmtctx.StatementContext) (int, error) {
 	// Here, len(ran.LowVal) always equal to len(ran.HighVal)
 	for i := 0; i < len(ran.LowVal); i++ {
-		cmp, err := ran.LowVal[i].Compare(tc, &ran.HighVal[i], ran.Collators[i])
+		cmp, err := ran.LowVal[i].Compare(sc, &ran.HighVal[i], ran.Collators[i])
 		if err != nil {
 			return 0, errors.Trace(err)
 		}

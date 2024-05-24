@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/util"
 )
 
 // canProjectionBeEliminatedLoose checks whether a projection can be eliminated,
@@ -81,9 +80,16 @@ func canProjectionBeEliminatedStrict(p *PhysicalProjection) bool {
 	if p.Schema().Len() != child.Schema().Len() {
 		return false
 	}
+	for _, ref := range p.SCtx().GetSessionVars().StmtCtx.ColRefFromUpdatePlan {
+		for _, one := range p.Schema().Columns {
+			if ref == one.UniqueID {
+				return false
+			}
+		}
+	}
 	for i, expr := range p.Exprs {
 		col, ok := expr.(*expression.Column)
-		if !ok || !col.EqualColumn(child.Schema().Columns[i]) {
+		if !ok || !col.Equal(nil, child.Schema().Columns[i]) {
 			return false
 		}
 	}
@@ -91,7 +97,7 @@ func canProjectionBeEliminatedStrict(p *PhysicalProjection) bool {
 }
 
 func resolveColumnAndReplace(origin *expression.Column, replace map[string]*expression.Column) {
-	dst := replace[string(origin.HashCode())]
+	dst := replace[string(origin.HashCode(nil))]
 	if dst != nil {
 		retType, inOperand := origin.RetType, origin.InOperand
 		*origin = *dst
@@ -134,11 +140,6 @@ func doPhysicalProjectionElimination(p PhysicalPlan) PhysicalPlan {
 	if childProj, ok := child.(*PhysicalProjection); ok {
 		childProj.SetSchema(p.Schema())
 	}
-	for i, col := range p.Schema().Columns {
-		if p.SCtx().GetSessionVars().StmtCtx.ColRefFromUpdatePlan.Has(int(col.UniqueID)) && !child.Schema().Columns[i].Equal(nil, col) {
-			return p
-		}
-	}
 	return child
 }
 
@@ -166,14 +167,14 @@ type projectionEliminator struct {
 }
 
 // optimize implements the logicalOptRule interface.
-func (pe *projectionEliminator) optimize(_ context.Context, lp LogicalPlan, opt *util.LogicalOptimizeOp) (LogicalPlan, bool, error) {
+func (pe *projectionEliminator) optimize(_ context.Context, lp LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, bool, error) {
 	planChanged := false
 	root := pe.eliminate(lp, make(map[string]*expression.Column), false, opt)
 	return root, planChanged, nil
 }
 
 // eliminate eliminates the redundant projection in a logical plan.
-func (pe *projectionEliminator) eliminate(p LogicalPlan, replace map[string]*expression.Column, canEliminate bool, opt *util.LogicalOptimizeOp) LogicalPlan {
+func (pe *projectionEliminator) eliminate(p LogicalPlan, replace map[string]*expression.Column, canEliminate bool, opt *logicalOptimizeOp) LogicalPlan {
 	// LogicalCTE's logical optimization is independent.
 	if _, ok := p.(*LogicalCTE); ok {
 		return p
@@ -208,10 +209,9 @@ func (pe *projectionEliminator) eliminate(p LogicalPlan, replace map[string]*exp
 	// eliminate duplicate projection: projection with child projection
 	if isProj {
 		if child, ok := p.Children()[0].(*LogicalProjection); ok && !ExprsHasSideEffects(child.Exprs) {
-			ctx := p.SCtx()
 			for i := range proj.Exprs {
 				proj.Exprs[i] = ReplaceColumnOfExpr(proj.Exprs[i], child, child.Schema())
-				foldedExpr := expression.FoldConstant(ctx.GetExprCtx(), proj.Exprs[i])
+				foldedExpr := expression.FoldConstant(proj.Exprs[i])
 				// the folded expr should have the same null flag with the original expr, especially for the projection under union, so forcing it here.
 				foldedExpr.GetType().SetFlag((foldedExpr.GetType().GetFlag() & ^mysql.NotNullFlag) | (proj.Exprs[i].GetType().GetFlag() & mysql.NotNullFlag))
 				proj.Exprs[i] = foldedExpr
@@ -226,7 +226,7 @@ func (pe *projectionEliminator) eliminate(p LogicalPlan, replace map[string]*exp
 	}
 	exprs := proj.Exprs
 	for i, col := range proj.Schema().Columns {
-		replace[string(col.HashCode())] = exprs[i].(*expression.Column)
+		replace[string(col.HashCode(nil))] = exprs[i].(*expression.Column)
 	}
 	appendProjEliminateTraceStep(proj, opt)
 	return p.Children()[0]
@@ -297,7 +297,7 @@ func (p *LogicalSelection) ReplaceExprColumns(replace map[string]*expression.Col
 func (la *LogicalApply) ReplaceExprColumns(replace map[string]*expression.Column) {
 	la.LogicalJoin.ReplaceExprColumns(replace)
 	for _, coCol := range la.CorCols {
-		dst := replace[string(coCol.Column.HashCode())]
+		dst := replace[string(coCol.Column.HashCode(nil))]
 		if dst != nil {
 			coCol.Column = *dst
 		}
@@ -337,7 +337,7 @@ func (*projectionEliminator) name() string {
 	return "projection_eliminate"
 }
 
-func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *util.LogicalOptimizeOp) {
+func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *logicalOptimizeOp) {
 	action := func() string {
 		buffer := bytes.NewBufferString(
 			fmt.Sprintf("%v_%v is eliminated, %v_%v's expressions changed into[", child.TP(), child.ID(), parent.TP(), parent.ID()))
@@ -353,15 +353,15 @@ func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *util
 	reason := func() string {
 		return fmt.Sprintf("%v_%v's child %v_%v is redundant", parent.TP(), parent.ID(), child.TP(), child.ID())
 	}
-	opt.AppendStepToCurrent(child.ID(), child.TP(), reason, action)
+	opt.appendStepToCurrent(child.ID(), child.TP(), reason, action)
 }
 
-func appendProjEliminateTraceStep(proj *LogicalProjection, opt *util.LogicalOptimizeOp) {
+func appendProjEliminateTraceStep(proj *LogicalProjection, opt *logicalOptimizeOp) {
 	reason := func() string {
 		return fmt.Sprintf("%v_%v's Exprs are all Columns", proj.TP(), proj.ID())
 	}
 	action := func() string {
 		return fmt.Sprintf("%v_%v is eliminated", proj.TP(), proj.ID())
 	}
-	opt.AppendStepToCurrent(proj.ID(), proj.TP(), reason, action)
+	opt.appendStepToCurrent(proj.ID(), proj.TP(), reason, action)
 }

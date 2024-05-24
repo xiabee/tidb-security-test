@@ -463,64 +463,6 @@ func RunErrMsgTest(t *testing.T, table []testErrMsgCase) {
 	}
 }
 
-func TestAdminStmt(t *testing.T) {
-	table := []testCase{
-		{"admin show ddl;", true, "ADMIN SHOW DDL"},
-		{"admin show ddl jobs;", true, "ADMIN SHOW DDL JOBS"},
-		{"admin show ddl jobs where id > 0;", true, "ADMIN SHOW DDL JOBS WHERE `id`>0"},
-		{"admin show ddl jobs 20 where id=0;", true, "ADMIN SHOW DDL JOBS 20 WHERE `id`=0"},
-		{"admin show ddl jobs -1;", false, ""},
-		{"admin show ddl job queries 1", true, "ADMIN SHOW DDL JOB QUERIES 1"},
-		{"admin show ddl job queries 1, 2, 3, 4", true, "ADMIN SHOW DDL JOB QUERIES 1, 2, 3, 4"},
-		{"admin show ddl job queries limit 5", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 0, 5"},
-		{"admin show ddl job queries limit 5, 10", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 5, 10"},
-		{"admin show ddl job queries limit 3 offset 2", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 2, 3"},
-		{"admin show ddl job queries limit 22 offset 0", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 0, 22"},
-		{"admin show t1 next_row_id", true, "ADMIN SHOW `t1` NEXT_ROW_ID"},
-		{"admin check table t1, t2;", true, "ADMIN CHECK TABLE `t1`, `t2`"},
-		{"admin check index tableName idxName;", true, "ADMIN CHECK INDEX `tableName` idxName"},
-		{"admin check index tableName idxName (1, 2), (4, 5);", true, "ADMIN CHECK INDEX `tableName` idxName (1,2), (4,5)"},
-		{"admin checksum table t1, t2;", true, "ADMIN CHECKSUM TABLE `t1`, `t2`"},
-		{"admin cancel ddl jobs 1", true, "ADMIN CANCEL DDL JOBS 1"},
-		{"admin cancel ddl jobs 1, 2", true, "ADMIN CANCEL DDL JOBS 1, 2"},
-		{"admin pause ddl jobs 1, 3", true, "ADMIN PAUSE DDL JOBS 1, 3"},
-		{"admin pause ddl jobs 5", true, "ADMIN PAUSE DDL JOBS 5"},
-		{"admin pause ddl jobs", false, "ADMIN PAUSE DDL JOBS"},
-		{"admin pause ddl jobs str_not_num", false, "ADMIN PAUSE DDL JOBS str_not_num"},
-		{"admin resume ddl jobs 1, 2", true, "ADMIN RESUME DDL JOBS 1, 2"},
-		{"admin resume ddl jobs 3", true, "ADMIN RESUME DDL JOBS 3"},
-		{"admin resume ddl jobs", false, "ADMIN RESUME DDL JOBS"},
-		{"admin resume ddl jobs str_not_num", false, "ADMIN RESUME DDL JOBS str_not_num"},
-		{"admin recover index t1 idx_a", true, "ADMIN RECOVER INDEX `t1` idx_a"},
-		{"admin cleanup index t1 idx_a", true, "ADMIN CLEANUP INDEX `t1` idx_a"},
-		{"admin show slow top 3", true, "ADMIN SHOW SLOW TOP 3"},
-		{"admin show slow top internal 7", true, "ADMIN SHOW SLOW TOP INTERNAL 7"},
-		{"admin show slow top all 9", true, "ADMIN SHOW SLOW TOP ALL 9"},
-		{"admin show slow recent 11", true, "ADMIN SHOW SLOW RECENT 11"},
-		{"admin reload expr_pushdown_blacklist", true, "ADMIN RELOAD EXPR_PUSHDOWN_BLACKLIST"},
-		{"admin plugins disable audit, whitelist", true, "ADMIN PLUGINS DISABLE audit, whitelist"},
-		{"admin plugins enable audit, whitelist", true, "ADMIN PLUGINS ENABLE audit, whitelist"},
-		{"admin flush bindings", true, "ADMIN FLUSH BINDINGS"},
-		{"admin capture bindings", true, "ADMIN CAPTURE BINDINGS"},
-		{"admin evolve bindings", true, "ADMIN EVOLVE BINDINGS"},
-		{"admin reload bindings", true, "ADMIN RELOAD BINDINGS"},
-		// This case would be removed once TiDB PR to remove ADMIN RELOAD STATISTICS is merged.
-		{"admin reload statistics", true, "ADMIN RELOAD STATS_EXTENDED"},
-		{"admin reload stats_extended", true, "ADMIN RELOAD STATS_EXTENDED"},
-		// Test for 'admin flush plan_cache'
-		{"admin flush instance plan_cache", true, "ADMIN FLUSH INSTANCE PLAN_CACHE"},
-		{"admin flush session plan_cache", true, "ADMIN FLUSH SESSION PLAN_CACHE"},
-		// We do not support the global level. We will check it in the later.
-		{"admin flush global plan_cache", true, "ADMIN FLUSH GLOBAL PLAN_CACHE"},
-		// for BDR
-		{"admin set bdr role primary", true, "ADMIN SET BDR ROLE PRIMARY"},
-		{"admin set bdr role secondary", true, "ADMIN SET BDR ROLE SECONDARY"},
-		{"admin unset bdr role", true, "ADMIN UNSET BDR ROLE"},
-		{"admin show bdr role", true, "ADMIN SHOW BDR ROLE"},
-	}
-	RunTest(t, table, false)
-}
-
 func TestDMLStmt(t *testing.T) {
 	table := []testCase{
 		{"", true, ""},
@@ -875,6 +817,57 @@ func TestDMLStmt(t *testing.T) {
 		{"DELETE t1, t2 FROM t1 INNER JOIN t2 INNER JOIN t3 WHERE t1.id=t2.id AND t2.id=t3.id limit 10;", false, ""},
 		{"DELETE t1, t2 FROM t1 INNER JOIN t2 INNER JOIN t3 WHERE t1.id=t2.id AND t2.id=t3.id order by t1.id;", false, ""},
 
+		// for admin
+		{"admin show ddl;", true, "ADMIN SHOW DDL"},
+		{"admin show ddl jobs;", true, "ADMIN SHOW DDL JOBS"},
+		{"admin show ddl jobs where id > 0;", true, "ADMIN SHOW DDL JOBS WHERE `id`>0"},
+		{"admin show ddl jobs 20 where id=0;", true, "ADMIN SHOW DDL JOBS 20 WHERE `id`=0"},
+		{"admin show ddl jobs -1;", false, ""},
+		{"admin show ddl job queries 1", true, "ADMIN SHOW DDL JOB QUERIES 1"},
+		{"admin show ddl job queries 1, 2, 3, 4", true, "ADMIN SHOW DDL JOB QUERIES 1, 2, 3, 4"},
+		{"admin show ddl job queries limit 5", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 0, 5"},
+		{"admin show ddl job queries limit 5, 10", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 5, 10"},
+		{"admin show ddl job queries limit 3 offset 2", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 2, 3"},
+		{"admin show ddl job queries limit 22 offset 0", true, "ADMIN SHOW DDL JOB QUERIES LIMIT 0, 22"},
+		{"admin show t1 next_row_id", true, "ADMIN SHOW `t1` NEXT_ROW_ID"},
+		{"admin check table t1, t2;", true, "ADMIN CHECK TABLE `t1`, `t2`"},
+		{"admin check index tableName idxName;", true, "ADMIN CHECK INDEX `tableName` idxName"},
+		{"admin check index tableName idxName (1, 2), (4, 5);", true, "ADMIN CHECK INDEX `tableName` idxName (1,2), (4,5)"},
+		{"admin checksum table t1, t2;", true, "ADMIN CHECKSUM TABLE `t1`, `t2`"},
+		{"admin cancel ddl jobs 1", true, "ADMIN CANCEL DDL JOBS 1"},
+		{"admin cancel ddl jobs 1, 2", true, "ADMIN CANCEL DDL JOBS 1, 2"},
+		{"admin pause ddl jobs 1, 3", true, "ADMIN PAUSE DDL JOBS 1, 3"},
+		{"admin pause ddl jobs 5", true, "ADMIN PAUSE DDL JOBS 5"},
+		{"admin pause ddl jobs", false, "ADMIN PAUSE DDL JOBS"},
+		{"admin pause ddl jobs str_not_num", false, "ADMIN PAUSE DDL JOBS str_not_num"},
+		{"admin resume ddl jobs 1, 2", true, "ADMIN RESUME DDL JOBS 1, 2"},
+		{"admin resume ddl jobs 3", true, "ADMIN RESUME DDL JOBS 3"},
+		{"admin resume ddl jobs", false, "ADMIN RESUME DDL JOBS"},
+		{"admin resume ddl jobs str_not_num", false, "ADMIN RESUME DDL JOBS str_not_num"},
+		{"admin recover index t1 idx_a", true, "ADMIN RECOVER INDEX `t1` idx_a"},
+		{"admin cleanup index t1 idx_a", true, "ADMIN CLEANUP INDEX `t1` idx_a"},
+		{"admin show slow top 3", true, "ADMIN SHOW SLOW TOP 3"},
+		{"admin show slow top internal 7", true, "ADMIN SHOW SLOW TOP INTERNAL 7"},
+		{"admin show slow top all 9", true, "ADMIN SHOW SLOW TOP ALL 9"},
+		{"admin show slow recent 11", true, "ADMIN SHOW SLOW RECENT 11"},
+		{"admin reload expr_pushdown_blacklist", true, "ADMIN RELOAD EXPR_PUSHDOWN_BLACKLIST"},
+		{"admin plugins disable audit, whitelist", true, "ADMIN PLUGINS DISABLE audit, whitelist"},
+		{"admin plugins enable audit, whitelist", true, "ADMIN PLUGINS ENABLE audit, whitelist"},
+		{"admin flush bindings", true, "ADMIN FLUSH BINDINGS"},
+		{"admin capture bindings", true, "ADMIN CAPTURE BINDINGS"},
+		{"admin evolve bindings", true, "ADMIN EVOLVE BINDINGS"},
+		{"admin reload bindings", true, "ADMIN RELOAD BINDINGS"},
+		{"admin show telemetry", true, "ADMIN SHOW TELEMETRY"},
+		{"admin reset telemetry_id", true, "ADMIN RESET TELEMETRY_ID"},
+		// This case would be removed once TiDB PR to remove ADMIN RELOAD STATISTICS is merged.
+		{"admin reload statistics", true, "ADMIN RELOAD STATS_EXTENDED"},
+		{"admin reload stats_extended", true, "ADMIN RELOAD STATS_EXTENDED"},
+		// Test for 'admin flush plan_cache'
+		{"admin flush instance plan_cache", true, "ADMIN FLUSH INSTANCE PLAN_CACHE"},
+		{"admin flush session plan_cache", true, "ADMIN FLUSH SESSION PLAN_CACHE"},
+		// We do not support the global level. We will check it in the later.
+		{"admin flush global plan_cache", true, "ADMIN FLUSH GLOBAL PLAN_CACHE"},
+
 		// for on duplicate key update
 		{"INSERT INTO t (a,b,c) VALUES (1,2,3),(4,5,6) ON DUPLICATE KEY UPDATE c=VALUES(a)+VALUES(b);", true, "INSERT INTO `t` (`a`,`b`,`c`) VALUES (1,2,3),(4,5,6) ON DUPLICATE KEY UPDATE `c`=VALUES(`a`)+VALUES(`b`)"},
 		{"INSERT INTO t (a,b,c) VALUES (1,2,3),(4,5,6) ON DUPLICATE KEY UPDATE c:=VALUES(a)+VALUES(b);", true, "INSERT INTO `t` (`a`,`b`,`c`) VALUES (1,2,3),(4,5,6) ON DUPLICATE KEY UPDATE `c`=VALUES(`a`)+VALUES(`b`)"},
@@ -1148,7 +1141,6 @@ AAAAAAAAAAAA5gm5Mg==
 		{"query watch add SQL TEXT SIMILAR 'select 1'", false, ""},
 		{"query watch remove 1", true, "QUERY WATCH REMOVE 1"},
 		{"query watch remove", false, ""},
-
 		// for issue 34325, "replace into" with hints
 		{"replace /*+ SET_VAR(sql_mode='ALLOW_INVALID_DATES') */ into t values ('2004-04-31');", true, "REPLACE /*+ SET_VAR(sql_mode = 'ALLOW_INVALID_DATES')*/ INTO `t` VALUES (_UTF8MB4'2004-04-31')"},
 	}
@@ -1203,7 +1195,6 @@ func TestDBAStmt(t *testing.T) {
 		{`SHOW PROFILE CPU FOR QUERY 2 LIMIT 1,1`, true, "SHOW PROFILE CPU FOR QUERY 2 LIMIT 1,1"},
 		{`SHOW PROFILE CPU, MEMORY, BLOCK IO, CONTEXT SWITCHES, PAGE FAULTS, IPC, SWAPS, SOURCE FOR QUERY 1 limit 100`, true, "SHOW PROFILE CPU, MEMORY, BLOCK IO, CONTEXT SWITCHES, PAGE FAULTS, IPC, SWAPS, SOURCE FOR QUERY 1 LIMIT 100"},
 		{`SHOW MASTER STATUS`, true, "SHOW MASTER STATUS"},
-		{`SHOW BINARY LOG STATUS`, true, "SHOW BINARY LOG STATUS"},
 		{`SHOW PRIVILEGES`, true, "SHOW PRIVILEGES"},
 		// for show character set
 		{"show character set;", true, "SHOW CHARSET"},
@@ -1276,8 +1267,6 @@ func TestDBAStmt(t *testing.T) {
 		{"show backups where start_time > now() - interval 10 hour", true, "SHOW BACKUPS WHERE `start_time`>DATE_SUB(NOW(), INTERVAL 10 HOUR)"},
 		{"show backup", false, ""},
 		{"show restore", false, ""},
-		{"show replica status", true, "SHOW REPLICA STATUS"},
-		{"show slave status", true, "SHOW REPLICA STATUS"},
 
 		// for load stats
 		{"load stats '/tmp/stats.json'", true, "LOAD STATS '/tmp/stats.json'"},
@@ -2947,21 +2936,6 @@ func TestDDL(t *testing.T) {
 		{"create table t (d date default (current_date()))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (CURRENT_DATE()))"},
 		{"create table t (d date default (curdate()))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (CURRENT_DATE()))"},
 		{"create table t (d date default curdate())", true, "CREATE TABLE `t` (`d` DATE DEFAULT (CURRENT_DATE()))"},
-		{"create table t (d date default current_date())", true, "CREATE TABLE `t` (`d` DATE DEFAULT (CURRENT_DATE()))"},
-		{"create table t (d date default date_format(now(),'%Y-%m'))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%Y-%m')))"},
-		{"create table t (d date default (date_format(now(),'%Y-%m')))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%Y-%m')))"},
-		{"create table t (d date default date_format(now(),'%Y-%m-%d'))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%Y-%m-%d')))"},
-		{"create table t (d date default date_format(now(),'%Y-%m-%d %H.%i.%s'))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%Y-%m-%d %H.%i.%s')))"},
-		{"create table t (d date default date_format(now(),'%Y-%m-%d %H:%i:%s'))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%Y-%m-%d %H:%i:%s')))"},
-		{"create table t (d date default date_format(now(),'%b %d %Y %h:%i %p'))", true, "CREATE TABLE `t` (`d` DATE DEFAULT (DATE_FORMAT(NOW(), _UTF8MB4'%b %d %Y %h:%i %p')))"},
-		{"create table t (a varchar(32) default (replace(upper(uuid()), '-', '')))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (REPLACE(UPPER(UUID()), _UTF8MB4'-', _UTF8MB4'')))"},
-		{"create table t (a varchar(32) default replace(upper(uuid()), '-', ''))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (REPLACE(UPPER(UUID()), _UTF8MB4'-', _UTF8MB4'')))"},
-		{"create table t (a varchar(32) default (replace(convert(upper(uuid()) using utf8mb4), '-', '')))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (REPLACE(CONVERT(UPPER(UUID()) USING 'utf8mb4'), _UTF8MB4'-', _UTF8MB4'')))"},
-		{"create table t (a varchar(32) default replace(convert(upper(uuid()) using utf8mb4), '-', ''))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (REPLACE(CONVERT(UPPER(UUID()) USING 'utf8mb4'), _UTF8MB4'-', _UTF8MB4'')))"},
-		{"create table t (a int default upper(substring_index(user(),'@',1)))", true, "CREATE TABLE `t` (`a` INT DEFAULT (UPPER(SUBSTRING_INDEX(USER(), _UTF8MB4'@', 1))))"},
-		{"create table t (a int default (upper(substring_index(user(),'@',1))))", true, "CREATE TABLE `t` (`a` INT DEFAULT (UPPER(SUBSTRING_INDEX(USER(), _UTF8MB4'@', 1))))"},
-		{"create table t (a varchar(32) default (str_to_date('1980-01-01','%Y-%m-%d')))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (STR_TO_DATE(_UTF8MB4'1980-01-01', _UTF8MB4'%Y-%m-%d')))"},
-		{"create table t (a varchar(32) default str_to_date('1980-01-01','%Y-%m-%d'))", true, "CREATE TABLE `t` (`a` VARCHAR(32) DEFAULT (STR_TO_DATE(_UTF8MB4'1980-01-01', _UTF8MB4'%Y-%m-%d')))"},
 
 		// For table option `ENCRYPTION`
 		{"create table t (a int) encryption = 'n';", true, "CREATE TABLE `t` (`a` INT) ENCRYPTION = 'n'"},
@@ -3975,12 +3949,6 @@ func TestErrorMsg(t *testing.T) {
 
 	_, _, err = p.Parse("create table t(f_year year(5))ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;", "", "")
 	require.EqualError(t, err, "[parser:1818]Supports only YEAR or YEAR(4) column")
-
-	_, _, err = p.Parse("create table ``.t (id int);", "", "")
-	require.EqualError(t, err, "[parser:1102]Incorrect database name ''")
-
-	_, _, err = p.Parse("create table ` `.t (id int);", "", "")
-	require.EqualError(t, err, "[parser:1102]Incorrect database name ' '")
 
 	_, _, err = p.Parse("select ifnull(a,0) & ifnull(a,0) like '55' ESCAPE '\\\\a' from t;", "", "")
 	require.EqualError(t, err, "[parser:1210]Incorrect arguments to ESCAPE")
@@ -5509,11 +5477,6 @@ func TestBinding(t *testing.T) {
 		{"create session binding for select 1 union select 2 intersect select 3 using select 1 union select 2 intersect select 3", true, "CREATE SESSION BINDING FOR SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 USING SELECT 1 UNION SELECT 2 INTERSECT SELECT 3"},
 		{"drop session binding for select 1 union select 2 intersect select 3 using select 1 union select 2 intersect select 3", true, "DROP SESSION BINDING FOR SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 USING SELECT 1 UNION SELECT 2 INTERSECT SELECT 3"},
 		{"drop session binding for select 1 union select 2 intersect select 3", true, "DROP SESSION BINDING FOR SELECT 1 UNION SELECT 2 INTERSECT SELECT 3"},
-		// Use wildcards when creating binding
-		{"create global binding using select * from *.t1", true, "CREATE GLOBAL BINDING FOR SELECT * FROM `*`.`t1` USING SELECT * FROM `*`.`t1`"},
-		{"create global binding using select * from *.t1 where t1.a > (select max(a) from t2)", true, "CREATE GLOBAL BINDING FOR SELECT * FROM `*`.`t1` WHERE `t1`.`a`>(SELECT MAX(`a`) FROM `t2`) USING SELECT * FROM `*`.`t1` WHERE `t1`.`a`>(SELECT MAX(`a`) FROM `t2`)"},
-		{"create session binding using select * from *.t1", true, "CREATE SESSION BINDING FOR SELECT * FROM `*`.`t1` USING SELECT * FROM `*`.`t1`"},
-		{"create binding using select * from *.t1", true, "CREATE SESSION BINDING FOR SELECT * FROM `*`.`t1` USING SELECT * FROM `*`.`t1`"},
 		// Update cases.
 		{"CREATE GLOBAL BINDING FOR UPDATE `t` SET `a`=1 WHERE `b`=1 USING UPDATE /*+ USE_INDEX(`t` `b`)*/ `t` SET `a`=1 WHERE `b`=1", true, "CREATE GLOBAL BINDING FOR UPDATE `t` SET `a`=1 WHERE `b`=1 USING UPDATE /*+ USE_INDEX(`t` `b`)*/ `t` SET `a`=1 WHERE `b`=1"},
 		{"CREATE SESSION BINDING FOR UPDATE `t` SET `a`=1 WHERE `b`=1 USING UPDATE /*+ USE_INDEX(`t` `b`)*/ `t` SET `a`=1 WHERE `b`=1", true, "CREATE SESSION BINDING FOR UPDATE `t` SET `a`=1 WHERE `b`=1 USING UPDATE /*+ USE_INDEX(`t` `b`)*/ `t` SET `a`=1 WHERE `b`=1"},
@@ -5917,8 +5880,6 @@ func TestAnalyze(t *testing.T) {
 		{"analyze table t index a predicate columns", false, ""},
 		{"analyze table t with 10 samplerate", true, "ANALYZE TABLE `t` WITH 10 SAMPLERATE"},
 		{"analyze table t with 0.1 samplerate", true, "ANALYZE TABLE `t` WITH 0.1 SAMPLERATE"},
-		{"analyze no_write_to_binlog table t1", true, "ANALYZE NO_WRITE_TO_BINLOG TABLE `t1`"},
-		{"analyze local table t,t1", true, "ANALYZE NO_WRITE_TO_BINLOG TABLE `t`,`t1`"},
 	}
 	RunTest(t, table, false)
 }

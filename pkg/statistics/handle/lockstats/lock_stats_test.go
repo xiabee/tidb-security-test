@@ -19,7 +19,6 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	statstypes "github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -160,7 +159,7 @@ func TestInsertIntoStatsTableLocked(t *testing.T) {
 		util.StatsCtx,
 		util.UseCurrentSessionOpt,
 		gomock.Eq(insertSQL),
-		gomock.Eq([]any{int64(1), int64(1)}),
+		gomock.Eq([]interface{}{int64(1), int64(1)}),
 	)
 	err := insertIntoStatsTableLocked(wrapAsSCtx(exec), 1)
 	require.NoError(t, err)
@@ -196,23 +195,23 @@ func TestAddLockedTables(t *testing.T) {
 		gomock.All(&ctxMatcher{}),
 		util.UseCurrentSessionOpt,
 		insertSQL,
-		gomock.Eq([]any{int64(2), int64(2)}),
+		gomock.Eq([]interface{}{int64(2), int64(2)}),
 	)
 	exec.EXPECT().ExecRestrictedSQL(
 		gomock.All(&ctxMatcher{}),
 		util.UseCurrentSessionOpt,
 		insertSQL,
-		gomock.Eq([]any{int64(3), int64(3)}),
+		gomock.Eq([]interface{}{int64(3), int64(3)}),
 	)
 
 	exec.EXPECT().ExecRestrictedSQL(
 		gomock.All(&ctxMatcher{}),
 		util.UseCurrentSessionOpt,
 		insertSQL,
-		gomock.Eq([]any{int64(4), int64(4)}),
+		gomock.Eq([]interface{}{int64(4), int64(4)}),
 	)
 
-	tables := map[int64]*statstypes.StatsLockTable{
+	tables := map[int64]*util.StatsLockTable{
 		1: {
 			FullName: "test.t1",
 			PartitionInfo: map[int64]string{
@@ -251,13 +250,13 @@ func TestAddLockedPartitions(t *testing.T) {
 		gomock.All(&ctxMatcher{}),
 		util.UseCurrentSessionOpt,
 		insertSQL,
-		gomock.Eq([]any{int64(2), int64(2)}),
+		gomock.Eq([]interface{}{int64(2), int64(2)}),
 	)
 	exec.EXPECT().ExecRestrictedSQL(
 		gomock.All(&ctxMatcher{}),
 		util.UseCurrentSessionOpt,
 		insertSQL,
-		gomock.Eq([]any{int64(3), int64(3)}),
+		gomock.Eq([]interface{}{int64(3), int64(3)}),
 	)
 
 	msg, err := AddLockedPartitions(

@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/btree"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/failpoint"
 	brpb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
@@ -393,9 +394,7 @@ func (p *Preparer) workOnPendingRanges(ctx context.Context) error {
 }
 
 func (p *Preparer) sendWaitApply(ctx context.Context, reqs pendingRequests) error {
-	logutil.CL(ctx).Info("about to send wait apply to stores", zap.Int("to-stores", len(reqs)))
 	for store, req := range reqs {
-		logutil.CL(ctx).Info("sending wait apply requests to store", zap.Uint64("store", store), zap.Int("regions", len(req.Regions)))
 		stream, err := p.streamOf(ctx, store)
 		if err != nil {
 			return errors.Annotatef(err, "failed to dial the store %d", store)
@@ -404,6 +403,7 @@ func (p *Preparer) sendWaitApply(ctx context.Context, reqs pendingRequests) erro
 		if err != nil {
 			return errors.Annotatef(err, "failed to send message to the store %d", store)
 		}
+		logutil.CL(ctx).Info("sent wait apply requests to store", zap.Uint64("store", store), zap.Int("regions", len(req.Regions)))
 	}
 	return nil
 }
@@ -453,6 +453,9 @@ func (p *Preparer) pushWaitApply(reqs pendingRequests, region Region) {
 // PrepareConnections prepares the connections for each store.
 // This will pause the admin commands for each store.
 func (p *Preparer) PrepareConnections(ctx context.Context) error {
+	failpoint.Inject("PrepareConnectionsErr", func() {
+		failpoint.Return(errors.New("mock PrepareConnectionsErr"))
+	})
 	log.Info("Preparing connections to stores.")
 	stores, err := p.env.GetAllLiveStores(ctx)
 	if err != nil {

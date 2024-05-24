@@ -76,10 +76,10 @@ func TestRowToTTLTask(t *testing.T) {
 	require.Equal(t, now, task.ExpireTime)
 	require.Equal(t, now, task.CreatedTime)
 
-	rangeStart, err := codec.EncodeKey(tk.Session().GetSessionVars().StmtCtx.TimeZone(),
+	rangeStart, err := codec.EncodeKey(tk.Session().GetSessionVars().StmtCtx,
 		[]byte{}, []types.Datum{types.NewDatum(1)}...)
 	require.NoError(t, err)
-	rangeEnd, err := codec.EncodeKey(tk.Session().GetSessionVars().StmtCtx.TimeZone(),
+	rangeEnd, err := codec.EncodeKey(tk.Session().GetSessionVars().StmtCtx,
 		[]byte{}, []types.Datum{types.NewDatum(2)}...)
 	require.NoError(t, err)
 	tk.MustExec(

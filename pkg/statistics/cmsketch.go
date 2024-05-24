@@ -23,12 +23,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/context"
 	"github.com/pingcap/tidb/pkg/planner/util/debugtrace"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
@@ -98,7 +96,7 @@ func newTopNHelper(sample [][]byte, numTop uint32) *topNHelper {
 			onlyOnceItems++
 		}
 	}
-	slices.SortStableFunc(sorted, func(i, j dataCnt) int { return -cmp.Compare(i.cnt, j.cnt) })
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].cnt > sorted[j].cnt })
 	failpoint.Inject("StabilizeV1AnalyzeTopN", func(val failpoint.Value) {
 		if val.(bool) {
 			// The earlier TopN entry will modify the CMSketch, therefore influence later TopN entry's row count.
@@ -259,17 +257,12 @@ func (c *CMSketch) SubValue(h1, h2 uint64, count uint64) {
 }
 
 // QueryValue is used to query the count of specified value.
-func QueryValue(sctx context.PlanContext, c *CMSketch, t *TopN, val types.Datum) (uint64, error) {
+func QueryValue(sctx sessionctx.Context, c *CMSketch, t *TopN, val types.Datum) (uint64, error) {
 	var sc *stmtctx.StatementContext
-	tz := time.UTC
 	if sctx != nil {
 		sc = sctx.GetSessionVars().StmtCtx
-		tz = sc.TimeZone()
 	}
-	rawData, err := tablecodec.EncodeValue(tz, nil, val)
-	if sc != nil {
-		err = sc.HandleError(err)
-	}
+	rawData, err := tablecodec.EncodeValue(sc, nil, val)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
@@ -290,7 +283,7 @@ func (c *CMSketch) QueryBytes(d []byte) uint64 {
 }
 
 // The input sctx is just for debug trace, you can pass nil safely if that's not needed.
-func (c *CMSketch) queryHashValue(sctx context.PlanContext, h1, h2 uint64) (result uint64) {
+func (c *CMSketch) queryHashValue(sctx sessionctx.Context, h1, h2 uint64) (result uint64) {
 	vals := make([]uint32, c.depth)
 	originVals := make([]uint32, c.depth)
 	minValue := uint32(math.MaxUint32)
@@ -629,7 +622,7 @@ type TopNMeta struct {
 
 // QueryTopN returns the results for (h1, h2) in murmur3.Sum128(), if not exists, return (0, false).
 // The input sctx is just for debug trace, you can pass nil safely if that's not needed.
-func (c *TopN) QueryTopN(sctx context.PlanContext, d []byte) (result uint64, found bool) {
+func (c *TopN) QueryTopN(sctx sessionctx.Context, d []byte) (result uint64, found bool) {
 	if sctx != nil && sctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
 		debugtrace.EnterContextCommon(sctx)
 		defer func() {
@@ -685,15 +678,19 @@ func (c *TopN) LowerBound(d []byte) (idx int, match bool) {
 	if c == nil {
 		return 0, false
 	}
-	idx, match = slices.BinarySearchFunc(c.TopN, d, func(a TopNMeta, b []byte) int {
-		return bytes.Compare(a.Encoded, b)
+	idx = sort.Search(len(c.TopN), func(i int) bool {
+		cmpRst := bytes.Compare(c.TopN[i].Encoded, d)
+		if cmpRst == 0 {
+			match = true
+		}
+		return cmpRst >= 0
 	})
 	return idx, match
 }
 
 // BetweenCount estimates the row count for interval [l, r).
 // The input sctx is just for debug trace, you can pass nil safely if that's not needed.
-func (c *TopN) BetweenCount(sctx context.PlanContext, l, r []byte) (result uint64) {
+func (c *TopN) BetweenCount(sctx sessionctx.Context, l, r []byte) (result uint64) {
 	if sctx != nil && sctx.GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
 		debugtrace.EnterContextCommon(sctx)
 		defer func() {
@@ -838,12 +835,14 @@ func MergeTopN(topNs []*TopN, n uint32) (*TopN, []TopNMeta) {
 
 // CheckEmptyTopNs checks whether all TopNs are empty.
 func CheckEmptyTopNs(topNs []*TopN) bool {
+	count := uint64(0)
 	for _, topN := range topNs {
-		if topN.TotalCount() != 0 {
+		count += topN.TotalCount()
+		if count != 0 {
 			return false
 		}
 	}
-	return true
+	return count == 0
 }
 
 // SortTopnMeta sort topnMeta
@@ -858,8 +857,8 @@ func SortTopnMeta(topnMetas []TopNMeta) {
 
 // TopnMetaCompare compare topnMeta
 func TopnMetaCompare(i, j TopNMeta) int {
-	c := cmp.Compare(j.Count, i.Count)
-	if c != 0 {
+	c := cmp.Compare(i.Count, j.Count)
+	if c == 0 {
 		return c
 	}
 	return bytes.Compare(i.Encoded, j.Encoded)

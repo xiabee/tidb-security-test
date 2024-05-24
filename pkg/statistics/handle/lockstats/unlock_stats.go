@@ -19,7 +19,6 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics/handle/cache"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
-	"github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"go.uber.org/zap"
 )
@@ -38,7 +37,7 @@ const (
 // Return the message of skipped tables and error.
 func RemoveLockedTables(
 	sctx sessionctx.Context,
-	tables map[int64]*types.StatsLockTable,
+	tables map[int64]*util.StatsLockTable,
 ) (string, error) {
 	// Load tables to check locked before delete.
 	lockedTables, err := QueryLockedTables(sctx)

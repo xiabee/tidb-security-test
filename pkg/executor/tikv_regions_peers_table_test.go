@@ -26,41 +26,39 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pingcap/fn"
 	"github.com/pingcap/tidb/pkg/store/helper"
-	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/pkg/util/pdapi"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/tikv"
-	pd "github.com/tikv/pd/client/http"
 )
 
-var regionsInfo = map[uint64]pd.RegionInfo{
+var regionsInfo = map[uint64]helper.RegionInfo{
 	1: {
 		ID:     1,
-		Peers:  []pd.RegionPeer{{ID: 11, StoreID: 1, IsLearner: false}, {ID: 12, StoreID: 2, IsLearner: false}, {ID: 13, StoreID: 3, IsLearner: false}},
-		Leader: pd.RegionPeer{ID: 11, StoreID: 1, IsLearner: false},
+		Peers:  []helper.RegionPeer{{ID: 11, StoreID: 1, IsLearner: false}, {ID: 12, StoreID: 2, IsLearner: false}, {ID: 13, StoreID: 3, IsLearner: false}},
+		Leader: helper.RegionPeer{ID: 11, StoreID: 1, IsLearner: false},
 	},
 	2: {
 		ID:     2,
-		Peers:  []pd.RegionPeer{{ID: 21, StoreID: 1, IsLearner: false}, {ID: 22, StoreID: 2, IsLearner: false}, {ID: 23, StoreID: 3, IsLearner: false}},
-		Leader: pd.RegionPeer{ID: 22, StoreID: 2, IsLearner: false},
+		Peers:  []helper.RegionPeer{{ID: 21, StoreID: 1, IsLearner: false}, {ID: 22, StoreID: 2, IsLearner: false}, {ID: 23, StoreID: 3, IsLearner: false}},
+		Leader: helper.RegionPeer{ID: 22, StoreID: 2, IsLearner: false},
 	},
 	3: {
 		ID:     3,
-		Peers:  []pd.RegionPeer{{ID: 31, StoreID: 1, IsLearner: false}, {ID: 32, StoreID: 2, IsLearner: false}, {ID: 33, StoreID: 3, IsLearner: false}},
-		Leader: pd.RegionPeer{ID: 33, StoreID: 3, IsLearner: false},
+		Peers:  []helper.RegionPeer{{ID: 31, StoreID: 1, IsLearner: false}, {ID: 32, StoreID: 2, IsLearner: false}, {ID: 33, StoreID: 3, IsLearner: false}},
+		Leader: helper.RegionPeer{ID: 33, StoreID: 3, IsLearner: false},
 	},
 }
 
-var storeRegionsInfo = &pd.RegionsInfo{
+var storeRegionsInfo = &helper.RegionsInfo{
 	Count: 3,
-	Regions: []pd.RegionInfo{
+	Regions: []helper.RegionInfo{
 		regionsInfo[1],
 		regionsInfo[2],
 		regionsInfo[3],
 	},
 }
 
-var storesRegionsInfo = map[uint64]*pd.RegionsInfo{
+var storesRegionsInfo = map[uint64]*helper.RegionsInfo{
 	1: storeRegionsInfo,
 	2: storeRegionsInfo,
 	3: storeRegionsInfo,
@@ -94,7 +92,7 @@ func TestTikvRegionPeers(t *testing.T) {
 	// mock store stats stat
 	mockAddr := strings.TrimPrefix(server.URL, "http://")
 	// mock PD API
-	router.Handle(pd.Status, fn.Wrap(func() (any, error) {
+	router.Handle(pdapi.Status, fn.Wrap(func() (interface{}, error) {
 		return struct {
 			Version        string `json:"version"`
 			GitHash        string `json:"git_hash"`
@@ -106,16 +104,12 @@ func TestTikvRegionPeers(t *testing.T) {
 		}, nil
 	}))
 	// mock get regionsInfo by store id
-	router.HandleFunc(pd.RegionsByStoreIDPrefix+"/"+"{id}", storesRegionsInfoHandler)
+	router.HandleFunc(pdapi.StoreRegions+"/"+"{id}", storesRegionsInfoHandler)
 	// mock get regionInfo by region id
-	router.HandleFunc(pd.RegionByIDPrefix+"/"+"{id}", regionsInfoHandler)
+	router.HandleFunc(pdapi.RegionByID+"/"+"{id}", regionsInfoHandler)
 	defer server.Close()
 
-	pdAddrs := []string{mockAddr}
-	store := testkit.CreateMockStore(t,
-		mockstore.WithTiKVOptions(tikv.WithPDHTTPClient("tikv-regions-peers-table-test", pdAddrs)),
-		mockstore.WithPDAddr(pdAddrs),
-	)
+	store := testkit.CreateMockStore(t)
 
 	store = &mockStore{
 		store.(helper.Storage),

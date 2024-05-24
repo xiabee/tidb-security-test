@@ -18,9 +18,9 @@ import (
 	"math"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/context"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/ranger"
@@ -33,7 +33,7 @@ const SelectionFactor = 0.8
 // AdjustRowCountForTableScanByLimit will adjust the row count for table scan by limit.
 // For a query like `select pk from t using index(primary) where pk > 10 limit 1`, the row count of the table scan
 // should be adjusted by the limit number 1, because only one row is returned.
-func AdjustRowCountForTableScanByLimit(sctx context.PlanContext,
+func AdjustRowCountForTableScanByLimit(sctx sessionctx.Context,
 	dsStatsInfo, dsTableStats *property.StatsInfo, dsStatisticTable *statistics.Table,
 	path *util.AccessPath, expectedCnt float64, desc bool) float64 {
 	rowCount := path.CountAfterAccess
@@ -67,7 +67,7 @@ func AdjustRowCountForTableScanByLimit(sctx context.PlanContext,
 // `select * from tbl where a = 1 order by pk limit 1`
 // if order of column `a` is strictly correlated with column `pk`, the row count of table scan should be:
 // `1 + row_count(a < 1 or a is null)`
-func crossEstimateTableRowCount(sctx context.PlanContext,
+func crossEstimateTableRowCount(sctx sessionctx.Context,
 	dsStatsInfo, dsTableStats *property.StatsInfo, dsStatisticTable *statistics.Table,
 	path *util.AccessPath, expectedCnt float64, desc bool) (float64, bool, float64) {
 	if dsStatisticTable.Pseudo || len(path.TableFilters) == 0 || !sctx.GetSessionVars().EnableCorrelationAdjustment {
@@ -80,7 +80,7 @@ func crossEstimateTableRowCount(sctx context.PlanContext,
 // AdjustRowCountForIndexScanByLimit will adjust the row count for table scan by limit.
 // For a query like `select k from t using index(k) where k > 10 limit 1`, the row count of the index scan
 // should be adjusted by the limit number 1, because only one row is returned.
-func AdjustRowCountForIndexScanByLimit(sctx context.PlanContext,
+func AdjustRowCountForIndexScanByLimit(sctx sessionctx.Context,
 	dsStatsInfo, dsTableStats *property.StatsInfo, dsStatisticTable *statistics.Table,
 	path *util.AccessPath, expectedCnt float64, desc bool) float64 {
 	rowCount := path.CountAfterAccess
@@ -89,22 +89,9 @@ func AdjustRowCountForIndexScanByLimit(sctx context.PlanContext,
 	if ok {
 		rowCount = count
 	} else if abs := math.Abs(corr); abs < 1 {
-		// If OptOrderingIdxSelRatio is enabled - estimate the difference between index and table filtering, as this represents
-		// the possible scan range when LIMIT rows will be found. orderRatio is the estimated percentage of that range when the first
-		// row is expected to be found. Index filtering applies orderRatio twice. Once found - rows are estimated to be clustered (expectedCnt).
-		// This formula is to bias away from non-filtering (or poorly filtering) indexes that provide order due, where filtering exists
-		// outside of that index. Such plans have high risk since we cannot estimate when rows will be found.
-		orderRatio := sctx.GetSessionVars().OptOrderingIdxSelRatio
-		if dsStatsInfo.RowCount < path.CountAfterAccess && orderRatio >= 0 {
-			rowsToMeetFirst := (((path.CountAfterAccess - path.CountAfterIndex) * orderRatio) + (path.CountAfterIndex - dsStatsInfo.RowCount)) * orderRatio
-			rowCount = rowsToMeetFirst + expectedCnt
-		} else {
-			// Assume rows are linearly distributed throughout the range - for example: selectivity 0.1 assumes that a
-			// qualified row is found every 10th row.
-			correlationFactor := math.Pow(1-abs, float64(sctx.GetSessionVars().CorrelationExpFactor))
-			selectivity := dsStatsInfo.RowCount / rowCount
-			rowCount = min(expectedCnt/selectivity/correlationFactor, rowCount)
-		}
+		correlationFactor := math.Pow(1-abs, float64(sctx.GetSessionVars().CorrelationExpFactor))
+		selectivity := dsStatsInfo.RowCount / rowCount
+		rowCount = min(expectedCnt/selectivity/correlationFactor, rowCount)
 	}
 	return rowCount
 }
@@ -114,7 +101,7 @@ func AdjustRowCountForIndexScanByLimit(sctx context.PlanContext,
 // `select * from tbl where a = 1 order by b limit 1`
 // if order of column `a` is strictly correlated with column `b`, the row count of IndexScan(b) should be:
 // `1 + row_count(a < 1 or a is null)`
-func crossEstimateIndexRowCount(sctx context.PlanContext,
+func crossEstimateIndexRowCount(sctx sessionctx.Context,
 	dsStatsInfo, dsTableStats *property.StatsInfo, dsStatisticTable *statistics.Table,
 	path *util.AccessPath, expectedCnt float64, desc bool) (float64, bool, float64) {
 	filtersLen := len(path.TableFilters) + len(path.IndexFilters)
@@ -130,7 +117,7 @@ func crossEstimateIndexRowCount(sctx context.PlanContext,
 }
 
 // crossEstimateRowCount is the common logic of crossEstimateTableRowCount and crossEstimateIndexRowCount.
-func crossEstimateRowCount(sctx context.PlanContext,
+func crossEstimateRowCount(sctx sessionctx.Context,
 	dsStatsInfo, dsTableStats *property.StatsInfo,
 	path *util.AccessPath, conds []expression.Expression, col *expression.Column,
 	corr, expectedCnt float64, desc bool) (float64, bool, float64) {
@@ -182,20 +169,20 @@ func crossEstimateRowCount(sctx context.PlanContext,
 }
 
 // getColumnRangeCounts estimates row count for each range respectively.
-func getColumnRangeCounts(sctx context.PlanContext, colID int64, ranges []*ranger.Range, histColl *statistics.HistColl, idxID int64) ([]float64, bool) {
+func getColumnRangeCounts(sctx sessionctx.Context, colID int64, ranges []*ranger.Range, histColl *statistics.HistColl, idxID int64) ([]float64, bool) {
 	var err error
 	var count float64
 	rangeCounts := make([]float64, len(ranges))
 	for i, ran := range ranges {
 		if idxID >= 0 {
 			idxHist := histColl.Indices[idxID]
-			if statistics.IndexStatsIsInvalid(sctx, idxHist, histColl, idxID) {
+			if idxHist == nil || idxHist.IsInvalid(sctx, false) {
 				return nil, false
 			}
 			count, err = GetRowCountByIndexRanges(sctx, histColl, idxID, []*ranger.Range{ran})
 		} else {
-			colHist := histColl.Columns[colID]
-			if statistics.ColumnStatsIsInvalid(colHist, sctx, histColl, colID) {
+			colHist, ok := histColl.Columns[colID]
+			if !ok || colHist.IsInvalid(sctx, false) {
 				return nil, false
 			}
 			count, err = GetRowCountByColumnRanges(sctx, histColl, colID, []*ranger.Range{ran})

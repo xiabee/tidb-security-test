@@ -20,13 +20,13 @@ import (
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/logutil"
+	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/rtree"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/redact"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -255,7 +255,6 @@ func GetSSTMetaFromFile(
 	}
 
 	log.Debug("get sstMeta",
-		logutil.Region(region),
 		logutil.File(file),
 		logutil.Key("startKey", rangeStart),
 		logutil.Key("endKey", rangeEnd))
@@ -366,8 +365,8 @@ func GoValidateFileRanges(
 					}
 				}
 				// Merge small ranges to reduce split and scatter regions.
-				ranges, stat, err := MergeAndRewriteFileRanges(
-					files, t.RewriteRule, splitSizeBytes, splitKeyCount)
+				ranges, stat, err := MergeFileRanges(
+					files, splitSizeBytes, splitKeyCount)
 				if err != nil {
 					errCh <- err
 					return
@@ -507,18 +506,13 @@ func SplitRanges(
 	ctx context.Context,
 	client *Client,
 	ranges []rtree.Range,
+	rewriteRules *RewriteRules,
 	updateCh glue.Progress,
 	isRawKv bool,
 ) error {
-	splitter := NewRegionSplitter(split.NewSplitClient(
-		client.GetPDClient(),
-		client.pdHTTPClient,
-		client.GetTLSConfig(),
-		isRawKv,
-		maxSplitKeysOnce,
-	))
+	splitter := NewRegionSplitter(split.NewSplitClient(client.GetPDClient(), client.GetTLSConfig(), isRawKv))
 
-	return splitter.ExecuteSplit(ctx, ranges, client.GetStoreCount(), isRawKv, func(keys [][]byte) {
+	return splitter.Split(ctx, ranges, rewriteRules, isRawKv, func(keys [][]byte) {
 		for range keys {
 			updateCh.Inc()
 		}
@@ -602,7 +596,7 @@ func encodeKeyPrefix(key []byte) []byte {
 
 // ZapTables make zap field of table for debuging, including table names.
 func ZapTables(tables []CreatedTable) zapcore.Field {
-	return logutil.AbbreviatedArray("tables", tables, func(input any) []string {
+	return logutil.AbbreviatedArray("tables", tables, func(input interface{}) []string {
 		tables := input.([]CreatedTable)
 		names := make([]string, 0, len(tables))
 		for _, t := range tables {
@@ -683,7 +677,7 @@ func keyCmp(a, b []byte) int {
 	return chosen
 }
 
-func keyCmpInterface(a, b any) int {
+func keyCmpInterface(a, b interface{}) int {
 	return keyCmp(a.([]byte), b.([]byte))
 }
 
@@ -741,7 +735,7 @@ func CheckConsistencyAndValidPeer(regionInfos []*RecoverRegionInfo) (map[uint64]
 	// Resolve version conflicts.
 	var treeMap = treemap.NewWith(keyCmpInterface)
 	for _, p := range regionInfos {
-		var fk, fv any
+		var fk, fv interface{}
 		fk, _ = treeMap.Ceiling(p.StartKey)
 		// keyspace overlap sk within ceiling - fk
 		if fk != nil && (keyEq(fk.([]byte), p.StartKey) || keyCmp(fk.([]byte), p.EndKey) < 0) {
@@ -773,7 +767,7 @@ func CheckConsistencyAndValidPeer(regionInfos []*RecoverRegionInfo) (map[uint64]
 		if !keyEq(prevEndKey, iter.Key().([]byte)) {
 			log.Error("regions are not adjacent", zap.Uint64("pre region", prevRegion), zap.Uint64("cur region", v.RegionId))
 			// TODO, some enhancement may need, a PoC or test may need for decision
-			return nil, errors.Annotatef(berrors.ErrInvalidRange,
+			return nil, errors.Annotatef(berrors.ErrRestoreInvalidRange,
 				"invalid region range")
 		}
 		prevEndKey = v.EndKey

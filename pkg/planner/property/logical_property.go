@@ -26,5 +26,3 @@ type LogicalProperty struct {
 	Schema    *expression.Schema
 	MaxOneRow bool
 }
-
-// todo: ScalarProperty: usedColumns in current scalar expr, null reject, cor-related, subq contained and so on

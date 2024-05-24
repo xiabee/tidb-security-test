@@ -17,8 +17,6 @@ package label
 import (
 	"fmt"
 	"strings"
-
-	pd "github.com/tikv/pd/client/http"
 )
 
 const (
@@ -39,9 +37,15 @@ const (
 	AttributesDuplicated
 )
 
+// Label is used to describe attributes
+type Label struct {
+	Key   string `json:"key,omitempty"`
+	Value string `json:"value,omitempty"`
+}
+
 // NewLabel creates a new label for a given string.
-func NewLabel(attr string) (pd.RegionLabel, error) {
-	l := pd.RegionLabel{}
+func NewLabel(attr string) (Label, error) {
+	l := Label{}
 	kv := strings.Split(attr, "=")
 	if len(kv) != 2 {
 		return l, fmt.Errorf("%w: %s", ErrInvalidAttributesFormat, attr)
@@ -62,14 +66,14 @@ func NewLabel(attr string) (pd.RegionLabel, error) {
 	return l, nil
 }
 
-// RestoreRegionLabel converts a Attribute to a string.
-func RestoreRegionLabel(l *pd.RegionLabel) string {
+// Restore converts a Attribute to a string.
+func (l *Label) Restore() string {
 	return l.Key + "=" + l.Value
 }
 
 // CompatibleWith will check if two constraints are compatible.
 // Return (compatible, duplicated).
-func CompatibleWith(l *pd.RegionLabel, o *pd.RegionLabel) AttributesCompatibility {
+func (l *Label) CompatibleWith(o *Label) AttributesCompatibility {
 	if l.Key != o.Key {
 		return AttributesCompatible
 	}
@@ -81,23 +85,26 @@ func CompatibleWith(l *pd.RegionLabel, o *pd.RegionLabel) AttributesCompatibilit
 	return AttributesIncompatible
 }
 
+// Labels is a slice of Label.
+type Labels []Label
+
 // NewLabels creates a slice of Label for given attributes.
-func NewLabels(attrs []string) ([]pd.RegionLabel, error) {
-	labels := make([]pd.RegionLabel, 0, len(attrs))
+func NewLabels(attrs []string) (Labels, error) {
+	labels := make(Labels, 0, len(attrs))
 	for _, attr := range attrs {
 		label, err := NewLabel(attr)
 		if err != nil {
 			return nil, err
 		}
-		if err := Add(&labels, label); err != nil {
+		if err := labels.Add(label); err != nil {
 			return nil, err
 		}
 	}
 	return labels, nil
 }
 
-// RestoreRegionLabels converts Attributes to a string.
-func RestoreRegionLabels(labels *[]pd.RegionLabel) string {
+// Restore converts Attributes to a string.
+func (labels *Labels) Restore() string {
 	var sb strings.Builder
 	for i, label := range *labels {
 		switch label.Key {
@@ -110,25 +117,25 @@ func RestoreRegionLabels(labels *[]pd.RegionLabel) string {
 			sb.WriteByte(',')
 		}
 		sb.WriteByte('"')
-		sb.WriteString(RestoreRegionLabel(&label))
+		sb.WriteString(label.Restore())
 		sb.WriteByte('"')
 	}
 	return sb.String()
 }
 
 // Add will add a new attribute, with validation of all attributes.
-func Add(labels *[]pd.RegionLabel, label pd.RegionLabel) error {
+func (labels *Labels) Add(label Label) error {
 	for i := range *labels {
 		l := (*labels)[i]
-		res := CompatibleWith(&label, &l)
+		res := label.CompatibleWith(&l)
 		if res == AttributesCompatible {
 			continue
 		}
 		if res == AttributesDuplicated {
 			return nil
 		}
-		s1 := RestoreRegionLabel(&label)
-		s2 := RestoreRegionLabel(&l)
+		s1 := label.Restore()
+		s2 := l.Restore()
 		return fmt.Errorf("'%s' and '%s' are conflicted", s1, s2)
 	}
 

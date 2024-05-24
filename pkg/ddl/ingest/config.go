@@ -16,16 +16,17 @@ package ingest
 
 import (
 	"context"
+	"math"
 	"net"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 
+	"github.com/pingcap/tidb/br/pkg/lightning/backend"
+	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
+	lightning "github.com/pingcap/tidb/br/pkg/lightning/config"
 	tidb "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/lightning/backend"
-	"github.com/pingcap/tidb/pkg/lightning/checkpoints"
-	"github.com/pingcap/tidb/pkg/lightning/common"
-	lightning "github.com/pingcap/tidb/pkg/lightning/config"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"go.uber.org/zap"
@@ -34,30 +35,21 @@ import (
 // ImporterRangeConcurrencyForTest is only used for test.
 var ImporterRangeConcurrencyForTest *atomic.Int32
 
-// litConfig is the configuration for the lightning local backend used in DDL.
-type litConfig struct {
-	lightning     *lightning.Config
-	keyspaceName  string
-	isRaftKV2     bool
-	resourceGroup string
+// Config is the configuration for the lightning local backend used in DDL.
+type Config struct {
+	Lightning    *lightning.Config
+	KeyspaceName string
+	IsRaftKV2    bool
 }
 
-func genConfig(
-	ctx context.Context,
-	jobSortPath string,
-	memRoot MemRoot,
-	unique bool,
-	resourceGroup string,
-) (*litConfig, error) {
+func genConfig(ctx context.Context, memRoot MemRoot, jobID int64, unique bool) (*Config, error) {
 	tidbCfg := tidb.GetGlobalConfig()
 	cfg := lightning.NewConfig()
 	cfg.TikvImporter.Backend = lightning.BackendLocal
 	// Each backend will build a single dir in lightning dir.
-	cfg.TikvImporter.SortedKVDir = jobSortPath
+	cfg.TikvImporter.SortedKVDir = filepath.Join(LitSortPath, EncodeBackendTag(jobID))
 	if ImporterRangeConcurrencyForTest != nil {
 		cfg.TikvImporter.RangeConcurrency = int(ImporterRangeConcurrencyForTest.Load())
-	} else {
-		cfg.TikvImporter.RangeConcurrency = int(variable.GetDDLReorgWorkerCounter())
 	}
 	err := cfg.AdjustForDDL()
 	if err != nil {
@@ -67,10 +59,11 @@ func genConfig(
 	adjustImportMemory(ctx, memRoot, cfg)
 	cfg.Checkpoint.Enable = true
 	if unique {
-		cfg.Conflict.Strategy = lightning.ErrorOnDup
-		cfg.Conflict.Threshold = lightning.DefaultRecordDuplicateThreshold
+		cfg.TikvImporter.DuplicateResolution = lightning.DupeResAlgErr
+		// TODO(lance6716): will introduce fail-fast for DDL usage later
+		cfg.Conflict.Threshold = math.MaxInt64
 	} else {
-		cfg.Conflict.Strategy = lightning.NoneOnDup
+		cfg.TikvImporter.DuplicateResolution = lightning.DupeResAlgNone
 	}
 	cfg.TiDB.Host = "127.0.0.1"
 	cfg.TiDB.StatusPort = int(tidbCfg.Status.StatusPort)
@@ -81,14 +74,13 @@ func genConfig(
 	// in DDL scenario, we don't switch import mode
 	cfg.Cron.SwitchMode = lightning.Duration{Duration: 0}
 
-	c := &litConfig{
-		lightning:     cfg,
-		keyspaceName:  tidb.GetGlobalKeyspaceName(),
-		isRaftKV2:     false,
-		resourceGroup: resourceGroup,
+	c := &Config{
+		Lightning:    cfg,
+		KeyspaceName: tidb.GetGlobalKeyspaceName(),
+		IsRaftKV2:    false,
 	}
 
-	return c, nil
+	return c, err
 }
 
 // NewDDLTLS creates a common.TLS from the tidb config for DDL.
@@ -109,13 +101,12 @@ var (
 	compactConcurrency = 4
 )
 
-func generateLocalEngineConfig(id int64, dbName, tbName string, ts uint64) *backend.EngineConfig {
+func generateLocalEngineConfig(id int64, dbName, tbName string) *backend.EngineConfig {
 	return &backend.EngineConfig{
 		Local: backend.LocalEngineConfig{
 			Compact:            true,
 			CompactThreshold:   int64(compactMemory),
 			CompactConcurrency: compactConcurrency,
-			BlockSize:          16 * 1024, // using default for DDL
 		},
 		TableInfo: &checkpoints.TidbTableInfo{
 			ID:   id,
@@ -123,7 +114,6 @@ func generateLocalEngineConfig(id int64, dbName, tbName string, ts uint64) *back
 			Name: tbName,
 		},
 		KeepSortDir: true,
-		TS:          ts,
 	}
 }
 
@@ -151,7 +141,7 @@ func adjustImportMemory(ctx context.Context, memRoot MemRoot, cfg *lightning.Con
 
 	cfg.TikvImporter.LocalWriterMemCacheSize /= lightning.ByteSize(scale)
 	cfg.TikvImporter.EngineMemCacheSize /= lightning.ByteSize(scale)
-
+	// TODO: adjust range concurrency number to control total concurrency in the future.
 	logutil.Logger(ctx).Info(LitInfoChgMemSetting,
 		zap.Int64("local writer memory cache size", int64(cfg.TikvImporter.LocalWriterMemCacheSize)),
 		zap.Int64("engine memory cache size", int64(cfg.TikvImporter.EngineMemCacheSize)),

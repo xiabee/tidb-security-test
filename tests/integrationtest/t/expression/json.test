@@ -248,18 +248,7 @@ select
 		json_length('[]'),
 		json_length('{"a": 1}'),
 		json_length('{"a": 1, "b": 2}'),
-		json_length('[1, 2, 3]'),
-		json_length('{}', '$'),
-		json_length('1', '$'),
-		json_length(null, '$'),
-		json_length(null, 'fdfd'),
-		json_length('{}', null),
-		json_length('1', '$.a'),
-		json_length('{}', '$.a');
--- error 3143
-select json_length('{}', 'fsdfds');
--- error 3143
-select json_length('1', 'fsdfds');
+		json_length('[1, 2, 3]');
 # issue 16267
 select json_array(922337203685477580) =  json_array(922337203685477581);
 
@@ -354,7 +343,7 @@ select json_storage_free(NULL);
 select json_storage_free('{}');
 select json_storage_free('1');
 select json_storage_free('{"a": "b"}');
--- error 3140
+-- error 1064
 select json_storage_free('{"c":["a","b"]');
 
 # TestJSONExtractFromLast
@@ -369,17 +358,6 @@ select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[1 to last - 100]');
 select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[1 to 100]');
 select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[0 to last]');
 select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[0 to 2]');
-
-# TestCastJSONStringToInteger
-drop table if exists t;
-create table t (a json);
-insert into t values ('"-1"');
-insert into t values ('"18446744073709551615"');
-insert into t values ('"18446744073709552000"');
--- sorted_result
-select a, cast(a as unsigned) from t;
--- sorted_result
-select a, cast(a as signed) from t;
 
 # TestCastBinaryStringToJSON
 select cast(binary 'aa' as json);

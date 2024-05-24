@@ -52,6 +52,10 @@ type dumpFileGcChecker struct {
 	planReplayerTaskStatus *planReplayerDumpTaskStatus
 }
 
+func parseType(s string) string {
+	return strings.Split(s, "_")[0]
+}
+
 func parseTime(s string) (time.Time, error) {
 	startIdx := strings.LastIndex(s, "_")
 	if startIdx == -1 {
@@ -135,7 +139,7 @@ func (p *dumpFileGcChecker) gcDumpFilesByPath(path string, gcDurationDefault, gc
 
 func deletePlanReplayerStatus(ctx context.Context, sctx sessionctx.Context, token string) {
 	ctx1 := kv.WithInternalSourceType(ctx, kv.InternalTxnStats)
-	exec := sctx.GetRestrictedSQLExecutor()
+	exec := sctx.(sqlexec.RestrictedSQLExecutor)
 	_, _, err := exec.ExecRestrictedSQL(ctx1, nil, "delete from mysql.plan_replayer_status where token = %?", token)
 	if err != nil {
 		logutil.BgLogger().Warn("delete mysql.plan_replayer_status record failed", zap.String("token", token), zap.Error(err))
@@ -163,7 +167,7 @@ func insertPlanReplayerStatus(ctx context.Context, sctx sessionctx.Context, reco
 }
 
 func insertPlanReplayerErrorStatusRecord(ctx context.Context, sctx sessionctx.Context, instance string, record PlanReplayerStatusRecord) {
-	exec := sctx.GetRestrictedSQLExecutor()
+	exec := sctx.(sqlexec.RestrictedSQLExecutor)
 	_, _, err := exec.ExecRestrictedSQL(
 		ctx, nil,
 		"insert into mysql.plan_replayer_status (sql_digest, plan_digest, origin_sql, fail_reason, instance) values (%?,%?,%?,%?,%?)",
@@ -181,7 +185,7 @@ func insertPlanReplayerErrorStatusRecord(ctx context.Context, sctx sessionctx.Co
 }
 
 func insertPlanReplayerSuccessStatusRecord(ctx context.Context, sctx sessionctx.Context, instance string, record PlanReplayerStatusRecord) {
-	exec := sctx.GetRestrictedSQLExecutor()
+	exec := sctx.(sqlexec.RestrictedSQLExecutor)
 	_, _, err := exec.ExecRestrictedSQL(
 		ctx,
 		nil,
@@ -303,7 +307,7 @@ func (h *planReplayerTaskCollectorHandle) removeTask(taskKey replayer.PlanReplay
 }
 
 func (h *planReplayerTaskCollectorHandle) collectAllPlanReplayerTask(ctx context.Context) ([]replayer.PlanReplayerTaskKey, error) {
-	exec := h.sctx.GetSQLExecutor()
+	exec := h.sctx.(sqlexec.SQLExecutor)
 	rs, err := exec.ExecuteInternal(ctx, "select sql_digest, plan_digest from mysql.plan_replayer_task")
 	if err != nil {
 		return nil, err
@@ -512,7 +516,7 @@ func (h *planReplayerTaskDumpHandle) DrainTask() *PlanReplayerDumpTask {
 }
 
 func checkUnHandledReplayerTask(ctx context.Context, sctx sessionctx.Context, task replayer.PlanReplayerTaskKey) (bool, error) {
-	exec := sctx.GetSQLExecutor()
+	exec := sctx.(sqlexec.SQLExecutor)
 	rs, err := exec.ExecuteInternal(ctx, fmt.Sprintf("select * from mysql.plan_replayer_status where sql_digest = '%v' and plan_digest = '%v' and fail_reason is null", task.SQLDigest, task.PlanDigest))
 	if err != nil {
 		return false, err
@@ -533,7 +537,7 @@ func checkUnHandledReplayerTask(ctx context.Context, sctx sessionctx.Context, ta
 
 // CheckPlanReplayerTaskExists checks whether plan replayer capture task exists already
 func CheckPlanReplayerTaskExists(ctx context.Context, sctx sessionctx.Context, sqlDigest, planDigest string) (bool, error) {
-	exec := sctx.GetSQLExecutor()
+	exec := sctx.(sqlexec.SQLExecutor)
 	rs, err := exec.ExecuteInternal(ctx, fmt.Sprintf("select * from mysql.plan_replayer_task where sql_digest = '%v' and plan_digest = '%v'",
 		sqlDigest, planDigest))
 	if err != nil {
@@ -567,17 +571,17 @@ type PlanReplayerDumpTask struct {
 	replayer.PlanReplayerTaskKey
 
 	// tmp variables stored during the query
-	TblStats map[int64]any
+	TblStats map[int64]interface{}
 
 	// variables used to dump the plan
 	StartTS           uint64
-	SessionBindings   []bindinfo.Bindings
+	SessionBindings   []*bindinfo.BindRecord
 	EncodedPlan       string
 	SessionVars       *variable.SessionVars
 	ExecStmts         []ast.StmtNode
 	Analyze           bool
 	HistoricalStatsTS uint64
-	DebugTrace        []any
+	DebugTrace        []interface{}
 
 	FileName string
 	Zf       *os.File

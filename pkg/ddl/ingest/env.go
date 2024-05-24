@@ -19,10 +19,10 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
-	"github.com/pingcap/tidb/pkg/lightning/log"
 	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"go.uber.org/zap"
@@ -33,10 +33,12 @@ var (
 	LitBackCtxMgr BackendCtxMgr
 	// LitMemRoot is used to track the memory usage of the lightning backfill process.
 	LitMemRoot MemRoot
-	// litDiskRoot is used to track the disk usage of the lightning backfill process.
-	litDiskRoot DiskRoot
-	// litRLimit is the max open file number of the lightning backfill process.
-	litRLimit uint64
+	// LitDiskRoot is used to track the disk usage of the lightning backfill process.
+	LitDiskRoot DiskRoot
+	// LitRLimit is the max open file number of the lightning backfill process.
+	LitRLimit uint64
+	// LitSortPath is the sort path for the lightning backfill process.
+	LitSortPath string
 	// LitInitialized is the flag indicates whether the lightning backfill process is initialized.
 	LitInitialized bool
 )
@@ -44,62 +46,74 @@ var (
 const defaultMemoryQuota = 2 * size.GB
 
 // InitGlobalLightningEnv initialize Lightning backfill environment.
-func InitGlobalLightningEnv(filterProcessingJobIDs FilterProcessingJobIDsFunc) {
-	log.SetAppLogger(logutil.DDLIngestLogger())
+func InitGlobalLightningEnv() {
+	log.SetAppLogger(logutil.BgLogger())
 	globalCfg := config.GetGlobalConfig()
 	if globalCfg.Store != "tikv" {
-		logutil.DDLIngestLogger().Warn(LitWarnEnvInitFail,
+		logutil.BgLogger().Warn(LitWarnEnvInitFail,
+			zap.String("category", "ddl-ingest"),
 			zap.String("storage limitation", "only support TiKV storage"),
 			zap.String("current storage", globalCfg.Store),
 			zap.Bool("lightning is initialized", LitInitialized))
 		return
 	}
-	sortPath, err := genLightningDataDir()
+	sPath, err := genLightningDataDir()
 	if err != nil {
-		logutil.DDLIngestLogger().Warn(LitWarnEnvInitFail,
-			zap.Error(err),
-			zap.Bool("lightning is initialized", LitInitialized))
+		logutil.BgLogger().Warn(LitWarnEnvInitFail,
+			zap.String("category", "ddl-ingest"),
+			zap.Error(err), zap.Bool("lightning is initialized", LitInitialized))
 		return
 	}
+	LitSortPath = sPath
 	memTotal, err := memory.MemTotal()
 	if err != nil {
-		logutil.DDLIngestLogger().Warn("get total memory fail", zap.Error(err))
+		logutil.BgLogger().Warn("get total memory fail", zap.Error(err))
 		memTotal = defaultMemoryQuota
 	} else {
 		memTotal = memTotal / 2
 	}
-	LitBackCtxMgr = NewLitBackendCtxMgr(sortPath, memTotal, filterProcessingJobIDs)
-	litRLimit = util.GenRLimit("ddl-ingest")
+	LitBackCtxMgr = newLitBackendCtxMgr(LitSortPath, memTotal)
+	LitRLimit = util.GenRLimit("ddl-ingest")
 	LitInitialized = true
-	logutil.DDLIngestLogger().Info(LitInfoEnvInitSucc,
+	logutil.BgLogger().Info(LitInfoEnvInitSucc,
+		zap.String("category", "ddl-ingest"),
 		zap.Uint64("memory limitation", memTotal),
-		zap.String("disk usage info", litDiskRoot.UsageInfo()),
-		zap.Uint64("max open file number", litRLimit),
+		zap.String("disk usage info", LitDiskRoot.UsageInfo()),
+		zap.Uint64("max open file number", LitRLimit),
 		zap.Bool("lightning is initialized", LitInitialized))
 }
 
 // Generate lightning local store dir in TiDB data dir.
 // it will append -port to be tmp_ddl suffix.
 func genLightningDataDir() (string, error) {
-	tidbCfg := config.GetGlobalConfig()
-	sortPathSuffix := "/tmp_ddl-" + strconv.Itoa(int(tidbCfg.Port))
-	sortPath := filepath.Join(tidbCfg.TempDir, sortPathSuffix)
-
+	sortPath := ConfigSortPath()
 	if _, err := os.Stat(sortPath); err != nil {
 		if !os.IsNotExist(err) {
-			logutil.DDLIngestLogger().Error(LitErrStatDirFail,
+			logutil.BgLogger().Error(LitErrStatDirFail,
+				zap.String("category", "ddl-ingest"),
 				zap.String("sort path", sortPath), zap.Error(err))
 			return "", err
 		}
 	}
 	err := os.MkdirAll(sortPath, 0o700)
 	if err != nil {
-		logutil.DDLIngestLogger().Error(LitErrCreateDirFail,
+		logutil.BgLogger().Error(LitErrCreateDirFail,
+			zap.String("category", "ddl-ingest"),
 			zap.String("sort path", sortPath), zap.Error(err))
 		return "", err
 	}
-	logutil.DDLIngestLogger().Info(LitInfoSortDir, zap.String("data path", sortPath))
+	logutil.BgLogger().Info(LitInfoSortDir,
+		zap.String("category", "ddl-ingest"),
+		zap.String("data path:", sortPath))
 	return sortPath, nil
+}
+
+// ConfigSortPath returns the sort path for lightning.
+func ConfigSortPath() string {
+	tidbCfg := config.GetGlobalConfig()
+	sortPathSuffix := "/tmp_ddl-" + strconv.Itoa(int(tidbCfg.Port))
+	sortPath := filepath.Join(tidbCfg.TempDir, sortPathSuffix)
+	return sortPath
 }
 
 // GenLightningDataDirForTest is only used for test.

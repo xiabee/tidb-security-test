@@ -53,8 +53,7 @@ func TestEnforceMPP(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -149,8 +148,7 @@ func TestEnforceMPPWarning1(t *testing.T) {
 			is := dom.InfoSchema()
 			db, exists := is.SchemaByName(model.NewCIStr("test"))
 			require.True(t, exists)
-			for _, tbl := range is.SchemaTables(db.Name) {
-				tblInfo := tbl.Meta()
+			for _, tblInfo := range db.Tables {
 				if tblInfo.Name.L == "t" {
 					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 						Count:     1,
@@ -166,8 +164,7 @@ func TestEnforceMPPWarning1(t *testing.T) {
 			is := dom.InfoSchema()
 			db, exists := is.SchemaByName(model.NewCIStr("test"))
 			require.True(t, exists)
-			for _, tbl := range is.SchemaTables(db.Name) {
-				tblInfo := tbl.Meta()
+			for _, tblInfo := range db.Tables {
 				if tblInfo.Name.L == "t" {
 					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 						Count:     1,
@@ -204,8 +201,7 @@ func TestEnforceMPPWarning2(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -257,8 +253,7 @@ func TestEnforceMPPWarning3(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -321,8 +316,7 @@ func TestEnforceMPPWarning4(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" || tblInfo.Name.L == "s" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -383,8 +377,7 @@ func TestMPP2PhaseAggPushDown(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "c" || tblInfo.Name.L == "o" || tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -438,8 +431,7 @@ func TestMPPSkewedGroupDistinctRewrite(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
@@ -491,8 +483,7 @@ func TestMPPSingleDistinct3Stage(t *testing.T) {
 	is := dom.InfoSchema()
 	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	for _, tbl := range is.SchemaTables(db.Name) {
-		tblInfo := tbl.Meta()
+	for _, tblInfo := range db.Tables {
 		if tblInfo.Name.L == "t" {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,

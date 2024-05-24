@@ -186,12 +186,13 @@ func (d SchemaTracker) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStm
 		return infoschema.ErrDatabaseNotExists.GenWithStackByArgs(ident.Schema)
 	}
 	// suppress ErrTooLongKey
-	ctx.SetValue(ddl.SuppressErrorTooLongKeyKey, true)
+	strictSQLModeBackup := ctx.GetSessionVars().StrictSQLMode
+	ctx.GetSessionVars().StrictSQLMode = false
 	// support drop PK
 	enableClusteredIndexBackup := ctx.GetSessionVars().EnableClusteredIndex
 	ctx.GetSessionVars().EnableClusteredIndex = variable.ClusteredIndexDefModeOff
 	defer func() {
-		ctx.ClearValue(ddl.SuppressErrorTooLongKeyKey)
+		ctx.GetSessionVars().StrictSQLMode = strictSQLModeBackup
 		ctx.GetSessionVars().EnableClusteredIndex = enableClusteredIndexBackup
 	}()
 
@@ -713,7 +714,7 @@ func (d SchemaTracker) handleModifyColumn(
 	job, err := ddl.GetModifiableColumnJob(ctx, sctx, nil, ident, originalColName, schema, t, spec)
 	if err != nil {
 		if infoschema.ErrColumnNotExists.Equal(err) && spec.IfExists {
-			sctx.GetSessionVars().StmtCtx.AppendNote(infoschema.ErrColumnNotExists.FastGenByArgs(originalColName, ident.Name))
+			sctx.GetSessionVars().StmtCtx.AppendNote(infoschema.ErrColumnNotExists.GenWithStackByArgs(originalColName, ident.Name))
 			return nil
 		}
 		return errors.Trace(err)
@@ -787,7 +788,7 @@ func (d SchemaTracker) addTablePartitions(ctx sessionctx.Context, ident ast.Iden
 		return errors.Trace(dbterror.ErrPartitionMgmtOnNonpartitioned)
 	}
 
-	partInfo, err := ddl.BuildAddedPartitionInfo(ctx.GetExprCtx(), tblInfo, spec)
+	partInfo, err := ddl.BuildAddedPartitionInfo(ctx, tblInfo, spec)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1212,7 +1213,7 @@ func (SchemaTracker) GetLease() time.Duration {
 }
 
 // Stats implements the DDL interface, it's no-op in DM's case.
-func (SchemaTracker) Stats(_ *variable.SessionVars) (map[string]any, error) {
+func (SchemaTracker) Stats(_ *variable.SessionVars) (map[string]interface{}, error) {
 	return nil, nil
 }
 

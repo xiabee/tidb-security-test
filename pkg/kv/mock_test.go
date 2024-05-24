@@ -67,7 +67,7 @@ func TestInterface(t *testing.T) {
 	assert.Equal(t, 0, transaction.Size())
 	assert.Nil(t, transaction.GetMemBuffer())
 
-	transaction.(*mockTxn).Reset()
+	transaction.Reset()
 	err = transaction.Rollback()
 	assert.Nil(t, err)
 	assert.False(t, transaction.Valid())

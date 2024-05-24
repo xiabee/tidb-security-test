@@ -29,7 +29,7 @@ type gener struct {
 	defaultGener
 }
 
-func (g gener) gen() any {
+func (g gener) gen() interface{} {
 	result := g.defaultGener.gen()
 	if _, ok := result.(string); ok {
 		dg := newDefaultGener(0, types.ETDuration)

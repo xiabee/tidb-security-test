@@ -21,6 +21,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 // Codec is used to:
@@ -151,7 +152,7 @@ func (*Codec) setAllNotNull(col *Column) {
 	numNullBitmapBytes := (col.length + 7) / 8
 	col.nullBitmap = col.nullBitmap[:0]
 	for i := 0; i < numNullBitmapBytes; {
-		numAppendBytes := min(numNullBitmapBytes-i, cap(allNotNullBitmap))
+		numAppendBytes := mathutil.Min(numNullBitmapBytes-i, cap(allNotNullBitmap))
 		col.nullBitmap = append(col.nullBitmap, allNotNullBitmap[:numAppendBytes]...)
 		i += numAppendBytes
 	}

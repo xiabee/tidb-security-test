@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/vecgroupchecker"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/channel"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
@@ -108,7 +107,7 @@ type shuffleOutput struct {
 // Open implements the Executor Open interface.
 func (e *ShuffleExec) Open(ctx context.Context) error {
 	for _, s := range e.dataSources {
-		if err := exec.Open(ctx, s); err != nil {
+		if err := s.Open(ctx); err != nil {
 			return err
 		}
 	}
@@ -131,7 +130,7 @@ func (e *ShuffleExec) Open(ctx context.Context) error {
 		w.outputCh = e.outputCh
 		w.outputHolderCh = make(chan *chunk.Chunk, 1)
 
-		if err := exec.Open(ctx, w.childExec); err != nil {
+		if err := w.childExec.Open(ctx); err != nil {
 			return err
 		}
 
@@ -175,7 +174,7 @@ func (e *ShuffleExec) Close() error {
 			}
 		}
 		// close child executor of each worker
-		if err := exec.Close(w.childExec); err != nil && firstErr == nil {
+		if err := w.childExec.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -192,7 +191,7 @@ func (e *ShuffleExec) Close() error {
 
 	// close dataSources
 	for _, dataSource := range e.dataSources {
-		if err := exec.Close(dataSource); err != nil && firstErr == nil {
+		if err := dataSource.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -255,9 +254,9 @@ func (e *ShuffleExec) Next(ctx context.Context, req *chunk.Chunk) error {
 	return nil
 }
 
-func recoveryShuffleExec(output chan *shuffleOutput, r any) {
-	err := util.GetRecoverError(r)
-	output <- &shuffleOutput{err: util.GetRecoverError(r)}
+func recoveryShuffleExec(output chan *shuffleOutput, r interface{}) {
+	err := errors.Errorf("%v", r)
+	output <- &shuffleOutput{err: errors.Errorf("%v", r)}
 	logutil.BgLogger().Error("shuffle panicked", zap.Error(err), zap.Stack("stack"))
 }
 
@@ -465,7 +464,7 @@ func buildPartitionRangeSplitter(ctx sessionctx.Context, concurrency int, byItem
 	return &partitionRangeSplitter{
 		byItems:      byItems,
 		numWorkers:   concurrency,
-		groupChecker: vecgroupchecker.NewVecGroupChecker(ctx.GetExprCtx().GetEvalCtx(), ctx.GetSessionVars().EnableVectorizedExpression, byItems),
+		groupChecker: vecgroupchecker.NewVecGroupChecker(ctx, byItems),
 		idx:          0,
 	}
 }

@@ -32,15 +32,12 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
@@ -85,8 +82,7 @@ func (h coprHandler) handleCopDAGRequest(req *coprocessor.Request) *coprocessor.
 		execDetails = e.ExecDetails()
 	}
 
-	sc := dagCtx.evalCtx.sctx.GetSessionVars().StmtCtx
-	selResp := h.initSelectResponse(err, sc.GetWarnings(), e.Counts())
+	selResp := h.initSelectResponse(err, dagCtx.evalCtx.sc.GetWarnings(), e.Counts())
 	if err == nil {
 		err = h.fillUpData4SelectResponse(selResp, dagReq, dagCtx, rows)
 	}
@@ -107,22 +103,18 @@ func (h coprHandler) buildDAGExecutor(req *coprocessor.Request) (*dagContext, ex
 		return nil, nil, nil, errors.Trace(err)
 	}
 
+	sc := flagsToStatementContext(dagReq.Flags)
 	tz, err := timeutil.ConstructTimeZone(dagReq.TimeZoneName, int(dagReq.TimeZoneOffset))
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
-	sctx := flagsAndTzToSessionContext(dagReq.Flags, tz)
-	if dagReq.DivPrecisionIncrement != nil {
-		sctx.GetSessionVars().DivPrecisionIncrement = int(*dagReq.DivPrecisionIncrement)
-	} else {
-		sctx.GetSessionVars().DivPrecisionIncrement = variable.DefDivPrecisionIncrement
-	}
+	sc.SetTimeZone(tz)
 
 	ctx := &dagContext{
 		dagReq:    dagReq,
 		keyRanges: req.Ranges,
 		startTS:   req.StartTs,
-		evalCtx:   &evalContext{sctx: sctx},
+		evalCtx:   &evalContext{sc: sc},
 	}
 	var e executor
 	if len(dagReq.Executors) == 0 {
@@ -134,6 +126,13 @@ func (h coprHandler) buildDAGExecutor(req *coprocessor.Request) (*dagContext, ex
 		return nil, nil, nil, errors.Trace(err)
 	}
 	return ctx, e, dagReq, err
+}
+
+// constructTimeZone constructs timezone by name first. When the timezone name
+// is set, the daylight saving problem must be considered. Otherwise the
+// timezone offset in seconds east of UTC is used to constructed the timezone.
+func constructTimeZone(name string, offset int) (*time.Location, error) {
+	return timeutil.ConstructTimeZone(name, offset)
 }
 
 func (h coprHandler) buildExec(ctx *dagContext, curr *tipb.Executor) (executor, *tipb.Executor, error) {
@@ -310,7 +309,7 @@ func (h coprHandler) buildSelection(ctx *dagContext, executor *tipb.Executor) (*
 			return nil, errors.Trace(err)
 		}
 	}
-	conds, err := convertToExprs(ctx.evalCtx.sctx, ctx.evalCtx.fieldTps, pbConds)
+	conds, err := convertToExprs(ctx.evalCtx.sc, ctx.evalCtx.fieldTps, pbConds)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -331,7 +330,7 @@ func (h coprHandler) getAggInfo(ctx *dagContext, executor *tipb.Executor) ([]agg
 	var relatedColOffsets []int
 	for _, expr := range executor.Aggregation.AggFunc {
 		var aggExpr aggregation.Aggregation
-		aggExpr, _, err = aggregation.NewDistAggFunc(expr, ctx.evalCtx.fieldTps, ctx.evalCtx.sctx.GetExprCtx())
+		aggExpr, err = aggregation.NewDistAggFunc(expr, ctx.evalCtx.fieldTps, ctx.evalCtx.sc)
 		if err != nil {
 			return nil, nil, nil, errors.Trace(err)
 		}
@@ -347,7 +346,7 @@ func (h coprHandler) getAggInfo(ctx *dagContext, executor *tipb.Executor) ([]agg
 			return nil, nil, nil, errors.Trace(err)
 		}
 	}
-	groupBys, err := convertToExprs(ctx.evalCtx.sctx, ctx.evalCtx.fieldTps, executor.Aggregation.GetGroupBy())
+	groupBys, err := convertToExprs(ctx.evalCtx.sc, ctx.evalCtx.fieldTps, executor.Aggregation.GetGroupBy())
 	if err != nil {
 		return nil, nil, nil, errors.Trace(err)
 	}
@@ -380,7 +379,7 @@ func (h coprHandler) buildStreamAgg(ctx *dagContext, executor *tipb.Executor) (*
 	}
 	aggCtxs := make([]*aggregation.AggEvaluateContext, 0, len(aggs))
 	for _, agg := range aggs {
-		aggCtxs = append(aggCtxs, agg.CreateContext(ctx.evalCtx.sctx.GetExprCtx().GetEvalCtx()))
+		aggCtxs = append(aggCtxs, agg.CreateContext(ctx.evalCtx.sc))
 	}
 	groupByCollators := make([]collate.Collator, 0, len(groupBys))
 	for _, expr := range groupBys {
@@ -416,11 +415,11 @@ func (h coprHandler) buildTopN(ctx *dagContext, executor *tipb.Executor) (*topNE
 		totalCount: int(topN.Limit),
 		topNSorter: topNSorter{
 			orderByItems: topN.OrderBy,
-			sc:           ctx.evalCtx.sctx.GetSessionVars().StmtCtx,
+			sc:           ctx.evalCtx.sc,
 		},
 	}
 
-	conds, err := convertToExprs(ctx.evalCtx.sctx, ctx.evalCtx.fieldTps, pbConds)
+	conds, err := convertToExprs(ctx.evalCtx.sc, ctx.evalCtx.fieldTps, pbConds)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -439,7 +438,7 @@ type evalContext struct {
 	colIDs      map[int64]int
 	columnInfos []*tipb.ColumnInfo
 	fieldTps    []*types.FieldType
-	sctx        sessionctx.Context
+	sc          *stmtctx.StatementContext
 }
 
 func (e *evalContext) setColumnInfo(cols []*tipb.ColumnInfo) {
@@ -459,7 +458,7 @@ func (e *evalContext) setColumnInfo(cols []*tipb.ColumnInfo) {
 func (e *evalContext) decodeRelatedColumnVals(relatedColOffsets []int, value [][]byte, row []types.Datum) error {
 	var err error
 	for _, offset := range relatedColOffsets {
-		row[offset], err = tablecodec.DecodeColumnValue(value[offset], e.fieldTps[offset], e.sctx.GetSessionVars().StmtCtx.TimeZone())
+		row[offset], err = tablecodec.DecodeColumnValue(value[offset], e.fieldTps[offset], e.sc.TimeZone())
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -467,14 +466,19 @@ func (e *evalContext) decodeRelatedColumnVals(relatedColOffsets []int, value [][
 	return nil
 }
 
-// flagsAndTzToSessionContext creates a StatementContext from a `tipb.SelectRequest.Flags`.
-func flagsAndTzToSessionContext(flags uint64, tz *time.Location) sessionctx.Context {
-	sctx := mock.NewContext()
+// flagsToStatementContext creates a StatementContext from a `tipb.SelectRequest.Flags`.
+func flagsToStatementContext(flags uint64) *stmtctx.StatementContext {
 	sc := stmtctx.NewStmtCtx()
-	sc.InitFromPBFlagAndTz(flags, tz)
-	sctx.GetSessionVars().StmtCtx = sc
-	sctx.GetSessionVars().TimeZone = tz
-	return sctx
+	sc.IgnoreTruncate.Store((flags & model.FlagIgnoreTruncate) > 0)
+	sc.TruncateAsWarning = (flags & model.FlagTruncateAsWarning) > 0
+	sc.InInsertStmt = (flags & model.FlagInInsertStmt) > 0
+	sc.InSelectStmt = (flags & model.FlagInSelectStmt) > 0
+	sc.InDeleteStmt = (flags & model.FlagInUpdateOrDeleteStmt) > 0
+	sc.OverflowAsWarning = (flags & model.FlagOverflowAsWarning) > 0
+	sc.IgnoreZeroInDate = (flags & model.FlagIgnoreZeroInDate) > 0
+	sc.DividedByZeroAsWarning = (flags & model.FlagDividedByZeroAsWarning) > 0
+	// TODO set FlagInSetOprStmt,
+	return sc
 }
 
 // MockGRPCClientStream is exported for testing purpose.
@@ -498,10 +502,10 @@ func (mockClientStream) CloseSend() error { return nil }
 func (mockClientStream) Context() context.Context { return nil }
 
 // SendMsg implements grpc.ClientStream interface
-func (mockClientStream) SendMsg(m any) error { return nil }
+func (mockClientStream) SendMsg(m interface{}) error { return nil }
 
 // RecvMsg implements grpc.ClientStream interface
-func (mockClientStream) RecvMsg(m any) error { return nil }
+func (mockClientStream) RecvMsg(m interface{}) error { return nil }
 
 type mockBathCopErrClient struct {
 	mockClientStream
@@ -556,7 +560,7 @@ func (h coprHandler) fillUpData4SelectResponse(selResp *tipb.SelectResponse, dag
 		h.encodeDefault(selResp, rows, dagReq.OutputOffsets)
 	case tipb.EncodeType_TypeChunk:
 		colTypes := h.constructRespSchema(dagCtx)
-		loc := dagCtx.evalCtx.sctx.GetSessionVars().StmtCtx.TimeZone()
+		loc := dagCtx.evalCtx.sc.TimeZone()
 		err := h.encodeChunk(selResp, rows, colTypes, dagReq.OutputOffsets, loc)
 		if err != nil {
 			return err

@@ -39,19 +39,11 @@ func getIndexMergePathDigest(paths []*util.AccessPath, startIndex int) string {
 		}
 		path := paths[i]
 		idxMergeDisgest += "{Idxs:["
-		for j := 0; j < len(path.PartialAlternativeIndexPaths); j++ {
+		for j := 0; j < len(path.PartialIndexPaths); j++ {
 			if j > 0 {
 				idxMergeDisgest += ","
 			}
-			idxMergeDisgest += "{"
-			// for every ONE index partial alternatives, output a set.
-			for k, one := range path.PartialAlternativeIndexPaths[j] {
-				if k != 0 {
-					idxMergeDisgest += ","
-				}
-				idxMergeDisgest += one.Index.Name.L
-			}
-			idxMergeDisgest += "}"
+			idxMergeDisgest += path.PartialIndexPaths[j].Index.Name.L
 		}
 		idxMergeDisgest += "],TbFilters:["
 		for j := 0; j < len(path.TableFilters); j++ {
@@ -84,7 +76,7 @@ func TestIndexMergePathGeneration(t *testing.T) {
 		err = Preprocess(context.Background(), sctx, stmt, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: is}))
 		require.NoError(t, err)
 		sctx := MockContext()
-		builder, _ := NewPlanBuilder().Init(sctx, is, hint.NewQBHintHandler(nil))
+		builder, _ := NewPlanBuilder().Init(sctx, is, &hint.BlockHintProcessor{})
 		p, err := builder.Build(ctx, stmt)
 		if err != nil {
 			testdata.OnRecord(func() {

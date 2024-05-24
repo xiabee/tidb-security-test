@@ -40,8 +40,8 @@ var (
 	AffectedRowsCounterDelete  prometheus.Counter
 	AffectedRowsCounterReplace prometheus.Counter
 
-	InPacketBytes  prometheus.Counter
-	OutPacketBytes prometheus.Counter
+	ReadPacketBytes  prometheus.Counter
+	WritePacketBytes prometheus.Counter
 )
 
 func init() {
@@ -126,6 +126,6 @@ func InitMetricsVars() {
 	AffectedRowsCounterDelete = metrics.AffectedRowsCounter.WithLabelValues("Delete")
 	AffectedRowsCounterReplace = metrics.AffectedRowsCounter.WithLabelValues("Replace")
 
-	InPacketBytes = metrics.PacketIOCounter.WithLabelValues("In")
-	OutPacketBytes = metrics.PacketIOCounter.WithLabelValues("Out")
+	ReadPacketBytes = metrics.PacketIOCounter.WithLabelValues("read")
+	WritePacketBytes = metrics.PacketIOCounter.WithLabelValues("write")
 }

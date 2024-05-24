@@ -22,17 +22,18 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	planctx "github.com/pingcap/tidb/pkg/planner/context"
 	"github.com/pingcap/tidb/pkg/planner/util/fixcontrol"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 // detachColumnCNFConditions detaches the condition for calculating range from the other conditions.
 // Please make sure that the top level is CNF form.
-func detachColumnCNFConditions(sctx expression.BuildContext, conditions []expression.Expression, checker *conditionChecker) ([]expression.Expression, []expression.Expression) {
+func detachColumnCNFConditions(sctx sessionctx.Context, conditions []expression.Expression, checker *conditionChecker) ([]expression.Expression, []expression.Expression) {
 	var accessConditions, filterConditions []expression.Expression //nolint: prealloc
 	for _, cond := range conditions {
 		if sf, ok := cond.(*expression.ScalarFunction); ok && sf.FuncName.L == ast.LogicOr {
@@ -65,7 +66,7 @@ func detachColumnCNFConditions(sctx expression.BuildContext, conditions []expres
 
 // detachColumnDNFConditions detaches the condition for calculating range from the other conditions.
 // Please make sure that the top level is DNF form.
-func detachColumnDNFConditions(sctx expression.BuildContext, conditions []expression.Expression, checker *conditionChecker) ([]expression.Expression, bool) {
+func detachColumnDNFConditions(sctx sessionctx.Context, conditions []expression.Expression, checker *conditionChecker) ([]expression.Expression, bool) {
 	var (
 		hasResidualConditions bool
 		accessConditions      []expression.Expression
@@ -101,8 +102,7 @@ func detachColumnDNFConditions(sctx expression.BuildContext, conditions []expres
 // in function which is `column in (constant list)`.
 // If so, it will return the offset of this column in the slice, otherwise return -1 for not found.
 // Since combining `x >= 2` and `x <= 2` can lead to an eq condition `x = 2`, we take le/ge/lt/gt into consideration.
-func getPotentialEqOrInColOffset(sctx planctx.PlanContext, expr expression.Expression, cols []*expression.Column) int {
-	evalCtx := sctx.GetExprCtx().GetEvalCtx()
+func getPotentialEqOrInColOffset(sctx sessionctx.Context, expr expression.Expression, cols []*expression.Column) int {
 	f, ok := expr.(*expression.ScalarFunction)
 	if !ok {
 		return -1
@@ -132,7 +132,7 @@ func getPotentialEqOrInColOffset(sctx planctx.PlanContext, expr expression.Expre
 				return -1
 			}
 			if constVal, ok := f.GetArgs()[1].(*expression.Constant); ok {
-				val, err := constVal.Eval(evalCtx, chunk.Row{})
+				val, err := constVal.Eval(chunk.Row{})
 				if err != nil || (!sctx.GetSessionVars().RegardNULLAsPoint && val.IsNull()) {
 					// treat col<=>null as range scan instead of point get to avoid incorrect results
 					// when nullable unique index has multiple matches for filter x is null
@@ -140,7 +140,7 @@ func getPotentialEqOrInColOffset(sctx planctx.PlanContext, expr expression.Expre
 				}
 				for i, col := range cols {
 					// When cols are a generated expression col, compare them in terms of virtual expr.
-					if col.EqualByExprAndID(evalCtx, c) {
+					if col.EqualByExprAndID(nil, c) {
 						return i
 					}
 				}
@@ -154,12 +154,12 @@ func getPotentialEqOrInColOffset(sctx planctx.PlanContext, expr expression.Expre
 				return -1
 			}
 			if constVal, ok := f.GetArgs()[0].(*expression.Constant); ok {
-				val, err := constVal.Eval(evalCtx, chunk.Row{})
+				val, err := constVal.Eval(chunk.Row{})
 				if err != nil || (!sctx.GetSessionVars().RegardNULLAsPoint && val.IsNull()) {
 					return -1
 				}
 				for i, col := range cols {
-					if col.EqualColumn(c) {
+					if col.Equal(nil, c) {
 						return i
 					}
 				}
@@ -179,7 +179,7 @@ func getPotentialEqOrInColOffset(sctx planctx.PlanContext, expr expression.Expre
 			}
 		}
 		for i, col := range cols {
-			if col.EqualColumn(c) {
+			if col.Equal(nil, c) {
 				return i
 			}
 		}
@@ -196,7 +196,7 @@ type cnfItemRangeResult struct {
 	minColNum          int
 }
 
-func getCNFItemRangeResult(sctx planctx.PlanContext, rangeResult *DetachRangeResult, offset int) *cnfItemRangeResult {
+func getCNFItemRangeResult(sctx sessionctx.Context, rangeResult *DetachRangeResult, offset int) *cnfItemRangeResult {
 	sameLenPointRanges := true
 	var maxColNum, minColNum int
 	for i, ran := range rangeResult.Ranges {
@@ -207,8 +207,8 @@ func getCNFItemRangeResult(sctx planctx.PlanContext, rangeResult *DetachRangeRes
 			maxColNum = len(ran.LowVal)
 			minColNum = len(ran.LowVal)
 		} else {
-			maxColNum = max(maxColNum, len(ran.LowVal))
-			minColNum = min(minColNum, len(ran.LowVal))
+			maxColNum = mathutil.Max(maxColNum, len(ran.LowVal))
+			minColNum = mathutil.Min(minColNum, len(ran.LowVal))
 		}
 	}
 	if minColNum != maxColNum {
@@ -241,7 +241,7 @@ func compareCNFItemRangeResult(curResult, bestResult *cnfItemRangeResult) (curIs
 // item ranges.
 // e.g, for input CNF expressions ((a,b) in ((1,1),(2,2))) and a > 1 and ((a,b,c) in (1,1,1),(2,2,2))
 // ((a,b,c) in (1,1,1),(2,2,2)) would be extracted.
-func extractBestCNFItemRanges(sctx planctx.PlanContext, conds []expression.Expression, cols []*expression.Column,
+func extractBestCNFItemRanges(sctx sessionctx.Context, conds []expression.Expression, cols []*expression.Column,
 	lengths []int, rangeMaxSize int64, convertToSortKey bool) (*cnfItemRangeResult, []*valueInfo, error) {
 	if len(conds) < 2 {
 		return nil, nil, nil
@@ -371,10 +371,10 @@ func (d *rangeDetacher) detachCNFCondAndBuildRangeForIndex(conditions []expressi
 		return res, nil
 	}
 	checker := &conditionChecker{
+		ctx:                      d.sctx,
 		checkerCol:               d.cols[eqOrInCount],
 		length:                   d.lengths[eqOrInCount],
 		optPrefixIndexSingleScan: d.sctx.GetSessionVars().OptPrefixIndexSingleScan,
-		ctx:                      d.sctx.GetExprCtx().GetEvalCtx(),
 	}
 	if considerDNF {
 		bestCNFItemRes, columnValues, err := extractBestCNFItemRanges(d.sctx, conditions, d.cols, d.lengths, d.rangeMaxSize, d.convertToSortKey)
@@ -452,7 +452,7 @@ func (d *rangeDetacher) detachCNFCondAndBuildRangeForIndex(conditions []expressi
 			return res, nil
 		}
 		// `eqOrInCount` must be 0 when coming here.
-		res.AccessConds, res.RemainedConds = detachColumnCNFConditions(d.sctx.GetExprCtx(), newConditions, checker)
+		res.AccessConds, res.RemainedConds = detachColumnCNFConditions(d.sctx, newConditions, checker)
 		ranges, res.AccessConds, remainedConds, err = d.buildCNFIndexRange(newTpSlice, 0, res.AccessConds)
 		if err != nil {
 			return nil, err
@@ -488,9 +488,7 @@ func (d *rangeDetacher) detachCNFCondAndBuildRangeForIndex(conditions []expressi
 // excludeToIncludeForIntPoint converts `(i` to `[i+1` and `i)` to `i-1]` if `i` is integer.
 // For example, if p is `(3`, i.e., point { value: int(3), excl: true, start: true }, it is equal to `[4`, i.e., point { value: int(4), excl: false, start: true }.
 // Similarly, if p is `8)`, i.e., point { value: int(8), excl: true, start: false}, it is equal to `7]`, i.e., point { value: int(7), excl: false, start: false }.
-// If return value is nil, it means p is unsatisfiable. For example, `(MaxUint64` is unsatisfiable.
-// The boundary value will be treated as the bigger type: For example, `(MaxInt64` of type KindInt64 will become `[MaxInt64+1` of type KindUint64,
-// and vice versa for `0)` of type KindUint64 will become `-1]` of type KindInt64.
+// If return value is nil, it means p is unsatisfiable. For example, `(MaxInt64` is unsatisfiable.
 func excludeToIncludeForIntPoint(p *point) *point {
 	if !p.excl {
 		return p
@@ -499,10 +497,9 @@ func excludeToIncludeForIntPoint(p *point) *point {
 		val := p.value.GetInt64()
 		if p.start {
 			if val == math.MaxInt64 {
-				p.value.SetUint64(uint64(val + 1))
-			} else {
-				p.value.SetInt64(val + 1)
+				return nil
 			}
+			p.value.SetInt64(val + 1)
 			p.excl = false
 		} else {
 			if val == math.MinInt64 {
@@ -521,10 +518,9 @@ func excludeToIncludeForIntPoint(p *point) *point {
 			p.excl = false
 		} else {
 			if val == 0 {
-				p.value.SetInt64(int64(val - 1))
-			} else {
-				p.value.SetUint64(val - 1)
+				return nil
 			}
+			p.value.SetUint64(val - 1)
 			p.excl = false
 		}
 	}
@@ -550,7 +546,7 @@ func allSinglePoints(sc *stmtctx.StatementContext, points []*point) []*point {
 			return nil
 		}
 		// Since the point's collations are equal to the column's collation, we can use any of them.
-		cmp, err := left.value.Compare(sc.TypeCtx(), &right.value, collate.GetCollator(left.value.Collation()))
+		cmp, err := left.value.Compare(sc, &right.value, collate.GetCollator(left.value.Collation()))
 		if err != nil || cmp != 0 {
 			return nil
 		}
@@ -610,7 +606,7 @@ func extractValueInfo(expr expression.Expression) *valueInfo {
 //
 // columnValues: the constant column values for all index columns. columnValues[i] is nil if cols[i] is not constant.
 // bool: indicate whether there's nil range when merging eq and in conditions.
-func ExtractEqAndInCondition(sctx planctx.PlanContext, conditions []expression.Expression, cols []*expression.Column,
+func ExtractEqAndInCondition(sctx sessionctx.Context, conditions []expression.Expression, cols []*expression.Column,
 	lengths []int) ([]expression.Expression, []expression.Expression, []expression.Expression, []*valueInfo, bool) {
 	var filters []expression.Expression
 	rb := builder{sctx: sctx}
@@ -643,9 +639,9 @@ func ExtractEqAndInCondition(sctx planctx.PlanContext, conditions []expression.E
 		}
 		points[offset] = rb.intersection(points[offset], rb.build(cond, newTp, types.UnspecifiedLength, false), collator)
 		if len(points[offset]) == 0 { // Early termination if false expression found
-			if expression.MaybeOverOptimized4PlanCache(sctx.GetExprCtx(), conditions) {
+			if expression.MaybeOverOptimized4PlanCache(sctx, conditions) {
 				// `a>@x and a<@y` --> `invalid-range if @x>=@y`
-				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.NewNoStackErrorf("some parameters may be overwritten"))
+				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.Errorf("some parameters may be overwritten"))
 			}
 			return nil, nil, nil, nil, true
 		}
@@ -667,23 +663,23 @@ func ExtractEqAndInCondition(sctx planctx.PlanContext, conditions []expression.E
 			// There exists an interval whose length is larger than 0
 			accesses[i] = nil
 		} else if len(points[i]) == 0 { // Early termination if false expression found
-			if expression.MaybeOverOptimized4PlanCache(sctx.GetExprCtx(), conditions) {
+			if expression.MaybeOverOptimized4PlanCache(sctx, conditions) {
 				// `a>@x and a<@y` --> `invalid-range if @x>=@y`
-				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.NewNoStackErrorf("some parameters may be overwritten"))
+				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.Errorf("some parameters may be overwritten"))
 			}
 			return nil, nil, nil, nil, true
 		} else {
 			// All Intervals are single points
-			accesses[i] = points2EqOrInCond(sctx.GetExprCtx(), points[i], cols[i])
+			accesses[i] = points2EqOrInCond(sctx, points[i], cols[i])
 			newConditions = append(newConditions, accesses[i])
 			if f, ok := accesses[i].(*expression.ScalarFunction); ok && f.FuncName.L == ast.EQ {
 				// Actually the constant column value may not be mutable. Here we assume it is mutable to keep it simple.
 				// Maybe we can improve it later.
 				columnValues[i] = &valueInfo{mutable: true}
 			}
-			if expression.MaybeOverOptimized4PlanCache(sctx.GetExprCtx(), conditions) {
+			if expression.MaybeOverOptimized4PlanCache(sctx, conditions) {
 				// `a=@x and a=@y` --> `a=@x if @x==@y`
-				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.NewNoStackErrorf("some parameters may be overwritten"))
+				sctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.Errorf("some parameters may be overwritten"))
 			}
 		}
 	}
@@ -719,10 +715,10 @@ func ExtractEqAndInCondition(sctx planctx.PlanContext, conditions []expression.E
 // We will detach the conditions of every DNF items, then compose them to a DNF.
 func (d *rangeDetacher) detachDNFCondAndBuildRangeForIndex(condition *expression.ScalarFunction, newTpSlice []*types.FieldType) (Ranges, []expression.Expression, []*valueInfo, bool, error) {
 	firstColumnChecker := &conditionChecker{
+		ctx:                      d.sctx,
 		checkerCol:               d.cols[0],
 		length:                   d.lengths[0],
 		optPrefixIndexSingleScan: d.sctx.GetSessionVars().OptPrefixIndexSingleScan,
-		ctx:                      d.sctx.GetExprCtx().GetEvalCtx(),
 	}
 	rb := builder{sctx: d.sctx}
 	dnfItems := expression.FlattenDNFConditions(condition)
@@ -760,7 +756,7 @@ func (d *rangeDetacher) detachDNFCondAndBuildRangeForIndex(condition *expression
 				d.sctx.GetSessionVars().StmtCtx.RecordRangeFallback(d.rangeMaxSize)
 				return FullRange(), nil, nil, true, nil
 			}
-			newAccessItems = append(newAccessItems, expression.ComposeCNFCondition(d.sctx.GetExprCtx(), accesses...))
+			newAccessItems = append(newAccessItems, expression.ComposeCNFCondition(d.sctx, accesses...))
 			if res.ColumnValues != nil {
 				if i == 0 {
 					columnValues = res.ColumnValues
@@ -829,7 +825,7 @@ func (d *rangeDetacher) detachDNFCondAndBuildRangeForIndex(condition *expression
 		return nil, nil, nil, false, errors.Trace(err)
 	}
 
-	return totalRanges, []expression.Expression{expression.ComposeDNFCondition(d.sctx.GetExprCtx(), newAccessItems...)}, columnValues, hasResidual, nil
+	return totalRanges, []expression.Expression{expression.ComposeDNFCondition(d.sctx, newAccessItems...)}, columnValues, hasResidual, nil
 }
 
 // valueInfo is used for recording the constant column value in DetachCondAndBuildRangeForIndex.
@@ -848,7 +844,7 @@ func isSameValue(sc *stmtctx.StatementContext, lhs, rhs *valueInfo) (bool, error
 		return false, nil
 	}
 	// binary collator may not the best choice, but it can make sure the result is correct.
-	cmp, err := lhs.value.Compare(sc.TypeCtx(), rhs.value, collate.GetBinaryCollator())
+	cmp, err := lhs.value.Compare(sc, rhs.value, collate.GetBinaryCollator())
 	if err != nil {
 		return false, err
 	}
@@ -878,7 +874,7 @@ type DetachRangeResult struct {
 // rangeMaxSize is the max memory limit for ranges. O indicates no memory limit. If you ask that all conditions must be used
 // for building ranges, set rangeMemQuota to 0 to avoid range fallback.
 // The returned values are encapsulated into a struct DetachRangeResult, see its comments for explanation.
-func DetachCondAndBuildRangeForIndex(sctx planctx.PlanContext, conditions []expression.Expression, cols []*expression.Column,
+func DetachCondAndBuildRangeForIndex(sctx sessionctx.Context, conditions []expression.Expression, cols []*expression.Column,
 	lengths []int, rangeMaxSize int64) (*DetachRangeResult, error) {
 	d := &rangeDetacher{
 		sctx:             sctx,
@@ -894,7 +890,7 @@ func DetachCondAndBuildRangeForIndex(sctx planctx.PlanContext, conditions []expr
 
 // detachCondAndBuildRangeWithoutMerging detaches the index filters from table filters and uses them to build ranges.
 // When building ranges, it doesn't merge consecutive ranges.
-func detachCondAndBuildRangeWithoutMerging(sctx planctx.PlanContext, conditions []expression.Expression, cols []*expression.Column,
+func detachCondAndBuildRangeWithoutMerging(sctx sessionctx.Context, conditions []expression.Expression, cols []*expression.Column,
 	lengths []int, rangeMaxSize int64, convertToSortKey bool) (*DetachRangeResult, error) {
 	d := &rangeDetacher{
 		sctx:             sctx,
@@ -912,13 +908,13 @@ func detachCondAndBuildRangeWithoutMerging(sctx planctx.PlanContext, conditions 
 // rangeMaxSize is the max memory limit for ranges. O indicates no memory limit. If you ask that all conditions must be used
 // for building ranges, set rangeMemQuota to 0 to avoid range fallback.
 // The returned values are encapsulated into a struct DetachRangeResult, see its comments for explanation.
-func DetachCondAndBuildRangeForPartition(sctx planctx.PlanContext, conditions []expression.Expression, cols []*expression.Column,
+func DetachCondAndBuildRangeForPartition(sctx sessionctx.Context, conditions []expression.Expression, cols []*expression.Column,
 	lengths []int, rangeMaxSize int64) (*DetachRangeResult, error) {
 	return detachCondAndBuildRangeWithoutMerging(sctx, conditions, cols, lengths, rangeMaxSize, false)
 }
 
 type rangeDetacher struct {
-	sctx             planctx.PlanContext
+	sctx             sessionctx.Context
 	allConds         []expression.Expression
 	cols             []*expression.Column
 	lengths          []int
@@ -958,7 +954,7 @@ func (d *rangeDetacher) detachCondAndBuildRangeForCols() (*DetachRangeResult, er
 // It will find the point query column firstly and then extract the range query column.
 // rangeMaxSize is the max memory limit for ranges. O indicates no memory limit. If you ask that all conditions must be used
 // for building ranges, set rangeMemQuota to 0 to avoid range fallback.
-func DetachSimpleCondAndBuildRangeForIndex(sctx planctx.PlanContext, conditions []expression.Expression,
+func DetachSimpleCondAndBuildRangeForIndex(sctx sessionctx.Context, conditions []expression.Expression,
 	cols []*expression.Column, lengths []int, rangeMaxSize int64) (Ranges, []expression.Expression, error) {
 	newTpSlice := make([]*types.FieldType, 0, len(cols))
 	for _, col := range cols {
@@ -1000,12 +996,12 @@ func AppendConditionsIfNotExist(conditions, condsToAppend []expression.Expressio
 
 // ExtractAccessConditionsForColumn extracts the access conditions used for range calculation. Since
 // we don't need to return the remained filter conditions, it is much simpler than DetachCondsForColumn.
-func ExtractAccessConditionsForColumn(ctx planctx.PlanContext, conds []expression.Expression, col *expression.Column) []expression.Expression {
+func ExtractAccessConditionsForColumn(ctx sessionctx.Context, conds []expression.Expression, col *expression.Column) []expression.Expression {
 	checker := conditionChecker{
+		ctx:                      ctx,
 		checkerCol:               col,
 		length:                   types.UnspecifiedLength,
 		optPrefixIndexSingleScan: ctx.GetSessionVars().OptPrefixIndexSingleScan,
-		ctx:                      ctx.GetExprCtx().GetEvalCtx(),
 	}
 	accessConds := make([]expression.Expression, 0, 8)
 	filter := func(expr expression.Expression) bool {
@@ -1016,19 +1012,19 @@ func ExtractAccessConditionsForColumn(ctx planctx.PlanContext, conds []expressio
 }
 
 // DetachCondsForColumn detaches access conditions for specified column from other filter conditions.
-func DetachCondsForColumn(sctx planctx.PlanContext, conds []expression.Expression, col *expression.Column) (accessConditions, otherConditions []expression.Expression) {
+func DetachCondsForColumn(sctx sessionctx.Context, conds []expression.Expression, col *expression.Column) (accessConditions, otherConditions []expression.Expression) {
 	checker := &conditionChecker{
+		ctx:                      sctx,
 		checkerCol:               col,
 		length:                   types.UnspecifiedLength,
 		optPrefixIndexSingleScan: sctx.GetSessionVars().OptPrefixIndexSingleScan,
-		ctx:                      sctx.GetExprCtx().GetEvalCtx(),
 	}
-	return detachColumnCNFConditions(sctx.GetExprCtx(), conds, checker)
+	return detachColumnCNFConditions(sctx, conds, checker)
 }
 
 // MergeDNFItems4Col receives a slice of DNF conditions, merges some of them which can be built into ranges on a single column, then returns.
 // For example, [a > 5, b > 6, c > 7, a = 1, b > 3] will become [a > 5 or a = 1, b > 6 or b > 3, c > 7].
-func MergeDNFItems4Col(ctx planctx.PlanContext, dnfItems []expression.Expression) []expression.Expression {
+func MergeDNFItems4Col(ctx sessionctx.Context, dnfItems []expression.Expression) []expression.Expression {
 	mergedDNFItems := make([]expression.Expression, 0, len(dnfItems))
 	col2DNFItems := make(map[int64][]expression.Expression)
 	for _, dnfItem := range dnfItems {
@@ -1042,10 +1038,10 @@ func MergeDNFItems4Col(ctx planctx.PlanContext, dnfItems []expression.Expression
 
 		uniqueID := cols[0].UniqueID
 		checker := &conditionChecker{
+			ctx:                      ctx,
 			checkerCol:               cols[0],
 			length:                   types.UnspecifiedLength,
 			optPrefixIndexSingleScan: ctx.GetSessionVars().OptPrefixIndexSingleScan,
-			ctx:                      ctx.GetExprCtx().GetEvalCtx(),
 		}
 		// If we can't use this condition to build range, we can't merge it.
 		// Currently, we assume if every condition in a DNF expression can pass this check, then `Selectivity` must be able to
@@ -1060,7 +1056,7 @@ func MergeDNFItems4Col(ctx planctx.PlanContext, dnfItems []expression.Expression
 		col2DNFItems[uniqueID] = append(col2DNFItems[uniqueID], dnfItem)
 	}
 	for _, items := range col2DNFItems {
-		mergedDNFItems = append(mergedDNFItems, expression.ComposeDNFCondition(ctx.GetExprCtx(), items...))
+		mergedDNFItems = append(mergedDNFItems, expression.ComposeDNFCondition(ctx, items...))
 	}
 	return mergedDNFItems
 }
@@ -1081,7 +1077,7 @@ func MergeDNFItems4Col(ctx planctx.PlanContext, dnfItems []expression.Expression
 // @retval -  []expression.Expression   the new conditions after adding `tidb_shard() = xxx` prefix
 //
 //	error                     if error gernerated, return error
-func AddGcColumnCond(sctx planctx.PlanContext,
+func AddGcColumnCond(sctx sessionctx.Context,
 	cols []*expression.Column,
 	accessesCond []expression.Expression,
 	columnValues []*valueInfo) ([]expression.Expression, error) {
@@ -1104,7 +1100,7 @@ func AddGcColumnCond(sctx planctx.PlanContext,
 // @retval -  []expression.Expression   the new conditions after adding `tidb_shard() = xxx` prefix
 //
 //	error                     if error gernerated, return error
-func AddGcColumn4InCond(sctx planctx.PlanContext,
+func AddGcColumn4InCond(sctx sessionctx.Context,
 	cols []*expression.Column,
 	accessesCond []expression.Expression) ([]expression.Expression, error) {
 	var errRes error
@@ -1117,35 +1113,34 @@ func AddGcColumn4InCond(sctx planctx.PlanContext,
 	sf := accessesCond[1].(*expression.ScalarFunction)
 	c := sf.GetArgs()[0].(*expression.Column)
 	var andOrExpr expression.Expression
-	evalCtx := sctx.GetExprCtx().GetEvalCtx()
 	for i, arg := range sf.GetArgs()[1:] {
 		// get every const value and calculate tidb_shard(val)
 		con := arg.(*expression.Constant)
-		conVal, err := con.Eval(evalCtx, chunk.Row{})
+		conVal, err := con.Eval(chunk.Row{})
 		if err != nil {
 			return accessesCond, err
 		}
 
 		record[0] = conVal
 		mutRow := chunk.MutRowFromDatums(record)
-		exprVal, err := expr.Eval(evalCtx, mutRow.ToRow())
+		exprVal, err := expr.Eval(mutRow.ToRow())
 		if err != nil {
 			return accessesCond, err
 		}
 
 		// tmpArg1 is like `tidb_shard(a) = 8`, tmpArg2 is like `a = 100`
 		exprCon := &expression.Constant{Value: exprVal, RetType: cols[0].RetType}
-		tmpArg1, err := expression.NewFunction(sctx.GetExprCtx(), ast.EQ, cols[0].RetType, cols[0], exprCon)
+		tmpArg1, err := expression.NewFunction(sctx, ast.EQ, cols[0].RetType, cols[0], exprCon)
 		if err != nil {
 			return accessesCond, err
 		}
-		tmpArg2, err := expression.NewFunction(sctx.GetExprCtx(), ast.EQ, c.RetType, c.Clone(), arg)
+		tmpArg2, err := expression.NewFunction(sctx, ast.EQ, c.RetType, c.Clone(), arg)
 		if err != nil {
 			return accessesCond, err
 		}
 
 		// make a LogicAnd, e.g. `tidb_shard(a) = 8 AND a = 100`
-		andExpr, err := expression.NewFunction(sctx.GetExprCtx(), ast.LogicAnd, andType, tmpArg1, tmpArg2)
+		andExpr, err := expression.NewFunction(sctx, ast.LogicAnd, andType, tmpArg1, tmpArg2)
 		if err != nil {
 			return accessesCond, err
 		}
@@ -1155,7 +1150,7 @@ func AddGcColumn4InCond(sctx planctx.PlanContext,
 		} else {
 			// if the LogicAnd more than one, make a LogicOr,
 			// e.g. `(tidb_shard(a) = 8 AND a = 100) OR (tidb_shard(a) = 161 AND a = 200)`
-			andOrExpr, errRes = expression.NewFunction(sctx.GetExprCtx(), ast.LogicOr, andType, andOrExpr, andExpr)
+			andOrExpr, errRes = expression.NewFunction(sctx, ast.LogicOr, andType, andOrExpr, andExpr)
 			if errRes != nil {
 				return accessesCond, errRes
 			}
@@ -1173,7 +1168,7 @@ func AddGcColumn4InCond(sctx planctx.PlanContext,
 //
 //	[]*valueInfo              the values of every columns in the returned new conditions
 //	error                     if error gernerated, return error
-func AddGcColumn4EqCond(sctx planctx.PlanContext,
+func AddGcColumn4EqCond(sctx sessionctx.Context,
 	cols []*expression.Column,
 	accessesCond []expression.Expression,
 	columnValues []*valueInfo) ([]expression.Expression, error) {
@@ -1189,15 +1184,14 @@ func AddGcColumn4EqCond(sctx planctx.PlanContext,
 	}
 
 	mutRow := chunk.MutRowFromDatums(record)
-	exprCtx := sctx.GetExprCtx()
-	evaluated, err := expr.Eval(exprCtx.GetEvalCtx(), mutRow.ToRow())
+	evaluated, err := expr.Eval(mutRow.ToRow())
 	if err != nil {
 		return accessesCond, err
 	}
 	vi := &valueInfo{&evaluated, false}
 	con := &expression.Constant{Value: evaluated, RetType: cols[0].RetType}
 	// make a tidb_shard() function, e.g. `tidb_shard(a) = 8`
-	cond, err := expression.NewFunction(exprCtx, ast.EQ, cols[0].RetType, cols[0], con)
+	cond, err := expression.NewFunction(sctx, ast.EQ, cols[0].RetType, cols[0], con)
 	if err != nil {
 		return accessesCond, err
 	}
@@ -1216,7 +1210,7 @@ func AddGcColumn4EqCond(sctx planctx.PlanContext,
 // @param[in] cols        the columns of shard index, such as [tidb_shard(a), a, ...]
 // @param[in] lengths     the length for every column of shard index
 // @retval - the new condition after adding tidb_shard() prefix
-func AddExpr4EqAndInCondition(sctx planctx.PlanContext, conditions []expression.Expression,
+func AddExpr4EqAndInCondition(sctx sessionctx.Context, conditions []expression.Expression,
 	cols []*expression.Column) ([]expression.Expression, error) {
 	accesses := make([]expression.Expression, len(cols))
 	columnValues := make([]*valueInfo, len(cols))
@@ -1287,7 +1281,10 @@ func AddExpr4EqAndInCondition(sctx planctx.PlanContext, conditions []expression.
 //	is empty.
 //
 // @retval -  return true if it needs to addr tidb_shard() prefix, ohterwise return false
-func NeedAddGcColumn4ShardIndex(cols []*expression.Column, accessCond []expression.Expression, columnValues []*valueInfo) bool {
+func NeedAddGcColumn4ShardIndex(
+	cols []*expression.Column,
+	accessCond []expression.Expression,
+	columnValues []*valueInfo) bool {
 	// the columns of shard index shoude be more than 2, like (tidb_shard(a),a,...)
 	// check cols and columnValues in the sub call function
 	if len(accessCond) < 2 || len(cols) < 2 {
@@ -1393,7 +1390,7 @@ func NeedAddColumn4InCond(cols []*expression.Column, accessCond []expression.Exp
 	}
 
 	if len(fields) != 1 ||
-		!fields[0].EqualColumn(c) {
+		!fields[0].Equal(nil, c) {
 		return false
 	}
 
@@ -1448,7 +1445,7 @@ func IsValidShardIndex(cols []*expression.Column) bool {
 
 	// parameter of tidb_shard must be the second column of the input index columns
 	col, ok := shardFunc.GetArgs()[0].(*expression.Column)
-	if !ok || !col.EqualColumn(cols[1]) {
+	if !ok || !col.Equal(nil, cols[1]) {
 		return false
 	}
 

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ngaut/pools"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/domain"
@@ -33,7 +32,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	dbsession "github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze/exec"
+	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze"
 	"github.com/pingcap/tidb/pkg/testkit"
 	timerapi "github.com/pingcap/tidb/pkg/timer/api"
 	timertable "github.com/pingcap/tidb/pkg/timer/tablestore"
@@ -64,45 +63,6 @@ func sessionFactory(t *testing.T, store kv.Storage) func() session.Session {
 	}
 }
 
-func TestGetSession(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("set @@time_zone = 'Asia/Shanghai'")
-	tk.MustExec("set @@global.time_zone= 'Europe/Berlin'")
-	tk.MustExec("set @@tidb_retry_limit=1")
-	tk.MustExec("set @@tidb_enable_1pc=0")
-	tk.MustExec("set @@tidb_enable_async_commit=0")
-	var getCnt atomic.Int32
-
-	pool := pools.NewResourcePool(func() (pools.Resource, error) {
-		if getCnt.CompareAndSwap(0, 1) {
-			return tk.Session(), nil
-		}
-		require.FailNow(t, "get session more than once")
-		return nil, nil
-	}, 1, 1, 0)
-	defer pool.Close()
-
-	se, err := ttlworker.GetSessionForTest(pool)
-	require.NoError(t, err)
-	defer se.Close()
-
-	// global time zone should not change
-	tk.MustQuery("select @@global.time_zone").Check(testkit.Rows("Europe/Berlin"))
-	tz, err := se.GlobalTimeZone(context.TODO())
-	require.NoError(t, err)
-	require.Equal(t, "Europe/Berlin", tz.String())
-
-	// session variables should be set
-	tk.MustQuery("select @@time_zone, @@tidb_retry_limit, @@tidb_enable_1pc, @@tidb_enable_async_commit").
-		Check(testkit.Rows("UTC 0 1 1"))
-
-	// all session variables should be restored after close
-	se.Close()
-	tk.MustQuery("select @@time_zone, @@tidb_retry_limit, @@tidb_enable_1pc, @@tidb_enable_async_commit").
-		Check(testkit.Rows("Asia/Shanghai 1 0 0"))
-}
-
 func TestParallelLockNewJob(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	waitAndStopTTLManager(t, dom)
@@ -115,14 +75,14 @@ func TestParallelLockNewJob(t *testing.T) {
 	m.InfoSchemaCache().Tables[testTable.ID] = testTable
 
 	se := sessionFactory()
-	job, err := m.LockJob(context.Background(), se, testTable, se.Now(), uuid.NewString(), false)
+	job, err := m.LockJob(context.Background(), se, testTable, time.Now(), uuid.NewString(), false)
 	require.NoError(t, err)
-	job.Finish(se, se.Now(), &ttlworker.TTLSummary{})
+	job.Finish(se, time.Now(), &ttlworker.TTLSummary{})
 
 	// lock one table in parallel, only one of them should lock successfully
 	testTimes := 100
 	concurrency := 5
-	now := se.Now()
+	now := time.Now()
 	for i := 0; i < testTimes; i++ {
 		successCounter := atomic.NewUint64(0)
 		successJob := &ttlworker.TTLJob{}
@@ -151,7 +111,7 @@ func TestParallelLockNewJob(t *testing.T) {
 		wg.Wait()
 
 		require.Equal(t, uint64(1), successCounter.Load())
-		successJob.Finish(se, se.Now(), &ttlworker.TTLSummary{})
+		successJob.Finish(se, time.Now(), &ttlworker.TTLSummary{})
 	}
 }
 
@@ -171,7 +131,7 @@ func TestFinishJob(t *testing.T) {
 	m := ttlworker.NewJobManager("test-id", nil, store, nil, nil)
 	m.InfoSchemaCache().Tables[testTable.ID] = testTable
 	se := sessionFactory()
-	startTime := se.Now()
+	startTime := time.Now()
 	job, err := m.LockJob(context.Background(), se, testTable, startTime, uuid.NewString(), false)
 	require.NoError(t, err)
 
@@ -196,7 +156,7 @@ func TestFinishJob(t *testing.T) {
 	summary.SummaryText = string(summaryBytes)
 
 	require.NoError(t, err)
-	endTime := se.Now()
+	endTime := time.Now()
 	job.Finish(se, endTime, summary)
 	tk.MustQuery("select table_id, last_job_summary from mysql.tidb_ttl_table_status").Check(testkit.Rows("2 " + summary.SummaryText))
 	tk.MustQuery("select * from mysql.tidb_ttl_task").Check(testkit.Rows())
@@ -218,10 +178,10 @@ func TestTTLAutoAnalyze(t *testing.T) {
 	failpoint.Enable("github.com/pingcap/tidb/pkg/ttl/ttlworker/task-manager-loop-interval", fmt.Sprintf("return(%d)", time.Second))
 	defer failpoint.Disable("github.com/pingcap/tidb/pkg/ttl/ttlworker/task-manager-loop-interval")
 
-	originAutoAnalyzeMinCnt := exec.AutoAnalyzeMinCnt
-	exec.AutoAnalyzeMinCnt = 0
+	originAutoAnalyzeMinCnt := autoanalyze.AutoAnalyzeMinCnt
+	autoanalyze.AutoAnalyzeMinCnt = 0
 	defer func() {
-		exec.AutoAnalyzeMinCnt = originAutoAnalyzeMinCnt
+		autoanalyze.AutoAnalyzeMinCnt = originAutoAnalyzeMinCnt
 	}()
 
 	store, dom := testkit.CreateMockStoreAndDomain(t)
@@ -266,7 +226,7 @@ func TestTTLAutoAnalyze(t *testing.T) {
 	is := dom.InfoSchema()
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
-	require.True(t, h.HandleAutoAnalyze())
+	require.True(t, h.HandleAutoAnalyze(is))
 }
 
 func TestTriggerTTLJob(t *testing.T) {
@@ -404,10 +364,10 @@ func TestTTLJobDisable(t *testing.T) {
 	failpoint.Enable("github.com/pingcap/tidb/pkg/ttl/ttlworker/resize-workers-interval", fmt.Sprintf("return(%d)", time.Second))
 	defer failpoint.Disable("github.com/pingcap/tidb/pkg/ttl/ttlworker/resize-workers-interval")
 
-	originAutoAnalyzeMinCnt := exec.AutoAnalyzeMinCnt
-	exec.AutoAnalyzeMinCnt = 0
+	originAutoAnalyzeMinCnt := autoanalyze.AutoAnalyzeMinCnt
+	autoanalyze.AutoAnalyzeMinCnt = 0
 	defer func() {
-		exec.AutoAnalyzeMinCnt = originAutoAnalyzeMinCnt
+		autoanalyze.AutoAnalyzeMinCnt = originAutoAnalyzeMinCnt
 	}()
 
 	store, dom := testkit.CreateMockStoreAndDomain(t)
@@ -649,6 +609,7 @@ func TestJobTimeout(t *testing.T) {
 
 	waitAndStopTTLManager(t, dom)
 
+	now := time.Now()
 	tk.MustExec("create table test.t (id int, created_at datetime) ttl = `created_at` + interval 1 minute ttl_job_interval = '1m'")
 	table, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	tableID := table.Meta().ID
@@ -656,7 +617,6 @@ func TestJobTimeout(t *testing.T) {
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnTTL)
 
 	se := sessionFactory()
-	now := se.Now()
 	m := ttlworker.NewJobManager("manager-1", nil, store, nil, func() bool {
 		return true
 	})
@@ -1067,10 +1027,6 @@ func TestManagerJobAdapterCanSubmitJob(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	adapter := ttlworker.NewManagerJobAdapter(store, dom.SysSessionPool(), nil)
 
-	// stop TTLJobManager to avoid unnecessary job schedule and make test stable
-	dom.TTLJobManager().Stop()
-	require.NoError(t, dom.TTLJobManager().WaitStopped(context.Background(), time.Minute))
-
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 
@@ -1285,21 +1241,4 @@ func TestManagerJobAdapterGetJob(t *testing.T) {
 		require.Equal(t, summary, *job.Summary, status)
 		tk.MustExec("delete from mysql.tidb_ttl_job_history")
 	}
-}
-
-func TestManagerJobAdapterNow(t *testing.T) {
-	store, dom := testkit.CreateMockStoreAndDomain(t)
-	adapter := ttlworker.NewManagerJobAdapter(store, dom.SysSessionPool(), nil)
-
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("set @@global.time_zone ='Europe/Berlin'")
-	tk.MustExec("set @@time_zone='Asia/Shanghai'")
-
-	now, err := adapter.Now()
-	require.NoError(t, err)
-	localNow := time.Now()
-
-	require.Equal(t, "Europe/Berlin", now.Location().String())
-	require.InDelta(t, now.Unix(), localNow.Unix(), 10)
 }

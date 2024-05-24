@@ -74,14 +74,14 @@ func TestPagingActRowsAndProcessKeys(t *testing.T) {
 		"desc analyze select /*+ use_index(t,idx) */ c from t;",   // IndexLookUp
 	}
 
-	checkScanOperator := func(strs []any) {
+	checkScanOperator := func(strs []interface{}) {
 		require.Equal(t, strs[2].(string), "100000")
 		if *realtikvtest.WithRealTiKV { // Unistore don't collect process_keys now
 			require.True(t, strings.Contains(strs[5].(string), "total_process_keys: 100000"), strs[5])
 		}
 	}
 
-	checkResult := func(result [][]any) {
+	checkResult := func(result [][]interface{}) {
 		for _, strs := range result {
 			if strings.Contains(strs[0].(string), "Scan") {
 				checkScanOperator(strs)

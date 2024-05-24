@@ -78,7 +78,7 @@ func TestOptimizerDebugTrace(t *testing.T) {
 	tk.MustExec("set @a = 1")
 	var (
 		in  []string
-		out []any
+		out []interface{}
 	)
 	optSuiteData := testDataMap["optimizer_suite"]
 	optSuiteData.LoadTestCases(t, &in, &out)
@@ -89,7 +89,7 @@ func TestOptimizerDebugTrace(t *testing.T) {
 		encoder := json.NewEncoder(&buf)
 		encoder.SetEscapeHTML(false)
 		require.NoError(t, encoder.Encode(traceInfo))
-		var res any
+		var res interface{}
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &res))
 		testdata.OnRecord(func() {
 			out[i] = res

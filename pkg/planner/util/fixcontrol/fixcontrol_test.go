@@ -52,7 +52,7 @@ func TestFixControl(t *testing.T) {
 		SQL        string
 		FixControl map[uint64]*resultForSingleFix
 		Error      string
-		Warnings   [][]any
+		Warnings   [][]interface{}
 		Variable   []string
 	}
 

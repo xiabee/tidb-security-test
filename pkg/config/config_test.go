@@ -126,7 +126,7 @@ func TestLogConfig(t *testing.T) {
 		require.Equal(t, expectedDisableErrorStack, conf.Log.DisableErrorStack)
 		require.Equal(t, expectedEnableTimestamp, conf.Log.EnableTimestamp)
 		require.Equal(t, expectedDisableTimestamp, conf.Log.DisableTimestamp)
-		require.Equal(t, logutil.NewLogConfig("info", "text", "tidb-slow.log", "", conf.Log.File, resultedDisableTimestamp, func(config *zaplog.Config) { config.DisableErrorVerbose = resultedDisableErrorVerbose }), conf.Log.ToLogConfig())
+		require.Equal(t, logutil.NewLogConfig("info", "text", "tidb-slow.log", conf.Log.File, resultedDisableTimestamp, func(config *zaplog.Config) { config.DisableErrorVerbose = resultedDisableErrorVerbose }), conf.Log.ToLogConfig())
 		err := f.Truncate(0)
 		require.NoError(t, err)
 		_, err = f.Seek(0, 0)
@@ -754,7 +754,6 @@ store-limit=0
 ttl-refreshed-txn-size=8192
 resolve-lock-lite-threshold = 16
 copr-req-timeout = "120s"
-enable-replica-selector-v2 = false
 [tikv-client.async-commit]
 keys-limit=123
 total-key-size-limit=1024
@@ -805,8 +804,6 @@ max_connections = 200
 	require.Equal(t, uint(6000), conf.TiKVClient.RegionCacheTTL)
 	require.Equal(t, int64(0), conf.TiKVClient.StoreLimit)
 	require.Equal(t, int64(8192), conf.TiKVClient.TTLRefreshedTxnSize)
-	require.Equal(t, false, conf.TiKVClient.EnableReplicaSelectorV2)
-	require.Equal(t, true, defaultConf.TiKVClient.EnableReplicaSelectorV2)
 	require.Equal(t, uint(1000), conf.TokenLimit)
 	require.True(t, conf.EnableTableLock)
 	require.Equal(t, uint64(5), conf.DelayCleanTableLock)
@@ -913,7 +910,7 @@ spilled-file-encryption-method = "aes128-ctr"
 	require.Equal(t, GetGlobalConfig(), conf)
 
 	// Test for log config.
-	require.Equal(t, logutil.NewLogConfig("info", "text", "tidb-slow.log", "", conf.Log.File, false, func(config *zaplog.Config) { config.DisableErrorVerbose = conf.Log.getDisableErrorStack() }), conf.Log.ToLogConfig())
+	require.Equal(t, logutil.NewLogConfig("info", "text", "tidb-slow.log", conf.Log.File, false, func(config *zaplog.Config) { config.DisableErrorVerbose = conf.Log.getDisableErrorStack() }), conf.Log.ToLogConfig())
 
 	// Test for tracing config.
 	tracingConf := &tracing.Configuration{
@@ -1208,8 +1205,8 @@ func TestModifyThroughLDFlags(t *testing.T) {
 		EnableTelemetry       bool
 		CheckTableBeforeDrop  bool
 	}{
-		{"Community", "None", false, false},
-		{"Community", "1", false, true},
+		{"Community", "None", true, false},
+		{"Community", "1", true, true},
 		{"Enterprise", "None", false, false},
 		{"Enterprise", "1", false, true},
 	}
@@ -1219,7 +1216,7 @@ func TestModifyThroughLDFlags(t *testing.T) {
 	originalGlobalConfig := GetGlobalConfig()
 
 	for _, test := range tests {
-		defaultConf.EnableTelemetry = false
+		defaultConf.EnableTelemetry = true
 		CheckTableBeforeDrop = false
 
 		initByLDFlags(test.Edition, test.CheckBeforeDropLDFlag)

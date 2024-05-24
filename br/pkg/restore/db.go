@@ -490,8 +490,9 @@ func GetExistedUserDBs(dom *domain.Domain) []*model.DBInfo {
 			// tidb create test db on fresh cluster
 			// if it's empty we don't take it as user db
 			continue
+		} else {
+			existedDatabases = append(existedDatabases, db)
 		}
-		existedDatabases = append(existedDatabases, db)
 	}
 
 	return existedDatabases

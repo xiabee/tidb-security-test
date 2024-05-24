@@ -214,7 +214,7 @@ func rowMemDeltaGens(srcChk *chunk.Chunk, dataType *types.FieldType) (memDeltas 
 	return memDeltas, nil
 }
 
-type multiArgsUpdateMemDeltaGens func(sessionctx.Context, *chunk.Chunk, []*types.FieldType, []*util.ByItems) (memDeltas []int64, err error)
+type multiArgsUpdateMemDeltaGens func(*chunk.Chunk, []*types.FieldType, []*util.ByItems) (memDeltas []int64, err error)
 
 type aggMemTest struct {
 	aggTest            aggTest
@@ -301,7 +301,7 @@ func testMergePartialResult(t *testing.T, p aggTest) {
 	if p.funcName == ast.AggFuncJsonArrayagg {
 		dt = resultChk.GetRow(0).GetDatum(0, types.NewFieldType(mysql.TypeJSON))
 	}
-	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[0])
 
@@ -328,7 +328,7 @@ func testMergePartialResult(t *testing.T, p aggTest) {
 	if p.funcName == ast.AggFuncJsonArrayagg {
 		dt = resultChk.GetRow(0).GetDatum(0, types.NewFieldType(mysql.TypeJSON))
 	}
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[1])
 	_, err = finalFunc.MergePartialResult(ctx, partialResult, finalPr)
@@ -351,16 +351,16 @@ func testMergePartialResult(t *testing.T, p aggTest) {
 	if p.funcName == ast.AggFuncJsonArrayagg {
 		dt = resultChk.GetRow(0).GetDatum(0, types.NewFieldType(mysql.TypeJSON))
 	}
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[2], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[2], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[2])
 }
 
-func buildAggTester(funcName string, tp byte, numRows int, results ...any) aggTest {
+func buildAggTester(funcName string, tp byte, numRows int, results ...interface{}) aggTest {
 	return buildAggTesterWithFieldType(funcName, types.NewFieldType(tp), numRows, results...)
 }
 
-func buildAggTesterWithFieldType(funcName string, ft *types.FieldType, numRows int, results ...any) aggTest {
+func buildAggTesterWithFieldType(funcName string, ft *types.FieldType, numRows int, results ...interface{}) aggTest {
 	pt := aggTest{
 		dataType: ft,
 		numRows:  numRows,
@@ -373,7 +373,7 @@ func buildAggTesterWithFieldType(funcName string, ft *types.FieldType, numRows i
 	return pt
 }
 
-func testMultiArgsMergePartialResult(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
+func testMultiArgsMergePartialResult(t *testing.T, ctx sessionctx.Context, p multiArgsAggTest) {
 	srcChk := p.genSrcChk()
 	iter := chunk.NewIterator4Chunk(srcChk)
 
@@ -410,7 +410,7 @@ func testMultiArgsMergePartialResult(t *testing.T, ctx *mock.Context, p multiArg
 	err = partialFunc.AppendFinalResult2Chunk(ctx, partialResult, resultChk)
 	require.NoError(t, err)
 	dt := resultChk.GetRow(0).GetDatum(0, p.retType)
-	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Zero(t, result)
 
@@ -431,7 +431,7 @@ func testMultiArgsMergePartialResult(t *testing.T, ctx *mock.Context, p multiArg
 	err = partialFunc.AppendFinalResult2Chunk(ctx, partialResult, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, p.retType)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Zero(t, result)
 	_, err = finalFunc.MergePartialResult(ctx, partialResult, finalPr)
@@ -442,13 +442,13 @@ func testMultiArgsMergePartialResult(t *testing.T, ctx *mock.Context, p multiArg
 	require.NoError(t, err)
 
 	dt = resultChk.GetRow(0).GetDatum(0, p.retType)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[2], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[2], ctor)
 	require.NoError(t, err)
 	require.Zero(t, result)
 }
 
 // for multiple args in aggfuncs such as json_objectagg(c1, c2)
-func buildMultiArgsAggTester(funcName string, tps []byte, rt byte, numRows int, results ...any) multiArgsAggTest {
+func buildMultiArgsAggTester(funcName string, tps []byte, rt byte, numRows int, results ...interface{}) multiArgsAggTest {
 	fts := make([]*types.FieldType, len(tps))
 	for i := 0; i < len(tps); i++ {
 		fts[i] = types.NewFieldType(tps[i])
@@ -456,7 +456,7 @@ func buildMultiArgsAggTester(funcName string, tps []byte, rt byte, numRows int, 
 	return buildMultiArgsAggTesterWithFieldType(funcName, fts, types.NewFieldType(rt), numRows, results...)
 }
 
-func buildMultiArgsAggTesterWithFieldType(funcName string, fts []*types.FieldType, rt *types.FieldType, numRows int, results ...any) multiArgsAggTest {
+func buildMultiArgsAggTesterWithFieldType(funcName string, fts []*types.FieldType, rt *types.FieldType, numRows int, results ...interface{}) multiArgsAggTest {
 	dataGens := make([]func(i int) types.Datum, len(fts))
 	for i := 0; i < len(fts); i++ {
 		dataGens[i] = getDataGenFunc(fts[i])
@@ -540,7 +540,7 @@ func testAggFunc(t *testing.T, p aggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt := resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[1])
 
@@ -550,7 +550,7 @@ func testAggFunc(t *testing.T, p aggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[0])
 
@@ -583,9 +583,19 @@ func testAggFunc(t *testing.T, p aggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[1])
+
+	// test the empty input
+	resultChk.Reset()
+	finalFunc.ResetPartialResult(finalPr)
+	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
+	require.NoError(t, err)
+	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
+	require.NoError(t, err)
+	require.Equalf(t, 0, result, "%v != %v", dt.String(), p.results[0])
 }
 
 func testAggFuncWithoutDistinct(t *testing.T, p aggTest) {
@@ -620,7 +630,7 @@ func testAggFuncWithoutDistinct(t *testing.T, p aggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt := resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Zerof(t, result, "%v != %v", dt.String(), p.results[1])
 
@@ -630,7 +640,7 @@ func testAggFuncWithoutDistinct(t *testing.T, p aggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Zerof(t, result, "%v != %v", dt.String(), p.results[0])
 }
@@ -666,7 +676,7 @@ func testAggMemFunc(t *testing.T, p aggMemTest) {
 	}
 }
 
-func testMultiArgsAggFunc(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
+func testMultiArgsAggFunc(t *testing.T, ctx sessionctx.Context, p multiArgsAggTest) {
 	srcChk := p.genSrcChk()
 
 	args := make([]expression.Expression, len(p.dataTypes))
@@ -698,7 +708,7 @@ func testMultiArgsAggFunc(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt := resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err := dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Zerof(t, result, "%v != %v", dt.String(), p.results[1])
 
@@ -708,7 +718,7 @@ func testMultiArgsAggFunc(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Zerof(t, result, "%v != %v", dt.String(), p.results[0])
 
@@ -741,7 +751,7 @@ func testMultiArgsAggFunc(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[1], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[1], ctor)
 	require.NoError(t, err)
 	require.Zerof(t, result, "%v != %v", dt.String(), p.results[1])
 
@@ -751,7 +761,7 @@ func testMultiArgsAggFunc(t *testing.T, ctx *mock.Context, p multiArgsAggTest) {
 	err = finalFunc.AppendFinalResult2Chunk(ctx, finalPr, resultChk)
 	require.NoError(t, err)
 	dt = resultChk.GetRow(0).GetDatum(0, desc.RetTp)
-	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx.TypeCtx(), &p.results[0], ctor)
+	result, err = dt.Compare(ctx.GetSessionVars().StmtCtx, &p.results[0], ctor)
 	require.NoError(t, err)
 	require.Zero(t, result)
 }
@@ -779,7 +789,7 @@ func testMultiArgsAggMemFunc(t *testing.T, p multiArgsAggMemTest) {
 	finalPr, memDelta := finalFunc.AllocPartialResult()
 	require.Equal(t, p.allocMemDelta, memDelta)
 
-	updateMemDeltas, err := p.multiArgsUpdateMemDeltaGens(ctx, srcChk, p.multiArgsAggTest.dataTypes, desc.OrderByItems)
+	updateMemDeltas, err := p.multiArgsUpdateMemDeltaGens(srcChk, p.multiArgsAggTest.dataTypes, desc.OrderByItems)
 	require.NoError(t, err)
 	iter := chunk.NewIterator4Chunk(srcChk)
 	i := 0
@@ -790,7 +800,7 @@ func testMultiArgsAggMemFunc(t *testing.T, p multiArgsAggMemTest) {
 	}
 }
 
-func benchmarkAggFunc(b *testing.B, ctx *mock.Context, p aggTest) {
+func benchmarkAggFunc(b *testing.B, ctx sessionctx.Context, p aggTest) {
 	srcChk := chunk.NewChunkWithCapacity([]*types.FieldType{p.dataType}, p.numRows)
 	for i := 0; i < p.numRows; i++ {
 		dt := p.dataGen(i)
@@ -838,7 +848,7 @@ func benchmarkAggFunc(b *testing.B, ctx *mock.Context, p aggTest) {
 	})
 }
 
-func benchmarkMultiArgsAggFunc(b *testing.B, ctx *mock.Context, p multiArgsAggTest) {
+func benchmarkMultiArgsAggFunc(b *testing.B, ctx sessionctx.Context, p multiArgsAggTest) {
 	srcChk := chunk.NewChunkWithCapacity(p.dataTypes, p.numRows)
 	for i := 0; i < p.numRows; i++ {
 		for j := 0; j < len(p.dataGens); j++ {
@@ -892,7 +902,7 @@ func benchmarkMultiArgsAggFunc(b *testing.B, ctx *mock.Context, p multiArgsAggTe
 	})
 }
 
-func baseBenchmarkAggFunc(b *testing.B, ctx aggfuncs.AggFuncUpdateContext, finalFunc aggfuncs.AggFunc, input []chunk.Row, output *chunk.Chunk) {
+func baseBenchmarkAggFunc(b *testing.B, ctx sessionctx.Context, finalFunc aggfuncs.AggFunc, input []chunk.Row, output *chunk.Chunk) {
 	finalPr, _ := finalFunc.AllocPartialResult()
 	output.Reset()
 	b.ResetTimer()

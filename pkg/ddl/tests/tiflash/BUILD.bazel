@@ -12,7 +12,6 @@ go_test(
     deps = [
         "//pkg/config",
         "//pkg/ddl",
-        "//pkg/ddl/logutil",
         "//pkg/ddl/placement",
         "//pkg/ddl/util",
         "//pkg/domain",
@@ -29,9 +28,8 @@ go_test(
         "//pkg/testkit",
         "//pkg/testkit/external",
         "//pkg/testkit/testsetup",
-        "//pkg/types",
         "//pkg/util",
-        "//pkg/util/sqlkiller",
+        "//pkg/util/logutil",
         "@com_github_pingcap_failpoint//:failpoint",
         "@com_github_pingcap_kvproto//pkg/metapb",
         "@com_github_stretchr_testify//require",

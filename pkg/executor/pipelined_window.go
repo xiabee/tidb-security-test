@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 type dataInfo struct {
@@ -218,7 +219,7 @@ func (e *PipelinedWindowExec) fetchChild(ctx context.Context) (eof bool, err err
 	}
 
 	// TODO: reuse chunks
-	resultChk := e.AllocPool.Alloc(e.RetFieldTypes(), 0, numRows)
+	resultChk := e.Ctx().GetSessionVars().GetNewChunkWithCapacity(e.RetFieldTypes(), 0, numRows, e.AllocPool)
 	err = e.copyChk(childResult, resultChk)
 	if err != nil {
 		return false, err
@@ -259,11 +260,11 @@ func (e *PipelinedWindowExec) getStart(ctx sessionctx.Context) (uint64, error) {
 	}
 	if e.isRangeFrame {
 		var start uint64
-		for start = max(e.lastStartRow, e.stagedStartRow); start < e.rowCnt; start++ {
+		for start = mathutil.Max(e.lastStartRow, e.stagedStartRow); start < e.rowCnt; start++ {
 			var res int64
 			var err error
 			for i := range e.orderByCols {
-				res, _, err = e.start.CmpFuncs[i](ctx.GetExprCtx().GetEvalCtx(), e.start.CompareCols[i], e.start.CalcFuncs[i], e.getRow(start), e.getRow(e.curRowIdx))
+				res, _, err = e.start.CmpFuncs[i](ctx, e.start.CompareCols[i], e.start.CalcFuncs[i], e.getRow(start), e.getRow(e.curRowIdx))
 				if err != nil {
 					return 0, err
 				}
@@ -299,11 +300,11 @@ func (e *PipelinedWindowExec) getEnd(ctx sessionctx.Context) (uint64, error) {
 	}
 	if e.isRangeFrame {
 		var end uint64
-		for end = max(e.lastEndRow, e.stagedEndRow); end < e.rowCnt; end++ {
+		for end = mathutil.Max(e.lastEndRow, e.stagedEndRow); end < e.rowCnt; end++ {
 			var res int64
 			var err error
 			for i := range e.orderByCols {
-				res, _, err = e.end.CmpFuncs[i](ctx.GetExprCtx().GetEvalCtx(), e.end.CalcFuncs[i], e.end.CompareCols[i], e.getRow(e.curRowIdx), e.getRow(end))
+				res, _, err = e.end.CmpFuncs[i](ctx, e.end.CalcFuncs[i], e.end.CompareCols[i], e.getRow(e.curRowIdx), e.getRow(end))
 				if err != nil {
 					return 0, err
 				}
@@ -369,7 +370,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 				if !e.emptyFrame {
 					wf.ResetPartialResult(e.partialResults[i])
 				}
-				err = wf.AppendFinalResult2Chunk(ctx.GetExprCtx().GetEvalCtx(), e.partialResults[i], chk)
+				err = wf.AppendFinalResult2Chunk(ctx, e.partialResults[i], chk)
 				if err != nil {
 					return
 				}
@@ -384,7 +385,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 				slidingWindowAggFunc := e.slidingWindowFuncs[i]
 				if e.lastStartRow != start || e.lastEndRow != end {
 					if slidingWindowAggFunc != nil && e.initializedSlidingWindow {
-						err = slidingWindowAggFunc.Slide(ctx.GetExprCtx().GetEvalCtx(), e.getRow, e.lastStartRow, e.lastEndRow, start-e.lastStartRow, end-e.lastEndRow, e.partialResults[i])
+						err = slidingWindowAggFunc.Slide(ctx, e.getRow, e.lastStartRow, e.lastEndRow, start-e.lastStartRow, end-e.lastEndRow, e.partialResults[i])
 					} else {
 						// For MinMaxSlidingWindowAggFuncs, it needs the absolute value of each start of window, to compare
 						// whether elements inside deque are out of current window.
@@ -394,13 +395,13 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 						}
 						// TODO(zhifeng): track memory usage here
 						wf.ResetPartialResult(e.partialResults[i])
-						_, err = wf.UpdatePartialResult(ctx.GetExprCtx().GetEvalCtx(), e.getRows(start, end), e.partialResults[i])
+						_, err = wf.UpdatePartialResult(ctx, e.getRows(start, end), e.partialResults[i])
 					}
 				}
 				if err != nil {
 					return
 				}
-				err = wf.AppendFinalResult2Chunk(ctx.GetExprCtx().GetEvalCtx(), e.partialResults[i], chk)
+				err = wf.AppendFinalResult2Chunk(ctx, e.partialResults[i], chk)
 				if err != nil {
 					return
 				}
@@ -413,7 +414,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 		produced++
 		remained--
 	}
-	extend := min(e.curRowIdx, e.lastEndRow, e.lastStartRow)
+	extend := mathutil.Min(e.curRowIdx, e.lastEndRow, e.lastStartRow)
 	if extend > e.rowStart {
 		numDrop := extend - e.rowStart
 		e.dropped += numDrop

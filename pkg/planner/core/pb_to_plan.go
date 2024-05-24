@@ -26,20 +26,21 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
 // PBPlanBuilder uses to build physical plan from dag protocol buffers.
 type PBPlanBuilder struct {
-	sctx   PlanContext
+	sctx   sessionctx.Context
 	tps    []*types.FieldType
 	is     infoschema.InfoSchema
 	ranges []*coprocessor.KeyRange
 }
 
 // NewPBPlanBuilder creates a new pb plan builder.
-func NewPBPlanBuilder(sctx PlanContext, is infoschema.InfoSchema, ranges []*coprocessor.KeyRange) *PBPlanBuilder {
+func NewPBPlanBuilder(sctx sessionctx.Context, is infoschema.InfoSchema, ranges []*coprocessor.KeyRange) *PBPlanBuilder {
 	return &PBPlanBuilder{sctx: sctx, is: is, ranges: ranges}
 }
 
@@ -97,7 +98,7 @@ func (b *PBPlanBuilder) pbToTableScan(e *tipb.Executor) (PhysicalPlan, error) {
 	if !ok {
 		return nil, infoschema.ErrTableNotExists.GenWithStack("Table which ID = %d does not exist.", tblScan.TableId)
 	}
-	dbInfo, ok := infoschema.SchemaByTable(b.is, tbl.Meta())
+	dbInfo, ok := b.is.SchemaByTable(tbl.Meta())
 	if !ok {
 		return nil, infoschema.ErrDatabaseNotExists.GenWithStack("Database of table ID = %d does not exist.", tblScan.TableId)
 	}
@@ -152,7 +153,7 @@ func (b *PBPlanBuilder) buildTableScanSchema(tblInfo *model.TableInfo, columns [
 }
 
 func (b *PBPlanBuilder) pbToSelection(e *tipb.Executor) (PhysicalPlan, error) {
-	conds, err := expression.PBToExprs(b.sctx.GetExprCtx(), e.Selection.Conditions, b.tps)
+	conds, err := expression.PBToExprs(e.Selection.Conditions, b.tps, b.sctx.GetSessionVars().StmtCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -164,10 +165,10 @@ func (b *PBPlanBuilder) pbToSelection(e *tipb.Executor) (PhysicalPlan, error) {
 
 func (b *PBPlanBuilder) pbToTopN(e *tipb.Executor) (PhysicalPlan, error) {
 	topN := e.TopN
+	sc := b.sctx.GetSessionVars().StmtCtx
 	byItems := make([]*util.ByItems, 0, len(topN.OrderBy))
-	exprCtx := b.sctx.GetExprCtx()
 	for _, item := range topN.OrderBy {
-		expr, err := expression.PBToExpr(exprCtx, item.Expr, b.tps)
+		expr, err := expression.PBToExpr(item.Expr, b.tps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -222,15 +223,14 @@ func (b *PBPlanBuilder) buildAggSchema(aggFuncs []*aggregation.AggFuncDesc, grou
 func (b *PBPlanBuilder) getAggInfo(executor *tipb.Executor) ([]*aggregation.AggFuncDesc, []expression.Expression, error) {
 	var err error
 	aggFuncs := make([]*aggregation.AggFuncDesc, 0, len(executor.Aggregation.AggFunc))
-	exprCtx := b.sctx.GetExprCtx()
 	for _, expr := range executor.Aggregation.AggFunc {
-		aggFunc, err := aggregation.PBExprToAggFuncDesc(exprCtx, expr, b.tps)
+		aggFunc, err := aggregation.PBExprToAggFuncDesc(b.sctx, expr, b.tps)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
 		aggFuncs = append(aggFuncs, aggFunc)
 	}
-	groupBys, err := expression.PBToExprs(exprCtx, executor.Aggregation.GetGroupBy(), b.tps)
+	groupBys, err := expression.PBToExprs(executor.Aggregation.GetGroupBy(), b.tps, b.sctx.GetSessionVars().StmtCtx)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}

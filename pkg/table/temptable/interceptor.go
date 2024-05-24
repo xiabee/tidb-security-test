@@ -17,7 +17,6 @@ package temptable
 import (
 	"bytes"
 	"context"
-	"maps"
 	"math"
 
 	"github.com/pingcap/errors"
@@ -27,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/store/driver/txn"
 	"github.com/pingcap/tidb/pkg/tablecodec"
+	"golang.org/x/exp/maps"
 )
 
 var (

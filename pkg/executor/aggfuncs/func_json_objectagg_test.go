@@ -23,14 +23,13 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/util"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/pingcap/tidb/pkg/util/mock"
 )
 
-func getJSONValue(secondArg types.Datum, valueType *types.FieldType) any {
+func getJSONValue(secondArg types.Datum, valueType *types.FieldType) interface{} {
 	if valueType.GetType() == mysql.TypeString && valueType.GetCharset() == charset.CharsetBin {
 		buf := make([]byte, valueType.GetFlen())
 		copy(buf, secondArg.GetBytes())
@@ -72,8 +71,8 @@ func TestMergePartialResult4JsonObjectagg(t *testing.T) {
 	numRows := 5
 
 	for k := 0; k < len(argCombines); k++ {
-		entries1 := make(map[string]any)
-		entries2 := make(map[string]any)
+		entries1 := make(map[string]interface{})
+		entries2 := make(map[string]interface{})
 
 		fGenFunc := getDataGenFunc(argCombines[k][0])
 		sGenFunc := getDataGenFunc(argCombines[k][1])
@@ -134,7 +133,7 @@ func TestJsonObjectagg(t *testing.T) {
 	numRows := 5
 
 	for k := 0; k < len(argCombines); k++ {
-		entries := make(map[string]any)
+		entries := make(map[string]interface{})
 
 		argTypes := argCombines[k]
 		fGenFunc := getDataGenFunc(argTypes[0])
@@ -171,7 +170,7 @@ func TestMemJsonObjectagg(t *testing.T) {
 	}
 	numRows := 5
 	for k := 0; k < len(argCombines); k++ {
-		entries := make(map[string]any)
+		entries := make(map[string]interface{})
 
 		argTypes := argCombines[k]
 		fGenFunc := getDataGenFunc(types.NewFieldType(argTypes[0]))
@@ -206,7 +205,7 @@ func TestMemJsonObjectagg(t *testing.T) {
 	}
 }
 
-func jsonMultiArgsMemDeltaGens(_ sessionctx.Context, srcChk *chunk.Chunk, dataTypes []*types.FieldType, byItems []*util.ByItems) (memDeltas []int64, err error) {
+func jsonMultiArgsMemDeltaGens(srcChk *chunk.Chunk, dataTypes []*types.FieldType, byItems []*util.ByItems) (memDeltas []int64, err error) {
 	memDeltas = make([]int64, 0)
 	m := make(map[string]bool)
 	for i := 0; i < srcChk.NumRows(); i++ {

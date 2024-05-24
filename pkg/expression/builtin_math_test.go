@@ -35,8 +35,8 @@ import (
 func TestAbs(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		Arg any
-		Ret any
+		Arg interface{}
+		Ret interface{}
 	}{
 		{nil, nil},
 		{int64(1), int64(1)},
@@ -52,7 +52,7 @@ func TestAbs(t *testing.T) {
 		fc := funcs[ast.Abs]
 		f, err := fc.getFunction(ctx, datumsToConstants(tt["Arg"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, tt["Ret"][0], v)
 	}
@@ -61,15 +61,15 @@ func TestAbs(t *testing.T) {
 func TestCeil(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	tmpIT := sc.IgnoreTruncate.Load()
+	sc.IgnoreTruncate.Store(true)
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(tmpIT)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	type testCase struct {
-		arg    any
-		expect any
+		arg    interface{}
+		expect interface{}
 		isNil  bool
 		getErr bool
 	}
@@ -97,10 +97,10 @@ func TestCeil(t *testing.T) {
 
 	runCasesOn := func(funcName string, cases []testCase, exps []Expression) {
 		for _, test := range cases {
-			f, err := newFunctionForTest(ctx, funcName, primitiveValsToConstants(ctx, []any{test.arg})...)
+			f, err := newFunctionForTest(ctx, funcName, primitiveValsToConstants(ctx, []interface{}{test.arg})...)
 			require.NoError(t, err)
 
-			result, err := f.Eval(ctx, chunk.Row{})
+			result, err := f.Eval(chunk.Row{})
 			if test.getErr {
 				require.Error(t, err)
 			} else {
@@ -126,7 +126,7 @@ func TestCeil(t *testing.T) {
 func TestExp(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args       any
+		args       interface{}
 		expect     float64
 		isNil      bool
 		getWarning bool
@@ -148,10 +148,10 @@ func TestExp(t *testing.T) {
 
 	for _, test := range tests {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Exp, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Exp, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getWarning {
 			if test.errMsg != "" {
 				require.Error(t, err)
@@ -177,11 +177,11 @@ func TestExp(t *testing.T) {
 func TestFloor(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	tmpIT := sc.IgnoreTruncate.Load()
+	sc.IgnoreTruncate.Store(true)
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(tmpIT)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	genDuration := func(h, m, s int64) types.Duration {
 		duration := time.Duration(h)*time.Hour +
@@ -196,8 +196,8 @@ func TestFloor(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		arg    any
-		expect any
+		arg    interface{}
+		expect interface{}
 		isNil  bool
 		getErr bool
 	}{
@@ -213,10 +213,10 @@ func TestFloor(t *testing.T) {
 		{genDuration(0, 12, 34), float64(1234), false, false},
 		{genTime(2017, 7, 19), float64(20170719000000), false, false},
 	} {
-		f, err := newFunctionForTest(ctx, ast.Floor, primitiveValsToConstants(ctx, []any{test.arg})...)
+		f, err := newFunctionForTest(ctx, ast.Floor, primitiveValsToConstants(ctx, []interface{}{test.arg})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getErr {
 			require.Error(t, err)
 		} else {
@@ -247,23 +247,23 @@ func TestFloor(t *testing.T) {
 func TestLog(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args         []any
+		args         []interface{}
 		expect       float64
 		isNil        bool
 		warningCount uint16
 	}{
-		{[]any{nil}, 0, true, 0},
-		{[]any{nil, nil}, 0, true, 0},
-		{[]any{int64(100)}, 4.605170185988092, false, 0},
-		{[]any{float64(100)}, 4.605170185988092, false, 0},
-		{[]any{int64(10), int64(100)}, 2, false, 0},
-		{[]any{float64(10), float64(100)}, 2, false, 0},
-		{[]any{float64(-1)}, 0, true, 1},
-		{[]any{float64(2), float64(-1)}, 0, true, 1},
-		{[]any{float64(-1), float64(2)}, 0, true, 1},
-		{[]any{float64(1), float64(2)}, 0, true, 1},
-		{[]any{float64(0.5), float64(0.25)}, 2, false, 0},
-		{[]any{"abc"}, 0, true, 2},
+		{[]interface{}{nil}, 0, true, 0},
+		{[]interface{}{nil, nil}, 0, true, 0},
+		{[]interface{}{int64(100)}, 4.605170185988092, false, 0},
+		{[]interface{}{float64(100)}, 4.605170185988092, false, 0},
+		{[]interface{}{int64(10), int64(100)}, 2, false, 0},
+		{[]interface{}{float64(10), float64(100)}, 2, false, 0},
+		{[]interface{}{float64(-1)}, 0, true, 1},
+		{[]interface{}{float64(2), float64(-1)}, 0, true, 1},
+		{[]interface{}{float64(-1), float64(2)}, 0, true, 1},
+		{[]interface{}{float64(1), float64(2)}, 0, true, 1},
+		{[]interface{}{float64(0.5), float64(0.25)}, 2, false, 0},
+		{[]interface{}{"abc"}, 0, true, 2},
 	}
 
 	for _, test := range tests {
@@ -271,7 +271,7 @@ func TestLog(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Log, primitiveValsToConstants(ctx, test.args)...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		if test.warningCount > 0 {
 			require.Equal(t, preWarningCnt+test.warningCount, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -290,7 +290,7 @@ func TestLog(t *testing.T) {
 func TestLog2(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args         any
+		args         interface{}
 		expect       float64
 		isNil        bool
 		warningCount uint16
@@ -306,10 +306,10 @@ func TestLog2(t *testing.T) {
 
 	for _, test := range tests {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Log2, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Log2, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		if test.warningCount > 0 {
 			require.Equal(t, preWarningCnt+test.warningCount, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -328,7 +328,7 @@ func TestLog2(t *testing.T) {
 func TestLog10(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args         any
+		args         interface{}
 		expect       float64
 		isNil        bool
 		warningCount uint16
@@ -344,10 +344,10 @@ func TestLog10(t *testing.T) {
 
 	for _, test := range tests {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Log10, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Log10, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		if test.warningCount > 0 {
 			require.Equal(t, preWarningCnt+test.warningCount, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -368,7 +368,7 @@ func TestRand(t *testing.T) {
 	fc := funcs[ast.Rand]
 	f, err := fc.getFunction(ctx, nil)
 	require.NoError(t, err)
-	v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	v, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Less(t, v.GetFloat64(), float64(1))
 	require.GreaterOrEqual(t, v.GetFloat64(), float64(0))
@@ -378,7 +378,7 @@ func TestRand(t *testing.T) {
 	require.NoError(t, err)
 	randGen := mathutil.NewWithSeed(20160101)
 	for i := 0; i < 3; i++ {
-		v, err = evalBuiltinFunc(f2, ctx, chunk.Row{})
+		v, err = evalBuiltinFunc(f2, chunk.Row{})
 		require.NoError(t, err)
 		require.Equal(t, randGen.Gen(), v.GetFloat64())
 	}
@@ -387,13 +387,13 @@ func TestRand(t *testing.T) {
 func TestPow(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		Arg []any
+		Arg []interface{}
 		Ret float64
 	}{
-		{[]any{1, 3}, 1},
-		{[]any{2, 2}, 4},
-		{[]any{4, 0.5}, 2},
-		{[]any{4, -2}, 0.0625},
+		{[]interface{}{1, 3}, 1},
+		{[]interface{}{2, 2}, 4},
+		{[]interface{}{4, 0.5}, 2},
+		{[]interface{}{4, -2}, 0.0625},
 	}
 
 	Dtbl := tblToDtbl(tbl)
@@ -402,17 +402,17 @@ func TestPow(t *testing.T) {
 		fc := funcs[ast.Pow]
 		f, err := fc.getFunction(ctx, datumsToConstants(tt["Arg"]))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, tt["Ret"][0], v)
 	}
 
 	errTbl := []struct {
-		Arg []any
+		Arg []interface{}
 	}{
-		{[]any{"test", "test"}},
-		{[]any{1, "test"}},
-		{[]any{10, 700}}, // added overflow test
+		{[]interface{}{"test", "test"}},
+		{[]interface{}{1, "test"}},
+		{[]interface{}{10, 700}}, // added overflow test
 	}
 
 	errDtbl := tblToDtbl(errTbl)
@@ -420,7 +420,7 @@ func TestPow(t *testing.T) {
 		fc := funcs[ast.Pow]
 		f, err := fc.getFunction(ctx, datumsToConstants(tt["Arg"]))
 		require.NoError(t, err)
-		_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+		_, err = evalBuiltinFunc(f, chunk.Row{})
 		if i == 2 {
 			require.Error(t, err)
 			require.Equal(t, "[types:1690]DOUBLE value is out of range in 'pow(10, 700)'", err.Error())
@@ -435,28 +435,28 @@ func TestRound(t *testing.T) {
 	ctx := createContext(t)
 	newDec := types.NewDecFromStringForTest
 	tbl := []struct {
-		Arg []any
-		Ret any
+		Arg []interface{}
+		Ret interface{}
 	}{
-		{[]any{-1.23}, -1},
-		{[]any{-1.23, 0}, -1},
-		{[]any{-1.58}, -2},
-		{[]any{1.58}, 2},
-		{[]any{1.298, 1}, 1.3},
-		{[]any{1.298}, 1},
-		{[]any{1.298, 0}, 1},
-		{[]any{-1.5, 0}, -2},
-		{[]any{1.5, 0}, 2},
-		{[]any{23.298, -1}, 20},
-		{[]any{newDec("-1.23")}, newDec("-1")},
-		{[]any{newDec("-1.23"), 1}, newDec("-1.2")},
-		{[]any{newDec("-1.58")}, newDec("-2")},
-		{[]any{newDec("1.58")}, newDec("2")},
-		{[]any{newDec("1.58"), 1}, newDec("1.6")},
-		{[]any{newDec("23.298"), -1}, newDec("20")},
-		{[]any{nil, 2}, nil},
-		{[]any{1, -2012}, 0},
-		{[]any{1, -201299999999999}, 0},
+		{[]interface{}{-1.23}, -1},
+		{[]interface{}{-1.23, 0}, -1},
+		{[]interface{}{-1.58}, -2},
+		{[]interface{}{1.58}, 2},
+		{[]interface{}{1.298, 1}, 1.3},
+		{[]interface{}{1.298}, 1},
+		{[]interface{}{1.298, 0}, 1},
+		{[]interface{}{-1.5, 0}, -2},
+		{[]interface{}{1.5, 0}, 2},
+		{[]interface{}{23.298, -1}, 20},
+		{[]interface{}{newDec("-1.23")}, newDec("-1")},
+		{[]interface{}{newDec("-1.23"), 1}, newDec("-1.2")},
+		{[]interface{}{newDec("-1.58")}, newDec("-2")},
+		{[]interface{}{newDec("1.58")}, newDec("2")},
+		{[]interface{}{newDec("1.58"), 1}, newDec("1.6")},
+		{[]interface{}{newDec("23.298"), -1}, newDec("20")},
+		{[]interface{}{nil, 2}, nil},
+		{[]interface{}{1, -2012}, 0},
+		{[]interface{}{1, -201299999999999}, 0},
 	}
 
 	Dtbl := tblToDtbl(tbl)
@@ -479,7 +479,7 @@ func TestRound(t *testing.T) {
 		case *builtinRoundRealSig:
 			require.Equal(t, tipb.ScalarFuncSig_RoundReal, f.PbCode())
 		}
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, tt["Ret"][0], v)
 	}
@@ -489,31 +489,31 @@ func TestTruncate(t *testing.T) {
 	ctx := createContext(t)
 	newDec := types.NewDecFromStringForTest
 	tbl := []struct {
-		Arg []any
-		Ret any
+		Arg []interface{}
+		Ret interface{}
 	}{
-		{[]any{-1.23, 0}, -1},
-		{[]any{1.58, 0}, 1},
-		{[]any{1.298, 1}, 1.2},
-		{[]any{123.2, -1}, 120},
-		{[]any{123.2, 100}, 123.2},
-		{[]any{123.2, -100}, 0},
-		{[]any{123.2, -100}, 0},
-		{[]any{1.797693134862315708145274237317043567981e+308, 2},
+		{[]interface{}{-1.23, 0}, -1},
+		{[]interface{}{1.58, 0}, 1},
+		{[]interface{}{1.298, 1}, 1.2},
+		{[]interface{}{123.2, -1}, 120},
+		{[]interface{}{123.2, 100}, 123.2},
+		{[]interface{}{123.2, -100}, 0},
+		{[]interface{}{123.2, -100}, 0},
+		{[]interface{}{1.797693134862315708145274237317043567981e+308, 2},
 			1.797693134862315708145274237317043567981e+308},
-		{[]any{newDec("-1.23"), 0}, newDec("-1")},
-		{[]any{newDec("-1.23"), 1}, newDec("-1.2")},
-		{[]any{newDec("-11.23"), -1}, newDec("-10")},
-		{[]any{newDec("1.58"), 0}, newDec("1")},
-		{[]any{newDec("1.58"), 1}, newDec("1.5")},
-		{[]any{newDec("11.58"), -1}, newDec("10")},
-		{[]any{newDec("23.298"), -1}, newDec("20")},
-		{[]any{newDec("23.298"), -100}, newDec("0")},
-		{[]any{newDec("23.298"), 100}, newDec("23.298")},
-		{[]any{nil, 2}, nil},
-		{[]any{uint64(9223372036854775808), -10}, 9223372030000000000},
-		{[]any{9223372036854775807, -7}, 9223372036850000000},
-		{[]any{uint64(18446744073709551615), -10}, uint64(18446744070000000000)},
+		{[]interface{}{newDec("-1.23"), 0}, newDec("-1")},
+		{[]interface{}{newDec("-1.23"), 1}, newDec("-1.2")},
+		{[]interface{}{newDec("-11.23"), -1}, newDec("-10")},
+		{[]interface{}{newDec("1.58"), 0}, newDec("1")},
+		{[]interface{}{newDec("1.58"), 1}, newDec("1.5")},
+		{[]interface{}{newDec("11.58"), -1}, newDec("10")},
+		{[]interface{}{newDec("23.298"), -1}, newDec("20")},
+		{[]interface{}{newDec("23.298"), -100}, newDec("0")},
+		{[]interface{}{newDec("23.298"), 100}, newDec("23.298")},
+		{[]interface{}{nil, 2}, nil},
+		{[]interface{}{uint64(9223372036854775808), -10}, 9223372030000000000},
+		{[]interface{}{9223372036854775807, -7}, 9223372036850000000},
+		{[]interface{}{uint64(18446744073709551615), -10}, uint64(18446744070000000000)},
 	}
 
 	Dtbl := tblToDtbl(tbl)
@@ -523,7 +523,7 @@ func TestTruncate(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(tt["Arg"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, tt["Ret"][0], v)
 	}
@@ -532,29 +532,29 @@ func TestTruncate(t *testing.T) {
 func TestCRC32(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		input  []any
+		input  []interface{}
 		chs    string
 		result int64
 		isNull bool
 	}{
-		{[]any{nil}, "utf8", 0, true},
-		{[]any{""}, "utf8", 0, false},
-		{[]any{-1}, "utf8", 808273962, false},
-		{[]any{"-1"}, "utf8", 808273962, false},
-		{[]any{"mysql"}, "utf8", 2501908538, false},
-		{[]any{"MySQL"}, "utf8", 3259397556, false},
-		{[]any{"hello"}, "utf8", 907060870, false},
-		{[]any{"一二三"}, "utf8", 1785250883, false},
-		{[]any{"一"}, "utf8", 2416838398, false},
-		{[]any{"一二三"}, "gbk", 3461331449, false},
-		{[]any{"一"}, "gbk", 2925846374, false},
+		{[]interface{}{nil}, "utf8", 0, true},
+		{[]interface{}{""}, "utf8", 0, false},
+		{[]interface{}{-1}, "utf8", 808273962, false},
+		{[]interface{}{"-1"}, "utf8", 808273962, false},
+		{[]interface{}{"mysql"}, "utf8", 2501908538, false},
+		{[]interface{}{"MySQL"}, "utf8", 3259397556, false},
+		{[]interface{}{"hello"}, "utf8", 907060870, false},
+		{[]interface{}{"一二三"}, "utf8", 1785250883, false},
+		{[]interface{}{"一"}, "utf8", 2416838398, false},
+		{[]interface{}{"一二三"}, "gbk", 3461331449, false},
+		{[]interface{}{"一"}, "gbk", 2925846374, false},
 	}
 	for _, c := range tbl {
 		err := ctx.GetSessionVars().SetSystemVar(variable.CharacterSetConnection, c.chs)
 		require.NoError(t, err)
 		f, err := newFunctionForTest(ctx, ast.CRC32, primitiveValsToConstants(ctx, c.input)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		require.NoError(t, err)
 		if c.isNull {
 			require.True(t, d.IsNull())
@@ -567,25 +567,25 @@ func TestCRC32(t *testing.T) {
 func TestConv(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     []any
-		expected any
+		args     []interface{}
+		expected interface{}
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{"a", 16, 2}, "1010", false, false},
-		{[]any{"6E", 18, 8}, "172", false, false},
-		{[]any{"-17", 10, -18}, "-H", false, false},
-		{[]any{"-17", 10, 18}, "2D3FGB0B9CG4BD1H", false, false},
-		{[]any{nil, 10, 10}, "0", true, false},
-		{[]any{"+18aZ", 7, 36}, "1", false, false},
-		{[]any{"18446744073709551615", -10, 16}, "7FFFFFFFFFFFFFFF", false, false},
-		{[]any{"12F", -10, 16}, "C", false, false},
-		{[]any{"  FF ", 16, 10}, "255", false, false},
-		{[]any{"TIDB", 10, 8}, "0", false, false},
-		{[]any{"aa", 10, 2}, "0", false, false},
-		{[]any{" A", -10, 16}, "0", false, false},
-		{[]any{"a6a", 10, 8}, "0", false, false},
-		{[]any{"a6a", 1, 8}, "0", true, false},
+		{[]interface{}{"a", 16, 2}, "1010", false, false},
+		{[]interface{}{"6E", 18, 8}, "172", false, false},
+		{[]interface{}{"-17", 10, -18}, "-H", false, false},
+		{[]interface{}{"-17", 10, 18}, "2D3FGB0B9CG4BD1H", false, false},
+		{[]interface{}{nil, 10, 10}, "0", true, false},
+		{[]interface{}{"+18aZ", 7, 36}, "1", false, false},
+		{[]interface{}{"18446744073709551615", -10, 16}, "7FFFFFFFFFFFFFFF", false, false},
+		{[]interface{}{"12F", -10, 16}, "C", false, false},
+		{[]interface{}{"  FF ", 16, 10}, "255", false, false},
+		{[]interface{}{"TIDB", 10, 8}, "0", false, false},
+		{[]interface{}{"aa", 10, 2}, "0", false, false},
+		{[]interface{}{" A", -10, 16}, "0", false, false},
+		{[]interface{}{"a6a", 10, 8}, "0", false, false},
+		{[]interface{}{"a6a", 1, 8}, "0", true, false},
 	}
 
 	for _, c := range cases {
@@ -597,7 +597,7 @@ func TestConv(t *testing.T) {
 		require.Equal(t, charset.CollationUTF8MB4, tp.GetCollate())
 		require.Equal(t, uint(0), tp.GetFlag())
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -631,33 +631,33 @@ func TestConv(t *testing.T) {
 func TestSign(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	tmpIT := sc.IgnoreTruncate.Load()
+	sc.IgnoreTruncate.Store(true)
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(tmpIT)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
 
 	for _, tt := range []struct {
-		num []any
-		ret any
+		num []interface{}
+		ret interface{}
 	}{
-		{[]any{nil}, nil},
-		{[]any{1}, int64(1)},
-		{[]any{0}, int64(0)},
-		{[]any{-1}, int64(-1)},
-		{[]any{0.4}, int64(1)},
-		{[]any{-0.4}, int64(-1)},
-		{[]any{"1"}, int64(1)},
-		{[]any{"-1"}, int64(-1)},
-		{[]any{"1a"}, int64(1)},
-		{[]any{"-1a"}, int64(-1)},
-		{[]any{"a"}, int64(0)},
-		{[]any{uint64(9223372036854775808)}, int64(1)},
+		{[]interface{}{nil}, nil},
+		{[]interface{}{1}, int64(1)},
+		{[]interface{}{0}, int64(0)},
+		{[]interface{}{-1}, int64(-1)},
+		{[]interface{}{0.4}, int64(1)},
+		{[]interface{}{-0.4}, int64(-1)},
+		{[]interface{}{"1"}, int64(1)},
+		{[]interface{}{"-1"}, int64(-1)},
+		{[]interface{}{"1a"}, int64(1)},
+		{[]interface{}{"-1a"}, int64(-1)},
+		{[]interface{}{"a"}, int64(0)},
+		{[]interface{}{uint64(9223372036854775808)}, int64(1)},
 	} {
 		fc := funcs[ast.Sign]
 		f, err := fc.getFunction(ctx, primitiveValsToConstants(ctx, tt.num))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.ret), v)
 	}
@@ -666,14 +666,9 @@ func TestSign(t *testing.T) {
 func TestDegrees(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
-	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
-	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(false))
-
+	sc.IgnoreTruncate.Store(false)
 	cases := []struct {
-		args       any
+		args       interface{}
 		expected   float64
 		isNil      bool
 		getWarning bool
@@ -692,9 +687,9 @@ func TestDegrees(t *testing.T) {
 
 	for _, c := range cases {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Degrees, primitiveValsToConstants(ctx, []any{c.args})...)
+		f, err := newFunctionForTest(ctx, ast.Degrees, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -714,22 +709,22 @@ func TestDegrees(t *testing.T) {
 func TestSqrt(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		Arg []any
-		Ret any
+		Arg []interface{}
+		Ret interface{}
 	}{
-		{[]any{nil}, nil},
-		{[]any{int64(1)}, float64(1)},
-		{[]any{float64(4)}, float64(2)},
-		{[]any{"4"}, float64(2)},
-		{[]any{"9"}, float64(3)},
-		{[]any{"-16"}, nil},
+		{[]interface{}{nil}, nil},
+		{[]interface{}{int64(1)}, float64(1)},
+		{[]interface{}{float64(4)}, float64(2)},
+		{[]interface{}{"4"}, float64(2)},
+		{[]interface{}{"9"}, float64(3)},
+		{[]interface{}{"-16"}, nil},
 	}
 
 	for _, tt := range tbl {
 		fc := funcs[ast.Sqrt]
 		f, err := fc.getFunction(ctx, primitiveValsToConstants(ctx, tt.Arg))
 		require.NoError(t, err)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tt.Ret), v)
 	}
@@ -740,7 +735,7 @@ func TestPi(t *testing.T) {
 	f, err := funcs[ast.PI].getFunction(ctx, nil)
 	require.NoError(t, err)
 
-	pi, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+	pi, err := evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	testutil.DatumEqual(t, types.NewDatum(math.Pi), pi)
 }
@@ -748,8 +743,8 @@ func TestPi(t *testing.T) {
 func TestRadians(t *testing.T) {
 	ctx := createContext(t)
 	tbl := []struct {
-		Arg any
-		Ret any
+		Arg interface{}
+		Ret interface{}
 	}{
 		{nil, nil},
 		{0, float64(0)},
@@ -764,7 +759,7 @@ func TestRadians(t *testing.T) {
 		f, err := fc.getFunction(ctx, datumsToConstants(tt["Arg"]))
 		require.NoError(t, err)
 		require.NotNil(t, f)
-		v, err := evalBuiltinFunc(f, ctx, chunk.Row{})
+		v, err := evalBuiltinFunc(f, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, tt["Ret"][0], v)
 	}
@@ -773,7 +768,7 @@ func TestRadians(t *testing.T) {
 	fc := funcs[ast.Radians]
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewDatum(invalidArg)}))
 	require.NoError(t, err)
-	_, err = evalBuiltinFunc(f, ctx, chunk.Row{})
+	_, err = evalBuiltinFunc(f, chunk.Row{})
 	require.NoError(t, err)
 	require.Equal(t, 1, int(ctx.GetSessionVars().StmtCtx.WarningCount()))
 }
@@ -781,7 +776,7 @@ func TestRadians(t *testing.T) {
 func TestSin(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args       any
+		args       interface{}
 		expected   float64
 		isNil      bool
 		getWarning bool
@@ -801,10 +796,10 @@ func TestSin(t *testing.T) {
 
 	for _, c := range cases {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Sin, primitiveValsToConstants(ctx, []any{c.args})...)
+		f, err := newFunctionForTest(ctx, ast.Sin, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -825,7 +820,7 @@ func TestSin(t *testing.T) {
 func TestCos(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args       any
+		args       interface{}
 		expected   float64
 		isNil      bool
 		getWarning bool
@@ -842,10 +837,10 @@ func TestCos(t *testing.T) {
 
 	for _, c := range cases {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Cos, primitiveValsToConstants(ctx, []any{c.args})...)
+		f, err := newFunctionForTest(ctx, ast.Cos, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -866,7 +861,7 @@ func TestCos(t *testing.T) {
 func TestAcos(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args       any
+		args       interface{}
 		expect     float64
 		isNil      bool
 		getWarning bool
@@ -881,10 +876,10 @@ func TestAcos(t *testing.T) {
 
 	for _, test := range tests {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Acos, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Acos, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -905,7 +900,7 @@ func TestAcos(t *testing.T) {
 func TestAsin(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args       any
+		args       interface{}
 		expect     float64
 		isNil      bool
 		getWarning bool
@@ -920,10 +915,10 @@ func TestAsin(t *testing.T) {
 
 	for _, test := range tests {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Asin, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Asin, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -944,17 +939,17 @@ func TestAsin(t *testing.T) {
 func TestAtan(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args       []any
+		args       []interface{}
 		expect     float64
 		isNil      bool
 		getWarning bool
 	}{
-		{[]any{nil}, 0, true, false},
-		{[]any{nil, nil}, 0, true, false},
-		{[]any{float64(1)}, 0.7853981633974483, false, false},
-		{[]any{float64(-1)}, -0.7853981633974483, false, false},
-		{[]any{float64(0), float64(-2)}, float64(math.Pi), false, false},
-		{[]any{"tidb"}, 0, false, true},
+		{[]interface{}{nil}, 0, true, false},
+		{[]interface{}{nil, nil}, 0, true, false},
+		{[]interface{}{float64(1)}, 0.7853981633974483, false, false},
+		{[]interface{}{float64(-1)}, -0.7853981633974483, false, false},
+		{[]interface{}{float64(0), float64(-2)}, float64(math.Pi), false, false},
+		{[]interface{}{"tidb"}, 0, false, true},
 	}
 
 	for _, test := range tests {
@@ -962,7 +957,7 @@ func TestAtan(t *testing.T) {
 		f, err := newFunctionForTest(ctx, ast.Atan, primitiveValsToConstants(ctx, test.args)...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -983,7 +978,7 @@ func TestAtan(t *testing.T) {
 func TestTan(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args       any
+		args       interface{}
 		expected   float64
 		isNil      bool
 		getWarning bool
@@ -999,10 +994,10 @@ func TestTan(t *testing.T) {
 
 	for _, c := range cases {
 		preWarningCnt := ctx.GetSessionVars().StmtCtx.WarningCount()
-		f, err := newFunctionForTest(ctx, ast.Tan, primitiveValsToConstants(ctx, []any{c.args})...)
+		f, err := newFunctionForTest(ctx, ast.Tan, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
 
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getWarning {
 			require.NoError(t, err)
 			require.Equal(t, preWarningCnt+1, ctx.GetSessionVars().StmtCtx.WarningCount())
@@ -1023,7 +1018,7 @@ func TestTan(t *testing.T) {
 func TestCot(t *testing.T) {
 	ctx := createContext(t)
 	tests := []struct {
-		args   any
+		args   interface{}
 		expect float64
 		isNil  bool
 		getErr bool
@@ -1040,10 +1035,10 @@ func TestCot(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		f, err := newFunctionForTest(ctx, ast.Cot, primitiveValsToConstants(ctx, []any{test.args})...)
+		f, err := newFunctionForTest(ctx, ast.Cot, primitiveValsToConstants(ctx, []interface{}{test.args})...)
 		require.NoError(t, err)
 
-		result, err := f.Eval(ctx, chunk.Row{})
+		result, err := f.Eval(chunk.Row{})
 		if test.getErr {
 			require.Error(t, err)
 			if test.errMsg != "" {

@@ -50,6 +50,7 @@ func TestAddAndDropColumn(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("create table t2 (c1 int, c2 int, c3 int)")
+	tk.MustExec("set @@tidb_disable_txn_auto_retry = 0")
 
 	// ==========
 	// ADD COLUMN
@@ -108,12 +109,12 @@ AddLoop:
 	require.NoError(t, err)
 	require.Greater(t, count, int64(0))
 
-	tk.MustQuery("select count(c4) from t2 where c4 = -1").Check([][]any{
+	tk.MustQuery("select count(c4) from t2 where c4 = -1").Check([][]interface{}{
 		{fmt.Sprintf("%v", count-int64(step))},
 	})
 
 	for i := num; i < num+step; i++ {
-		tk.MustQuery("select c4 from t2 where c4 = ?", i).Check([][]any{
+		tk.MustQuery("select c4 from t2 where c4 = ?", i).Check([][]interface{}{
 			{fmt.Sprintf("%v", i)},
 		})
 	}
@@ -132,7 +133,7 @@ AddLoop:
 		func(_ kv.Handle, data []types.Datum, cols []*table.Column) (bool, error) {
 			i++
 			// c4 must be -1 or > 0
-			v, err := data[3].ToInt64(tk.Session().GetSessionVars().StmtCtx.TypeCtx())
+			v, err := data[3].ToInt64(tk.Session().GetSessionVars().StmtCtx)
 			require.NoError(t, err)
 			if v == -1 {
 				j++
@@ -151,7 +152,7 @@ AddLoop:
 	for i := num + step; i < num+step+10; i++ {
 		tk.MustExec("insert into t2 values (?, ?, ?, ?)", i, i, i, i)
 	}
-	tk.MustQuery("select count(c4) from t2 where c4 = -1").Check([][]any{
+	tk.MustQuery("select count(c4) from t2 where c4 = -1").Check([][]interface{}{
 		{fmt.Sprintf("%v", count-int64(step))},
 	})
 
@@ -539,16 +540,15 @@ func TestColumnTypeChangeGenUniqueChangingName(t *testing.T) {
 	onJobUpdatedExportedFunc := func(job *model.Job) {
 		if job.SchemaState == model.StateDeleteOnly && job.Type == model.ActionModifyColumn {
 			var (
-				_newCol                *model.ColumnInfo
-				_oldColName            *model.CIStr
-				_pos                   = &ast.ColumnPosition{}
-				_modifyColumnTp        byte
-				_updatedAutoRandomBits uint64
-				changingCol            *model.ColumnInfo
-				changingIdxs           []*model.IndexInfo
+				newCol                *model.ColumnInfo
+				oldColName            *model.CIStr
+				modifyColumnTp        byte
+				updatedAutoRandomBits uint64
+				changingCol           *model.ColumnInfo
+				changingIdxs          []*model.IndexInfo
 			)
-
-			err := job.DecodeArgs(&_newCol, &_oldColName, _pos, &_modifyColumnTp, &_updatedAutoRandomBits, &changingCol, &changingIdxs)
+			pos := &ast.ColumnPosition{}
+			err := job.DecodeArgs(&newCol, &oldColName, pos, &modifyColumnTp, &updatedAutoRandomBits, &changingCol, &changingIdxs)
 			if err != nil {
 				checkErr = err
 				return
@@ -596,15 +596,15 @@ func TestColumnTypeChangeGenUniqueChangingName(t *testing.T) {
 	onJobUpdatedExportedFunc2 := func(job *model.Job) {
 		if (job.Query == query1 || job.Query == query2) && job.SchemaState == model.StateDeleteOnly && job.Type == model.ActionModifyColumn {
 			var (
-				_newCol                *model.ColumnInfo
-				_oldColName            *model.CIStr
-				_pos                   = &ast.ColumnPosition{}
-				_modifyColumnTp        byte
-				_updatedAutoRandomBits uint64
-				changingCol            *model.ColumnInfo
-				changingIdxs           []*model.IndexInfo
+				newCol                *model.ColumnInfo
+				oldColName            *model.CIStr
+				modifyColumnTp        byte
+				updatedAutoRandomBits uint64
+				changingCol           *model.ColumnInfo
+				changingIdxs          []*model.IndexInfo
 			)
-			err := job.DecodeArgs(&_newCol, &_oldColName, _pos, &_modifyColumnTp, &_updatedAutoRandomBits, &changingCol, &changingIdxs)
+			pos := &ast.ColumnPosition{}
+			err := job.DecodeArgs(&newCol, &oldColName, pos, &modifyColumnTp, &updatedAutoRandomBits, &changingCol, &changingIdxs)
 			if err != nil {
 				checkErr = err
 				return

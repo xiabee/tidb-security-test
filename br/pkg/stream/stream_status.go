@@ -231,7 +231,7 @@ func (p *printByJSON) PrintTasks() {
 			LastErrors:   se,
 		}
 	}
-	mustMarshal := func(i any) string {
+	mustMarshal := func(i interface{}) string {
 		r, err := json.Marshal(i)
 		if err != nil {
 			log.Panic("Failed to marshal a trivial struct to json", zap.Reflect("object", i), zap.Error(err))
@@ -321,7 +321,7 @@ func MaybeQPS(ctx context.Context, mgr PDInfoProvider) (float64, error) {
 		log.Warn("failed to get est QPS", logutil.ShortError(err))
 	}
 	qps := 0.0
-	qpsMap.Range(func(key, value any) bool {
+	qpsMap.Range(func(key, value interface{}) bool {
 		qps += value.(float64)
 		return true
 	})

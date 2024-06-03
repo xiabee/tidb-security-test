@@ -15,8 +15,8 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/metrics"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/metrics"
 	"go.uber.org/zap"
 )
 

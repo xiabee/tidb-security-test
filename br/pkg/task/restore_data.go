@@ -18,7 +18,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	tidbconfig "github.com/pingcap/tidb/pkg/config"
+	tidbconfig "github.com/pingcap/tidb/config"
 	"go.uber.org/zap"
 )
 

@@ -20,13 +20,13 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/pingcap/tidb/pkg/meta/autoid"
+	"github.com/pingcap/tidb/meta/autoid"
 )
 
 // panickingAllocator is an ID allocator which panics on all operations except Rebase
 type panickingAllocator struct {
 	autoid.Allocator
-	base atomic.Int64
+	base *int64
 	ty   autoid.AllocatorType
 }
 
@@ -34,30 +34,25 @@ type panickingAllocator struct {
 // we use this to collect the max id(either _tidb_rowid or auto_increment id or auto_random) used
 // during import, and we will use this info to do ALTER TABLE xxx AUTO_RANDOM_BASE or AUTO_INCREMENT
 // on post-process phase.
-// TODO: support save all bases in checkpoint.
-func NewPanickingAllocators(sepAutoInc bool, base int64) autoid.Allocators {
-	allocs := make([]autoid.Allocator, 0, 3)
-	for _, t := range []autoid.AllocatorType{
-		autoid.RowIDAllocType,
-		autoid.AutoIncrementType,
-		autoid.AutoRandomType,
-	} {
-		pa := &panickingAllocator{ty: t}
-		pa.base.Store(base)
-		allocs = append(allocs, pa)
-	}
-	return autoid.NewAllocators(sepAutoInc, allocs...)
+func NewPanickingAllocators(base int64) autoid.Allocators {
+	sharedBase := &base
+	return autoid.NewAllocators(
+		false,
+		&panickingAllocator{base: sharedBase, ty: autoid.RowIDAllocType},
+		&panickingAllocator{base: sharedBase, ty: autoid.AutoIncrementType},
+		&panickingAllocator{base: sharedBase, ty: autoid.AutoRandomType},
+	)
 }
 
 // Rebase implements the autoid.Allocator interface
-func (alloc *panickingAllocator) Rebase(_ context.Context, newBase int64, _ bool) error {
+func (alloc *panickingAllocator) Rebase(ctx context.Context, newBase int64, allocIDs bool) error {
 	// CAS
 	for {
-		oldBase := alloc.base.Load()
+		oldBase := atomic.LoadInt64(alloc.base)
 		if newBase <= oldBase {
 			break
 		}
-		if alloc.base.CompareAndSwap(oldBase, newBase) {
+		if atomic.CompareAndSwapInt64(alloc.base, oldBase, newBase) {
 			break
 		}
 	}
@@ -66,7 +61,7 @@ func (alloc *panickingAllocator) Rebase(_ context.Context, newBase int64, _ bool
 
 // Base implements the autoid.Allocator interface
 func (alloc *panickingAllocator) Base() int64 {
-	return alloc.base.Load()
+	return atomic.LoadInt64(alloc.base)
 }
 
 func (alloc *panickingAllocator) GetType() autoid.AllocatorType {

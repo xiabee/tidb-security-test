@@ -92,7 +92,3 @@ func ConcatAll[T any](items ...TryNextor[T]) TryNextor[T] {
 		current: empty[T]{},
 	}
 }
-
-func Enumerate[T any](it TryNextor[T]) TryNextor[Indexed[T]] {
-	return &withIndex[T]{inner: it, index: 0}
-}

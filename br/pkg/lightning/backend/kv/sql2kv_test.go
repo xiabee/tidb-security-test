@@ -17,28 +17,30 @@ package kv_test
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/encode"
 	lkv "github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
 	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/lightning/verification"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	_ "github.com/pingcap/tidb/pkg/planner/core" // to setup expression.EvalAstExpr. Otherwise we cannot parse the default value
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/table/tables"
-	"github.com/pingcap/tidb/pkg/tablecodec"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/mock"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta/autoid"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/parser/ast"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/mysql"
+	_ "github.com/pingcap/tidb/planner/core" // to setup expression.EvalAstExpr. Otherwise we cannot parse the default value
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/tablecodec"
+	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -50,7 +52,7 @@ func TestMarshal(t *testing.T) {
 	minNotNull := types.Datum{}
 	minNotNull.SetMinNotNull()
 	encoder := zapcore.NewMapObjectEncoder()
-	err := encoder.AddArray("test", lkv.RowArrayMarshaller{types.NewStringDatum("1"), nullDatum, minNotNull, types.MaxValueDatum()})
+	err := encoder.AddArray("test", lkv.RowArrayMarshaler{types.NewStringDatum("1"), nullDatum, minNotNull, types.MaxValueDatum()})
 	require.NoError(t, err)
 	require.Equal(t, encoder.Fields["test"], []interface{}{
 		map[string]interface{}{"kind": "string", "val": "1"},
@@ -61,7 +63,7 @@ func TestMarshal(t *testing.T) {
 
 	invalid := types.Datum{}
 	invalid.SetInterface(1)
-	err = encoder.AddArray("bad-test", lkv.RowArrayMarshaller{minNotNull, invalid})
+	err = encoder.AddArray("bad-test", lkv.RowArrayMarshaler{minNotNull, invalid})
 	require.Regexp(t, "cannot convert.*", err)
 	require.Equal(t, encoder.Fields["bad-test"], []interface{}{
 		map[string]interface{}{"kind": "min", "val": "-inf"},
@@ -80,7 +82,7 @@ func TestEncode(t *testing.T) {
 	c1 := &model.ColumnInfo{ID: 1, Name: model.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeTiny)}
 	cols := []*model.ColumnInfo{c1}
 	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
 	logger := log.Logger{Logger: zap.NewNop()}
@@ -89,16 +91,12 @@ func TestEncode(t *testing.T) {
 	}
 
 	// Strict mode
-	strictMode, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeStrictAllTables,
-			Timestamp: 1234567890,
-		},
-		Logger: logger,
-	}, nil)
+	strictMode, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeStrictAllTables,
+		Timestamp: 1234567890,
+	}, nil, logger)
 	require.NoError(t, err)
-	pairs, err := strictMode.Encode(rows, 1, []int{0, 1}, 1234)
+	pairs, err := strictMode.Encode(logger, rows, 1, []int{0, 1}, "1.csv", 1234)
 	require.Regexp(t, "failed to cast value as tinyint\\(4\\) for column `c1` \\(#1\\):.*overflows tinyint", err)
 	require.Nil(t, pairs)
 
@@ -106,55 +104,47 @@ func TestEncode(t *testing.T) {
 		types.NewIntDatum(1),
 		types.NewStringDatum("invalid-pk"),
 	}
-	_, err = strictMode.Encode(rowsWithPk, 2, []int{0, 1}, 1234)
+	_, err = strictMode.Encode(logger, rowsWithPk, 2, []int{0, 1}, "1.csv", 1234)
 	require.Regexp(t, "failed to cast value as bigint\\(20\\) for column `_tidb_rowid`.*Truncated.*", err)
 
 	rowsWithPk2 := []types.Datum{
 		types.NewIntDatum(1),
 		types.NewStringDatum("1"),
 	}
-	pairs, err = strictMode.Encode(rowsWithPk2, 2, []int{0, 1}, 1234)
+	pairs, err = strictMode.Encode(logger, rowsWithPk2, 2, []int{0, 1}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1},
 			Val:   []uint8{0x8, 0x2, 0x8, 0x2},
-			RowID: common.EncodeIntRowID(2),
+			RowID: 2,
 		},
 	}))
 
 	// Mock add record error
 	mockTbl := &mockTable{Table: tbl}
-	mockMode, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: mockTbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeStrictAllTables,
-			Timestamp: 1234567891,
-		},
-		Logger: logger,
-	}, nil)
+	mockMode, err := lkv.NewTableKVEncoder(mockTbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeStrictAllTables,
+		Timestamp: 1234567891,
+	}, nil, logger)
 	require.NoError(t, err)
-	_, err = mockMode.Encode(rowsWithPk2, 2, []int{0, 1}, 1234)
+	_, err = mockMode.Encode(logger, rowsWithPk2, 2, []int{0, 1}, "1.csv", 1234)
 	require.EqualError(t, err, "mock error")
 
 	// Non-strict mode
-	noneMode, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeNone,
-			Timestamp: 1234567892,
-			SysVars:   map[string]string{"tidb_row_format_version": "1"},
-		},
-		Logger: logger,
-	}, nil)
+	noneMode, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeNone,
+		Timestamp: 1234567892,
+		SysVars:   map[string]string{"tidb_row_format_version": "1"},
+	}, nil, logger)
 	require.NoError(t, err)
-	pairs, err = noneMode.Encode(rows, 1, []int{0, 1}, 1234)
+	pairs, err = noneMode.Encode(logger, rows, 1, []int{0, 1}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1},
 			Val:   []uint8{0x8, 0x2, 0x8, 0xfe, 0x1},
-			RowID: common.EncodeIntRowID(1),
+			RowID: 1,
 		},
 	}))
 }
@@ -163,9 +153,9 @@ func TestDecode(t *testing.T) {
 	c1 := &model.ColumnInfo{ID: 1, Name: model.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeTiny)}
 	cols := []*model.ColumnInfo{c1}
 	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
-	decoder, err := lkv.NewTableKVDecoder(tbl, "`test`.`c1`", &encode.SessionOptions{
+	decoder, err := lkv.NewTableKVDecoder(tbl, "`test`.`c1`", &lkv.SessionOptions{
 		SQLMode:   mysql.ModeStrictAllTables,
 		Timestamp: 1234567890,
 	}, log.L())
@@ -190,12 +180,13 @@ type LocalKvPairs struct {
 	pairs []common.KvPair
 }
 
-func fromRow(r encode.Row) (l LocalKvPairs) {
-	l.pairs = lkv.Row2KvPairs(r)
+func fromRow(r lkv.Row) (l LocalKvPairs) {
+	l.pairs = lkv.KvPairsFromRow(r)
 	return l
 }
 
 func TestDecodeIndex(t *testing.T) {
+	logger := log.Logger{Logger: zap.NewNop()}
 	tblInfo := &model.TableInfo{
 		ID: 1,
 		Indices: []*model.IndexInfo{
@@ -217,7 +208,7 @@ func TestDecodeIndex(t *testing.T) {
 		State:      model.StatePublic,
 		PKIsHandle: false,
 	}
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	if err != nil {
 		fmt.Printf("error: %v", err.Error())
 	}
@@ -228,20 +219,16 @@ func TestDecodeIndex(t *testing.T) {
 	}
 
 	// Strict mode
-	strictMode, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeStrictAllTables,
-			Timestamp: 1234567890,
-		},
-		Logger: log.L(),
-	}, nil)
+	strictMode, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeStrictAllTables,
+		Timestamp: 1234567890,
+	}, nil, log.L())
 	require.NoError(t, err)
-	pairs, err := strictMode.Encode(rows, 1, []int{0, 1, -1}, 123)
+	pairs, err := strictMode.Encode(logger, rows, 1, []int{0, 1, -1}, "1.csv", 123)
 	data := fromRow(pairs)
 	require.Len(t, data.pairs, 2)
 
-	decoder, err := lkv.NewTableKVDecoder(tbl, "`test`.``", &encode.SessionOptions{
+	decoder, err := lkv.NewTableKVDecoder(tbl, "`test`.``", &lkv.SessionOptions{
 		SQLMode:   mysql.ModeStrictAllTables,
 		Timestamp: 1234567890,
 	}, log.L())
@@ -262,24 +249,21 @@ func TestEncodeRowFormatV2(t *testing.T) {
 	c1 := &model.ColumnInfo{ID: 1, Name: model.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeTiny)}
 	cols := []*model.ColumnInfo{c1}
 	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
+	logger := log.Logger{Logger: zap.NewNop()}
 	rows := []types.Datum{
 		types.NewIntDatum(10000000),
 	}
 
-	noneMode, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeNone,
-			Timestamp: 1234567892,
-			SysVars:   map[string]string{"tidb_row_format_version": "2"},
-		},
-		Logger: log.L(),
-	}, nil)
+	noneMode, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeNone,
+		Timestamp: 1234567892,
+		SysVars:   map[string]string{"tidb_row_format_version": "2"},
+	}, nil, log.L())
 	require.NoError(t, err)
-	pairs, err := noneMode.Encode(rows, 1, []int{0, 1}, 1234)
+	pairs, err := noneMode.Encode(logger, rows, 1, []int{0, 1}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
@@ -294,7 +278,7 @@ func TestEncodeRowFormatV2(t *testing.T) {
 				0x1, 0x0, // not null offsets = [1]
 				0x7f, // column version = 127 (10000000 clamped to TINYINT)
 			},
-			RowID: common.EncodeIntRowID(1),
+			RowID: 1,
 		},
 	}))
 }
@@ -313,75 +297,71 @@ func TestEncodeTimestamp(t *testing.T) {
 	}
 	cols := []*model.ColumnInfo{c1}
 	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:   mysql.ModeStrictAllTables,
-			Timestamp: 1234567893,
-			SysVars: map[string]string{
-				"tidb_row_format_version": "1",
-				"time_zone":               "+08:00",
-			},
+	logger := log.Logger{Logger: zap.NewNop()}
+
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:   mysql.ModeStrictAllTables,
+		Timestamp: 1234567893,
+		SysVars: map[string]string{
+			"tidb_row_format_version": "1",
+			"time_zone":               "+08:00",
 		},
-		Logger: log.L(),
-	}, nil)
+	}, nil, log.L())
 	require.NoError(t, err)
-	pairs, err := encoder.Encode(nil, 70, []int{-1, 1}, 1234)
+	pairs, err := encoder.Encode(logger, nil, 70, []int{-1, 1}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x46},
 			Val:   []uint8{0x8, 0x2, 0x9, 0x80, 0x80, 0x80, 0xf0, 0xfd, 0x8e, 0xf7, 0xc0, 0x19},
-			RowID: common.EncodeIntRowID(70),
+			RowID: 70,
 		},
 	}))
 }
 
 func TestEncodeDoubleAutoIncrement(t *testing.T) {
 	tblInfo := mockTableInfo(t, "create table t (id double not null auto_increment, unique key `u_id` (`id`));")
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode: mysql.ModeStrictAllTables,
-			SysVars: map[string]string{
-				"tidb_row_format_version": "2",
-			},
+	logger := log.Logger{Logger: zap.NewNop()}
+
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode: mysql.ModeStrictAllTables,
+		SysVars: map[string]string{
+			"tidb_row_format_version": "2",
 		},
-		Logger: log.L(),
-	}, nil)
+	}, nil, log.L())
 	require.NoError(t, err)
 
 	strDatumForID := types.NewStringDatum("1")
-	actualDatum, err := lkv.GetActualDatum(encoder, tbl.Cols()[0], 70, &strDatumForID)
+	actualDatum, err := lkv.GetActualDatum(encoder, 70, 0, &strDatumForID)
 	require.NoError(t, err)
 	require.Equal(t, types.NewFloat64Datum(1.0), actualDatum)
 
-	pairsExpect, err := encoder.Encode([]types.Datum{
+	pairsExpect, err := encoder.Encode(logger, []types.Datum{
 		types.NewFloat64Datum(1.0),
-	}, 70, []int{0, -1}, 1234)
+	}, 70, []int{0, -1}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x46},
 			Val:   []uint8{0x80, 0x0, 0x1, 0x0, 0x0, 0x0, 0x1, 0x8, 0x0, 0xbf, 0xf0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-			RowID: common.EncodeIntRowID(70),
+			RowID: 70,
 		},
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x69, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5, 0xbf, 0xf0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
 			Val:   []uint8{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x46},
-			RowID: common.EncodeIntRowID(70),
+			RowID: 70,
 		},
 	}), pairsExpect)
 
-	pairs, err := encoder.Encode([]types.Datum{
+	pairs, err := encoder.Encode(logger, []types.Datum{
 		types.NewStringDatum("1"),
-	}, 70, []int{0, -1}, 1234)
+	}, 70, []int{0, -1}, "1.csv", 1234)
 	require.NoError(t, err)
 
 	require.Equal(t, pairsExpect, pairs)
@@ -389,6 +369,8 @@ func TestEncodeDoubleAutoIncrement(t *testing.T) {
 }
 
 func TestEncodeMissingAutoValue(t *testing.T) {
+	logger := log.Logger{Logger: zap.NewNop()}
+
 	var rowID int64 = 70
 	type testTableInfo struct {
 		AllocType  autoid.AllocatorType
@@ -406,19 +388,15 @@ func TestEncodeMissingAutoValue(t *testing.T) {
 		},
 	} {
 		tblInfo := mockTableInfo(t, testTblInfo.CreateStmt)
-		tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+		tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 		require.NoError(t, err)
 
-		encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-			Table: tbl,
-			SessionOptions: encode.SessionOptions{
-				SQLMode: mysql.ModeStrictAllTables,
-				SysVars: map[string]string{
-					"tidb_row_format_version": "2",
-				},
+		encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+			SQLMode: mysql.ModeStrictAllTables,
+			SysVars: map[string]string{
+				"tidb_row_format_version": "2",
 			},
-			Logger: log.L(),
-		}, nil)
+		}, nil, log.L())
 		require.NoError(t, err)
 
 		realRowID := lkv.GetEncoderIncrementalID(encoder, rowID)
@@ -427,29 +405,29 @@ func TestEncodeMissingAutoValue(t *testing.T) {
 		nullDatum.SetNull()
 
 		expectIDDatum := types.NewIntDatum(realRowID)
-		actualIDDatum, err := lkv.GetActualDatum(encoder, tbl.Cols()[0], rowID, nil)
+		actualIDDatum, err := lkv.GetActualDatum(encoder, rowID, 0, nil)
 		require.NoError(t, err)
 		require.Equal(t, expectIDDatum, actualIDDatum)
 
-		actualIDDatum, err = lkv.GetActualDatum(encoder, tbl.Cols()[0], rowID, &nullDatum)
+		actualIDDatum, err = lkv.GetActualDatum(encoder, rowID, 0, &nullDatum)
 		require.NoError(t, err)
 		require.Equal(t, expectIDDatum, actualIDDatum)
 
-		pairsExpect, err := encoder.Encode([]types.Datum{
+		pairsExpect, err := encoder.Encode(logger, []types.Datum{
 			types.NewIntDatum(realRowID),
-		}, rowID, []int{0}, 1234)
+		}, rowID, []int{0}, "1.csv", 1234)
 		require.NoError(t, err)
 
 		// test insert a NULL value on auto_xxxx column, and it is set to NOT NULL
-		pairs, err := encoder.Encode([]types.Datum{
+		pairs, err := encoder.Encode(logger, []types.Datum{
 			nullDatum,
-		}, rowID, []int{0}, 1234)
+		}, rowID, []int{0}, "1.csv", 1234)
 		require.NoError(t, err)
 		require.Equalf(t, pairsExpect, pairs, "test table info: %+v", testTblInfo)
 		require.Equalf(t, rowID, tbl.Allocators(lkv.GetEncoderSe(encoder)).Get(testTblInfo.AllocType).Base(), "test table info: %+v", testTblInfo)
 
 		// test insert a row without specifying the auto_xxxx column
-		pairs, err = encoder.Encode([]types.Datum{}, rowID, []int{0}, 1234)
+		pairs, err = encoder.Encode(logger, []types.Datum{}, rowID, []int{0}, "1.csv", 1234)
 		require.NoError(t, err)
 		require.Equalf(t, pairsExpect, pairs, "test table info: %+v", testTblInfo)
 		require.Equalf(t, rowID, tbl.Allocators(lkv.GetEncoderSe(encoder)).Get(testTblInfo.AllocType).Base(), "test table info: %+v", testTblInfo)
@@ -458,32 +436,28 @@ func TestEncodeMissingAutoValue(t *testing.T) {
 
 func TestEncodeExpressionColumn(t *testing.T) {
 	tblInfo := mockTableInfo(t, "create table t (id varchar(40) not null DEFAULT uuid(), unique key `u_id` (`id`));")
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
 
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode: mysql.ModeStrictAllTables,
-			SysVars: map[string]string{
-				"tidb_row_format_version": "2",
-			},
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode: mysql.ModeStrictAllTables,
+		SysVars: map[string]string{
+			"tidb_row_format_version": "2",
 		},
-		Logger: log.L(),
-	}, nil)
+	}, nil, log.L())
 	require.NoError(t, err)
 
 	strDatumForID := types.NewStringDatum("1")
-	actualDatum, err := lkv.GetActualDatum(encoder, tbl.Cols()[0], 70, &strDatumForID)
+	actualDatum, err := lkv.GetActualDatum(encoder, 70, 0, &strDatumForID)
 	require.NoError(t, err)
 	require.Equal(t, strDatumForID, actualDatum)
 
-	actualDatum, err = lkv.GetActualDatum(encoder, tbl.Cols()[0], 70, nil)
+	actualDatum, err = lkv.GetActualDatum(encoder, 70, 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, types.KindString, actualDatum.Kind())
 	require.Len(t, actualDatum.GetString(), 36) // uuid length
 
-	actualDatum2, err := lkv.GetActualDatum(encoder, tbl.Cols()[0], 70, nil)
+	actualDatum2, err := lkv.GetActualDatum(encoder, 70, 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, types.KindString, actualDatum2.Kind())
 	require.Len(t, actualDatum2.GetString(), 36)
@@ -503,37 +477,34 @@ func mockTableInfo(t *testing.T, createSQL string) *model.TableInfo {
 
 func TestDefaultAutoRandoms(t *testing.T) {
 	tblInfo := mockTableInfo(t, "create table t (id bigint unsigned NOT NULL auto_random primary key clustered, a varchar(100));")
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:        mysql.ModeStrictAllTables,
-			Timestamp:      1234567893,
-			SysVars:        map[string]string{"tidb_row_format_version": "2"},
-			AutoRandomSeed: 456,
-		},
-		Logger: log.L(),
-	}, nil)
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:        mysql.ModeStrictAllTables,
+		Timestamp:      1234567893,
+		SysVars:        map[string]string{"tidb_row_format_version": "2"},
+		AutoRandomSeed: 456,
+	}, nil, log.L())
 	require.NoError(t, err)
-	pairs, err := encoder.Encode([]types.Datum{types.NewStringDatum("")}, 70, []int{-1, 0}, 1234)
+	logger := log.Logger{Logger: zap.NewNop()}
+	pairs, err := encoder.Encode(logger, []types.Datum{types.NewStringDatum("")}, 70, []int{-1, 0}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0xf0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x46},
 			Val:   []uint8{0x80, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0},
-			RowID: common.EncodeIntRowID(70),
+			RowID: 70,
 		},
 	}))
 	require.Equal(t, tbl.Allocators(lkv.GetSession4test(encoder)).Get(autoid.AutoRandomType).Base(), int64(70))
 
-	pairs, err = encoder.Encode([]types.Datum{types.NewStringDatum("")}, 71, []int{-1, 0}, 1234)
+	pairs, err = encoder.Encode(logger, []types.Datum{types.NewStringDatum("")}, 71, []int{-1, 0}, "1.csv", 1234)
 	require.NoError(t, err)
 	require.Equal(t, pairs, lkv.MakeRowFromKvPairs([]common.KvPair{
 		{
 			Key:   []uint8{0x74, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x5f, 0x72, 0xf0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x47},
 			Val:   []uint8{0x80, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0},
-			RowID: common.EncodeIntRowID(71),
+			RowID: 71,
 		},
 	}))
 	require.Equal(t, tbl.Allocators(lkv.GetSession4test(encoder)).Get(autoid.AutoRandomType).Base(), int64(71))
@@ -541,22 +512,19 @@ func TestDefaultAutoRandoms(t *testing.T) {
 
 func TestShardRowId(t *testing.T) {
 	tblInfo := mockTableInfo(t, "create table t (s varchar(16)) shard_row_id_bits = 3;")
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tblInfo.SepAutoInc(), 0), tblInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
 	require.NoError(t, err)
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SQLMode:        mysql.ModeStrictAllTables,
-			Timestamp:      1234567893,
-			SysVars:        map[string]string{"tidb_row_format_version": "2"},
-			AutoRandomSeed: 456,
-		},
-		Logger: log.L(),
-	}, nil)
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{
+		SQLMode:        mysql.ModeStrictAllTables,
+		Timestamp:      1234567893,
+		SysVars:        map[string]string{"tidb_row_format_version": "2"},
+		AutoRandomSeed: 456,
+	}, nil, log.L())
 	require.NoError(t, err)
+	logger := log.Logger{Logger: zap.NewNop()}
 	keyMap := make(map[int64]struct{}, 16)
 	for i := int64(1); i <= 32; i++ {
-		pairs, err := encoder.Encode([]types.Datum{types.NewStringDatum(fmt.Sprintf("%d", i))}, i, []int{0, -1}, i*32)
+		pairs, err := encoder.Encode(logger, []types.Datum{types.NewStringDatum(fmt.Sprintf("%d", i))}, i, []int{0, -1}, "1.csv", i*32)
 		require.NoError(t, err)
 		kvs := fromRow(pairs)
 		require.Len(t, kvs.pairs, 1)
@@ -591,25 +559,25 @@ func TestSplitIntoChunks(t *testing.T) {
 	}
 
 	splitBy10 := lkv.MakeRowsFromKvPairs(pairs).SplitIntoChunks(10)
-	require.Equal(t, splitBy10, []encode.Rows{
+	require.Equal(t, splitBy10, []lkv.Rows{
 		lkv.MakeRowsFromKvPairs(pairs[0:2]),
 		lkv.MakeRowsFromKvPairs(pairs[2:3]),
 		lkv.MakeRowsFromKvPairs(pairs[3:4]),
 	})
 
 	splitBy12 := lkv.MakeRowsFromKvPairs(pairs).SplitIntoChunks(12)
-	require.Equal(t, splitBy12, []encode.Rows{
+	require.Equal(t, splitBy12, []lkv.Rows{
 		lkv.MakeRowsFromKvPairs(pairs[0:2]),
 		lkv.MakeRowsFromKvPairs(pairs[2:4]),
 	})
 
 	splitBy1000 := lkv.MakeRowsFromKvPairs(pairs).SplitIntoChunks(1000)
-	require.Equal(t, splitBy1000, []encode.Rows{
+	require.Equal(t, splitBy1000, []lkv.Rows{
 		lkv.MakeRowsFromKvPairs(pairs[0:4]),
 	})
 
 	splitBy1 := lkv.MakeRowsFromKvPairs(pairs).SplitIntoChunks(1)
-	require.Equal(t, splitBy1, []encode.Rows{
+	require.Equal(t, splitBy1, []lkv.Rows{
 		lkv.MakeRowsFromKvPairs(pairs[0:1]),
 		lkv.MakeRowsFromKvPairs(pairs[1:2]),
 		lkv.MakeRowsFromKvPairs(pairs[2:3]),
@@ -663,7 +631,7 @@ func TestClassifyAndAppend(t *testing.T) {
 type benchSQL2KVSuite struct {
 	row     []types.Datum
 	colPerm []int
-	encoder encode.Encoder
+	encoder lkv.Encoder
 	logger  log.Logger
 }
 
@@ -703,15 +671,9 @@ func SetUpTest(b *testing.B) *benchSQL2KVSuite {
 	tableInfo.State = model.StatePublic
 
 	// Construct the corresponding KV encoder.
-	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(tableInfo.SepAutoInc(), 0), tableInfo)
+	tbl, err := tables.TableFromMeta(lkv.NewPanickingAllocators(0), tableInfo)
 	require.NoError(b, err)
-	encoder, err := lkv.NewTableKVEncoder(&encode.EncodingConfig{
-		Table: tbl,
-		SessionOptions: encode.SessionOptions{
-			SysVars: map[string]string{"tidb_row_format_version": "2"},
-		},
-		Logger: log.L(),
-	}, nil)
+	encoder, err := lkv.NewTableKVEncoder(tbl, &lkv.SessionOptions{SysVars: map[string]string{"tidb_row_format_version": "2"}}, nil, log.L())
 	require.NoError(b, err)
 	logger := log.Logger{Logger: zap.NewNop()}
 
@@ -753,9 +715,43 @@ func SetUpTest(b *testing.B) *benchSQL2KVSuite {
 func BenchmarkSQL2KV(b *testing.B) {
 	s := SetUpTest(b)
 	for i := 0; i < b.N; i++ {
-		rows, err := s.encoder.Encode(s.row, 1, s.colPerm, 0)
+		rows, err := s.encoder.Encode(s.logger, s.row, 1, s.colPerm, "", 0)
 		require.NoError(b, err)
 		l := reflect.ValueOf(rows).Elem().Field(0).Len()
 		require.Equal(b, l, 2)
 	}
+}
+
+func TestLogKVConvertFailed(t *testing.T) {
+	tempPath := filepath.Join(t.TempDir(), "/temp.txt")
+	logCfg := &log.Config{File: tempPath, FileMaxSize: 1}
+	err := log.InitLogger(logCfg, "info")
+	require.NoError(t, err)
+
+	modelName := model.NewCIStr("c1")
+	modelState := model.StatePublic
+	modelFieldType := *types.NewFieldType(mysql.TypeTiny)
+	c1 := &model.ColumnInfo{ID: 1, Name: modelName, State: modelState, Offset: 0, FieldType: modelFieldType}
+	cols := []*model.ColumnInfo{c1}
+	tblInfo := &model.TableInfo{ID: 1, Columns: cols, PKIsHandle: false, State: model.StatePublic}
+	_, err = tables.TableFromMeta(lkv.NewPanickingAllocators(0), tblInfo)
+	require.NoError(t, err)
+
+	var newString strings.Builder
+	for i := 0; i < 100000; i++ {
+		newString.WriteString("test_test_test_test_")
+	}
+	newDatum := types.NewStringDatum(newString.String())
+	rows := []types.Datum{}
+	for i := 0; i <= 10; i++ {
+		rows = append(rows, newDatum)
+	}
+	err = lkv.LogKVConvertFailed(log.L(), rows, 6, c1, err)
+	require.NoError(t, err)
+
+	var content []byte
+	content, err = os.ReadFile(tempPath)
+	require.NoError(t, err)
+	require.LessOrEqual(t, 500, len(string(content)))
+	require.NotContains(t, content, "exceeds maximum file size")
 }

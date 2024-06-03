@@ -16,11 +16,10 @@ package local
 
 import (
 	"bytes"
-	"fmt"
+	"context"
 	"math/rand"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"testing"
 	"time"
 
@@ -30,12 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func randBytes(n int) []byte {
-	b := make([]byte, n)
-	rand.Read(b)
-	return b
-}
-
 func TestDupDetectIterator(t *testing.T) {
 	var pairs []common.KvPair
 	prevRowMax := int64(0)
@@ -44,7 +37,7 @@ func TestDupDetectIterator(t *testing.T) {
 		pairs = append(pairs, common.KvPair{
 			Key:   randBytes(32),
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 	}
@@ -54,13 +47,13 @@ func TestDupDetectIterator(t *testing.T) {
 		pairs = append(pairs, common.KvPair{
 			Key:   key,
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 		pairs = append(pairs, common.KvPair{
 			Key:   key,
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 	}
@@ -70,19 +63,19 @@ func TestDupDetectIterator(t *testing.T) {
 		pairs = append(pairs, common.KvPair{
 			Key:   key,
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 		pairs = append(pairs, common.KvPair{
 			Key:   key,
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 		pairs = append(pairs, common.KvPair{
 			Key:   key,
 			Val:   randBytes(128),
-			RowID: common.EncodeIntRowID(prevRowMax),
+			RowID: prevRowMax,
 		})
 		prevRowMax++
 	}
@@ -109,7 +102,7 @@ func TestDupDetectIterator(t *testing.T) {
 		i = j
 	}
 
-	keyAdapter := common.DupDetectKeyAdapter{}
+	keyAdapter := dupDetectKeyAdapter{}
 
 	// Write pairs to db after shuffling the pairs.
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -129,7 +122,7 @@ func TestDupDetectIterator(t *testing.T) {
 	dupDB, err := pebble.Open(filepath.Join(storeDir, "duplicates"), &pebble.Options{})
 	require.NoError(t, err)
 	var iter Iter
-	iter = newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), common.DupDetectOpt{})
+	iter = newDupDetectIter(context.Background(), db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), dupDetectOpt{})
 	sort.Slice(pairs, func(i, j int) bool {
 		key1 := keyAdapter.Encode(nil, pairs[i].Key, pairs[i].RowID)
 		key2 := keyAdapter.Encode(nil, pairs[j].Key, pairs[j].RowID)
@@ -186,45 +179,51 @@ func TestDupDetectIterator(t *testing.T) {
 	}
 }
 
-func TestKeyAdapterEncoding(t *testing.T) {
-	keyAdapter := common.DupDetectKeyAdapter{}
-	srcKey := []byte{1, 2, 3}
-	v := keyAdapter.Encode(nil, srcKey, common.EncodeIntRowID(1))
-	resKey, err := keyAdapter.Decode(nil, v)
-	require.NoError(t, err)
-	require.EqualValues(t, srcKey, resKey)
+func TestDupDetectIterSeek(t *testing.T) {
+	pairs := []common.KvPair{
+		{
+			Key:   []byte{1, 2, 3, 0},
+			Val:   randBytes(128),
+			RowID: 1,
+		},
+		{
+			Key:   []byte{1, 2, 3, 1},
+			Val:   randBytes(128),
+			RowID: 2,
+		},
+		{
+			Key:   []byte{1, 2, 3, 1},
+			Val:   randBytes(128),
+			RowID: 3,
+		},
+		{
+			Key:   []byte{1, 2, 3, 2},
+			Val:   randBytes(128),
+			RowID: 4,
+		},
+	}
 
-	v = keyAdapter.Encode(nil, srcKey, []byte("mock_common_handle"))
-	resKey, err = keyAdapter.Decode(nil, v)
+	storeDir := t.TempDir()
+	db, err := pebble.Open(filepath.Join(storeDir, "kv"), &pebble.Options{})
 	require.NoError(t, err)
-	require.EqualValues(t, srcKey, resKey)
-}
 
-func BenchmarkDupDetectIter(b *testing.B) {
-	keyAdapter := common.DupDetectKeyAdapter{}
-	db, _ := pebble.Open(filepath.Join(b.TempDir(), "kv"), &pebble.Options{})
+	keyAdapter := dupDetectKeyAdapter{}
 	wb := db.NewBatch()
-	val := []byte("value")
-	for i := 0; i < 100_000; i++ {
-		keyNum := i
-		// mimic we have 20% duplication
-		if keyNum%5 == 0 {
-			keyNum--
-		}
-		keyStr := fmt.Sprintf("%09d", keyNum)
-		rowID := strconv.Itoa(i)
-		key := keyAdapter.Encode(nil, []byte(keyStr), []byte(rowID))
-		wb.Set(key, val, nil)
+	for _, p := range pairs {
+		key := keyAdapter.Encode(nil, p.Key, p.RowID)
+		require.NoError(t, wb.Set(key, p.Val, nil))
 	}
-	wb.Commit(pebble.Sync)
+	require.NoError(t, wb.Commit(pebble.Sync))
 
-	dupDB, _ := pebble.Open(filepath.Join(b.TempDir(), "dup"), &pebble.Options{})
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		iter := newDupDetectIter(db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), common.DupDetectOpt{})
-		keyCnt := 0
-		for iter.First(); iter.Valid(); iter.Next() {
-			keyCnt++
-		}
-	}
+	dupDB, err := pebble.Open(filepath.Join(storeDir, "duplicates"), &pebble.Options{})
+	require.NoError(t, err)
+	iter := newDupDetectIter(context.Background(), db, keyAdapter, &pebble.IterOptions{}, dupDB, log.L(), dupDetectOpt{})
+
+	require.True(t, iter.Seek([]byte{1, 2, 3, 1}))
+	require.Equal(t, pairs[1].Val, iter.Value())
+	require.True(t, iter.Next())
+	require.Equal(t, pairs[3].Val, iter.Value())
+	require.NoError(t, iter.Close())
+	require.NoError(t, db.Close())
+	require.NoError(t, dupDB.Close())
 }

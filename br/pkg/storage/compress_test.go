@@ -20,7 +20,7 @@ func TestWithCompressReadWriteFile(t *testing.T) {
 	ctx := context.Background()
 	storage, err := Create(ctx, backend, true)
 	require.NoError(t, err)
-	storage = WithCompression(storage, Gzip, DecompressConfig{})
+	storage = WithCompression(storage, Gzip)
 	name := "with compress test"
 	content := "hello,world!"
 	fileName := strings.ReplaceAll(name, " ", "-") + ".txt.gz"
@@ -30,7 +30,7 @@ func TestWithCompressReadWriteFile(t *testing.T) {
 	// make sure compressed file is written correctly
 	file, err := os.Open(filepath.Join(dir, fileName))
 	require.NoError(t, err)
-	uncompressedFile, err := newCompressReader(Gzip, DecompressConfig{}, file)
+	uncompressedFile, err := newCompressReader(Gzip, file)
 	require.NoError(t, err)
 	newContent, err := io.ReadAll(uncompressedFile)
 	require.NoError(t, err)

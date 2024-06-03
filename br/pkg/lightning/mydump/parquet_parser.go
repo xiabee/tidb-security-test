@@ -14,7 +14,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/lightning/log"
 	"github.com/pingcap/tidb/br/pkg/storage"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/types"
 	"github.com/xitongsys/parquet-go/parquet"
 	preader "github.com/xitongsys/parquet-go/reader"
 	"github.com/xitongsys/parquet-go/source"
@@ -47,8 +47,6 @@ type ParquetParser struct {
 	curIndex    int
 	lastRow     Row
 	logger      log.Logger
-
-	readSeekCloser ReadSeekCloser
 }
 
 // readerWrapper is a used for implement `source.ParquetFile`
@@ -68,7 +66,7 @@ func (r *readerWrapper) Open(name string) (source.ParquetFile, error) {
 	if len(name) == 0 {
 		name = r.path
 	}
-	reader, err := r.store.Open(r.ctx, name, nil)
+	reader, err := r.store.Open(r.ctx, name)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -134,7 +132,7 @@ func OpenParquetReader(
 		}, nil
 	}
 
-	r, err := store.Open(ctx, path, nil)
+	r, err := store.Open(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -146,9 +144,9 @@ func OpenParquetReader(
 	}, nil
 }
 
-// readParquetFileRowCount reads the parquet file row count.
+// ReadParquetFileRowCount reads the parquet file row count.
 // It is a special func to fetch parquet file row count fast.
-func readParquetFileRowCount(
+func ReadParquetFileRowCount(
 	ctx context.Context,
 	store storage.ExternalStorage,
 	r storage.ReadSeekCloser,
@@ -172,23 +170,6 @@ func readParquetFileRowCount(
 		return 0, err
 	}
 	return numRows, nil
-}
-
-// ReadParquetFileRowCountByFile reads the parquet file row count through fileMeta.
-func ReadParquetFileRowCountByFile(
-	ctx context.Context,
-	store storage.ExternalStorage,
-	fileMeta SourceFileMeta,
-) (int64, error) {
-	r, err := store.Open(ctx, fileMeta.Path, nil)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	numberRows, err := readParquetFileRowCount(ctx, store, r, fileMeta.Path)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	return numberRows, nil
 }
 
 // NewParquetParser generates a parquet parser.
@@ -235,11 +216,10 @@ func NewParquetParser(
 	}
 
 	return &ParquetParser{
-		Reader:         reader,
-		columns:        columns,
-		columnMetas:    columnMetas,
-		logger:         log.FromContext(ctx),
-		readSeekCloser: wrapper,
+		Reader:      reader,
+		columns:     columns,
+		columnMetas: columnMetas,
+		logger:      log.FromContext(ctx),
 	}, nil
 }
 
@@ -371,10 +351,10 @@ func (pp *ParquetParser) SetPos(pos int64, rowID int64) error {
 	return nil
 }
 
-// ScannedPos implements the Parser interface.
-// For parquet it's parquet file's reader current position.
-func (pp *ParquetParser) ScannedPos() (int64, error) {
-	return pp.readSeekCloser.Seek(0, io.SeekCurrent)
+// RealPos implements the Parser interface.
+// For parquet it's equal to Pos().
+func (pp *ParquetParser) RealPos() (int64, error) {
+	return pp.curStart + int64(pp.curIndex), nil
 }
 
 // Close closes the parquet file of the parser.
@@ -462,10 +442,11 @@ func setDatumValue(d *types.Datum, v reflect.Value, meta *parquet.SchemaElement,
 	case reflect.Float32, reflect.Float64:
 		d.SetFloat64(v.Float())
 	case reflect.Ptr:
-		if !v.IsNil() {
+		if v.IsNil() {
+			d.SetNull()
+		} else {
 			return setDatumValue(d, v.Elem(), meta, logger)
 		}
-		d.SetNull()
 	default:
 		logger.Error("unknown value", zap.Stringer("kind", v.Kind()),
 			zap.String("type", v.Type().Name()), zap.Reflect("value", v.Interface()))
@@ -542,7 +523,7 @@ func setDatumByInt(d *types.Datum, v int64, meta *parquet.SchemaElement) error {
 		dotIndex := len(val) - int(*meta.Scale)
 		d.SetString(val[:dotIndex]+"."+val[dotIndex:], "utf8mb4_bin")
 	case logicalType.DATE != nil:
-		dateStr := time.Unix(v*86400, 0).Format(time.DateOnly)
+		dateStr := time.Unix(v*86400, 0).Format("2006-01-02")
 		d.SetString(dateStr, "utf8mb4_bin")
 	case logicalType.TIMESTAMP != nil:
 		// convert all timestamp types (datetime/timestamp) to string

@@ -72,7 +72,6 @@ run() {
 escape_backslash_arr="true false"
 csv_delimiter_arr="\" '"
 csv_separator_arr=', a aa |*|'
-csv_line_terminator_arr='\n \r\n'
 compress_arr='space gzip snappy zstd'
 
 for compress in $compress_arr
@@ -81,17 +80,14 @@ do
   do
     for csv_separator in $csv_separator_arr
     do
-      for csv_line_terminator in $csv_line_terminator_arr
+      for csv_delimiter in $csv_delimiter_arr
       do
-        for csv_delimiter in $csv_delimiter_arr
-        do
-          run
-        done
-        if [ "$escape_backslash" = "true" ]; then
-          csv_delimiter=""
-          run
-        fi
+        run
       done
+      if [ "$escape_backslash" = "true" ]; then
+        csv_delimiter=""
+        run
+      fi
     done
   done
 done

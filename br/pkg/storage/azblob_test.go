@@ -14,8 +14,6 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
-	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/stretchr/testify/require"
 )
@@ -24,33 +22,13 @@ import (
 type sharedKeyAzuriteClientBuilder struct {
 }
 
-func (b *sharedKeyAzuriteClientBuilder) GetServiceClient() (*azblob.Client, error) {
+func (b *sharedKeyAzuriteClientBuilder) GetServiceClient() (azblob.ServiceClient, error) {
 	connStr := "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
-	return azblob.NewClientFromConnectionString(connStr, nil)
+	return azblob.NewServiceClientFromConnectionString(connStr, nil)
 }
 
 func (b *sharedKeyAzuriteClientBuilder) GetAccountName() string {
 	return "devstoreaccount1"
-}
-
-func createContainer(
-	ctx context.Context,
-	clientBuilder *sharedKeyAzuriteClientBuilder,
-	container string,
-) (bool, error) {
-	serviceClient, err := clientBuilder.GetServiceClient()
-	if err != nil {
-		return false, errors.Annotate(err, "Failed to create azure service client")
-	}
-	containerClient := serviceClient.ServiceClient().NewContainerClient(container)
-	_, err = containerClient.Create(ctx, nil)
-	if err != nil && !bloberror.HasCode(err, bloberror.ContainerAlreadyExists) {
-		if strings.Contains(err.Error(), "connect: connection refused") {
-			return true, nil
-		}
-		return false, errors.Annotate(err, "Failed to create container")
-	}
-	return false, nil
 }
 
 func TestAzblob(t *testing.T) {
@@ -59,15 +37,14 @@ func TestAzblob(t *testing.T) {
 		Bucket: "test",
 		Prefix: "a/b/",
 	}
-	builder := &sharedKeyAzuriteClientBuilder{}
-	skip, err := createContainer(ctx, builder, options.Bucket)
-	if skip || err != nil {
-		t.Log("azurite is not running, skip test")
-		return
-	}
-	require.NoError(t, err)
 
-	azblobStorage, err := newAzureBlobStorageWithClientBuilder(ctx, options, builder)
+	azblobStorage, err := newAzureBlobStorageWithClientBuilder(ctx, options, &sharedKeyAzuriteClientBuilder{})
+	if err != nil {
+		if strings.Contains(err.Error(), "connect: connection refused") {
+			t.Log("azurite is not running, skip test")
+			return
+		}
+	}
 	require.NoError(t, err)
 
 	err = azblobStorage.WriteFile(ctx, "key", []byte("data"))
@@ -121,7 +98,7 @@ func TestAzblob(t *testing.T) {
 	require.Equal(t, "keykey1key2", list)
 	require.Equal(t, int64(42), totalSize)
 
-	efr, err := azblobStorage.Open(ctx, "key2", nil)
+	efr, err := azblobStorage.Open(ctx, "key2")
 	require.NoError(t, err)
 
 	p := make([]byte, 10)
@@ -330,9 +307,9 @@ type fakeClientBuilder struct {
 	Endpoint string
 }
 
-func (b *fakeClientBuilder) GetServiceClient() (*azblob.Client, error) {
+func (b *fakeClientBuilder) GetServiceClient() (azblob.ServiceClient, error) {
 	connStr := fmt.Sprintf("DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=%s/devstoreaccount1;", b.Endpoint)
-	return azblob.NewClientFromConnectionString(connStr, getDefaultClientOptions())
+	return azblob.NewServiceClientFromConnectionString(connStr, getDefaultClientOptions())
 }
 
 func (b *fakeClientBuilder) GetAccountName() string {
@@ -345,7 +322,7 @@ func TestDownloadRetry(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Log(r.URL)
 		if strings.Contains(r.URL.String(), "restype=container") {
-			w.WriteHeader(200)
+			w.WriteHeader(201)
 			return
 		}
 		lock.Lock()
@@ -362,9 +339,8 @@ func TestDownloadRetry(t *testing.T) {
 	t.Log(server.URL)
 
 	options := &backuppb.AzureBlobStorage{
-		Bucket:       "test",
-		Prefix:       "a/b/",
-		StorageClass: "Hot",
+		Bucket: "test",
+		Prefix: "a/b/",
 	}
 
 	ctx := context.Background()

@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cznic/mathutil"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
-	tmysql "github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
+	tmysql "github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/parser/terror"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -32,7 +32,6 @@ var retryableServerError = []string{
 	"body write aborted",
 	"error during dispatch",
 	"put object timeout",
-	"timeout after",
 	"internalerror",
 	"not read from or written to within the timeout period",
 	"<code>requesttimeout</code>",

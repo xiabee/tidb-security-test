@@ -33,7 +33,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
+	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/spf13/pflag"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
@@ -132,7 +132,7 @@ func RunBackupEBS(c context.Context, g glue.Glue, cfg *BackupConfig) error {
 		return errors.Trace(err)
 	}
 
-	backupStartTs, err = client.GetCurrentTS(c)
+	backupStartTs, err = client.GetCurerntTS(c)
 	if err != nil {
 		return errors.Trace(err)
 	}

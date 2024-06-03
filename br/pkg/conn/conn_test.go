@@ -106,7 +106,6 @@ func TestGetAllTiKVStoresWithUnknown(t *testing.T) {
 	require.Equal(t, 2, len(errs))
 	require.Equal(t, codes.Unknown, status.Code(errors.Cause(errs[0])))
 }
-
 func TestCheckStoresAlive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

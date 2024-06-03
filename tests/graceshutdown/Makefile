@@ -27,8 +27,8 @@ buildsucc:
 server:
 ifeq ($(TARGET), "")
 	cd ${BASE_DIR} && \
-	CGO_ENABLED=1 $(GOBUILD) -ldflags '$(LDFLAGS)' -o $(OUT_DIR)/tidb-server ${BASE_DIR}/cmd/tidb-server
+	CGO_ENABLED=1 $(GOBUILD) -ldflags '$(LDFLAGS)' -o $(OUT_DIR)/tidb-server tidb-server/main.go
 else
 	cd ${BASE_DIR} && \
-	CGO_ENABLED=1 $(GOBUILD) -ldflags '$(LDFLAGS)' -o '$(TARGET)' ${BASE_DIR}/cmd/tidb-server
+	CGO_ENABLED=1 $(GOBUILD) -ldflags '$(LDFLAGS)' -o '$(TARGET)' tidb-server/main.go
 endif

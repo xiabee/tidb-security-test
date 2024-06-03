@@ -27,9 +27,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -113,7 +112,7 @@ func checkStoresAlive(ctx context.Context,
 	// Check live tikv.
 	stores, err := util.GetAllTiKVStores(ctx, pdclient, storeBehavior)
 	if err != nil {
-		log.Error("failed to get store", zap.Error(err))
+		log.Error("fail to get store", zap.Error(err))
 		return errors.Trace(err)
 	}
 
@@ -154,7 +153,7 @@ func NewMgr(
 
 	controller, err := pdutil.NewPdController(ctx, pdAddrs, tlsConf, securityOption)
 	if err != nil {
-		log.Error("failed to create pd controller", zap.Error(err))
+		log.Error("fail to create pd controller", zap.Error(err))
 		return nil, errors.Trace(err)
 	}
 	if checkRequirements {
@@ -180,8 +179,7 @@ func NewMgr(
 	}
 
 	// Disable GC because TiDB enables GC already.
-	path := fmt.Sprintf("tikv://%s?disableGC=true&keyspaceName=%s", pdAddrs, config.GetGlobalKeyspaceName())
-	storage, err := g.Open(path, securityOption)
+	storage, err := g.Open(fmt.Sprintf("tikv://%s?disableGC=true", pdAddrs), securityOption)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -198,6 +196,7 @@ func NewMgr(
 			return nil, errors.Trace(err)
 		}
 		// we must check tidb(tikv version) any time after concurrent ddl feature implemented in v6.2.
+		// when tidb < 6.2 we need set EnableConcurrentDDL false to make ddl works.
 		// we will keep this check until 7.0, which allow the breaking changes.
 		// NOTE: must call it after domain created!
 		// FIXME: remove this check in v7.0
@@ -291,8 +290,7 @@ func (mgr *Mgr) GetTS(ctx context.Context) (uint64, error) {
 	return oracle.ComposeTS(p, l), nil
 }
 
-// GetMergeRegionSizeAndCount returns the tikv config
-// `coprocessor.region-split-size` and `coprocessor.region-split-key`.
+// GetMergeRegionSizeAndCount returns the tikv config `coprocessor.region-split-size` and `coprocessor.region-split-key`.
 // returns the default config when failed.
 func (mgr *Mgr) GetMergeRegionSizeAndCount(ctx context.Context, client *http.Client) (uint64, uint64) {
 	regionSplitSize := DefaultMergeRegionSizeBytes

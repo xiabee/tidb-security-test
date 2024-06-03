@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
-	"io"
+	"io/ioutil"
 	"log"
 	"strconv"
 
@@ -52,7 +52,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		}
 		return false
 	})
-	logger := log.New(io.Discard, "", 0)
+	logger := log.New(ioutil.Discard, "", 0)
 	analyzer := gosec.NewAnalyzer(gasConfig, logger)
 	analyzer.LoadRules(enabledRules.Builders())
 

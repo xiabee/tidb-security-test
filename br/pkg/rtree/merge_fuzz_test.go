@@ -7,7 +7,7 @@ import (
 
 	backup "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/tidb/br/pkg/rtree"
-	"github.com/pingcap/tidb/pkg/tablecodec"
+	"github.com/pingcap/tidb/tablecodec"
 )
 
 func FuzzMerge(f *testing.F) {

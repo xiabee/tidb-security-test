@@ -54,7 +54,7 @@ comment =
 	'using utf8mb4)'i;
 
 # The patterns parse quoted strings.
-bs = '\\' when { parser.escFlavor != escapeFlavorNone };
+bs = '\\' when { parser.escFlavor != backslashEscapeFlavorNone };
 
 single_quoted = "'" (^"'" | bs any | "''")** "'";
 double_quoted = '"' (^'"' | bs any | '""')** '"';

@@ -4,21 +4,20 @@ package gluetidb
 
 import (
 	"context"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/gluetikv"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/executor"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/session"
-	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/executor"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 )
@@ -31,13 +30,11 @@ var (
 
 const brComment = `/*from(br)*/`
 
-// New makes a new tidb glue.
 func New() Glue {
 	log.Debug("enabling no register config")
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.SkipRegisterToDashboard = true
 		conf.Log.EnableSlowLog.Store(false)
-		conf.TiKVClient.CoprReqTimeout = 1800 * time.Second
 	})
 	return Glue{}
 }
@@ -55,7 +52,6 @@ type tidbSession struct {
 
 // GetDomain implements glue.Glue.
 func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
-	existDom, _ := session.GetDomain(nil)
 	initStatsSe, err := session.CreateSession(store)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -68,16 +64,10 @@ func (Glue) GetDomain(store kv.Storage) (*domain.Domain, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	if existDom == nil {
-		err = session.InitMDLVariable(store)
-		if err != nil {
-			return nil, err
-		}
-		// create stats handler for backup and restore.
-		err = dom.UpdateTableStatsLoop(se, initStatsSe)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
+	// create stats handler for backup and restore.
+	err = dom.UpdateTableStatsLoop(se, initStatsSe)
+	if err != nil {
+		return nil, errors.Trace(err)
 	}
 	return dom, nil
 }
@@ -137,10 +127,6 @@ func (g Glue) UseOneShotSession(store kv.Storage, closeDomain bool, fn func(glue
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if err = session.InitMDLVariable(store); err != nil {
-		return errors.Trace(err)
-	}
-
 	// because domain was created during the whole program exists.
 	// and it will register br info to info syncer.
 	// we'd better close it as soon as possible.
@@ -180,7 +166,7 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 		vars.TxnCtxMu.Unlock()
 	}()
 	// Some of SQLs (like ADMIN RECOVER INDEX) may lazily take effect
-	// when we are polling the result set.
+	// when we polling the result set.
 	// At least call `next` once for triggering theirs side effect.
 	// (Maybe we'd better drain all returned rows?)
 	if rs != nil {
@@ -188,8 +174,7 @@ func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...
 		defer rs.Close()
 		c := rs.NewChunk(nil)
 		if err := rs.Next(ctx, c); err != nil {
-			log.Warn("Error during draining result of internal sql.",
-				logutil.Redact(zap.String("sql", sql)), logutil.ShortError(err))
+			log.Warn("Error during draining result of internal sql.", logutil.Redact(zap.String("sql", sql)), logutil.ShortError(err))
 			return nil
 		}
 	}
@@ -258,7 +243,7 @@ func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...i
 		return err
 	}
 	// Some of SQLs (like ADMIN RECOVER INDEX) may lazily take effect
-	// when we are polling the result set.
+	// when we polling the result set.
 	// At least call `next` once for triggering theirs side effect.
 	// (Maybe we'd better drain all returned rows?)
 	if rs != nil {
@@ -273,27 +258,25 @@ func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...i
 }
 
 // CreateDatabase implements glue.Session.
-func (*mockSession) CreateDatabase(_ context.Context, _ *model.DBInfo) error {
+func (s *mockSession) CreateDatabase(ctx context.Context, schema *model.DBInfo) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreatePlacementPolicy implements glue.Session.
-func (*mockSession) CreatePlacementPolicy(_ context.Context, _ *model.PolicyInfo) error {
+func (s *mockSession) CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreateTables implements glue.BatchCreateTableSession.
-func (*mockSession) CreateTables(_ context.Context, _ map[string][]*model.TableInfo,
-	_ ...ddl.CreateTableWithInfoConfigurier) error {
+func (s *mockSession) CreateTables(ctx context.Context, tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }
 
 // CreateTable implements glue.Session.
-func (*mockSession) CreateTable(_ context.Context, _ model.CIStr,
-	_ *model.TableInfo, _ ...ddl.CreateTableWithInfoConfigurier) error {
+func (s *mockSession) CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	log.Fatal("unimplemented CreateDatabase for mock session")
 	return nil
 }

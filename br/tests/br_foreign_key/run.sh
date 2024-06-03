@@ -19,6 +19,7 @@ DB="$TEST_NAME"
 
 for DDL_BATCH_SIZE in 1 2;
 do
+  run_sql "set @@global.tidb_enable_foreign_key=1;"
   run_sql "set @@global.foreign_key_checks=1;"
   run_sql "set @@foreign_key_checks=1;"
   run_sql "create schema $DB;"

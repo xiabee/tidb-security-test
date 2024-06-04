@@ -35,8 +35,9 @@ const (
 type WalkOption struct {
 	// walk on SubDir of specify directory
 	SubDir string
-	// ObjPrefix used fo prefix search in storage.
-	// it can save lots of time when we want find specify prefix objects in storage.
+	// ObjPrefix used fo prefix search in storage. Note that only part of storage
+	// support it.
+	// It can save lots of time when we want find specify prefix objects in storage.
 	// For example. we have 10000 <Hash>.sst files and 10 backupmeta.(\d+) files.
 	// we can use ObjPrefix = "backupmeta" to retrieve all meta files quickly.
 	ObjPrefix string
@@ -77,10 +78,6 @@ type Writer interface {
 	Close(ctx context.Context) error
 }
 
-type WriterOption struct {
-	Concurrency int
-}
-
 // ExternalStorage represents a kind of file system storage.
 type ExternalStorage interface {
 	// WriteFile writes a complete file to storage, similar to os.WriteFile, but WriteFile should be atomic
@@ -104,16 +101,15 @@ type ExternalStorage interface {
 	// URI returns the base path as a URI
 	URI() string
 
-	// Create opens a file writer by path. path is relative path to storage base path. Currently only s3 implemented WriterOption
-	Create(ctx context.Context, path string, option *WriterOption) (ExternalFileWriter, error)
+	// Create opens a file writer by path. path is relative path to storage base path
+	Create(ctx context.Context, path string) (ExternalFileWriter, error)
 	// Rename file name from oldFileName to newFileName
 	Rename(ctx context.Context, oldFileName, newFileName string) error
 }
 
 // ExternalFileReader represents the streaming external file reader.
 type ExternalFileReader interface {
-	io.ReadCloser
-	io.Seeker
+	io.ReadSeekCloser
 }
 
 // ExternalFileWriter represents the streaming external file writer.
@@ -166,6 +162,9 @@ func Create(ctx context.Context, backend *backuppb.StorageBackend, sendCreds boo
 
 // New creates an ExternalStorage with options.
 func New(ctx context.Context, backend *backuppb.StorageBackend, opts *ExternalStorageOptions) (ExternalStorage, error) {
+	if opts == nil {
+		opts = &ExternalStorageOptions{}
+	}
 	switch backend := backend.Backend.(type) {
 	case *backuppb.StorageBackend_Local:
 		if backend.Local == nil {
@@ -181,7 +180,7 @@ func New(ctx context.Context, backend *backuppb.StorageBackend, opts *ExternalSt
 		if backend.S3 == nil {
 			return nil, errors.Annotate(berrors.ErrStorageInvalidConfig, "s3 config not found")
 		}
-		return NewS3Storage(backend.S3, opts)
+		return NewS3Storage(ctx, backend.S3, opts)
 	case *backuppb.StorageBackend_Noop:
 		return newNoopStorage(), nil
 	case *backuppb.StorageBackend_Gcs:

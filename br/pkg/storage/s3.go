@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	alicred "github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials"
@@ -142,6 +141,7 @@ type S3BackendOptions struct {
 	ACL                   string `json:"acl" toml:"acl"`
 	AccessKey             string `json:"access-key" toml:"access-key"`
 	SecretAccessKey       string `json:"secret-access-key" toml:"secret-access-key"`
+	SessionToken          string `json:"session-token" toml:"session-token"`
 	Provider              string `json:"provider" toml:"provider"`
 	ForcePathStyle        bool   `json:"force-path-style" toml:"force-path-style"`
 	UseAccelerateEndpoint bool   `json:"use-accelerate-endpoint" toml:"use-accelerate-endpoint"`
@@ -158,10 +158,10 @@ func (options *S3BackendOptions) Apply(s3 *backuppb.S3) error {
 			return errors.Trace(err)
 		}
 		if u.Scheme == "" {
-			return errors.Annotate(berrors.ErrStorageInvalidConfig, "scheme not found in endpoint")
+			return errors.Errorf("scheme not found in endpoint")
 		}
 		if u.Host == "" {
-			return errors.Annotate(berrors.ErrStorageInvalidConfig, "host not found in endpoint")
+			return errors.Errorf("host not found in endpoint")
 		}
 	}
 	// In some cases, we need to set ForcePathStyle to false.
@@ -186,6 +186,7 @@ func (options *S3BackendOptions) Apply(s3 *backuppb.S3) error {
 	s3.Acl = options.ACL
 	s3.AccessKey = options.AccessKey
 	s3.SecretAccessKey = options.SecretAccessKey
+	s3.SessionToken = options.SessionToken
 	s3.ForcePathStyle = options.ForcePathStyle
 	s3.RoleArn = options.RoleARN
 	s3.ExternalId = options.ExternalID
@@ -265,7 +266,7 @@ func NewS3StorageForTest(svc s3iface.S3API, options *backuppb.S3) *S3Storage {
 // auto access without ak / sk.
 func autoNewCred(qs *backuppb.S3) (cred *credentials.Credentials, err error) {
 	if qs.AccessKey != "" && qs.SecretAccessKey != "" {
-		return credentials.NewStaticCredentials(qs.AccessKey, qs.SecretAccessKey, ""), nil
+		return credentials.NewStaticCredentials(qs.AccessKey, qs.SecretAccessKey, qs.SessionToken), nil
 	}
 	endpoint := qs.Endpoint
 	// if endpoint is empty,return no error and run default(aws) follow.
@@ -290,7 +291,7 @@ func createOssRAMCred() (*credentials.Credentials, error) {
 }
 
 // NewS3Storage initialize a new s3 storage for metadata.
-func NewS3Storage(backend *backuppb.S3, opts *ExternalStorageOptions) (obj *S3Storage, errRet error) {
+func NewS3Storage(ctx context.Context, backend *backuppb.S3, opts *ExternalStorageOptions) (obj *S3Storage, errRet error) {
 	qs := *backend
 	awsConfig := aws.NewConfig().
 		WithS3ForcePathStyle(qs.ForcePathStyle).
@@ -333,6 +334,7 @@ func NewS3Storage(backend *backuppb.S3, opts *ExternalStorageOptions) (obj *S3St
 		// Clear the credentials if exists so that they will not be sent to TiKV
 		backend.AccessKey = ""
 		backend.SecretAccessKey = ""
+		backend.SessionToken = ""
 	} else if ses.Config.Credentials != nil {
 		if qs.AccessKey == "" || qs.SecretAccessKey == "" {
 			v, cerr := ses.Config.Credentials.Get()
@@ -341,6 +343,7 @@ func NewS3Storage(backend *backuppb.S3, opts *ExternalStorageOptions) (obj *S3St
 			}
 			backend.AccessKey = v.AccessKeyID
 			backend.SecretAccessKey = v.SecretAccessKey
+			backend.SessionToken = v.SessionToken
 		}
 	}
 
@@ -373,7 +376,7 @@ func NewS3Storage(backend *backuppb.S3, opts *ExternalStorageOptions) (obj *S3St
 				req.Config.S3ForcePathStyle = ses.Config.S3ForcePathStyle
 			}
 		}
-		region, err = s3manager.GetBucketRegionWithClient(context.Background(), c, qs.Bucket, setCredOpt)
+		region, err = s3manager.GetBucketRegionWithClient(ctx, c, qs.Bucket, setCredOpt)
 		if err != nil {
 			return nil, errors.Annotatef(err, "failed to get region of bucket %s", qs.Bucket)
 		}
@@ -515,41 +518,22 @@ func (rs *S3Storage) WriteFile(ctx context.Context, file string, data []byte) er
 
 // ReadFile reads the file from the storage and returns the contents.
 func (rs *S3Storage) ReadFile(ctx context.Context, file string) ([]byte, error) {
-	var (
-		data    []byte
-		readErr error
-	)
-	for retryCnt := 0; retryCnt < maxErrorRetries; retryCnt += 1 {
-		input := &s3.GetObjectInput{
-			Bucket: aws.String(rs.options.Bucket),
-			Key:    aws.String(rs.options.Prefix + file),
-		}
-		result, err := rs.svc.GetObjectWithContext(ctx, input)
-		if err != nil {
-			return nil, errors.Annotatef(err,
-				"failed to read s3 file, file info: input.bucket='%s', input.key='%s'",
-				*input.Bucket, *input.Key)
-		}
-		data, readErr = io.ReadAll(result.Body)
-		// close the body of response since data has been already read out
-		result.Body.Close()
-		// for unit test
-		failpoint.Inject("read-s3-body-failed", func(_ failpoint.Value) {
-			log.Info("original error", zap.Error(readErr))
-			readErr = errors.Errorf("read: connection reset by peer")
-		})
-		if readErr != nil {
-			if isDeadlineExceedError(readErr) || isCancelError(readErr) {
-				return nil, errors.Annotatef(readErr, "failed to read body from get object result, file info: input.bucket='%s', input.key='%s', retryCnt='%d'",
-					*input.Bucket, *input.Key, retryCnt)
-			}
-			continue
-		}
-		return data, nil
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(rs.options.Bucket),
+		Key:    aws.String(rs.options.Prefix + file),
 	}
-	// retry too much, should be failed
-	return nil, errors.Annotatef(readErr, "failed to read body from get object result (retry too much), file info: input.bucket='%s', input.key='%s'",
-		rs.options.Bucket, rs.options.Prefix+file)
+	result, err := rs.svc.GetObjectWithContext(ctx, input)
+	if err != nil {
+		return nil, errors.Annotatef(err,
+			"failed to read s3 file, file info: input.bucket='%s', input.key='%s'",
+			*input.Bucket, *input.Key)
+	}
+	defer result.Body.Close()
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return data, nil
 }
 
 // DeleteFile delete the file in s3 storage
@@ -928,60 +912,11 @@ func (rs *S3Storage) CreateUploader(ctx context.Context, name string) (ExternalF
 	}, nil
 }
 
-type s3ObjectWriter struct {
-	wd  *io.PipeWriter
-	wg  *sync.WaitGroup
-	err error
-}
-
-// Write implement the io.Writer interface.
-func (s *s3ObjectWriter) Write(_ context.Context, p []byte) (int, error) {
-	return s.wd.Write(p)
-}
-
-// Close implement the io.Closer interface.
-func (s *s3ObjectWriter) Close(_ context.Context) error {
-	err := s.wd.Close()
-	if err != nil {
-		return err
-	}
-	s.wg.Wait()
-	return s.err
-}
-
 // Create creates multi upload request.
-func (rs *S3Storage) Create(ctx context.Context, name string, option *WriterOption) (ExternalFileWriter, error) {
-	var uploader ExternalFileWriter
-	var err error
-	if option == nil || option.Concurrency <= 1 {
-		uploader, err = rs.CreateUploader(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		up := s3manager.NewUploaderWithClient(rs.svc, func(u *s3manager.Uploader) {
-			u.Concurrency = option.Concurrency
-			u.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(option.Concurrency * 8 * 1024 * 1024)
-		})
-		rd, wd := io.Pipe()
-		upParams := &s3manager.UploadInput{
-			Bucket: aws.String(rs.options.Bucket),
-			Key:    aws.String(rs.options.Prefix + name),
-			Body:   rd,
-		}
-		s3Writer := &s3ObjectWriter{wd: wd, wg: &sync.WaitGroup{}}
-		s3Writer.wg.Add(1)
-		go func() {
-			_, err := up.UploadWithContext(ctx, upParams)
-			// like a channel we only let sender close the pipe in happy path
-			if err != nil {
-				log.Warn("upload to s3 failed", zap.String("filename", name), zap.Error(err))
-				_ = rd.CloseWithError(err)
-			}
-			s3Writer.err = err
-			s3Writer.wg.Done()
-		}()
-		uploader = s3Writer
+func (rs *S3Storage) Create(ctx context.Context, name string) (ExternalFileWriter, error) {
+	uploader, err := rs.CreateUploader(ctx, name)
+	if err != nil {
+		return nil, err
 	}
 	uploaderWriter := newBufferedWriter(uploader, hardcodedS3ChunkSize, NoCompression)
 	return uploaderWriter, nil
@@ -1006,10 +941,6 @@ func (rs *S3Storage) Rename(ctx context.Context, oldFileName, newFileName string
 // retryerWithLog wrappes the client.DefaultRetryer, and logging when retry triggered.
 type retryerWithLog struct {
 	client.DefaultRetryer
-}
-
-func isCancelError(err error) bool {
-	return strings.Contains(err.Error(), "context canceled")
 }
 
 func isDeadlineExceedError(err error) bool {
@@ -1038,13 +969,13 @@ func (rl retryerWithLog) ShouldRetry(r *request.Request) bool {
 			r.Error = errors.New("read tcp *.*.*.*:*->*.*.*.*:*: read: connection reset by peer")
 		}
 	})
-	if r.HTTPRequest.URL.Host == ec2MetaAddress && (isDeadlineExceedError(r.Error) || isConnectionResetError(r.Error)) {
+	if isConnectionResetError(r.Error) {
+		return true
+	}
+	if isDeadlineExceedError(r.Error) && r.HTTPRequest.URL.Host == ec2MetaAddress {
 		// fast fail for unreachable linklocal address in EC2 containers.
 		log.Warn("failed to get EC2 metadata. skipping.", logutil.ShortError(r.Error))
 		return false
-	}
-	if isConnectionResetError(r.Error) {
-		return true
 	}
 	return rl.DefaultRetryer.ShouldRetry(r)
 }

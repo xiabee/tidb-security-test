@@ -931,7 +931,7 @@ func prepare4HashJoin(testCase *hashJoinTestCase, innerExec, outerExec Executor)
 		},
 	}
 
-	childrenUsedSchema := markChildrenUsedColsForTest(e.Schema(), e.children[0].Schema(), e.children[0].Schema())
+	childrenUsedSchema := markChildrenUsedColsForTest(e.Schema(), e.children[0].Schema(), e.children[1].Schema())
 	defaultValues := make([]types.Datum, e.buildWorker.buildSideExec.Schema().Len())
 	lhsTypes, rhsTypes := retTypes(innerExec), retTypes(outerExec)
 	for i := uint(0); i < e.concurrency; i++ {
@@ -1127,16 +1127,6 @@ func BenchmarkHashJoinExec(b *testing.B) {
 	})
 
 	cas.keyIdx = []int{0}
-	b.Run(fmt.Sprintf("%v", cas), func(b *testing.B) {
-		benchmarkHashJoinExecWithCase(b, cas)
-	})
-
-	cols = []*types.FieldType{
-		types.NewFieldType(mysql.TypeLonglong),
-	}
-	cas = defaultHashJoinTestCase(cols, 0, false)
-	cas.keyIdx = []int{0}
-	cas.disk = true
 	b.Run(fmt.Sprintf("%v", cas), func(b *testing.B) {
 		benchmarkHashJoinExecWithCase(b, cas)
 	})

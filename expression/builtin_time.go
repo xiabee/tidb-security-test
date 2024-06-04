@@ -3192,7 +3192,11 @@ func (du *baseDateArithmetical) vecGetDateFromString(b *baseBuiltinFunc, input *
 			}
 			result.SetNull(i, true)
 		} else if b.ctx.GetSessionVars().SQLMode.HasNoZeroDateMode() && (date.Year() == 0 || date.Month() == 0 || date.Day() == 0) {
-			return handleInvalidTimeError(b.ctx, types.ErrWrongValue.GenWithStackByArgs(types.DateTimeStr, dateStr))
+			err = handleInvalidTimeError(b.ctx, types.ErrWrongValue.GenWithStackByArgs(types.DateTimeStr, dateStr))
+			if err != nil {
+				return err
+			}
+			result.SetNull(i, true)
 		} else {
 			dates[i] = date
 		}
@@ -3581,6 +3585,9 @@ func (c *addSubDateFunctionClass) getFunction(ctx sessionctx.Context, args []Exp
 	argTps := []types.EvalType{dateEvalTp, intervalEvalTp, types.ETString}
 	var bf baseBuiltinFunc
 	bf, err = newBaseBuiltinFuncWithTp(ctx, c.funcName, args, resultEvalTp, argTps...)
+	if err != nil {
+		return nil, err
+	}
 	bf.tp.SetType(resultTp)
 
 	var resultFsp int
@@ -6180,13 +6187,6 @@ func addUnitToTime(unit string, t time.Time, v float64) (time.Time, bool, error)
 			return tb, true, nil
 		}
 		tb = t.AddDate(0, int(v), 0)
-
-		// For corner case: timestampadd(month,1,date '2024-01-31') = "2024-02-29", timestampadd(month,1,date '2024-01-30') = "2024-02-29"
-		// `tb.Month()` refers to the actual result, `t.Month()+v` refers to the expect result.
-		// Actual result may be greater than expect result, we need to judge and modify it.
-		for int(tb.Month())%12 != (int(t.Month())+int(v))%12 {
-			tb = tb.AddDate(0, 0, -1)
-		}
 	case "QUARTER":
 		if !validAddMonth(v*3, t.Year(), int(t.Month())) {
 			return tb, true, nil

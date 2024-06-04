@@ -15,19 +15,18 @@
 package executor
 
 import (
-	"sync"
-
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/kvcache"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/pingcap/tidb/util/memory"
+	"github.com/pingcap/tidb/util/syncutil"
 )
 
 // applyCache is used in the apply executor. When we get the same value of the outer row.
 // We fetch the inner rows in the cache not to fetch them in the inner executor.
 type applyCache struct {
-	lock        sync.Mutex
+	lock        syncutil.Mutex
 	cache       *kvcache.SimpleLRUCache // cache.Get/Put are not thread-safe, so it's protected by the lock above
 	memCapacity int64
 	memTracker  *memory.Tracker // track memory usage.
@@ -67,12 +66,6 @@ func (c *applyCache) put(key applyCacheKey, val kvcache.Value) {
 	c.cache.Put(key, val)
 }
 
-func (c *applyCache) removeOldest() (kvcache.Key, kvcache.Value, bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	return c.cache.RemoveOldest()
-}
-
 // Get gets a cache item according to cache key. It's thread-safe.
 func (c *applyCache) Get(key applyCacheKey) (*chunk.List, error) {
 	value, hit := c.get(key)
@@ -90,7 +83,7 @@ func (c *applyCache) Set(key applyCacheKey, value *chunk.List) (bool, error) {
 		return false, nil
 	}
 	for mem+c.memTracker.BytesConsumed() > c.memCapacity {
-		evictedKey, evictedValue, evicted := c.removeOldest()
+		evictedKey, evictedValue, evicted := c.cache.RemoveOldest()
 		if !evicted {
 			return false, nil
 		}

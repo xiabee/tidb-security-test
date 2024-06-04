@@ -1487,10 +1487,10 @@ func TestStrToDate(t *testing.T) {
 func TestFromDays(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	origin := stmtCtx.IgnoreTruncate
-	stmtCtx.IgnoreTruncate = true
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.IgnoreTruncate = origin
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
 	tests := []struct {
 		day    int64
@@ -1768,7 +1768,7 @@ func TestTimestampDiff(t *testing.T) {
 		require.Equal(t, test.expect, d.GetInt64())
 	}
 	sc := ctx.GetSessionVars().StmtCtx
-	sc.IgnoreTruncate = true
+	sc.IgnoreTruncate.Store(true)
 	sc.IgnoreZeroInDate = true
 	resetStmtContext(ctx)
 	f, err := fc.getFunction(ctx, datumsToConstants([]types.Datum{types.NewStringDatum("DAY"),
@@ -2525,18 +2525,6 @@ func TestTimestampAdd(t *testing.T) {
 		{"MINUTE", 1.5, "1995-05-01 00:00:00", "1995-05-01 00:02:00"},
 		{"MINUTE", 1.5, "1995-05-01 00:00:00.000000", "1995-05-01 00:02:00"},
 		{"MICROSECOND", -100, "1995-05-01 00:00:00.0001", "1995-05-01 00:00:00"},
-
-		// issue41052
-		{"MONTH", 1, "2024-01-31", "2024-02-29 00:00:00"},
-		{"MONTH", 1, "2024-01-30", "2024-02-29 00:00:00"},
-		{"MONTH", 1, "2024-01-29", "2024-02-29 00:00:00"},
-		{"MONTH", 1, "2024-01-28", "2024-02-28 00:00:00"},
-		{"MONTH", 1, "2024-10-31", "2024-11-30 00:00:00"},
-		{"MONTH", 3, "2024-01-31", "2024-04-30 00:00:00"},
-		{"MONTH", 15, "2024-01-31", "2025-04-30 00:00:00"},
-		{"MONTH", 10, "2024-10-31", "2025-08-31 00:00:00"},
-		{"MONTH", 1, "2024-11-30", "2024-12-30 00:00:00"},
-		{"MONTH", 13, "2024-11-30", "2025-12-30 00:00:00"},
 	}
 
 	fc := funcs[ast.TimestampAdd]
@@ -2673,10 +2661,10 @@ func TestTimeToSec(t *testing.T) {
 func TestSecToTime(t *testing.T) {
 	ctx := createContext(t)
 	stmtCtx := ctx.GetSessionVars().StmtCtx
-	origin := stmtCtx.IgnoreTruncate
-	stmtCtx.IgnoreTruncate = true
+	origin := stmtCtx.IgnoreTruncate.Load()
+	stmtCtx.IgnoreTruncate.Store(true)
 	defer func() {
-		stmtCtx.IgnoreTruncate = origin
+		stmtCtx.IgnoreTruncate.Store(origin)
 	}()
 
 	fc := funcs[ast.SecToTime]

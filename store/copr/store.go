@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	tidb_config "github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/store/driver/backoff"
 	derr "github.com/pingcap/tidb/store/driver/error"
@@ -31,7 +32,8 @@ import (
 )
 
 type kvStore struct {
-	store *tikv.KVStore
+	store       *tikv.KVStore
+	mppStoreCnt *mppStoreCnt
 }
 
 // GetRegionCache returns the region cache instance.
@@ -88,7 +90,7 @@ func NewStore(s *tikv.KVStore, coprCacheConfig *config.CoprocessorCache) (*Store
 
 	/* #nosec G404 */
 	return &Store{
-		kvStore:         &kvStore{store: s},
+		kvStore:         &kvStore{store: s, mppStoreCnt: &mppStoreCnt{}},
 		coprCache:       coprCache,
 		replicaReadSeed: rand.Uint32(),
 		numcpu:          runtime.GOMAXPROCS(0),
@@ -126,6 +128,9 @@ func getEndPointType(t kv.StoreType) tikvrpc.EndpointType {
 	case kv.TiKV:
 		return tikvrpc.TiKV
 	case kv.TiFlash:
+		if tidb_config.GetGlobalConfig().DisaggregatedTiFlash {
+			return tikvrpc.TiFlashCompute
+		}
 		return tikvrpc.TiFlash
 	case kv.TiDB:
 		return tikvrpc.TiDB

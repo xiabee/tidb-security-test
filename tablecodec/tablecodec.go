@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/charset"
@@ -37,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/util/dbterror"
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/pingcap/tidb/util/stringutil"
+	"github.com/tikv/client-go/v2/tikv"
 )
 
 var (
@@ -209,6 +211,15 @@ func EncodeMetaKey(key []byte, field []byte) kv.Key {
 	return ek
 }
 
+// EncodeMetaKeyPrefix encodes the key prefix into meta key
+func EncodeMetaKeyPrefix(key []byte) kv.Key {
+	ek := make([]byte, 0, len(metaPrefix)+codec.EncodedBytesLength(len(key))+8)
+	ek = append(ek, metaPrefix...)
+	ek = codec.EncodeBytes(ek, key)
+	ek = codec.EncodeUint(ek, uint64(structure.HashData))
+	return ek
+}
+
 // DecodeMetaKey decodes the key and get the meta key and meta field.
 func DecodeMetaKey(ek kv.Key) (key []byte, field []byte, err error) {
 	var tp uint64
@@ -268,7 +279,16 @@ func DecodeKeyHead(key kv.Key) (tableID int64, indexID int64, isRecordKey bool, 
 // DecodeTableID decodes the table ID of the key, if the key is not table key, returns 0.
 func DecodeTableID(key kv.Key) int64 {
 	if !key.HasPrefix(tablePrefix) {
-		return 0
+		// If the key is in API V2, then ignore the prefix
+		_, k, err := tikv.DecodeKey(key, kvrpcpb.APIVersion_V2)
+		if err != nil {
+			terror.Log(errors.Trace(err))
+			return 0
+		}
+		key = k
+		if !key.HasPrefix(tablePrefix) {
+			return 0
+		}
 	}
 	key = key[len(tablePrefix):]
 	_, tableID, err := codec.DecodeInt(key)
@@ -302,12 +322,12 @@ func EncodeValue(sc *stmtctx.StatementContext, b []byte, raw types.Datum) ([]byt
 // EncodeRow encode row data and column ids into a slice of byte.
 // valBuf and values pass by caller, for reducing EncodeRow allocates temporary bufs. If you pass valBuf and values as nil,
 // EncodeRow will allocate it.
-func EncodeRow(sc *stmtctx.StatementContext, row []types.Datum, colIDs []int64, valBuf []byte, values []types.Datum, e *rowcodec.Encoder) ([]byte, error) {
+func EncodeRow(sc *stmtctx.StatementContext, row []types.Datum, colIDs []int64, valBuf []byte, values []types.Datum, e *rowcodec.Encoder, checksums ...uint32) ([]byte, error) {
 	if len(row) != len(colIDs) {
 		return nil, errors.Errorf("EncodeRow error: data and columnID count not match %d vs %d", len(row), len(colIDs))
 	}
 	if e.Enable {
-		return e.Encode(sc, colIDs, row, valBuf)
+		return e.Encode(sc, colIDs, row, valBuf, checksums...)
 	}
 	return EncodeOldRow(sc, row, colIDs, valBuf, values)
 }
@@ -843,11 +863,7 @@ func buildRestoredColumn(allCols []rowcodec.ColInfo) []rowcodec.ColInfo {
 		}
 		if collate.IsBinCollation(col.Ft.GetCollate()) {
 			// Change the fieldType from string to uint since we store the number of the truncated spaces.
-			// NOTE: the corresponding datum is generated as `types.NewUintDatum(paddingSize)`, and the raw data is
-			// encoded via `encodeUint`. Thus we should mark the field type as unsigened here so that the BytesDecoder
-			// can decode it correctly later. Otherwise there might be issues like #47115.
 			copyColInfo.Ft = types.NewFieldType(mysql.TypeLonglong)
-			copyColInfo.Ft.AddFlag(mysql.UnsignedFlag)
 		} else {
 			copyColInfo.Ft = allCols[i].Ft
 		}
@@ -962,7 +978,7 @@ func decodeIntHandleInIndexValue(data []byte) kv.Handle {
 
 // EncodeTableIndexPrefix encodes index prefix with tableID and idxID.
 func EncodeTableIndexPrefix(tableID, idxID int64) kv.Key {
-	key := make([]byte, 0, prefixLen+idLen)
+	key := make([]byte, 0, prefixLen)
 	key = appendTableIndexPrefix(key, tableID)
 	key = codec.EncodeInt(key, idxID)
 	return key
@@ -1834,7 +1850,7 @@ func IndexKVIsUnique(value []byte) bool {
 // VerifyTableIDForRanges verifies that all given ranges are valid to decode the table id.
 func VerifyTableIDForRanges(keyRanges *kv.KeyRanges) ([]int64, error) {
 	tids := make([]int64, 0, keyRanges.PartitionNum())
-	collectFunc := func(ranges []kv.KeyRange) error {
+	collectFunc := func(ranges []kv.KeyRange, _ []int) error {
 		if len(ranges) == 0 {
 			return nil
 		}

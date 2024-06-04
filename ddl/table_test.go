@@ -21,6 +21,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/ddl/util/callback"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/meta/autoid"
@@ -142,10 +143,10 @@ func testTruncateTable(t *testing.T, ctx sessionctx.Context, store kv.Storage, d
 	return job
 }
 
-func testGetTableWithError(r autoid.Requirement, schemaID, tableID int64) (table.Table, error) {
+func testGetTableWithError(store kv.Storage, schemaID, tableID int64) (table.Table, error) {
 	var tblInfo *model.TableInfo
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
-	err := kv.RunInNewTxn(ctx, r.Store(), false, func(ctx context.Context, txn kv.Transaction) error {
+	err := kv.RunInNewTxn(ctx, store, false, func(ctx context.Context, txn kv.Transaction) error {
 		t := meta.NewMeta(txn)
 		var err1 error
 		tblInfo, err1 = t.GetTable(schemaID, tableID)
@@ -160,7 +161,7 @@ func testGetTableWithError(r autoid.Requirement, schemaID, tableID int64) (table
 	if tblInfo == nil {
 		return nil, errors.New("table not found")
 	}
-	alloc := autoid.NewAllocator(r, schemaID, tblInfo.ID, false, autoid.RowIDAllocType)
+	alloc := autoid.NewAllocator(store, schemaID, tblInfo.ID, false, autoid.RowIDAllocType)
 	tbl, err := table.TableFromMeta(autoid.NewAllocators(false, alloc), tblInfo)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -549,7 +550,7 @@ func TestRenameTableIntermediateState(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		hook := &ddl.TestDDLCallback{Do: dom}
+		hook := &callback.TestDDLCallback{Do: dom}
 		runInsert := false
 		fn := func(job *model.Job) {
 			if job.Type == model.ActionRenameTable &&

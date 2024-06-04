@@ -163,13 +163,13 @@ func TestPlanStatsLoad(t *testing.T) {
 		{ // CTE
 			sql: "with cte(x, y) as (select d + 1, b from t where c > 1) select * from cte where x < 3",
 			check: func(p plannercore.Plan, tableInfo *model.TableInfo) {
-				ps, ok := p.(*plannercore.PhysicalProjection)
+				ps, ok := p.(*plannercore.PhysicalSelection)
 				require.True(t, ok)
-				pc, ok := ps.Children()[0].(*plannercore.PhysicalTableReader)
+				pc, ok := ps.Children()[0].(*plannercore.PhysicalCTE)
 				require.True(t, ok)
-				pp, ok := pc.GetTablePlan().(*plannercore.PhysicalSelection)
+				pp, ok := pc.SeedPlan.(*plannercore.PhysicalProjection)
 				require.True(t, ok)
-				reader, ok := pp.Children()[0].(*plannercore.PhysicalTableScan)
+				reader, ok := pp.Children()[0].(*plannercore.PhysicalTableReader)
 				require.True(t, ok)
 				require.Greater(t, countFullStats(reader.Stats().HistColl, tableInfo.Columns[2].ID), 0)
 			},
@@ -304,16 +304,25 @@ func TestPlanStatsStatusRecord(t *testing.T) {
 	store, _ := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec(`set @@tidb_enable_non_prepared_plan_cache=0`) // affect this ut
 	tk.MustExec(`create table t (b int,key b(b))`)
 	tk.MustExec("insert into t (b) values (1)")
 	tk.MustExec("analyze table t")
 	tk.MustQuery("select * from t where b >= 1")
-	require.Len(t, tk.Session().GetSessionVars().StmtCtx.StatsLoadStatus, 0)
+	require.Equal(t, tk.Session().GetSessionVars().StmtCtx.RecordedStatsLoadStatusCnt(), 0)
 	// drop stats in order to change status
 	domain.GetDomain(tk.Session()).StatsHandle().SetStatsCacheCapacity(1)
 	tk.MustQuery("select * from t where b >= 1")
-	require.Len(t, tk.Session().GetSessionVars().StmtCtx.StatsLoadStatus, 2)
-	for _, status := range tk.Session().GetSessionVars().StmtCtx.StatsLoadStatus {
-		require.Equal(t, status, "allEvicted")
+	require.Equal(t, tk.Session().GetSessionVars().StmtCtx.RecordedStatsLoadStatusCnt(), 2)
+	for _, usedStatsForTbl := range tk.Session().GetSessionVars().StmtCtx.GetUsedStatsInfo(false) {
+		if usedStatsForTbl == nil {
+			continue
+		}
+		for _, status := range usedStatsForTbl.IndexStatsLoadStatus {
+			require.Equal(t, status, "allEvicted")
+		}
+		for _, status := range usedStatsForTbl.ColumnStatsLoadStatus {
+			require.Equal(t, status, "allEvicted")
+		}
 	}
 }

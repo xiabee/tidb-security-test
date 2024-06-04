@@ -17,6 +17,7 @@ package executor_test
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/external"
 	"github.com/pingcap/tidb/testkit/testdata"
+	"github.com/pingcap/tidb/util/memory"
 	"github.com/stretchr/testify/require"
 )
 
@@ -356,7 +358,7 @@ func TestPartitionInfoDisable(t *testing.T) {
 	tk.MustQuery("select * from t_info_null where (date = '2020-10-02' or date = '2020-10-06') and app = 'xxx' and media = '19003006'").Check(testkit.Rows())
 }
 
-func TestOrderByandLimit(t *testing.T) {
+func TestOrderByAndLimit(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
@@ -366,16 +368,16 @@ func TestOrderByandLimit(t *testing.T) {
 	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
 
 	// range partition table
-	tk.MustExec(`create table trange(a int, b int, index idx_a(a)) partition by range(a) (
+	tk.MustExec(`create table trange(a int, b int, index idx_a(a), index idx_b(b), index idx_ab(a, b)) partition by range(a) (
 		partition p0 values less than(300),
 		partition p1 values less than (500),
 		partition p2 values less than(1100));`)
 
 	// hash partition table
-	tk.MustExec("create table thash(a int, b int, index idx_a(a), index idx_b(b)) partition by hash(a) partitions 4;")
+	tk.MustExec("create table thash(a int, b int, index idx_a(a), index idx_b(b), index idx_ab(a, b)) partition by hash(a) partitions 4;")
 
 	// regular table
-	tk.MustExec("create table tregular(a int, b int, index idx_a(a))")
+	tk.MustExec("create table tregular(a int, b int, index idx_a(a), index idx_b(b), index idx_ab(a, b))")
 
 	// range partition table with int pk
 	tk.MustExec(`create table trange_intpk(a int primary key, b int) partition by range(a) (
@@ -400,6 +402,52 @@ func TestOrderByandLimit(t *testing.T) {
 
 	// regular table with clustered index
 	tk.MustExec("create table tregular_clustered(a int, b int, primary key(a, b) clustered)")
+
+	listVals := make([]int, 0, 2000)
+
+	for i := 0; i < 2000; i++ {
+		listVals = append(listVals, i)
+	}
+	rand.Shuffle(len(listVals), func(i, j int) {
+		listVals[i], listVals[j] = listVals[j], listVals[i]
+	})
+
+	var listVals1, listVals2, listVals3 string
+
+	for i := 0; i <= 600; i++ {
+		listVals1 += strconv.Itoa(listVals[i])
+		if i != 600 {
+			listVals1 += ","
+		}
+	}
+	for i := 601; i <= 1200; i++ {
+		listVals2 += strconv.Itoa(listVals[i])
+		if i != 1200 {
+			listVals2 += ","
+		}
+	}
+	for i := 1201; i <= 1999; i++ {
+		listVals3 += strconv.Itoa(listVals[i])
+		if i != 1999 {
+			listVals3 += ","
+		}
+	}
+
+	tk.MustExec(fmt.Sprintf(`create table tlist_intpk(a int primary key, b int) partition by list(a)(
+		partition p1 values in (%s),
+		partition p2 values in (%s),
+		partition p3 values in (%s)
+	)`, listVals1, listVals2, listVals3))
+	tk.MustExec(fmt.Sprintf(`create table tlist(a int, b int, index idx_a(a), index idx_b(b), index idx_ab(a, b)) partition by list(a)(
+		partition p1 values in (%s),
+		partition p2 values in (%s),
+		partition p3 values in (%s)
+	)`, listVals1, listVals2, listVals3))
+	tk.MustExec(fmt.Sprintf(`create table tlist_clustered(a int, b int, primary key(a, b)) partition by list(a)(
+		partition p1 values in (%s),
+		partition p2 values in (%s),
+		partition p3 values in (%s)
+	)`, listVals1, listVals2, listVals3))
 
 	// generate some random data to be inserted
 	vals := make([]string, 0, 2000)
@@ -429,15 +477,22 @@ func TestOrderByandLimit(t *testing.T) {
 		dedupMapAB[val] = struct{}{}
 	}
 
-	tk.MustExec("insert into trange values " + strings.Join(vals, ","))
-	tk.MustExec("insert into thash values " + strings.Join(vals, ","))
-	tk.MustExec("insert into tregular values " + strings.Join(vals, ","))
-	tk.MustExec("insert into trange_intpk values " + strings.Join(dedupValsA, ","))
-	tk.MustExec("insert into thash_intpk values " + strings.Join(dedupValsA, ","))
-	tk.MustExec("insert into tregular_intpk values " + strings.Join(dedupValsA, ","))
-	tk.MustExec("insert into trange_clustered values " + strings.Join(dedupValsAB, ","))
-	tk.MustExec("insert into thash_clustered values " + strings.Join(dedupValsAB, ","))
-	tk.MustExec("insert into tregular_clustered values " + strings.Join(dedupValsAB, ","))
+	valInserted := strings.Join(vals, ",")
+	valDedupAInserted := strings.Join(dedupValsA, ",")
+	valDedupABInserted := strings.Join(dedupValsAB, ",")
+
+	tk.MustExec("insert into trange values " + valInserted)
+	tk.MustExec("insert into thash values " + valInserted)
+	tk.MustExec("insert into tlist values" + valInserted)
+	tk.MustExec("insert into tregular values " + valInserted)
+	tk.MustExec("insert into trange_intpk values " + valDedupAInserted)
+	tk.MustExec("insert into thash_intpk values " + valDedupAInserted)
+	tk.MustExec("insert into tlist_intpk values " + valDedupAInserted)
+	tk.MustExec("insert into tregular_intpk values " + valDedupAInserted)
+	tk.MustExec("insert into trange_clustered values " + valDedupABInserted)
+	tk.MustExec("insert into thash_clustered values " + valDedupABInserted)
+	tk.MustExec("insert into tlist_clustered values " + valDedupABInserted)
+	tk.MustExec("insert into tregular_clustered values " + valDedupABInserted)
 
 	tk.MustExec("analyze table trange")
 	tk.MustExec("analyze table trange_intpk")
@@ -448,6 +503,9 @@ func TestOrderByandLimit(t *testing.T) {
 	tk.MustExec("analyze table tregular")
 	tk.MustExec("analyze table tregular_intpk")
 	tk.MustExec("analyze table tregular_clustered")
+	tk.MustExec("analyze table tlist")
+	tk.MustExec("analyze table tlist_intpk")
+	tk.MustExec("analyze table tlist_clustered")
 
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
@@ -455,7 +513,7 @@ func TestOrderByandLimit(t *testing.T) {
 	db, exists := is.SchemaByName(model.NewCIStr("test_orderby_limit"))
 	require.True(t, exists)
 	for _, tblInfo := range db.Tables {
-		if strings.HasPrefix(tblInfo.Name.L, "tr") || strings.HasPrefix(tblInfo.Name.L, "thash") {
+		if strings.HasPrefix(tblInfo.Name.L, "tr") || strings.HasPrefix(tblInfo.Name.L, "thash") || strings.HasPrefix(tblInfo.Name.L, "tlist") {
 			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
 				Count:     1,
 				Available: true,
@@ -473,7 +531,7 @@ func TestOrderByandLimit(t *testing.T) {
 		queryPartition := fmt.Sprintf("select * from trange use index(idx_a) where a > %v order by a, b limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select * from tregular use index(idx_a) where a > %v order by a, b limit %v;", x, y)
 		require.True(t, tk.HasPlan(queryPartition, "IndexLookUp")) // check if IndexLookUp is used
-		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
+		tk.MustQuery(queryPartition).Check(tk.MustQuery(queryRegular).Rows())
 	}
 
 	// test indexLookUp with order property pushed down.
@@ -487,16 +545,47 @@ func TestOrderByandLimit(t *testing.T) {
 		maxEle := tk.MustQuery(fmt.Sprintf("select ifnull(max(a), 1100) from (select * from tregular use index(idx_a) where a > %v order by a limit %v) t", x, y)).Rows()[0][0]
 		queryRangePartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from trange use index(idx_a) where a > %v and a < greatest(%v+1, %v) order by a limit %v", x, x+1, maxEle, y)
 		queryHashPartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from thash use index(idx_a) where a > %v and a < greatest(%v+1, %v) order by a limit %v", x, x+1, maxEle, y)
+		queryListPartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from tlist use index(idx_a) where a > %v and a < greatest(%v+1, %v) order by a limit %v", x, x+1, maxEle, y)
 		queryRegular := fmt.Sprintf("select * from tregular use index(idx_a) where a > %v and a < greatest(%v+1, %v) order by a limit %v;", x, x+1, maxEle, y)
 		require.True(t, tk.HasPlan(queryRangePartitionWithLimitHint, "Limit"))
 		require.True(t, tk.HasPlan(queryRangePartitionWithLimitHint, "IndexLookUp"))
 		require.True(t, tk.HasPlan(queryHashPartitionWithLimitHint, "Limit"))
 		require.True(t, tk.HasPlan(queryHashPartitionWithLimitHint, "IndexLookUp"))
-		require.True(t, tk.HasPlan(queryRangePartitionWithLimitHint, "TopN")) // but not fully pushed
-		require.True(t, tk.HasPlan(queryHashPartitionWithLimitHint, "TopN"))
+		require.True(t, tk.HasPlan(queryListPartitionWithLimitHint, "Limit"))
+		require.True(t, tk.HasPlan(queryListPartitionWithLimitHint, "IndexLookUp"))
+		require.False(t, tk.HasPlan(queryRangePartitionWithLimitHint, "TopN")) // fully pushed
+		require.False(t, tk.HasPlan(queryHashPartitionWithLimitHint, "TopN"))
+		require.False(t, tk.HasPlan(queryListPartitionWithLimitHint, "TopN"))
 		regularResult := tk.MustQuery(queryRegular).Sort().Rows()
 		tk.MustQuery(queryRangePartitionWithLimitHint).Sort().Check(regularResult)
 		tk.MustQuery(queryHashPartitionWithLimitHint).Sort().Check(regularResult)
+		tk.MustQuery(queryListPartitionWithLimitHint).Sort().Check(regularResult)
+	}
+
+	// test indexLookUp with order property pushed down.
+	for i := 0; i < 100; i++ {
+		// explain select * from t where b > {y}  use index(idx_b) order by b limit {x}; // check if IndexLookUp is used
+		// select * from t where b > {y} use index(idx_b) order by b limit {x}; // it can return the correct result
+		x := rand.Intn(1999)
+		y := rand.Intn(2000) + 1
+		maxEle := tk.MustQuery(fmt.Sprintf("select ifnull(max(b), 2000) from (select * from tregular use index(idx_b) where b > %v order by b limit %v) t", x, y)).Rows()[0][0]
+		queryRangePartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from trange use index(idx_b) where b > %v and b < greatest(%v+1, %v) order by b limit %v", x, x+1, maxEle, y)
+		queryHashPartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from thash use index(idx_b) where b > %v and b < greatest(%v+1, %v) order by b limit %v", x, x+1, maxEle, y)
+		queryListPartitionWithLimitHint := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from tlist use index(idx_b) where b > %v and b < greatest(%v+1, %v) order by b limit %v", x, x+1, maxEle, y)
+		queryRegular := fmt.Sprintf("select * from tregular use index(idx_b) where b > %v and b < greatest(%v+1, %v) order by b limit %v;", x, x+1, maxEle, y)
+		require.True(t, tk.HasPlan(queryRangePartitionWithLimitHint, "Limit"))
+		require.True(t, tk.HasPlan(queryRangePartitionWithLimitHint, "IndexLookUp"))
+		require.True(t, tk.HasPlan(queryHashPartitionWithLimitHint, "Limit"))
+		require.True(t, tk.HasPlan(queryHashPartitionWithLimitHint, "IndexLookUp"))
+		require.True(t, tk.HasPlan(queryListPartitionWithLimitHint, "Limit"))
+		require.True(t, tk.HasPlan(queryListPartitionWithLimitHint, "IndexLookUp"))
+		require.False(t, tk.HasPlan(queryRangePartitionWithLimitHint, "TopN")) // fully pushed
+		require.False(t, tk.HasPlan(queryHashPartitionWithLimitHint, "TopN"))
+		require.False(t, tk.HasPlan(queryListPartitionWithLimitHint, "TopN"))
+		regularResult := tk.MustQuery(queryRegular).Sort().Rows()
+		tk.MustQuery(queryRangePartitionWithLimitHint).Sort().Check(regularResult)
+		tk.MustQuery(queryHashPartitionWithLimitHint).Sort().Check(regularResult)
+		tk.MustQuery(queryListPartitionWithLimitHint).Sort().Check(regularResult)
 	}
 
 	// test tableReader
@@ -505,10 +594,10 @@ func TestOrderByandLimit(t *testing.T) {
 		// select * from t where a > {y} ignore index(idx_a) order by a limit {x}; // it can return the correct result
 		x := rand.Intn(1099)
 		y := rand.Intn(2000) + 1
-		queryPartition := fmt.Sprintf("select * from trange ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
-		queryRegular := fmt.Sprintf("select * from tregular ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
+		queryPartition := fmt.Sprintf("select * from trange ignore index(idx_a, idx_ab) where a > %v order by a, b limit %v;", x, y)
+		queryRegular := fmt.Sprintf("select * from tregular ignore index(idx_a, idx_ab) where a > %v order by a, b limit %v;", x, y)
 		require.True(t, tk.HasPlan(queryPartition, "TableReader")) // check if tableReader is used
-		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
+		tk.MustQuery(queryPartition).Check(tk.MustQuery(queryRegular).Rows())
 	}
 
 	// test tableReader with order property pushed down.
@@ -517,43 +606,56 @@ func TestOrderByandLimit(t *testing.T) {
 		// select * from t where a > {y} ignore index(idx_a) order by a limit {x}; // it can return the correct result
 		x := rand.Intn(1099)
 		y := rand.Intn(2000) + 1
-		queryRangePartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from trange ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
-		queryHashPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from thash ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
+		queryRangePartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from trange ignore index(idx_a, idx_ab) where a > %v order by a, b limit %v;", x, y)
+		queryHashPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from thash ignore index(idx_a, idx_ab) where a > %v order by a, b limit %v;", x, y)
+		queryListPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from tlist ignore index(idx_a, idx_ab) where a > %v order by a, b limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select * from tregular ignore index(idx_a) where a > %v order by a, b limit %v;", x, y)
 		require.True(t, tk.HasPlan(queryRangePartition, "TableReader")) // check if tableReader is used
 		require.True(t, tk.HasPlan(queryHashPartition, "TableReader"))
+		require.True(t, tk.HasPlan(queryListPartition, "TableReader"))
 		require.False(t, tk.HasPlan(queryRangePartition, "Limit")) // check if order property is not pushed
 		require.False(t, tk.HasPlan(queryHashPartition, "Limit"))
-		regularResult := tk.MustQuery(queryRegular).Sort().Rows()
-		tk.MustQuery(queryRangePartition).Sort().Check(regularResult)
-		tk.MustQuery(queryHashPartition).Sort().Check(regularResult)
+		require.False(t, tk.HasPlan(queryListPartition, "Limit"))
+		regularResult := tk.MustQuery(queryRegular).Rows()
+		tk.MustQuery(queryRangePartition).Check(regularResult)
+		tk.MustQuery(queryHashPartition).Check(regularResult)
+		tk.MustQuery(queryListPartition).Check(regularResult)
 
 		// test int pk
 		// To be simplified, we only read column a.
 		queryRangePartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from trange_intpk use index(primary) where a > %v order by a limit %v", x, y)
 		queryHashPartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from thash_intpk use index(primary) where a > %v order by a limit %v", x, y)
+		queryListPartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from tlist_intpk use index(primary) where a > %v order by a limit %v", x, y)
 		queryRegular = fmt.Sprintf("select a from tregular_intpk where a > %v order by a limit %v", x, y)
 		require.True(t, tk.HasPlan(queryRangePartition, "TableReader"))
 		require.True(t, tk.HasPlan(queryHashPartition, "TableReader"))
+		require.True(t, tk.HasPlan(queryListPartition, "TableReader"))
 		require.True(t, tk.HasPlan(queryRangePartition, "Limit")) // check if order property is not pushed
 		require.True(t, tk.HasPlan(queryHashPartition, "Limit"))
+		require.True(t, tk.HasPlan(queryListPartition, "Limit"))
 		regularResult = tk.MustQuery(queryRegular).Rows()
 		tk.MustQuery(queryRangePartition).Check(regularResult)
 		tk.MustQuery(queryHashPartition).Check(regularResult)
+		tk.MustQuery(queryListPartition).Check(regularResult)
 
 		// test clustered index
 		queryRangePartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from trange_clustered use index(primary) where a > %v order by a, b limit %v;", x, y)
 		queryHashPartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from thash_clustered use index(primary) where a > %v order by a, b limit %v;", x, y)
+		queryListPartition = fmt.Sprintf("select /*+ LIMIT_TO_COP() */ * from tlist_clustered use index(primary) where a > %v order by a, b limit %v;", x, y)
 		queryRegular = fmt.Sprintf("select * from tregular_clustered where a > %v order by a, b limit %v;", x, y)
 		require.True(t, tk.HasPlan(queryRangePartition, "TableReader")) // check if tableReader is used
 		require.True(t, tk.HasPlan(queryHashPartition, "TableReader"))
+		require.True(t, tk.HasPlan(queryListPartition, "TableReader"))
 		require.True(t, tk.HasPlan(queryRangePartition, "Limit")) // check if order property is pushed
 		require.True(t, tk.HasPlan(queryHashPartition, "Limit"))
-		require.True(t, tk.HasPlan(queryRangePartition, "TopN")) // but not fully pushed
-		require.True(t, tk.HasPlan(queryHashPartition, "TopN"))
+		require.True(t, tk.HasPlan(queryListPartition, "Limit"))
+		require.False(t, tk.HasPlan(queryRangePartition, "TopN")) // could fully pushed for TableScan executor
+		require.False(t, tk.HasPlan(queryHashPartition, "TopN"))
+		require.False(t, tk.HasPlan(queryListPartition, "TopN"))
 		regularResult = tk.MustQuery(queryRegular).Rows()
 		tk.MustQuery(queryRangePartition).Check(regularResult)
 		tk.MustQuery(queryHashPartition).Check(regularResult)
+		tk.MustQuery(queryListPartition).Check(regularResult)
 
 		tk.MustExec(" set @@tidb_allow_mpp=1;")
 		tk.MustExec("set @@session.tidb_isolation_read_engines=\"tiflash,tikv\"")
@@ -591,6 +693,22 @@ func TestOrderByandLimit(t *testing.T) {
 		require.True(t, tk.HasTiFlashPlan(queryPartitionWithTiFlash))
 		// but order is not pushed
 		require.False(t, tk.HasPlan(queryPartitionWithTiFlash, "Limit"), fmt.Sprintf("%v", tk.MustQuery("explain "+queryPartitionWithTiFlash).Rows()))
+		queryPartitionWithTiFlash = fmt.Sprintf("select /*+ read_from_storage(tiflash[tlist_intpk]) */ * from tlist_intpk where a > %v order by a limit %v", x, y)
+		// check if tiflash is used
+		require.True(t, tk.HasTiFlashPlan(queryPartitionWithTiFlash), fmt.Sprintf("%v", tk.MustQuery("explain "+queryPartitionWithTiFlash).Rows()))
+		queryPartitionWithTiFlash = fmt.Sprintf("select /*+ read_from_storage(tiflash[tlist_intpk]) */ /*+ LIMIT_TO_COP() */ * from tlist_intpk where a > %v order by a limit %v", x, y)
+		// check if tiflash is used
+		require.True(t, tk.HasTiFlashPlan(queryPartitionWithTiFlash))
+		// but order is not pushed
+		require.False(t, tk.HasPlan(queryPartitionWithTiFlash, "Limit"), fmt.Sprintf("%v", tk.MustQuery("explain "+queryPartitionWithTiFlash).Rows()))
+		queryPartitionWithTiFlash = fmt.Sprintf("select /*+ read_from_storage(tiflash[tlist_clustered]) */ * from tlist_clustered where a > %v order by a limit %v", x, y)
+		// check if tiflash is used
+		require.True(t, tk.HasTiFlashPlan(queryPartitionWithTiFlash), fmt.Sprintf("%v", tk.MustQuery("explain "+queryPartitionWithTiFlash).Rows()))
+		queryPartitionWithTiFlash = fmt.Sprintf("select /*+ read_from_storage(tiflash[tlist_clustered]) */ /*+ LIMIT_TO_COP() */ * from tlist_clustered where a > %v order by a limit %v", x, y)
+		// check if tiflash is used
+		require.True(t, tk.HasTiFlashPlan(queryPartitionWithTiFlash))
+		// but order is not pushed
+		require.False(t, tk.HasPlan(queryPartitionWithTiFlash, "Limit"), fmt.Sprintf("%v", tk.MustQuery("explain "+queryPartitionWithTiFlash).Rows()))
 		tk.MustExec(" set @@tidb_allow_mpp=0;")
 		tk.MustExec("set @@session.tidb_isolation_read_engines=\"tikv\"")
 	}
@@ -604,7 +722,7 @@ func TestOrderByandLimit(t *testing.T) {
 		queryPartition := fmt.Sprintf("select a from trange use index(idx_a) where a > %v order by a limit %v;", x, y)
 		queryRegular := fmt.Sprintf("select a from tregular use index(idx_a) where a > %v order by a limit %v;", x, y)
 		require.True(t, tk.HasPlan(queryPartition, "IndexReader")) // check if indexReader is used
-		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
+		tk.MustQuery(queryPartition).Check(tk.MustQuery(queryRegular).Rows())
 	}
 
 	// test indexReader with order property pushed down.
@@ -620,21 +738,57 @@ func TestOrderByandLimit(t *testing.T) {
 		require.True(t, tk.HasPlan(queryHashPartition, "IndexReader"))
 		require.True(t, tk.HasPlan(queryRangePartition, "Limit")) // check if order property is pushed
 		require.True(t, tk.HasPlan(queryHashPartition, "Limit"))
-		regularResult := tk.MustQuery(queryRegular).Sort().Rows()
-		tk.MustQuery(queryRangePartition).Sort().Check(regularResult)
-		tk.MustQuery(queryHashPartition).Sort().Check(regularResult)
+		require.False(t, tk.HasPlan(queryRangePartition, "TopN")) // fully pushed limit
+		require.False(t, tk.HasPlan(queryHashPartition, "TopN"))
+		regularResult := tk.MustQuery(queryRegular).Rows()
+		tk.MustQuery(queryRangePartition).Check(regularResult)
+		tk.MustQuery(queryHashPartition).Check(regularResult)
+	}
+
+	// test indexReader use idx_ab(a, b) with a = {x} order by b limit {y}
+	for i := 0; i < 100; i++ {
+		x := rand.Intn(1099)
+		y := rand.Intn(2000) + 1
+		queryRangePartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from trange use index(idx_ab) where a = %v order by b limit %v;", x, y)
+		queryHashPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from thash use index(idx_ab) where a = %v order by b limit %v;", x, y)
+		queryListPartition := fmt.Sprintf("select /*+ LIMIT_TO_COP() */ a from tlist use index(idx_ab) where a = %v order by b limit %v;", x, y)
+		queryRegular := fmt.Sprintf("select a from tregular use index(idx_ab) where a = %v order by b limit %v;", x, y)
+		require.True(t, tk.HasPlan(queryRangePartition, "IndexReader")) // check if indexReader is used
+		require.True(t, tk.HasPlan(queryHashPartition, "IndexReader"))
+		require.True(t, tk.HasPlan(queryListPartition, "IndexReader"))
+		require.True(t, tk.HasPlan(queryRangePartition, "Limit")) // check if order property is pushed
+		require.True(t, tk.HasPlan(queryHashPartition, "Limit"))
+		require.True(t, tk.HasPlan(queryListPartition, "Limit"))
+		require.False(t, tk.HasPlan(queryRangePartition, "TopN")) // fully pushed limit
+		require.False(t, tk.HasPlan(queryHashPartition, "TopN"))
+		require.False(t, tk.HasPlan(queryListPartition, "TopN"))
+		regularResult := tk.MustQuery(queryRegular).Rows()
+		tk.MustQuery(queryRangePartition).Check(regularResult)
+		tk.MustQuery(queryHashPartition).Check(regularResult)
+		tk.MustQuery(queryListPartition).Check(regularResult)
 	}
 
 	// test indexMerge
 	for i := 0; i < 100; i++ {
-		// explain select /*+ use_index_merge(t) */ * from t where a > 2 or b < 5 order by a limit {x}; // check if IndexMerge is used
-		// select /*+ use_index_merge(t) */ * from t where a > 2 or b < 5 order by a limit {x};  // can return the correct value
+		// explain select /*+ use_index_merge(t) */ * from t where a > 2 or b < 5 order by a, b limit {x}; // check if IndexMerge is used
+		// select /*+ use_index_merge(t) */ * from t where a > 2 or b < 5 order by a, b limit {x};  // can return the correct value
 		y := rand.Intn(2000) + 1
-		queryPartition := fmt.Sprintf("select /*+ use_index_merge(thash) */ * from thash where a > 2 or b < 5 order by a, b limit %v;", y)
+		queryHashPartition := fmt.Sprintf("select /*+ use_index_merge(thash) */ * from thash where a > 2 or b < 5 order by a, b limit %v;", y)
 		queryRegular := fmt.Sprintf("select * from tregular where a > 2 or b < 5 order by a, b limit %v;", y)
-		require.True(t, tk.HasPlan(queryPartition, "IndexMerge")) // check if indexMerge is used
-		tk.MustQuery(queryPartition).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
+		require.True(t, tk.HasPlan(queryHashPartition, "IndexMerge")) // check if indexMerge is used
+		tk.MustQuery(queryHashPartition).Check(tk.MustQuery(queryRegular).Rows())
 	}
+
+	// test sql killed when memory exceed `tidb_mem_quota_query`
+	originMemQuota := tk.MustQuery("show variables like 'tidb_mem_quota_query'").Rows()[0][1].(string)
+	originOOMAction := tk.MustQuery("show variables like 'tidb_mem_oom_action'").Rows()[0][1].(string)
+	tk.MustExec("set session tidb_mem_quota_query=128")
+	tk.MustExec("set global tidb_mem_oom_action=CANCEL")
+	err := tk.QueryToErr("select /*+ LIMIT_TO_COP() */ a from trange use index(idx_a) where a > 1 order by a limit 2000")
+	require.Error(t, err)
+	require.Regexp(t, memory.PanicMemoryExceedWarnMsg+memory.WarnMsgSuffixForSingleQuery, err)
+	tk.MustExec(fmt.Sprintf("set session tidb_mem_quota_query=%s", originMemQuota))
+	tk.MustExec(fmt.Sprintf("set global tidb_mem_oom_action=%s", originOOMAction))
 }
 
 func TestOrderByOnUnsignedPk(t *testing.T) {
@@ -646,6 +800,61 @@ func TestOrderByOnUnsignedPk(t *testing.T) {
 	tk.MustExec("insert into tunsigned_hash values(25), (9279808998424041135)")
 	tk.MustQuery("select min(a) from tunsigned_hash").Check(testkit.Rows("25"))
 	tk.MustQuery("select max(a) from tunsigned_hash").Check(testkit.Rows("9279808998424041135"))
+}
+
+func TestOrderByOnHandle(t *testing.T) {
+	// https://github.com/pingcap/tidb/issues/44266
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	// indexLookUp + _tidb_rowid
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("CREATE TABLE `t`(" +
+		"`a` int(11) NOT NULL," +
+		"`b` int(11) DEFAULT NULL," +
+		"`c` int(11) DEFAULT NULL," +
+		"KEY `idx_b` (`b`)) PARTITION BY HASH (`a`) PARTITIONS 2;")
+	tk.MustExec("insert into t values (2,-1,3), (3,2,2), (1,1,1);")
+	tk.MustExec("analyze table t")
+	tk.MustQuery("select * from t use index(idx_b) order by b, _tidb_rowid limit 10;").Check(testkit.Rows("2 -1 3", "1 1 1", "3 2 2"))
+
+	// indexLookUp + pkIsHandle
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("CREATE TABLE `t`(" +
+		"`a` int(11) NOT NULL," +
+		"`b` int(11) DEFAULT NULL," +
+		"`c` int(11) DEFAULT NULL," +
+		"primary key(`a`)," +
+		"KEY `idx_b` (`b`)) PARTITION BY HASH (`a`) PARTITIONS 2;")
+	tk.MustExec("insert into t values (2,-1,3), (3,2,2), (1,1,1);")
+	tk.MustExec("analyze table t")
+	tk.MustQuery("select * from t use index(idx_b) order by b, a limit 10;").Check(testkit.Rows("2 -1 3", "1 1 1", "3 2 2"))
+
+	// indexMerge + _tidb_rowid
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("CREATE TABLE `t`(" +
+		"`a` int(11) NOT NULL," +
+		"`b` int(11) DEFAULT NULL," +
+		"`c` int(11) DEFAULT NULL," +
+		"KEY `idx_b` (`b`)," +
+		"KEY `idx_c` (`c`)) PARTITION BY HASH (`a`) PARTITIONS 2;")
+	tk.MustExec("insert into t values (2,-1,3), (3,2,2), (1,1,1);")
+	tk.MustExec("analyze table t")
+	tk.MustQuery("select * from t use index(idx_b, idx_c) where b = 1 or c = 2 order by _tidb_rowid limit 10;").Check(testkit.Rows("3 2 2", "1 1 1"))
+
+	// indexMerge + pkIsHandle
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("CREATE TABLE `t`(" +
+		"`a` int(11) NOT NULL," +
+		"`b` int(11) DEFAULT NULL," +
+		"`c` int(11) DEFAULT NULL," +
+		"KEY `idx_b` (`b`)," +
+		"KEY `idx_c` (`c`)," +
+		"PRIMARY KEY (`a`)) PARTITION BY HASH (`a`) PARTITIONS 2;")
+	tk.MustExec("insert into t values (2,-1,3), (3,2,2), (1,1,1);")
+	tk.MustExec("analyze table t")
+	tk.MustQuery("select * from t use index(idx_b, idx_c) where b = 1 or c = 2 order by a limit 10;").Check(testkit.Rows("1 1 1", "3 2 2"))
 }
 
 func TestBatchGetandPointGetwithHashPartition(t *testing.T) {
@@ -1114,6 +1323,82 @@ func TestBatchGetforRangeandListPartitionTable(t *testing.T) {
 	queryRange := fmt.Sprintf("select a from trange3 where a in (%v)", strings.Join(points, ","))
 	require.True(t, tk.HasPlan(queryRange, "Batch_Point_Get")) // check if BatchGet is used
 	tk.MustQuery(queryRange).Sort().Check(tk.MustQuery(queryRegular).Sort().Rows())
+}
+
+func TestGlobalStatsAndSQLBinding(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create database test_global_stats")
+	tk.MustExec("use test_global_stats")
+	tk.MustExec("set @@tidb_partition_prune_mode = 'dynamic'")
+	tk.MustExec("set tidb_cost_model_version=2")
+
+	// hash and range and list partition
+	tk.MustExec("create table thash(a int, b int, key(a)) partition by hash(a) partitions 4")
+	tk.MustExec(`create table trange(a int, b int, key(a)) partition by range(a) (
+		partition p0 values less than (200),
+		partition p1 values less than (400),
+		partition p2 values less than (600),
+		partition p3 values less than (800),
+		partition p4 values less than (1001))`)
+	tk.MustExec(`create table tlist (a int, b int, key(a)) partition by list (a) (
+		partition p0 values in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
+		partition p1 values in (10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+		partition p2 values in (20, 21, 22, 23, 24, 25, 26, 27, 28, 29),
+		partition p3 values in (30, 31, 32, 33, 34, 35, 36, 37, 38, 39),
+		partition p4 values in (40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50))`)
+
+	// construct some special data distribution
+	vals := make([]string, 0, 1000)
+	listVals := make([]string, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		if i < 10 {
+			// for hash and range partition, 1% of records are in [0, 100)
+			vals = append(vals, fmt.Sprintf("(%v, %v)", rand.Intn(100), rand.Intn(100)))
+			// for list partition, 1% of records are equal to 0
+			listVals = append(listVals, "(0, 0)")
+		} else {
+			vals = append(vals, fmt.Sprintf("(%v, %v)", 100+rand.Intn(900), 100+rand.Intn(900)))
+			listVals = append(listVals, fmt.Sprintf("(%v, %v)", 1+rand.Intn(50), 1+rand.Intn(50)))
+		}
+	}
+	tk.MustExec("insert into thash values " + strings.Join(vals, ","))
+	tk.MustExec("insert into trange values " + strings.Join(vals, ","))
+	tk.MustExec("insert into tlist values " + strings.Join(listVals, ","))
+
+	// before analyzing, the planner will choose TableScan to access the 1% of records
+	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
+
+	tk.MustExec("analyze table thash")
+	tk.MustExec("analyze table trange")
+	tk.MustExec("analyze table tlist")
+
+	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
+
+	// create SQL bindings
+	tk.MustExec("create session binding for select * from thash where a<100 using select * from thash ignore index(a) where a<100")
+	tk.MustExec("create session binding for select * from trange where a<100 using select * from trange ignore index(a) where a<100")
+	tk.MustExec("create session binding for select * from tlist where a<100 using select * from tlist ignore index(a) where a<100")
+
+	// use TableScan again since the Index(a) is ignored
+	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
+
+	// drop SQL bindings
+	tk.MustExec("drop session binding for select * from thash where a<100")
+	tk.MustExec("drop session binding for select * from trange where a<100")
+	tk.MustExec("drop session binding for select * from tlist where a<100")
+
+	require.True(t, tk.HasPlan("select * from thash where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from trange where a<100", "TableFullScan"))
+	require.True(t, tk.HasPlan("select * from tlist where a<1", "TableFullScan"))
 }
 
 func TestPartitionTableWithDifferentJoin(t *testing.T) {
@@ -2997,6 +3282,28 @@ partition p2 values less than (10))`)
 	tk.MustQuery("select * from p use index (idx)").Sort().Check(testkit.Rows("1 3", "3 4", "5 6", "7 9"))
 }
 
+func TestDropGlobalIndex(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.EnableGlobalIndex = true
+	})
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists p")
+	tk.MustExec(`create table p (id int, c int) partition by range (c) (
+partition p0 values less than (4),
+partition p1 values less than (7),
+partition p2 values less than (10))`)
+	tk.MustExec("alter table p add unique idx(id)")
+
+	failpoint.Enable("github.com/pingcap/tidb/ddl/checkDropGlobalIndex", `return(true)`)
+	tk.MustExec("alter table p drop index idx")
+	failpoint.Disable("github.com/pingcap/tidb/ddl/checkDropGlobalIndex")
+}
+
 func TestIssue20028(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 
@@ -3749,21 +4056,75 @@ func TestIssue35181(t *testing.T) {
 }
 
 func TestIssue21732(t *testing.T) {
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.EnableGlobalIndex = true
+	})
+
 	store := testkit.CreateMockStore(t)
 
 	tk := testkit.NewTestKit(t, store)
-	for _, mode := range []variable.PartitionPruneMode{variable.StaticOnly, variable.DynamicOnly} {
-		testkit.WithPruneMode(tk, mode, func() {
-			tk.MustExec("create database TestIssue21732")
-			tk.MustExec("use TestIssue21732")
-			tk.MustExec("drop table if exists p")
-			tk.MustExec(`create table p (a int, b int GENERATED ALWAYS AS (3*a-2*a) VIRTUAL) partition by hash(b) partitions 2;`)
-			tk.MustExec("alter table p add unique index idx (a, b);")
-			tk.MustExec("insert into p (a) values  (1),(2),(3);")
-			tk.MustExec("select * from p ignore index (idx);")
-			tk.MustQuery("select * from p use index (idx)").Sort().Check(testkit.Rows("1 1", "2 2", "3 3"))
-			tk.MustExec("drop database TestIssue21732")
-		})
+	tk.MustExec("create database TestIssue21732")
+	tk.MustExec("use TestIssue21732")
+	tk.MustExec("drop table if exists p")
+	tk.MustExec(`create table p (a int, b int GENERATED ALWAYS AS (3*a-2*a) VIRTUAL) partition by hash(b) partitions 2;`)
+	tk.MustExec("alter table p add unique index idx (a);")
+	tk.MustExec("insert into p (a) values  (1),(2),(3);")
+	tk.MustQuery("select * from p use index (idx)").Sort().Check(testkit.Rows("1 1", "2 2", "3 3"))
+	tk.MustExec("drop database TestIssue21732")
+}
+
+func TestGlobalIndexSelectSpecifiedPartition(t *testing.T) {
+	failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(true)`)
+	defer failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.EnableGlobalIndex = true
+	})
+
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists p")
+	tk.MustExec(`create table p (id int, c int) partition by range (c) (
+partition p0 values less than (4),
+partition p1 values less than (7),
+partition p2 values less than (10))`)
+	tk.MustExec("alter table p add unique idx(id)")
+	tk.MustExec("insert into p values (1,3), (3,4), (5,6), (7,9)")
+	tk.MustQuery("select * from p partition(p0) use index (idx)").Sort().Check(testkit.Rows("1 3"))
+}
+
+func TestGlobalIndexForIssue40149(t *testing.T) {
+	restoreConfig := config.RestoreFunc()
+	defer restoreConfig()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.EnableGlobalIndex = true
+	})
+
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	for _, opt := range []string{"true", "false"} {
+		failpoint.Enable("github.com/pingcap/tidb/planner/core/forceDynamicPrune", `return(`+opt+`)`)
+		tk.MustExec("use test")
+		tk.MustExec("drop table if exists test_t1")
+		tk.MustExec(`CREATE TABLE test_t1 (
+  		a int(11) NOT NULL,
+  		b int(11) DEFAULT NULL,
+  		c int(11) DEFAULT NULL
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin PARTITION BY RANGE (c) (
+ 	PARTITION p0 VALUES LESS THAN (10),
+ 	PARTITION p1 VALUES LESS THAN (MAXVALUE));`)
+		tk.MustExec("alter table test_t1 add unique  p_a (a);")
+		tk.MustExec("insert into test_t1 values (1,1,1);")
+		tk.MustQuery("select * from test_t1 where a = 1;").Sort().Check(testkit.Rows("1 1 1"))
+		failpoint.Disable("github.com/pingcap/tidb/planner/core/forceDynamicPrune")
 	}
 }
 
@@ -3774,6 +4135,7 @@ func TestIssue39999(t *testing.T) {
 
 	tk.MustExec(`create schema test39999`)
 	tk.MustExec(`use test39999`)
+	tk.MustExec(`set @@tidb_opt_advanced_join_hint=0`)
 	tk.MustExec(`drop table if exists c, t`)
 	tk.MustExec("CREATE TABLE `c` (" +
 		"`serial_id` varchar(24)," +
@@ -3834,60 +4196,4 @@ from
 		`└─TableReader_19(Probe) 0.80 root partition:all data:Selection_18`,
 		`  └─Selection_18 0.80 cop[tikv]  eq(test39999.c.occur_trade_date, 2022-11-17 00:00:00.000000)`,
 		`    └─TableRangeScan_17 0.80 cop[tikv] table:c range: decided by [eq(test39999.c.txt_account_id, test39999.t.txn_account_id) eq(test39999.c.serial_id, test39999.t.serial_id) eq(test39999.c.occur_trade_date, 2022-11-17 00:00:00.000000)], keep order:false`))
-}
-
-func TestPartitionOnMissing(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("create schema OnMissing")
-	tk.MustExec("use OnMissing")
-	tk.MustExec(`set global tidb_partition_prune_mode='dynamic'`)
-	tk.MustExec(`set session tidb_partition_prune_mode='dynamic'`)
-
-	tk.MustExec(`CREATE TABLE tt1 (
-		id INT NOT NULL,
-		listid INT,
-		name varchar(10),
-		primary key (listid) clustered
-	)
-	PARTITION BY LIST (listid) (
-		PARTITION p1 VALUES IN (1),
-		PARTITION p2 VALUES IN (2),
-		PARTITION p3 VALUES IN (3),
-		PARTITION p4 VALUES IN (4)
-	)`)
-
-	tk.MustExec(`CREATE TABLE tt2 (
-		id INT NOT NULL,
-		listid INT
-	)`)
-
-	tk.MustExec(`create index idx_listid on tt1(id,listid)`)
-	tk.MustExec(`create index idx_listid on tt2(listid)`)
-
-	tk.MustExec(`insert into tt1 values(1,1,1)`)
-	tk.MustExec(`insert into tt1 values(2,2,2)`)
-	tk.MustExec(`insert into tt1 values(3,3,3)`)
-	tk.MustExec(`insert into tt1 values(4,4,4)`)
-	tk.MustExec(`insert into tt2 values(1,1)`)
-	tk.MustExec(`insert into tt2 values(2,2)`)
-	tk.MustExec(`insert into tt2 values(3,3)`)
-	tk.MustExec(`insert into tt2 values(4,4)`)
-	tk.MustExec(`insert into tt2 values(5,5)`)
-
-	tk.MustExec(`analyze table tt1`)
-	tk.MustExec(`analyze table tt2`)
-
-	tk.MustQuery(`select /*+ inl_join(tt1)*/ count(*) from tt2
-		left join tt1 on tt1.listid=tt2.listid and tt1.id=tt2.id`).Check(testkit.Rows("5"))
-	tk.MustQuery(`select /*+ inl_join(tt1)*/ count(*) from tt2
-		left join tt1 on tt1.listid=tt2.listid`).Check(testkit.Rows("5"))
-	tk.MustQuery(`explain format = 'brief' select /*+ inl_join(tt1)*/ count(*) from tt2
-		left join tt1 on tt1.listid=tt2.listid`).Check(testkit.Rows(""+
-		"StreamAgg 1.00 root  funcs:count(1)->Column#7",
-		"└─IndexJoin 5.00 root  left outer join, inner:TableReader, outer key:onmissing.tt2.listid, inner key:onmissing.tt1.listid, equal cond:eq(onmissing.tt2.listid, onmissing.tt1.listid)",
-		"  ├─IndexReader(Build) 5.00 root  index:IndexFullScan",
-		"  │ └─IndexFullScan 5.00 cop[tikv] table:tt2, index:idx_listid(listid) keep order:false",
-		"  └─TableReader(Probe) 4.00 root partition:all data:TableRangeScan",
-		"    └─TableRangeScan 4.00 cop[tikv] table:tt1 range: decided by [onmissing.tt2.listid], keep order:false"))
 }

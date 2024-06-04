@@ -16,7 +16,6 @@ package testutil
 
 import (
 	"context"
-	"encoding/hex"
 	"runtime/pprof"
 )
 
@@ -25,8 +24,7 @@ func MockCPULoad(ctx context.Context, labels ...string) {
 	lvs := []string{}
 	for _, label := range labels {
 		lvs = append(lvs, label)
-		val := hex.EncodeToString([]byte(label + " value"))
-		lvs = append(lvs, val)
+		lvs = append(lvs, label+" value")
 		// start goroutine with only 1 label.
 		go mockCPULoadByGoroutineWithLabel(ctx, label, label+" value")
 	}

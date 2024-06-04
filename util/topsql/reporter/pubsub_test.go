@@ -20,10 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -87,8 +85,6 @@ func TestPubSubDataSink(t *testing.T) {
 		_ = ds.run()
 	}()
 
-	panicPath := "github.com/pingcap/tidb/pkg/util/topsql/reporter/mockGrpcLogPanic"
-	require.NoError(t, failpoint.Enable(panicPath, "panic"))
 	err := ds.TrySend(&ReportData{
 		DataRecords: []tipb.TopSQLRecord{{
 			SqlDigest:  []byte("S1"),
@@ -121,5 +117,4 @@ func TestPubSubDataSink(t *testing.T) {
 	mockStream.Unlock()
 
 	ds.OnReporterClosing()
-	require.NoError(t, failpoint.Disable(panicPath))
 }

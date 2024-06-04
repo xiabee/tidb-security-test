@@ -25,11 +25,13 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/statistics"
 	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/testkit/testdata"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/codec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -167,7 +169,7 @@ func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
 	tk.MustExec("analyze table t index idx")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead",
 		"Warning 1105 The version 2 would collect all statistics not only the selected indexes",
-		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t")) // since fallback to ver2 path, should do samplerate adjustment
+		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t, reason to use this rate is \"use min(1, 110000/3) as the sample-rate=1\"")) // since fallback to ver2 path, should do samplerate adjustment
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
@@ -176,7 +178,7 @@ func TestChangeVerTo2BehaviorWithPersistedOptions(t *testing.T) {
 	tk.MustExec("analyze table t index")
 	tk.MustQuery("show warnings").Check(testkit.Rows("Warning 1105 The analyze version from the session is not compatible with the existing statistics of the table. Use the existing version instead",
 		"Warning 1105 The version 2 would collect all statistics not only the selected indexes",
-		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t"))
+		"Note 1105 Analyze use auto adjusted sample rate 1.000000 for table test.t, reason to use this rate is \"use min(1, 110000/3) as the sample-rate=1\""))
 	require.NoError(t, h.Update(is))
 	statsTblT = h.GetTableStats(tblT.Meta())
 	for _, idx := range statsTblT.Indices {
@@ -270,6 +272,7 @@ func TestExpBackoffEstimation(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
+	tk.MustExec(`set @@tidb_enable_non_prepared_plan_cache=0`) // estRows won't be updated if hit cache.
 	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("create table exp_backoff(a int, b int, c int, d int, index idx(a, b, c, d))")
 	tk.MustExec("insert into exp_backoff values(1, 1, 1, 1), (1, 1, 1, 2), (1, 1, 2, 3), (1, 2, 2, 4), (1, 2, 3, 5)")
@@ -522,14 +525,23 @@ func TestOutdatedStatsCheck(t *testing.T) {
 	tk.MustExec("explain select * from t where a = 1")
 	require.NoError(t, h.LoadNeededHistograms())
 
+	getStatsHealthy := func() int {
+		rows := tk.MustQuery("show stats_healthy where db_name = 'test' and table_name = 't'").Rows()
+		require.Len(t, rows, 1)
+		healthy, err := strconv.Atoi(rows[0][3].(string))
+		require.NoError(t, err)
+		return healthy
+	}
+
 	tk.MustExec("insert into t values (1)" + strings.Repeat(", (1)", 13)) // 34 rows
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, h.Update(is))
+	require.Equal(t, getStatsHealthy(), 30)
 	require.False(t, hasPseudoStats(tk.MustQuery("explain select * from t where a = 1").Rows()))
-
 	tk.MustExec("insert into t values (1)") // 35 rows
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, h.Update(is))
+	require.Equal(t, getStatsHealthy(), 25)
 	require.True(t, hasPseudoStats(tk.MustQuery("explain select * from t where a = 1").Rows()))
 
 	tk.MustExec("analyze table t")
@@ -537,11 +549,13 @@ func TestOutdatedStatsCheck(t *testing.T) {
 	tk.MustExec("delete from t limit 24") // 11 rows
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, h.Update(is))
+	require.Equal(t, getStatsHealthy(), 31)
 	require.False(t, hasPseudoStats(tk.MustQuery("explain select * from t where a = 1").Rows()))
 
 	tk.MustExec("delete from t limit 1") // 10 rows
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
 	require.NoError(t, h.Update(is))
+	require.Equal(t, getStatsHealthy(), 28)
 	require.True(t, hasPseudoStats(tk.MustQuery("explain select * from t where a = 1").Rows()))
 }
 
@@ -661,6 +675,30 @@ func TestShowHistogramsLoadStatus(t *testing.T) {
 	}
 }
 
+func TestSingleColumnIndexNDV(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a int, b int, c varchar(20), d varchar(20), index idx_a(a), index idx_b(b), index idx_c(c), index idx_d(d))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	tk.MustExec("insert into t values (1, 1, 'xxx', 'zzz'), (2, 2, 'yyy', 'zzz'), (1, 3, null, 'zzz')")
+	for i := 0; i < 5; i++ {
+		tk.MustExec("insert into t select * from t")
+	}
+	tk.MustExec("analyze table t")
+	rows := tk.MustQuery("show stats_histograms where db_name = 'test' and table_name = 't'").Sort().Rows()
+	expectedResults := [][]string{
+		{"a", "2", "0"}, {"b", "3", "0"}, {"c", "2", "32"}, {"d", "1", "0"},
+		{"idx_a", "2", "0"}, {"idx_b", "3", "0"}, {"idx_c", "2", "32"}, {"idx_d", "1", "0"},
+	}
+	for i, row := range rows {
+		require.Equal(t, expectedResults[i][0], row[3]) // column_name
+		require.Equal(t, expectedResults[i][1], row[6]) // distinct_count
+		require.Equal(t, expectedResults[i][2], row[7]) // null_count
+	}
+}
+
 func TestColumnStatsLazyLoad(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
@@ -772,6 +810,88 @@ func TestIndexJoinInnerRowCountUpperBound(t *testing.T) {
 	))
 }
 
+func TestOrderingIdxSelectivityThreshold(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	testKit := testkit.NewTestKit(t, store)
+	h := dom.StatsHandle()
+	sc := &stmtctx.StatementContext{TimeZone: time.UTC}
+
+	testKit.MustExec("use test")
+	testKit.MustExec("drop table if exists t")
+	testKit.MustExec("create table t(a int primary key , b int, c int, index ib(b), index ic(c))")
+	require.NoError(t, h.HandleDDLEvent(<-h.DDLEventCh()))
+	is := dom.InfoSchema()
+	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	require.NoError(t, err)
+	tblInfo := tb.Meta()
+
+	// Mock the stats:
+	// total row count 100000
+	// column a: PK, from 0 to 100000, NDV 100000
+	// column b, c: from 0 to 10000, each value has 10 rows, NDV 10000
+	// indexes are created on (b), (c) respectively
+	mockStatsTbl := mockStatsTable(tblInfo, 100000)
+	pkColValues, err := generateIntDatum(1, 100000)
+	require.NoError(t, err)
+	mockStatsTbl.Columns[1] = &statistics.Column{
+		Histogram:         *mockStatsHistogram(1, pkColValues, 1, types.NewFieldType(mysql.TypeLonglong)),
+		Info:              tblInfo.Columns[0],
+		StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+		StatsVer:          2,
+	}
+	colValues, err := generateIntDatum(1, 10000)
+	require.NoError(t, err)
+	idxValues := make([]types.Datum, 0)
+	for _, val := range colValues {
+		b, err := codec.EncodeKey(sc, nil, val)
+		require.NoError(t, err)
+		idxValues = append(idxValues, types.NewBytesDatum(b))
+	}
+
+	for i := 2; i <= 3; i++ {
+		mockStatsTbl.Columns[int64(i)] = &statistics.Column{
+			Histogram:         *mockStatsHistogram(int64(i), colValues, 10, types.NewFieldType(mysql.TypeLonglong)),
+			Info:              tblInfo.Columns[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		mockStatsTbl.Indices[int64(i)] = &statistics.Index{
+			Histogram:         *mockStatsHistogram(int64(i), idxValues, 10, types.NewFieldType(mysql.TypeBlob)),
+			Info:              tblInfo.Indices[i-1],
+			StatsLoadedStatus: statistics.NewStatsFullLoadStatus(),
+			StatsVer:          2,
+		}
+	}
+	generateMapsForMockStatsTbl(mockStatsTbl)
+	stat := h.GetTableStats(tblInfo)
+	stat.HistColl = mockStatsTbl.HistColl
+
+	var (
+		input  []string
+		output []struct {
+			Query  string
+			Result []string
+		}
+	)
+	integrationSuiteData := statistics.GetIntegrationSuiteData()
+	integrationSuiteData.LoadTestCases(t, &input, &output)
+	for i := 0; i < len(input); i++ {
+		testdata.OnRecord(func() {
+			output[i].Query = input[i]
+		})
+		if !strings.HasPrefix(input[i], "explain") {
+			testKit.MustExec(input[i])
+			continue
+		}
+		testdata.OnRecord(func() {
+			output[i].Result = testdata.ConvertRowsToStrings(testKit.MustQuery(input[i]).Rows())
+		})
+		testKit.MustQuery(input[i]).Check(testkit.Rows(output[i].Result...))
+	}
+}
+
 func TestIssue44369(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	h := dom.StatsHandle()
@@ -786,25 +906,4 @@ func TestIssue44369(t *testing.T) {
 	require.NoError(t, h.Update(is))
 	tk.MustExec("alter table t rename column b to bb;")
 	tk.MustExec("select * from t where a = 10 and bb > 20;")
-}
-
-func TestIssue49986(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
-	tk.MustExec("drop table if exists test.t;")
-	tk.MustExec("create table if not exists test.ast (i varchar(20));")
-	tk.MustExec("create table if not exists test.acc (j varchar(20), k varchar(20), l varchar(20), m varchar(20));")
-	tk.MustQuery("explain format='brief' with t as(select i, (case when b.j = '20001' then b.l else b.k end) an from test.ast a inner join test.acc b on (a.i = b.m) and a.i = 'astp2019121731703151'), t1 as (select i, group_concat(an order by an separator '; ') an from t group by i) select * from t1;").Check(
-		testkit.Rows("Projection 8.00 root  test.ast.i, Column#32",
-			"└─HashAgg 8.00 root  group by:Column#37, funcs:group_concat(Column#34 order by Column#35 separator \"; \")->Column#32, funcs:firstrow(Column#36)->test.ast.i",
-			"  └─Projection 100.00 root  case(eq(test.acc.j, 20001), test.acc.l, test.acc.k)->Column#34, case(eq(test.acc.j, 20001), test.acc.l, test.acc.k)->Column#35, test.ast.i, test.ast.i",
-			"    └─HashJoin 100.00 root  CARTESIAN inner join",
-			"      ├─TableReader(Build) 10.00 root  data:Selection",
-			"      │ └─Selection 10.00 cop[tikv]  eq(test.ast.i, \"astp2019121731703151\")",
-			"      │   └─TableFullScan 10000.00 cop[tikv] table:a keep order:false, stats:pseudo",
-			"      └─TableReader(Probe) 10.00 root  data:Selection",
-			"        └─Selection 10.00 cop[tikv]  eq(\"astp2019121731703151\", test.acc.m)",
-			"          └─TableFullScan 10000.00 cop[tikv] table:b keep order:false, stats:pseudo"))
 }

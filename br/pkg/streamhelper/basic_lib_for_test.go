@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/util/codec"
-	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -101,9 +100,7 @@ type fakeCluster struct {
 	testCtx   *testing.T
 
 	onGetClient        func(uint64) error
-	onClearCache       func(uint64) error
 	serviceGCSafePoint uint64
-	currentTS          uint64
 }
 
 func (r *region) splitAt(newID uint64, k string) *region {
@@ -172,10 +169,6 @@ func (t trivialFlushStream) SendMsg(m interface{}) error {
 
 func (t trivialFlushStream) RecvMsg(m interface{}) error {
 	return nil
-}
-
-func (f *fakeStore) GetID() uint64 {
-	return f.id
 }
 
 func (f *fakeStore) SubscribeFlushEvent(ctx context.Context, in *logbackup.SubscribeFlushEventRequest, opts ...grpc.CallOption) (logbackup.LogBackup_SubscribeFlushEventClient, error) {
@@ -275,10 +268,6 @@ func (f *fakeCluster) BlockGCUntil(ctx context.Context, at uint64) (uint64, erro
 	return at, nil
 }
 
-func (f *fakeCluster) FetchCurrentTS(ctx context.Context) (uint64, error) {
-	return f.currentTS, nil
-}
-
 // RegionScan gets a list of regions, starts from the region that contains key.
 // Limit limits the maximum number of regions returned.
 func (f *fakeCluster) RegionScan(ctx context.Context, key []byte, endKey []byte, limit int) ([]streamhelper.RegionWithLeader, error) {
@@ -324,17 +313,6 @@ func (f *fakeCluster) GetLogBackupClient(ctx context.Context, storeID uint64) (l
 		f.testCtx.Fatalf("the store %d doesn't exist", storeID)
 	}
 	return cli, nil
-}
-
-func (f *fakeCluster) ClearCache(ctx context.Context, storeID uint64) error {
-	if f.onGetClient != nil {
-		err := f.onGetClient(storeID)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
-	return nil
 }
 
 // Stores returns the store metadata from the cluster.
@@ -494,29 +472,6 @@ func (f *fakeCluster) advanceCheckpoints() uint64 {
 	}
 	log.Info("checkpoint updated", zap.Uint64("to", minCheckpoint))
 	return minCheckpoint
-}
-
-func (f *fakeCluster) advanceCheckpointBy(duration time.Duration) uint64 {
-	minCheckpoint := uint64(math.MaxUint64)
-	for _, r := range f.regions {
-		f.updateRegion(r.id, func(r *region) {
-			newCheckpointTime := oracle.GetTimeFromTS(r.checkpoint.Load()).Add(duration)
-			newCheckpoint := oracle.GoTimeToTS(newCheckpointTime)
-			r.checkpoint.Store(newCheckpoint)
-			if newCheckpoint < minCheckpoint {
-				minCheckpoint = newCheckpoint
-			}
-			r.fsim.flushedEpoch.Store(0)
-		})
-	}
-	log.Info("checkpoint updated", zap.Uint64("to", minCheckpoint))
-	return minCheckpoint
-}
-
-func (f *fakeCluster) advanceClusterTimeBy(duration time.Duration) uint64 {
-	newTime := oracle.GoTimeToTS(oracle.GetTimeFromTS(f.currentTS).Add(duration))
-	f.currentTS = newTime
-	return newTime
 }
 
 func createFakeCluster(t *testing.T, n int, simEnabled bool) *fakeCluster {
@@ -683,22 +638,6 @@ func (t *testEnv) ClearV3GlobalCheckpointForTask(ctx context.Context, taskName s
 	return nil
 }
 
-func (t *testEnv) PauseTask(ctx context.Context, taskName string) error {
-	t.taskCh <- streamhelper.TaskEvent{
-		Type: streamhelper.EventPause,
-		Name: taskName,
-	}
-	return nil
-}
-
-func (t *testEnv) ResumeTask(ctx context.Context) error {
-	t.taskCh <- streamhelper.TaskEvent{
-		Type: streamhelper.EventResume,
-		Name: "whole",
-	}
-	return nil
-}
-
 func (t *testEnv) getCheckpoint() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -711,22 +650,6 @@ func (t *testEnv) unregisterTask() {
 		Type: streamhelper.EventDel,
 		Name: "whole",
 	}
-}
-
-func (t *testEnv) putTask() {
-	rngs := t.ranges
-	if len(rngs) == 0 {
-		rngs = []kv.KeyRange{{}}
-	}
-	tsk := streamhelper.TaskEvent{
-		Type: streamhelper.EventAdd,
-		Name: "whole",
-		Info: &backup.StreamBackupTaskInfo{
-			Name: "whole",
-		},
-		Ranges: rngs,
-	}
-	t.taskCh <- tsk
 }
 
 func (t *testEnv) ScanLocksInOneRegion(bo *tikv.Backoffer, key []byte, maxVersion uint64, limit uint32) ([]*txnlock.Lock, *tikv.KeyLocation, error) {

@@ -17,13 +17,17 @@ package stmtctx
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/errno"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/model"
@@ -39,6 +43,8 @@ import (
 	"github.com/tikv/client-go/v2/util"
 	atomic2 "go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -152,10 +158,11 @@ type StatementContext struct {
 	InSelectStmt                  bool
 	InLoadDataStmt                bool
 	InExplainStmt                 bool
+	ExplainFormat                 string
 	InCreateOrAlterStmt           bool
 	InSetSessionStatesStmt        bool
 	InPreparedPlanBuilding        bool
-	IgnoreTruncate                bool
+	IgnoreTruncate                atomic2.Bool
 	IgnoreZeroInDate              bool
 	NoZeroDate                    bool
 	DupKeyAsWarning               bool
@@ -166,6 +173,7 @@ type StatementContext struct {
 	ErrAutoincReadFailedAsWarning bool
 	InShowWarning                 bool
 	UseCache                      bool
+	CacheType                     PlanCacheType
 	BatchCheck                    bool
 	InNullRejectCheck             bool
 	AllowInvalidDate              bool
@@ -181,9 +189,6 @@ type StatementContext struct {
 	IsStaleness     bool
 	InRestrictedSQL bool
 	ViewDepth       int32
-
-	IsRefineComparedConstant bool
-
 	// mu struct holds variables that change during execution.
 	mu struct {
 		sync.Mutex
@@ -210,9 +215,15 @@ type StatementContext struct {
 		copied  uint64
 		touched uint64
 
-		message        string
-		warnings       []SQLWarn
-		errorCount     uint16
+		message  string
+		warnings []SQLWarn
+		// extraWarnings record the extra warnings and are only used by the slow log only now.
+		// If a warning is expected to be output only under some conditions (like in EXPLAIN or EXPLAIN VERBOSE) but it's
+		// not under such conditions now, it is considered as an extra warning.
+		// extraWarnings would not be printed through SHOW WARNINGS, but we want to always output them through the slow
+		// log to help diagnostics, so we store them here separately.
+		extraWarnings []SQLWarn
+
 		execDetails    execdetails.ExecDetails
 		detailsSummary execdetails.P90Summary
 	}
@@ -301,8 +312,6 @@ type StatementContext struct {
 		LogOnExceed [2]memory.LogOnExceed
 	}
 
-	// OptimInfo maps Plan.ID() to optimization information when generating Plan.
-	OptimInfo map[int]string
 	// InVerboseExplain indicates the statement is "explain format='verbose' ...".
 	InVerboseExplain bool
 
@@ -310,10 +319,14 @@ type StatementContext struct {
 	EnableOptimizeTrace bool
 	// OptimizeTracer indicates the tracer for optimize
 	OptimizeTracer *tracing.OptimizeTracer
+
 	// EnableOptimizerCETrace indicate if cardinality estimation internal process needs to be traced.
 	// CE Trace is currently a submodule of the optimizer trace and is controlled by a separated option.
 	EnableOptimizerCETrace bool
 	OptimizerCETrace       []*tracing.CETraceRecord
+
+	EnableOptimizerDebugTrace bool
+	OptimizerDebugTrace       interface{}
 
 	// WaitLockLeaseTime is the duration of cached table read lease expiration time.
 	WaitLockLeaseTime time.Duration
@@ -350,8 +363,9 @@ type StatementContext struct {
 	IsSQLAndPlanRegistered atomic2.Bool
 	// IsReadOnly uses to indicate whether the SQL is read-only.
 	IsReadOnly bool
-	// StatsLoadStatus records StatsLoadedStatus for the index/column which is used in query
-	StatsLoadStatus map[model.TableItemID]string
+	// usedStatsInfo records version of stats of each table used in the query.
+	// It's a map of table physical id -> *UsedStatsInfoForTable
+	usedStatsInfo map[int64]*UsedStatsInfoForTable
 	// IsSyncStatsFailed indicates whether any failure happened during sync stats
 	IsSyncStatsFailed bool
 	// UseDynamicPruneMode indicates whether use UseDynamicPruneMode in query stmt
@@ -376,10 +390,19 @@ type StatementContext struct {
 		HasFKCascades bool
 	}
 
+	// MPPQueryInfo stores some id and timestamp of current MPP query statement.
+	MPPQueryInfo struct {
+		QueryID            atomic2.Uint64
+		QueryTS            atomic2.Uint64
+		AllocatedMPPTaskID atomic2.Int64
+	}
+
 	// TableStats stores the visited runtime table stats by table id during query
 	TableStats map[int64]interface{}
 	// useChunkAlloc indicates whether statement use chunk alloc
 	useChunkAlloc bool
+	// Check if TiFlash read engine is removed due to strict sql mode.
+	TiFlashEngineRemovedDueToStrictSQLMode bool
 	// StaleTSOProvider is used to provide stale timestamp oracle for read-only transactions.
 	StaleTSOProvider struct {
 		sync.Mutex
@@ -401,7 +424,8 @@ type StmtHints struct {
 	EnableCascadesPlanner bool
 	// ForceNthPlan indicates the PlanCounterTp number for finding physical plan.
 	// -1 for disable.
-	ForceNthPlan int64
+	ForceNthPlan  int64
+	ResourceGroup string
 
 	// Hint flags
 	HasAllowInSubqToJoinAndAggHint bool
@@ -409,6 +433,7 @@ type StmtHints struct {
 	HasReplicaReadHint             bool
 	HasMaxExecutionTime            bool
 	HasEnableCascadesPlannerHint   bool
+	HasResourceGroup               bool
 	SetVars                        map[string]string
 
 	// the original table hints
@@ -445,11 +470,13 @@ func (sh *StmtHints) Clone() *StmtHints {
 		StraightJoinOrder:              sh.StraightJoinOrder,
 		EnableCascadesPlanner:          sh.EnableCascadesPlanner,
 		ForceNthPlan:                   sh.ForceNthPlan,
+		ResourceGroup:                  sh.ResourceGroup,
 		HasAllowInSubqToJoinAndAggHint: sh.HasAllowInSubqToJoinAndAggHint,
 		HasMemQuotaHint:                sh.HasMemQuotaHint,
 		HasReplicaReadHint:             sh.HasReplicaReadHint,
 		HasMaxExecutionTime:            sh.HasMaxExecutionTime,
 		HasEnableCascadesPlannerHint:   sh.HasEnableCascadesPlannerHint,
+		HasResourceGroup:               sh.HasResourceGroup,
 		SetVars:                        vars,
 		OriginalTableHints:             tableHints,
 	}
@@ -638,13 +665,35 @@ func (sc *StatementContext) SetPlanHint(hint string) {
 	sc.planHint = hint
 }
 
+// PlanCacheType is the flag of plan cache
+type PlanCacheType int
+
+const (
+	// DefaultNoCache no cache
+	DefaultNoCache PlanCacheType = iota
+	// SessionPrepared session prepared plan cache
+	SessionPrepared
+	// SessionNonPrepared session non-prepared plan cache
+	SessionNonPrepared
+)
+
 // SetSkipPlanCache sets to skip the plan cache and records the reason.
 func (sc *StatementContext) SetSkipPlanCache(reason error) {
 	if !sc.UseCache {
 		return // avoid unnecessary warnings
 	}
 	sc.UseCache = false
-	sc.AppendWarning(reason)
+	switch sc.CacheType {
+	case DefaultNoCache:
+		sc.AppendWarning(errors.New("unknown cache type"))
+	case SessionPrepared:
+		sc.AppendWarning(errors.Errorf("skip prepared plan-cache: %s", reason.Error()))
+	case SessionNonPrepared:
+		if sc.InExplainStmt && sc.ExplainFormat == "plan_cache" {
+			// use "plan_cache" rather than types.ExplainFormatPlanCache to avoid import cycle
+			sc.AppendWarning(errors.Errorf("skip non-prepared plan-cache: %s", reason.Error()))
+		}
+	}
 }
 
 // TableEntry presents table in db.
@@ -780,9 +829,7 @@ func (sc *StatementContext) SetMessage(msg string) {
 func (sc *StatementContext) GetWarnings() []SQLWarn {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	warns := make([]SQLWarn, len(sc.mu.warnings))
-	copy(warns, sc.mu.warnings)
-	return warns
+	return sc.mu.warnings
 }
 
 // TruncateWarnings truncates warnings begin from start and returns the truncated warnings.
@@ -813,7 +860,11 @@ func (sc *StatementContext) WarningCount() uint16 {
 func (sc *StatementContext) NumErrorWarnings() (ec uint16, wc int) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	ec = sc.mu.errorCount
+	for _, w := range sc.mu.warnings {
+		if w.Level == WarnLevelError {
+			ec++
+		}
+	}
 	wc = len(sc.mu.warnings)
 	return
 }
@@ -823,12 +874,6 @@ func (sc *StatementContext) SetWarnings(warns []SQLWarn) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.mu.warnings = warns
-	sc.mu.errorCount = 0
-	for _, w := range warns {
-		if w.Level == WarnLevelError {
-			sc.mu.errorCount++
-		}
-	}
 }
 
 // AppendWarning appends a warning with level 'Warning'.
@@ -864,7 +909,47 @@ func (sc *StatementContext) AppendError(warn error) {
 	defer sc.mu.Unlock()
 	if len(sc.mu.warnings) < math.MaxUint16 {
 		sc.mu.warnings = append(sc.mu.warnings, SQLWarn{WarnLevelError, warn})
-		sc.mu.errorCount++
+	}
+}
+
+// GetExtraWarnings gets extra warnings.
+func (sc *StatementContext) GetExtraWarnings() []SQLWarn {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.mu.extraWarnings
+}
+
+// SetExtraWarnings sets extra warnings.
+func (sc *StatementContext) SetExtraWarnings(warns []SQLWarn) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.mu.extraWarnings = warns
+}
+
+// AppendExtraWarning appends an extra warning with level 'Warning'.
+func (sc *StatementContext) AppendExtraWarning(warn error) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelWarning, warn})
+	}
+}
+
+// AppendExtraNote appends an extra warning with level 'Note'.
+func (sc *StatementContext) AppendExtraNote(warn error) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelNote, warn})
+	}
+}
+
+// AppendExtraError appends an extra warning with level 'Error'.
+func (sc *StatementContext) AppendExtraError(warn error) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelError, warn})
 	}
 }
 
@@ -875,7 +960,23 @@ func (sc *StatementContext) HandleTruncate(err error) error {
 	if err == nil {
 		return nil
 	}
-	if sc.IgnoreTruncate {
+
+	err = errors.Cause(err)
+	if e, ok := err.(*errors.Error); !ok ||
+		(e.Code() != errno.ErrTruncatedWrongValue &&
+			e.Code() != errno.ErrDataTooLong &&
+			e.Code() != errno.ErrTruncatedWrongValueForField &&
+			e.Code() != errno.ErrWarnDataOutOfRange &&
+			e.Code() != errno.ErrDataOutOfRange &&
+			e.Code() != errno.ErrBadNumber &&
+			e.Code() != errno.ErrWrongValueForType &&
+			e.Code() != errno.ErrDatetimeFunctionOverflow &&
+			e.Code() != errno.WarnDataTruncated &&
+			e.Code() != errno.ErrIncorrectDatetimeValue) {
+		return err
+	}
+
+	if sc.IgnoreTruncate.Load() {
 		return nil
 	}
 	if sc.TruncateAsWarning {
@@ -910,7 +1011,6 @@ func (sc *StatementContext) resetMuForRetry() {
 	sc.mu.copied = 0
 	sc.mu.touched = 0
 	sc.mu.message = ""
-	sc.mu.errorCount = 0
 	sc.mu.warnings = nil
 	sc.mu.execDetails = execdetails.ExecDetails{}
 	sc.mu.detailsSummary.Reset()
@@ -997,7 +1097,7 @@ func (sc *StatementContext) GetExecDetails() execdetails.ExecDetails {
 // This is the case for `insert`, `update`, `alter table`, `create table` and `load data infile` statements, when not in strict SQL mode.
 // see https://dev.mysql.com/doc/refman/5.7/en/out-of-range-and-overflow.html
 func (sc *StatementContext) ShouldClipToZero() bool {
-	return sc.InInsertStmt || sc.InLoadDataStmt || sc.InUpdateStmt || sc.InCreateOrAlterStmt || sc.IsDDLJobInQueue || sc.IsRefineComparedConstant
+	return sc.InInsertStmt || sc.InLoadDataStmt || sc.InUpdateStmt || sc.InCreateOrAlterStmt || sc.IsDDLJobInQueue
 }
 
 // ShouldIgnoreOverflowError indicates whether we should ignore the error when type conversion overflows,
@@ -1019,7 +1119,7 @@ func (sc *StatementContext) PushDownFlags() uint64 {
 	} else if sc.InSelectStmt {
 		flags |= model.FlagInSelectStmt
 	}
-	if sc.IgnoreTruncate {
+	if sc.IgnoreTruncate.Load() {
 		flags |= model.FlagIgnoreTruncate
 	} else if sc.TruncateAsWarning {
 		flags |= model.FlagTruncateAsWarning
@@ -1088,7 +1188,7 @@ func (sc *StatementContext) CopTasksDetails() *CopTasksDetails {
 
 // SetFlagsFromPBFlag set the flag of StatementContext from a `tipb.SelectRequest.Flags`.
 func (sc *StatementContext) SetFlagsFromPBFlag(flags uint64) {
-	sc.IgnoreTruncate = (flags & model.FlagIgnoreTruncate) > 0
+	sc.IgnoreTruncate.Store((flags & model.FlagIgnoreTruncate) > 0)
 	sc.TruncateAsWarning = (flags & model.FlagTruncateAsWarning) > 0
 	sc.InInsertStmt = (flags & model.FlagInInsertStmt) > 0
 	sc.InSelectStmt = (flags & model.FlagInSelectStmt) > 0
@@ -1112,7 +1212,7 @@ func (sc *StatementContext) RecordRangeFallback(rangeMaxSize int64) {
 	// If range fallback happens, it means ether the query is unreasonable(for example, several long IN lists) or tidb_opt_range_max_size is too small
 	// and the generated plan is probably suboptimal. In that case we don't put it into plan cache.
 	if sc.UseCache {
-		sc.SetSkipPlanCache(errors.Errorf("skip plan-cache: in-list is too long"))
+		sc.SetSkipPlanCache(errors.Errorf("in-list is too long"))
 	}
 	if !sc.RangeFallback {
 		sc.AppendWarning(errors.Errorf("Memory capacity of %v bytes for 'tidb_opt_range_max_size' exceeded when building ranges. Less accurate ranges such as full range are chosen", rangeMaxSize))
@@ -1202,6 +1302,142 @@ func (d *CopTasksDetails) ToZapFields() (fields []zap.Field) {
 	fields = append(fields, zap.String("wait_max_time", strconv.FormatFloat(d.MaxWaitTime.Seconds(), 'f', -1, 64)+"s"))
 	fields = append(fields, zap.String("wait_max_addr", d.MaxWaitAddress))
 	return fields
+}
+
+// GetUsedStatsInfo returns the map for recording the used stats during query.
+// If initIfNil is true, it will initialize it when this map is nil.
+func (sc *StatementContext) GetUsedStatsInfo(initIfNil bool) map[int64]*UsedStatsInfoForTable {
+	if sc.usedStatsInfo == nil && initIfNil {
+		sc.usedStatsInfo = make(map[int64]*UsedStatsInfoForTable)
+	}
+	return sc.usedStatsInfo
+}
+
+// RecordedStatsLoadStatusCnt returns the total number of recorded column/index stats status, which is not full loaded.
+func (sc *StatementContext) RecordedStatsLoadStatusCnt() (cnt int) {
+	allStatus := sc.GetUsedStatsInfo(false)
+	for _, status := range allStatus {
+		if status == nil {
+			continue
+		}
+		cnt += status.recordedColIdxCount()
+	}
+	return
+}
+
+// UsedStatsInfoForTable records stats that are used during query and their information.
+type UsedStatsInfoForTable struct {
+	Name                  string
+	TblInfo               *model.TableInfo
+	Version               uint64
+	RealtimeCount         int64
+	ModifyCount           int64
+	ColumnStatsLoadStatus map[int64]string
+	IndexStatsLoadStatus  map[int64]string
+}
+
+// FormatForExplain format the content in the format expected to be printed in the execution plan.
+// case 1: if stats version is 0, print stats:pseudo.
+// case 2: if stats version is not 0, and there are column/index stats that are not full loaded,
+// print stats:partial, then print status of 3 column/index status at most. For the rest, only
+// the count will be printed, in the format like (more: 1 onlyCmsEvicted, 2 onlyHistRemained).
+func (s *UsedStatsInfoForTable) FormatForExplain() string {
+	// statistics.PseudoVersion == 0
+	if s.Version == 0 {
+		return "stats:pseudo"
+	}
+	var b strings.Builder
+	if len(s.ColumnStatsLoadStatus)+len(s.IndexStatsLoadStatus) == 0 {
+		return ""
+	}
+	b.WriteString("stats:partial")
+	outputNumsLeft := 3
+	statusCnt := make(map[string]uint64, 1)
+	var strs []string
+	strs = append(strs, s.collectFromColOrIdxStatus(false, &outputNumsLeft, statusCnt)...)
+	strs = append(strs, s.collectFromColOrIdxStatus(true, &outputNumsLeft, statusCnt)...)
+	b.WriteString("[")
+	b.WriteString(strings.Join(strs, ", "))
+	if len(statusCnt) > 0 {
+		b.WriteString("...(more: ")
+		keys := maps.Keys(statusCnt)
+		slices.Sort(keys)
+		var cntStrs []string
+		for _, key := range keys {
+			cntStrs = append(cntStrs, strconv.FormatUint(statusCnt[key], 10)+" "+key)
+		}
+		b.WriteString(strings.Join(cntStrs, ", "))
+		b.WriteString(")")
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// WriteToSlowLog format the content in the format expected to be printed to the slow log, then write to w.
+// The format is table name partition name:version[realtime row count;modify count][index load status][column load status].
+func (s *UsedStatsInfoForTable) WriteToSlowLog(w io.Writer) {
+	ver := "pseudo"
+	// statistics.PseudoVersion == 0
+	if s.Version != 0 {
+		ver = strconv.FormatUint(s.Version, 10)
+	}
+	fmt.Fprintf(w, "%s:%s[%d;%d]", s.Name, ver, s.RealtimeCount, s.ModifyCount)
+	if ver == "pseudo" {
+		return
+	}
+	if len(s.ColumnStatsLoadStatus)+len(s.IndexStatsLoadStatus) > 0 {
+		fmt.Fprintf(w,
+			"[%s][%s]",
+			strings.Join(s.collectFromColOrIdxStatus(false, nil, nil), ","),
+			strings.Join(s.collectFromColOrIdxStatus(true, nil, nil), ","),
+		)
+	}
+}
+
+// collectFromColOrIdxStatus prints the status of column or index stats to a slice
+// of the string in the format of "col/idx name:status".
+// If outputNumsLeft is not nil, this function will output outputNumsLeft column/index
+// status at most, the rest will be counted in statusCnt, which is a map of status->count.
+func (s *UsedStatsInfoForTable) collectFromColOrIdxStatus(
+	forColumn bool,
+	outputNumsLeft *int,
+	statusCnt map[string]uint64,
+) []string {
+	var status map[int64]string
+	if forColumn {
+		status = s.ColumnStatsLoadStatus
+	} else {
+		status = s.IndexStatsLoadStatus
+	}
+	keys := maps.Keys(status)
+	slices.Sort(keys)
+	strs := make([]string, 0, len(status))
+	for _, id := range keys {
+		if outputNumsLeft == nil || *outputNumsLeft > 0 {
+			var name string
+			if s.TblInfo != nil {
+				if forColumn {
+					name = s.TblInfo.FindColumnNameByID(id)
+				} else {
+					name = s.TblInfo.FindIndexNameByID(id)
+				}
+			}
+			if len(name) == 0 {
+				name = "ID " + strconv.FormatInt(id, 10)
+			}
+			strs = append(strs, name+":"+status[id])
+			if outputNumsLeft != nil {
+				*outputNumsLeft--
+			}
+		} else if statusCnt != nil {
+			statusCnt[status[id]] = statusCnt[status[id]] + 1
+		}
+	}
+	return strs
+}
+
+func (s *UsedStatsInfoForTable) recordedColIdxCount() int {
+	return len(s.IndexStatsLoadStatus) + len(s.ColumnStatsLoadStatus)
 }
 
 // StatsLoadResult indicates result for StatsLoad

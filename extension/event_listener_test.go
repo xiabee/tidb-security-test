@@ -120,6 +120,7 @@ type stmtEventCase struct {
 	parseError      bool
 	prepareNotFound bool
 	multiQueryCases []stmtEventCase
+	dispatchData    []byte
 }
 
 func TestExtensionStmtEvents(t *testing.T) {
@@ -134,6 +135,7 @@ func TestExtensionStmtEvents(t *testing.T) {
 	conn := server.CreateMockConn(t, serv)
 	defer conn.Close()
 
+	require.NoError(t, conn.HandleQuery(context.Background(), "SET tidb_enable_non_prepared_plan_cache=0")) // sctx.InMultiStmts cannot be set correctly in this UT.
 	require.NoError(t, conn.HandleQuery(context.Background(), "SET tidb_multi_statement_mode='ON'"))
 	require.NoError(t, conn.HandleQuery(context.Background(), "use test"))
 	require.NoError(t, conn.HandleQuery(context.Background(), "create table t1(a int, b int)"))
@@ -323,6 +325,17 @@ func TestExtensionStmtEvents(t *testing.T) {
 			sql:        "create placement policy p1 followers=1",
 			redactText: "create placement policy `p1` followers = ?",
 		},
+		{
+			dispatchData: append([]byte{mysql.ComInitDB}, []byte("db1")...),
+			originalText: "use `db1`",
+			redactText:   "use `db1`",
+		},
+		{
+			dispatchData: append([]byte{mysql.ComInitDB}, []byte("noexistdb")...),
+			originalText: "use `noexistdb`",
+			redactText:   "use `noexistdb`",
+			err:          "[schema:1049]Unknown database 'noexistdb'",
+		},
 	}
 
 	for i, c := range cases {
@@ -341,6 +354,8 @@ func TestExtensionStmtEvents(t *testing.T) {
 			}
 		case c.binaryExecute != 0:
 			err = conn.Dispatch(context.Background(), getExecuteBytes(c.binaryExecute, false, true, c.executeParams...))
+		case c.dispatchData != nil:
+			err = conn.Dispatch(context.Background(), c.dispatchData)
 		}
 
 		if c.err != "" {

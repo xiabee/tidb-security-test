@@ -92,11 +92,6 @@ func TestRecoverTable(t *testing.T) {
 	err := tk.ExecToErr(fmt.Sprintf("recover table by job %d", 10000000))
 	require.Error(t, err)
 
-	// recover table by zero JobID.
-	// related issue: https://github.com/pingcap/tidb/issues/46296
-	err = tk.ExecToErr(fmt.Sprintf("recover table by job %d", 0))
-	require.Error(t, err)
-
 	// Disable GC by manual first, then after recover table, the GC enable status should also be disabled.
 	require.NoError(t, gcutil.DisableGC(tk.Session()))
 
@@ -301,6 +296,43 @@ func TestRecoverTableMeetError(t *testing.T) {
 	tk.MustContainErrMsg("select * from t_recover", "Table 'test_recover.t_recover' doesn't exist")
 }
 
+func TestRecoverTablePrivilege(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	timeBeforeDrop, _, safePointSQL, resetGC := MockGC(tk)
+	defer resetGC()
+
+	// Set GC safe point
+	tk.MustExec(fmt.Sprintf(safePointSQL, timeBeforeDrop))
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t_recover")
+	tk.MustExec("create table t_recover (a int);")
+	tk.MustExec("drop table t_recover")
+
+	// Recover without drop/create privilege.
+	tk.MustExec("CREATE USER 'testrecovertable'@'localhost';")
+	newTk := testkit.NewTestKit(t, store)
+	require.NoError(t, newTk.Session().Auth(&auth.UserIdentity{Username: "testrecovertable", Hostname: "localhost"}, nil, nil, nil))
+	newTk.MustGetErrCode("recover table t_recover", errno.ErrTableaccessDenied)
+	newTk.MustGetErrCode("flashback table t_recover", errno.ErrTableaccessDenied)
+
+	// Got drop privilege, still failed.
+	tk.MustExec("grant drop on *.* to 'testrecovertable'@'localhost';")
+	newTk.MustGetErrCode("recover table t_recover", errno.ErrTableaccessDenied)
+	newTk.MustGetErrCode("flashback table t_recover", errno.ErrTableaccessDenied)
+
+	// Got select, create and drop privilege, execute success.
+	tk.MustExec("grant select,create on *.* to 'testrecovertable'@'localhost';")
+	newTk.MustExec("use test")
+	newTk.MustExec("recover table t_recover")
+	newTk.MustExec("drop table t_recover")
+	newTk.MustExec("flashback table t_recover")
+
+	tk.MustExec("drop user 'testrecovertable'@'localhost';")
+}
+
 func TestRecoverClusterMeetError(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -331,14 +363,23 @@ func TestRecoverClusterMeetError(t *testing.T) {
 	// Flashback without super privilege.
 	tk.MustExec("CREATE USER 'testflashback'@'localhost';")
 	newTk := testkit.NewTestKit(t, store)
-	require.NoError(t, newTk.Session().Auth(&auth.UserIdentity{Username: "testflashback", Hostname: "localhost"}, nil, nil))
+	require.NoError(t, newTk.Session().Auth(&auth.UserIdentity{Username: "testflashback", Hostname: "localhost"}, nil, nil, nil))
 	newTk.MustGetErrCode(fmt.Sprintf("flashback cluster to timestamp '%s'", time.Now().Add(0-30*time.Second)), errno.ErrPrivilegeCheckFail)
 	tk.MustExec("drop user 'testflashback'@'localhost';")
 
-	// Flashback failed because of ddl history.
-	tk.MustExec("use test;")
-	tk.MustExec("create table t(a int);")
-	tk.MustMatchErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", flashbackTs), "Detected schema change due to another DDL job during \\[.*, now\\), can't do flashback")
+	// detect modify system table
+	nowTS, err := tk.Session().GetStore().GetOracle().GetTimestamp(context.Background(), &oracle.Option{})
+	require.NoError(t, err)
+	tk.MustExec("truncate table mysql.stats_meta")
+	errorMsg := fmt.Sprintf("[ddl:-1]Detected modified system table during [%s, now), can't do flashback", oracle.GetTimeFromTS(nowTS).String())
+	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(nowTS)), errorMsg)
+
+	// update tidb_server_version
+	nowTS, err = tk.Session().GetStore().GetOracle().GetTimestamp(context.Background(), &oracle.Option{})
+	require.NoError(t, err)
+	tk.MustExec("update mysql.tidb set VARIABLE_VALUE=VARIABLE_VALUE+1 where VARIABLE_NAME='tidb_server_version'")
+	errorMsg = fmt.Sprintf("[ddl:-1]Detected TiDB upgrade during [%s, now), can't do flashback", oracle.GetTimeFromTS(nowTS).String())
+	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(nowTS)), errorMsg)
 
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/injectSafeTS"))
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/mockFlashbackTest"))
@@ -382,67 +423,6 @@ func TestFlashbackWithSafeTs(t *testing.T) {
 		{
 			name:              "5 seconds ago to now, safeTS 10 secs ago",
 			sql:               fmt.Sprintf("flashback cluster to timestamp '%s'", flashbackTs),
-			injectSafeTS:      oracle.GoTimeToTS(flashbackTs.Add(-10 * time.Second)),
-			compareWithSafeTS: 1,
-		},
-	}
-	for _, testcase := range testcases {
-		t.Log(testcase.name)
-		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/injectSafeTS",
-			fmt.Sprintf("return(%v)", testcase.injectSafeTS)))
-		if testcase.compareWithSafeTS == 1 {
-			start := time.Now()
-			tk.MustContainErrMsg(testcase.sql,
-				"cannot set flashback timestamp after min-resolved-ts")
-			// When set `flashbackGetMinSafeTimeTimeout` = 0, no retry for `getStoreGlobalMinSafeTS`.
-			require.Less(t, time.Since(start), time.Second)
-		} else {
-			tk.MustExec(testcase.sql)
-		}
-	}
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/injectSafeTS"))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/mockFlashbackTest"))
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/ddl/changeFlashbackGetMinSafeTimeTimeout"))
-}
-
-func TestFlashbackTSOWithSafeTs(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/mockFlashbackTest", `return(true)`))
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/ddl/changeFlashbackGetMinSafeTimeTimeout", `return(0)`))
-
-	timeBeforeDrop, _, safePointSQL, resetGC := MockGC(tk)
-	defer resetGC()
-
-	// Set GC safe point.
-	tk.MustExec(fmt.Sprintf(safePointSQL, timeBeforeDrop))
-
-	time.Sleep(time.Second)
-	ts, _ := tk.Session().GetStore().GetOracle().GetTimestamp(context.Background(), &oracle.Option{})
-	flashbackTs := oracle.GetTimeFromTS(ts)
-	testcases := []struct {
-		name         string
-		sql          string
-		injectSafeTS uint64
-		// compareWithSafeTS will be 0 if FlashbackTS==SafeTS, -1 if FlashbackTS < SafeTS, and +1 if FlashbackTS > SafeTS.
-		compareWithSafeTS int
-	}{
-		{
-			name:              "5 seconds ago to now, safeTS 5 secs ago",
-			sql:               fmt.Sprintf("flashback cluster to tso %d", ts),
-			injectSafeTS:      oracle.GoTimeToTS(flashbackTs),
-			compareWithSafeTS: 0,
-		},
-		{
-			name:              "10 seconds ago to now, safeTS 5 secs ago",
-			sql:               fmt.Sprintf("flashback cluster to tso %d", ts),
-			injectSafeTS:      oracle.GoTimeToTS(flashbackTs.Add(10 * time.Second)),
-			compareWithSafeTS: -1,
-		},
-		{
-			name:              "5 seconds ago to now, safeTS 10 secs ago",
-			sql:               fmt.Sprintf("flashback cluster to tso %d", ts),
 			injectSafeTS:      oracle.GoTimeToTS(flashbackTs.Add(-10 * time.Second)),
 			compareWithSafeTS: 1,
 		},
@@ -556,6 +536,26 @@ func TestFlashbackSchema(t *testing.T) {
 	tk.MustExec("use test2")
 	tk.MustQuery("select a from t order by a").Check(testkit.Rows("1", "2", "3"))
 	tk.MustQuery("select a from t1 order by a").Check(testkit.Rows("4", "5", "6"))
+
+	tk.MustExec("drop database if exists t_recover")
+	tk.MustExec("create database t_recover")
+	tk.MustExec("drop database t_recover")
+
+	// Recover without drop/create privilege.
+	tk.MustExec("CREATE USER 'testflashbackschema'@'localhost';")
+	newTk := testkit.NewTestKit(t, store)
+	require.NoError(t, newTk.Session().Auth(&auth.UserIdentity{Username: "testflashbackschema", Hostname: "localhost"}, nil, nil, nil))
+	newTk.MustGetErrCode("flashback database t_recover", errno.ErrDBaccessDenied)
+
+	// Got drop privilege, still failed.
+	tk.MustExec("grant drop on *.* to 'testflashbackschema'@'localhost';")
+	newTk.MustGetErrCode("flashback database t_recover", errno.ErrDBaccessDenied)
+
+	// Got create and drop privilege, execute success.
+	tk.MustExec("grant create on *.* to 'testflashbackschema'@'localhost';")
+	newTk.MustExec("flashback schema t_recover")
+
+	tk.MustExec("drop user 'testflashbackschema'@'localhost';")
 }
 
 // MockGC is used to make GC work in the test environment.

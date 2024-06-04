@@ -54,10 +54,12 @@ func TestSetSystemVariable(t *testing.T) {
 		{variable.TxnIsolation, "SERIALIZABLE", true},
 		{variable.TimeZone, "xyz", true},
 		{variable.TiDBOptAggPushDown, "1", false},
+		{variable.TiDBOptDeriveTopN, "1", false},
 		{variable.TiDBOptDistinctAggPushDown, "1", false},
 		{variable.TiDBMemQuotaQuery, "1024", false},
 		{variable.TiDBMemQuotaApplyCache, "1024", false},
 		{variable.TiDBEnableStmtSummary, "1", true}, // now global only
+		{variable.TiDBEnableRowLevelChecksum, "1", true},
 	}
 
 	for _, tc := range testCases {
@@ -134,16 +136,9 @@ func TestSession(t *testing.T) {
 
 func TestAllocMPPID(t *testing.T) {
 	ctx := mock.NewContext()
-
-	seVar := ctx.GetSessionVars()
-	require.NotNil(t, seVar)
-
-	require.Equal(t, int64(1), seVar.AllocMPPTaskID(1))
-	require.Equal(t, int64(2), seVar.AllocMPPTaskID(1))
-	require.Equal(t, int64(3), seVar.AllocMPPTaskID(1))
-	require.Equal(t, int64(1), seVar.AllocMPPTaskID(2))
-	require.Equal(t, int64(2), seVar.AllocMPPTaskID(2))
-	require.Equal(t, int64(3), seVar.AllocMPPTaskID(2))
+	require.Equal(t, int64(1), plannercore.AllocMPPTaskID(ctx))
+	require.Equal(t, int64(2), plannercore.AllocMPPTaskID(ctx))
+	require.Equal(t, int64(3), plannercore.AllocMPPTaskID(ctx))
 }
 
 func TestSlowLogFormat(t *testing.T) {
@@ -175,11 +170,22 @@ func TestSlowLogFormat(t *testing.T) {
 			},
 		},
 	}
-	statsInfos := make(map[string]uint64)
-	statsInfos["t1"] = 123
-	loadStatus := make(map[string]map[string]string)
-	loadStatus["t1"] = map[string]string{
-		"col1": "unInitialized",
+	usedStats1 := &stmtctx.UsedStatsInfoForTable{
+		Name:                  "t1",
+		TblInfo:               nil,
+		Version:               123,
+		RealtimeCount:         1000,
+		ModifyCount:           0,
+		ColumnStatsLoadStatus: map[int64]string{2: "allEvicted", 3: "onlyCmsEvicted"},
+		IndexStatsLoadStatus:  map[int64]string{1: "allLoaded", 2: "allLoaded"},
+	}
+	usedStats2 := &stmtctx.UsedStatsInfoForTable{
+		Name:                  "t2",
+		TblInfo:               nil,
+		Version:               0,
+		RealtimeCount:         10000,
+		ModifyCount:           0,
+		ColumnStatsLoadStatus: map[int64]string{2: "unInitialized"},
 	}
 
 	copTasks := &stmtctx.CopTasksDetails{
@@ -213,6 +219,8 @@ func TestSlowLogFormat(t *testing.T) {
 	var memMax int64 = 2333
 	var diskMax int64 = 6666
 	resultFields := `# Txn_start_ts: 406649736972468225
+# Keyspace_name: keyspace_a
+# Keyspace_ID: 1
 # User@Host: root[root] @ 192.168.0.1 [192.168.0.1]
 # Conn_ID: 1
 # Exec_retry_time: 5.1 Exec_retry_count: 3
@@ -227,7 +235,7 @@ func TestSlowLogFormat(t *testing.T) {
 # Index_names: [t1:a,t2:b]
 # Is_internal: true
 # Digest: 01d00e6e93b28184beae487ac05841145d2a2f6a7b16de32a763bed27967e83d
-# Stats: t1:123[col1:unInitialized]
+# Stats: t1:123[1000;0][ID 1:allLoaded,ID 2:allLoaded][ID 2:allEvicted,ID 3:onlyCmsEvicted],t2:pseudo[10000;0]
 # Num_cop_tasks: 10
 # Cop_proc_avg: 1 Cop_proc_p90: 2 Cop_proc_max: 3 Cop_proc_addr: 10.6.131.78
 # Cop_wait_avg: 0.01 Cop_wait_p90: 0.02 Cop_wait_max: 0.03 Cop_wait_addr: 10.6.131.79
@@ -253,6 +261,8 @@ func TestSlowLogFormat(t *testing.T) {
 	_, digest := parser.NormalizeDigest(sql)
 	logItems := &variable.SlowQueryLogItems{
 		TxnTS:             txnTS,
+		KeyspaceName:      "keyspace_a",
+		KeyspaceID:        1,
 		SQL:               sql,
 		Digest:            digest.String(),
 		TimeTotal:         costTime,
@@ -261,7 +271,6 @@ func TestSlowLogFormat(t *testing.T) {
 		TimeOptimize:      time.Duration(10),
 		TimeWaitTS:        time.Duration(3),
 		IndexNames:        "[t1:a,t2:b]",
-		StatsInfos:        statsInfos,
 		CopTasks:          copTasks,
 		ExecDetail:        execDetail,
 		MemMax:            memMax,
@@ -285,7 +294,7 @@ func TestSlowLogFormat(t *testing.T) {
 		ExecRetryTime:     5*time.Second + time.Millisecond*100,
 		IsExplicitTxn:     true,
 		IsWriteCacheTable: true,
-		StatsLoadStatus:   loadStatus,
+		UsedStats:         map[int64]*stmtctx.UsedStatsInfoForTable{1: usedStats1, 2: usedStats2},
 	}
 	logString := seVar.SlowLogFormat(logItems)
 	require.Equal(t, resultFields+"\n"+sql, logString)
@@ -344,6 +353,7 @@ func TestTransactionContextSavepoint(t *testing.T) {
 		},
 	}
 	tc.SetPessimisticLockCache([]byte{'a'}, []byte{'a'})
+	tc.FlushStmtPessimisticLockCache()
 
 	tc.AddSavepoint("S1", nil)
 	require.Equal(t, 1, len(tc.Savepoints))
@@ -363,6 +373,7 @@ func TestTransactionContextSavepoint(t *testing.T) {
 		TableID:  9,
 	}
 	tc.SetPessimisticLockCache([]byte{'b'}, []byte{'b'})
+	tc.FlushStmtPessimisticLockCache()
 
 	tc.AddSavepoint("S2", nil)
 	require.Equal(t, 2, len(tc.Savepoints))
@@ -380,6 +391,7 @@ func TestTransactionContextSavepoint(t *testing.T) {
 		TableID:  13,
 	}
 	tc.SetPessimisticLockCache([]byte{'c'}, []byte{'c'})
+	tc.FlushStmtPessimisticLockCache()
 
 	tc.AddSavepoint("s2", nil)
 	require.Equal(t, 2, len(tc.Savepoints))
@@ -402,21 +414,21 @@ func TestTransactionContextSavepoint(t *testing.T) {
 	require.Equal(t, 0, len(tc.Savepoints))
 }
 
-func TestGeneralPlanCacheStmt(t *testing.T) {
+func TestNonPreparedPlanCacheStmt(t *testing.T) {
 	sessVars := variable.NewSessionVars(nil)
-	sessVars.GeneralPlanCacheSize = 100
+	sessVars.SessionPlanCacheSize = 100
 	sql1 := "select * from t where a>?"
 	sql2 := "select * from t where a<?"
-	require.Nil(t, sessVars.GetGeneralPlanCacheStmt(sql1))
-	require.Nil(t, sessVars.GetGeneralPlanCacheStmt(sql2))
+	require.Nil(t, sessVars.GetNonPreparedPlanCacheStmt(sql1))
+	require.Nil(t, sessVars.GetNonPreparedPlanCacheStmt(sql2))
 
-	sessVars.AddGeneralPlanCacheStmt(sql1, new(plannercore.PlanCacheStmt))
-	require.NotNil(t, sessVars.GetGeneralPlanCacheStmt(sql1))
-	require.Nil(t, sessVars.GetGeneralPlanCacheStmt(sql2))
+	sessVars.AddNonPreparedPlanCacheStmt(sql1, new(plannercore.PlanCacheStmt))
+	require.NotNil(t, sessVars.GetNonPreparedPlanCacheStmt(sql1))
+	require.Nil(t, sessVars.GetNonPreparedPlanCacheStmt(sql2))
 
-	sessVars.AddGeneralPlanCacheStmt(sql2, new(plannercore.PlanCacheStmt))
-	require.NotNil(t, sessVars.GetGeneralPlanCacheStmt(sql1))
-	require.NotNil(t, sessVars.GetGeneralPlanCacheStmt(sql2))
+	sessVars.AddNonPreparedPlanCacheStmt(sql2, new(plannercore.PlanCacheStmt))
+	require.NotNil(t, sessVars.GetNonPreparedPlanCacheStmt(sql1))
+	require.NotNil(t, sessVars.GetNonPreparedPlanCacheStmt(sql2))
 }
 
 func TestHookContext(t *testing.T) {

@@ -88,10 +88,9 @@ func buildCMSketchTopNAndMap(d, w, n, sample int32, seed int64, total, imax uint
 }
 
 func averageAbsoluteError(cms *CMSketch, topN *TopN, mp map[int64]uint32) (uint64, error) {
-	sc := &stmtctx.StatementContext{TimeZone: time.Local}
 	var total uint64
 	for num, count := range mp {
-		estimate, err := queryValue(sc, cms, topN, types.NewIntDatum(num))
+		estimate, err := queryValue(nil, cms, topN, types.NewIntDatum(num))
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -389,24 +388,4 @@ func TestMergePartTopN2GlobalTopNWithHists(t *testing.T) {
 	require.Len(t, globalTopN.TopN, 2, "should only have 2 topN")
 	require.Equal(t, uint64(55), globalTopN.TotalCount(), "should have 55")
 	require.Len(t, leftTopN, 1, "should have 1 left topN")
-}
-
-func TestTopNScale(t *testing.T) {
-	for _, scaleFactor := range []float64{0.9999, 1.00001, 1.9999, 4.9999, 5.001, 9.99} {
-		var data []TopNMeta
-		sumCount := uint64(0)
-		for i := 0; i < 20; i++ {
-			cnt := uint64(rand.Intn(100000))
-			data = append(data, TopNMeta{
-				Count: cnt,
-			})
-			sumCount += cnt
-		}
-		topN := TopN{TopN: data}
-		topN.Scale(scaleFactor)
-		scaleCount := float64(sumCount) * scaleFactor
-		delta := math.Abs(float64(topN.TotalCount()) - scaleCount)
-		roundErrorRatio := delta / scaleCount
-		require.Less(t, roundErrorRatio, 0.0001)
-	}
 }

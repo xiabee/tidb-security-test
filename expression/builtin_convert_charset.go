@@ -287,7 +287,7 @@ var convertActionMap = map[funcProp][]string{
 		ast.GE, ast.LE, ast.GT, ast.LT, ast.EQ, ast.NE, ast.NullEQ, ast.If, ast.Ifnull, ast.In,
 		ast.Case, ast.Cast,
 		/* string comparing */
-		ast.Like, ast.Strcmp,
+		ast.Like, ast.Ilike, ast.Strcmp,
 		/* regex */
 		ast.Regexp, ast.RegexpLike, ast.RegexpInStr, ast.RegexpSubstr, ast.RegexpReplace,
 		/* math */
@@ -322,8 +322,7 @@ func HandleBinaryLiteral(ctx sessionctx.Context, expr Expression, ec *ExprCollat
 				return expr
 			}
 			return BuildToBinaryFunction(ctx, expr)
-		} else if argChs == charset.CharsetBin && dstChs != charset.CharsetBin &&
-			expr.GetType().GetType() != mysql.TypeNull {
+		} else if argChs == charset.CharsetBin && dstChs != charset.CharsetBin {
 			ft := expr.GetType().Clone()
 			ft.SetCharset(ec.Charset)
 			ft.SetCollate(ec.Collation)

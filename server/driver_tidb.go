@@ -204,12 +204,12 @@ func (ts *TiDBStatement) Close() error {
 			}
 			bindSQL, _ := core.GetBindSQL4PlanCache(ts.ctx, preparedObj)
 			cacheKey, err := core.NewPlanCacheKey(ts.ctx.GetSessionVars(), preparedObj.StmtText, preparedObj.StmtDB,
-				preparedObj.PreparedAst.SchemaVersion, 0, bindSQL)
+				preparedObj.PreparedAst.SchemaVersion, 0, bindSQL, expression.ExprPushDownBlackListReloadTimeStamp.Load())
 			if err != nil {
 				return err
 			}
 			if !ts.ctx.GetSessionVars().IgnorePreparedCacheCloseStmt { // keep the plan in cache
-				ts.ctx.GetPlanCache(false).Delete(cacheKey)
+				ts.ctx.GetSessionPlanCache().Delete(cacheKey)
 			}
 		}
 		ts.ctx.GetSessionVars().RemovePreparedStmt(ts.id)
@@ -541,13 +541,14 @@ func (tcrs *tidbCursorResultSet) GetRowContainerReader() chunk.RowContainerReade
 
 func convertColumnInfo(fld *ast.ResultField) (ci *ColumnInfo) {
 	ci = &ColumnInfo{
-		Name:    fld.ColumnAsName.O,
-		OrgName: fld.Column.Name.O,
-		Table:   fld.TableAsName.O,
-		Schema:  fld.DBName.O,
-		Flag:    uint16(fld.Column.GetFlag()),
-		Charset: uint16(mysql.CharsetNameToID(fld.Column.GetCharset())),
-		Type:    fld.Column.GetType(),
+		Name:         fld.ColumnAsName.O,
+		OrgName:      fld.Column.Name.O,
+		Table:        fld.TableAsName.O,
+		Schema:       fld.DBName.O,
+		Flag:         uint16(fld.Column.GetFlag()),
+		Charset:      uint16(mysql.CharsetNameToID(fld.Column.GetCharset())),
+		Type:         fld.Column.GetType(),
+		DefaultValue: fld.Column.GetDefaultValue(),
 	}
 
 	if fld.Table != nil {

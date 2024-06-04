@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 
@@ -147,6 +146,7 @@ func TestApplyUpdate(t *testing.T) {
 		if test.setEnv {
 			require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
 			require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
+			require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
 		}
 		u, err := ParseBackend("s3://bucket/prefix/", &BackendOptions{S3: test.options})
 		require.NoError(t, err)
@@ -266,11 +266,13 @@ func TestApplyUpdate(t *testing.T) {
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 			},
 			s3: &backuppb.S3{
 				Region:          "us-west-2",
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 			},
@@ -293,6 +295,7 @@ func TestS3Storage(t *testing.T) {
 
 	require.NoError(t, os.Setenv("AWS_ACCESS_KEY_ID", "ab"))
 	require.NoError(t, os.Setenv("AWS_SECRET_ACCESS_KEY", "cd"))
+	require.NoError(t, os.Setenv("AWS_SESSION_TOKEN", "ef"))
 	s := createGetBucketRegionServer("us-west-2", 200, true)
 	defer s.Close()
 
@@ -362,6 +365,7 @@ func TestS3Storage(t *testing.T) {
 				Endpoint:        s.URL,
 				AccessKey:       "ab",
 				SecretAccessKey: "cd",
+				SessionToken:    "ef",
 				Bucket:          "bucket",
 				Prefix:          "prefix",
 				ForcePathStyle:  true,
@@ -417,10 +421,12 @@ func TestS3Storage(t *testing.T) {
 func TestS3URI(t *testing.T) {
 	accessKey := "ab"
 	secretAccessKey := "cd"
+	sessionToken := "ef"
 	options := &BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err := ParseBackend("s3://bucket/prefix/", options)
@@ -476,24 +482,6 @@ func TestWriteNoError(t *testing.T) {
 
 	err := s.storage.WriteFile(ctx, "file", []byte("test"))
 	require.NoError(t, err)
-}
-
-func TestMultiUploadErrorNotOverwritten(t *testing.T) {
-	s := createS3Suite(t)
-	ctx := aws.BackgroundContext()
-
-	s.s3.EXPECT().
-		CreateMultipartUploadWithContext(ctx, gomock.Any(), gomock.Any()).
-		Return(nil, errors.New("mock error"))
-
-	w, err := s.storage.Create(ctx, "file", &WriterOption{Concurrency: 2})
-	require.NoError(t, err)
-	// data should be larger than 5MB to trigger CreateMultipartUploadWithContext path
-	data := make([]byte, 5*1024*1024+6716)
-	n, err := w.Write(ctx, data)
-	require.NoError(t, err)
-	require.Equal(t, 5*1024*1024+6716, n)
-	require.ErrorContains(t, w.Close(ctx), "mock error")
 }
 
 // TestReadNoError ensures the ReadFile API issues a GetObject request and correctly
@@ -1146,10 +1134,12 @@ func TestWalkDirWithEmptyPrefix(t *testing.T) {
 func TestSendCreds(t *testing.T) {
 	accessKey := "ab"
 	secretAccessKey := "cd"
+	sessionToken := "ef"
 	backendOpt := BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err := ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1162,12 +1152,15 @@ func TestSendCreds(t *testing.T) {
 	sentAccessKey := backend.GetS3().AccessKey
 	require.Equal(t, accessKey, sentAccessKey)
 	sentSecretAccessKey := backend.GetS3().SecretAccessKey
-	require.Equal(t, sentSecretAccessKey, sentSecretAccessKey)
+	require.Equal(t, secretAccessKey, sentSecretAccessKey)
+	sentSessionToken := backend.GetS3().SessionToken
+	require.Equal(t, sessionToken, sentSessionToken)
 
 	backendOpt = BackendOptions{
 		S3: S3BackendOptions{
 			AccessKey:       accessKey,
 			SecretAccessKey: secretAccessKey,
+			SessionToken:    sessionToken,
 		},
 	}
 	backend, err = ParseBackend("s3://bucket/prefix/", &backendOpt)
@@ -1181,6 +1174,8 @@ func TestSendCreds(t *testing.T) {
 	require.Equal(t, "", sentAccessKey)
 	sentSecretAccessKey = backend.GetS3().SecretAccessKey
 	require.Equal(t, "", sentSecretAccessKey)
+	sentSessionToken = backend.GetS3().SessionToken
+	require.Equal(t, "", sentSessionToken)
 }
 
 func TestObjectLock(t *testing.T) {
@@ -1331,53 +1326,17 @@ func TestRetryError(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	s, err := NewS3Storage(&backuppb.S3{
+	s, err := NewS3Storage(ctx, &backuppb.S3{
 		Endpoint:        server.URL,
 		Bucket:          "test",
 		Prefix:          "retry",
 		AccessKey:       "none",
 		SecretAccessKey: "none",
+		Provider:        "skip check region",
 		ForcePathStyle:  true,
 	}, &ExternalStorageOptions{})
 	require.NoError(t, err)
 	err = s.WriteFile(ctx, "reset", []byte(errString))
 	require.NoError(t, err)
 	require.Equal(t, count, int32(2))
-}
-
-func TestS3ReadFileRetryable(t *testing.T) {
-	s := createS3Suite(t)
-	ctx := aws.BackgroundContext()
-	errMsg := "just some unrelated error"
-	expectedErr := errors.New(errMsg)
-
-	s.s3.EXPECT().
-		GetObjectWithContext(ctx, gomock.Any()).
-		DoAndReturn(func(_ context.Context, input *s3.GetObjectInput, opt ...request.Option) (*s3.GetObjectOutput, error) {
-			require.Equal(t, "bucket", aws.StringValue(input.Bucket))
-			require.Equal(t, "prefix/file", aws.StringValue(input.Key))
-			return &s3.GetObjectOutput{
-				Body: io.NopCloser(bytes.NewReader([]byte("test"))),
-			}, nil
-		})
-	s.s3.EXPECT().
-		GetObjectWithContext(ctx, gomock.Any()).
-		DoAndReturn(func(_ context.Context, input *s3.GetObjectInput, opt ...request.Option) (*s3.GetObjectOutput, error) {
-			require.Equal(t, "bucket", aws.StringValue(input.Bucket))
-			require.Equal(t, "prefix/file", aws.StringValue(input.Key))
-			return &s3.GetObjectOutput{
-				Body: io.NopCloser(bytes.NewReader([]byte("test"))),
-			}, nil
-		})
-	s.s3.EXPECT().
-		GetObjectWithContext(ctx, gomock.Any()).
-		Return(nil, expectedErr)
-
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/storage/read-s3-body-failed", "2*return(true)"))
-	defer func() {
-		failpoint.Disable("github.com/pingcap/tidb/br/pkg/storage/read-s3-body-failed")
-	}()
-	_, err := s.storage.ReadFile(ctx, "file")
-	require.Error(t, err)
-	require.True(t, strings.Contains(err.Error(), errMsg))
 }

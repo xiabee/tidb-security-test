@@ -50,7 +50,6 @@ import (
 
 	"github.com/blacktear23/go-proxyprotocol"
 	"github.com/pingcap/errors"
-	"github.com/pingcap/log"
 	autoid "github.com/pingcap/tidb/autoid_service"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/domain"
@@ -84,8 +83,6 @@ var (
 	osVersion string
 	// RunInGoTest represents whether we are run code in test.
 	RunInGoTest bool
-	// RunInGoTestChan is used to control the RunInGoTest.
-	RunInGoTestChan chan struct{}
 )
 
 func init() {
@@ -133,18 +130,20 @@ type Server struct {
 	driver            IDriver
 	listener          net.Listener
 	socket            net.Listener
-	rwlock            sync.RWMutex
 	concurrentLimiter *TokenLimiter
-	clients           map[uint64]*clientConn
-	capability        uint32
-	dom               *domain.Domain
-	globalConnID      util.GlobalConnID
+
+	rwlock  sync.RWMutex
+	clients map[uint64]*clientConn
+
+	capability   uint32
+	dom          *domain.Domain
+	globalConnID util.GlobalConnID
 
 	statusAddr     string
 	statusListener net.Listener
 	statusServer   *http.Server
 	grpcServer     *grpc.Server
-	inShutdownMode bool
+	inShutdownMode *uatomic.Bool
 	health         *uatomic.Bool
 
 	sessionMapMutex     sync.Mutex
@@ -213,8 +212,9 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		clients:           make(map[uint64]*clientConn),
 		globalConnID:      util.NewGlobalConnID(0, true),
 		internalSessions:  make(map[interface{}]struct{}, 100),
+		health:            uatomic.NewBool(true),
+		inShutdownMode:    uatomic.NewBool(false),
 		printMDLLogTime:   time.Now(),
-		health:            uatomic.NewBool(false),
 	}
 	s.capability = defaultCapability
 	setTxnScope()
@@ -258,11 +258,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 	if s.tlsConfig != nil {
 		s.capability |= mysql.ClientSSL
 	}
-	variable.RegisterStatistics(s)
-	return s, nil
-}
 
-func (s *Server) initTiDBListener() (err error) {
 	if s.cfg.Host != "" && (s.cfg.Port != 0 || RunInGoTest) {
 		addr := net.JoinHostPort(s.cfg.Host, strconv.Itoa(int(s.cfg.Port)))
 		tcpProto := "tcp"
@@ -270,7 +266,7 @@ func (s *Server) initTiDBListener() (err error) {
 			tcpProto = "tcp4"
 		}
 		if s.listener, err = net.Listen(tcpProto, addr); err != nil {
-			return errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 		logutil.BgLogger().Info("server is running MySQL protocol", zap.String("addr", addr))
 		if RunInGoTest && s.cfg.Port == 0 {
@@ -280,18 +276,18 @@ func (s *Server) initTiDBListener() (err error) {
 
 	if s.cfg.Socket != "" {
 		if err := cleanupStaleSocket(s.cfg.Socket); err != nil {
-			return errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 
 		if s.socket, err = net.Listen("unix", s.cfg.Socket); err != nil {
-			return errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 		logutil.BgLogger().Info("server is running MySQL protocol", zap.String("socket", s.cfg.Socket))
 	}
 
 	if s.socket == nil && s.listener == nil {
 		err = errors.New("Server not configured to listen on either -socket or -host and -port")
-		return errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 
 	if s.cfg.ProxyProtocol.Networks != "" {
@@ -303,7 +299,7 @@ func (s *Server) initTiDBListener() (err error) {
 			int(s.cfg.ProxyProtocol.HeaderTimeout), s.cfg.ProxyProtocol.Fallbackable)
 		if err != nil {
 			logutil.BgLogger().Error("ProxyProtocol networks parameter invalid")
-			return errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 		if s.listener != nil {
 			s.listener = ppListener
@@ -313,13 +309,10 @@ func (s *Server) initTiDBListener() (err error) {
 			logutil.BgLogger().Info("server is running MySQL protocol (through PROXY protocol)", zap.String("socket", s.cfg.Socket))
 		}
 	}
-	return nil
-}
 
-func (s *Server) initHTTPListener() (err error) {
 	if s.cfg.Status.ReportStatus {
 		if err = s.listenStatusHTTPServer(); err != nil {
-			return errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 	}
 
@@ -346,7 +339,7 @@ func (s *Server) initHTTPListener() (err error) {
 
 	variable.RegisterStatistics(s)
 
-	return nil
+	return s, nil
 }
 
 func cleanupStaleSocket(socket string) error {
@@ -399,55 +392,24 @@ func (s *Server) reportConfig() {
 }
 
 // Run runs the server.
-func (s *Server) Run(dom *domain.Domain) error {
+func (s *Server) Run() error {
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventStart).Inc()
 	s.reportConfig()
 
 	// Start HTTP API to report tidb info such as TPS.
 	if s.cfg.Status.ReportStatus {
-		err := s.startStatusHTTP()
-		if err != nil {
-			log.Error("failed to create the server", zap.Error(err), zap.Stack("stack"))
-			return err
-		}
-	}
-	if config.GetGlobalConfig().Performance.ForceInitStats && dom != nil {
-		<-dom.StatsHandle().InitStatsDone
+		s.startStatusHTTP()
 	}
 	// If error should be reported and exit the server it can be sent on this
 	// channel. Otherwise, end with sending a nil error to signal "done"
 	errChan := make(chan error, 2)
-	err := s.initTiDBListener()
-	if err != nil {
-		log.Error("failed to create the server", zap.Error(err), zap.Stack("stack"))
-		return err
-	}
-	// Register error API is not thread-safe, the caller MUST NOT register errors after initialization.
-	// To prevent misuse, set a flag to indicate that register new error will panic immediately.
-	// For regression of issue like https://github.com/pingcap/tidb/issues/28190
-	terror.RegisterFinish()
 	go s.startNetworkListener(s.listener, false, errChan)
 	go s.startNetworkListener(s.socket, true, errChan)
-	if RunInGoTest && !isClosed(RunInGoTestChan) {
-		close(RunInGoTestChan)
-	}
-	s.health.Store(true)
-	err = <-errChan
+	err := <-errChan
 	if err != nil {
 		return err
 	}
 	return <-errChan
-}
-
-// isClosed is to check if the channel is closed
-func isClosed(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-	}
-
-	return false
 }
 
 func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, errChan chan error) {
@@ -460,7 +422,7 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 		if err != nil {
 			if opErr, ok := err.(*net.OpError); ok {
 				if opErr.Err.Error() == "use of closed network connection" {
-					if s.inShutdownMode {
+					if s.inShutdownMode.Load() {
 						errChan <- nil
 					} else {
 						errChan <- err
@@ -479,6 +441,8 @@ func (s *Server) startNetworkListener(listener net.Listener, isUnixSocket bool, 
 			errChan <- err
 			return
 		}
+
+		logutil.BgLogger().Debug("accept new connection success")
 
 		clientConn := s.newConn(conn)
 		if isUnixSocket {
@@ -551,10 +515,8 @@ func (s *Server) checkAuditPlugin(clientConn *clientConn) error {
 }
 
 func (s *Server) startShutdown() {
-	s.rwlock.RLock()
 	logutil.BgLogger().Info("setting tidb-server to report unhealthy (shutting-down)")
-	s.inShutdownMode = true
-	s.rwlock.RUnlock()
+	s.health.Store(false)
 	// give the load balancer a chance to receive a few unhealthy health reports
 	// before acquiring the s.rwlock and blocking connections.
 	waitTime := time.Duration(s.cfg.GracefulWaitBeforeShutdown) * time.Second
@@ -564,12 +526,7 @@ func (s *Server) startShutdown() {
 	}
 }
 
-// Close closes the server.
-func (s *Server) Close() {
-	s.startShutdown()
-	s.rwlock.Lock() // prevent new connections
-	defer s.rwlock.Unlock()
-
+func (s *Server) closeListener() {
 	if s.listener != nil {
 		err := s.listener.Close()
 		terror.Log(errors.Trace(err))
@@ -597,6 +554,34 @@ func (s *Server) Close() {
 	}
 	s.wg.Wait()
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventClose).Inc()
+}
+
+var gracefulCloseConnectionsTimeout = 15 * time.Second
+
+// Close closes the server.
+func (s *Server) Close() {
+	s.startShutdown()
+	s.rwlock.Lock() // // prevent new connections
+	defer s.rwlock.Unlock()
+	s.inShutdownMode.Store(true)
+	s.closeListener()
+}
+
+func (s *Server) registerConn(conn *clientConn) bool {
+	s.rwlock.Lock()
+	defer s.rwlock.Unlock()
+	connections := len(s.clients)
+
+	logger := logutil.BgLogger()
+	if s.inShutdownMode.Load() {
+		logger.Info("close connection directly when shutting down")
+		terror.Log(closeConn(conn, connections))
+		return false
+	}
+	s.clients[conn.connectionID] = conn
+	connections = len(s.clients)
+	metrics.ConnGauge.Set(float64(connections))
+	return true
 }
 
 // onConn runs in its own goroutine, handles queries from this connection.
@@ -627,6 +612,7 @@ func (s *Server) onConn(conn *clientConn) {
 	}
 
 	ctx := logutil.WithConnID(context.Background(), conn.connectionID)
+
 	if err := conn.handshake(ctx); err != nil {
 		conn.onExtensionConnEvent(extension.ConnHandshakeRejected, err)
 		if plugin.IsEnable(plugin.Audit) && conn.getCtx() != nil {
@@ -668,11 +654,10 @@ func (s *Server) onConn(conn *clientConn) {
 		terror.Log(conn.Close())
 		logutil.Logger(ctx).Debug("connection closed")
 	}()
-	s.rwlock.Lock()
-	s.clients[conn.connectionID] = conn
-	connections := len(s.clients)
-	s.rwlock.Unlock()
-	metrics.ConnGauge.Set(float64(connections))
+
+	if !s.registerConn(conn) {
+		return
+	}
 
 	sessionVars := conn.ctx.GetSessionVars()
 	sessionVars.ConnectionInfo = conn.connectInfo()
@@ -709,10 +694,24 @@ func (s *Server) onConn(conn *clientConn) {
 
 func (cc *clientConn) connectInfo() *variable.ConnectionInfo {
 	connType := variable.ConnTypeSocket
+	sslVersion := ""
 	if cc.isUnixSocket {
 		connType = variable.ConnTypeUnixSocket
 	} else if cc.tlsConn != nil {
 		connType = variable.ConnTypeTLS
+		sslVersionNum := cc.tlsConn.ConnectionState().Version
+		switch sslVersionNum {
+		case tls.VersionTLS10:
+			sslVersion = "TLSv1.0"
+		case tls.VersionTLS11:
+			sslVersion = "TLSv1.1"
+		case tls.VersionTLS12:
+			sslVersion = "TLSv1.2"
+		case tls.VersionTLS13:
+			sslVersion = "TLSv1.3"
+		default:
+			sslVersion = fmt.Sprintf("Unknown TLS version: %d", sslVersionNum)
+		}
 	}
 	connInfo := &variable.ConnectionInfo{
 		ConnectionID:      cc.connectionID,
@@ -727,7 +726,7 @@ func (cc *clientConn) connectInfo() *variable.ConnectionInfo {
 		ServerOSLoginUser: osUser,
 		OSVersion:         osVersion,
 		ServerVersion:     mysql.TiDBReleaseVersion,
-		SSLVersion:        "v1.2.0", // for current go version
+		SSLVersion:        sslVersion,
 		PID:               serverPID,
 		DB:                cc.dbname,
 	}
@@ -812,7 +811,7 @@ func (s *Server) GetProcessInfo(id uint64) (*util.ProcessInfo, bool) {
 
 // Kill implements the SessionManager interface.
 func (s *Server) Kill(connectionID uint64, query bool) {
-	logutil.BgLogger().Info("kill", zap.Uint64("connID", connectionID), zap.Bool("query", query))
+	logutil.BgLogger().Info("kill", zap.Uint64("conn", connectionID), zap.Bool("query", query))
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventKill).Inc()
 
 	s.rwlock.RLock()
@@ -826,9 +825,9 @@ func (s *Server) Kill(connectionID uint64, query bool) {
 	if !query {
 		// Mark the client connection status as WaitShutdown, when clientConn.Run detect
 		// this, it will end the dispatch loop and exit.
-		atomic.StoreInt32(&conn.status, connStatusWaitShutdown)
+		conn.setStatus(connStatusWaitShutdown)
 	}
-	killConn(conn)
+	killQuery(conn)
 }
 
 // UpdateTLSConfig implements the SessionManager interface.
@@ -840,7 +839,7 @@ func (s *Server) getTLSConfig() *tls.Config {
 	return (*tls.Config)(atomic.LoadPointer(&s.tlsConfig))
 }
 
-func killConn(conn *clientConn) {
+func killQuery(conn *clientConn) {
 	sessVars := conn.ctx.GetSessionVars()
 	atomic.StoreUint32(&sessVars.Killed, 1)
 	conn.mu.RLock()
@@ -868,84 +867,65 @@ func (s *Server) KillSysProcesses() {
 	}
 }
 
-// KillAllConnections kills all connections when server is not gracefully shutdown.
+// KillAllConnections implements the SessionManager interface.
+// KillAllConnections kills all connections.
 func (s *Server) KillAllConnections() {
 	logutil.BgLogger().Info("[server] kill all connections.")
 
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
 	for _, conn := range s.clients {
-		atomic.StoreInt32(&conn.status, connStatusShutdown)
+		conn.setStatus(connStatusShutdown)
 		if err := conn.closeWithoutLock(); err != nil {
 			terror.Log(err)
 		}
-		killConn(conn)
+		killQuery(conn)
 	}
 
 	s.KillSysProcesses()
 }
 
-var gracefulCloseConnectionsTimeout = 15 * time.Second
+// DrainClients drain all connections in drainWait.
+// After drainWait duration, we kill all connections still not quit explicitly and wait for cancelWait.
+func (s *Server) DrainClients(drainWait time.Duration, cancelWait time.Duration) {
+	logger := logutil.BgLogger()
+	logger.Info("start drain clients")
 
-// TryGracefulDown will try to gracefully close all connection first with timeout. if timeout, will close all connection directly.
-func (s *Server) TryGracefulDown() {
-	ctx, cancel := context.WithTimeout(context.Background(), gracefulCloseConnectionsTimeout)
-	defer cancel()
-	done := make(chan struct{})
+	conns := make(map[uint64]*clientConn)
+
+	s.rwlock.Lock()
+	for k, v := range s.clients {
+		conns[k] = v
+	}
+	s.rwlock.Unlock()
+
+	allDone := make(chan struct{})
+	quitWaitingForConns := make(chan struct{})
+	defer close(quitWaitingForConns)
 	go func() {
-		s.GracefulDown(ctx, done)
+		defer close(allDone)
+		for _, conn := range conns {
+			select {
+			case <-conn.quit:
+			case <-quitWaitingForConns:
+				return
+			}
+		}
 	}()
+
 	select {
-	case <-ctx.Done():
-		s.KillAllConnections()
-	case <-done:
-		return
+	case <-allDone:
+		logger.Info("all sessions quit in drain wait time")
+	case <-time.After(drainWait):
+		logger.Info("timeout waiting all sessions quit")
 	}
-}
 
-// GracefulDown waits all clients to close.
-func (s *Server) GracefulDown(ctx context.Context, done chan struct{}) {
-	logutil.Logger(ctx).Info("[server] graceful shutdown.")
-	metrics.ServerEventCounter.WithLabelValues(metrics.EventGracefulDown).Inc()
+	s.KillAllConnections()
 
-	count := s.ConnectionCount()
-	for i := 0; count > 0; i++ {
-		s.kickIdleConnection()
-
-		count = s.ConnectionCount()
-		if count == 0 {
-			break
-		}
-		// Print information for every 30s.
-		if i%30 == 0 {
-			logutil.Logger(ctx).Info("graceful shutdown...", zap.Int("conn count", count))
-		}
-		ticker := time.After(time.Second)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker:
-		}
-	}
-	close(done)
-}
-
-func (s *Server) kickIdleConnection() {
-	var conns []*clientConn
-	s.rwlock.RLock()
-	for _, cc := range s.clients {
-		if cc.ShutdownOrNotify() {
-			// Shutdowned conn will be closed by us, and notified conn will exist themselves.
-			conns = append(conns, cc)
-		}
-	}
-	s.rwlock.RUnlock()
-
-	for _, cc := range conns {
-		err := cc.Close()
-		if err != nil {
-			logutil.BgLogger().Error("close connection", zap.Error(err))
-		}
+	select {
+	case <-allDone:
+	case <-time.After(cancelWait):
+		logger.Warn("some sessions do not quit in cancel wait time")
 	}
 }
 

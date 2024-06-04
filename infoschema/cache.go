@@ -18,19 +18,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/pingcap/tidb/metrics"
+	infoschema_metrics "github.com/pingcap/tidb/infoschema/metrics"
 	"github.com/pingcap/tidb/util/logutil"
 	"go.uber.org/zap"
-)
-
-var (
-	getLatestCounter  = metrics.InfoCacheCounters.WithLabelValues("get", "latest")
-	getTSCounter      = metrics.InfoCacheCounters.WithLabelValues("get", "ts")
-	getVersionCounter = metrics.InfoCacheCounters.WithLabelValues("get", "version")
-
-	hitLatestCounter  = metrics.InfoCacheCounters.WithLabelValues("hit", "latest")
-	hitTSCounter      = metrics.InfoCacheCounters.WithLabelValues("hit", "ts")
-	hitVersionCounter = metrics.InfoCacheCounters.WithLabelValues("hit", "version")
 )
 
 // InfoCache handles information schema, including getting and setting.
@@ -40,9 +30,6 @@ type InfoCache struct {
 	mu sync.RWMutex
 	// cache is sorted by both SchemaVersion and timestamp in descending order, assume they have same order
 	cache []schemaAndTimestamp
-
-	// emptySchemaVersions stores schema version which has no schema_diff.
-	emptySchemaVersions map[int64]struct{}
 }
 
 type schemaAndTimestamp struct {
@@ -53,16 +40,8 @@ type schemaAndTimestamp struct {
 // NewCache creates a new InfoCache.
 func NewCache(capacity int) *InfoCache {
 	return &InfoCache{
-		cache:               make([]schemaAndTimestamp, 0, capacity),
-		emptySchemaVersions: make(map[int64]struct{}),
+		cache: make([]schemaAndTimestamp, 0, capacity),
 	}
-}
-
-// Size returns the size of the cache, export for test.
-func (h *InfoCache) Size() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.cache)
 }
 
 // Reset resets the cache.
@@ -76,22 +55,12 @@ func (h *InfoCache) Reset(capacity int) {
 func (h *InfoCache) GetLatest() InfoSchema {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	getLatestCounter.Inc()
+	infoschema_metrics.GetLatestCounter.Inc()
 	if len(h.cache) > 0 {
-		hitLatestCounter.Inc()
+		infoschema_metrics.HitLatestCounter.Inc()
 		return h.cache[0].infoschema
 	}
 	return nil
-}
-
-// Len returns the size of the cache
-func (h *InfoCache) Len() int {
-	return len(h.cache)
-}
-
-// GetEmptySchemaVersions returns emptySchemaVersions, exports for testing.
-func (h *InfoCache) GetEmptySchemaVersions() map[int64]struct{} {
-	return h.emptySchemaVersions
 }
 
 func (h *InfoCache) getSchemaByTimestampNoLock(ts uint64) (InfoSchema, bool) {
@@ -101,45 +70,15 @@ func (h *InfoCache) getSchemaByTimestampNoLock(ts uint64) (InfoSchema, bool) {
 	// moreover, the most likely hit element in the array is the first one in steady mode
 	// thus it may have better performance than binary search
 	for i, is := range h.cache {
-		if is.timestamp == 0 || ts < uint64(is.timestamp) {
-			// is.timestamp == 0 means the schema ts is unknown, so we can't use it, then just skip it.
-			// ts < is.timestamp means the schema is newer than ts, so we can't use it too, just skip it to find the older one.
-			continue
+		if is.timestamp == 0 || (i > 0 && h.cache[i-1].infoschema.SchemaMetaVersion() != is.infoschema.SchemaMetaVersion()+1) {
+			// the schema version doesn't have a timestamp or there is a gap in the schema cache
+			// ignore all the schema cache equals or less than this version in search by timestamp
+			break
 		}
-		// ts >= is.timestamp must be true after the above condition.
-		if i == 0 {
-			// the first element is the latest schema, so we can return it directly.
+		if ts >= uint64(is.timestamp) {
+			// found the largest version before the given ts
 			return is.infoschema, true
 		}
-
-		if uint64(h.cache[i-1].timestamp) > ts {
-			// The first condition is to make sure the cache[i-1].timestamp > ts >= cache[i].timestamp, then the current schema is suitable for ts.
-			lastVersion := h.cache[i-1].infoschema.SchemaMetaVersion()
-			currentVersion := is.infoschema.SchemaMetaVersion()
-			if lastVersion == currentVersion+1 {
-				// This condition is to make sure the schema version is continuous. If last(cache[i-1]) schema-version is 10,
-				// but current(cache[i]) schema-version is not 9, then current schema may not suitable for ts.
-				return is.infoschema, true
-			}
-			if lastVersion > currentVersion {
-				found := true
-				for ver := currentVersion + 1; ver < lastVersion; ver++ {
-					_, ok := h.emptySchemaVersions[ver]
-					if !ok {
-						found = false
-						break
-					}
-				}
-				if found {
-					// This condition is to make sure the schema version is continuous. If last(cache[i-1]) schema-version is 10, and
-					// current(cache[i]) schema-version is 8, then there is a gap exist, and if all the gap version can be found in cache.emptySchemaVersions
-					// which means those gap versions don't have schema info, then current schema is also suitable for ts.
-					return is.infoschema, true
-				}
-			}
-		}
-		// current schema is not suitable for ts, then break the loop to avoid the unnecessary search.
-		break
 	}
 
 	logutil.BgLogger().Debug("SCHEMA CACHE no schema found")
@@ -154,7 +93,7 @@ func (h *InfoCache) GetByVersion(version int64) InfoSchema {
 }
 
 func (h *InfoCache) getByVersionNoLock(version int64) InfoSchema {
-	getVersionCounter.Inc()
+	infoschema_metrics.GetVersionCounter.Inc()
 	i := sort.Search(len(h.cache), func(i int) bool {
 		return h.cache[i].infoschema.SchemaMetaVersion() <= version
 	})
@@ -178,7 +117,7 @@ func (h *InfoCache) getByVersionNoLock(version int64) InfoSchema {
 	// ```
 
 	if i < len(h.cache) && (i != 0 || h.cache[i].infoschema.SchemaMetaVersion() == version) {
-		hitVersionCounter.Inc()
+		infoschema_metrics.HitVersionCounter.Inc()
 		return h.cache[i].infoschema
 	}
 	return nil
@@ -191,9 +130,9 @@ func (h *InfoCache) GetBySnapshotTS(snapshotTS uint64) InfoSchema {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	getTSCounter.Inc()
+	infoschema_metrics.GetTSCounter.Inc()
 	if schema, ok := h.getSchemaByTimestampNoLock(snapshotTS); ok {
-		hitTSCounter.Inc()
+		infoschema_metrics.HitTSCounter.Inc()
 		return schema
 	}
 	return nil
@@ -245,26 +184,4 @@ func (h *InfoCache) Insert(is InfoSchema, schemaTS uint64) bool {
 	}
 
 	return true
-}
-
-// InsertEmptySchemaVersion inserts empty schema version into a map. If exceeded the cache capacity, remove the oldest version.
-func (h *InfoCache) InsertEmptySchemaVersion(version int64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.emptySchemaVersions[version] = struct{}{}
-	if len(h.emptySchemaVersions) > cap(h.cache) {
-		// remove oldest version.
-		versions := make([]int64, 0, len(h.emptySchemaVersions))
-		for ver := range h.emptySchemaVersions {
-			versions = append(versions, ver)
-		}
-		sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
-		for _, ver := range versions {
-			delete(h.emptySchemaVersions, ver)
-			if len(h.emptySchemaVersions) <= cap(h.cache) {
-				break
-			}
-		}
-	}
 }

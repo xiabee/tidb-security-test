@@ -34,6 +34,7 @@ import (
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/testkit"
 	"github.com/pingcap/tidb/types"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,7 +59,7 @@ func TestShowOpenTables(t *testing.T) {
 func TestShowCreateViewDefiner(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%", AuthUsername: "root", AuthHostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "%", AuthUsername: "root", AuthHostname: "%"}, nil, nil, nil))
 
 	tk.MustExec("use test")
 	tk.MustExec("create or replace view v1 as select 1")
@@ -143,7 +144,8 @@ func TestShowCreateTable(t *testing.T) {
 		"`d` datetime(4) default current_timestamp(4),\n" +
 		"`e` varchar(20) default 'cUrrent_tImestamp',\n" +
 		"`f` datetime(2) default current_timestamp(2) on update current_timestamp(2),\n" +
-		"`g` timestamp(2) default current_timestamp(2) on update current_timestamp(2))")
+		"`g` timestamp(2) default current_timestamp(2) on update current_timestamp(2),\n" +
+		"`h` date default current_date )")
 	tk.MustQuery("show create table `t`").Check(testkit.RowsWithSep("|",
 		""+
 			"t CREATE TABLE `t` (\n"+
@@ -153,7 +155,8 @@ func TestShowCreateTable(t *testing.T) {
 			"  `d` datetime(4) DEFAULT CURRENT_TIMESTAMP(4),\n"+
 			"  `e` varchar(20) DEFAULT 'cUrrent_tImestamp',\n"+
 			"  `f` datetime(2) DEFAULT CURRENT_TIMESTAMP(2) ON UPDATE CURRENT_TIMESTAMP(2),\n"+
-			"  `g` timestamp(2) DEFAULT CURRENT_TIMESTAMP(2) ON UPDATE CURRENT_TIMESTAMP(2)\n"+
+			"  `g` timestamp(2) DEFAULT CURRENT_TIMESTAMP(2) ON UPDATE CURRENT_TIMESTAMP(2),\n"+
+			"  `h` date DEFAULT CURRENT_DATE\n"+
 			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 	))
 	tk.MustExec("drop table t")
@@ -314,13 +317,14 @@ func TestShowCreateTable(t *testing.T) {
 	tk.MustQuery("show create table default_sequence").Check(testkit.RowsWithSep("|",
 		""+
 			"default_sequence CREATE TABLE `default_sequence` (\n"+
-			"  `a` int(11) DEFAULT (nextval(`test`.`seq`))\n"+
+			"  `a` int(11) DEFAULT nextval(`test`.`seq`)\n"+
 			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 	))
 
-	// TiDB defaults (and only supports) foreign_key_checks=0
+	// set @@foreign_key_checks=0,
 	// This means that the child table can be created before the parent table.
 	// This behavior is required for mysqldump restores.
+	tk.MustExec("set @@foreign_key_checks=0")
 	tk.MustExec(`DROP TABLE IF EXISTS parent, child`)
 	tk.MustExec(`CREATE TABLE child (id INT NOT NULL PRIMARY KEY auto_increment, parent_id INT NOT NULL, INDEX par_ind (parent_id), CONSTRAINT child_ibfk_1 FOREIGN KEY (parent_id) REFERENCES parent(id))`)
 	tk.MustExec(`CREATE TABLE parent ( id INT NOT NULL PRIMARY KEY auto_increment )`)
@@ -331,7 +335,7 @@ func TestShowCreateTable(t *testing.T) {
 			"  `parent_id` int(11) NOT NULL,\n"+
 			"  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,\n"+
 			"  KEY `par_ind` (`parent_id`),\n"+
-			"  CONSTRAINT `child_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `test`.`parent` (`id`) /* FOREIGN KEY INVALID */\n"+
+			"  CONSTRAINT `child_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `test`.`parent` (`id`)\n"+
 			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 	))
 
@@ -345,7 +349,7 @@ func TestShowCreateTable(t *testing.T) {
 			"  `parent_id` int(11) NOT NULL,\n"+
 			"  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,\n"+
 			"  KEY `par_ind` (`parent_id`),\n"+
-			"  CONSTRAINT `child_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `test`.`parent` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE /* FOREIGN KEY INVALID */\n"+
+			"  CONSTRAINT `child_ibfk_1` FOREIGN KEY (`parent_id`) REFERENCES `test`.`parent` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE\n"+
 			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin",
 	))
 
@@ -358,7 +362,8 @@ func TestShowCreateTable(t *testing.T) {
 		"  `id` int(11) NOT NULL,\n" +
 		"  `b` int(11) DEFAULT NULL,\n" +
 		"  PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */,\n" +
-		"  CONSTRAINT `fk` FOREIGN KEY (`b`) REFERENCES `test1`.`t1` (`id`) /* FOREIGN KEY INVALID */\n" +
+		"  KEY `fk` (`b`),\n" +
+		"  CONSTRAINT `fk` FOREIGN KEY (`b`) REFERENCES `test1`.`t1` (`id`)\n" +
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
 
 	// Test issue #20327
@@ -483,7 +488,7 @@ func TestShowCreateTable(t *testing.T) {
 	tk.MustExec(`create table t(a bit default (rand()))`)
 	tk.MustQuery(`show create table t`).Check(testkit.RowsWithSep("|", ""+
 		"t CREATE TABLE `t` (\n"+
-		"  `a` bit(1) DEFAULT (rand())\n"+
+		"  `a` bit(1) DEFAULT rand()\n"+
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"))
 
 	tk.MustExec(`drop table if exists t`)
@@ -674,7 +679,7 @@ func TestShowVisibility(t *testing.T) {
 	tk.MustExec(`create user 'show'@'%'`)
 
 	tk1 := testkit.NewTestKit(t, store)
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show", Hostname: "%"}, nil, nil, nil))
 
 	// No ShowDatabases privilege, this user would see nothing except INFORMATION_SCHEMA.
 	tk.MustQuery("show databases").Check(testkit.Rows("INFORMATION_SCHEMA"))
@@ -712,7 +717,7 @@ func TestShowDatabasesInfoSchemaFirst(t *testing.T) {
 	tk.MustExec(`grant select on BBBB.* to 'show'@'%'`)
 
 	tk1 := testkit.NewTestKit(t, store)
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show", Hostname: "%"}, nil, nil, nil))
 	tk1.MustQuery("show databases").Check(testkit.Rows("INFORMATION_SCHEMA", "AAAA", "BBBB"))
 
 	tk.MustExec(`drop user 'show'@'%'`)
@@ -816,12 +821,12 @@ func TestShowGrantsPrivilege(t *testing.T) {
 	tk.MustExec("create user show_grants")
 	tk.MustExec("show grants for show_grants")
 	tk1 := testkit.NewTestKit(t, store)
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show_grants", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show_grants", Hostname: "%"}, nil, nil, nil))
 	err := tk1.QueryToErr("show grants for root")
-	require.EqualError(t, executor.ErrDBaccessDenied.GenWithStackByArgs("show_grants", "%", mysql.SystemDB), err.Error())
+	require.EqualError(t, exeerrors.ErrDBaccessDenied.GenWithStackByArgs("show_grants", "%", mysql.SystemDB), err.Error())
 	// Test show grants for user with auth host name `%`.
 	tk2 := testkit.NewTestKit(t, store)
-	require.NoError(t, tk2.Session().Auth(&auth.UserIdentity{Username: "show_grants", Hostname: "127.0.0.1", AuthUsername: "show_grants", AuthHostname: "%"}, nil, nil))
+	require.NoError(t, tk2.Session().Auth(&auth.UserIdentity{Username: "show_grants", Hostname: "127.0.0.1", AuthUsername: "show_grants", AuthHostname: "%"}, nil, nil, nil))
 	tk2.MustQuery("show grants")
 }
 
@@ -831,7 +836,7 @@ func TestShowStatsPrivilege(t *testing.T) {
 	tk.MustExec("create user show_stats")
 	tk1 := testkit.NewTestKit(t, store)
 
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show_stats", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "show_stats", Hostname: "%"}, nil, nil, nil))
 	e := "[planner:1142]SHOW command denied to user 'show_stats'@'%' for table"
 	err := tk1.ExecToErr("show stats_meta")
 	require.ErrorContains(t, err, e)
@@ -850,7 +855,7 @@ func TestShowStatsPrivilege(t *testing.T) {
 	tk1.MustExec("SHOW STATS_HISTOGRAMS")
 
 	tk.MustExec("create user a@'%' identified by '';")
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "a", Hostname: "%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "a", Hostname: "%"}, nil, nil, nil))
 	tk.MustExec("grant select on mysql.stats_meta to a@'%';")
 	tk.MustExec("grant select on mysql.stats_buckets to a@'%';")
 	tk.MustExec("grant select on mysql.stats_histograms to a@'%';")
@@ -862,7 +867,7 @@ func TestShowStatsPrivilege(t *testing.T) {
 func TestIssue18878(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "127.0.0.1", AuthHostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "127.0.0.1", AuthHostname: "%"}, nil, nil, nil))
 	tk.MustQuery("select user()").Check(testkit.Rows("root@127.0.0.1"))
 	tk.MustQuery("show grants")
 	tk.MustQuery("select user()").Check(testkit.Rows("root@127.0.0.1"))
@@ -882,10 +887,10 @@ func TestIssue17794(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("CREATE USER 'root'@'8.8.%'")
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "9.9.9.9", AuthHostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "9.9.9.9", AuthHostname: "%"}, nil, nil, nil))
 
 	tk1 := testkit.NewTestKit(t, store)
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "8.8.8.8", AuthHostname: "8.8.%"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "8.8.8.8", AuthHostname: "8.8.%"}, nil, nil, nil))
 	tk.MustQuery("show grants").Check(testkit.Rows("GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION"))
 	tk1.MustQuery("show grants").Check(testkit.Rows("GRANT USAGE ON *.* TO 'root'@'8.8.%'"))
 }
@@ -907,7 +912,7 @@ func TestIssue10549(t *testing.T) {
 	tk.MustExec("GRANT 'app_developer' TO 'dev';")
 	tk.MustExec("SET DEFAULT ROLE app_developer TO 'dev';")
 
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "dev", Hostname: "%", AuthUsername: "dev", AuthHostname: "%"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "dev", Hostname: "%", AuthUsername: "dev", AuthHostname: "%"}, nil, nil, nil))
 	tk.MustQuery("SHOW DATABASES;").Check(testkit.Rows("INFORMATION_SCHEMA", "newdb"))
 	tk.MustQuery("SHOW GRANTS;").Check(testkit.Rows("GRANT USAGE ON *.* TO 'dev'@'%'", "GRANT ALL PRIVILEGES ON newdb.* TO 'dev'@'%'", "GRANT 'app_developer'@'%' TO 'dev'@'%'"))
 	tk.MustQuery("SHOW GRANTS FOR CURRENT_USER").Check(testkit.Rows("GRANT USAGE ON *.* TO 'dev'@'%'", "GRANT ALL PRIVILEGES ON newdb.* TO 'dev'@'%'", "GRANT 'app_developer'@'%' TO 'dev'@'%'"))
@@ -921,7 +926,7 @@ func TestIssue11165(t *testing.T) {
 	tk.MustExec("CREATE USER 'manager'@'localhost';")
 	tk.MustExec("GRANT 'r_manager' TO 'manager'@'localhost';")
 
-	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "manager", Hostname: "localhost", AuthUsername: "manager", AuthHostname: "localhost"}, nil, nil))
+	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{Username: "manager", Hostname: "localhost", AuthUsername: "manager", AuthHostname: "localhost"}, nil, nil, nil))
 	tk.MustExec("SET DEFAULT ROLE ALL TO 'manager'@'localhost';")
 	tk.MustExec("SET DEFAULT ROLE NONE TO 'manager'@'localhost';")
 	tk.MustExec("SET DEFAULT ROLE 'r_manager' TO 'manager'@'localhost';")
@@ -964,6 +969,8 @@ func TestShow2(t *testing.T) {
 					c_timestamp_default timestamp default current_timestamp,
 					c_timestamp_default_3 timestamp(3) default current_timestamp(3),
 					c_timestamp_default_4 timestamp(3) default current_timestamp(3) on update current_timestamp(3),
+					c_date_default date default current_date,
+					c_date_default_2 date default (curdate()),
 					c_blob blob,
 					c_tinyblob tinyblob,
 					c_mediumblob mediumblob,
@@ -1000,6 +1007,8 @@ func TestShow2(t *testing.T) {
 			"[c_timestamp_default timestamp <nil> YES  CURRENT_TIMESTAMP  select,insert,update,references ]\n" +
 			"[c_timestamp_default_3 timestamp(3) <nil> YES  CURRENT_TIMESTAMP(3)  select,insert,update,references ]\n" +
 			"[c_timestamp_default_4 timestamp(3) <nil> YES  CURRENT_TIMESTAMP(3) DEFAULT_GENERATED on update CURRENT_TIMESTAMP(3) select,insert,update,references ]\n" +
+			"[c_date_default date <nil> YES  CURRENT_DATE  select,insert,update,references ]\n" +
+			"[c_date_default_2 date <nil> YES  CURRENT_DATE  select,insert,update,references ]\n" +
 			"[c_blob blob <nil> YES  <nil>  select,insert,update,references ]\n" +
 			"[c_tinyblob tinyblob <nil> YES  <nil>  select,insert,update,references ]\n" +
 			"[c_mediumblob mediumblob <nil> YES  <nil>  select,insert,update,references ]\n" +
@@ -1038,7 +1047,7 @@ func TestShow2(t *testing.T) {
 	createTime := model.TSConvert2Time(tblInfo.Meta().UpdateTS).Format("2006-01-02 15:04:05")
 
 	// The Hostname is the actual host
-	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"))
+	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"), nil)
 
 	r := tk.MustQuery("show table status from test like 't'")
 	r.Check(testkit.Rows(fmt.Sprintf("t InnoDB 10 Compact 0 0 0 0 0 0 <nil> %s <nil> <nil> utf8mb4_bin   注释", createTime)))
@@ -1066,13 +1075,13 @@ func TestShowCreateUser(t *testing.T) {
 
 	// Case: the user exists but the host portion doesn't match
 	err := tk.QueryToErr("show create user 'test_show_create_user'@'asdf';")
-	require.Equal(t, executor.ErrCannotUser.GenWithStackByArgs("SHOW CREATE USER", "'test_show_create_user'@'asdf'").Error(), err.Error())
+	require.Equal(t, exeerrors.ErrCannotUser.GenWithStackByArgs("SHOW CREATE USER", "'test_show_create_user'@'asdf'").Error(), err.Error())
 
 	// Case: a user that doesn't exist
 	err = tk.QueryToErr("show create user 'aaa'@'localhost';")
-	require.Equal(t, executor.ErrCannotUser.GenWithStackByArgs("SHOW CREATE USER", "'aaa'@'localhost'").Error(), err.Error())
+	require.Equal(t, exeerrors.ErrCannotUser.GenWithStackByArgs("SHOW CREATE USER", "'aaa'@'localhost'").Error(), err.Error())
 
-	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "127.0.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, nil)
+	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "127.0.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, nil, nil)
 	tk.MustQuery("show create user current_user").
 		Check(testkit.Rows("CREATE USER 'root'@'127.0.0.1' IDENTIFIED WITH 'mysql_native_password' AS '' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT"))
 
@@ -1084,7 +1093,7 @@ func TestShowCreateUser(t *testing.T) {
 	// "show create user" for other user requires the SELECT privilege on mysql database.
 	tk1 := testkit.NewTestKit(t, store)
 	tk1.MustExec("use mysql")
-	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "check_priv", Hostname: "127.0.0.1", AuthUsername: "test_show", AuthHostname: "asdf"}, nil, nil))
+	require.NoError(t, tk1.Session().Auth(&auth.UserIdentity{Username: "check_priv", Hostname: "127.0.0.1", AuthUsername: "test_show", AuthHostname: "asdf"}, nil, nil, nil))
 	err = tk1.QueryToErr("show create user 'root'@'%'")
 	require.Error(t, err)
 
@@ -1166,14 +1175,14 @@ func TestUnprivilegedShow(t *testing.T) {
 
 	tk.MustExec(`CREATE USER 'lowprivuser'`) // no grants
 
-	tk.Session().Auth(&auth.UserIdentity{Username: "lowprivuser", Hostname: "192.168.0.1", AuthUsername: "lowprivuser", AuthHostname: "%"}, nil, []byte("012345678901234567890"))
+	tk.Session().Auth(&auth.UserIdentity{Username: "lowprivuser", Hostname: "192.168.0.1", AuthUsername: "lowprivuser", AuthHostname: "%"}, nil, []byte("012345678901234567890"), nil)
 	rs, err := tk.Exec("SHOW TABLE STATUS FROM testshow")
 	require.NoError(t, err)
 	require.NotNil(t, rs)
 
-	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"))
+	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"), nil)
 	tk.MustExec("GRANT ALL ON testshow.t1 TO 'lowprivuser'")
-	tk.Session().Auth(&auth.UserIdentity{Username: "lowprivuser", Hostname: "192.168.0.1", AuthUsername: "lowprivuser", AuthHostname: "%"}, nil, []byte("012345678901234567890"))
+	tk.Session().Auth(&auth.UserIdentity{Username: "lowprivuser", Hostname: "192.168.0.1", AuthUsername: "lowprivuser", AuthHostname: "%"}, nil, []byte("012345678901234567890"), nil)
 
 	is := dom.InfoSchema()
 	tblInfo, err := is.TableByName(model.NewCIStr("testshow"), model.NewCIStr("t1"))
@@ -1207,7 +1216,7 @@ func TestShowTableStatus(t *testing.T) {
 	tk.MustExec(`drop table if exists t;`)
 	tk.MustExec(`create table t(a bigint);`)
 
-	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"))
+	tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "192.168.0.1", AuthUsername: "root", AuthHostname: "%"}, nil, []byte("012345678901234567890"), nil)
 
 	// It's not easy to test the result contents because every time the test runs, "Create_time" changed.
 	tk.MustExec("show table status;")
@@ -1514,7 +1523,7 @@ func TestShowBuiltin(t *testing.T) {
 	res := tk.MustQuery("show builtins;")
 	require.NotNil(t, res)
 	rows := res.Rows()
-	const builtinFuncNum = 283
+	const builtinFuncNum = 288
 	require.Equal(t, builtinFuncNum, len(rows))
 	require.Equal(t, rows[0][0].(string), "abs")
 	require.Equal(t, rows[builtinFuncNum-1][0].(string), "yearweek")
@@ -1912,7 +1921,7 @@ func TestShowDatabasesLike(t *testing.T) {
 
 	tk := testkit.NewTestKit(t, store)
 	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{
-		Username: "root", Hostname: "%"}, nil, nil))
+		Username: "root", Hostname: "%"}, nil, nil, nil))
 
 	tk.MustExec("DROP DATABASE IF EXISTS `TEST_$1`")
 	tk.MustExec("DROP DATABASE IF EXISTS `test_$2`")
@@ -1949,7 +1958,7 @@ func TestShowCollationsLike(t *testing.T) {
 
 	tk := testkit.NewTestKit(t, store)
 	require.NoError(t, tk.Session().Auth(&auth.UserIdentity{
-		Username: "root", Hostname: "%"}, nil, nil))
+		Username: "root", Hostname: "%"}, nil, nil, nil))
 	tk.MustQuery("SHOW COLLATION LIKE 'UTF8MB4_BI%'").Check(testkit.Rows("utf8mb4_bin utf8mb4 46 Yes Yes 1"))
 	tk.MustQuery("SHOW COLLATION LIKE 'utf8mb4_bi%'").Check(testkit.Rows("utf8mb4_bin utf8mb4 46 Yes Yes 1"))
 }
@@ -2026,18 +2035,22 @@ func TestShowTTLOption(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(created_at datetime) ttl = `created_at` + INTERVAL 100 YEAR")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 100 YEAR */ /*T![ttl] TTL_ENABLE='ON' */"))
+	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 100 YEAR */ /*T![ttl] TTL_ENABLE='ON' */ /*T![ttl] TTL_JOB_INTERVAL='1h' */"))
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t(created_at datetime) ttl = `created_at` + INTERVAL 100 YEAR ttl_enable = 'OFF'")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 100 YEAR */ /*T![ttl] TTL_ENABLE='OFF' */"))
+	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 100 YEAR */ /*T![ttl] TTL_ENABLE='OFF' */ /*T![ttl] TTL_JOB_INTERVAL='1h' */"))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (created_at datetime) TTL = created_at + INTERVAL 3.14159 HOUR_MINUTE")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 3.14159 HOUR_MINUTE */ /*T![ttl] TTL_ENABLE='ON' */"))
+	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 3.14159 HOUR_MINUTE */ /*T![ttl] TTL_ENABLE='ON' */ /*T![ttl] TTL_JOB_INTERVAL='1h' */"))
 
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("create table t (created_at datetime) TTL = created_at + INTERVAL \"15:20\" HOUR_MINUTE")
-	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL _utf8mb4'15:20' HOUR_MINUTE */ /*T![ttl] TTL_ENABLE='ON' */"))
+	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL _utf8mb4'15:20' HOUR_MINUTE */ /*T![ttl] TTL_ENABLE='ON' */ /*T![ttl] TTL_JOB_INTERVAL='1h' */"))
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t (created_at datetime) TTL = created_at + INTERVAL 100 YEAR TTL_JOB_INTERVAL = '1d'")
+	tk.MustQuery("show create table t").Check(testkit.Rows("t CREATE TABLE `t` (\n  `created_at` datetime DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T![ttl] TTL=`created_at` + INTERVAL 100 YEAR */ /*T![ttl] TTL_ENABLE='ON' */ /*T![ttl] TTL_JOB_INTERVAL='1d' */"))
 }
 
 func TestShowBindingDigestField(t *testing.T) {

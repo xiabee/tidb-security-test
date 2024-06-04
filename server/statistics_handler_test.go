@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/statistics/handle"
 	"github.com/pingcap/tidb/testkit"
@@ -41,17 +42,17 @@ func TestDumpStatsAPI(t *testing.T) {
 	cfg.Status.StatusPort = client.statusPort
 	cfg.Status.ReportStatus = true
 	cfg.Socket = fmt.Sprintf("/tmp/tidb-mock-%d.sock", time.Now().UnixNano())
-	RunInGoTestChan = make(chan struct{})
+
 	server, err := NewServer(cfg, driver)
 	require.NoError(t, err)
 	defer server.Close()
-	go func() {
-		err := server.Run(nil)
-		require.NoError(t, err)
-	}()
-	<-RunInGoTestChan
+
 	client.port = getPortFromTCPAddr(server.listener.Addr())
 	client.statusPort = getPortFromTCPAddr(server.statusListener.Addr())
+	go func() {
+		err := server.Run()
+		require.NoError(t, err)
+	}()
 	client.waitUntilServerOnline()
 
 	dom, err := session.GetDomain(store)
@@ -59,6 +60,10 @@ func TestDumpStatsAPI(t *testing.T) {
 	statsHandler := &StatsHandler{dom}
 
 	prepareData(t, client, statsHandler)
+	tableInfo, err := dom.InfoSchema().TableByName(model.NewCIStr("tidb"), model.NewCIStr("test"))
+	require.NoError(t, err)
+	err = dom.GetHistoricalStatsWorker().DumpHistoricalStats(tableInfo.Meta().ID, dom.StatsHandle())
+	require.NoError(t, err)
 
 	router := mux.NewRouter()
 	router.Handle("/stats/dump/{db}/{table}", statsHandler)
@@ -168,6 +173,7 @@ func prepareData(t *testing.T, client *testServerClient, statHandle *StatsHandle
 	tk.MustExec("insert test values (1, 's')")
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))
 	tk.MustExec("analyze table test")
+	tk.MustExec("set global tidb_enable_historical_stats = 1")
 	tk.MustExec("insert into test(a,b) values (1, 'v'),(3, 'vvv'),(5, 'vv')")
 	is := statHandle.do.InfoSchema()
 	require.NoError(t, h.DumpStatsDeltaToKV(handle.DumpAll))

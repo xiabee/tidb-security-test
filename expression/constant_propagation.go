@@ -15,7 +15,8 @@
 package expression
 
 import (
-	"github.com/pingcap/errors"
+	"errors"
+
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
@@ -55,7 +56,7 @@ func (s *basePropConstSolver) insertCol(col *Column) {
 // tryToUpdateEQList tries to update the eqList. When the eqList has store this column with a different constant, like
 // a = 1 and a = 2, we set the second return value to false.
 func (s *basePropConstSolver) tryToUpdateEQList(col *Column, con *Constant) (bool, bool) {
-	if con.Value.IsNull() {
+	if con.ConstItem(s.ctx.GetSessionVars().StmtCtx) && con.Value.IsNull() {
 		return false, true
 	}
 	id := s.getColID(col)
@@ -87,9 +88,6 @@ func validEqualCondHelper(ctx sessionctx.Context, eq *ScalarFunction, colIsLeft 
 		con, conOk = eq.GetArgs()[0].(*Constant)
 	}
 	if !conOk {
-		return nil, nil
-	}
-	if MaybeOverOptimized4PlanCache(ctx, []Expression{con}) {
 		return nil, nil
 	}
 	if col.GetType().GetCollate() != con.GetType().GetCollate() {
@@ -282,6 +280,9 @@ func (s *propConstSolver) propagateColumnEQ() {
 }
 
 func (s *propConstSolver) setConds2ConstFalse() {
+	if MaybeOverOptimized4PlanCache(s.ctx, s.conditions) {
+		s.ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("some parameters may be overwritten when constant propagation"))
+	}
 	s.conditions = []Expression{&Constant{
 		Value:   types.NewDatum(false),
 		RetType: types.NewFieldType(mysql.TypeTiny),
@@ -304,9 +305,6 @@ func (s *propConstSolver) pickNewEQConds(visited []bool) (retMapper map[int]*Con
 				continue
 			}
 			visited[i] = true
-			if MaybeOverOptimized4PlanCache(s.ctx, []Expression{con}) {
-				continue
-			}
 			value, _, err := EvalBool(s.ctx, []Expression{con}, chunk.Row{})
 			if err != nil {
 				terror.Log(err)
@@ -388,52 +386,6 @@ func (s *propOuterJoinConstSolver) setConds2ConstFalse(filterConds bool) {
 	}
 }
 
-func (s *basePropConstSolver) dealWithPossibleHybridType(col *Column, con *Constant) (*Constant, bool) {
-	if !col.GetType().Hybrid() {
-		return con, true
-	}
-	if col.GetType().GetType() == mysql.TypeEnum {
-		d, err := con.Eval(chunk.Row{})
-		if err != nil {
-			return nil, false
-		}
-		if MaybeOverOptimized4PlanCache(s.ctx, []Expression{con}) {
-			s.ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(errors.New("Skip plan cache since mutable constant is restored and propagated"))
-		}
-		switch d.Kind() {
-		case types.KindInt64:
-			enum, err := types.ParseEnumValue(col.GetType().GetElems(), uint64(d.GetInt64()))
-			if err != nil {
-				logutil.BgLogger().Debug("Invalid Enum parsed during constant propagation")
-				return nil, false
-			}
-			con = &Constant{
-				Value:         types.NewMysqlEnumDatum(enum),
-				RetType:       col.RetType.Clone(),
-				collationInfo: col.collationInfo,
-			}
-		case types.KindString:
-			enum, err := types.ParseEnumName(col.GetType().GetElems(), d.GetString(), d.Collation())
-			if err != nil {
-				logutil.BgLogger().Debug("Invalid Enum parsed during constant propagation")
-				return nil, false
-			}
-			con = &Constant{
-				Value:         types.NewMysqlEnumDatum(enum),
-				RetType:       col.RetType.Clone(),
-				collationInfo: col.collationInfo,
-			}
-		case types.KindMysqlEnum, types.KindMysqlSet:
-			// It's already a hybrid type. Just use it.
-		default:
-			// We skip other cases first.
-			return nil, false
-		}
-		return con, true
-	}
-	return nil, false
-}
-
 // pickEQCondsOnOuterCol picks constant equal expression from specified conditions.
 func (s *propOuterJoinConstSolver) pickEQCondsOnOuterCol(retMapper map[int]*Constant, visited []bool, filterConds bool) map[int]*Constant {
 	var conds []Expression
@@ -457,9 +409,6 @@ func (s *propOuterJoinConstSolver) pickEQCondsOnOuterCol(retMapper map[int]*Cons
 				continue
 			}
 			visited[i+condsOffset] = true
-			if MaybeOverOptimized4PlanCache(s.ctx, []Expression{con}) {
-				continue
-			}
 			value, _, err := EvalBool(s.ctx, []Expression{con}, chunk.Row{})
 			if err != nil {
 				terror.Log(err)
@@ -469,11 +418,6 @@ func (s *propOuterJoinConstSolver) pickEQCondsOnOuterCol(retMapper map[int]*Cons
 				s.setConds2ConstFalse(filterConds)
 				return nil
 			}
-			continue
-		}
-		var valid bool
-		con, valid = s.dealWithPossibleHybridType(col, con)
-		if !valid {
 			continue
 		}
 		// Only extract `outerCol = const` expressions.

@@ -1481,12 +1481,6 @@ func RefineComparedConstant(ctx sessionctx.Context, targetFieldType types.FieldT
 		targetFieldType = *types.NewFieldType(mysql.TypeLonglong)
 	}
 	var intDatum types.Datum
-	// To make sure return zero when underflow happens.
-	oriFlag := sc.IsRefineComparedConstant
-	sc.IsRefineComparedConstant = true
-	defer func() {
-		sc.IsRefineComparedConstant = oriFlag
-	}()
 	intDatum, err = dt.ConvertTo(sc, &targetFieldType)
 	if err != nil {
 		if terror.ErrorEqual(err, types.ErrOverflow) {
@@ -1591,7 +1585,7 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		exprType := args[1-conIdx].GetType()
 		exprEvalType := exprType.EvalType()
 		if exprType.GetType() == mysql.TypeYear {
-			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
+			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
 			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
@@ -1601,7 +1595,7 @@ func allowCmpArgsRefining4PlanCache(ctx sessionctx.Context, args []Expression) (
 		conEvalType := args[conIdx].GetType().EvalType()
 		if exprEvalType == types.ETInt &&
 			(conEvalType == types.ETString || conEvalType == types.ETReal || conEvalType == types.ETDecimal) {
-			reason := errors.Errorf("skip plan-cache: '%v' may be converted to INT", args[conIdx].String())
+			reason := errors.Errorf("'%v' may be converted to INT", args[conIdx].String())
 			ctx.GetSessionVars().StmtCtx.SetSkipPlanCache(reason)
 			return true
 		}
@@ -2633,8 +2627,22 @@ func (b *builtinNullEQIntSig) evalInt(row chunk.Row) (val int64, isNull bool, er
 		res = 1
 	case isNull0 != isNull1:
 		return res, false, nil
-	default:
-		if types.CompareInt(arg0, isUnsigned0, arg1, isUnsigned1) == 0 {
+	case isUnsigned0 && isUnsigned1 && types.CompareUint64(uint64(arg0), uint64(arg1)) == 0:
+		res = 1
+	case !isUnsigned0 && !isUnsigned1 && types.CompareInt64(arg0, arg1) == 0:
+		res = 1
+	case isUnsigned0 && !isUnsigned1:
+		if arg1 < 0 {
+			return res, false, nil
+		}
+		if types.CompareInt64(arg0, arg1) == 0 {
+			res = 1
+		}
+	case !isUnsigned0 && isUnsigned1:
+		if arg0 < 0 {
+			return res, false, nil
+		}
+		if types.CompareInt64(arg0, arg1) == 0 {
 			res = 1
 		}
 	}
@@ -2937,7 +2945,26 @@ func CompareInt(sctx sessionctx.Context, lhsArg, rhsArg Expression, lhsRow, rhsR
 	}
 
 	isUnsigned0, isUnsigned1 := mysql.HasUnsignedFlag(lhsArg.GetType().GetFlag()), mysql.HasUnsignedFlag(rhsArg.GetType().GetFlag())
-	return int64(types.CompareInt(arg0, isUnsigned0, arg1, isUnsigned1)), false, nil
+	var res int
+	switch {
+	case isUnsigned0 && isUnsigned1:
+		res = types.CompareUint64(uint64(arg0), uint64(arg1))
+	case isUnsigned0 && !isUnsigned1:
+		if arg1 < 0 || uint64(arg0) > math.MaxInt64 {
+			res = 1
+		} else {
+			res = types.CompareInt64(arg0, arg1)
+		}
+	case !isUnsigned0 && isUnsigned1:
+		if arg0 < 0 || uint64(arg1) > math.MaxInt64 {
+			res = -1
+		} else {
+			res = types.CompareInt64(arg0, arg1)
+		}
+	case !isUnsigned0 && !isUnsigned1:
+		res = types.CompareInt64(arg0, arg1)
+	}
+	return int64(res), false, nil
 }
 
 func genCompareString(collation string) func(sctx sessionctx.Context, lhsArg Expression, rhsArg Expression, lhsRow chunk.Row, rhsRow chunk.Row) (int64, bool, error) {

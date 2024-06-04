@@ -18,19 +18,19 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/autoid"
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/metrics"
 	"github.com/pingcap/tidb/util/logutil"
+	"github.com/pingcap/tidb/util/tracing"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var _ Allocator = &singlePointAlloc{}
@@ -40,11 +40,10 @@ type singlePointAlloc struct {
 	tblID         int64
 	lastAllocated int64
 	isUnsigned    bool
-	*ClientDiscover
+	clientDiscover
 }
 
-// ClientDiscover is used to get the AutoIDAllocClient, it creates the grpc connection with autoid service leader.
-type ClientDiscover struct {
+type clientDiscover struct {
 	// This the etcd client for service discover
 	etcdCli *clientv3.Client
 	// This is the real client for the AutoIDAlloc service
@@ -55,65 +54,55 @@ type ClientDiscover struct {
 		// See https://github.com/grpc/grpc-go/issues/5321
 		*grpc.ClientConn
 	}
-	// version is increased in every ResetConn() to make the operation safe.
-	version uint64
 }
 
 const (
 	autoIDLeaderPath = "tidb/autoid/leader"
 )
 
-// NewClientDiscover creates a ClientDiscover object.
-func NewClientDiscover(etcdCli *clientv3.Client) *ClientDiscover {
-	return &ClientDiscover{
-		etcdCli: etcdCli,
-	}
-}
-
-// GetClient gets the AutoIDAllocClient.
-func (d *ClientDiscover) GetClient(ctx context.Context) (autoid.AutoIDAllocClient, uint64, error) {
+func (d *clientDiscover) GetClient(ctx context.Context) (autoid.AutoIDAllocClient, error) {
 	d.mu.RLock()
 	cli := d.mu.AutoIDAllocClient
 	if cli != nil {
 		d.mu.RUnlock()
-		return cli, atomic.LoadUint64(&d.version), nil
+		return cli, nil
 	}
 	d.mu.RUnlock()
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.mu.AutoIDAllocClient != nil {
-		return d.mu.AutoIDAllocClient, atomic.LoadUint64(&d.version), nil
+		return d.mu.AutoIDAllocClient, nil
 	}
 
 	resp, err := d.etcdCli.Get(ctx, autoIDLeaderPath, clientv3.WithFirstCreate()...)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	if len(resp.Kvs) == 0 {
-		return nil, 0, errors.New("autoid service leader not found")
+		return nil, errors.New("autoid service leader not found")
 	}
 
 	addr := string(resp.Kvs[0].Value)
-	opt := grpc.WithInsecure()
+	opt := grpc.WithTransportCredentials(insecure.NewCredentials())
 	security := config.GetGlobalConfig().Security
 	if len(security.ClusterSSLCA) != 0 {
 		clusterSecurity := security.ClusterSecurity()
 		tlsConfig, err := clusterSecurity.ToTLSConfig()
 		if err != nil {
-			return nil, 0, errors.Trace(err)
+			return nil, errors.Trace(err)
 		}
 		opt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 	logutil.BgLogger().Info("[autoid client] connect to leader", zap.String("addr", addr))
 	grpcConn, err := grpc.Dial(addr, opt)
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	cli = autoid.NewAutoIDAllocClient(grpcConn)
 	d.mu.AutoIDAllocClient = cli
 	d.mu.ClientConn = grpcConn
-	return cli, atomic.LoadUint64(&d.version), nil
+	return cli, nil
 }
 
 // Alloc allocs N consecutive autoID for table with tableID, returning (min, max] of the allocated autoID batch.
@@ -123,18 +112,15 @@ func (d *ClientDiscover) GetClient(ctx context.Context) (autoid.AutoIDAllocClien
 // case increment=1 & offset=1: you can derive the ids like min+1, min+2... max.
 // case increment=x & offset=y: you firstly need to seek to firstID by `SeekToFirstAutoIDXXX`, then derive the IDs like firstID, firstID + increment * 2... in the caller.
 func (sp *singlePointAlloc) Alloc(ctx context.Context, n uint64, increment, offset int64) (min int64, max int64, _ error) {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span1 := span.Tracer().StartSpan("autoid.Alloc", opentracing.ChildOf(span.Context()))
-		defer span1.Finish()
-		ctx = opentracing.ContextWithSpan(ctx, span1)
-	}
+	r, ctx := tracing.StartRegionEx(ctx, "autoid.Alloc")
+	defer r.End()
 
 	if !validIncrementAndOffset(increment, offset) {
 		return 0, 0, errInvalidIncrementAndOffset.GenWithStackByArgs(increment, offset)
 	}
 
 retry:
-	cli, ver, err := sp.GetClient(ctx)
+	cli, err := sp.GetClient(ctx)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
 	}
@@ -152,7 +138,7 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			time.Sleep(backoffDuration)
-			sp.resetConn(ver, err)
+			sp.resetConn(err)
 			goto retry
 		}
 		return 0, 0, errors.Trace(err)
@@ -169,37 +155,21 @@ retry:
 
 const backoffDuration = 200 * time.Millisecond
 
-func (d *ClientDiscover) resetConn(version uint64, reason error) {
-	// Avoid repeated Reset operation
-	if !atomic.CompareAndSwapUint64(&d.version, version, version+1) {
-		return
-	}
-	d.ResetConn(reason)
-}
-
-// ResetConn reset the AutoIDAllocClient and underlying grpc connection.
-// The next GetClient() call will recreate the client connecting to the correct leader by querying etcd.
-func (d *ClientDiscover) ResetConn(reason error) {
-	if reason != nil {
-		logutil.BgLogger().Info("[autoid client] reset grpc connection",
-			zap.String("reason", reason.Error()))
-	}
+func (sp *singlePointAlloc) resetConn(reason error) {
+	logutil.BgLogger().Info("[autoid client] reset grpc connection",
+		zap.String("reason", reason.Error()))
 	var grpcConn *grpc.ClientConn
-	d.mu.Lock()
-	grpcConn = d.mu.ClientConn
-	d.mu.AutoIDAllocClient = nil
-	d.mu.ClientConn = nil
-	d.mu.Unlock()
+	sp.mu.Lock()
+	grpcConn = sp.mu.ClientConn
+	sp.mu.AutoIDAllocClient = nil
+	sp.mu.ClientConn = nil
+	sp.mu.Unlock()
 	// Close grpc.ClientConn to release resource.
 	if grpcConn != nil {
-		go func() {
-			// Doen't close the conn immediately, in case the other sessions are still using it.
-			time.Sleep(200 * time.Millisecond)
-			err := grpcConn.Close()
-			if err != nil {
-				logutil.BgLogger().Warn("close grpc connection error", zap.String("category", "autoid client"), zap.Error(err))
-			}
-		}()
+		err := grpcConn.Close()
+		if err != nil {
+			logutil.BgLogger().Warn("[autoid client] close grpc connection error", zap.Error(err))
+		}
 	}
 }
 
@@ -214,11 +184,8 @@ func (*singlePointAlloc) AllocSeqCache() (a int64, b int64, c int64, err error) 
 // If allocIDs is true, it will allocate some IDs and save to the cache.
 // If allocIDs is false, it will not allocate IDs.
 func (sp *singlePointAlloc) Rebase(ctx context.Context, newBase int64, _ bool) error {
-	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-		span1 := span.Tracer().StartSpan("autoid.Rebase", opentracing.ChildOf(span.Context()))
-		defer span1.Finish()
-		ctx = opentracing.ContextWithSpan(ctx, span1)
-	}
+	r, ctx := tracing.StartRegionEx(ctx, "autoid.Rebase")
+	defer r.End()
 
 	start := time.Now()
 	err := sp.rebase(ctx, newBase, false)
@@ -228,7 +195,7 @@ func (sp *singlePointAlloc) Rebase(ctx context.Context, newBase int64, _ bool) e
 
 func (sp *singlePointAlloc) rebase(ctx context.Context, newBase int64, force bool) error {
 retry:
-	cli, ver, err := sp.GetClient(ctx)
+	cli, err := sp.GetClient(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -243,7 +210,7 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			time.Sleep(backoffDuration)
-			sp.resetConn(ver, err)
+			sp.resetConn(err)
 			goto retry
 		}
 		return errors.Trace(err)

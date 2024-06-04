@@ -24,6 +24,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	sess "github.com/pingcap/tidb/ddl/internal/session"
 	"github.com/pingcap/tidb/ddl/label"
 	"github.com/pingcap/tidb/ddl/placement"
 	"github.com/pingcap/tidb/ddl/util"
@@ -176,11 +177,8 @@ func onCreateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error)
 
 func createTableWithForeignKeys(d *ddlCtx, t *meta.Meta, job *model.Job, tbInfo *model.TableInfo, fkCheck bool) (ver int64, err error) {
 	switch tbInfo.State {
-	case model.StateNone, model.StatePublic:
-		// create table in non-public or public state. The function `createTable` will always reset
-		// the `tbInfo.State` with `model.StateNone`, so it's fine to just call the `createTable` with
-		// public state.
-		// when `br` restores table, the state of `tbInfo` will be public.
+	case model.StateNone:
+		// create table in non-public state
 		tbInfo, err = createTable(d, t, job, fkCheck)
 		if err != nil {
 			return ver, errors.Trace(err)
@@ -198,7 +196,6 @@ func createTableWithForeignKeys(d *ddlCtx, t *meta.Meta, job *model.Job, tbInfo 
 			return ver, errors.Trace(err)
 		}
 		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
-		asyncNotifyEvent(d, &util.Event{Tp: model.ActionCreateTable, TableInfo: tbInfo})
 		return ver, nil
 	default:
 		return ver, errors.Trace(dbterror.ErrInvalidDDLJob.GenWithStackByArgs("table", tbInfo.State))
@@ -209,7 +206,7 @@ func createTableWithForeignKeys(d *ddlCtx, t *meta.Meta, job *model.Job, tbInfo 
 func onCreateTables(d *ddlCtx, t *meta.Meta, job *model.Job) (int64, error) {
 	var ver int64
 
-	args := []*model.TableInfo{}
+	var args []*model.TableInfo
 	fkCheck := false
 	err := job.DecodeArgs(&args, &fkCheck)
 	if err != nil {
@@ -412,6 +409,11 @@ func (w *worker) onRecoverTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver in
 
 	schemaID := recoverInfo.SchemaID
 	tblInfo := recoverInfo.TableInfo
+	if tblInfo.TTLInfo != nil {
+		// force disable TTL job schedule for recovered table
+		tblInfo.TTLInfo.Enable = false
+	}
+
 	// check GC and safe point
 	gcEnable, err := checkGCEnable(w)
 	if err != nil {
@@ -536,6 +538,9 @@ func (w *worker) recoverTable(t *meta.Meta, job *model.Job, recoverInfo *Recover
 	failpoint.Inject("mockRecoverTableCommitErr", func(val failpoint.Value) {
 		if val.(bool) && atomic.CompareAndSwapUint32(&mockRecoverTableCommitErrOnce, 0, 1) {
 			err = failpoint.Enable(`tikvclient/mockCommitErrorOpt`, "return(true)")
+			if err != nil {
+				return
+			}
 		}
 	})
 
@@ -577,47 +582,47 @@ func clearTablePlacementAndBundles(tblInfo *model.TableInfo) error {
 var mockRecoverTableCommitErrOnce uint32
 
 func enableGC(w *worker) error {
-	ctx, err := w.sessPool.get()
+	ctx, err := w.sessPool.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.put(ctx)
+	defer w.sessPool.Put(ctx)
 
 	return gcutil.EnableGC(ctx)
 }
 
 func disableGC(w *worker) error {
-	ctx, err := w.sessPool.get()
+	ctx, err := w.sessPool.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.put(ctx)
+	defer w.sessPool.Put(ctx)
 
 	return gcutil.DisableGC(ctx)
 }
 
 func checkGCEnable(w *worker) (enable bool, err error) {
-	ctx, err := w.sessPool.get()
+	ctx, err := w.sessPool.Get()
 	if err != nil {
 		return false, errors.Trace(err)
 	}
-	defer w.sessPool.put(ctx)
+	defer w.sessPool.Put(ctx)
 
 	return gcutil.CheckGCEnable(ctx)
 }
 
 func checkSafePoint(w *worker, snapshotTS uint64) error {
-	ctx, err := w.sessPool.get()
+	ctx, err := w.sessPool.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.put(ctx)
+	defer w.sessPool.Put(ctx)
 
 	return gcutil.ValidateSnapshot(ctx, snapshotTS)
 }
 
-func getTable(r autoid.Requirement, schemaID int64, tblInfo *model.TableInfo) (table.Table, error) {
-	allocs := autoid.NewAllocatorsFromTblInfo(r, schemaID, tblInfo)
+func getTable(store kv.Storage, schemaID int64, tblInfo *model.TableInfo) (table.Table, error) {
+	allocs := autoid.NewAllocatorsFromTblInfo(store, schemaID, tblInfo)
 	tbl, err := table.TableFromMeta(allocs, tblInfo)
 	return tbl, errors.Trace(err)
 }
@@ -676,7 +681,7 @@ func getTableInfo(t *meta.Meta, tableID, schemaID int64) (*model.TableInfo, erro
 }
 
 // onTruncateTable delete old table meta, and creates a new table identical to old table except for table ID.
-// As all the old data is encoded with old table ID, it can not be accessed any more.
+// As all the old data is encoded with old table ID, it can not be accessed anymore.
 // A background job will be created to delete old data.
 func onTruncateTable(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	schemaID := job.SchemaID
@@ -829,7 +834,7 @@ func onRebaseAutoRandomType(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64,
 	return onRebaseAutoID(d, d.store, t, job, autoid.AutoRandomType)
 }
 
-func onRebaseAutoID(d *ddlCtx, _ kv.Storage, t *meta.Meta, job *model.Job, tp autoid.AllocatorType) (ver int64, _ error) {
+func onRebaseAutoID(d *ddlCtx, store kv.Storage, t *meta.Meta, job *model.Job, tp autoid.AllocatorType) (ver int64, _ error) {
 	schemaID := job.SchemaID
 	var (
 		newBase int64
@@ -852,7 +857,7 @@ func onRebaseAutoID(d *ddlCtx, _ kv.Storage, t *meta.Meta, job *model.Job, tp au
 		return ver, errors.Trace(err)
 	}
 
-	tbl, err := getTable((*asAutoIDRequirement)(d), schemaID, tblInfo)
+	tbl, err := getTable(store, schemaID, tblInfo)
 	if err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
@@ -934,7 +939,7 @@ func (w *worker) onShardRowID(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int6
 	if shardRowIDBits < tblInfo.ShardRowIDBits {
 		tblInfo.ShardRowIDBits = shardRowIDBits
 	} else {
-		tbl, err := getTable((*asAutoIDRequirement)(d), job.SchemaID, tblInfo)
+		tbl, err := getTable(d.store, job.SchemaID, tblInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -956,15 +961,15 @@ func (w *worker) onShardRowID(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int6
 	return ver, nil
 }
 
-func verifyNoOverflowShardBits(s *sessionPool, tbl table.Table, shardRowIDBits uint64) error {
+func verifyNoOverflowShardBits(s *sess.Pool, tbl table.Table, shardRowIDBits uint64) error {
 	if shardRowIDBits == 0 {
 		return nil
 	}
-	ctx, err := s.get()
+	ctx, err := s.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer s.put(ctx)
+	defer s.Put(ctx)
 	// Check next global max auto ID first.
 	autoIncID, err := tbl.Allocators(ctx).Get(autoid.RowIDAllocType).NextGlobalAutoID()
 	if err != nil {
@@ -1378,11 +1383,11 @@ func (w *worker) onSetTableFlashReplica(d *ddlCtx, t *meta.Meta, job *model.Job)
 }
 
 func (w *worker) checkTiFlashReplicaCount(replicaCount uint64) error {
-	ctx, err := w.sessPool.get()
+	ctx, err := w.sessPool.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
-	defer w.sessPool.put(ctx)
+	defer w.sessPool.Put(ctx)
 
 	return checkTiFlashReplicaCount(ctx, replicaCount)
 }
@@ -1489,7 +1494,7 @@ func checkTableNotExistsFromInfoSchema(is infoschema.InfoSchema, schemaID int64,
 
 func checkTableNotExistsFromStore(t *meta.Meta, schemaID int64, tableName string) error {
 	// Check this table's database.
-	tables, err := t.ListTables(schemaID)
+	tbls, err := t.ListTables(schemaID)
 	if err != nil {
 		if meta.ErrDBNotExists.Equal(err) {
 			return infoschema.ErrDatabaseNotExists.GenWithStackByArgs("")
@@ -1498,7 +1503,7 @@ func checkTableNotExistsFromStore(t *meta.Meta, schemaID int64, tableName string
 	}
 
 	// Check the table.
-	for _, tbl := range tables {
+	for _, tbl := range tbls {
 		if tbl.Name.L == tableName {
 			return infoschema.ErrTableExists.GenWithStackByArgs(tbl.Name)
 		}

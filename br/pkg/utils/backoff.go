@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"io"
-	"math"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -27,33 +26,23 @@ const (
 	downloadSSTWaitInterval    = 1 * time.Second
 	downloadSSTMaxWaitInterval = 4 * time.Second
 
-	resetTSRetryTime       = 32
+	resetTSRetryTime       = 16
 	resetTSWaitInterval    = 50 * time.Millisecond
-	resetTSMaxWaitInterval = 2 * time.Second
+	resetTSMaxWaitInterval = 500 * time.Millisecond
 
 	resetTSRetryTimeExt       = 600
 	resetTSWaitIntervalExt    = 500 * time.Millisecond
 	resetTSMaxWaitIntervalExt = 300 * time.Second
 
 	// region heartbeat are 10 seconds by default, if some region has 2 heartbeat missing (15 seconds), it appear to be a network issue between PD and TiKV.
-	flashbackRetryTime       = 3
-	flashbackWaitInterval    = 3000 * time.Millisecond
-	flashbackMaxWaitInterval = 15 * time.Second
+	FlashbackRetryTime       = 3
+	FlashbackWaitInterval    = 3 * time.Second
+	FlashbackMaxWaitInterval = 15 * time.Second
+
+	ChecksumRetryTime       = 8
+	ChecksumWaitInterval    = 1 * time.Second
+	ChecksumMaxWaitInterval = 30 * time.Second
 )
-
-// ConstantBackoff is a backoffer that retry forever until success.
-type ConstantBackoff time.Duration
-
-// NextBackoff returns a duration to wait before retrying again
-func (c ConstantBackoff) NextBackoff(err error) time.Duration {
-	return time.Duration(c)
-}
-
-// Attempt returns the remain attempt times
-func (c ConstantBackoff) Attempt() int {
-	// A large enough value. Also still safe for arithmetic operations (won't easily overflow).
-	return math.MaxInt16
-}
 
 // RetryState is the mutable state needed for retrying.
 // It likes the `utils.Backoffer`, but more fundamental:
@@ -101,6 +90,11 @@ func (rs *RetryState) RecordRetry() {
 	rs.retryTimes++
 }
 
+// ReduceRetry reduces retry times for 1.
+func (rs *RetryState) ReduceRetry() {
+	rs.retryTimes--
+}
+
 // RetryTimes returns the retry times.
 // usage: unit test.
 func (rs *RetryState) RetryTimes() int {
@@ -126,33 +120,27 @@ type importerBackoffer struct {
 	attempt      int
 	delayTime    time.Duration
 	maxDelayTime time.Duration
-	errContext   *ErrorContext
 }
 
 // NewBackoffer creates a new controller regulating a truncated exponential backoff.
-func NewBackoffer(attempt int, delayTime, maxDelayTime time.Duration, errContext *ErrorContext) Backoffer {
+func NewBackoffer(attempt int, delayTime, maxDelayTime time.Duration) Backoffer {
 	return &importerBackoffer{
 		attempt:      attempt,
 		delayTime:    delayTime,
 		maxDelayTime: maxDelayTime,
-		errContext:   errContext,
 	}
 }
 
 func NewImportSSTBackoffer() Backoffer {
-	errContext := NewErrorContext("import sst", 3)
-	return NewBackoffer(importSSTRetryTimes, importSSTWaitInterval, importSSTMaxWaitInterval, errContext)
+	return NewBackoffer(importSSTRetryTimes, importSSTWaitInterval, importSSTMaxWaitInterval)
 }
 
 func NewDownloadSSTBackoffer() Backoffer {
-	errContext := NewErrorContext("download sst", 3)
-	return NewBackoffer(downloadSSTRetryTimes, downloadSSTWaitInterval, downloadSSTMaxWaitInterval, errContext)
+	return NewBackoffer(downloadSSTRetryTimes, downloadSSTWaitInterval, downloadSSTMaxWaitInterval)
 }
 
 func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
-	// we don't care storeID here.
-	res := bo.errContext.HandleErrorMsg(err.Error(), 0)
-	if res.Strategy == RetryStrategy {
+	if MessageIsRetryableStorageError(err.Error()) {
 		bo.delayTime = 2 * bo.delayTime
 		bo.attempt--
 	} else {
@@ -162,7 +150,7 @@ func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 			bo.delayTime = 2 * bo.delayTime
 			bo.attempt--
 		case berrors.ErrKVRangeIsEmpty, berrors.ErrKVRewriteRuleNotFound:
-			// Expected error, finish the operation
+			// Excepted error, finish the operation
 			bo.delayTime = 0
 			bo.attempt = 0
 		default:
@@ -171,10 +159,10 @@ func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 				bo.delayTime = 2 * bo.delayTime
 				bo.attempt--
 			default:
-				// Unexpected error
+				// Unexcepted error
 				bo.delayTime = 0
 				bo.attempt = 0
-				log.Warn("unexpected error, stop retrying", zap.Error(err))
+				log.Warn("unexcepted error, stop to retry", zap.Error(err))
 			}
 		}
 	}
@@ -223,12 +211,8 @@ func (bo *pdReqBackoffer) NextBackoff(err error) time.Duration {
 		bo.delayTime = 2 * bo.delayTime
 		bo.attempt--
 	default:
-		// If the connection timeout, pd client would cancel the context, and return grpc context cancel error.
-		// So make the codes.Canceled retryable too.
-		// It's OK to retry the grpc context cancel error, because the parent context cancel returns context.Canceled.
-		// For example, cancel the `ectx` and then pdClient.GetTS(ectx) returns context.Canceled instead of grpc context canceled.
 		switch status.Code(e) {
-		case codes.DeadlineExceeded, codes.Canceled, codes.NotFound, codes.AlreadyExists, codes.PermissionDenied, codes.ResourceExhausted, codes.Aborted, codes.OutOfRange, codes.Unavailable, codes.DataLoss, codes.Unknown:
+		case codes.DeadlineExceeded, codes.NotFound, codes.AlreadyExists, codes.PermissionDenied, codes.ResourceExhausted, codes.Aborted, codes.OutOfRange, codes.Unavailable, codes.DataLoss, codes.Unknown:
 			bo.delayTime = 2 * bo.delayTime
 			bo.attempt--
 		default:
@@ -246,36 +230,5 @@ func (bo *pdReqBackoffer) NextBackoff(err error) time.Duration {
 }
 
 func (bo *pdReqBackoffer) Attempt() int {
-	return bo.attempt
-}
-
-type flashbackBackoffer struct {
-	attempt      int
-	delayTime    time.Duration
-	maxDelayTime time.Duration
-}
-
-// NewBackoffer creates a new controller regulating a truncated exponential backoff.
-func NewFlashBackBackoffer() Backoffer {
-	return &flashbackBackoffer{
-		attempt:      flashbackRetryTime,
-		delayTime:    flashbackWaitInterval,
-		maxDelayTime: flashbackMaxWaitInterval,
-	}
-}
-
-// retry 3 times when prepare flashback failure.
-func (bo *flashbackBackoffer) NextBackoff(err error) time.Duration {
-	bo.delayTime = 2 * bo.delayTime
-	bo.attempt--
-	log.Warn("region may not ready to serve, retry it...", zap.Error(err))
-
-	if bo.delayTime > bo.maxDelayTime {
-		return bo.maxDelayTime
-	}
-	return bo.delayTime
-}
-
-func (bo *flashbackBackoffer) Attempt() int {
 	return bo.attempt
 }

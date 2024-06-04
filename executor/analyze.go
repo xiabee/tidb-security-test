@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -40,6 +39,7 @@ import (
 	"github.com/pingcap/tidb/types"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/pingcap/tipb/go-tipb"
@@ -292,6 +292,8 @@ func (e *AnalyzeExec) handleResultsError(ctx context.Context, concurrency int, n
 		}
 	}
 
+	tableIDs := map[int64]struct{}{}
+
 	// save analyze results in single-thread.
 	statsHandle := domain.GetDomain(e.ctx).StatsHandle()
 	panicCnt := 0
@@ -312,25 +314,29 @@ func (e *AnalyzeExec) handleResultsError(ctx context.Context, concurrency int, n
 			continue
 		}
 		handleGlobalStats(needGlobalStats, globalStatsMap, results)
+		tableIDs[results.TableID.GetStatisticsID()] = struct{}{}
 
-		if err1 := statsHandle.SaveTableStatsToStorage(results, e.ctx.GetSessionVars().EnableAnalyzeSnapshot); err1 != nil {
+		if err1 := statsHandle.SaveTableStatsToStorage(results, e.ctx.GetSessionVars().EnableAnalyzeSnapshot, handle.StatsMetaHistorySourceAnalyze); err1 != nil {
 			tableID := results.TableID.TableID
 			err = err1
 			logutil.Logger(ctx).Error("save table stats to storage failed", zap.Error(err), zap.Int64("tableID", tableID))
 			finishJobWithLog(e.ctx, results.Job, err)
 		} else {
 			finishJobWithLog(e.ctx, results.Job, nil)
-			// Dump stats to historical storage.
-			if err := recordHistoricalStats(e.ctx, results.TableID.TableID); err != nil {
-				logutil.BgLogger().Error("record historical stats failed", zap.Error(err))
-			}
 		}
 		invalidInfoSchemaStatCache(results.TableID.GetStatisticsID())
 		if atomic.LoadUint32(&e.ctx.GetSessionVars().Killed) == 1 {
-			finishJobWithLog(e.ctx, results.Job, ErrQueryInterrupted)
-			return errors.Trace(ErrQueryInterrupted)
+			finishJobWithLog(e.ctx, results.Job, exeerrors.ErrQueryInterrupted)
+			return errors.Trace(exeerrors.ErrQueryInterrupted)
 		}
 	}
+	// Dump stats to historical storage.
+	for tableID := range tableIDs {
+		if err := recordHistoricalStats(e.ctx, tableID); err != nil {
+			logutil.BgLogger().Error("record historical stats failed", zap.Error(err))
+		}
+	}
+
 	return err
 }
 
@@ -349,12 +355,13 @@ func (e *AnalyzeExec) handleResultsErrorWithConcurrency(ctx context.Context, sta
 			worker.run(ctx1, e.ctx.GetSessionVars().EnableAnalyzeSnapshot)
 		})
 	}
+	tableIDs := map[int64]struct{}{}
 	panicCnt := 0
 	var err error
 	for panicCnt < statsConcurrency {
 		if atomic.LoadUint32(&e.ctx.GetSessionVars().Killed) == 1 {
 			close(saveResultsCh)
-			return errors.Trace(ErrQueryInterrupted)
+			return errors.Trace(exeerrors.ErrQueryInterrupted)
 		}
 		results, ok := <-resultsCh
 		if !ok {
@@ -371,6 +378,7 @@ func (e *AnalyzeExec) handleResultsErrorWithConcurrency(ctx context.Context, sta
 			continue
 		}
 		handleGlobalStats(needGlobalStats, globalStatsMap, results)
+		tableIDs[results.TableID.GetStatisticsID()] = struct{}{}
 		saveResultsCh <- results
 	}
 	close(saveResultsCh)
@@ -382,6 +390,12 @@ func (e *AnalyzeExec) handleResultsErrorWithConcurrency(ctx context.Context, sta
 			errMsg = append(errMsg, err1.Error())
 		}
 		err = errors.New(strings.Join(errMsg, ","))
+	}
+	for tableID := range tableIDs {
+		// Dump stats to historical storage.
+		if err := recordHistoricalStats(e.ctx, tableID); err != nil {
+			logutil.BgLogger().Error("record historical stats failed", zap.Error(err))
+		}
 	}
 	return err
 }
@@ -451,7 +465,7 @@ func AddNewAnalyzeJob(ctx sessionctx.Context, job *statistics.AnalyzeJob) {
 		logutil.BgLogger().Error("failed to get server info", zap.Error(err))
 		instance = "unknown"
 	} else {
-		instance = net.JoinHostPort(serverInfo.IP, strconv.Itoa(int(serverInfo.Port)))
+		instance = fmt.Sprintf("%s:%d", serverInfo.IP, serverInfo.Port)
 	}
 	statsHandle := domain.GetDomain(ctx).StatsHandle()
 	err = statsHandle.InsertAnalyzeJob(job, instance, ctx.GetSessionVars().ConnectionID)
@@ -578,7 +592,8 @@ func finishJobWithLog(sctx sessionctx.Context, job *statistics.AnalyzeJob, analy
 			zap.String("job info", job.JobInfo),
 			zap.Time("start time", job.StartTime),
 			zap.Time("end time", job.EndTime),
-			zap.String("cost", job.EndTime.Sub(job.StartTime).String()))
+			zap.String("cost", job.EndTime.Sub(job.StartTime).String()),
+			zap.String("sample rate reason", job.SampleRateReason))
 	}
 }
 

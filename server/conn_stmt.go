@@ -48,6 +48,7 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/expression"
 	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
 	"github.com/pingcap/tidb/parser/charset"
 	"github.com/pingcap/tidb/parser/mysql"
@@ -233,7 +234,7 @@ func (cc *clientConn) executePlanCacheStmt(ctx context.Context, stmt interface{}
 	ctx = context.WithValue(ctx, util.ExecDetailsKey, &util.ExecDetails{})
 	retryable, err := cc.executePreparedStmtAndWriteResult(ctx, stmt.(PreparedStatement), args, useCursor)
 	if err != nil {
-		action, txnErr := sessiontxn.GetTxnManager(&cc.ctx).OnStmtErrorForNextAction(sessiontxn.StmtErrAfterQuery, err)
+		action, txnErr := sessiontxn.GetTxnManager(&cc.ctx).OnStmtErrorForNextAction(ctx, sessiontxn.StmtErrAfterQuery, err)
 		if txnErr != nil {
 			return txnErr
 		}
@@ -421,7 +422,7 @@ func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stm
 
 		return false, cc.flush(ctx)
 	}
-	retryable, err := cc.writeResultset(ctx, rs, true, cc.ctx.Status(), 0)
+	retryable, err := cc.writeResultSet(ctx, rs, true, cc.ctx.Status(), 0)
 	if err != nil {
 		return retryable, errors.Annotate(err, cc.preparedStmt2String(uint32(stmt.ID())))
 	}
@@ -483,7 +484,7 @@ func (cc *clientConn) handleStmtFetch(ctx context.Context, data []byte) (err err
 	cc.ctx.SetProcessInfo(sql, time.Now(), mysql.ComStmtExecute, 0)
 	rs := stmt.GetResultSet()
 
-	_, err = cc.writeResultset(ctx, rs, true, cc.ctx.Status(), int(fetchSize))
+	_, err = cc.writeResultSet(ctx, rs, true, cc.ctx.Status(), int(fetchSize))
 	// if the iterator reached the end before writing result, we could say the `FETCH` command will send EOF
 	if rs.GetRowContainerReader().Current() == rs.GetRowContainerReader().End() {
 		// also reset the statement when the cursor reaches the end
@@ -768,7 +769,7 @@ func parseExecArgs(sc *stmtctx.StatementContext, params []expression.Expression,
 
 	for i := range params {
 		ft := new(types.FieldType)
-		types.DefaultParamTypeForValue(args[i].GetValue(), ft)
+		types.InferParamTypeFromUnderlyingValue(args[i].GetValue(), ft)
 		params[i] = &expression.Constant{Value: args[i], RetType: ft}
 	}
 	return
@@ -915,9 +916,9 @@ func (cc *clientConn) preparedStmt2String(stmtID uint32) string {
 		return ""
 	}
 	if sv.EnableRedactLog {
-		return cc.preparedStmt2StringNoArgs(stmtID)
+		return parser.Normalize(cc.preparedStmt2StringNoArgs(stmtID))
 	}
-	return cc.preparedStmt2StringNoArgs(stmtID) + sv.PreparedParams.String()
+	return cc.preparedStmt2StringNoArgs(stmtID) + sv.PlanCacheParams.String()
 }
 
 func (cc *clientConn) preparedStmt2StringNoArgs(stmtID uint32) string {

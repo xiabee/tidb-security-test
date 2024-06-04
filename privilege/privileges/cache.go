@@ -116,6 +116,7 @@ type UserRecord struct {
 	PasswordExpired      bool
 	PasswordLastChanged  time.Time
 	PasswordLifeTime     int64
+	ResourceGroup        string
 }
 
 // NewUserRecord return a UserRecord, only use for unit test.
@@ -688,6 +689,17 @@ func (p *MySQLPrivilege) decodeUserTableRow(row chunk.Row, fs []*ast.ResultField
 				}
 				value.Email = email
 			}
+			pathExpr, err = types.ParseJSONPathExpr("$.resource_group")
+			if err != nil {
+				return err
+			}
+			if resourceGroup, found := bj.Extract([]types.JSONPathExpression{pathExpr}); found {
+				resourceGroup, err := resourceGroup.Unquote()
+				if err != nil {
+					return err
+				}
+				value.ResourceGroup = resourceGroup
+			}
 			passwordLocking := PasswordLocking{}
 			if err := passwordLocking.ParseJSON(bj); err != nil {
 				return err
@@ -997,6 +1009,17 @@ func (p *MySQLPrivilege) matchIdentity(user, host string, skipNameResolve bool) 
 					return record
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// matchResoureGroup finds an identity to match resource group.
+func (p *MySQLPrivilege) matchResoureGroup(resourceGroupName string) *UserRecord {
+	for i := 0; i < len(p.User); i++ {
+		record := &p.User[i]
+		if record.ResourceGroup == resourceGroupName {
+			return record
 		}
 	}
 	return nil

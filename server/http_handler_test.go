@@ -16,7 +16,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -39,7 +38,6 @@ import (
 	"github.com/pingcap/tidb/config"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/domain"
-	"github.com/pingcap/tidb/domain/infosync"
 	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/meta"
@@ -61,7 +59,6 @@ import (
 	"github.com/pingcap/tidb/util/rowcodec"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
-	"go.etcd.io/etcd/tests/v3/integration"
 	"go.uber.org/zap"
 )
 
@@ -457,17 +454,16 @@ func (ts *basicHTTPHandlerTestSuite) startServer(t *testing.T) {
 	cfg.Port = 0
 	cfg.Status.StatusPort = 0
 	cfg.Status.ReportStatus = true
-	RunInGoTestChan = make(chan struct{})
+
 	server, err := NewServer(cfg, ts.tidbdrv)
 	require.NoError(t, err)
-	ts.server = server
-	go func() {
-		err := server.Run(ts.domain)
-		require.NoError(t, err)
-	}()
-	<-RunInGoTestChan
 	ts.port = getPortFromTCPAddr(server.listener.Addr())
 	ts.statusPort = getPortFromTCPAddr(server.statusListener.Addr())
+	ts.server = server
+	go func() {
+		err := server.Run()
+		require.NoError(t, err)
+	}()
 	ts.waitUntilServerOnline()
 
 	do, err := session.GetDomain(ts.store)
@@ -1205,64 +1201,6 @@ func TestSetLabels(t *testing.T) {
 	})
 }
 
-func TestSetLabelsWithEtcd(t *testing.T) {
-	ts := createBasicHTTPHandlerTestSuite()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	ts.startServer(t)
-	defer ts.stopServer(t)
-
-	integration.BeforeTestExternal(t)
-	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
-	defer cluster.Terminate(t)
-	client := cluster.RandClient()
-	infosync.SetEtcdClient(client)
-	ts.domain.InfoSyncer().Restart(ctx)
-
-	testUpdateLabels := func(labels, expected map[string]string) {
-		buffer := bytes.NewBuffer([]byte{})
-		require.Nil(t, json.NewEncoder(buffer).Encode(labels))
-		resp, err := ts.postStatus("/labels", "application/json", buffer)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-		defer func() {
-			require.NoError(t, resp.Body.Close())
-		}()
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		newLabels := config.GetGlobalConfig().Labels
-		require.Equal(t, newLabels, expected)
-		servers, err := infosync.GetAllServerInfo(ctx)
-		require.NoError(t, err)
-		for _, server := range servers {
-			for k, expectV := range expected {
-				v, ok := server.Labels[k]
-				require.True(t, ok)
-				require.Equal(t, expectV, v)
-			}
-			return
-		}
-		require.Fail(t, "no server found")
-	}
-
-	labels := map[string]string{
-		"zone": "us-west-1",
-		"test": "123",
-	}
-	testUpdateLabels(labels, labels)
-
-	updated := map[string]string{
-		"zone": "bj-1",
-	}
-	labels["zone"] = "bj-1"
-	testUpdateLabels(updated, labels)
-
-	// reset the global variable
-	config.UpdateGlobal(func(conf *config.Config) {
-		conf.Labels = map[string]string{}
-	})
-}
-
 func TestSetLabelsConcurrentWithGetLabel(t *testing.T) {
 	ts := createBasicHTTPHandlerTestSuite()
 
@@ -1304,4 +1242,89 @@ func TestSetLabelsConcurrentWithGetLabel(t *testing.T) {
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Labels = map[string]string{}
 	})
+}
+
+func TestUpgrade(t *testing.T) {
+	ts := createBasicHTTPHandlerTestSuite()
+	ts.startServer(t)
+	defer ts.stopServer(t)
+
+	resp, err := ts.fetchStatus("/upgrade/start")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	// test upgrade start
+	resp, err = ts.postStatus("/upgrade/start", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err := httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"success!\"", string(body))
+	// check the result
+	se, err := session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err := session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.True(t, isUpgrading)
+
+	// Do start upgrade again.
+	resp, err = ts.postStatus("/upgrade/start", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"It's a duplicated operation and the cluster is already in upgrading state.\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.True(t, isUpgrading)
+
+	// test upgrade finish
+	resp, err = ts.postStatus("/upgrade/finish", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"success!\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.False(t, isUpgrading)
+
+	// Do finish upgrade again.
+	resp, err = ts.postStatus("/upgrade/finish", "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err = httputil.DumpResponse(resp, true)
+	require.NoError(t, err)
+	require.Greater(t, len(b), 0)
+	body, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, "\"It's a duplicated operation and the cluster is already in normal state.\"", string(body))
+	// check the result
+	se, err = session.CreateSession(ts.store)
+	require.NoError(t, err)
+	isUpgrading, err = session.IsUpgradingClusterState(se)
+	require.NoError(t, err)
+	require.False(t, isUpgrading)
 }

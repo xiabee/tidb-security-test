@@ -254,7 +254,7 @@ func (db *DB) CreateTablePostRestore(ctx context.Context, table *metautil.Table,
 				utils.EncloseName(table.DB.Name.O),
 				utils.EncloseName(table.Info.Name.O),
 				table.Info.AutoIncID)
-		} else if table.Info.ContainsAutoRandomBits() {
+		} else if table.Info.PKIsHandle && table.Info.ContainsAutoRandomBits() {
 			restoreMetaSQL = fmt.Sprintf(
 				"alter table %s.%s auto_random_base = %d",
 				utils.EncloseName(table.DB.Name.O),
@@ -308,6 +308,10 @@ func (db *DB) CreateTables(ctx context.Context, tables []*metautil.Table,
 					return errors.Trace(err)
 				}
 			}
+
+			if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
+				ttlInfo.Enable = false
+			}
 		}
 		if err := batchSession.CreateTables(ctx, m, db.tableIDAllocFilter()); err != nil {
 			return err
@@ -334,6 +338,10 @@ func (db *DB) CreateTable(ctx context.Context, table *metautil.Table,
 		if err := db.ensureTablePlacementPolicies(ctx, table.Info, policyMap); err != nil {
 			return errors.Trace(err)
 		}
+	}
+
+	if ttlInfo := table.Info.TTLInfo; ttlInfo != nil {
+		ttlInfo.Enable = false
 	}
 
 	err := db.se.CreateTable(ctx, table.DB.Name, table.Info, db.tableIDAllocFilter())

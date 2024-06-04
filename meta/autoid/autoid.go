@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/autoid"
@@ -37,8 +36,10 @@ import (
 	"github.com/pingcap/tidb/util/execdetails"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/mathutil"
+	"github.com/pingcap/tidb/util/tracing"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 	tikvutil "github.com/tikv/client-go/v2/util"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -284,11 +285,15 @@ func SetStep(s int64) {
 
 // Base implements autoid.Allocator Base interface.
 func (alloc *allocator) Base() int64 {
+	alloc.mu.Lock()
+	defer alloc.mu.Unlock()
 	return alloc.base
 }
 
 // End implements autoid.Allocator End interface.
 func (alloc *allocator) End() int64 {
+	alloc.mu.Lock()
+	defer alloc.mu.Unlock()
 	return alloc.end
 }
 
@@ -562,18 +567,37 @@ func NextStep(curStep int64, consumeDur time.Duration) int64 {
 // package circle depending issue.
 var MockForTest func(kv.Storage) autoid.AutoIDAllocClient
 
-func newSinglePointAlloc(r Requirement, dbID, tblID int64, isUnsigned bool) *singlePointAlloc {
+func newSinglePointAlloc(store kv.Storage, dbID, tblID int64, isUnsigned bool) *singlePointAlloc {
+	ebd, ok := store.(kv.EtcdBackend)
+	if !ok {
+		// newSinglePointAlloc fail because not etcd background
+		// This could happen in the server package unit test
+		return nil
+	}
+
+	addrs, err := ebd.EtcdAddrs()
+	if err != nil {
+		panic(err)
+	}
 	spa := &singlePointAlloc{
 		dbID:       dbID,
 		tblID:      tblID,
 		isUnsigned: isUnsigned,
 	}
-	if r.AutoIDClient() == nil {
-		// Only for test in mockstore
-		spa.ClientDiscover = &ClientDiscover{}
-		spa.mu.AutoIDAllocClient = MockForTest(r.Store())
+	if len(addrs) > 0 {
+		etcdCli, err := clientv3.New(clientv3.Config{
+			Endpoints:        addrs,
+			TLS:              ebd.TLSConfig(),
+			AutoSyncInterval: 30 * time.Second,
+		})
+		if err != nil {
+			logutil.BgLogger().Error("[autoid client] fail to connect etcd, fallback to default", zap.Error(err))
+			return nil
+		}
+		spa.clientDiscover = clientDiscover{etcdCli: etcdCli}
 	} else {
-		spa.ClientDiscover = r.AutoIDClient()
+		spa.clientDiscover = clientDiscover{}
+		spa.mu.AutoIDAllocClient = MockForTest(store)
 	}
 
 	// mockAutoIDChange failpoint is not implemented in this allocator, so fallback to use the default one.
@@ -585,19 +609,9 @@ func newSinglePointAlloc(r Requirement, dbID, tblID int64, isUnsigned bool) *sin
 	return spa
 }
 
-// Requirement is the parameter required by NewAllocator
-type Requirement interface {
-	Store() kv.Storage
-	AutoIDClient() *ClientDiscover
-}
-
 // NewAllocator returns a new auto increment id generator on the store.
-func NewAllocator(r Requirement, dbID, tbID int64, isUnsigned bool,
+func NewAllocator(store kv.Storage, dbID, tbID int64, isUnsigned bool,
 	allocType AllocatorType, opts ...AllocOption) Allocator {
-	var store kv.Storage
-	if r != nil {
-		store = r.Store()
-	}
 	alloc := &allocator{
 		store:         store,
 		dbID:          dbID,
@@ -614,7 +628,7 @@ func NewAllocator(r Requirement, dbID, tbID int64, isUnsigned bool,
 	// Use the MySQL compatible AUTO_INCREMENT mode.
 	if alloc.customStep && alloc.step == 1 && alloc.tbVersion >= model.TableInfoVersion5 {
 		if allocType == AutoIncrementType {
-			alloc1 := newSinglePointAlloc(r, dbID, tbID, isUnsigned)
+			alloc1 := newSinglePointAlloc(store, dbID, tbID, isUnsigned)
 			if alloc1 != nil {
 				return alloc1
 			}
@@ -644,7 +658,7 @@ func NewSequenceAllocator(store kv.Storage, dbID, tbID int64, info *model.Sequen
 }
 
 // NewAllocatorsFromTblInfo creates an array of allocators of different types with the information of model.TableInfo.
-func NewAllocatorsFromTblInfo(r Requirement, schemaID int64, tblInfo *model.TableInfo) Allocators {
+func NewAllocatorsFromTblInfo(store kv.Storage, schemaID int64, tblInfo *model.TableInfo) Allocators {
 	var allocs []Allocator
 	dbID := tblInfo.GetDBID(schemaID)
 	idCacheOpt := CustomAutoIncCacheOption(tblInfo.AutoIdCache)
@@ -653,20 +667,20 @@ func NewAllocatorsFromTblInfo(r Requirement, schemaID int64, tblInfo *model.Tabl
 	hasRowID := !tblInfo.PKIsHandle && !tblInfo.IsCommonHandle
 	hasAutoIncID := tblInfo.GetAutoIncrementColInfo() != nil
 	if hasRowID || hasAutoIncID {
-		alloc := NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), RowIDAllocType, idCacheOpt, tblVer)
+		alloc := NewAllocator(store, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), RowIDAllocType, idCacheOpt, tblVer)
 		allocs = append(allocs, alloc)
 	}
 	if hasAutoIncID {
-		alloc := NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), AutoIncrementType, idCacheOpt, tblVer)
+		alloc := NewAllocator(store, dbID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), AutoIncrementType, idCacheOpt, tblVer)
 		allocs = append(allocs, alloc)
 	}
 	hasAutoRandID := tblInfo.ContainsAutoRandomBits()
 	if hasAutoRandID {
-		alloc := NewAllocator(r, dbID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), AutoRandomType, idCacheOpt, tblVer)
+		alloc := NewAllocator(store, dbID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), AutoRandomType, idCacheOpt, tblVer)
 		allocs = append(allocs, alloc)
 	}
 	if tblInfo.IsSequence() {
-		allocs = append(allocs, NewSequenceAllocator(r.Store(), dbID, tblInfo.ID, tblInfo.Sequence))
+		allocs = append(allocs, NewSequenceAllocator(store, dbID, tblInfo.ID, tblInfo.Sequence))
 	}
 	return NewAllocators(tblInfo.SepAutoInc(), allocs...)
 }
@@ -887,11 +901,7 @@ func (alloc *allocator) alloc4Signed(ctx context.Context, n uint64, increment, o
 
 		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 		err := kv.RunInNewTxn(ctx, alloc.store, true, func(ctx context.Context, txn kv.Transaction) error {
-			if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-				span1 := span.Tracer().StartSpan("alloc.alloc4Signed", opentracing.ChildOf(span.Context()))
-				defer span1.Finish()
-				opentracing.ContextWithSpan(ctx, span1)
-			}
+			defer tracing.StartRegion(ctx, "alloc.alloc4Signed").End()
 			if allocatorStats != nil {
 				txn.SetOption(kv.CollectRuntimeStats, allocatorStats.SnapshotRuntimeStats)
 			}
@@ -982,11 +992,7 @@ func (alloc *allocator) alloc4Unsigned(ctx context.Context, n uint64, increment,
 
 		ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnMeta)
 		err := kv.RunInNewTxn(ctx, alloc.store, true, func(ctx context.Context, txn kv.Transaction) error {
-			if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
-				span1 := span.Tracer().StartSpan("alloc.alloc4Unsigned", opentracing.ChildOf(span.Context()))
-				defer span1.Finish()
-				opentracing.ContextWithSpan(ctx, span1)
-			}
+			defer tracing.StartRegion(ctx, "alloc.alloc4Unsigned").End()
 			if allocatorStats != nil {
 				txn.SetOption(kv.CollectRuntimeStats, allocatorStats.SnapshotRuntimeStats)
 			}

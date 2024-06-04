@@ -219,7 +219,7 @@ func (c *hashRowContainer) GetAllMatchedRows(probeHCtx *hashContext, probeSideRo
 }
 
 // signalCheckpointForJoinMask indicates the times of row probe that a signal detection will be triggered.
-const signalCheckpointForJoinMask int = 1<<14 - 1
+const signalCheckpointForJoinMask int = 1<<17 - 1
 
 // rowSize is the size of Row.
 const rowSize = int64(unsafe.Sizeof(chunk.Row{}))
@@ -243,15 +243,15 @@ func (c *hashRowContainer) GetMatchedRowsAndPtrs(probeKey uint64, probeRow chunk
 	// Some variables used for memTracker.
 	var (
 		matchedDataSize                  = int64(cap(matched))*rowSize + int64(cap(matchedPtrs))*rowPtrSize
-		lastChunkBufPointer *chunk.Chunk = c.chkBuf
+		lastChunkBufPointer *chunk.Chunk = nil
 		memDelta            int64        = 0
 		needTrackMemUsage                = cap(innerPtrs) > signalCheckpointForJoinMask
 	)
+	c.chkBuf = nil
 	c.memTracker.Consume(-c.chkBufSizeForOneProbe)
-	defer func() { c.memTracker.Consume(memDelta) }()
 	if needTrackMemUsage {
 		c.memTracker.Consume(int64(cap(innerPtrs)) * rowPtrSize)
-		defer c.memTracker.Consume(-int64(cap(innerPtrs)) * rowPtrSize)
+		defer c.memTracker.Consume(-int64(cap(innerPtrs))*rowPtrSize + memDelta)
 	}
 	c.chkBufSizeForOneProbe = 0
 
@@ -265,7 +265,7 @@ func (c *hashRowContainer) GetMatchedRowsAndPtrs(probeKey uint64, probeRow chunk
 		if err != nil {
 			return nil, nil, err
 		}
-		if c.chkBuf != lastChunkBufPointer && lastChunkBufPointer != nil {
+		if needTrackMemUsage && c.chkBuf != lastChunkBufPointer && lastChunkBufPointer != nil {
 			lastChunkSize := lastChunkBufPointer.MemoryUsage()
 			c.chkBufSizeForOneProbe += lastChunkSize
 			memDelta += lastChunkSize

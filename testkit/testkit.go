@@ -19,9 +19,6 @@ package testkit
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
-	"runtime/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +31,9 @@ import (
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/testkit/testenv"
 	"github.com/pingcap/tidb/util/chunk"
+	"github.com/pingcap/tidb/util/intest"
 	"github.com/pingcap/tidb/util/sqlexec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,6 +56,8 @@ type TestKit struct {
 
 // NewTestKit returns a new *TestKit.
 func NewTestKit(t testing.TB, store kv.Storage) *TestKit {
+	require.True(t, intest.InTest, "you should add --tags=intest when to test, see https://pingcap.github.io/tidb-dev-guide/get-started/setup-an-ide.html for help")
+	testenv.SetGOMAXPROCSForTest()
 	tk := &TestKit{
 		require: require.New(t),
 		assert:  assert.New(t),
@@ -122,7 +123,8 @@ func (tk *TestKit) MustExec(sql string, args ...interface{}) {
 			tk.alloc.Reset()
 		}
 	}()
-	tk.MustExecWithContext(context.Background(), sql, args...)
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
+	tk.MustExecWithContext(ctx, sql, args...)
 }
 
 // MustExecWithContext executes a sql statement and asserts nil error.
@@ -234,17 +236,6 @@ func (tk *TestKit) HasPlan(sql string, plan string, args ...interface{}) bool {
 	return false
 }
 
-// HasNoPlan checks if the result execution plan doesn't contain specific plan.
-func (tk *TestKit) HasNoPlan(sql string, plan string, args ...interface{}) bool {
-	rs := tk.MustQuery("explain "+sql, args...)
-	for i := range rs.rows {
-		if strings.Contains(rs.rows[i][0], plan) {
-			return false
-		}
-	}
-	return true
-}
-
 // HasTiFlashPlan checks if the result execution plan contains TiFlash plan.
 func (tk *TestKit) HasTiFlashPlan(sql string, args ...interface{}) bool {
 	rs := tk.MustQuery("explain "+sql, args...)
@@ -302,7 +293,8 @@ func (tk *TestKit) HasPlan4ExplainFor(result *Result, plan string) bool {
 
 // Exec executes a sql statement using the prepared stmt API
 func (tk *TestKit) Exec(sql string, args ...interface{}) (sqlexec.RecordSet, error) {
-	return tk.ExecWithContext(context.Background(), sql, args...)
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
+	return tk.ExecWithContext(ctx, sql, args...)
 }
 
 // ExecWithContext executes a sql statement using the prepared stmt API
@@ -545,52 +537,4 @@ func (c *RegionProperityClient) SendRequest(ctx context.Context, addr string, re
 		}
 	}
 	return c.Client.SendRequest(ctx, addr, req, timeout)
-}
-
-// DebugDumpOnTimeout will dump stack traces and possible blockers after given timeout.
-// wg is the WaitGroup to mark as done when finished (to avoid runaway goroutines)
-// c is the channel that will signal or close to cancel the timeout.
-func DebugDumpOnTimeout(wg *sync.WaitGroup, c chan struct{}, d time.Duration) {
-	select {
-	case <-time.After(d):
-		log.Print("Injected timeout, dumping all goroutines:")
-		_ = pprof.Lookup("goroutine").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces led to possible block:")
-		_ = pprof.Lookup("block").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces holding mutexes:")
-		_ = pprof.Lookup("mutex").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces led to creation of new OS threads:")
-		_ = pprof.Lookup("threadcreate").WriteTo(os.Stdout, 2)
-		log.Print("Waiting 2 seconds and to see if things changed...")
-		// Wait 2 seconds and print it again, to see if any progress is made
-		time.Sleep(2 * time.Second)
-		log.Print("Injected timeout, dumping all goroutines:")
-		_ = pprof.Lookup("goroutine").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces led to possible block:")
-		_ = pprof.Lookup("block").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces holding mutexes:")
-		_ = pprof.Lookup("mutex").WriteTo(os.Stdout, 2)
-		log.Print("dumping all stack traces led to creation of new OS threads:")
-		_ = pprof.Lookup("threadcreate").WriteTo(os.Stdout, 2)
-		panic("Injected timeout")
-	case <-c:
-		// Test finished
-	}
-	wg.Done()
-}
-
-func (tk *TestKit) hasPlan(sql string, plan string, args ...any) (bool, *Result) {
-	rs := tk.MustQuery("explain "+sql, args...)
-	for i := range rs.rows {
-		if strings.Contains(rs.rows[i][0], plan) {
-			return true, rs
-		}
-	}
-	return false, rs
-}
-
-// MustHavePlan checks if the result execution plan contains specific plan.
-func (tk *TestKit) MustHavePlan(sql string, plan string, args ...any) {
-	has, rs := tk.hasPlan(sql, plan, args...)
-	tk.require.True(has, fmt.Sprintf("%s doesn't have plan %s, full plan %v", sql, plan, rs.Rows()))
 }

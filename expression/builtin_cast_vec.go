@@ -15,6 +15,7 @@
 package expression
 
 import (
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -843,7 +844,7 @@ func (b *builtinCastStringAsJSONSig) vecEvalJSON(input *chunk.Chunk, result *chu
 
 			val := buf.GetBytes(i)
 			resultBuf := val
-			if typ.GetType() == mysql.TypeString && typ.GetFlen() > 0 {
+			if typ.GetType() == mysql.TypeString {
 				// only for BINARY: the tailing zero should also be in the opaque json
 				resultBuf = make([]byte, typ.GetFlen())
 				copy(resultBuf, val)
@@ -1186,7 +1187,11 @@ func (b *builtinCastJSONAsStringSig) vecEvalString(input *chunk.Chunk, result *c
 			result.AppendNull()
 			continue
 		}
-		result.AppendString(buf.GetJSON(i).String())
+		s, err := types.ProduceStrWithSpecifiedTp(buf.GetJSON(i).String(), b.tp, b.ctx.GetSessionVars().StmtCtx, false)
+		if err != nil {
+			return err
+		}
+		result.AppendString(s)
 	}
 	return nil
 }
@@ -1764,6 +1769,9 @@ func (b *builtinCastStringAsTimeSig) vecEvalTime(input *chunk.Chunk, result *chu
 		}
 		tm, err := types.ParseTime(stmtCtx, buf.GetString(i), b.tp.GetType(), fsp, nil)
 		if err != nil {
+			if errors.Is(err, strconv.ErrSyntax) {
+				err = types.ErrIncorrectDatetimeValue.GenWithStackByArgs(buf.GetString(i))
+			}
 			if err = handleInvalidTimeError(b.ctx, err); err != nil {
 				return err
 			}

@@ -43,8 +43,8 @@ type AppliedFile interface {
 	GetEndKey() []byte
 }
 
-// getPartitionIDMap creates a map maping old physical ID to new physical ID.
-func getPartitionIDMap(newTable, oldTable *model.TableInfo) map[int64]int64 {
+// getTableIDMap creates a map maping old tableID to new tableID.
+func getTableIDMap(newTable, oldTable *model.TableInfo) map[int64]int64 {
 	tableIDMap := make(map[int64]int64)
 
 	if oldTable.Partition != nil && newTable.Partition != nil {
@@ -60,12 +60,6 @@ func getPartitionIDMap(newTable, oldTable *model.TableInfo) map[int64]int64 {
 		}
 	}
 
-	return tableIDMap
-}
-
-// getTableIDMap creates a map maping old tableID to new tableID.
-func getTableIDMap(newTable, oldTable *model.TableInfo) map[int64]int64 {
-	tableIDMap := getPartitionIDMap(newTable, oldTable)
 	tableIDMap[oldTable.ID] = newTable.ID
 	return tableIDMap
 }
@@ -202,7 +196,25 @@ func GetSSTMetaFromFile(
 	file *backuppb.File,
 	region *metapb.Region,
 	regionRule *import_sstpb.RewriteRule,
-) import_sstpb.SSTMeta {
+	rewriteMode RewriteMode,
+) (meta *import_sstpb.SSTMeta, err error) {
+	r := *region
+	// If the rewrite mode is for keyspace, then the region bound should be decoded.
+	if rewriteMode == RewriteModeKeyspace {
+		if len(region.GetStartKey()) > 0 {
+			_, r.StartKey, err = codec.DecodeBytes(region.GetStartKey(), nil)
+			if err != nil {
+				return
+			}
+		}
+		if len(region.GetEndKey()) > 0 {
+			_, r.EndKey, err = codec.DecodeBytes(region.GetEndKey(), nil)
+			if err != nil {
+				return
+			}
+		}
+	}
+
 	// Get the column family of the file by the file name.
 	var cfName string
 	if strings.Contains(file.GetName(), defaultCFName) {
@@ -214,8 +226,8 @@ func GetSSTMetaFromFile(
 	// Here we rewrites the keys to compare with the keys of the region.
 	rangeStart := regionRule.GetNewKeyPrefix()
 	//  rangeStart = max(rangeStart, region.StartKey)
-	if bytes.Compare(rangeStart, region.GetStartKey()) < 0 {
-		rangeStart = region.GetStartKey()
+	if bytes.Compare(rangeStart, r.GetStartKey()) < 0 {
+		rangeStart = r.GetStartKey()
 	}
 
 	// Append 10 * 0xff to make sure rangeEnd cover all file key
@@ -225,8 +237,8 @@ func GetSSTMetaFromFile(
 	suffix := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	rangeEnd := append(append([]byte{}, regionRule.GetNewKeyPrefix()...), suffix...)
 	// rangeEnd = min(rangeEnd, region.EndKey)
-	if len(region.GetEndKey()) > 0 && bytes.Compare(rangeEnd, region.GetEndKey()) > 0 {
-		rangeEnd = region.GetEndKey()
+	if len(r.GetEndKey()) > 0 && bytes.Compare(rangeEnd, r.GetEndKey()) > 0 {
+		rangeEnd = r.GetEndKey()
 	}
 
 	if bytes.Compare(rangeStart, rangeEnd) > 0 {
@@ -241,7 +253,7 @@ func GetSSTMetaFromFile(
 		logutil.Key("startKey", rangeStart),
 		logutil.Key("endKey", rangeEnd))
 
-	return import_sstpb.SSTMeta{
+	return &import_sstpb.SSTMeta{
 		Uuid:   id,
 		CfName: cfName,
 		Range: &import_sstpb.Range{
@@ -252,7 +264,7 @@ func GetSSTMetaFromFile(
 		RegionId:    region.GetId(),
 		RegionEpoch: region.GetRegionEpoch(),
 		CipherIv:    file.GetCipherIv(),
-	}
+	}, nil
 }
 
 // makeDBPool makes a session pool with specficated size by sessionFactory.
@@ -263,9 +275,7 @@ func makeDBPool(size uint, dbFactory func() (*DB, error)) ([]*DB, error) {
 		if e != nil {
 			return dbPool, e
 		}
-		if db != nil {
-			dbPool = append(dbPool, db)
-		}
+		dbPool = append(dbPool, db)
 	}
 	return dbPool, nil
 }
@@ -797,4 +807,73 @@ func SelectRegionLeader(storeBalanceScore map[uint64]int, peers []*RecoverRegion
 		}
 	}
 	return leader
+}
+
+// each 64 items constitute a bitmap unit
+type bitMap map[int]uint64
+
+func newBitMap() bitMap {
+	return make(map[int]uint64)
+}
+
+func (m bitMap) pos(off int) (blockIndex int, bitOffset uint64) {
+	return off >> 6, uint64(1) << (off & 63)
+}
+
+func (m bitMap) Set(off int) {
+	blockIndex, bitOffset := m.pos(off)
+	m[blockIndex] |= bitOffset
+}
+
+func (m bitMap) Hit(off int) bool {
+	blockIndex, bitOffset := m.pos(off)
+	return (m[blockIndex] & bitOffset) > 0
+}
+
+type fileMap struct {
+	// group index -> bitmap of kv files
+	pos map[int]bitMap
+}
+
+func newFileMap() fileMap {
+	return fileMap{
+		pos: make(map[int]bitMap),
+	}
+}
+
+type LogFilesSkipMap struct {
+	// metadata group key -> group map
+	skipMap map[string]fileMap
+}
+
+func NewLogFilesSkipMap() *LogFilesSkipMap {
+	return &LogFilesSkipMap{
+		skipMap: make(map[string]fileMap),
+	}
+}
+
+func (m *LogFilesSkipMap) Insert(metaKey string, groupOff, fileOff int) {
+	mp, exists := m.skipMap[metaKey]
+	if !exists {
+		mp = newFileMap()
+		m.skipMap[metaKey] = mp
+	}
+	gp, exists := mp.pos[groupOff]
+	if !exists {
+		gp = newBitMap()
+		mp.pos[groupOff] = gp
+	}
+	gp.Set(fileOff)
+}
+
+func (m *LogFilesSkipMap) NeedSkip(metaKey string, groupOff, fileOff int) bool {
+	mp, exists := m.skipMap[metaKey]
+	if !exists {
+		return false
+	}
+	gp, exists := mp.pos[groupOff]
+	if !exists {
+		return false
+	}
+	return gp.Hit(fileOff)
 }

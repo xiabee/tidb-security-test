@@ -34,19 +34,22 @@ import (
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/parser/ast"
+	session_metrics "github.com/pingcap/tidb/session/metrics"
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/sessiontxn"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/chunk"
 	"github.com/pingcap/tidb/util/dbterror"
+	"github.com/pingcap/tidb/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/util/logutil"
 	"github.com/pingcap/tidb/util/sqlexec"
+	"github.com/pingcap/tidb/util/syncutil"
 	"go.uber.org/zap"
 )
 
 type domainMap struct {
-	mu      sync.Mutex
+	mu      syncutil.Mutex
 	domains map[string]*domain.Domain
 }
 
@@ -219,12 +222,20 @@ func Parse(ctx sessionctx.Context, src string) ([]ast.StmtNode, error) {
 	return stmts, nil
 }
 
-func recordAbortTxnDuration(sessVars *variable.SessionVars) {
+func recordAbortTxnDuration(sessVars *variable.SessionVars, isInternal bool) {
 	duration := time.Since(sessVars.TxnCtx.CreateTime).Seconds()
 	if sessVars.TxnCtx.IsPessimistic {
-		transactionDurationPessimisticAbort.Observe(duration)
+		if isInternal {
+			session_metrics.TransactionDurationPessimisticAbortInternal.Observe(duration)
+		} else {
+			session_metrics.TransactionDurationPessimisticAbortGeneral.Observe(duration)
+		}
 	} else {
-		transactionDurationOptimisticAbort.Observe(duration)
+		if isInternal {
+			session_metrics.TransactionDurationOptimisticAbortInternal.Observe(duration)
+		} else {
+			session_metrics.TransactionDurationOptimisticAbortGeneral.Observe(duration)
+		}
 	}
 }
 
@@ -239,9 +250,9 @@ func finishStmt(ctx context.Context, se *session, meetsErr error, sql sqlexec.St
 		// Handle the stmt commit/rollback.
 		if se.txn.Valid() {
 			if meetsErr != nil {
-				se.StmtRollback()
+				se.StmtRollback(ctx, false)
 			} else {
-				se.StmtCommit()
+				se.StmtCommit(ctx)
 			}
 		}
 	}
@@ -260,20 +271,24 @@ func finishStmt(ctx context.Context, se *session, meetsErr error, sql sqlexec.St
 	if err != nil {
 		return err
 	}
-	return checkStmtLimit(ctx, se, true)
+	return checkStmtLimit(ctx, se)
 }
 
 func autoCommitAfterStmt(ctx context.Context, se *session, meetsErr error, sql sqlexec.Statement) error {
+	isInternal := false
+	if internal := se.txn.GetOption(kv.RequestSourceInternal); internal != nil && internal.(bool) {
+		isInternal = true
+	}
 	sessVars := se.sessionVars
 	if meetsErr != nil {
 		if !sessVars.InTxn() {
 			logutil.BgLogger().Info("rollbackTxn called due to ddl/autocommit failure")
 			se.RollbackTxn(ctx)
-			recordAbortTxnDuration(sessVars)
-		} else if se.txn.Valid() && se.txn.IsPessimistic() && executor.ErrDeadlock.Equal(meetsErr) {
+			recordAbortTxnDuration(sessVars, isInternal)
+		} else if se.txn.Valid() && se.txn.IsPessimistic() && exeerrors.ErrDeadlock.Equal(meetsErr) {
 			logutil.BgLogger().Info("rollbackTxn for deadlock", zap.Uint64("txn", se.txn.StartTS()))
 			se.RollbackTxn(ctx)
-			recordAbortTxnDuration(sessVars)
+			recordAbortTxnDuration(sessVars, isInternal)
 		}
 		return meetsErr
 	}
@@ -290,29 +305,18 @@ func autoCommitAfterStmt(ctx context.Context, se *session, meetsErr error, sql s
 	return nil
 }
 
-func checkStmtLimit(ctx context.Context, se *session, isFinish bool) error {
+func checkStmtLimit(ctx context.Context, se *session) error {
 	// If the user insert, insert, insert ... but never commit, TiDB would OOM.
 	// So we limit the statement count in a transaction here.
 	var err error
 	sessVars := se.GetSessionVars()
 	history := GetHistory(se)
-	stmtCount := history.Count()
-	if !isFinish {
-		// history stmt count + current stmt, since current stmt is not finish, it has not add to history.
-		stmtCount++
-	}
-	if stmtCount > int(config.GetGlobalConfig().Performance.StmtCountLimit) {
+	if history.Count() > int(config.GetGlobalConfig().Performance.StmtCountLimit) {
 		if !sessVars.BatchCommit {
 			se.RollbackTxn(ctx)
-			return errors.Errorf("statement count %d exceeds the transaction limitation, transaction has been rollback, autocommit = %t",
-				stmtCount, sessVars.IsAutocommit())
+			return errors.Errorf("statement count %d exceeds the transaction limitation, autocommit = %t",
+				history.Count(), sessVars.IsAutocommit())
 		}
-		if !isFinish {
-			// if the stmt is not finish execute, then just return, since some work need to be done such as StmtCommit.
-			return nil
-		}
-		// If the stmt is finish execute, and exceed the StmtCountLimit, and BatchCommit is true,
-		// then commit the current transaction and create a new transaction.
 		err = sessiontxn.NewTxn(ctx, se)
 		// The transaction does not committed yet, we need to keep it in transaction.
 		// The last history could not be "commit"/"rollback" statement.
@@ -324,7 +328,6 @@ func checkStmtLimit(ctx context.Context, se *session, isFinish bool) error {
 }
 
 // GetHistory get all stmtHistory in current txn. Exported only for test.
-// If stmtHistory is nil, will create a new one for current txn.
 func GetHistory(ctx sessionctx.Context) *StmtHistory {
 	hist, ok := ctx.GetSessionVars().TxnCtx.History.(*StmtHistory)
 	if ok {

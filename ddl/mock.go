@@ -29,13 +29,14 @@ import (
 	"github.com/pingcap/tidb/sessionctx"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	atomicutil "go.uber.org/atomic"
 )
 
 var _ syncer.SchemaSyncer = &MockSchemaSyncer{}
 
 const mockCheckVersInterval = 2 * time.Millisecond
 
-// MockSchemaSyncer is a mock schema syncer, it is exported for tesing.
+// MockSchemaSyncer is a mock schema syncer, it is exported for testing.
 type MockSchemaSyncer struct {
 	selfSchemaVersion int64
 	mdlSchemaVersions sync.Map
@@ -109,12 +110,6 @@ func (s *MockSchemaSyncer) OwnerCheckAllVersions(ctx context.Context, jobID int6
 	ticker := time.NewTicker(mockCheckVersInterval)
 	defer ticker.Stop()
 
-	failpoint.Inject("mockOwnerCheckAllVersionSlow", func(val failpoint.Value) {
-		if v, ok := val.(int); ok && v == int(jobID) {
-			time.Sleep(2 * time.Second)
-		}
-	})
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -142,6 +137,63 @@ func (s *MockSchemaSyncer) OwnerCheckAllVersions(ctx context.Context, jobID int6
 
 // Close implements SchemaSyncer.Close interface.
 func (*MockSchemaSyncer) Close() {}
+
+// NewMockStateSyncer creates a new mock StateSyncer.
+func NewMockStateSyncer() syncer.StateSyncer {
+	return &MockStateSyncer{}
+}
+
+// clusterState mocks cluster state.
+// We move it from MockStateSyncer to here. Because we want to make it unaffected by ddl close.
+var clusterState *atomicutil.Pointer[syncer.StateInfo]
+
+// MockStateSyncer is a mock state syncer, it is exported for testing.
+type MockStateSyncer struct {
+	globalVerCh chan clientv3.WatchResponse
+	mockSession chan struct{}
+}
+
+// Init implements StateSyncer.Init interface.
+func (s *MockStateSyncer) Init(context.Context) error {
+	s.globalVerCh = make(chan clientv3.WatchResponse, 1)
+	s.mockSession = make(chan struct{}, 1)
+	state := syncer.NewStateInfo(syncer.StateNormalRunning)
+	if clusterState == nil {
+		clusterState = atomicutil.NewPointer(state)
+	}
+	return nil
+}
+
+// UpdateGlobalState implements StateSyncer.UpdateGlobalState interface.
+func (s *MockStateSyncer) UpdateGlobalState(_ context.Context, stateInfo *syncer.StateInfo) error {
+	failpoint.Inject("mockUpgradingState", func(val failpoint.Value) {
+		if val.(bool) {
+			clusterState.Store(stateInfo)
+			failpoint.Return(nil)
+		}
+	})
+	s.globalVerCh <- clientv3.WatchResponse{}
+	clusterState.Store(stateInfo)
+	return nil
+}
+
+// GetGlobalState implements StateSyncer.GetGlobalState interface.
+func (*MockStateSyncer) GetGlobalState(context.Context) (*syncer.StateInfo, error) {
+	return clusterState.Load(), nil
+}
+
+// IsUpgradingState implements StateSyncer.IsUpgradingState interface.
+func (*MockStateSyncer) IsUpgradingState() bool {
+	return clusterState.Load().State == syncer.StateUpgrading
+}
+
+// WatchChan implements StateSyncer.WatchChan interface.
+func (s *MockStateSyncer) WatchChan() clientv3.WatchChan {
+	return s.globalVerCh
+}
+
+// Rewatch implements StateSyncer.Rewatch interface.
+func (*MockStateSyncer) Rewatch(context.Context) {}
 
 type mockDelRange struct {
 }

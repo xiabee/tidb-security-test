@@ -286,8 +286,10 @@ TableOptimizerHintOpt:
 	}
 |	"RESOURCE_GROUP" '(' Identifier ')'
 	{
-		parser.warnUnsupportedHint($1)
-		$$ = nil
+		$$ = &ast.TableOptimizerHint{
+			HintName: model.NewCIStr($1),
+			HintData: $3,
+		}
 	}
 |	"QB_NAME" '(' Identifier ')'
 	{
@@ -350,27 +352,6 @@ TableOptimizerHintOpt:
 			QBName:   model.NewCIStr($3),
 			HintData: model.NewCIStr($4),
 		}
-	}
-|	hintIdentifier '(' QueryBlockOpt hintIntLit ')'
-	/* The hints below are pseudo hint. They are unsupported hints */
-	{
-		parser.warnUnsupportedHint($1)
-		$$ = nil
-	}
-|	hintIdentifier '(' PartitionList ')'
-	{
-		parser.warnUnsupportedHint($1)
-		$$ = nil
-	}
-|	hintIdentifier '(' PartitionList CommaOpt hintIntLit ')'
-	{
-		parser.warnUnsupportedHint($1)
-		$$ = nil
-	}
-|	hintIdentifier '(' Identifier '=' Value ')'
-	{
-		parser.warnUnsupportedHint($1)
-		$$ = nil
 	}
 
 StorageOptimizerHintOpt:

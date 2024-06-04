@@ -182,9 +182,9 @@ type Builder struct {
 	// This map will indicate which DB has been copied, so that they
 	// don't need to be copied again.
 	dirtyDB map[string]bool
-
-	// Used by autoid allocators
-	autoid.Requirement
+	// TODO: store is only used by autoid allocators
+	// detach allocators from storage, use passed transaction in the feature
+	store kv.Storage
 
 	factory func() (pools.Resource, error)
 	bundleInfoBuilder
@@ -211,14 +211,22 @@ func (b *Builder) ApplyDiff(m *meta.Meta, diff *model.SchemaDiff) ([]int64, erro
 		return b.applyDropPolicy(diff.SchemaID), nil
 	case model.ActionAlterPlacementPolicy:
 		return b.applyAlterPolicy(m, diff)
+	case model.ActionCreateResourceGroup:
+		return nil, b.applyCreateOrAlterResourceGroup(m, diff)
+	case model.ActionAlterResourceGroup:
+		return nil, b.applyCreateOrAlterResourceGroup(m, diff)
+	case model.ActionDropResourceGroup:
+		return b.applyDropResourceGroup(m, diff), nil
 	case model.ActionTruncateTablePartition, model.ActionTruncateTable:
 		return b.applyTruncateTableOrPartition(m, diff)
 	case model.ActionDropTable, model.ActionDropTablePartition:
-		return b.applyDropTableOrParition(m, diff)
+		return b.applyDropTableOrPartition(m, diff)
 	case model.ActionRecoverTable:
 		return b.applyRecoverTable(m, diff)
 	case model.ActionCreateTables:
 		return b.applyCreateTables(m, diff)
+	case model.ActionReorganizePartition:
+		return b.applyReorganizePartition(m, diff)
 	case model.ActionExchangeTablePartition:
 		return b.applyExchangeTablePartition(m, diff)
 	case model.ActionFlashbackCluster:
@@ -274,7 +282,7 @@ func (b *Builder) applyTruncateTableOrPartition(m *meta.Meta, diff *model.Schema
 	return tblIDs, nil
 }
 
-func (b *Builder) applyDropTableOrParition(m *meta.Meta, diff *model.SchemaDiff) ([]int64, error) {
+func (b *Builder) applyDropTableOrPartition(m *meta.Meta, diff *model.SchemaDiff) ([]int64, error) {
 	tblIDs, err := b.applyTableUpdate(m, diff)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -283,6 +291,22 @@ func (b *Builder) applyDropTableOrParition(m *meta.Meta, diff *model.SchemaDiff)
 	b.markTableBundleShouldUpdate(diff.TableID)
 	for _, opt := range diff.AffectedOpts {
 		b.deleteBundle(b.is, opt.OldTableID)
+	}
+	return tblIDs, nil
+}
+
+func (b *Builder) applyReorganizePartition(m *meta.Meta, diff *model.SchemaDiff) ([]int64, error) {
+	tblIDs, err := b.applyTableUpdate(m, diff)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	for _, opt := range diff.AffectedOpts {
+		if opt.OldTableID != 0 {
+			b.deleteBundle(b.is, opt.OldTableID)
+		}
+		if opt.TableID != 0 {
+			b.markTableBundleShouldUpdate(opt.TableID)
+		}
 	}
 	return tblIDs, nil
 }
@@ -298,6 +322,7 @@ func (b *Builder) applyExchangeTablePartition(m *meta.Meta, diff *model.SchemaDi
 	ptID := diff.TableID
 	partID := diff.TableID
 	if len(diff.AffectedOpts) > 0 {
+		// should always have len == 1
 		ptID = diff.AffectedOpts[0].TableID
 		if diff.AffectedOpts[0].SchemaID != 0 {
 			ptSchemaID = diff.AffectedOpts[0].SchemaID
@@ -306,9 +331,6 @@ func (b *Builder) applyExchangeTablePartition(m *meta.Meta, diff *model.SchemaDi
 	// The normal table needs to be updated first:
 	// Just update the tables separately
 	currDiff := &model.SchemaDiff{
-		// This is only for the case since https://github.com/pingcap/tidb/pull/45877
-		// Fixed now, by adding back the AffectedOpts
-		// to carry the partitioned Table ID.
 		Type:     diff.Type,
 		Version:  diff.Version,
 		TableID:  ntID,
@@ -336,7 +358,7 @@ func (b *Builder) applyExchangeTablePartition(m *meta.Meta, diff *model.SchemaDi
 	}
 	// ntID is the new id for the partition!
 	b.markPartitionBundleShouldUpdate(ntID)
-	err = updateAutoIDForExchangePartition(b.Requirement.Store(), ptSchemaID, ptID, ntSchemaID, ntID)
+	err = updateAutoIDForExchangePartition(b.store, ptSchemaID, ptID, ntSchemaID, ntID)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -553,13 +575,36 @@ func (b *Builder) copySortedTables(oldTableID, newTableID int64) {
 	}
 }
 
+func (b *Builder) applyCreateOrAlterResourceGroup(m *meta.Meta, diff *model.SchemaDiff) error {
+	group, err := m.GetResourceGroup(diff.SchemaID)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if group == nil {
+		return ErrResourceGroupNotExists.GenWithStackByArgs(fmt.Sprintf("(Group ID %d)", diff.SchemaID))
+	}
+	// TODO: need mark updated?
+	b.is.setResourceGroup(group)
+	return nil
+}
+
+func (b *Builder) applyDropResourceGroup(m *meta.Meta, diff *model.SchemaDiff) []int64 {
+	group, ok := b.is.ResourceGroupByID(diff.SchemaID)
+	if !ok {
+		return nil
+	}
+	b.is.deleteResourceGroup(group.Name.L)
+	// TODO: return the related information.
+	return []int64{}
+}
+
 func (b *Builder) applyCreatePolicy(m *meta.Meta, diff *model.SchemaDiff) error {
 	po, err := m.GetPolicy(diff.SchemaID)
 	if err != nil {
 		return errors.Trace(err)
 	}
 	if po == nil {
-		return ErrPlacementPolicyExists.GenWithStackByArgs(
+		return ErrPlacementPolicyNotExists.GenWithStackByArgs(
 			fmt.Sprintf("(Policy ID %d)", diff.SchemaID),
 		)
 	}
@@ -581,7 +626,7 @@ func (b *Builder) applyAlterPolicy(m *meta.Meta, diff *model.SchemaDiff) ([]int6
 	}
 
 	if po == nil {
-		return nil, ErrPlacementPolicyExists.GenWithStackByArgs(
+		return nil, ErrPlacementPolicyNotExists.GenWithStackByArgs(
 			fmt.Sprintf("(Policy ID %d)", diff.SchemaID),
 		)
 	}
@@ -719,6 +764,8 @@ func (b *Builder) applyCreateTable(m *meta.Meta, dbInfo *model.DBInfo, tableID i
 	switch tp {
 	case model.ActionDropTablePartition:
 	case model.ActionTruncateTablePartition:
+	// ReorganizePartition handle the bundles in applyReorganizePartition
+	case model.ActionReorganizePartition:
 	default:
 		pi := tblInfo.GetPartitionInfo()
 		if pi != nil {
@@ -746,7 +793,7 @@ func (b *Builder) applyCreateTable(m *meta.Meta, dbInfo *model.DBInfo, tableID i
 	ConvertOldVersionUTF8ToUTF8MB4IfNeed(tblInfo)
 
 	if len(allocs.Allocs) == 0 {
-		allocs = autoid.NewAllocatorsFromTblInfo(b.Requirement, dbInfo.ID, tblInfo)
+		allocs = autoid.NewAllocatorsFromTblInfo(b.store, dbInfo.ID, tblInfo)
 	} else {
 		tblVer := autoid.AllocOptionTableInfoVersion(tblInfo.Version)
 		switch tp {
@@ -756,11 +803,11 @@ func (b *Builder) applyCreateTable(m *meta.Meta, dbInfo *model.DBInfo, tableID i
 			// and RowIDAllocType allocator for it. Because auto id and row id could share the same allocator.
 			// Allocate auto id may route to allocate row id, if row id allocator is nil, the program panic!
 			for _, tp := range [2]autoid.AllocatorType{autoid.AutoIncrementType, autoid.RowIDAllocType} {
-				newAlloc := autoid.NewAllocator(b.Requirement, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), tp, tblVer, idCacheOpt)
+				newAlloc := autoid.NewAllocator(b.store, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoIncColUnsigned(), tp, tblVer, idCacheOpt)
 				allocs = allocs.Append(newAlloc)
 			}
 		case model.ActionRebaseAutoRandomBase:
-			newAlloc := autoid.NewAllocator(b.Requirement, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), autoid.AutoRandomType, tblVer)
+			newAlloc := autoid.NewAllocator(b.store, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), autoid.AutoRandomType, tblVer)
 			allocs = allocs.Append(newAlloc)
 		case model.ActionModifyColumn:
 			// Change column attribute from auto_increment to auto_random.
@@ -769,7 +816,7 @@ func (b *Builder) applyCreateTable(m *meta.Meta, dbInfo *model.DBInfo, tableID i
 				allocs = allocs.Filter(func(a autoid.Allocator) bool {
 					return a.GetType() != autoid.AutoIncrementType && a.GetType() != autoid.RowIDAllocType
 				})
-				newAlloc := autoid.NewAllocator(b.Requirement, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), autoid.AutoRandomType, tblVer)
+				newAlloc := autoid.NewAllocator(b.store, dbInfo.ID, tblInfo.ID, tblInfo.IsAutoRandomBitColUnsigned(), autoid.AutoRandomType, tblVer)
 				allocs = allocs.Append(newAlloc)
 			}
 		}
@@ -881,6 +928,7 @@ func (b *Builder) InitWithOldInfoSchema(oldSchema InfoSchema) *Builder {
 	b.copySchemasMap(oldIS)
 	b.copyBundlesMap(oldIS)
 	b.copyPoliciesMap(oldIS)
+	b.copyResourceGroupMap(oldIS)
 	b.copyTemporaryTableIDsMap(oldIS)
 	b.copyReferredForeignKeyMap(oldIS)
 
@@ -905,6 +953,13 @@ func (b *Builder) copyPoliciesMap(oldIS *infoSchema) {
 	is := b.is
 	for _, v := range oldIS.AllPlacementPolicies() {
 		is.policyMap[v.Name.L] = v
+	}
+}
+
+func (b *Builder) copyResourceGroupMap(oldIS *infoSchema) {
+	is := b.is
+	for _, v := range oldIS.AllResourceGroups() {
+		is.resourceGroupMap[v.Name.L] = v
 	}
 }
 
@@ -949,12 +1004,17 @@ func (b *Builder) getSchemaAndCopyIfNecessary(dbName string) *model.DBInfo {
 }
 
 // InitWithDBInfos initializes an empty new InfoSchema with a slice of DBInfo, all placement rules, and schema version.
-func (b *Builder) InitWithDBInfos(dbInfos []*model.DBInfo, policies []*model.PolicyInfo, schemaVersion int64) (*Builder, error) {
+func (b *Builder) InitWithDBInfos(dbInfos []*model.DBInfo, policies []*model.PolicyInfo, resourceGroups []*model.ResourceGroupInfo, schemaVersion int64) (*Builder, error) {
 	info := b.is
 	info.schemaMetaVersion = schemaVersion
 	// build the policies.
 	for _, policy := range policies {
 		info.setPolicy(policy)
+	}
+
+	// build the groups.
+	for _, group := range resourceGroups {
+		info.setResourceGroup(group)
 	}
 
 	// Maintain foreign key reference information.
@@ -1018,7 +1078,7 @@ func (b *Builder) createSchemaTablesForDB(di *model.DBInfo, tableFromMeta tableF
 	b.is.schemaMap[di.Name.L] = schTbls
 
 	for _, t := range di.Tables {
-		allocs := autoid.NewAllocatorsFromTblInfo(b.Requirement, di.ID, t)
+		allocs := autoid.NewAllocatorsFromTblInfo(b.store, di.ID, t)
 		var tbl table.Table
 		tbl, err := tableFromMeta(allocs, t)
 		if err != nil {
@@ -1054,12 +1114,13 @@ func RegisterVirtualTable(dbInfo *model.DBInfo, tableFromMeta tableFromMetaFunc)
 }
 
 // NewBuilder creates a new Builder with a Handle.
-func NewBuilder(r autoid.Requirement, factory func() (pools.Resource, error)) *Builder {
+func NewBuilder(store kv.Storage, factory func() (pools.Resource, error)) *Builder {
 	return &Builder{
-		Requirement: r,
+		store: store,
 		is: &infoSchema{
 			schemaMap:             map[string]*schemaTables{},
 			policyMap:             map[string]*model.PolicyInfo{},
+			resourceGroupMap:      map[string]*model.ResourceGroupInfo{},
 			ruleBundleMap:         map[int64]*placement.Bundle{},
 			sortedTablesBuckets:   make([]sortedTables, bucketCount),
 			referredForeignKeyMap: make(map[SchemaAndTableName][]*model.ReferredFKInfo),

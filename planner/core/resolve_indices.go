@@ -488,7 +488,7 @@ func (p *PhysicalSelection) ResolveIndices() (err error) {
 	return nil
 }
 
-// ResolveIndicesItself resolve indices for PhyicalPlan itself
+// ResolveIndicesItself resolve indices for PhysicalPlan itself
 func (p *PhysicalExchangeSender) ResolveIndicesItself() (err error) {
 	for i, col := range p.HashCols {
 		colExpr, err1 := col.Col.ResolveIndices(p.children[0].Schema())
@@ -503,6 +503,31 @@ func (p *PhysicalExchangeSender) ResolveIndicesItself() (err error) {
 // ResolveIndices implements Plan interface.
 func (p *PhysicalExchangeSender) ResolveIndices() (err error) {
 	err = p.basePhysicalPlan.ResolveIndices()
+	if err != nil {
+		return err
+	}
+	return p.ResolveIndicesItself()
+}
+
+// ResolveIndicesItself resolve indices for PhysicalPlan itself
+func (p *PhysicalExpand) ResolveIndicesItself() error {
+	for _, gs := range p.GroupingSets {
+		for _, groupingExprs := range gs {
+			for k, groupingExpr := range groupingExprs {
+				gExpr, err := groupingExpr.ResolveIndices(p.children[0].Schema())
+				if err != nil {
+					return err
+				}
+				groupingExprs[k] = gExpr
+			}
+		}
+	}
+	return nil
+}
+
+// ResolveIndices implements Plan interface.
+func (p *PhysicalExpand) ResolveIndices() (err error) {
+	err = p.physicalSchemaProducer.ResolveIndices()
 	if err != nil {
 		return err
 	}
@@ -657,7 +682,14 @@ func (p *PhysicalTopN) ResolveIndices() (err error) {
 			return err
 		}
 	}
-	return nil
+	for i, item := range p.PartitionBy {
+		newCol, err := item.Col.ResolveIndices(p.children[0].Schema())
+		if err != nil {
+			return err
+		}
+		p.PartitionBy[i].Col = newCol.(*expression.Column)
+	}
+	return
 }
 
 // ResolveIndices implements Plan interface.
@@ -665,6 +697,13 @@ func (p *PhysicalLimit) ResolveIndices() (err error) {
 	err = p.basePhysicalPlan.ResolveIndices()
 	if err != nil {
 		return err
+	}
+	for i, item := range p.PartitionBy {
+		newCol, err := item.Col.ResolveIndices(p.children[0].Schema())
+		if err != nil {
+			return err
+		}
+		p.PartitionBy[i].Col = newCol.(*expression.Column)
 	}
 	// To avoid that two plan shares the same column slice.
 	shallowColSlice := make([]*expression.Column, p.schema.Len())

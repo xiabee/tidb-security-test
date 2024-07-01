@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/require"
 )
@@ -98,7 +97,7 @@ import (
 //	.          .     86:   fmt.Println(sql)
 //	.          .     87:   stmt, err := s.GetParser().ParseOneStmt(sql, "", "")
 //	.          .     88:   require.NoError(b, err, sql)
-//	.   512.01kB     89:   p, err := core.BuildLogicalPlanForTest(ctx, s.GetCtx(), stmt, s.GetIS())
+//	.   512.01kB     89:   p, _, err := core.BuildLogicalPlanForTest(ctx, s.GetCtx(), stmt, s.GetIS())
 //	.          .     90:   require.NoError(b, err)
 //	.          .     91:   selection := p.(core.LogicalPlan).Children()[0]
 //	.          .     92:   m := make(core.ExprColumnMap, len(selection.Schema().Columns))
@@ -188,7 +187,7 @@ import (
 //	.          .     86:   fmt.Println(sql)
 //	.          .     87:   stmt, err := s.GetParser().ParseOneStmt(sql, "", "")
 //	.          .     88:   require.NoError(b, err, sql)
-//	.   512.07kB     89:   p, err := core.BuildLogicalPlanForTest(ctx, s.GetCtx(), stmt, s.GetIS())
+//	.   512.07kB     89:   p, _, err := core.BuildLogicalPlanForTest(ctx, s.GetCtx(), stmt, s.GetIS())
 //	.          .     90:   require.NoError(b, err)
 //	.          .     91:   selection := p.(core.LogicalPlan).Children()[0]
 //	.          .     92:   m := make(core.ExprColumnMap, len(selection.Schema().Columns))
@@ -252,21 +251,20 @@ func BenchmarkSubstituteExpression(b *testing.B) {
 		"(tai.a='%s' AND tai.b='%s') OR" +
 		"(tai.a='%s' AND tai.b='%s') OR" +
 		"(tai.a='%s' AND tai.b='%s')"
-	addresses := make([]any, 0, 90)
+	addresses := make([]interface{}, 0, 90)
 	for i := 0; i < 80; i++ {
 		addresses = append(addresses, "0x6ab6Bf9117A8A9dd5a2FF203aa8a22457162fC510x6ab6Bf9117A8A9dd5a2FF203aa8a22457162fC510x6ab6Bf9117A8A9dd5a2FF203aa8a22457162fC510x6ab6Bf9117A8A9dd5a2FF203aa8a22457162fC51")
 	}
 	condition = fmt.Sprintf(condition, addresses...)
 	s := core.CreatePlannerSuite(tk.Session(), is)
-	defer s.Close()
 	ctx := context.Background()
 	sql := "select * from tai where " + condition
 	fmt.Println(sql)
 	stmt, err := s.GetParser().ParseOneStmt(sql, "", "")
 	require.NoError(b, err, sql)
-	p, err := core.BuildLogicalPlanForTest(ctx, s.GetSCtx(), stmt, s.GetIS())
+	p, _, err := core.BuildLogicalPlanForTest(ctx, s.GetCtx(), stmt, s.GetIS())
 	require.NoError(b, err)
-	selection := p.(base.LogicalPlan).Children()[0]
+	selection := p.(core.LogicalPlan).Children()[0]
 	m := make(core.ExprColumnMap, len(selection.Schema().Columns))
 	for _, col := range selection.Schema().Columns {
 		if col.VirtualExpr != nil {

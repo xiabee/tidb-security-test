@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/util/redact"
+	"github.com/pingcap/tidb/br/pkg/redact"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -55,6 +55,6 @@ func (rs rangesMarshaler) MarshalLogObject(encoder zapcore.ObjectEncoder) error 
 	encoder.AddInt("totalFiles", totalFile)
 	encoder.AddUint64("totalKVs", totalKV)
 	encoder.AddUint64("totalBytes", totalBytes)
-	encoder.AddUint64("totalSize", totalSize)
+	encoder.AddUint64("totalSize", totalBytes)
 	return nil
 }

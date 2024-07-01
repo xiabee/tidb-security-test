@@ -18,16 +18,15 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 	"unsafe"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	rangerctx "github.com/pingcap/tidb/pkg/util/ranger/context"
 )
 
 // MutableRanges represents a range may change after it is created.
@@ -96,11 +95,11 @@ func (ran *Range) Clone() *Range {
 }
 
 // IsPoint returns if the range is a point.
-func (ran *Range) IsPoint(sctx *rangerctx.RangerContext) bool {
-	return ran.isPoint(sctx.TypeCtx, sctx.RegardNULLAsPoint)
+func (ran *Range) IsPoint(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, sctx.GetSessionVars().RegardNULLAsPoint)
 }
 
-func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
+func (ran *Range) isPoint(stmtCtx *stmtctx.StatementContext, regardNullAsPoint bool) bool {
 	if len(ran.LowVal) != len(ran.HighVal) {
 		return false
 	}
@@ -110,7 +109,7 @@ func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
 		if a.Kind() == types.KindMinNotNull || b.Kind() == types.KindMaxValue {
 			return false
 		}
-		cmp, err := a.Compare(tc, &b, ran.Collators[i])
+		cmp, err := a.Compare(stmtCtx, &b, ran.Collators[i])
 		if err != nil {
 			return false
 		}
@@ -128,14 +127,14 @@ func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
 }
 
 // IsPointNonNullable returns if the range is a point without NULL.
-func (ran *Range) IsPointNonNullable(tc types.Context) bool {
-	return ran.isPoint(tc, false)
+func (ran *Range) IsPointNonNullable(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, false)
 }
 
 // IsPointNullable returns if the range is a point.
 // TODO: unify the parameter type with IsPointNullable and IsPoint
-func (ran *Range) IsPointNullable(tc types.Context) bool {
-	return ran.isPoint(tc, true)
+func (ran *Range) IsPointNullable(sctx sessionctx.Context) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx, true)
 }
 
 // IsFullRange check if the range is full scan range
@@ -194,18 +193,16 @@ func (ran *Range) String() string {
 }
 
 // Encode encodes the range to its encoded value.
-func (ran *Range) Encode(ec errctx.Context, loc *time.Location, lowBuffer, highBuffer []byte) ([]byte, []byte, error) {
+func (ran *Range) Encode(sc *stmtctx.StatementContext, lowBuffer, highBuffer []byte) ([]byte, []byte, error) {
 	var err error
-	lowBuffer, err = codec.EncodeKey(loc, lowBuffer[:0], ran.LowVal...)
-	err = ec.HandleError(err)
+	lowBuffer, err = codec.EncodeKey(sc, lowBuffer[:0], ran.LowVal...)
 	if err != nil {
 		return nil, nil, err
 	}
 	if ran.LowExclude {
 		lowBuffer = kv.Key(lowBuffer).PrefixNext()
 	}
-	highBuffer, err = codec.EncodeKey(loc, highBuffer[:0], ran.HighVal...)
-	err = ec.HandleError(err)
+	highBuffer, err = codec.EncodeKey(sc, highBuffer[:0], ran.HighVal...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -217,10 +214,10 @@ func (ran *Range) Encode(ec errctx.Context, loc *time.Location, lowBuffer, highB
 
 // PrefixEqualLen tells you how long the prefix of the range is a point.
 // e.g. If this range is (1 2 3, 1 2 +inf), then the return value is 2.
-func (ran *Range) PrefixEqualLen(tc types.Context) (int, error) {
+func (ran *Range) PrefixEqualLen(sc *stmtctx.StatementContext) (int, error) {
 	// Here, len(ran.LowVal) always equal to len(ran.HighVal)
 	for i := 0; i < len(ran.LowVal); i++ {
-		cmp, err := ran.LowVal[i].Compare(tc, &ran.HighVal[i], ran.Collators[i])
+		cmp, err := ran.LowVal[i].Compare(sc, &ran.HighVal[i], ran.Collators[i])
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -280,83 +277,4 @@ func formatDatum(d types.Datum, isLeftSide bool) string {
 		return fmt.Sprintf("\"%v\"", d.GetValue())
 	}
 	return fmt.Sprintf("%v", d.GetValue())
-}
-
-// Check if a list of Datum is a prefix of another list of Datum. This is useful for checking if
-// lower/upper bound of a range is a subset of another.
-func prefix(tc types.Context, superValue []types.Datum, supValue []types.Datum, length int, collators []collate.Collator) bool {
-	for i := 0; i < length; i++ {
-		cmp, err := superValue[i].Compare(tc, &supValue[i], collators[i])
-		if (err != nil) || (cmp != 0) {
-			return false
-		}
-	}
-	return true
-}
-
-// Subset checks if a list of ranges(rs) is a subset of another list of ranges(superRanges).
-// This is true if every range in the first list is a subset of any
-// range in the second list. Also, we check if all elements of superRanges are covered.
-func (rs Ranges) Subset(tc types.Context, superRanges Ranges) bool {
-	var subset bool
-	superRangesCovered := make([]bool, len(superRanges))
-	if len(rs) == 0 {
-		return len(superRanges) == 0
-	} else if len(superRanges) == 0 {
-		// unrestricted superRanges and restricted rs
-		return true
-	}
-
-	for _, subRange := range rs {
-		subset = false
-		for i, superRange := range superRanges {
-			if subRange.Subset(tc, superRange) {
-				subset = true
-				superRangesCovered[i] = true
-				break
-			}
-		}
-		if !subset {
-			return false
-		}
-	}
-	for i := 0; i < len(superRangesCovered); i++ {
-		if !superRangesCovered[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
-// Subset for Range type, check if range(ran)  is a subset of another range(superRange).
-// This is done by:
-//   - Both ran and superRange have the same collators. This is not needed for the current code path.
-//     But, it is used here for future use of the function.
-//   - Checking if the lower/upper bound of superRange covers the corresponding lower/upper bound of ran.
-//     Thus include checking open/closed inetrvals.
-func (ran *Range) Subset(tc types.Context, superRange *Range) bool {
-	if len(ran.LowVal) < len(superRange.LowVal) {
-		return false
-	}
-
-	// Make sure both ran and superRange have the same collations.
-	// The current code path for this function always will have same collation
-	// for ran and superRange. It is added here for future
-	// use of the function.
-	for i := 0; i < len(superRange.LowVal); i++ {
-		if ran.Collators[i] != superRange.Collators[i] {
-			return false
-		}
-	}
-
-	// Either superRange is closed or both ranges have the same open/close setting.
-	lowExcludeOK := !superRange.LowExclude || ran.LowExclude == superRange.LowExclude
-	highExcludeOK := !superRange.HighExclude || ran.HighExclude == superRange.HighExclude
-	if !lowExcludeOK || !highExcludeOK {
-		return false
-	}
-
-	return prefix(tc, superRange.LowVal, ran.LowVal, len(superRange.LowVal), ran.Collators) &&
-		prefix(tc, superRange.HighVal, ran.HighVal, len(superRange.LowVal), ran.Collators)
 }

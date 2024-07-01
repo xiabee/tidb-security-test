@@ -25,8 +25,9 @@ import (
 // GenerateExecID used to generate IP:port as exec_id value
 // This function is used by distributed task execution to generate serverID string to
 // correlated one subtask to on TiDB node to be executed.
-func GenerateExecID(info *infosync.ServerInfo) string {
-	return net.JoinHostPort(info.IP, fmt.Sprintf("%d", info.Port))
+func GenerateExecID(ip string, port uint) string {
+	portstring := fmt.Sprintf("%d", port)
+	return net.JoinHostPort(ip, portstring)
 }
 
 // MatchServerInfo will check if the schedulerID matched in all serverInfos.
@@ -37,7 +38,7 @@ func MatchServerInfo(serverInfos []*infosync.ServerInfo, schedulerID string) boo
 // FindServerInfo will find the schedulerID in all serverInfos.
 func FindServerInfo(serverInfos []*infosync.ServerInfo, schedulerID string) int {
 	for i, serverInfo := range serverInfos {
-		serverID := GenerateExecID(serverInfo)
+		serverID := GenerateExecID(serverInfo.IP, serverInfo.Port)
 		if serverID == schedulerID {
 			return i
 		}
@@ -52,7 +53,7 @@ func GenerateSubtaskExecID(ctx context.Context, id string) string {
 		return ""
 	}
 	if serverNode, ok := serverInfos[id]; ok {
-		return GenerateExecID(serverNode)
+		return GenerateExecID(serverNode.IP, serverNode.Port)
 	}
 	return ""
 }
@@ -64,7 +65,7 @@ func GenerateSubtaskExecID4Test(id string) string {
 		return ""
 	}
 	if serverNode, ok := serverInfos[id]; ok {
-		return GenerateExecID(serverNode)
+		return GenerateExecID(serverNode.IP, serverNode.Port)
 	}
 	return ""
 }

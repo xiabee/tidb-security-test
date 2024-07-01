@@ -19,7 +19,6 @@ import (
 	"math"
 	"math/rand"
 	"testing"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -30,7 +29,7 @@ import (
 )
 
 func (c *CMSketch) insert(val *types.Datum) error {
-	bytes, err := codec.EncodeValue(time.UTC, nil, *val)
+	bytes, err := codec.EncodeValue(nil, nil, *val)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -41,7 +40,7 @@ func (c *CMSketch) insert(val *types.Datum) error {
 func prepareCMSAndTopN(d, w int32, vals []*types.Datum, n uint32, total uint64) (*CMSketch, *TopN, error) {
 	data := make([][]byte, 0, len(vals))
 	for _, v := range vals {
-		bytes, err := codec.EncodeValue(time.UTC, nil, *v)
+		bytes, err := codec.EncodeValue(nil, nil, *v)
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}

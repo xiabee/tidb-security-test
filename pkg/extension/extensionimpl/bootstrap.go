@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/extension"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -76,18 +75,17 @@ func Bootstrap(ctx context.Context, do *domain.Domain) error {
 	}
 
 	pool := do.SysSessionPool()
-	r, err := pool.Get()
+	sctx, err := pool.Get()
 	if err != nil {
 		return err
 	}
-	defer pool.Put(r)
+	defer pool.Put(sctx)
 
-	sctx, ok := r.(sessionctx.Context)
+	executor, ok := sctx.(sqlexec.SQLExecutor)
 	if !ok {
-		return errors.Errorf("type '%T' cannot be casted to 'sessionctx.Context'", sctx)
+		return errors.Errorf("type '%T' cannot be casted to 'sqlexec.SQLExecutor'", sctx)
 	}
 
-	executor := sctx.GetSQLExecutor()
 	return extensions.Bootstrap(&bootstrapContext{
 		Context:     ctx,
 		sessionPool: pool,

@@ -19,7 +19,7 @@ import (
 	"reflect"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 )
 
 // GroupExpr is used to store all the logically equivalent expressions which
@@ -28,7 +28,7 @@ import (
 // Another property of Group expression is that the child Group references will
 // never be changed once the Group expression is created.
 type GroupExpr struct {
-	ExprNode base.LogicalPlan
+	ExprNode plannercore.LogicalPlan
 	Children []*Group
 	Group    *Group
 
@@ -44,7 +44,7 @@ type GroupExpr struct {
 }
 
 // NewGroupExpr creates a GroupExpr based on a logical plan node.
-func NewGroupExpr(node base.LogicalPlan) *GroupExpr {
+func NewGroupExpr(node plannercore.LogicalPlan) *GroupExpr {
 	return &GroupExpr{
 		ExprNode:       node,
 		Children:       nil,
@@ -80,13 +80,13 @@ func (e *GroupExpr) Schema() *expression.Schema {
 }
 
 // AddAppliedRule adds a rule into the appliedRuleSet.
-func (e *GroupExpr) AddAppliedRule(rule any) {
+func (e *GroupExpr) AddAppliedRule(rule interface{}) {
 	ruleID := reflect.ValueOf(rule).Pointer()
 	e.appliedRuleSet[uint64(ruleID)] = struct{}{}
 }
 
 // HasAppliedRule returns if the rule has been applied.
-func (e *GroupExpr) HasAppliedRule(rule any) bool {
+func (e *GroupExpr) HasAppliedRule(rule interface{}) bool {
 	ruleID := reflect.ValueOf(rule).Pointer()
 	_, ok := e.appliedRuleSet[uint64(ruleID)]
 	return ok

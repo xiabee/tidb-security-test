@@ -25,8 +25,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 )
 
-func (d *ddl) MultiSchemaChange(ctx sessionctx.Context, ti ast.Ident, info *model.MultiSchemaInfo) error {
-	subJobs := info.SubJobs
+func (d *ddl) MultiSchemaChange(ctx sessionctx.Context, ti ast.Ident) error {
+	subJobs := ctx.GetSessionVars().StmtCtx.MultiSchemaInfo.SubJobs
 	if len(subJobs) == 0 {
 		return nil
 	}
@@ -43,10 +43,8 @@ func (d *ddl) MultiSchemaChange(ctx sessionctx.Context, ti ast.Ident, info *mode
 		Type:            model.ActionMultiSchemaChange,
 		BinlogInfo:      &model.HistoryInfo{},
 		Args:            nil,
-		MultiSchemaInfo: info,
+		MultiSchemaInfo: ctx.GetSessionVars().StmtCtx.MultiSchemaInfo,
 		ReorgMeta:       nil,
-		CDCWriteSource:  ctx.GetSessionVars().CDCWriteSource,
-		SQLMode:         ctx.GetSessionVars().SQLMode,
 	}
 	if containsDistTaskSubJob(subJobs) {
 		job.ReorgMeta, err = newReorgMetaFromVariables(job, ctx)
@@ -57,11 +55,12 @@ func (d *ddl) MultiSchemaChange(ctx sessionctx.Context, ti ast.Ident, info *mode
 		job.ReorgMeta = NewDDLReorgMeta(ctx)
 	}
 
-	err = checkMultiSchemaInfo(info, t)
+	err = checkMultiSchemaInfo(ctx.GetSessionVars().StmtCtx.MultiSchemaInfo, t)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	mergeAddIndex(info)
+	mergeAddIndex(ctx.GetSessionVars().StmtCtx.MultiSchemaInfo)
+	ctx.GetSessionVars().StmtCtx.MultiSchemaInfo = nil
 	err = d.DoDDLJob(ctx, job)
 	return d.callHookOnChanged(job, err)
 }
@@ -373,29 +372,26 @@ func checkOperateSameColAndIdx(info *model.MultiSchemaInfo) error {
 }
 
 func mergeAddIndex(info *model.MultiSchemaInfo) {
-	var mergedSubJob *model.SubJob
-	var mergeCnt int
-	for _, subJob := range info.SubJobs {
+	consistentUnique := false
+	for i, subJob := range info.SubJobs {
 		if subJob.Type == model.ActionAddForeignKey {
 			// Foreign key requires the order of adding indexes is unchanged.
 			return
 		}
-		if subJob.Type == model.ActionAddIndex {
-			mergeCnt++
-			if mergedSubJob == nil {
-				clonedSubJob := *subJob
-				mergedSubJob = &clonedSubJob
-				mergedSubJob.Args = nil
-				mergedSubJob.RawArgs = nil
+		if subJob.Type == model.ActionAddIndex || subJob.Type == model.ActionAddPrimaryKey {
+			if i == 0 {
+				consistentUnique = subJob.Args[0].(bool)
+			} else {
+				if consistentUnique != subJob.Args[0].(bool) {
+					// Some indexes are unique, others are not.
+					// There are problems with the mix usage of unique and non-unique backend,
+					// we don't merge these sub-jobs for now.
+					return
+				}
 			}
 		}
 	}
-
-	if mergeCnt <= 1 {
-		// no add index job in this multi-schema change.
-		return
-	}
-
+	var newSubJob *model.SubJob
 	var unique []bool
 	var indexNames []model.CIStr
 	var indexPartSpecifications [][]*ast.IndexPartSpecification
@@ -406,6 +402,12 @@ func mergeAddIndex(info *model.MultiSchemaInfo) {
 	newSubJobs := make([]*model.SubJob, 0, len(info.SubJobs))
 	for _, subJob := range info.SubJobs {
 		if subJob.Type == model.ActionAddIndex {
+			if newSubJob == nil {
+				clonedSubJob := *subJob
+				newSubJob = &clonedSubJob
+				newSubJob.Args = nil
+				newSubJob.RawArgs = nil
+			}
 			unique = append(unique, subJob.Args[0].(bool))
 			indexNames = append(indexNames, subJob.Args[1].(model.CIStr))
 			indexPartSpecifications = append(indexPartSpecifications, subJob.Args[2].([]*ast.IndexPartSpecification))
@@ -416,11 +418,11 @@ func mergeAddIndex(info *model.MultiSchemaInfo) {
 			newSubJobs = append(newSubJobs, subJob)
 		}
 	}
-
-	mergedSubJob.Args = []any{unique, indexNames, indexPartSpecifications, indexOption, hiddenCols, global}
-	// place the merged add index job at the end of the sub-jobs.
-	newSubJobs = append(newSubJobs, mergedSubJob)
-	info.SubJobs = newSubJobs
+	if newSubJob != nil {
+		newSubJob.Args = []interface{}{unique, indexNames, indexPartSpecifications, indexOption, hiddenCols, global}
+		newSubJobs = append(newSubJobs, newSubJob)
+		info.SubJobs = newSubJobs
+	}
 }
 
 func checkOperateDropIndexUseByForeignKey(info *model.MultiSchemaInfo, t table.Table) error {

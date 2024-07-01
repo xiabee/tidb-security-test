@@ -107,13 +107,11 @@ func buildTableInfoWithPartition(t *testing.T, store kv.Storage) (*model.TableIn
 func buildDropPartitionJob(dbInfo *model.DBInfo, tblInfo *model.TableInfo, partNames []string) *model.Job {
 	return &model.Job{
 		SchemaID:    dbInfo.ID,
-		SchemaName:  dbInfo.Name.L,
 		TableID:     tblInfo.ID,
-		TableName:   tblInfo.Name.L,
 		SchemaState: model.StatePublic,
 		Type:        model.ActionDropTablePartition,
 		BinlogInfo:  &model.HistoryInfo{},
-		Args:        []any{partNames},
+		Args:        []interface{}{partNames},
 	}
 }
 
@@ -130,13 +128,11 @@ func testDropPartition(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *
 func buildTruncatePartitionJob(dbInfo *model.DBInfo, tblInfo *model.TableInfo, pids []int64, newIDs []int64) *model.Job {
 	return &model.Job{
 		SchemaID:    dbInfo.ID,
-		SchemaName:  dbInfo.Name.L,
 		TableID:     tblInfo.ID,
-		TableName:   tblInfo.Name.L,
 		Type:        model.ActionTruncateTablePartition,
 		SchemaState: model.StatePublic,
 		BinlogInfo:  &model.HistoryInfo{},
-		Args:        []any{pids, newIDs},
+		Args:        []interface{}{pids, newIDs},
 	}
 }
 

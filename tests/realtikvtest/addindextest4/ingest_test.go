@@ -22,13 +22,13 @@ import (
 	"testing"
 
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend/local"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/ddl/ingest"
 	"github.com/pingcap/tidb/pkg/ddl/testutil"
 	"github.com/pingcap/tidb/pkg/ddl/util/callback"
 	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/lightning/backend/local"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -376,7 +376,6 @@ func TestAddIndexFinishImportError(t *testing.T) {
 	tk.MustExec("create database addindexlit;")
 	tk.MustExec("use addindexlit;")
 	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-	tk.MustExec("set global tidb_enable_dist_task = off;")
 
 	tk.MustExec("create table t (a int primary key, b int);")
 	for i := 0; i < 4; i++ {
@@ -475,7 +474,7 @@ func TestAddIndexBackfillLostUpdate(t *testing.T) {
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockDMLExecutionStateBeforeImport"))
 }
 
-func TestAddIndexIngestFailures(t *testing.T) {
+func TestAddIndexPreCheckFailed(t *testing.T) {
 	store := realtikvtest.CreateMockStoreAndSetup(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("drop database if exists addindexlit;")
@@ -485,18 +484,9 @@ func TestAddIndexIngestFailures(t *testing.T) {
 
 	tk.MustExec("create table t(id int primary key, b int, k int);")
 	tk.MustExec("insert into t values (1, 1, 1);")
-
-	// Test precheck failed.
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/ingest/mockIngestCheckEnvFailed", "return"))
 	tk.MustGetErrMsg("alter table t add index idx(b);", "[ddl:8256]Check ingest environment failed: mock error")
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/ingest/mockIngestCheckEnvFailed"))
-
-	tk.MustExec(`set global tidb_enable_dist_task=on;`)
-	// Test reset engine failed.
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/ingest/mockResetEngineFailed", "return"))
-	tk.MustGetErrMsg("alter table t add index idx(b);", "[0]mock reset engine failed")
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/ingest/mockResetEngineFailed"))
-	tk.MustExec(`set global tidb_enable_dist_task=off;`)
 }
 
 func TestAddIndexImportFailed(t *testing.T) {
@@ -515,10 +505,10 @@ func TestAddIndexImportFailed(t *testing.T) {
 		tk.MustExec(insertSQL)
 	}
 
-	err := failpoint.Enable("github.com/pingcap/tidb/pkg/lightning/backend/local/mockWritePeerErr", "1*return")
+	err := failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/mockWritePeerErr", "1*return")
 	require.NoError(t, err)
 	tk.MustExec("alter table t add index idx(a);")
-	err = failpoint.Disable("github.com/pingcap/tidb/pkg/lightning/backend/local/mockWritePeerErr")
+	err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/mockWritePeerErr")
 	require.NoError(t, err)
 	tk.MustExec("admin check table t;")
 }
@@ -556,7 +546,6 @@ func TestFirstLitSlowStart(t *testing.T) {
 	tk.MustExec("create database addindexlit;")
 	tk.MustExec("use addindexlit;")
 	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-	tk.MustExec(`set global tidb_enable_dist_task=off;`)
 
 	tk.MustExec("create table t(a int, b int);")
 	tk.MustExec("insert into t values (1, 1), (2, 2), (3, 3);")
@@ -574,9 +563,9 @@ func TestFirstLitSlowStart(t *testing.T) {
 	t.Cleanup(func() {
 		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/ownerResignAfterDispatchLoopCheck"))
 	})
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/lightning/backend/local/slowCreateFS", "return()"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/slowCreateFS", "return()"))
 	t.Cleanup(func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/lightning/backend/local/slowCreateFS"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/br/pkg/lightning/backend/local/slowCreateFS"))
 	})
 
 	var wg sync.WaitGroup
@@ -589,39 +578,5 @@ func TestFirstLitSlowStart(t *testing.T) {
 		defer wg.Done()
 		tk1.MustExec("alter table t2 add unique index idx(a);")
 	}()
-	wg.Wait()
-}
-
-func TestConcFastReorg(t *testing.T) {
-	store := realtikvtest.CreateMockStoreAndSetup(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("drop database if exists addindexlit;")
-	tk.MustExec("create database addindexlit;")
-	tk.MustExec("use addindexlit;")
-	tk.MustExec(`set global tidb_ddl_enable_fast_reorg=on;`)
-
-	tblNum := 10
-	for i := 0; i < tblNum; i++ {
-		tk.MustExec(fmt.Sprintf("create table t%d(a int);", i))
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(tblNum)
-	for i := 0; i < tblNum; i++ {
-		i := i
-		go func() {
-			defer wg.Done()
-			tk2 := testkit.NewTestKit(t, store)
-			tk2.MustExec("use addindexlit;")
-			tk2.MustExec(fmt.Sprintf("insert into t%d values (1), (2), (3);", i))
-
-			if i%2 == 0 {
-				tk2.MustExec(fmt.Sprintf("alter table t%d add index idx(a);", i))
-			} else {
-				tk2.MustExec(fmt.Sprintf("alter table t%d add unique index idx(a);", i))
-			}
-		}()
-	}
-
 	wg.Wait()
 }

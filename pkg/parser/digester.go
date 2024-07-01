@@ -23,7 +23,6 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/charset"
 )
 
@@ -82,17 +81,11 @@ func DigestNormalized(normalized string) (digest *Digest) {
 // Normalize generates the normalized statements.
 // it will get normalized form of statement text
 // which removes general property of a statement but keeps specific property.
-// possible values for 'redact' is "OFF", "ON" or "MARKER". Passing "" is seen as "OFF".
 //
-// when "OFF", it is returned as is
-// for example, when "ON": Normalize('select 1 from b where a = 1') => 'select ? from b where a = ?'
-// for example, when "MARKER": Normalize('select 1 from b where a = 1') => 'select ‹1› from b where a = ‹1›'
-func Normalize(sql string, redact string) (result string) {
-	if redact == "" || redact == errors.RedactLogDisable {
-		return sql
-	}
+// for example: Normalize('select 1 from b where a = 1') => 'select ? from b where a = ?'
+func Normalize(sql string) (result string) {
 	d := digesterPool.Get().(*sqlDigester)
-	result = d.doNormalize(sql, redact, false)
+	result = d.doNormalize(sql, false)
 	digesterPool.Put(d)
 	return
 }
@@ -102,9 +95,9 @@ func Normalize(sql string, redact string) (result string) {
 // which removes general property of a statement but keeps specific property.
 //
 // for example: NormalizeForBinding('select 1 from b where a = 1') => 'select ? from b where a = ?'
-func NormalizeForBinding(sql string, forPlanReplayerReload bool) (result string) {
+func NormalizeForBinding(sql string) (result string) {
 	d := digesterPool.Get().(*sqlDigester)
-	result = d.doNormalizeForBinding(sql, false, forPlanReplayerReload)
+	result = d.doNormalizeForBinding(sql, false)
 	digesterPool.Put(d)
 	return
 }
@@ -116,7 +109,7 @@ func NormalizeForBinding(sql string, forPlanReplayerReload bool) (result string)
 // for example: Normalize('select /*+ use_index(t, primary) */ 1 from b where a = 1') => 'select /*+ use_index(t, primary) */ ? from b where a = ?'
 func NormalizeKeepHint(sql string) (result string) {
 	d := digesterPool.Get().(*sqlDigester)
-	result = d.doNormalize(sql, errors.RedactLogEnable, true)
+	result = d.doNormalize(sql, true)
 	digesterPool.Put(d)
 	return
 }
@@ -168,7 +161,7 @@ func (d *sqlDigester) doDigestNormalized(normalized string) (digest *Digest) {
 }
 
 func (d *sqlDigester) doDigest(sql string) (digest *Digest) {
-	d.normalize(sql, errors.RedactLogEnable, false, false, false)
+	d.normalize(sql, false, false)
 	d.hasher.Write(d.buffer.Bytes())
 	d.buffer.Reset()
 	digest = NewDigest(d.hasher.Sum(nil))
@@ -176,22 +169,22 @@ func (d *sqlDigester) doDigest(sql string) (digest *Digest) {
 	return
 }
 
-func (d *sqlDigester) doNormalize(sql string, redact string, keepHint bool) (result string) {
-	d.normalize(sql, redact, keepHint, false, false)
+func (d *sqlDigester) doNormalize(sql string, keepHint bool) (result string) {
+	d.normalize(sql, keepHint, false)
 	result = d.buffer.String()
 	d.buffer.Reset()
 	return
 }
 
-func (d *sqlDigester) doNormalizeForBinding(sql string, keepHint bool, forPlanReplayerReload bool) (result string) {
-	d.normalize(sql, errors.RedactLogEnable, keepHint, true, forPlanReplayerReload)
+func (d *sqlDigester) doNormalizeForBinding(sql string, keepHint bool) (result string) {
+	d.normalize(sql, keepHint, true)
 	result = d.buffer.String()
 	d.buffer.Reset()
 	return
 }
 
 func (d *sqlDigester) doNormalizeDigest(sql string) (normalized string, digest *Digest) {
-	d.normalize(sql, errors.RedactLogEnable, false, false, false)
+	d.normalize(sql, false, false)
 	normalized = d.buffer.String()
 	d.hasher.Write(d.buffer.Bytes())
 	d.buffer.Reset()
@@ -201,7 +194,7 @@ func (d *sqlDigester) doNormalizeDigest(sql string) (normalized string, digest *
 }
 
 func (d *sqlDigester) doNormalizeDigestForBinding(sql string) (normalized string, digest *Digest) {
-	d.normalize(sql, errors.RedactLogEnable, false, true, false)
+	d.normalize(sql, false, true)
 	normalized = d.buffer.String()
 	d.hasher.Write(d.buffer.Bytes())
 	d.buffer.Reset()
@@ -219,7 +212,7 @@ const (
 	genericSymbolList = -2
 )
 
-func (d *sqlDigester) normalize(sql string, redact string, keepHint bool, forBinding bool, forPlanReplayerReload bool) {
+func (d *sqlDigester) normalize(sql string, keepHint bool, forBinding bool) {
 	d.lexer.reset(sql)
 	d.lexer.setKeepHint(keepHint)
 	for {
@@ -236,15 +229,12 @@ func (d *sqlDigester) normalize(sql string, redact string, keepHint bool, forBin
 			continue
 		}
 
-		d.reduceLit(&currTok, redact, forBinding, forPlanReplayerReload)
-		if forPlanReplayerReload {
-			// Apply for plan replayer to match specific rules, changing IN (...) to IN (?). This can avoid plan replayer load failures caused by parse errors.
-			d.replaceSingleLiteralWithInList(&currTok)
-		} else if forBinding {
-			// Apply binding matching specific rules, IN (?) => IN ( ... ) #44298
+		d.reduceLit(&currTok)
+
+		// Apply binding matching specific rules
+		if forBinding {
+			// IN (?) => IN ( ... ) #44298
 			d.reduceInListWithSingleLiteral(&currTok)
-			// In (Row(...)) => In (...) #51222
-			d.reduceInRowListWithSingleLiteral(&currTok)
 		}
 
 		if currTok.tok == identifier {
@@ -320,33 +310,10 @@ func (d *sqlDigester) reduceOptimizerHint(tok *token) (reduced bool) {
 	return
 }
 
-func (d *sqlDigester) reduceLit(currTok *token, redact string, forBinding bool, forPlanReplayer bool) {
+func (d *sqlDigester) reduceLit(currTok *token) {
 	if !d.isLit(*currTok) {
 		return
 	}
-
-	if redact == errors.RedactLogMarker && !forBinding && !forPlanReplayer {
-		switch currTok.lit {
-		case "?", "*":
-			return
-		}
-		input := currTok.lit
-		b := &strings.Builder{}
-		b.Grow(len(input))
-		_, _ = b.WriteRune('‹')
-		for _, c := range input {
-			if c == '‹' || c == '›' {
-				_, _ = b.WriteRune(c)
-				_, _ = b.WriteRune(c)
-			} else {
-				_, _ = b.WriteRune(c)
-			}
-		}
-		_, _ = b.WriteRune('›')
-		currTok.lit = b.String()
-		return
-	}
-
 	// count(*) => count(?)
 	if currTok.lit == "*" {
 		if d.isStarParam() {
@@ -377,17 +344,6 @@ func (d *sqlDigester) reduceLit(currTok *token, redact string, forBinding bool, 
 		currTok.tok = genericSymbolList
 		currTok.lit = "..."
 		return
-	}
-	// reduce "In (row(...), row(...))" to "In (row(...))"
-	// final, it will be reduced to "In (...)". Issue: #51222
-	if forBinding {
-		last9 := d.tokens.back(9)
-		if d.isGenericRowListsWithIn(last9) {
-			d.tokens.popBack(5)
-			currTok.tok = genericSymbolList
-			currTok.lit = "..."
-			return
-		}
 	}
 
 	// order by n => order by n
@@ -421,57 +377,6 @@ func (d *sqlDigester) isGenericLists(last4 []token) bool {
 	return true
 }
 
-// In (Row(...), Row(...)) => In (Row(...))
-func (d *sqlDigester) isGenericRowListsWithIn(last9 []token) bool {
-	if len(last9) < 7 {
-		return false
-	}
-	if !d.isInKeyword(last9[0]) {
-		return false
-	}
-	if last9[1].lit != "(" {
-		return false
-	}
-	if !d.isRowKeyword(last9[2]) {
-		return false
-	}
-	if last9[3].lit != "(" {
-		return false
-	}
-	if !(last9[4].tok == genericSymbol || last9[4].tok == genericSymbolList) {
-		return false
-	}
-	if last9[5].lit != ")" {
-		return false
-	}
-	if !d.isComma(last9[6]) {
-		return false
-	}
-	if !d.isRowKeyword(last9[7]) {
-		return false
-	}
-	if last9[8].lit != "(" {
-		return false
-	}
-	return true
-}
-
-// IN (...) => IN (?) Issue: #43192
-func (d *sqlDigester) replaceSingleLiteralWithInList(currTok *token) {
-	last5 := d.tokens.back(5)
-	if len(last5) == 5 &&
-		d.isInKeyword(last5[0]) &&
-		d.isLeftParen(last5[1]) &&
-		last5[2].lit == "." &&
-		last5[3].lit == "." &&
-		last5[4].lit == "." &&
-		d.isRightParen(*currTok) {
-		d.tokens.popBack(3)
-		d.tokens.pushBack(token{genericSymbol, "?"})
-		return
-	}
-}
-
 // IN (?) => IN (...) Issue: #44298
 func (d *sqlDigester) reduceInListWithSingleLiteral(currTok *token) {
 	last3 := d.tokens.back(3)
@@ -481,23 +386,6 @@ func (d *sqlDigester) reduceInListWithSingleLiteral(currTok *token) {
 		last3[2].tok == genericSymbol &&
 		d.isRightParen(*currTok) {
 		d.tokens.popBack(1)
-		d.tokens.pushBack(token{genericSymbolList, "..."})
-		return
-	}
-}
-
-// In (Row(...)) => In (...) #51222
-func (d *sqlDigester) reduceInRowListWithSingleLiteral(currTok *token) {
-	last5 := d.tokens.back(6)
-	if len(last5) == 6 &&
-		d.isInKeyword(last5[0]) &&
-		d.isLeftParen(last5[1]) &&
-		d.isRowKeyword(last5[2]) &&
-		d.isLeftParen(last5[3]) &&
-		(last5[4].tok == genericSymbolList || last5[4].tok == genericSymbol) &&
-		d.isRightParen(last5[5]) &&
-		d.isRightParen(*currTok) {
-		d.tokens.popBack(4)
 		d.tokens.pushBack(token{genericSymbolList, "..."})
 		return
 	}
@@ -623,11 +511,6 @@ func (*sqlDigester) isRightParen(tok token) (isLeftParen bool) {
 
 func (*sqlDigester) isInKeyword(tok token) (isInKeyword bool) {
 	isInKeyword = tok.lit == "in"
-	return
-}
-
-func (*sqlDigester) isRowKeyword(tok token) (isRowKeyword bool) {
-	isRowKeyword = tok.lit == "row"
 	return
 }
 

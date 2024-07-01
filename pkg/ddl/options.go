@@ -34,7 +34,6 @@ type Options struct {
 	InfoCache    *infoschema.InfoCache
 	Hook         Callback
 	Lease        time.Duration
-	SchemaLoader SchemaLoader
 }
 
 // WithEtcdClient specifies the `clientv3.Client` of DDL used to request the etcd service
@@ -76,12 +75,5 @@ func WithHook(callback Callback) Option {
 func WithLease(lease time.Duration) Option {
 	return func(options *Options) {
 		options.Lease = lease
-	}
-}
-
-// WithSchemaLoader specifies the schema loader used to load schema from storage
-func WithSchemaLoader(loader SchemaLoader) Option {
-	return func(options *Options) {
-		options.SchemaLoader = loader
 	}
 }

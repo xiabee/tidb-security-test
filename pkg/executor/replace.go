@@ -20,7 +20,6 @@ import (
 	"runtime/trace"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -44,7 +43,7 @@ func (e *ReplaceExec) Close() error {
 		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
 	}
 	if e.SelectExec != nil {
-		return exec.Close(e.SelectExec)
+		return e.SelectExec.Close()
 	}
 	return nil
 }
@@ -55,7 +54,7 @@ func (e *ReplaceExec) Open(ctx context.Context) error {
 	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
 
 	if e.SelectExec != nil {
-		return exec.Open(ctx, e.SelectExec)
+		return e.SelectExec.Open(ctx)
 	}
 	e.initEvalBuffer()
 	return nil
@@ -120,7 +119,7 @@ func (e *ReplaceExec) replaceRow(ctx context.Context, r toBeCheckedRow) error {
 //  3. error: the error.
 func (e *ReplaceExec) removeIndexRow(ctx context.Context, txn kv.Transaction, r toBeCheckedRow) (rowUnchanged, foundDupKey bool, err error) {
 	for _, uk := range r.uniqueKeys {
-		_, handle, err := tables.FetchDuplicatedHandle(ctx, uk.newKey, true, txn, e.Table.Meta().ID)
+		_, handle, err := tables.FetchDuplicatedHandle(ctx, uk.newKey, true, txn, e.Table.Meta().ID, uk.commonHandle)
 		if err != nil {
 			return false, false, err
 		}
@@ -188,7 +187,7 @@ func (e *ReplaceExec) exec(ctx context.Context, newRows [][]types.Datum) error {
 		}
 	}
 	e.memTracker.Consume(int64(txn.Size() - txnSize))
-	return txn.MayFlush()
+	return nil
 }
 
 // Next implements the Executor Next interface.

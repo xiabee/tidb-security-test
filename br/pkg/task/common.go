@@ -33,7 +33,6 @@ import (
 	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/tikv/client-go/v2/config"
 	pd "github.com/tikv/pd/client"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -158,15 +157,6 @@ func (tls *TLSConfig) ToPDSecurityOption() pd.SecurityOption {
 	securityOption.CertPath = tls.Cert
 	securityOption.KeyPath = tls.Key
 	return securityOption
-}
-
-// Convert the TLS config to the PD security option.
-func (tls *TLSConfig) ToKVSecurity() config.Security {
-	return config.Security{
-		ClusterSSLCA:   tls.CA,
-		ClusterSSLCert: tls.Cert,
-		ClusterSSLKey:  tls.Key,
-	}
 }
 
 // ParseFromFlags parses the TLS config from the flag set.
@@ -329,7 +319,6 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 // HiddenFlagsForStream temporary hidden flags that stream cmd not support.
 func HiddenFlagsForStream(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagChecksum)
-	_ = flags.MarkHidden(flagLoadStats)
 	_ = flags.MarkHidden(flagChecksumConcurrency)
 	_ = flags.MarkHidden(flagRateLimit)
 	_ = flags.MarkHidden(flagRateLimitUnit)
@@ -415,12 +404,12 @@ func parseCipherType(t string) (encryptionpb.EncryptionMethod, error) {
 func checkCipherKey(cipherKey, cipherKeyFile string) error {
 	if (len(cipherKey) == 0) == (len(cipherKeyFile) == 0) {
 		return errors.Annotate(berrors.ErrInvalidArgument,
-			"exactly one of cipher key or keyfile path should be provided")
+			"exactly one of --crypter.key or --crypter.key-file should be provided")
 	}
 	return nil
 }
 
-func GetCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
+func getCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
 	if err := checkCipherKey(cipherKey, cipherKeyFile); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -480,7 +469,7 @@ func (cfg *Config) parseCipherInfo(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
-	cfg.CipherInfo.CipherKey, err = GetCipherKeyContent(key, keyFilePath)
+	cfg.CipherInfo.CipherKey, err = getCipherKeyContent(key, keyFilePath)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -642,7 +631,8 @@ func NewMgr(ctx context.Context,
 		tlsConf *tls.Config
 		err     error
 	)
-	if len(pds) == 0 {
+	pdAddress := strings.Join(pds, ",")
+	if len(pdAddress) == 0 {
 		return nil, errors.Annotate(berrors.ErrInvalidArgument, "pd address can not be empty")
 	}
 
@@ -659,7 +649,7 @@ func NewMgr(ctx context.Context,
 
 	// Is it necessary to remove `StoreBehavior`?
 	return conn.NewMgr(
-		ctx, g, pds, tlsConf, securityOption, keepalive, util.SkipTiFlash,
+		ctx, g, pdAddress, tlsConf, securityOption, keepalive, util.SkipTiFlash,
 		checkRequirements, needDomain, versionCheckerType,
 	)
 }

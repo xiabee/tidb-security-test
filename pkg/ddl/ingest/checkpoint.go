@@ -25,15 +25,12 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/config"
 	sess "github.com/pingcap/tidb/pkg/ddl/internal/session"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/tikv/client-go/v2/oracle"
-	pd "github.com/tikv/pd/client"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
 )
 
@@ -49,7 +46,6 @@ type CheckpointManager struct {
 	jobID         int64
 	indexIDs      []int64
 	localStoreDir string
-	pdCli         pd.Client
 	logger        *zap.Logger
 
 	// Derived and unchanged after the initialization.
@@ -76,7 +72,6 @@ type CheckpointManager struct {
 	pidImported      int64
 	startKeyImported kv.Key
 	endKeyImported   kv.Key
-	ts               uint64
 
 	// For persisting the checkpoint periodically.
 	updaterWg sync.WaitGroup
@@ -92,12 +87,9 @@ type taskCheckpoint struct {
 	lastBatchRead bool
 }
 
-// FlushController is an interface to control the flush of data so after it
-// returns caller can save checkpoint.
+// FlushController is an interface to control the flush of the checkpoint.
 type FlushController interface {
-	// Flush checks if al engines need to be flushed and imported based on given
-	// FlushMode. It's concurrent safe.
-	Flush(mode FlushMode) (flushed, imported bool, errIdxID int64, err error)
+	Flush(indexID int64, mode FlushMode) (flushed, imported bool, err error)
 }
 
 // NewCheckpointManager creates a new checkpoint manager.
@@ -108,11 +100,11 @@ func NewCheckpointManager(
 	jobID int64,
 	indexIDs []int64,
 	localStoreDir string,
-	pdCli pd.Client,
 ) (*CheckpointManager, error) {
 	instanceAddr := InstanceAddr()
 	ctx2, cancel := context.WithCancel(ctx)
-	logger := logutil.DDLIngestLogger().With(
+	logger := logutil.BgLogger().With(
+		zap.String("category", "ddl-ingest"),
 		zap.Int64("jobID", jobID), zap.Int64s("indexIDs", indexIDs))
 
 	cm := &CheckpointManager{
@@ -123,7 +115,6 @@ func NewCheckpointManager(
 		jobID:         jobID,
 		indexIDs:      indexIDs,
 		localStoreDir: localStoreDir,
-		pdCli:         pdCli,
 		logger:        logger,
 		checkpoints:   make(map[int]*taskCheckpoint, 16),
 		mu:            sync.Mutex{},
@@ -131,7 +122,7 @@ func NewCheckpointManager(
 		updaterWg:     sync.WaitGroup{},
 		updaterCh:     make(chan chan struct{}),
 	}
-	err := cm.resumeOrInitCheckpoint()
+	err := cm.resumeCheckpoint()
 	if err != nil {
 		return nil, err
 	}
@@ -206,19 +197,10 @@ func (s *CheckpointManager) UpdateWrittenKeys(taskID int, delta int) error {
 	cp.writtenKeys += delta
 	s.mu.Unlock()
 
-	flushed, imported, _, err := s.flushCtrl.Flush(FlushModeAuto)
+	flushed, imported, _, err := TryFlushAllIndexes(s.flushCtrl, FlushModeAuto, s.indexIDs)
 	if !flushed || err != nil {
 		return err
 	}
-
-	failpoint.Inject("resignAfterFlush", func() {
-		// used in a manual test
-		ResignOwnerForTest.Store(true)
-		// wait until ResignOwnerForTest is processed
-		for ResignOwnerForTest.Load() {
-			time.Sleep(100 * time.Millisecond)
-		}
-	})
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,7 +243,7 @@ func (s *CheckpointManager) Close() {
 // Flush flushed the data and updates checkpoint.
 func (s *CheckpointManager) Flush() {
 	// use FlushModeForceFlushNoImport to finish the flush process timely.
-	_, _, _, err := s.flushCtrl.Flush(FlushModeForceFlushNoImport)
+	_, _, _, err := TryFlushAllIndexes(s.flushCtrl, FlushModeForceFlushNoImport, s.indexIDs)
 	if err != nil {
 		s.logger.Warn("flush local engine failed", zap.Error(err))
 	}
@@ -269,9 +251,16 @@ func (s *CheckpointManager) Flush() {
 	s.afterFlush()
 	s.mu.Unlock()
 
-	err = s.updateCheckpoint()
-	if err != nil {
-		s.logger.Error("update checkpoint failed", zap.Error(err))
+	finishCh := make(chan struct{})
+	select {
+	case s.updaterCh <- finishCh:
+	case <-s.ctx.Done():
+		return
+	}
+	// wait updateCheckpointLoop to finish checkpoint update.
+	select {
+	case <-finishCh:
+	case <-s.ctx.Done():
 	}
 }
 
@@ -294,13 +283,6 @@ func (s *CheckpointManager) Reset(newPhysicalID int64, start, end kv.Key) {
 	}
 }
 
-// GetTS returns the TS saved in checkpoint.
-func (s *CheckpointManager) GetTS() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.ts
-}
-
 // JobReorgMeta is the metadata for a reorg job.
 type JobReorgMeta struct {
 	Checkpoint *ReorgCheckpoint `json:"reorg_checkpoint"`
@@ -317,8 +299,6 @@ type ReorgCheckpoint struct {
 	PhysicalID int64  `json:"physical_id"`
 	StartKey   kv.Key `json:"start_key"`
 	EndKey     kv.Key `json:"end_key"`
-	// TS of next engine ingest.
-	TS uint64 `json:"ts"`
 
 	Version int64 `json:"version"`
 }
@@ -329,14 +309,14 @@ const (
 	JobCheckpointVersion1       = 1
 )
 
-func (s *CheckpointManager) resumeOrInitCheckpoint() error {
+func (s *CheckpointManager) resumeCheckpoint() error {
 	sessCtx, err := s.sessPool.Get()
 	if err != nil {
 		return errors.Trace(err)
 	}
 	defer s.sessPool.Put(sessCtx)
 	ddlSess := sess.NewSession(sessCtx)
-	err = ddlSess.RunInTxn(func(se *sess.Session) error {
+	return ddlSess.RunInTxn(func(se *sess.Session) error {
 		template := "select reorg_meta from mysql.tidb_ddl_reorg where job_id = %d and ele_type = %s;"
 		sql := fmt.Sprintf(template, s.jobID, util.WrapKey2String(meta.IndexElementKey))
 		ctx := kv.WithInternalSourceType(s.ctx, kv.InternalTxnBackfillDDLPrefix+"add_index")
@@ -344,7 +324,6 @@ func (s *CheckpointManager) resumeOrInitCheckpoint() error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-
 		if len(rows) == 0 || rows[0].IsNull(0) {
 			return nil
 		}
@@ -360,7 +339,6 @@ func (s *CheckpointManager) resumeOrInitCheckpoint() error {
 			s.pidImported = cp.PhysicalID
 			s.startKeyImported = cp.StartKey
 			s.endKeyImported = cp.EndKey
-			s.ts = cp.TS
 			if util.FolderNotEmpty(s.localStoreDir) &&
 				(s.instanceAddr == cp.InstanceAddr || cp.InstanceAddr == "" /* initial state */) {
 				s.localDataIsValid = true
@@ -368,8 +346,8 @@ func (s *CheckpointManager) resumeOrInitCheckpoint() error {
 				s.flushedKeyCnt = cp.LocalKeyCount
 			}
 			s.logger.Info("resume checkpoint",
-				zap.String("flushed key low watermark", hex.EncodeToString(s.flushedKeyLowWatermark)),
-				zap.String("imported key low watermark", hex.EncodeToString(s.importedKeyLowWatermark)),
+				zap.String("minimum flushed key", hex.EncodeToString(s.flushedKeyLowWatermark)),
+				zap.String("minimum imported key", hex.EncodeToString(s.importedKeyLowWatermark)),
 				zap.Int64("physical table ID", cp.PhysicalID),
 				zap.String("previous instance", cp.InstanceAddr),
 				zap.String("current instance", s.instanceAddr))
@@ -378,27 +356,10 @@ func (s *CheckpointManager) resumeOrInitCheckpoint() error {
 		s.logger.Info("checkpoint is empty")
 		return nil
 	})
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if s.ts > 0 {
-		return nil
-	}
-	// if TS is not set, we need to allocate a TS and save it to the storage before
-	// continue.
-	p, l, err := s.pdCli.GetTS(s.ctx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	ts := oracle.ComposeTS(p, l)
-	s.ts = ts
-	return s.updateCheckpointImpl()
 }
 
-// updateCheckpointImpl is only used by updateCheckpointLoop goroutine or in
-// NewCheckpointManager. In other cases, use updateCheckpoint instead.
-func (s *CheckpointManager) updateCheckpointImpl() error {
+// updateCheckpoint is only used by updateCheckpointLoop goroutine.
+func (s *CheckpointManager) updateCheckpoint() error {
 	s.mu.Lock()
 	flushedKeyLowWatermark := s.flushedKeyLowWatermark
 	importedKeyLowWatermark := s.importedKeyLowWatermark
@@ -407,7 +368,6 @@ func (s *CheckpointManager) updateCheckpointImpl() error {
 	pidImported := s.pidImported
 	startKeyImported := s.startKeyImported
 	endKeyImported := s.endKeyImported
-	ts := s.ts
 	s.mu.Unlock()
 
 	sessCtx, err := s.sessPool.Get()
@@ -427,7 +387,6 @@ func (s *CheckpointManager) updateCheckpointImpl() error {
 			PhysicalID:     pidImported,
 			StartKey:       startKeyImported,
 			EndKey:         endKeyImported,
-			TS:             ts,
 			Version:        JobCheckpointVersionCurrent,
 		}
 		rawReorgMeta, err := json.Marshal(JobReorgMeta{Checkpoint: cp})
@@ -454,16 +413,12 @@ func (s *CheckpointManager) updateCheckpointImpl() error {
 }
 
 func (s *CheckpointManager) updateCheckpointLoop() {
-	failpoint.Inject("checkpointLoopExit", func() {
-		// used in a manual test
-		failpoint.Return()
-	})
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case finishCh := <-s.updaterCh:
-			err := s.updateCheckpointImpl()
+			err := s.updateCheckpoint()
 			if err != nil {
 				s.logger.Error("update checkpoint failed", zap.Error(err))
 			}
@@ -475,7 +430,7 @@ func (s *CheckpointManager) updateCheckpointLoop() {
 				continue
 			}
 			s.mu.Unlock()
-			err := s.updateCheckpointImpl()
+			err := s.updateCheckpoint()
 			if err != nil {
 				s.logger.Error("periodically update checkpoint failed", zap.Error(err))
 			}
@@ -483,36 +438,4 @@ func (s *CheckpointManager) updateCheckpointLoop() {
 			return
 		}
 	}
-}
-
-func (s *CheckpointManager) updateCheckpoint() error {
-	failpoint.Inject("checkpointLoopExit", func() {
-		// used in a manual test
-		failpoint.Return(errors.New("failpoint triggered so can't update checkpoint"))
-	})
-	finishCh := make(chan struct{})
-	select {
-	case s.updaterCh <- finishCh:
-	case <-s.ctx.Done():
-		return s.ctx.Err()
-	}
-	// wait updateCheckpointLoop to finish checkpoint update.
-	select {
-	case <-finishCh:
-	case <-s.ctx.Done():
-		return s.ctx.Err()
-	}
-	return nil
-}
-
-func (s *CheckpointManager) refreshTSAndUpdateCP() (uint64, error) {
-	p, l, err := s.pdCli.GetTS(s.ctx)
-	if err != nil {
-		return 0, errors.Trace(err)
-	}
-	newTS := oracle.ComposeTS(p, l)
-	s.mu.Lock()
-	s.ts = newTS
-	s.mu.Unlock()
-	return newTS, s.updateCheckpoint()
 }

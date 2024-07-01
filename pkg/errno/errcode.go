@@ -846,15 +846,12 @@ const (
 	ErrWarnConflictingHint                                   = 3126
 	ErrUnresolvedHintName                                    = 3128
 	ErrInvalidJSONText                                       = 3140
-	ErrInvalidJSONTextInParam                                = 3141
 	ErrInvalidJSONPath                                       = 3143
 	ErrInvalidJSONCharset                                    = 3144
 	ErrInvalidTypeForJSON                                    = 3146
 	ErrInvalidJSONPathMultipleSelection                      = 3149
 	ErrInvalidJSONContainsPathType                           = 3150
 	ErrJSONUsedAsKey                                         = 3152
-	ErrJSONVacuousPath                                       = 3153
-	ErrJSONBadOneOrAllArg                                    = 3154
 	ErrJSONDocumentTooDeep                                   = 3157
 	ErrJSONDocumentNULLKey                                   = 3158
 	ErrSecureTransportRequired                               = 3159
@@ -930,7 +927,6 @@ const (
 	ErrCheckConstraintDupName                                = 3822
 	ErrCheckConstraintClauseUsingFKReferActionColumn         = 3823
 	ErrDependentByFunctionalIndex                            = 3837
-	ErrInvalidJSONType                                       = 3853
 	ErrCannotConvertString                                   = 3854
 	ErrDependentByPartitionFunctional                        = 3855
 	ErrInvalidJSONValueForFuncIndex                          = 3903
@@ -1072,6 +1068,7 @@ const (
 	ErrLoadDataInvalidURI                  = 8158
 	ErrLoadDataCantAccess                  = 8159
 	ErrLoadDataCantRead                    = 8160
+	ErrLoadDataPhysicalImportTableNotEmpty = 8161
 	ErrLoadDataWrongFormatConfig           = 8162
 	ErrUnknownOption                       = 8163
 	ErrInvalidOptionVal                    = 8164
@@ -1082,8 +1079,6 @@ const (
 	ErrLoadDataLocalUnsupportedOption      = 8172
 	ErrLoadDataPreCheckFailed              = 8173
 	ErrBRJobNotFound                       = 8174
-	ErrMemoryExceedForQuery                = 8175
-	ErrMemoryExceedForInstance             = 8176
 
 	// Error codes used by TiDB ddl package
 	ErrUnsupportedDDLOperation            = 8200
@@ -1138,7 +1133,6 @@ const (
 	ErrCannotPauseDDLJob  = 8260
 	ErrCannotResumeDDLJob = 8261
 	ErrPausedDDLJob       = 8262
-	ErrBDRRestrictedDDL   = 8263
 
 	// Resource group errors.
 	ErrResourceGroupExists                    = 8248

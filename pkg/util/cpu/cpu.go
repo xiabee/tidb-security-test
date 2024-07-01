@@ -16,12 +16,10 @@ package cpu
 
 import (
 	"os"
-	"runtime"
 	"sync"
 	"time"
 
 	sigar "github.com/cloudfoundry/gosigar"
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/util/cgroup"
@@ -121,12 +119,4 @@ func getCPUTime() (userTimeMillis, sysTimeMillis int64, err error) {
 		return 0, 0, err
 	}
 	return int64(cpuTime.User), int64(cpuTime.Sys), nil
-}
-
-// GetCPUCount returns the number of logical CPUs usable by the current process.
-func GetCPUCount() int {
-	failpoint.Inject("mockNumCpu", func(val failpoint.Value) {
-		failpoint.Return(val.(int))
-	})
-	return runtime.GOMAXPROCS(0)
 }

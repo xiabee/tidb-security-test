@@ -5,7 +5,6 @@
 //
 //	mockgen -package mock github.com/pingcap/tidb/pkg/disttask/importinto MiniTaskExecutor
 //
-
 // Package mock is a generated GoMock package.
 package mock
 
@@ -13,7 +12,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	"github.com/pingcap/tidb/pkg/lightning/backend"
+	backend "github.com/pingcap/tidb/br/pkg/lightning/backend"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -38,11 +37,6 @@ func NewMockMiniTaskExecutor(ctrl *gomock.Controller) *MockMiniTaskExecutor {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockMiniTaskExecutor) EXPECT() *MockMiniTaskExecutorMockRecorder {
 	return m.recorder
-}
-
-// ISGOMOCK indicates that this struct is a gomock mock.
-func (m *MockMiniTaskExecutor) ISGOMOCK() struct{} {
-	return struct{}{}
 }
 
 // Run mocks base method.

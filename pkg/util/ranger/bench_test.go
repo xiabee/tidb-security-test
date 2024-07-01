@@ -20,7 +20,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -113,22 +112,21 @@ WHERE
 	err = plannercore.Preprocess(context.Background(), sctx, stmts[0], plannercore.WithPreprocessorReturn(ret))
 	require.NoError(b, err)
 	ctx := context.Background()
-	p, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
+	p, _, err := plannercore.BuildLogicalPlanForTest(ctx, sctx, stmts[0], ret.InfoSchema)
 	require.NoError(b, err)
-	selection := p.(base.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
+	selection := p.(plannercore.LogicalPlan).Children()[0].(*plannercore.LogicalSelection)
 	tbl := selection.Children()[0].(*plannercore.DataSource).TableInfo()
 	require.NotNil(b, selection)
 	conds := make([]expression.Expression, len(selection.Conditions))
 	for i, cond := range selection.Conditions {
-		conds[i] = expression.PushDownNot(sctx.GetExprCtx(), cond)
+		conds[i] = expression.PushDownNot(sctx, cond)
 	}
 	cols, lengths := expression.IndexInfo2PrefixCols(tbl.Columns, selection.Schema().Columns, tbl.Indices[0])
 	require.NotNil(b, cols)
 
 	b.ResetTimer()
-	pctx := sctx.GetPlanCtx()
 	for i := 0; i < b.N; i++ {
-		_, err = ranger.DetachCondAndBuildRangeForIndex(pctx.GetRangerCtx(), conds, cols, lengths, 0)
+		_, err = ranger.DetachCondAndBuildRangeForIndex(sctx, conds, cols, lengths, 0)
 		require.NoError(b, err)
 	}
 	b.StopTimer()

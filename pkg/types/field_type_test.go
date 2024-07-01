@@ -158,7 +158,7 @@ func TestFieldType(t *testing.T) {
 
 func TestDefaultTypeForValue(t *testing.T) {
 	tests := []struct {
-		value     any
+		value     interface{}
 		tp        byte
 		flen      int
 		decimal   int

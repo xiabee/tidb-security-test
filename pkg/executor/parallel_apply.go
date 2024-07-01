@@ -20,13 +20,12 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/executor/internal/applycache"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
-	"github.com/pingcap/tidb/pkg/executor/join"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
@@ -67,7 +66,7 @@ type ParallelNestedLoopApplyExec struct {
 	outerRow      []*chunk.Row
 	hasMatch      []bool
 	hasNull       []bool
-	joiners       []join.Joiner
+	joiners       []joiner
 
 	// fields about concurrency control
 	concurrency int
@@ -91,7 +90,7 @@ type ParallelNestedLoopApplyExec struct {
 
 // Open implements the Executor interface.
 func (e *ParallelNestedLoopApplyExec) Open(ctx context.Context) error {
-	err := exec.Open(ctx, e.outerExec)
+	err := e.outerExec.Open(ctx)
 	if err != nil {
 		return err
 	}
@@ -175,18 +174,18 @@ func (e *ParallelNestedLoopApplyExec) Close() error {
 	}
 	// Wait all workers to finish before Close() is called.
 	// Otherwise we may got data race.
-	err := exec.Close(e.outerExec)
+	err := e.outerExec.Close()
 
 	if e.RuntimeStats() != nil {
-		runtimeStats := join.NewJoinRuntimeStats()
+		runtimeStats := newJoinRuntimeStats()
 		if e.useCache {
 			var hitRatio float64
 			if e.cacheAccessCounter > 0 {
 				hitRatio = float64(e.cacheHitCounter) / float64(e.cacheAccessCounter)
 			}
-			runtimeStats.SetCacheInfo(true, hitRatio)
+			runtimeStats.setCacheInfo(true, hitRatio)
 		} else {
-			runtimeStats.SetCacheInfo(false, 0)
+			runtimeStats.setCacheInfo(false, 0)
 		}
 		runtimeStats.SetConcurrencyInfo(execdetails.NewConcurrencyInfo("Concurrency", e.concurrency))
 		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), runtimeStats)
@@ -220,7 +219,7 @@ func (e *ParallelNestedLoopApplyExec) outerWorker(ctx context.Context) {
 		}
 		e.outerList.Add(chk)
 		outerIter := chunk.NewIterator4Chunk(chk)
-		selected, err = expression.VectorizedFilter(e.Ctx().GetExprCtx().GetEvalCtx(), e.Ctx().GetSessionVars().EnableVectorizedExpression, e.outerFilter, outerIter, selected)
+		selected, err = expression.VectorizedFilter(e.Ctx(), e.outerFilter, outerIter, selected)
 		if err != nil {
 			e.putResult(nil, err)
 			return
@@ -268,7 +267,7 @@ func (e *ParallelNestedLoopApplyExec) putResult(chk *chunk.Chunk, err error) (ex
 
 func (e *ParallelNestedLoopApplyExec) handleWorkerPanic(ctx context.Context, wg *sync.WaitGroup) {
 	if r := recover(); r != nil {
-		err := util.GetRecoverError(r)
+		err := errors.Errorf("%v", r)
 		logutil.Logger(ctx).Error("parallel nested loop join worker panicked", zap.Error(err), zap.Stack("stack"))
 		e.resultChkCh <- result{nil, err}
 	}
@@ -283,9 +282,7 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 	for _, col := range e.corCols[id] {
 		*col.Data = e.outerRow[id].GetDatum(col.Index, col.RetType)
 		if e.useCache {
-			key, err = codec.EncodeKey(e.Ctx().GetSessionVars().StmtCtx.TimeZone(), key, *col.Data)
-			err = e.Ctx().GetSessionVars().StmtCtx.HandleError(err)
-			if err != nil {
+			if key, err = codec.EncodeKey(e.Ctx().GetSessionVars().StmtCtx, key, *col.Data); err != nil {
 				return err
 			}
 		}
@@ -304,8 +301,8 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 		}
 	}
 
-	err = exec.Open(ctx, e.innerExecs[id])
-	defer func() { terror.Log(exec.Close(e.innerExecs[id])) }()
+	err = e.innerExecs[id].Open(ctx)
+	defer terror.Call(e.innerExecs[id].Close)
 	if err != nil {
 		return err
 	}
@@ -327,7 +324,7 @@ func (e *ParallelNestedLoopApplyExec) fetchAllInners(ctx context.Context, id int
 			break
 		}
 
-		e.innerSelected[id], err = expression.VectorizedFilter(e.Ctx().GetExprCtx().GetEvalCtx(), e.Ctx().GetSessionVars().EnableVectorizedExpression, e.innerFilter[id], innerIter, e.innerSelected[id])
+		e.innerSelected[id], err = expression.VectorizedFilter(e.Ctx(), e.innerFilter[id], innerIter, e.innerSelected[id])
 		if err != nil {
 			return err
 		}
@@ -356,7 +353,7 @@ func (e *ParallelNestedLoopApplyExec) fetchNextOuterRow(id int, req *chunk.Chunk
 			}
 			if !outerRow.selected {
 				if e.outer {
-					e.joiners[id].OnMissMatch(false, *outerRow.row, req)
+					e.joiners[id].onMissMatch(false, *outerRow.row, req)
 					if req.IsFull() {
 						return nil, false
 					}
@@ -375,7 +372,7 @@ func (e *ParallelNestedLoopApplyExec) fillInnerChunk(ctx context.Context, id int
 	for {
 		if e.innerIter[id] == nil || e.innerIter[id].Current() == e.innerIter[id].End() {
 			if e.outerRow[id] != nil && !e.hasMatch[id] {
-				e.joiners[id].OnMissMatch(e.hasNull[id], *e.outerRow[id], req)
+				e.joiners[id].onMissMatch(e.hasNull[id], *e.outerRow[id], req)
 			}
 			var exit bool
 			e.outerRow[id], exit = e.fetchNextOuterRow(id, req)
@@ -394,7 +391,7 @@ func (e *ParallelNestedLoopApplyExec) fillInnerChunk(ctx context.Context, id int
 			e.innerIter[id].Begin()
 		}
 
-		matched, isNull, err := e.joiners[id].TryToMatchInners(*e.outerRow[id], e.innerIter[id], req)
+		matched, isNull, err := e.joiners[id].tryToMatchInners(*e.outerRow[id], e.innerIter[id], req)
 		e.hasMatch[id] = e.hasMatch[id] || matched
 		e.hasNull[id] = e.hasNull[id] || isNull
 

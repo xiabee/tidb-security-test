@@ -23,7 +23,6 @@ import (
 
 	"github.com/ngaut/pools"
 	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
@@ -34,6 +33,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -41,12 +41,10 @@ import (
 func testCreateTable(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *model.DBInfo, tblInfo *model.TableInfo) *model.Job {
 	job := &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: dbInfo.Name.L,
 		TableID:    tblInfo.ID,
-		TableName:  tblInfo.Name.L,
 		Type:       model.ActionCreateTable,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{tblInfo},
+		Args:       []interface{}{tblInfo},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	err := d.DoDDLJob(ctx, job)
@@ -139,11 +137,7 @@ func testCreateSchema(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *m
 		SchemaID:   dbInfo.ID,
 		Type:       model.ActionCreateSchema,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{dbInfo},
-		InvolvingSchemaInfo: []model.InvolvingSchemaInfo{{
-			Database: dbInfo.Name.L,
-			Table:    model.InvolvingAll,
-		}},
+		Args:       []interface{}{dbInfo},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	require.NoError(t, d.DoDDLJob(ctx, job))
@@ -160,11 +154,6 @@ func buildDropSchemaJob(dbInfo *model.DBInfo) *model.Job {
 		SchemaID:   dbInfo.ID,
 		Type:       model.ActionDropSchema,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{true},
-		InvolvingSchemaInfo: []model.InvolvingSchemaInfo{{
-			Database: dbInfo.Name.L,
-			Table:    model.InvolvingAll,
-		}},
 	}
 }
 
@@ -243,7 +232,7 @@ func TestSchema(t *testing.T) {
 	err = sessiontxn.NewTxn(context.Background(), tk.Session())
 	require.NoError(t, err)
 	for i := 1; i <= 100; i++ {
-		_, err := tbl1.AddRecord(tk.Session().GetTableCtx(), types.MakeDatums(i, i, i))
+		_, err := tbl1.AddRecord(tk.Session(), types.MakeDatums(i, i, i))
 		require.NoError(t, err)
 	}
 	// create table t1 with 1034 records.
@@ -257,7 +246,7 @@ func TestSchema(t *testing.T) {
 	err = sessiontxn.NewTxn(context.Background(), tk2.Session())
 	require.NoError(t, err)
 	for i := 1; i <= 1034; i++ {
-		_, err := tbl2.AddRecord(tk2.Session().GetTableCtx(), types.MakeDatums(i, i, i))
+		_, err := tbl2.AddRecord(tk2.Session(), types.MakeDatums(i, i, i))
 		require.NoError(t, err)
 	}
 	tk3 := testkit.NewTestKit(t, store)
@@ -271,7 +260,6 @@ func TestSchema(t *testing.T) {
 	// Drop a non-existent database.
 	job = &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: "test_schema",
 		Type:       model.ActionDropSchema,
 		BinlogInfo: &model.HistoryInfo{},
 	}
@@ -301,7 +289,6 @@ func TestSchemaWaitJob(t *testing.T) {
 		ddl.WithStore(store),
 		ddl.WithInfoCache(domain.InfoCache()),
 		ddl.WithLease(testLease),
-		ddl.WithSchemaLoader(domain),
 	)
 	err := d2.Start(pools.NewResourcePool(func() (pools.Resource, error) {
 		session := testkit.NewTestKit(t, store).Session()
@@ -331,24 +318,13 @@ func TestSchemaWaitJob(t *testing.T) {
 	genIDs, err := genGlobalIDs(store, 1)
 	require.NoError(t, err)
 	schemaID := genIDs[0]
-	doDDLJobErr(t, schemaID, 0, "test_schema", "", model.ActionCreateSchema, []any{dbInfo}, testkit.NewTestKit(t, store).Session(), d2, store)
+	doDDLJobErr(t, schemaID, 0, model.ActionCreateSchema, []interface{}{dbInfo}, testkit.NewTestKit(t, store).Session(), d2, store)
 }
 
-func doDDLJobErr(
-	t *testing.T,
-	schemaID, tableID int64,
-	schemaName, tableName string,
-	tp model.ActionType,
-	args []any,
-	ctx sessionctx.Context,
-	d ddl.DDL,
-	store kv.Storage,
-) *model.Job {
+func doDDLJobErr(t *testing.T, schemaID, tableID int64, tp model.ActionType, args []interface{}, ctx sessionctx.Context, d ddl.DDL, store kv.Storage) *model.Job {
 	job := &model.Job{
 		SchemaID:   schemaID,
-		SchemaName: schemaName,
 		TableID:    tableID,
-		TableName:  tableName,
 		Type:       tp,
 		Args:       args,
 		BinlogInfo: &model.HistoryInfo{},
@@ -374,19 +350,20 @@ func testCheckJobCancelled(t *testing.T, store kv.Storage, job *model.Job, state
 func TestRenameTableAutoIDs(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk1 := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk3 := testkit.NewTestKit(t, store)
+
 	dbName := "RenameTableAutoIDs"
 	tk1.MustExec(`create schema ` + dbName)
 	tk1.MustExec(`create schema ` + dbName + "2")
 	tk1.MustExec(`use ` + dbName)
-	tk2.MustExec(`use ` + dbName)
-	tk3.MustExec(`use ` + dbName)
-	tk1.MustExec(`CREATE TABLE t (a int auto_increment primary key nonclustered, b varchar(255), key (b)) AUTO_ID_CACHE 100`)
+	tk1.MustExec(`CREATE TABLE t (a int auto_increment primary key nonclustered, b varchar(255), key (b))`)
 	tk1.MustExec(`insert into t values (11,11),(2,2),(null,12)`)
 	tk1.MustExec(`insert into t values (null,18)`)
 	tk1.MustQuery(`select _tidb_rowid, a, b from t`).Sort().Check(testkit.Rows("13 11 11", "14 2 2", "15 12 12", "17 16 18"))
 
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExec(`use ` + dbName)
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec(`use ` + dbName)
 	waitFor := func(col int, tableName, s string) {
 		for {
 			tk4 := testkit.NewTestKit(t, store)
@@ -396,14 +373,12 @@ func TestRenameTableAutoIDs(t *testing.T) {
 			if len(res) == 1 && res[0][col] == s {
 				break
 			}
-			logutil.DDLLogger().Info("Could not find match", zap.String("tableName", tableName), zap.String("s", s), zap.Int("colNum", col))
-
 			for i := range res {
 				strs := make([]string, 0, len(res[i]))
 				for j := range res[i] {
 					strs = append(strs, res[i][j].(string))
 				}
-				logutil.DDLLogger().Info("ddl jobs", zap.Strings("jobs", strs))
+				logutil.BgLogger().Info("ddl jobs", zap.Strings("jobs", strs))
 			}
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -418,57 +393,41 @@ func TestRenameTableAutoIDs(t *testing.T) {
 	waitFor(11, "t", "running")
 	waitFor(4, "t", "public")
 	tk3.MustExec(`BEGIN`)
-	tk3.MustExec(`insert into ` + dbName + `2.t2 values (50, 5)`)
-
-	tk2.MustExec(`insert into t values (null, 6)`)
 	tk3.MustExec(`insert into ` + dbName + `2.t2 values (20, 5)`)
 
-	// Done: Fix https://github.com/pingcap/tidb/issues/46904
-	//tk2.MustContainErrMsg(`insert into t values (null, 6)`, "[tikv:1205]Lock wait timeout exceeded; try restarting transaction")
-	tk2.MustExec(`insert into t values (null, 6)`)
-	tk3.MustExec(`insert into ` + dbName + `2.t2 values (null, 7)`)
-	tk2.MustExec(`COMMIT`)
+	// TODO: Fix https://github.com/pingcap/tidb/issues/46904
+	tk2.MustContainErrMsg(`insert into t values (null, 6)`, "[tikv:1205]Lock wait timeout exceeded; try restarting transaction")
+	tk2.MustExec(`rollback`)
+	tk3.MustExec(`rollback`)
+	/*
+		tk3.MustExec(`insert into ` + dbName + `2.t2 values (null, 7)`)
+		tk2.MustExec(`COMMIT`)
 
-	waitFor(11, "t", "done")
-	tk2.MustExec(`BEGIN`)
-	tk2.MustExec(`insert into ` + dbName + `2.t2 values (null, 8)`)
+		waitFor(11, "t", "done")
+		tk2.MustExec(`BEGIN`)
+		tk2.MustExec(`insert into ` + dbName + `2.t2 values (null, 8)`)
 
-	tk3.MustExec(`insert into ` + dbName + `2.t2 values (null, 9)`)
-	tk2.MustExec(`insert into ` + dbName + `2.t2 values (null, 10)`)
-	tk3.MustExec(`COMMIT`)
+		tk3.MustExec(`insert into ` + dbName + `2.t2 values (null, 9)`)
+		tk2.MustExec(`insert into ` + dbName + `2.t2 values (null, 10)`)
+		tk3.MustExec(`COMMIT`)
 
-	waitFor(11, "t", "synced")
-	tk2.MustExec(`COMMIT`)
-	tk3.MustQuery(`select _tidb_rowid, a, b from ` + dbName + `2.t2`).Sort().Check(testkit.Rows(""+
-		"13 11 11",
-		"14 2 2",
-		"15 12 12",
-		"17 16 18",
-		"19 18 4",
-		"51 50 5",
-		"53 52 6",
-		"54 20 5",
-		"56 55 6",
-		"58 57 7",
-		"60 59 8",
-		"62 61 9",
-		"64 63 10",
-	))
+		waitFor(11, "t", "synced")
+		tk2.MustExec(`COMMIT`)
+		tk3.MustQuery(`select _tidb_rowid, a, b from ` + dbName + `2.t2`).Sort().Check(testkit.Rows(""+
+			"13 11 11",
+			"14 2 2",
+			"15 12 12",
+			"17 16 18",
+			"19 18 4",
+			"21 20 6",
+			"5013 5012 5",
+			"5015 5014 7",
+		))
 
+		require.NoError(t, <-alterChan)
+		tk2.MustQuery(`select _tidb_rowid, a, b from ` + dbName + `2.t2`).Sort().Check(testkit.Rows(
+			"13 11 11", "14 2 2", "15 12 12", "17 16 18",
+			"19 18 4", "21 20 6", "5013 5012 5", "5015 5014 7"))
+	*/
 	require.NoError(t, <-alterChan)
-	tk2.MustQuery(`select _tidb_rowid, a, b from ` + dbName + `2.t2`).Sort().Check(testkit.Rows(""+
-		"13 11 11",
-		"14 2 2",
-		"15 12 12",
-		"17 16 18",
-		"19 18 4",
-		"51 50 5",
-		"53 52 6",
-		"54 20 5",
-		"56 55 6",
-		"58 57 7",
-		"60 59 8",
-		"62 61 9",
-		"64 63 10",
-	))
 }

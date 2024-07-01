@@ -150,9 +150,6 @@ type StmtRecord struct {
 	// request units(RU)
 	ResourceGroupName string `json:"resource_group_name"`
 	stmtsummary.StmtRUSummary
-
-	PlanCacheUnqualifiedCount int64  `json:"plan_cache_unqualified_count"`
-	LastPlanCacheUnqualified  string `json:"last_plan_cache_unqualified"` // the reason why this query is unqualified for the plan cache
 }
 
 // NewStmtRecord creates a new StmtRecord from StmtExecInfo.
@@ -182,7 +179,7 @@ func NewStmtRecord(info *stmtsummary.StmtExecInfo) *StmtRecord {
 	}
 	// sampleSQL / authUsers(sampleUser) / samplePlan / prevSQL / indexNames store the values shown at the first time,
 	// because it compacts performance to update every time.
-	samplePlan, planHint, _ := info.PlanGenerator()
+	samplePlan, planHint := info.PlanGenerator()
 	if len(samplePlan) > MaxEncodedPlanSizeInBytes {
 		samplePlan = plancodec.PlanDiscardedEncoded
 	}
@@ -371,10 +368,6 @@ func (r *StmtRecord) Add(info *stmtsummary.StmtExecInfo) {
 	} else {
 		r.PlanInCache = false
 	}
-	if info.PlanCacheUnqualified != "" {
-		r.PlanCacheUnqualifiedCount++
-		r.LastPlanCacheUnqualified = info.PlanCacheUnqualified
-	}
 	// SPM
 	if info.PlanInBinding {
 		r.PlanInBinding = true
@@ -549,10 +542,6 @@ func (r *StmtRecord) Merge(other *StmtRecord) {
 	}
 	// Plan cache
 	r.PlanCacheHits += other.PlanCacheHits
-	r.PlanCacheUnqualifiedCount += other.PlanCacheUnqualifiedCount
-	if other.LastPlanCacheUnqualified != "" {
-		r.LastPlanCacheUnqualified = other.LastPlanCacheUnqualified
-	}
 	// Other
 	r.SumAffectedRows += other.SumAffectedRows
 	r.SumMem += other.SumMem
@@ -614,12 +603,12 @@ func GenerateStmtExecInfo4Test(digest string) *stmtsummary.StmtExecInfo {
 		NormalizedSQL:  "normalized_sql",
 		Digest:         digest,
 		PlanDigest:     "plan_digest",
-		PlanGenerator:  func() (string, string, any) { return "", "", nil },
+		PlanGenerator:  func() (string, string) { return "", "" },
 		User:           "user",
 		TotalLatency:   10000,
 		ParseLatency:   100,
 		CompileLatency: 1000,
-		CopTasks: &execdetails.CopTasksDetails{
+		CopTasks: &stmtctx.CopTasksDetails{
 			NumCopTasks:       10,
 			AvgProcessTime:    1000,
 			P90ProcessTime:    10000,

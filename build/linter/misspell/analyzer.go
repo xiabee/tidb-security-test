@@ -34,7 +34,6 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
@@ -44,13 +43,15 @@ type Misspell struct {
 	IgnoreWords []string `mapstructure:"ignore-words"`
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	r := misspell.Replacer{
 		Replacements: misspell.DictMain,
 	}
 
 	// Figure out regional variations
-	settings := &Misspell{}
+	settings := &Misspell{
+		Locale: "",
+	}
 
 	if len(settings.IgnoreWords) != 0 {
 		r.RemoveRule(settings.IgnoreWords)

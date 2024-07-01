@@ -31,7 +31,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/statistics"
@@ -50,7 +49,6 @@ type visit struct {
 func TestShow(t *testing.T) {
 	node := &ast.ShowStmt{}
 	tps := []ast.ShowStmtType{
-		ast.ShowBinlogStatus,
 		ast.ShowEngines,
 		ast.ShowDatabases,
 		ast.ShowTables,
@@ -125,16 +123,16 @@ func TestRewriterPool(t *testing.T) {
 	defer func() {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
-	builder, _ := NewPlanBuilder().Init(ctx, nil, hint.NewQBHintHandler(nil))
+	builder, _ := NewPlanBuilder().Init(ctx, nil, &hint.BlockHintProcessor{})
 
 	// Make sure PlanBuilder.getExpressionRewriter() provides clean rewriter from pool.
 	// First, pick one rewriter from the pool and make it dirty.
 	builder.rewriterCounter++
 	dirtyRewriter := builder.getExpressionRewriter(context.TODO(), nil)
 	dirtyRewriter.asScalar = true
-	dirtyRewriter.planCtx.aggrMap = make(map[*ast.AggregateFuncExpr]int)
+	dirtyRewriter.aggrMap = make(map[*ast.AggregateFuncExpr]int)
 	dirtyRewriter.preprocess = func(ast.Node) ast.Node { return nil }
-	dirtyRewriter.planCtx.insertPlan = &Insert{}
+	dirtyRewriter.insertPlan = &Insert{}
 	dirtyRewriter.disableFoldCounter = 1
 	dirtyRewriter.ctxStack = make([]expression.Expression, 2)
 	dirtyRewriter.ctxNameStk = make([]*types.FieldName, 2)
@@ -144,9 +142,9 @@ func TestRewriterPool(t *testing.T) {
 	cleanRewriter := builder.getExpressionRewriter(context.TODO(), nil)
 	require.Equal(t, dirtyRewriter, cleanRewriter)
 	require.Equal(t, false, cleanRewriter.asScalar)
-	require.Nil(t, cleanRewriter.planCtx.aggrMap)
+	require.Nil(t, cleanRewriter.aggrMap)
 	require.Nil(t, cleanRewriter.preprocess)
-	require.Nil(t, cleanRewriter.planCtx.insertPlan)
+	require.Nil(t, cleanRewriter.insertPlan)
 	require.Zero(t, cleanRewriter.disableFoldCounter)
 	require.Len(t, cleanRewriter.ctxStack, 0)
 	builder.rewriterCounter--
@@ -182,12 +180,12 @@ func TestDisableFold(t *testing.T) {
 		stmt := st.(*ast.SelectStmt)
 		expr := stmt.Fields.Fields[0].Expr
 
-		builder, _ := NewPlanBuilder().Init(ctx, nil, hint.NewQBHintHandler(nil))
+		builder, _ := NewPlanBuilder().Init(ctx, nil, &hint.BlockHintProcessor{})
 		builder.rewriterCounter++
 		rewriter := builder.getExpressionRewriter(context.TODO(), nil)
 		require.NotNil(t, rewriter)
 		require.Equal(t, 0, rewriter.disableFoldCounter)
-		rewrittenExpression, _, err := rewriteExprNode(rewriter, expr, true)
+		rewrittenExpression, _, err := builder.rewriteExprNode(rewriter, expr, true)
 		require.NoError(t, err)
 		require.Equal(t, 0, rewriter.disableFoldCounter)
 		builder.rewriterCounter--
@@ -206,7 +204,7 @@ func TestDeepClone(t *testing.T) {
 	byItems := []*util.ByItems{{Expr: expr}}
 	sort1 := &PhysicalSort{ByItems: byItems}
 	sort2 := &PhysicalSort{ByItems: byItems}
-	checkDeepClone := func(p1, p2 base.PhysicalPlan) error {
+	checkDeepClone := func(p1, p2 PhysicalPlan) error {
 		whiteList := []string{"*property.StatsInfo", "*sessionctx.Context", "*mock.Context"}
 		return checkDeepClonedCore(reflect.ValueOf(p1), reflect.ValueOf(p2), typeName(reflect.TypeOf(p1)), whiteList, nil)
 	}
@@ -252,7 +250,7 @@ func TestTablePlansAndTablePlanInPhysicalTableReaderClone(t *testing.T) {
 	// table reader
 	tableReader := &PhysicalTableReader{
 		tablePlan:  tableScan,
-		TablePlans: []base.PhysicalPlan{tableScan},
+		TablePlans: []PhysicalPlan{tableScan},
 		StoreType:  kv.TiFlash,
 	}
 	tableReader = tableReader.Init(ctx, 0)
@@ -288,7 +286,7 @@ func TestPhysicalPlanClone(t *testing.T) {
 	// table reader
 	tableReader := &PhysicalTableReader{
 		tablePlan:  tableScan,
-		TablePlans: []base.PhysicalPlan{tableScan},
+		TablePlans: []PhysicalPlan{tableScan},
 		StoreType:  kv.TiFlash,
 	}
 	tableReader = tableReader.Init(ctx, 0)
@@ -308,7 +306,7 @@ func TestPhysicalPlanClone(t *testing.T) {
 	// index reader
 	indexReader := &PhysicalIndexReader{
 		indexPlan:     indexScan,
-		IndexPlans:    []base.PhysicalPlan{indexScan},
+		IndexPlans:    []PhysicalPlan{indexScan},
 		OutputColumns: []*expression.Column{col, col},
 	}
 	indexReader = indexReader.Init(ctx, 0)
@@ -316,9 +314,9 @@ func TestPhysicalPlanClone(t *testing.T) {
 
 	// index lookup
 	indexLookup := &PhysicalIndexLookUpReader{
-		IndexPlans:     []base.PhysicalPlan{indexReader},
+		IndexPlans:     []PhysicalPlan{indexReader},
 		indexPlan:      indexScan,
-		TablePlans:     []base.PhysicalPlan{tableReader},
+		TablePlans:     []PhysicalPlan{tableReader},
 		tablePlan:      tableScan,
 		ExtraHandleCol: col,
 		PushedLimit:    &PushedDownLimit{1, 2},
@@ -395,7 +393,7 @@ func TestPhysicalPlanClone(t *testing.T) {
 }
 
 //go:linkname valueInterface reflect.valueInterface
-func valueInterface(v reflect.Value, safe bool) any
+func valueInterface(v reflect.Value, safe bool) interface{}
 
 func typeName(t reflect.Type) string {
 	path := t.String()
@@ -403,7 +401,7 @@ func typeName(t reflect.Type) string {
 	return tmp[len(tmp)-1]
 }
 
-func checkPhysicalPlanClone(p base.PhysicalPlan) error {
+func checkPhysicalPlanClone(p PhysicalPlan) error {
 	cloned, err := p.Clone()
 	if err != nil {
 		return err
@@ -560,11 +558,11 @@ func TestHandleAnalyzeOptionsV1AndV2(t *testing.T) {
 			opts: []ast.AnalyzeOpt{
 				{
 					Type:  ast.AnalyzeOptNumTopN,
-					Value: ast.NewValueExpr(100000+1, "", ""),
+					Value: ast.NewValueExpr(16384+1, "", ""),
 				},
 			},
 			statsVer:    statistics.Version1,
-			ExpectedErr: "Value of analyze option TOPN should not be larger than 100000",
+			ExpectedErr: "Value of analyze option TOPN should not be larger than 16384",
 		},
 		{
 			name: "Use SampleRate option in stats version 1",
@@ -593,11 +591,11 @@ func TestHandleAnalyzeOptionsV1AndV2(t *testing.T) {
 			opts: []ast.AnalyzeOpt{
 				{
 					Type:  ast.AnalyzeOptNumBuckets,
-					Value: ast.NewValueExpr(100000+1, "", ""),
+					Value: ast.NewValueExpr(1024+1, "", ""),
 				},
 			},
 			statsVer:    2,
-			ExpectedErr: "Value of analyze option BUCKETS should be positive and not larger than 100000",
+			ExpectedErr: "Value of analyze option BUCKETS should be positive and not larger than 1024",
 		},
 		{
 			name: "Set both sample num and sample rate",
@@ -659,7 +657,7 @@ func TestGetFullAnalyzeColumnsInfo(t *testing.T) {
 	defer func() {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
-	pb, _ := NewPlanBuilder().Init(ctx, nil, hint.NewQBHintHandler(nil))
+	pb, _ := NewPlanBuilder().Init(ctx, nil, &hint.BlockHintProcessor{})
 
 	// Create a new TableName instance.
 	tableName := &ast.TableName{
@@ -715,7 +713,7 @@ func TestRequireInsertAndSelectPriv(t *testing.T) {
 	defer func() {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
-	pb, _ := NewPlanBuilder().Init(ctx, nil, hint.NewQBHintHandler(nil))
+	pb, _ := NewPlanBuilder().Init(ctx, nil, &hint.BlockHintProcessor{})
 
 	tables := []*ast.TableName{
 		{

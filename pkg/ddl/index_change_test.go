@@ -55,9 +55,6 @@ func TestIndexChange(t *testing.T) {
 		publicTable     table.Table
 	)
 	onJobUpdatedExportedFunc := func(job *model.Job) {
-		if job.Type != model.ActionAddIndex || job.TableName != "t" {
-			return
-		}
 		if job.SchemaState == prevState {
 			return
 		}
@@ -90,11 +87,11 @@ func TestIndexChange(t *testing.T) {
 	// We need to make sure onJobUpdated is called in the first hook.
 	// After testCreateIndex(), onJobUpdated() may not be called when job.state is Sync.
 	// If we skip this check, prevState may wrongly set to StatePublic.
-	for i := 0; i <= 100; i++ {
+	for i := 0; i <= 10; i++ {
 		if addIndexDone {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	v := getSchemaVer(t, tk.Session())
 	checkHistoryJobArgs(t, tk.Session(), jobID.Load(), &historyJobArgs{ver: v, tbl: publicTable.Meta()})
@@ -132,14 +129,13 @@ func TestIndexChange(t *testing.T) {
 	checkHistoryJobArgs(t, tk.Session(), jobID.Load(), &historyJobArgs{ver: v, tbl: noneTable.Meta()})
 }
 
-func checkIndexExists(ctx sessionctx.Context, tbl table.Table, indexValue any, handle int64, exists bool) error {
+func checkIndexExists(ctx sessionctx.Context, tbl table.Table, indexValue interface{}, handle int64, exists bool) error {
 	idx := tbl.Indices()[0]
 	txn, err := ctx.Txn(true)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	sc := ctx.GetSessionVars().StmtCtx
-	doesExist, _, err := idx.Exist(sc.ErrCtx(), sc.TimeZone(), txn, types.MakeDatums(indexValue), kv.IntHandle(handle))
+	doesExist, _, err := idx.Exist(ctx.GetSessionVars().StmtCtx, txn, types.MakeDatums(indexValue), kv.IntHandle(handle))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -158,7 +154,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = delOnlyTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(4, 4))
+	_, err = delOnlyTbl.AddRecord(ctx, types.MakeDatums(4, 4))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -168,7 +164,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	}
 
 	// WriteOnlyTable: insert t values (5, 5);
-	_, err = writeOnlyTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(5, 5))
+	_, err = writeOnlyTbl.AddRecord(ctx, types.MakeDatums(5, 5))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -178,7 +174,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	}
 
 	// WriteOnlyTable: update t set c2 = 1 where c1 = 4 and c2 = 4
-	err = writeOnlyTbl.UpdateRecord(context.Background(), ctx.GetTableCtx(), kv.IntHandle(4), types.MakeDatums(4, 4), types.MakeDatums(4, 1), touchedSlice(writeOnlyTbl))
+	err = writeOnlyTbl.UpdateRecord(context.Background(), ctx, kv.IntHandle(4), types.MakeDatums(4, 4), types.MakeDatums(4, 1), touchedSlice(writeOnlyTbl))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -188,7 +184,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	}
 
 	// DeleteOnlyTable: update t set c2 = 3 where c1 = 4 and c2 = 1
-	err = delOnlyTbl.UpdateRecord(context.Background(), ctx.GetTableCtx(), kv.IntHandle(4), types.MakeDatums(4, 1), types.MakeDatums(4, 3), touchedSlice(writeOnlyTbl))
+	err = delOnlyTbl.UpdateRecord(context.Background(), ctx, kv.IntHandle(4), types.MakeDatums(4, 1), types.MakeDatums(4, 3), touchedSlice(writeOnlyTbl))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -204,7 +200,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	}
 
 	// WriteOnlyTable: delete t where c1 = 4 and c2 = 3
-	err = writeOnlyTbl.RemoveRecord(ctx.GetTableCtx(), kv.IntHandle(4), types.MakeDatums(4, 3))
+	err = writeOnlyTbl.RemoveRecord(ctx, kv.IntHandle(4), types.MakeDatums(4, 3))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -214,7 +210,7 @@ func checkAddWriteOnlyForAddIndex(ctx sessionctx.Context, delOnlyTbl, writeOnlyT
 	}
 
 	// DeleteOnlyTable: delete t where c1 = 5
-	err = delOnlyTbl.RemoveRecord(ctx.GetTableCtx(), kv.IntHandle(5), types.MakeDatums(5, 5))
+	err = delOnlyTbl.RemoveRecord(ctx, kv.IntHandle(5), types.MakeDatums(5, 5))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -232,7 +228,7 @@ func checkAddPublicForAddIndex(ctx sessionctx.Context, writeTbl, publicTbl table
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = writeTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(6, 6))
+	_, err = writeTbl.AddRecord(ctx, types.MakeDatums(6, 6))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -245,7 +241,7 @@ func checkAddPublicForAddIndex(ctx sessionctx.Context, writeTbl, publicTbl table
 		return errors.Trace(err)
 	}
 	// PublicTable: insert t values (7, 7)
-	_, err = publicTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(7, 7))
+	_, err = publicTbl.AddRecord(ctx, types.MakeDatums(7, 7))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -255,7 +251,7 @@ func checkAddPublicForAddIndex(ctx sessionctx.Context, writeTbl, publicTbl table
 	}
 
 	// WriteOnlyTable: update t set c2 = 5 where c1 = 7 and c2 = 7
-	err = writeTbl.UpdateRecord(context.Background(), ctx.GetTableCtx(), kv.IntHandle(7), types.MakeDatums(7, 7), types.MakeDatums(7, 5), touchedSlice(writeTbl))
+	err = writeTbl.UpdateRecord(context.Background(), ctx, kv.IntHandle(7), types.MakeDatums(7, 7), types.MakeDatums(7, 5), touchedSlice(writeTbl))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -276,7 +272,7 @@ func checkAddPublicForAddIndex(ctx sessionctx.Context, writeTbl, publicTbl table
 		return errors.Trace(err)
 	}
 	// WriteOnlyTable: delete t where c1 = 6
-	err = writeTbl.RemoveRecord(ctx.GetTableCtx(), kv.IntHandle(6), types.MakeDatums(6, 6))
+	err = writeTbl.RemoveRecord(ctx, kv.IntHandle(6), types.MakeDatums(6, 6))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -322,7 +318,7 @@ func checkDropWriteOnly(ctx sessionctx.Context, publicTbl, writeTbl table.Table)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = writeTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(8, 8))
+	_, err = writeTbl.AddRecord(ctx, types.MakeDatums(8, 8))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -333,7 +329,7 @@ func checkDropWriteOnly(ctx sessionctx.Context, publicTbl, writeTbl table.Table)
 	}
 
 	// WriteOnlyTable update t set c2 = 7 where c1 = 8 and c2 = 8
-	err = writeTbl.UpdateRecord(context.Background(), ctx.GetTableCtx(), kv.IntHandle(8), types.MakeDatums(8, 8), types.MakeDatums(8, 7), touchedSlice(writeTbl))
+	err = writeTbl.UpdateRecord(context.Background(), ctx, kv.IntHandle(8), types.MakeDatums(8, 8), types.MakeDatums(8, 7), touchedSlice(writeTbl))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -344,7 +340,7 @@ func checkDropWriteOnly(ctx sessionctx.Context, publicTbl, writeTbl table.Table)
 	}
 
 	// WriteOnlyTable delete t where c1 = 8
-	err = writeTbl.RemoveRecord(ctx.GetTableCtx(), kv.IntHandle(8), types.MakeDatums(8, 7))
+	err = writeTbl.RemoveRecord(ctx, kv.IntHandle(8), types.MakeDatums(8, 7))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -366,7 +362,7 @@ func checkDropDeleteOnly(ctx sessionctx.Context, writeTbl, delTbl table.Table) e
 	if err != nil {
 		return errors.Trace(err)
 	}
-	_, err = writeTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(9, 9))
+	_, err = writeTbl.AddRecord(ctx, types.MakeDatums(9, 9))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -377,7 +373,7 @@ func checkDropDeleteOnly(ctx sessionctx.Context, writeTbl, delTbl table.Table) e
 	}
 
 	// DeleteOnlyTable insert t values (10, 10)
-	_, err = delTbl.AddRecord(ctx.GetTableCtx(), types.MakeDatums(10, 10))
+	_, err = delTbl.AddRecord(ctx, types.MakeDatums(10, 10))
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -388,7 +384,7 @@ func checkDropDeleteOnly(ctx sessionctx.Context, writeTbl, delTbl table.Table) e
 	}
 
 	// DeleteOnlyTable update t set c2 = 10 where c1 = 9
-	err = delTbl.UpdateRecord(context.Background(), ctx.GetTableCtx(), kv.IntHandle(9), types.MakeDatums(9, 9), types.MakeDatums(9, 10), touchedSlice(delTbl))
+	err = delTbl.UpdateRecord(context.Background(), ctx, kv.IntHandle(9), types.MakeDatums(9, 9), types.MakeDatums(9, 10), touchedSlice(delTbl))
 	if err != nil {
 		return errors.Trace(err)
 	}

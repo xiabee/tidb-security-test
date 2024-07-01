@@ -18,20 +18,21 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/collate"
 )
 
 // conditionChecker checks if this condition can be pushed to index planner.
 type conditionChecker struct {
-	ctx                      expression.EvalContext
+	ctx                      sessionctx.Context
 	checkerCol               *expression.Column
 	length                   int
 	optPrefixIndexSingleScan bool
 }
 
 func (c *conditionChecker) isFullLengthColumn() bool {
-	return c.length == types.UnspecifiedLength || c.length == c.checkerCol.GetType(c.ctx).GetFlen()
+	return c.length == types.UnspecifiedLength || c.length == c.checkerCol.GetType().GetFlen()
 }
 
 // check returns two values, isAccessCond and shouldReserve.
@@ -66,7 +67,7 @@ func (c *conditionChecker) checkScalarFunction(scalar *expression.ScalarFunction
 		if _, ok := scalar.GetArgs()[0].(*expression.Constant); ok {
 			if c.matchColumn(scalar.GetArgs()[1]) {
 				// Checks whether the scalar function is calculated use the collation compatible with the column.
-				if scalar.GetArgs()[1].GetType(c.ctx).EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[1].GetType(c.ctx).GetCollate(), collation) {
+				if scalar.GetArgs()[1].GetType().EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[1].GetType().GetCollate(), collation) {
 					return false, true
 				}
 				isFullLength := c.isFullLengthColumn()
@@ -79,7 +80,7 @@ func (c *conditionChecker) checkScalarFunction(scalar *expression.ScalarFunction
 		if _, ok := scalar.GetArgs()[1].(*expression.Constant); ok {
 			if c.matchColumn(scalar.GetArgs()[0]) {
 				// Checks whether the scalar function is calculated use the collation compatible with the column.
-				if scalar.GetArgs()[0].GetType(c.ctx).EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[0].GetType(c.ctx).GetCollate(), collation) {
+				if scalar.GetArgs()[0].GetType().EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[0].GetType().GetCollate(), collation) {
 					return false, true
 				}
 				isFullLength := c.isFullLengthColumn()
@@ -120,7 +121,7 @@ func (c *conditionChecker) checkScalarFunction(scalar *expression.ScalarFunction
 		if !c.matchColumn(scalar.GetArgs()[0]) {
 			return false, true
 		}
-		if scalar.GetArgs()[0].GetType(c.ctx).EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[0].GetType(c.ctx).GetCollate(), collation) {
+		if scalar.GetArgs()[0].GetType().EvalType() == types.ETString && !collate.CompatibleCollate(scalar.GetArgs()[0].GetType().GetCollate(), collation) {
 			return false, true
 		}
 		for _, v := range scalar.GetArgs()[1:] {
@@ -140,7 +141,7 @@ func (c *conditionChecker) checkScalarFunction(scalar *expression.ScalarFunction
 
 func (c *conditionChecker) checkLikeFunc(scalar *expression.ScalarFunction) (isAccessCond, shouldReserve bool) {
 	_, collation := scalar.CharsetAndCollation()
-	if !collate.CompatibleCollate(scalar.GetArgs()[0].GetType(c.ctx).GetCollate(), collation) {
+	if !collate.CompatibleCollate(scalar.GetArgs()[0].GetType().GetCollate(), collation) {
 		return false, true
 	}
 	if !c.matchColumn(scalar.GetArgs()[0]) {
@@ -157,20 +158,11 @@ func (c *conditionChecker) checkLikeFunc(scalar *expression.ScalarFunction) (isA
 	if err != nil {
 		return false, true
 	}
-	likeFuncReserve := !c.isFullLengthColumn()
-
-	// Different from `=`, trailing spaces are always significant, and can't be ignored in `like`.
-	// In tidb's implementation, for PAD SPACE collations, the trailing spaces are removed in the index key. So we are
-	// unable to distinguish 'xxx' from 'xxx   ' by a single index range scan, and we may read more data than needed by
-	// the `like` function. Therefore, a Selection is needed to filter the data.
-	if isPadSpaceCollation(collation) {
-		likeFuncReserve = true
-	}
-
 	if len(patternStr) == 0 {
-		return true, likeFuncReserve
+		return true, !c.isFullLengthColumn()
 	}
 	escape := byte(scalar.GetArgs()[2].(*expression.Constant).Value.GetInt64())
+	likeFuncReserve := !c.isFullLengthColumn()
 	for i := 0; i < len(patternStr); i++ {
 		if patternStr[i] == escape {
 			i++
@@ -185,7 +177,7 @@ func (c *conditionChecker) checkLikeFunc(scalar *expression.ScalarFunction) (isA
 		if patternStr[i] == '%' {
 			// We currently do not support using `enum like 'xxx%'` to build range
 			// see https://github.com/pingcap/tidb/issues/27130 for more details
-			if scalar.GetArgs()[0].GetType(c.ctx).GetType() == mysql.TypeEnum {
+			if scalar.GetArgs()[0].GetType().GetType() == mysql.TypeEnum {
 				return false, true
 			}
 			if i != len(patternStr)-1 {
@@ -196,7 +188,7 @@ func (c *conditionChecker) checkLikeFunc(scalar *expression.ScalarFunction) (isA
 		if patternStr[i] == '_' {
 			// We currently do not support using `enum like 'xxx_'` to build range
 			// see https://github.com/pingcap/tidb/issues/27130 for more details
-			if scalar.GetArgs()[0].GetType(c.ctx).GetType() == mysql.TypeEnum {
+			if scalar.GetArgs()[0].GetType().GetType() == mysql.TypeEnum {
 				return false, true
 			}
 			likeFuncReserve = true
@@ -209,7 +201,7 @@ func (c *conditionChecker) checkLikeFunc(scalar *expression.ScalarFunction) (isA
 func (c *conditionChecker) matchColumn(expr expression.Expression) bool {
 	// Check if virtual expression column matched
 	if c.checkerCol != nil {
-		return c.checkerCol.EqualByExprAndID(c.ctx, expr)
+		return c.checkerCol.EqualByExprAndID(nil, expr)
 	}
 	return false
 }

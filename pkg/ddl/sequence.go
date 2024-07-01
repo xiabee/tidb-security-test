@@ -19,6 +19,7 @@ import (
 	"reflect"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -37,7 +38,7 @@ func onCreateSequence(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ err
 	}
 
 	tbInfo.State = model.StateNone
-	err := checkTableNotExists(d, schemaID, tbInfo.Name.L)
+	err := checkTableNotExists(d, t, schemaID, tbInfo.Name.L)
 	if err != nil {
 		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableExists.Equal(err) {
 			job.State = model.JobStateCancelled
@@ -45,40 +46,42 @@ func onCreateSequence(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ err
 		return ver, errors.Trace(err)
 	}
 
-	err = createSequenceWithCheck(t, job, tbInfo)
-	if err != nil {
-		return ver, errors.Trace(err)
-	}
-
 	ver, err = updateSchemaVersion(d, t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
-	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
-	return ver, nil
-}
 
-func createSequenceWithCheck(t *meta.Meta, job *model.Job, tbInfo *model.TableInfo) error {
 	switch tbInfo.State {
-	case model.StateNone, model.StatePublic:
+	case model.StateNone:
 		// none -> public
 		tbInfo.State = model.StatePublic
 		tbInfo.UpdateTS = t.StartTS
-		err := checkTableInfoValid(tbInfo)
+		err = createSequenceWithCheck(t, job, schemaID, tbInfo)
 		if err != nil {
-			job.State = model.JobStateCancelled
-			return errors.Trace(err)
+			return ver, errors.Trace(err)
 		}
-		var sequenceBase int64
-		if tbInfo.Sequence.Increment >= 0 {
-			sequenceBase = tbInfo.Sequence.Start - 1
-		} else {
-			sequenceBase = tbInfo.Sequence.Start + 1
-		}
-		return t.CreateSequenceAndSetSeqValue(job.SchemaID, job.SchemaName, tbInfo, sequenceBase)
+		// Finish this job.
+		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
+		asyncNotifyEvent(d, &util.Event{Tp: model.ActionCreateSequence, TableInfo: tbInfo})
+		return ver, nil
 	default:
-		return dbterror.ErrInvalidDDLState.GenWithStackByArgs("sequence", tbInfo.State)
+		return ver, dbterror.ErrInvalidDDLState.GenWithStackByArgs("sequence", tbInfo.State)
 	}
+}
+
+func createSequenceWithCheck(t *meta.Meta, job *model.Job, schemaID int64, tbInfo *model.TableInfo) error {
+	err := checkTableInfoValid(tbInfo)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return errors.Trace(err)
+	}
+	var sequenceBase int64
+	if tbInfo.Sequence.Increment >= 0 {
+		sequenceBase = tbInfo.Sequence.Start - 1
+	} else {
+		sequenceBase = tbInfo.Sequence.Start + 1
+	}
+	return t.CreateSequenceAndSetSeqValue(schemaID, tbInfo, sequenceBase)
 }
 
 func handleSequenceOptions(seqOptions []*ast.SequenceOption, sequenceInfo *model.SequenceInfo) {
@@ -129,7 +132,7 @@ func handleSequenceOptions(seqOptions []*ast.SequenceOption, sequenceInfo *model
 				sequenceInfo.MaxValue = model.DefaultNegativeSequenceMaxValue
 			}
 			if !startSetFlag {
-				sequenceInfo.Start = min(sequenceInfo.MaxValue, model.DefaultNegativeSequenceStartValue)
+				sequenceInfo.Start = mathutil.Min(sequenceInfo.MaxValue, model.DefaultNegativeSequenceStartValue)
 			}
 			if !minSetFlag {
 				sequenceInfo.MinValue = model.DefaultNegativeSequenceMinValue

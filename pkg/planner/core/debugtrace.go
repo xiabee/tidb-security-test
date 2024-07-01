@@ -23,10 +23,9 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/context"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/debugtrace"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/util/hint"
 )
@@ -73,7 +72,7 @@ func (info *binaryParamInfo) MarshalJSON() ([]byte, error) {
 }
 
 // DebugTraceReceivedCommand records the received command from the client to the debug trace.
-func DebugTraceReceivedCommand(s base.PlanContext, cmd byte, stmtNode ast.StmtNode) {
+func DebugTraceReceivedCommand(s sessionctx.Context, cmd byte, stmtNode ast.StmtNode) {
 	sessionVars := s.GetSessionVars()
 	trace := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := new(receivedCmdInfo)
@@ -92,7 +91,7 @@ func DebugTraceReceivedCommand(s base.PlanContext, cmd byte, stmtNode ast.StmtNo
 			binaryParams, _ = execStmt.BinaryArgs.([]expression.Expression)
 		}
 	}
-	useCursor := sessionVars.HasStatusFlag(mysql.ServerStatusCursorExists)
+	useCursor := mysql.HasCursorExistsFlag(sessionVars.Status)
 	// If none of them needs record, we don't need a executeInfo.
 	if binaryParams == nil && planCacheStmt == nil && !useCursor {
 		return
@@ -106,7 +105,7 @@ func DebugTraceReceivedCommand(s base.PlanContext, cmd byte, stmtNode ast.StmtNo
 	if len(binaryParams) > 0 {
 		execInfo.BinaryParamsInfo = make([]binaryParamInfo, len(binaryParams))
 		for i, param := range binaryParams {
-			execInfo.BinaryParamsInfo[i].Type = param.GetType(s.GetExprCtx().GetEvalCtx()).String()
+			execInfo.BinaryParamsInfo[i].Type = param.GetType().String()
 			execInfo.BinaryParamsInfo[i].Value = param.String()
 		}
 	}
@@ -136,7 +135,7 @@ func (b *bindingHint) MarshalJSON() ([]byte, error) {
 }
 
 // DebugTraceTryBinding records the hint that might be chosen to the debug trace.
-func DebugTraceTryBinding(s context.PlanContext, binding *hint.HintsSet) {
+func DebugTraceTryBinding(s sessionctx.Context, binding *hint.HintsSet) {
 	root := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := &bindingHint{
 		Hint:   binding,
@@ -146,7 +145,7 @@ func DebugTraceTryBinding(s context.PlanContext, binding *hint.HintsSet) {
 }
 
 // DebugTraceBestBinding records the chosen hint to the debug trace.
-func DebugTraceBestBinding(s context.PlanContext, binding *hint.HintsSet) {
+func DebugTraceBestBinding(s sessionctx.Context, binding *hint.HintsSet) {
 	root := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := &bindingHint{
 		Hint:   binding,
@@ -173,7 +172,7 @@ type getStatsTblInfo struct {
 }
 
 func debugTraceGetStatsTbl(
-	s base.PlanContext,
+	s sessionctx.Context,
 	tblInfo *model.TableInfo,
 	pid int64,
 	handleIsNil,
@@ -250,7 +249,7 @@ func convertAccessPathForDebugTrace(path *util.AccessPath, out *accessPathForDeb
 	}
 }
 
-func debugTraceAccessPaths(s base.PlanContext, paths []*util.AccessPath) {
+func debugTraceAccessPaths(s sessionctx.Context, paths []*util.AccessPath) {
 	root := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := make([]accessPathForDebugTrace, len(paths))
 	for i, partialPath := range paths {

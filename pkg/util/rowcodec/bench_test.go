@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/benchdaily"
@@ -67,7 +68,7 @@ func BenchmarkEncode(b *testing.B) {
 func BenchmarkEncodeFromOldRow(b *testing.B) {
 	b.ReportAllocs()
 	oldRow := types.MakeDatums(1, "abc", 1.1)
-	oldRowData, err := tablecodec.EncodeOldRow(nil, oldRow, []int64{1, 2, 3}, nil, nil)
+	oldRowData, err := tablecodec.EncodeOldRow(stmtctx.NewStmtCtx(), oldRow, []int64{1, 2, 3}, nil, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -17,7 +17,6 @@ package ddl_test
 import (
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
@@ -47,17 +45,16 @@ func TestInvalidDDLJob(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
 
 	job := &model.Job{
-		SchemaID:            0,
-		TableID:             0,
-		Type:                model.ActionNone,
-		BinlogInfo:          &model.HistoryInfo{},
-		Args:                []any{},
-		InvolvingSchemaInfo: []model.InvolvingSchemaInfo{{}},
+		SchemaID:   0,
+		TableID:    0,
+		Type:       model.ActionNone,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{},
 	}
 	ctx := testNewContext(store)
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	err := dom.DDL().DoDDLJob(ctx, job)
-	require.ErrorContains(t, err, "[ddl:8204]invalid ddl job type: none")
+	require.Equal(t, err.Error(), "[ddl:8204]invalid ddl job type: none")
 }
 
 func TestAddBatchJobError(t *testing.T) {
@@ -171,38 +168,76 @@ func TestParallelDDL(t *testing.T) {
 
 	seqIDs := make([]int, 11)
 
-	var enable atomic.Bool
-	ch := make(chan struct{})
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/waitJobSubmitted",
-		func() {
-			if enable.Load() {
-				<-ch
-			}
-		},
-	)
-	enable.Store(true)
-	for i, sql := range []string{
-		"alter table test_parallel_ddl_1.t1 add index db1_idx1(c1)",
-		"alter table test_parallel_ddl_1.t1 add column c3 int",
-		"alter table test_parallel_ddl_1.t1 add index db1_idxx(c1)",
-		"alter table test_parallel_ddl_1.t2 drop column c3",
-		"alter table test_parallel_ddl_1.t1 drop index db1_idx2",
-		"alter table test_parallel_ddl_1.t2 add index db1_idx2(c2)",
-		"alter table test_parallel_ddl_2.t3 drop column c4",
-		"alter table test_parallel_ddl_2.t3 auto_id_cache 1024",
-		"alter table test_parallel_ddl_1.t1 add index db1_idx3(c2)",
-		"drop database test_parallel_ddl_2",
-	} {
-		idx := i
-		wg.Run(func() {
-			tk2 := testkit.NewTestKit(t, store)
-			tk2.MustExec(sql)
-			rs := tk2.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
-			seqIDs[idx], _ = strconv.Atoi(rs.Rows()[0][0].(string))
-		})
-		ch <- struct{}{}
-	}
-	enable.Store(false)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t1 add index db1_idx1(c1)")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[0], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t1 add column c3 int")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[1], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t1 add index db1_idxx(c1)")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[2], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t2 drop column c3")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[3], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t1 drop index db1_idx2")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[4], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t2 add index db1_idx2(c2)")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[5], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_2.t3 drop column c4")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[6], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_2.t3 auto_id_cache 1024")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[7], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("alter table test_parallel_ddl_1.t1 add index db1_idx3(c2)")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[8], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
+	wg.Run(func() {
+		tk := testkit.NewTestKit(t, store)
+		tk.MustExec("drop database test_parallel_ddl_2")
+		rs := tk.MustQuery("select json_extract(@@tidb_last_ddl_info, '$.seq_num')")
+		seqIDs[9], _ = strconv.Atoi(rs.Rows()[0][0].(string))
+	})
+	time.Sleep(5 * time.Millisecond)
 	wg.Run(func() {
 		tk := testkit.NewTestKit(t, store)
 		_ = tk.ExecToErr("alter table test_parallel_ddl_2.t3 add index db3_idx1(c2)")
@@ -228,46 +263,46 @@ func TestParallelDDL(t *testing.T) {
 
 func TestJobNeedGC(t *testing.T) {
 	job := &model.Job{Type: model.ActionAddIndex, State: model.JobStateCancelled}
-	require.False(t, ddl.JobNeedGC(job))
+	require.False(t, ddl.JobNeedGCForTest(job))
 
 	job = &model.Job{Type: model.ActionAddColumn, State: model.JobStateDone}
-	require.False(t, ddl.JobNeedGC(job))
+	require.False(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionAddIndex, State: model.JobStateDone}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionAddPrimaryKey, State: model.JobStateDone}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionAddIndex, State: model.JobStateRollbackDone}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionAddPrimaryKey, State: model.JobStateRollbackDone}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 
 	job = &model.Job{Type: model.ActionMultiSchemaChange, State: model.JobStateDone, MultiSchemaInfo: &model.MultiSchemaInfo{
 		SubJobs: []*model.SubJob{
 			{Type: model.ActionAddColumn, State: model.JobStateDone},
 			{Type: model.ActionRebaseAutoID, State: model.JobStateDone},
 		}}}
-	require.False(t, ddl.JobNeedGC(job))
+	require.False(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionMultiSchemaChange, State: model.JobStateDone, MultiSchemaInfo: &model.MultiSchemaInfo{
 		SubJobs: []*model.SubJob{
 			{Type: model.ActionAddIndex, State: model.JobStateDone},
 			{Type: model.ActionAddColumn, State: model.JobStateDone},
 			{Type: model.ActionRebaseAutoID, State: model.JobStateDone},
 		}}}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionMultiSchemaChange, State: model.JobStateDone, MultiSchemaInfo: &model.MultiSchemaInfo{
 		SubJobs: []*model.SubJob{
 			{Type: model.ActionAddIndex, State: model.JobStateDone},
 			{Type: model.ActionDropColumn, State: model.JobStateDone},
 			{Type: model.ActionRebaseAutoID, State: model.JobStateDone},
 		}}}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 	job = &model.Job{Type: model.ActionMultiSchemaChange, State: model.JobStateRollbackDone, MultiSchemaInfo: &model.MultiSchemaInfo{
 		SubJobs: []*model.SubJob{
 			{Type: model.ActionAddIndex, State: model.JobStateRollbackDone},
 			{Type: model.ActionAddColumn, State: model.JobStateRollbackDone},
 			{Type: model.ActionRebaseAutoID, State: model.JobStateCancelled},
 		}}}
-	require.True(t, ddl.JobNeedGC(job))
+	require.True(t, ddl.JobNeedGCForTest(job))
 }
 
 func TestUsingReorgCtx(t *testing.T) {

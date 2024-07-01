@@ -26,10 +26,13 @@ import (
 )
 
 var (
-	mockCMSMemoryUsage = int64(4)
+	mockCMSMemoryUsage  = int64(4)
+	mockTopNMemoryUsage = int64(64)
+	mockHistMemoryUsage = int64(289)
 )
 
 func TestLFUPutGetDel(t *testing.T) {
+	testMode = true
 	capacity := int64(100)
 	lfu, err := NewLFU(capacity)
 	require.NoError(t, err)
@@ -47,6 +50,7 @@ func TestLFUPutGetDel(t *testing.T) {
 }
 
 func TestLFUFreshMemUsage(t *testing.T) {
+	testMode = true
 	lfu, err := NewLFU(10000)
 	require.NoError(t, err)
 	t1 := testutil.NewMockStatisticsTable(1, 1, true, false, false)
@@ -81,6 +85,7 @@ func TestLFUFreshMemUsage(t *testing.T) {
 }
 
 func TestLFUPutTooBig(t *testing.T) {
+	testMode = true
 	lfu, err := NewLFU(1)
 	require.NoError(t, err)
 	mockTable := testutil.NewMockStatisticsTable(1, 1, true, false, false)
@@ -93,6 +98,7 @@ func TestLFUPutTooBig(t *testing.T) {
 }
 
 func TestCacheLen(t *testing.T) {
+	testMode = true
 	capacity := int64(12)
 	lfu, err := NewLFU(capacity)
 	require.NoError(t, err)
@@ -115,6 +121,7 @@ func TestCacheLen(t *testing.T) {
 }
 
 func TestLFUCachePutGetWithManyConcurrency(t *testing.T) {
+	testMode = true
 	// to test DATA RACE
 	capacity := int64(100000000000)
 	lfu, err := NewLFU(capacity)
@@ -140,6 +147,7 @@ func TestLFUCachePutGetWithManyConcurrency(t *testing.T) {
 }
 
 func TestLFUCachePutGetWithManyConcurrency2(t *testing.T) {
+	testMode = true
 	// to test DATA RACE
 	capacity := int64(100000000000)
 	lfu, err := NewLFU(capacity)
@@ -170,6 +178,7 @@ func TestLFUCachePutGetWithManyConcurrency2(t *testing.T) {
 }
 
 func TestLFUCachePutGetWithManyConcurrencyAndSmallConcurrency(t *testing.T) {
+	testMode = true
 	// to test DATA RACE
 
 	capacity := int64(100)
@@ -235,6 +244,7 @@ func checkTable(t *testing.T, tbl *statistics.Table) {
 }
 
 func TestLFUReject(t *testing.T) {
+	testMode = true
 	capacity := int64(100000000000)
 	lfu, err := NewLFU(capacity)
 	require.NoError(t, err)
@@ -263,6 +273,7 @@ func TestLFUReject(t *testing.T) {
 }
 
 func TestMemoryControl(t *testing.T) {
+	testMode = true
 	capacity := int64(100000000000)
 	lfu, err := NewLFU(capacity)
 	require.NoError(t, err)

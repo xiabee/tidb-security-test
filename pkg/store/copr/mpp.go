@@ -31,6 +31,7 @@ import (
 	"github.com/pingcap/tidb/pkg/store/driver/backoff"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/tiflash"
 	"github.com/pingcap/tidb/pkg/util/tiflashcompute"
 	"github.com/tikv/client-go/v2/tikv"
@@ -108,8 +109,6 @@ func (c *MPPClient) DispatchMPPTask(param kv.DispatchMPPTaskParam) (resp *mpp.Di
 		ReportExecutionSummary: req.ReportExecutionSummary,
 		MppVersion:             req.MppVersion.ToInt64(),
 		ResourceGroupName:      req.ResourceGroupName,
-		ConnectionId:           req.ConnectionID,
-		ConnectionAlias:        req.ConnectionAlias,
 	}
 
 	mppReq := &mpp.DispatchTaskRequest{
@@ -175,7 +174,7 @@ func (c *MPPClient) DispatchMPPTask(param kv.DispatchMPPTaskParam) (resp *mpp.Di
 	}
 
 	if len(realResp.RetryRegions) > 0 {
-		logutil.BgLogger().Info("TiFlash found " + strconv.Itoa(len(realResp.RetryRegions)) + " stale regions. Only first " + strconv.Itoa(min(10, len(realResp.RetryRegions))) + " regions will be logged if the log level is higher than Debug")
+		logutil.BgLogger().Info("TiFlash found " + strconv.Itoa(len(realResp.RetryRegions)) + " stale regions. Only first " + strconv.Itoa(mathutil.Min(10, len(realResp.RetryRegions))) + " regions will be logged if the log level is higher than Debug")
 		for index, retry := range realResp.RetryRegions {
 			id := tikv.NewRegionVerID(retry.Id, retry.RegionEpoch.ConfVer, retry.RegionEpoch.Version)
 			if index < 10 || log.GetLevel() <= zap.DebugLevel {
@@ -255,15 +254,7 @@ func (c *MPPClient) EstablishMPPConns(param kv.EstablishMPPConnsParam) (*tikvrpc
 	// We don't need to process any special error. When we meet errors, just let it fail.
 	rpcResp, err := c.store.GetTiKVClient().SendRequest(param.Ctx, req.Meta.GetAddress(), wrappedReq, TiFlashReadTimeoutUltraLong)
 
-	var stream *tikvrpc.MPPStreamResponse
-	if rpcResp != nil && rpcResp.Resp != nil {
-		stream = rpcResp.Resp.(*tikvrpc.MPPStreamResponse)
-	}
-
 	if err != nil {
-		if stream != nil {
-			stream.Close()
-		}
 		logutil.BgLogger().Warn("establish mpp connection meet error and cannot retry", zap.String("error", err.Error()), zap.Uint64("timestamp", taskMeta.StartTs), zap.Int64("task", taskMeta.TaskId), zap.Int64("mpp-version", taskMeta.MppVersion))
 		if config.GetGlobalConfig().DisaggregatedTiFlash && !config.GetGlobalConfig().UseAutoScaler {
 			c.store.GetRegionCache().InvalidateTiFlashComputeStores()
@@ -271,7 +262,8 @@ func (c *MPPClient) EstablishMPPConns(param kv.EstablishMPPConnsParam) (*tikvrpc
 		return nil, err
 	}
 
-	return stream, nil
+	streamResponse := rpcResp.Resp.(*tikvrpc.MPPStreamResponse)
+	return streamResponse, nil
 }
 
 // CheckVisibility checks if it is safe to read using given ts.

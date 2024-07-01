@@ -23,6 +23,5 @@ import (
 var Analyzer = nlc.Analyzer
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }

@@ -115,7 +115,7 @@ func TestQueryLockedTables(t *testing.T) {
 
 type ctxMatcher struct{}
 
-func (c *ctxMatcher) Matches(x any) bool {
+func (c *ctxMatcher) Matches(x interface{}) bool {
 	ctx := x.(context.Context)
 	s := util.RequestSourceFromCtx(ctx)
 	return s == util.InternalRequest+"_"+kv.InternalTxnStats

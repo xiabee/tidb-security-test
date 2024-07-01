@@ -15,10 +15,15 @@
 package aggregation
 
 import (
+	"context"
+	"strconv"
+
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tipb/go-tipb"
@@ -95,10 +100,9 @@ func (desc *baseFuncDesc) GetTiPBExpr(tryWindowDesc bool) (tp tipb.ExprType) {
 }
 
 // AggFuncToPBExpr converts aggregate function to pb.
-func AggFuncToPBExpr(ctx expression.PushDownContext, aggFunc *AggFuncDesc, storeType kv.StoreType) (*tipb.Expr, error) {
-	pc := ctx.PbConverter()
+func AggFuncToPBExpr(sctx sessionctx.Context, client kv.Client, aggFunc *AggFuncDesc, storeType kv.StoreType) (*tipb.Expr, error) {
+	pc := expression.NewPBConverter(client, sctx.GetSessionVars().StmtCtx)
 	tp := aggFunc.GetTiPBExpr(false)
-	client := ctx.Client()
 	if !client.IsRequestTypeSupported(kv.ReqTypeSelect, int64(tp)) {
 		return nil, errors.New("select request is not supported by client")
 	}
@@ -118,15 +122,24 @@ func AggFuncToPBExpr(ctx expression.PushDownContext, aggFunc *AggFuncDesc, store
 
 	if tp == tipb.ExprType_GroupConcat {
 		orderBy := make([]*tipb.ByItem, 0, len(aggFunc.OrderByItems))
+		sc := sctx.GetSessionVars().StmtCtx
 		for _, arg := range aggFunc.OrderByItems {
-			pbArg := expression.SortByItemToPB(ctx.EvalCtx(), client, arg.Expr, arg.Desc)
+			pbArg := expression.SortByItemToPB(sc, client, arg.Expr, arg.Desc)
 			if pbArg == nil {
 				return nil, errors.New(aggFunc.String() + " can't be converted to PB.")
 			}
 			orderBy = append(orderBy, pbArg)
 		}
 		// encode GroupConcatMaxLen
-		maxLen := ctx.GetGroupConcatMaxLen()
+		gcMaxLen, err := sctx.GetSessionVars().GetSessionOrGlobalSystemVar(context.Background(), variable.GroupConcatMaxLen)
+		if err != nil {
+			return nil, errors.Errorf("Error happened when buildGroupConcat: no system variable named '%s'", variable.GroupConcatMaxLen)
+		}
+		maxLen, err := strconv.ParseUint(gcMaxLen, 10, 64)
+		// Should never happen
+		if err != nil {
+			return nil, errors.Errorf("Error happened when buildGroupConcat: %s", err.Error())
+		}
 		return &tipb.Expr{Tp: tp, Val: codec.EncodeUint(nil, maxLen), Children: children, FieldType: retType, HasDistinct: aggFunc.HasDistinct, OrderBy: orderBy, AggFuncMode: AggFunctionModeToPB(aggFunc.Mode)}, nil
 	}
 	return &tipb.Expr{Tp: tp, Children: children, FieldType: retType, HasDistinct: aggFunc.HasDistinct, AggFuncMode: AggFunctionModeToPB(aggFunc.Mode)}, nil
@@ -172,7 +185,7 @@ func PBAggFuncModeToAggFuncMode(pbMode *tipb.AggFunctionMode) (mode AggFunctionM
 }
 
 // PBExprToAggFuncDesc converts pb to aggregate function.
-func PBExprToAggFuncDesc(ctx expression.BuildContext, aggFunc *tipb.Expr, fieldTps []*types.FieldType) (*AggFuncDesc, error) {
+func PBExprToAggFuncDesc(ctx sessionctx.Context, aggFunc *tipb.Expr, fieldTps []*types.FieldType) (*AggFuncDesc, error) {
 	var name string
 	switch aggFunc.Tp {
 	case tipb.ExprType_Count:
@@ -201,7 +214,7 @@ func PBExprToAggFuncDesc(ctx expression.BuildContext, aggFunc *tipb.Expr, fieldT
 		return nil, errors.Errorf("unknown aggregation function type: %v", aggFunc.Tp)
 	}
 
-	args, err := expression.PBToExprs(ctx, aggFunc.Children, fieldTps)
+	args, err := expression.PBToExprs(aggFunc.Children, fieldTps, ctx.GetSessionVars().StmtCtx)
 	if err != nil {
 		return nil, err
 	}

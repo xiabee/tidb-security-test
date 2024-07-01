@@ -27,12 +27,10 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/util/callback"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
+	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sync/errgroup"
 )
 
 func TestGetDDLJobs(t *testing.T) {
@@ -141,7 +139,7 @@ func TestIsJobRollbackable(t *testing.T) {
 	}
 }
 
-func enQueueDDLJobs(t *testing.T, sess sessiontypes.Session, txn kv.Transaction, jobType model.ActionType, start, end int) {
+func enQueueDDLJobs(t *testing.T, sess session.Session, txn kv.Transaction, jobType model.ActionType, start, end int) {
 	for i := start; i < end; i++ {
 		job := &model.Job{
 			ID:       int64(i),
@@ -151,46 +149,6 @@ func enQueueDDLJobs(t *testing.T, sess sessiontypes.Session, txn kv.Transaction,
 		err := addDDLJobs(sess, txn, job)
 		require.NoError(t, err)
 	}
-}
-
-func TestCreateViewConcurrently(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
-	tk.MustExec("create table t (a int);")
-	tk.MustExec("create view v as select * from t;")
-	var (
-		counterErr error
-		counter    int
-	)
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onDDLCreateView", func(job *model.Job) {
-		counter++
-		if counter > 1 {
-			counterErr = fmt.Errorf("create view job should not run concurrently")
-			return
-		}
-	})
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/afterDelivery2Worker", func(job *model.Job) {
-		if job.Type == model.ActionCreateView {
-			counter--
-		}
-	})
-	var eg errgroup.Group
-	for i := 0; i < 5; i++ {
-		eg.Go(func() error {
-			newTk := testkit.NewTestKit(t, store)
-			_, err := newTk.Exec("use test")
-			if err != nil {
-				return err
-			}
-			_, err = newTk.Exec("create or replace view v as select * from t;")
-			return err
-		})
-	}
-	err := eg.Wait()
-	require.NoError(t, err)
-	require.NoError(t, counterErr)
 }
 
 func TestCreateDropCreateTable(t *testing.T) {
@@ -254,67 +212,4 @@ func TestCreateDropCreateTable(t *testing.T) {
 	create1TS, dropTS, create0TS := finishTSs[0], finishTSs[1], finishTSs[2]
 	require.Less(t, create0TS, dropTS, "first create should finish before drop")
 	require.Less(t, dropTS, create1TS, "second create should finish after drop")
-}
-
-func TestBuildQueryStringFromJobs(t *testing.T) {
-	testCases := []struct {
-		name     string
-		jobs     []*model.Job
-		expected string
-	}{
-		{
-			name:     "Empty jobs",
-			jobs:     []*model.Job{},
-			expected: "",
-		},
-		{
-			name:     "Single create table job",
-			jobs:     []*model.Job{{Query: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255));"}},
-			expected: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255));",
-		},
-		{
-			name: "Multiple create table jobs with trailing semicolons",
-			jobs: []*model.Job{
-				{Query: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255));"},
-				{Query: "CREATE TABLE products (id INT PRIMARY KEY, description TEXT);"},
-			},
-			expected: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255)); CREATE TABLE products (id INT PRIMARY KEY, description TEXT);",
-		},
-		{
-			name: "Multiple create table jobs with and without trailing semicolons",
-			jobs: []*model.Job{
-				{Query: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255))"},
-				{Query: "CREATE TABLE products (id INT PRIMARY KEY, description TEXT);"},
-				{Query: "   CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, product_id INT) "},
-			},
-			expected: "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255)); CREATE TABLE products (id INT PRIMARY KEY, description TEXT); CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, product_id INT);",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			actual := ddl.BuildQueryStringFromJobs(tc.jobs)
-			require.Equal(t, tc.expected, actual, "Query strings do not match")
-		})
-	}
-}
-
-func TestBatchCreateTableWithJobs(t *testing.T) {
-	job1 := &model.Job{
-		SchemaID:   1,
-		Type:       model.ActionCreateTable,
-		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{&model.TableInfo{Name: model.CIStr{O: "t1", L: "t1"}}, false},
-		Query:      "create table db1.t1 (c1 int, c2 int)",
-	}
-	job2 := &model.Job{
-		SchemaID:   1,
-		Type:       model.ActionCreateTable,
-		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{&model.TableInfo{Name: model.CIStr{O: "t2", L: "t2"}}, &model.TableInfo{}},
-		Query:      "create table db1.t2 (c1 int, c2 int);",
-	}
-	job, err := ddl.BatchCreateTableWithJobs([]*model.Job{job1, job2})
-	require.NoError(t, err)
-	require.Equal(t, "create table db1.t1 (c1 int, c2 int); create table db1.t2 (c1 int, c2 int);", job.Query)
 }

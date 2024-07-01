@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
@@ -264,11 +263,11 @@ func (p *PessimisticRCTxnContextProvider) AdviseWarmup() error {
 }
 
 // planSkipGetTsoFromPD identifies the plans which don't need get newest ts from PD.
-func planSkipGetTsoFromPD(sctx sessionctx.Context, plan base.Plan, inLockOrWriteStmt bool) bool {
+func planSkipGetTsoFromPD(sctx sessionctx.Context, plan plannercore.Plan, inLockOrWriteStmt bool) bool {
 	switch v := plan.(type) {
 	case *plannercore.PointGetPlan:
 		return sctx.GetSessionVars().RcWriteCheckTS && (v.Lock || inLockOrWriteStmt)
-	case base.PhysicalPlan:
+	case plannercore.PhysicalPlan:
 		if len(v.Children()) == 0 {
 			return false
 		}
@@ -295,7 +294,7 @@ func planSkipGetTsoFromPD(sctx sessionctx.Context, plan base.Plan, inLockOrWrite
 // 2. An INSERT statement without "SELECT" subquery.
 // 3. A UPDATE statement whose sub execution plan is "PointGet".
 // 4. A DELETE statement whose sub execution plan is "PointGet".
-func (p *PessimisticRCTxnContextProvider) AdviseOptimizeWithPlan(val any) (err error) {
+func (p *PessimisticRCTxnContextProvider) AdviseOptimizeWithPlan(val interface{}) (err error) {
 	if p.isTidbSnapshotEnabled() || p.isBeginStmtWithStaleRead() {
 		return nil
 	}
@@ -303,7 +302,7 @@ func (p *PessimisticRCTxnContextProvider) AdviseOptimizeWithPlan(val any) (err e
 		return nil
 	}
 
-	plan, ok := val.(base.Plan)
+	plan, ok := val.(plannercore.Plan)
 	if !ok {
 		return nil
 	}

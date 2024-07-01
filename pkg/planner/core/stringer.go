@@ -19,18 +19,17 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
 )
 
 // ToString explains a Plan, returns description string.
-func ToString(p base.Plan) string {
+func ToString(p Plan) string {
 	strs, _ := toString(p, []string{}, []int{})
 	return strings.Join(strs, "->")
 }
 
 // FDToString explains fd transfer over a Plan, returns description string.
-func FDToString(p base.LogicalPlan) string {
+func FDToString(p LogicalPlan) string {
 	strs, _ := fdToString(p, []string{}, []int{})
 	for i, j := 0, len(strs)-1; i < j; i, j = i+1, j-1 {
 		strs[i], strs[j] = strs[j], strs[i]
@@ -38,47 +37,47 @@ func FDToString(p base.LogicalPlan) string {
 	return strings.Join(strs, " >>> ")
 }
 
-func needIncludeChildrenString(plan base.Plan) bool {
+func needIncludeChildrenString(plan Plan) bool {
 	switch x := plan.(type) {
 	case *LogicalUnionAll, *PhysicalUnionAll, *LogicalPartitionUnionAll:
 		// after https://github.com/pingcap/tidb/pull/25218, the union may contain less than 2 children,
 		// but we still wants to include its child plan's information when calling `toString` on union.
 		return true
-	case base.LogicalPlan:
+	case LogicalPlan:
 		return len(x.Children()) > 1
-	case base.PhysicalPlan:
+	case PhysicalPlan:
 		return len(x.Children()) > 1
 	default:
 		return false
 	}
 }
 
-func fdToString(in base.LogicalPlan, strs []string, idxs []int) ([]string, []int) {
+func fdToString(in LogicalPlan, strs []string, idxs []int) ([]string, []int) {
 	switch x := in.(type) {
 	case *LogicalProjection:
-		strs = append(strs, "{"+x.FDs().String()+"}")
+		strs = append(strs, "{"+x.fdSet.String()+"}")
 		for _, child := range x.Children() {
 			strs, idxs = fdToString(child, strs, idxs)
 		}
 	case *LogicalAggregation:
-		strs = append(strs, "{"+x.FDs().String()+"}")
+		strs = append(strs, "{"+x.fdSet.String()+"}")
 		for _, child := range x.Children() {
 			strs, idxs = fdToString(child, strs, idxs)
 		}
 	case *DataSource:
-		strs = append(strs, "{"+x.FDs().String()+"}")
+		strs = append(strs, "{"+x.fdSet.String()+"}")
 	case *LogicalApply:
-		strs = append(strs, "{"+x.FDs().String()+"}")
+		strs = append(strs, "{"+x.fdSet.String()+"}")
 	case *LogicalJoin:
-		strs = append(strs, "{"+x.FDs().String()+"}")
+		strs = append(strs, "{"+x.fdSet.String()+"}")
 	default:
 	}
 	return strs, idxs
 }
 
-func toString(in base.Plan, strs []string, idxs []int) ([]string, []int) {
+func toString(in Plan, strs []string, idxs []int) ([]string, []int) {
 	switch x := in.(type) {
-	case base.LogicalPlan:
+	case LogicalPlan:
 		if needIncludeChildrenString(in) {
 			idxs = append(idxs, len(strs))
 		}
@@ -87,7 +86,7 @@ func toString(in base.Plan, strs []string, idxs []int) ([]string, []int) {
 			strs, idxs = toString(c, strs, idxs)
 		}
 	case *PhysicalExchangeReceiver: // do nothing
-	case base.PhysicalPlan:
+	case PhysicalPlan:
 		if needIncludeChildrenString(in) {
 			idxs = append(idxs, len(strs))
 		}
@@ -168,12 +167,12 @@ func toString(in base.Plan, strs []string, idxs []int) ([]string, []int) {
 	case *LogicalShow:
 		str = "Show"
 		if pl := in.(*LogicalShow); pl.Extractor != nil {
-			str = str + "(" + pl.Extractor.ExplainInfo() + ")"
+			str = str + "(" + pl.Extractor.explainInfo() + ")"
 		}
 	case *PhysicalShow:
 		str = "Show"
 		if pl := in.(*PhysicalShow); pl.Extractor != nil {
-			str = str + "(" + pl.Extractor.ExplainInfo() + ")"
+			str = str + "(" + pl.Extractor.explainInfo() + ")"
 		}
 	case *LogicalShowDDLJobs, *PhysicalShowDDLJobs:
 		str = "ShowDDLJobs"
@@ -211,9 +210,7 @@ func toString(in base.Plan, strs []string, idxs []int) ([]string, []int) {
 		str = name + "{" + strings.Join(children, ",") + "}"
 		idxs = idxs[:last]
 	case *DataSource:
-		if x.partitionDefIdx != nil {
-			// TODO: Change this to:
-			//str = fmt.Sprintf("Partition(%d)", x.tableInfo.Partition.Definitions[*x.partitionDefIdx].Name.O)
+		if x.isPartition {
 			str = fmt.Sprintf("Partition(%d)", x.physicalTableID)
 		} else {
 			if x.TableAsName != nil && x.TableAsName.L != "" {
@@ -328,7 +325,7 @@ func toString(in base.Plan, strs []string, idxs []int) ([]string, []int) {
 		}
 	case *LogicalWindow:
 		buffer := bytes.NewBufferString("")
-		formatWindowFuncDescs(buffer, x.WindowFuncDescs, x.Schema())
+		formatWindowFuncDescs(buffer, x.WindowFuncDescs, x.schema)
 		str = fmt.Sprintf("Window(%s)", buffer.String())
 	case *PhysicalWindow:
 		str = fmt.Sprintf("Window(%s)", x.ExplainInfo())

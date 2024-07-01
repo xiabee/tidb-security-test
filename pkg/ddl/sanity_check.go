@@ -21,14 +21,15 @@ import (
 
 	"github.com/pingcap/errors"
 	sess "github.com/pingcap/tidb/pkg/ddl/internal/session"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/intest"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/mathutil"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -38,12 +39,12 @@ func (d *ddl) checkDeleteRangeCnt(job *model.Job) {
 		if strings.Contains(err.Error(), "Not Supported") {
 			return // For mock session, we don't support executing SQLs.
 		}
-		logutil.DDLLogger().Error("query delete range count failed", zap.Error(err))
+		logutil.BgLogger().Error("query delete range count failed", zap.Error(err))
 		panic(err)
 	}
 	expectedCnt, err := expectedDeleteRangeCnt(delRangeCntCtx{idxIDs: map[int64]struct{}{}}, job)
 	if err != nil {
-		logutil.DDLLogger().Error("decode job's delete range count failed", zap.Error(err))
+		logutil.BgLogger().Error("decode job's delete range count failed", zap.Error(err))
 		panic(err)
 	}
 	if actualCnt != expectedCnt {
@@ -53,7 +54,7 @@ func (d *ddl) checkDeleteRangeCnt(job *model.Job) {
 
 func queryDeleteRangeCnt(sessPool *sess.Pool, jobID int64) (int, error) {
 	sctx, _ := sessPool.Get()
-	s := sctx.GetSQLExecutor()
+	s, _ := sctx.(sqlexec.SQLExecutor)
 	defer func() {
 		sessPool.Put(sctx)
 	}()
@@ -126,7 +127,7 @@ func expectedDeleteRangeCnt(ctx delRangeCntCtx, job *model.Job) (int, error) {
 		}
 		return mathutil.Max(len(partitionIDs)*idxIDNumFactor, idxIDNumFactor), nil
 	case model.ActionDropIndex, model.ActionDropPrimaryKey:
-		var indexName any
+		var indexName interface{}
 		ifNotExists := make([]bool, 1)
 		indexID := make([]int64, 1)
 		var partitionIDs []int64
@@ -193,7 +194,7 @@ func (d *ddl) checkHistoryJobInTest(ctx sessionctx.Context, historyJob *model.Jo
 	}
 
 	// Check delete range.
-	if JobNeedGC(historyJob) {
+	if jobNeedGC(historyJob) {
 		d.checkDeleteRangeCnt(historyJob)
 	}
 

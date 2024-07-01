@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit/testutil"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -38,12 +39,12 @@ func constructFieldType() types.FieldType {
 	return tp
 }
 
-func createGroupingFunc(args []Expression) (*BuiltinGroupingImplSig, error) {
+func createGroupingFunc(ctx sessionctx.Context, args []Expression) (*BuiltinGroupingImplSig, error) {
 	// TODO We should use the commented codes after the completion of rollup
 	// argTp := []types.EvalType{types.ETInt}
 	tp := constructFieldType()
 	// bf, err := newBaseBuiltinFuncWithTp(ctx, groupingImplName, args, types.ETInt, argTp...)
-	bf, err := newBaseBuiltinFuncWithFieldType(&tp, args)
+	bf, err := newBaseBuiltinFuncWithFieldType(ctx, &tp, args)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +92,13 @@ func TestGrouping(t *testing.T) {
 		comment := fmt.Sprintf(`for grouping = "%d", version = "%d", groupingIDs = "%v", expectRes = "%d"`, testCase.groupingID, testCase.mode, testCase.groupingIDs, testCase.expectResult)
 		args := datumsToConstants(types.MakeDatums(testCase.groupingID))
 
-		groupingFunc, err := createGroupingFunc(args)
+		groupingFunc, err := createGroupingFunc(ctx, args)
 		require.NoError(t, err, comment)
 
 		err = groupingFunc.SetMetadata(testCase.mode, []map[uint64]struct{}{testCase.groupingIDs})
 		require.NoError(t, err, comment)
 
-		actualResult, err := evalBuiltinFunc(groupingFunc, ctx, chunk.Row{})
+		actualResult, err := evalBuiltinFunc(groupingFunc, chunk.Row{})
 		require.NoError(t, err, comment)
 		testutil.DatumEqual(t, types.NewDatum(testCase.expectResult), actualResult, comment)
 	}

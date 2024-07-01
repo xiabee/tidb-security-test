@@ -23,13 +23,13 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/ddl/placement"
 	ddlutil "github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/domain"
@@ -45,9 +45,8 @@ import (
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
@@ -187,7 +186,7 @@ func TestTiFlashNoRedundantPDRules(t *testing.T) {
 	s, teardown := createTiFlashContext(t)
 	defer teardown()
 
-	rpcClient, pdClient, cluster, err := unistore.New("", nil)
+	rpcClient, pdClient, cluster, err := unistore.New("")
 	require.NoError(t, err)
 	defer func() {
 		rpcClient.Close()
@@ -472,8 +471,8 @@ func TestTiFlashFlashbackCluster(t *testing.T) {
 	}()
 
 	errorMsg := fmt.Sprintf("[ddl:-1]Detected unsupported DDL job type(%s) during [%s, now), can't do flashback",
-		model.ActionSetTiFlashReplica.String(), oracle.GetTimeFromTS(ts).Format(types.TimeFSPFormat))
-	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(ts).Format(types.TimeFSPFormat)), errorMsg)
+		model.ActionSetTiFlashReplica.String(), oracle.GetTimeFromTS(ts).String())
+	tk.MustGetErrMsg(fmt.Sprintf("flashback cluster to timestamp '%s'", oracle.GetTimeFromTS(ts)), errorMsg)
 
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockFlashbackTest"))
 	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/injectSafeTS"))
@@ -583,7 +582,7 @@ func TestSetPlacementRuleWithGCWorker(t *testing.T) {
 	s, teardown := createTiFlashContext(t)
 	defer teardown()
 
-	rpcClient, pdClient, cluster, err := unistore.New("", nil)
+	rpcClient, pdClient, cluster, err := unistore.New("")
 	defer func() {
 		rpcClient.Close()
 		pdClient.Close()
@@ -801,20 +800,6 @@ func TestAlterDatabaseBasic(t *testing.T) {
 
 	// There is less TiFlash store
 	tk.MustGetErrMsg("alter database tiflash_ddl set tiflash replica 3", "the tiflash replica count: 3 should be less than the total tiflash server count: 2")
-
-	// Test Issue #51990, alter database skip set tiflash replica on sequence and view.
-	tk.MustExec("create database tiflash_ddl_skip;")
-	tk.MustExec("use tiflash_ddl_skip")
-	tk.MustExec("create table t (id int);")
-	tk.MustExec("create sequence t_seq;")
-	tk.MustExec("create view t_view as select id from t;")
-	tk.MustExec("create global temporary table t_temp (id int) on commit delete rows;")
-	tk.MustExec("alter database tiflash_ddl_skip set tiflash replica 1;")
-	require.Equal(t, "In total 4 tables: 1 succeed, 0 failed, 3 skipped", tk.Session().GetSessionVars().StmtCtx.GetMessage())
-	tk.MustQuery(`show warnings;`).Sort().Check(testkit.Rows(
-		"Note 1347 'tiflash_ddl_skip.t_seq' is not BASE TABLE",
-		"Note 1347 'tiflash_ddl_skip.t_view' is not BASE TABLE",
-		"Note 8006 `set on tiflash` is unsupported on temporary tables."))
 }
 
 func execWithTimeout(t *testing.T, tk *testkit.TestKit, to time.Duration, sql string) (bool, error) {
@@ -833,7 +818,7 @@ func execWithTimeout(t *testing.T, tk *testkit.TestKit, to time.Duration, sql st
 		return false, e
 	case <-ctx.Done():
 		// Exceed given timeout
-		logutil.DDLLogger().Info("execWithTimeout meet timeout", zap.String("sql", sql))
+		logutil.BgLogger().Info("execWithTimeout meet timeout", zap.String("sql", sql))
 		require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/BatchAddTiFlashSendDone", "return(true)"))
 	}
 
@@ -911,7 +896,7 @@ func TestTiFlashBatchRateLimiter(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		tk.Session().Close()
-		logutil.DDLLogger().Info("session closed")
+		logutil.BgLogger().Info("session closed")
 	})
 	mu.Lock()
 	timeOut, err = execWithTimeout(t, tk, time.Second*2, "alter database tiflash_ddl_limit set tiflash replica 1")
@@ -935,7 +920,7 @@ func TestTiFlashBatchKill(t *testing.T) {
 	wg.Run(func() {
 		time.Sleep(time.Millisecond * 100)
 		sessVars := tk.Session().GetSessionVars()
-		sessVars.SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
+		atomic.StoreUint32(&sessVars.Killed, 1)
 	})
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/FastFailCheckTiFlashPendingTables", `return(2)`))
@@ -1390,7 +1375,7 @@ type TestDDLCallback struct {
 	*ddl.BaseCallback
 	// We recommended to pass the domain parameter to the test ddl callback, it will ensure
 	// domain to reload schema before your ddl stepping into the next state change.
-	Do ddl.SchemaLoader
+	Do ddl.DomainReloader
 
 	// Only need this for now
 	OnJobRunBeforeExported func(*model.Job)
@@ -1398,7 +1383,7 @@ type TestDDLCallback struct {
 
 // OnJobRunBefore is used to run the user customized logic of `onJobRunBefore` first.
 func (tc *TestDDLCallback) OnJobRunBefore(job *model.Job) {
-	logutil.DDLLogger().Info("on job run before", zap.String("job", job.String()))
+	logutil.BgLogger().Info("on job run before", zap.String("job", job.String()))
 	if tc.OnJobRunBeforeExported != nil {
 		tc.OnJobRunBeforeExported(job)
 		return

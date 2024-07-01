@@ -8,7 +8,6 @@ go_library(
     deps = [
         "//pkg/parser/terror",
         "//pkg/session",
-        "//pkg/session/types",
         "//pkg/store",
         "//pkg/store/driver",
         "//pkg/util/logutil",

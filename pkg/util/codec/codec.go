@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
@@ -83,7 +84,7 @@ func preRealloc(b []byte, vals []types.Datum, comparable1 bool) []byte {
 
 // encode will encode a datum and append it to a byte slice. If comparable1 is true, the encoded bytes can be sorted as it's original order.
 // If hash is true, the encoded bytes can be checked equal as it's original value.
-func encode(loc *time.Location, b []byte, vals []types.Datum, comparable1 bool) (_ []byte, err error) {
+func encode(sc *stmtctx.StatementContext, b []byte, vals []types.Datum, comparable1 bool) (_ []byte, err error) {
 	b = preRealloc(b, vals, comparable1)
 	for i, length := 0, len(vals); i < length; i++ {
 		switch vals[i].Kind() {
@@ -100,7 +101,7 @@ func encode(loc *time.Location, b []byte, vals []types.Datum, comparable1 bool) 
 			b = encodeBytes(b, vals[i].GetBytes(), comparable1)
 		case types.KindMysqlTime:
 			b = append(b, uintFlag)
-			b, err = EncodeMySQLTime(loc, vals[i].GetMysqlTime(), mysql.TypeUnspecified, b)
+			b, err = EncodeMySQLTime(sc, vals[i].GetMysqlTime(), mysql.TypeUnspecified, b)
 			if err != nil {
 				return b, err
 			}
@@ -111,6 +112,11 @@ func encode(loc *time.Location, b []byte, vals []types.Datum, comparable1 bool) 
 		case types.KindMysqlDecimal:
 			b = append(b, decimalFlag)
 			b, err = EncodeDecimal(b, vals[i].GetMysqlDecimal(), vals[i].Length(), vals[i].Frac())
+			if terror.ErrorEqual(err, types.ErrTruncated) {
+				err = sc.HandleTruncate(err)
+			} else if terror.ErrorEqual(err, types.ErrOverflow) {
+				err = sc.HandleOverflow(err, err)
+			}
 		case types.KindMysqlEnum:
 			b = encodeUnsignedInt(b, vals[i].GetMysqlEnum().Value, comparable1)
 		case types.KindMysqlSet:
@@ -118,7 +124,7 @@ func encode(loc *time.Location, b []byte, vals []types.Datum, comparable1 bool) 
 		case types.KindMysqlBit, types.KindBinaryLiteral:
 			// We don't need to handle errors here since the literal is ensured to be able to store in uint64 in convertToMysqlBit.
 			var val uint64
-			val, err = vals[i].GetBinaryLiteral().ToInt(types.StrictContext)
+			val, err = vals[i].GetBinaryLiteral().ToInt(sc)
 			terror.Log(errors.Trace(err))
 			b = encodeUnsignedInt(b, val, comparable1)
 		case types.KindMysqlJSON:
@@ -141,7 +147,7 @@ func encode(loc *time.Location, b []byte, vals []types.Datum, comparable1 bool) 
 }
 
 // EstimateValueSize uses to estimate the value  size of the encoded values.
-func EstimateValueSize(typeCtx types.Context, val types.Datum) (int, error) {
+func EstimateValueSize(sc *stmtctx.StatementContext, val types.Datum) (int, error) {
 	l := 0
 	switch val.Kind() {
 	case types.KindInt64:
@@ -164,7 +170,7 @@ func EstimateValueSize(typeCtx types.Context, val types.Datum) (int, error) {
 	case types.KindMysqlSet:
 		l = valueSizeOfUnsignedInt(val.GetMysqlSet().Value)
 	case types.KindMysqlBit, types.KindBinaryLiteral:
-		val, err := val.GetBinaryLiteral().ToInt(typeCtx)
+		val, err := val.GetBinaryLiteral().ToInt(sc)
 		terror.Log(errors.Trace(err))
 		l = valueSizeOfUnsignedInt(val)
 	case types.KindMysqlJSON:
@@ -178,14 +184,14 @@ func EstimateValueSize(typeCtx types.Context, val types.Datum) (int, error) {
 }
 
 // EncodeMySQLTime encodes datum of `KindMysqlTime` to []byte.
-func EncodeMySQLTime(loc *time.Location, t types.Time, tp byte, b []byte) (_ []byte, err error) {
+func EncodeMySQLTime(sc *stmtctx.StatementContext, t types.Time, tp byte, b []byte) (_ []byte, err error) {
 	// Encoding timestamp need to consider timezone. If it's not in UTC, transform to UTC first.
 	// This is compatible with `PBToExpr > convertTime`, and coprocessor assumes the passed timestamp is in UTC as well.
 	if tp == mysql.TypeUnspecified {
 		tp = t.Type()
 	}
-	if tp == mysql.TypeTimestamp && loc != time.UTC {
-		err = t.ConvertTimeZone(loc, time.UTC)
+	if tp == mysql.TypeTimestamp && sc.TimeZone() != time.UTC {
+		err = t.ConvertTimeZone(sc.TimeZone(), time.UTC)
 		if err != nil {
 			return nil, err
 		}
@@ -287,17 +293,17 @@ func sizeInt(comparable1 bool) int {
 // EncodeKey appends the encoded values to byte slice b, returns the appended
 // slice. It guarantees the encoded value is in ascending order for comparison.
 // For decimal type, datum must set datum's length and frac.
-func EncodeKey(loc *time.Location, b []byte, v ...types.Datum) ([]byte, error) {
-	return encode(loc, b, v, true)
+func EncodeKey(sc *stmtctx.StatementContext, b []byte, v ...types.Datum) ([]byte, error) {
+	return encode(sc, b, v, true)
 }
 
 // EncodeValue appends the encoded values to byte slice b, returning the appended
 // slice. It does not guarantee the order for comparison.
-func EncodeValue(loc *time.Location, b []byte, v ...types.Datum) ([]byte, error) {
-	return encode(loc, b, v, false)
+func EncodeValue(sc *stmtctx.StatementContext, b []byte, v ...types.Datum) ([]byte, error) {
+	return encode(sc, b, v, false)
 }
 
-func encodeHashChunkRowIdx(typeCtx types.Context, row chunk.Row, tp *types.FieldType, idx int) (flag byte, b []byte, err error) {
+func encodeHashChunkRowIdx(sc *stmtctx.StatementContext, row chunk.Row, tp *types.FieldType, idx int) (flag byte, b []byte, err error) {
 	if row.IsNull(idx) {
 		flag = NilFlag
 		return
@@ -378,7 +384,7 @@ func encodeHashChunkRowIdx(typeCtx types.Context, row chunk.Row, tp *types.Field
 	case mysql.TypeBit:
 		// We don't need to handle errors here since the literal is ensured to be able to store in uint64 in convertToMysqlBit.
 		flag = uvarintFlag
-		v, err1 := types.BinaryLiteral(row.GetBytes(idx)).ToInt(typeCtx)
+		v, err1 := types.BinaryLiteral(row.GetBytes(idx)).ToInt(sc)
 		terror.Log(errors.Trace(err1))
 		b = unsafe.Slice((*byte)(unsafe.Pointer(&v)), unsafe.Sizeof(v))
 	case mysql.TypeJSON:
@@ -391,192 +397,14 @@ func encodeHashChunkRowIdx(typeCtx types.Context, row chunk.Row, tp *types.Field
 	return
 }
 
-// SerializeMode is for some special cases during serialize key
-type SerializeMode int
-
-const (
-	// Normal means serialize in the normal way
-	Normal SerializeMode = iota
-	// NeedSignFlag when serialize integer column, if the join key is <signed, signed> or <unsigned, unsigned>,
-	// the unsigned flag can be ignored, if the join key is <unsigned, signed> or <signed, unsigned>
-	// the unsigned flag can not be ignored, if the unsigned flag can not be ignored, the key can not be inlined
-	NeedSignFlag
-	// KeepStringLength when serialize string column, if the string column can use raw data as the key, then it can be inlined,
-	// in this case, the string length should be included in the serialized key
-	KeepStringLength
-)
-
-// SerializeKeys is used in join
-func SerializeKeys(typeCtx types.Context, chk *chunk.Chunk, tp *types.FieldType, colIdx int, usedRows []int, filterVector []bool, nullVector []bool, serializeMode SerializeMode, serializedKeysVector [][]byte) (err error) {
-	column := chk.Column(colIdx)
-	canSkip := func(index int) bool {
-		if column.IsNull(index) {
-			nullVector[index] = true
-		}
-		return (filterVector != nil && !filterVector[index]) || (nullVector != nil && nullVector[index])
-	}
-	switch tp.GetType() {
-	case mysql.TypeTiny, mysql.TypeShort, mysql.TypeInt24, mysql.TypeLong, mysql.TypeLonglong, mysql.TypeYear:
-		i64s := column.Int64s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			if serializeMode == NeedSignFlag {
-				if !mysql.HasUnsignedFlag(tp.GetFlag()) && i64s[physicalRowindex] < 0 {
-					serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], intFlag)
-				} else {
-					serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], uintFlag)
-				}
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], column.GetRaw(physicalRowindex)...)
-		}
-	case mysql.TypeFloat:
-		f32s := column.Float32s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			d := float64(f32s[physicalRowindex])
-			// For negative zero. In memory, 0 is [0, 0, 0, 0, 0, 0, 0, 0] and -0 is [0, 0, 0, 0, 0, 0, 0, 128].
-			// It makes -0's hash val different from 0's.
-			if d == 0 {
-				d = 0
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&d)), sizeFloat64)...)
-		}
-	case mysql.TypeDouble:
-		f64s := column.Float64s()
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			// For negative zero. In memory, 0 is [0, 0, 0, 0, 0, 0, 0, 0] and -0 is [0, 0, 0, 0, 0, 0, 0, 128].
-			// It makes -0's hash val different from 0's.
-			f := f64s[physicalRowindex]
-			if f == 0 {
-				f = 0
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&f)), sizeFloat64)...)
-		}
-	case mysql.TypeVarchar, mysql.TypeVarString, mysql.TypeString, mysql.TypeBlob, mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob:
-		for logicalRowIndex, physicalRowIndex := range usedRows {
-			if canSkip(physicalRowIndex) {
-				continue
-			}
-			data := ConvertByCollation(column.GetBytes(physicalRowIndex), tp)
-			size := uint64(len(data))
-			if serializeMode == KeepStringLength {
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&size)), sizeUint64)...)
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], data...)
-		}
-	case mysql.TypeDate, mysql.TypeDatetime, mysql.TypeTimestamp:
-		ts := column.Times()
-		for logicalRowIndex, physicalRowIndex := range usedRows {
-			if canSkip(physicalRowIndex) {
-				continue
-			}
-			var v uint64
-			v, err = ts[physicalRowIndex].ToPackedUint()
-			if err != nil {
-				return err
-			}
-			// don't need to check serializeMode since date/datetime/timestamp must be compared with date/datetime/timestamp, so the serializeMode must be normal
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
-		}
-	case mysql.TypeDuration:
-		for logicalRowIndex, physicalRowIndex := range usedRows {
-			if canSkip(physicalRowIndex) {
-				continue
-			}
-			// don't need to check serializeMode since duration must be compared with duration, so the serializeMode must be normal
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], column.GetRaw(physicalRowIndex)...)
-		}
-	case mysql.TypeNewDecimal:
-		ds := column.Decimals()
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			var b []byte
-			b, err = ds[physicalRowindex].ToHashKey()
-			if err != nil {
-				return err
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], b...)
-		}
-	case mysql.TypeEnum:
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			v := column.GetEnum(physicalRowindex).Value
-			if mysql.HasEnumSetAsIntFlag(tp.GetFlag()) {
-				// check serializeMode here because enum maybe compare to integer type directly
-				if serializeMode == NeedSignFlag {
-					serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], uintFlag)
-				}
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
-			} else {
-				str := ""
-				if enum, err := types.ParseEnumValue(tp.GetElems(), v); err == nil {
-					str = enum.Name
-				}
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], ConvertByCollation(hack.Slice(str), tp)...)
-			}
-		}
-	case mysql.TypeSet:
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			s, err := types.ParseSetValue(tp.GetElems(), column.GetSet(physicalRowindex).Value)
-			if err != nil {
-				return err
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], ConvertByCollation(hack.Slice(s.Name), tp)...)
-		}
-	case mysql.TypeBit:
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			v, err1 := types.BinaryLiteral(column.GetBytes(physicalRowindex)).ToInt(typeCtx)
-			terror.Log(errors.Trace(err1))
-			// check serializeMode here because enum maybe compare to integer type directly
-			if serializeMode == NeedSignFlag {
-				serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], uintFlag)
-			}
-			serializedKeysVector[logicalRowIndex] = append(serializedKeysVector[logicalRowIndex], unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)...)
-		}
-	case mysql.TypeJSON:
-		for logicalRowIndex, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-			serializedKeysVector[logicalRowIndex] = column.GetJSON(physicalRowindex).HashValue(serializedKeysVector[logicalRowIndex])
-		}
-	case mysql.TypeNull:
-		for _, physicalRowindex := range usedRows {
-			if canSkip(physicalRowindex) {
-				continue
-			}
-		}
-	default:
-		return errors.Errorf("unsupport column type for encode %d", tp.GetType())
-	}
-	return
-}
-
 // HashChunkColumns writes the encoded value of each row's column, which of index `colIdx`, to h.
-func HashChunkColumns(typeCtx types.Context, h []hash.Hash64, chk *chunk.Chunk, tp *types.FieldType, colIdx int, buf []byte, isNull []bool) (err error) {
-	return HashChunkSelected(typeCtx, h, chk, tp, colIdx, buf, isNull, nil, false)
+func HashChunkColumns(sc *stmtctx.StatementContext, h []hash.Hash64, chk *chunk.Chunk, tp *types.FieldType, colIdx int, buf []byte, isNull []bool) (err error) {
+	return HashChunkSelected(sc, h, chk, tp, colIdx, buf, isNull, nil, false)
 }
 
 // HashChunkSelected writes the encoded value of selected row's column, which of index `colIdx`, to h.
 // sel indicates which rows are selected. If it is nil, all rows are selected.
-func HashChunkSelected(typeCtx types.Context, h []hash.Hash64, chk *chunk.Chunk, tp *types.FieldType, colIdx int, buf []byte,
+func HashChunkSelected(sc *stmtctx.StatementContext, h []hash.Hash64, chk *chunk.Chunk, tp *types.FieldType, colIdx int, buf []byte,
 	isNull, sel []bool, ignoreNull bool) (err error) {
 	var b []byte
 	column := chk.Column(colIdx)
@@ -801,7 +629,7 @@ func HashChunkSelected(typeCtx types.Context, h []hash.Hash64, chk *chunk.Chunk,
 			} else {
 				// We don't need to handle errors here since the literal is ensured to be able to store in uint64 in convertToMysqlBit.
 				buf[0] = uvarintFlag
-				v, err1 := types.BinaryLiteral(column.GetBytes(i)).ToInt(typeCtx)
+				v, err1 := types.BinaryLiteral(column.GetBytes(i)).ToInt(sc)
 				terror.Log(errors.Trace(err1))
 				b = unsafe.Slice((*byte)(unsafe.Pointer(&v)), sizeUint64)
 			}
@@ -848,10 +676,10 @@ func HashChunkSelected(typeCtx types.Context, h []hash.Hash64, chk *chunk.Chunk,
 
 // HashChunkRow writes the encoded values to w.
 // If two rows are logically equal, it will generate the same bytes.
-func HashChunkRow(typeCtx types.Context, w io.Writer, row chunk.Row, allTypes []*types.FieldType, colIdx []int, buf []byte) (err error) {
+func HashChunkRow(sc *stmtctx.StatementContext, w io.Writer, row chunk.Row, allTypes []*types.FieldType, colIdx []int, buf []byte) (err error) {
 	var b []byte
 	for i, idx := range colIdx {
-		buf[0], b, err = encodeHashChunkRowIdx(typeCtx, row, allTypes[i], idx)
+		buf[0], b, err = encodeHashChunkRowIdx(sc, row, allTypes[i], idx)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -869,7 +697,7 @@ func HashChunkRow(typeCtx types.Context, w io.Writer, row chunk.Row, allTypes []
 
 // EqualChunkRow returns a boolean reporting whether row1 and row2
 // with their types and column index are logically equal.
-func EqualChunkRow(typeCtx types.Context,
+func EqualChunkRow(sc *stmtctx.StatementContext,
 	row1 chunk.Row, allTypes1 []*types.FieldType, colIdx1 []int,
 	row2 chunk.Row, allTypes2 []*types.FieldType, colIdx2 []int,
 ) (bool, error) {
@@ -878,11 +706,11 @@ func EqualChunkRow(typeCtx types.Context,
 	}
 	for i := range colIdx1 {
 		idx1, idx2 := colIdx1[i], colIdx2[i]
-		flag1, b1, err := encodeHashChunkRowIdx(typeCtx, row1, allTypes1[i], idx1)
+		flag1, b1, err := encodeHashChunkRowIdx(sc, row1, allTypes1[i], idx1)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
-		flag2, b2, err := encodeHashChunkRowIdx(typeCtx, row2, allTypes2[i], idx2)
+		flag2, b2, err := encodeHashChunkRowIdx(sc, row2, allTypes2[i], idx2)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -1407,7 +1235,7 @@ func appendFloatToChunk(val float64, chk *chunk.Chunk, colIdx int, ft *types.Fie
 
 // HashGroupKey encodes each row of this column and append encoded data into buf.
 // Only use in the aggregate executor.
-func HashGroupKey(loc *time.Location, n int, col *chunk.Column, buf [][]byte, ft *types.FieldType) ([][]byte, error) {
+func HashGroupKey(sc *stmtctx.StatementContext, n int, col *chunk.Column, buf [][]byte, ft *types.FieldType) ([][]byte, error) {
 	var err error
 	switch ft.EvalType() {
 	case types.ETInt:
@@ -1437,6 +1265,11 @@ func HashGroupKey(loc *time.Location, n int, col *chunk.Column, buf [][]byte, ft
 			} else {
 				buf[i] = append(buf[i], decimalFlag)
 				buf[i], err = EncodeDecimal(buf[i], &ds[i], ft.GetFlen(), ft.GetDecimal())
+				if terror.ErrorEqual(err, types.ErrTruncated) {
+					err = sc.HandleTruncate(err)
+				} else if terror.ErrorEqual(err, types.ErrOverflow) {
+					err = sc.HandleOverflow(err, err)
+				}
 				if err != nil {
 					return nil, err
 				}
@@ -1449,7 +1282,7 @@ func HashGroupKey(loc *time.Location, n int, col *chunk.Column, buf [][]byte, ft
 				buf[i] = append(buf[i], NilFlag)
 			} else {
 				buf[i] = append(buf[i], uintFlag)
-				buf[i], err = EncodeMySQLTime(loc, ts[i], mysql.TypeUnspecified, buf[i])
+				buf[i], err = EncodeMySQLTime(sc, ts[i], mysql.TypeUnspecified, buf[i])
 				if err != nil {
 					return nil, err
 				}

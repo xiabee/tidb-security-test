@@ -16,6 +16,7 @@ package fastrand
 
 import (
 	"math/bits"
+	_ "unsafe" // required by go:linkname
 )
 
 // wyrand is a fast PRNG. See https://github.com/wangyi-fudan/wyhash
@@ -46,6 +47,11 @@ func Buf(size int) []byte {
 	}
 	return buf
 }
+
+// Uint32 returns a lock free uint32 value.
+//
+//go:linkname Uint32 runtime.fastrand
+func Uint32() uint32
 
 // Uint32N returns, as an uint32, a pseudo-random number in [0,n).
 func Uint32N(n uint32) uint32 {

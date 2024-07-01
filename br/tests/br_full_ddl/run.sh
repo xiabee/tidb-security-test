@@ -157,7 +157,7 @@ run_sql "DROP DATABASE $DB;"
 
 # restore full
 echo "restore start..."
-export GO_FAILPOINTS="github.com/pingcap/tidb/br/pkg/restore/snap_client/restore-createtables-error=return(true)"
+export GO_FAILPOINTS="github.com/pingcap/tidb/br/pkg/restore/restore-createtables-error=return(true)"
 run_br restore full -s "local://$TEST_DIR/$DB" --pd $PD_ADDR --log-file $RESTORE_LOG --ddl-batch-size=128 || { cat $RESTORE_LOG; }
 export GO_FAILPOINTS=""
 
@@ -204,8 +204,7 @@ then
 else
   echo "TEST: [$TEST_NAME] fail due to stats are not equal"
   grep ERROR $LOG
-  cat $BACKUP_STAT | tail -n 1000
-  cat $RESOTRE_STAT | tail -n 1000
+  diff $BACKUP_STAT $RESOTRE_STAT
   exit 1
 fi
 

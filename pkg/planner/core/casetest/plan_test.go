@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
@@ -82,7 +81,7 @@ func TestPreferRangeScan(t *testing.T) {
 		tk.MustExec(tt)
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(base.Plan)
+		p, ok := info.Plan.(core.Plan)
 		require.True(t, ok)
 		normalized, digest := core.NormalizePlan(p)
 
@@ -133,7 +132,7 @@ func TestNormalizedPlan(t *testing.T) {
 		tk.MustExec(tt)
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(base.Plan)
+		p, ok := info.Plan.(core.Plan)
 		require.True(t, ok)
 		normalized, digest := core.NormalizePlan(p)
 
@@ -153,43 +152,6 @@ func TestNormalizedPlan(t *testing.T) {
 			output[i].Plan = normalizedPlanRows
 		})
 		compareStringSlice(t, normalizedPlanRows, output[i].Plan)
-	}
-}
-
-func TestPlanDigest4InList(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t (a int);")
-	tk.MustExec("set global tidb_ignore_inlist_plan_digest=true;")
-	tk.Session().GetSessionVars().PlanID.Store(0)
-	queriesGroup1 := []string{
-		"select * from t where a in (1, 2);",
-		"select a in (1, 2) from t;",
-	}
-	queriesGroup2 := []string{
-		"select * from t where a in (1, 2, 3);",
-		"select a in (1, 2, 3) from t;",
-	}
-	for i := 0; i < len(queriesGroup1); i++ {
-		query1 := queriesGroup1[i]
-		query2 := queriesGroup2[i]
-		t.Run(query1+" vs "+query2, func(t *testing.T) {
-			tk.MustExec(query1)
-			info1 := tk.Session().ShowProcess()
-			require.NotNil(t, info1)
-			p1, ok := info1.Plan.(base.Plan)
-			require.True(t, ok)
-			_, digest1 := core.NormalizePlan(p1)
-			tk.MustExec(query2)
-			info2 := tk.Session().ShowProcess()
-			require.NotNil(t, info2)
-			p2, ok := info2.Plan.(base.Plan)
-			require.True(t, ok)
-			_, digest2 := core.NormalizePlan(p2)
-			require.Equal(t, digest1, digest2)
-		})
 	}
 }
 
@@ -217,13 +179,13 @@ func TestIssue47634(t *testing.T) {
 			tk.MustExec(query1)
 			info1 := tk.Session().ShowProcess()
 			require.NotNil(t, info1)
-			p1, ok := info1.Plan.(base.Plan)
+			p1, ok := info1.Plan.(core.Plan)
 			require.True(t, ok)
 			_, digest1 := core.NormalizePlan(p1)
 			tk.MustExec(query2)
 			info2 := tk.Session().ShowProcess()
 			require.NotNil(t, info2)
-			p2, ok := info2.Plan.(base.Plan)
+			p2, ok := info2.Plan.(core.Plan)
 			require.True(t, ok)
 			_, digest2 := core.NormalizePlan(p2)
 			require.Equal(t, digest1, digest2)

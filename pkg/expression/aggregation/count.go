@@ -15,7 +15,6 @@
 package aggregation
 
 import (
-	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -32,7 +31,7 @@ func (cf *countFunction) Update(evalCtx *AggEvaluateContext, _ *stmtctx.Statemen
 		datumBuf = make([]types.Datum, 0, len(cf.Args))
 	}
 	for _, a := range cf.Args {
-		value, err := a.Eval(evalCtx.Ctx, row)
+		value, err := a.Eval(row)
 		if err != nil {
 			return err
 		}
@@ -61,11 +60,10 @@ func (cf *countFunction) Update(evalCtx *AggEvaluateContext, _ *stmtctx.Statemen
 	return nil
 }
 
-func (cf *countFunction) ResetContext(ctx expression.EvalContext, evalCtx *AggEvaluateContext) {
+func (cf *countFunction) ResetContext(sc *stmtctx.StatementContext, evalCtx *AggEvaluateContext) {
 	if cf.HasDistinct {
-		evalCtx.DistinctChecker = createDistinctChecker(ctx)
+		evalCtx.DistinctChecker = createDistinctChecker(sc)
 	}
-	evalCtx.Ctx = ctx
 	evalCtx.Count = 0
 }
 

@@ -38,6 +38,10 @@ const (
 	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
 )
 
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
+
 func randInt(min int, max int) int {
 	return min + rand.Intn(max-min+1)
 }

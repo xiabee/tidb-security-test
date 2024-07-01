@@ -19,8 +19,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/docker/go-units"
+	"github.com/google/uuid"
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/br/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/pkg/disttask/framework/handle"
 	"github.com/pingcap/tidb/pkg/disttask/framework/planner"
 	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
@@ -28,48 +29,141 @@ import (
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/executor/importer"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/lightning/checkpoints"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
 
-// SubmitStandaloneTask submits a task to the distribute framework that only runs on the current node.
-// when import from server-disk, pass engine checkpoints too, as scheduler might run on another
-// node where we can't access the data files.
-func SubmitStandaloneTask(ctx context.Context, plan *importer.Plan, stmt string, ecp map[int32]*checkpoints.EngineCheckpoint) (int64, *proto.TaskBase, error) {
+// DistImporter is a JobImporter for distributed IMPORT INTO.
+type DistImporter struct {
+	*importer.JobImportParam
+	plan   *importer.Plan
+	stmt   string
+	logger *zap.Logger
+	// the instance to import data, used for single-node import, nil means import data on all instances.
+	instance *infosync.ServerInfo
+	// the files to import, when import from server file, we need to pass those file to the framework.
+	chunkMap       map[int32][]Chunk
+	sourceFileSize int64
+	// only set after submit task
+	jobID  int64
+	taskID int64
+}
+
+// NewDistImporter creates a new DistImporter.
+func NewDistImporter(param *importer.JobImportParam, plan *importer.Plan, stmt string, sourceFileSize int64) (*DistImporter, error) {
+	return &DistImporter{
+		JobImportParam: param,
+		plan:           plan,
+		stmt:           stmt,
+		logger:         logutil.BgLogger(),
+		sourceFileSize: sourceFileSize,
+	}, nil
+}
+
+// NewDistImporterCurrNode creates a new DistImporter to import data on current node.
+func NewDistImporterCurrNode(param *importer.JobImportParam, plan *importer.Plan, stmt string, sourceFileSize int64) (*DistImporter, error) {
 	serverInfo, err := infosync.GetServerInfo()
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
-	return doSubmitTask(ctx, plan, stmt, serverInfo, toChunkMap(ecp))
+	return &DistImporter{
+		JobImportParam: param,
+		plan:           plan,
+		stmt:           stmt,
+		logger:         logutil.BgLogger(),
+		instance:       serverInfo,
+		sourceFileSize: sourceFileSize,
+	}, nil
 }
 
-// SubmitTask submits a task to the distribute framework that runs on all managed nodes.
-func SubmitTask(ctx context.Context, plan *importer.Plan, stmt string) (int64, *proto.TaskBase, error) {
-	return doSubmitTask(ctx, plan, stmt, nil, nil)
+// NewDistImporterServerFile creates a new DistImporter to import given files on current node.
+// we also run import on current node.
+// todo: merge all 3 ctor into one.
+func NewDistImporterServerFile(param *importer.JobImportParam, plan *importer.Plan, stmt string, ecp map[int32]*checkpoints.EngineCheckpoint, sourceFileSize int64) (*DistImporter, error) {
+	distImporter, err := NewDistImporterCurrNode(param, plan, stmt, sourceFileSize)
+	if err != nil {
+		return nil, err
+	}
+	distImporter.chunkMap = toChunkMap(ecp)
+	return distImporter, nil
 }
 
-func doSubmitTask(ctx context.Context, plan *importer.Plan, stmt string, instance *infosync.ServerInfo, chunkMap map[int32][]Chunk) (int64, *proto.TaskBase, error) {
+// Param implements JobImporter.Param.
+func (ti *DistImporter) Param() *importer.JobImportParam {
+	return ti.JobImportParam
+}
+
+// Import implements JobImporter.Import.
+func (*DistImporter) Import() {
+	// todo: remove it
+}
+
+// ImportTask import task.
+func (ti *DistImporter) ImportTask(task *proto.Task) {
+	ti.logger.Info("start distribute IMPORT INTO")
+	ti.Group.Go(func() error {
+		defer close(ti.Done)
+		// task is run using distribute framework, so we only wait for the task to finish.
+		return handle.WaitGlobalTask(ti.GroupCtx, task.ID)
+	})
+}
+
+// Result implements JobImporter.Result.
+func (ti *DistImporter) Result(ctx context.Context) importer.JobImportResult {
+	var result importer.JobImportResult
+	taskMeta, err := getTaskMeta(ctx, ti.jobID)
+	if err != nil {
+		return result
+	}
+
+	return importer.JobImportResult{
+		Affected:   taskMeta.Result.LoadedRowCnt,
+		ColSizeMap: taskMeta.Result.ColSizeMap,
+	}
+}
+
+// Close implements the io.Closer interface.
+func (*DistImporter) Close() error {
+	return nil
+}
+
+// SubmitTask submits a task to the distribute framework.
+func (ti *DistImporter) SubmitTask(ctx context.Context) (int64, *proto.Task, error) {
 	var instances []*infosync.ServerInfo
-	if instance != nil {
-		instances = append(instances, instance)
+	if ti.instance != nil {
+		instances = append(instances, ti.instance)
 	}
-	// we use taskManager to submit task, user might not have the privilege to system tables.
-	taskManager, err := storage.GetTaskManager()
+	// we use globalTaskManager to submit task, user might not have the privilege to system tables.
+	globalTaskManager, err := storage.GetTaskManager()
 	ctx = util.WithInternalSourceType(ctx, kv.InternalDistTask)
 	if err != nil {
 		return 0, nil, err
 	}
 
 	var jobID, taskID int64
-	if err = taskManager.WithNewTxn(ctx, func(se sessionctx.Context) error {
+	plan := ti.plan
+	if err = globalTaskManager.WithNewTxn(ctx, func(se sessionctx.Context) error {
 		var err2 error
-		exec := se.GetSQLExecutor()
+		exec := se.(sqlexec.SQLExecutor)
+		// If 2 client try to execute IMPORT INTO concurrently, there's chance that both of them will pass the check.
+		// We can enforce ONLY one import job running by:
+		// 	- using LOCK TABLES, but it requires enable-table-lock=true, it's not enabled by default.
+		// 	- add a key to PD as a distributed lock, but it's a little complex, and we might support job queuing later.
+		// So we only add this simple soft check here and doc it.
+		activeJobCnt, err2 := importer.GetActiveJobCnt(ctx, exec)
+		if err2 != nil {
+			return err2
+		}
+		if activeJobCnt > 0 {
+			return exeerrors.ErrLoadDataPreCheckFailed.FastGenByArgs("there's pending or running jobs")
+		}
 		jobID, err2 = importer.CreateJob(ctx, exec, plan.DBName, plan.TableInfo.Name.L, plan.TableInfo.ID,
-			plan.User, plan.Parameters, plan.TotalFileSize)
+			plan.User, plan.Parameters, ti.sourceFileSize)
 		if err2 != nil {
 			return err2
 		}
@@ -79,16 +173,16 @@ func doSubmitTask(ctx context.Context, plan *importer.Plan, stmt string, instanc
 		logicalPlan := &LogicalPlan{
 			JobID:             jobID,
 			Plan:              *plan,
-			Stmt:              stmt,
+			Stmt:              ti.stmt,
 			EligibleInstances: instances,
-			ChunkMap:          chunkMap,
+			ChunkMap:          ti.chunkMap,
 		}
 		planCtx := planner.PlanCtx{
 			Ctx:        ctx,
 			SessionCtx: se,
 			TaskKey:    TaskKey(jobID),
 			TaskType:   proto.ImportInto,
-			ThreadCnt:  plan.ThreadCnt,
+			ThreadCnt:  int(plan.ThreadCnt),
 		}
 		p := planner.NewPlanner()
 		taskID, err2 = p.Run(planCtx, logicalPlan)
@@ -99,36 +193,72 @@ func doSubmitTask(ctx context.Context, plan *importer.Plan, stmt string, instanc
 	}); err != nil {
 		return 0, nil, err
 	}
-	handle.NotifyTaskChange()
-	task, err := taskManager.GetTaskBaseByID(ctx, taskID)
+	globalTask, err := globalTaskManager.GetGlobalTaskByID(ctx, taskID)
 	if err != nil {
 		return 0, nil, err
 	}
+	if globalTask == nil {
+		return 0, nil, errors.Errorf("cannot find global task with ID %d", taskID)
+	}
 
-	metrics.UpdateMetricsForAddTask(task)
+	metrics.UpdateMetricsForAddTask(globalTask)
+	// update logger with task id.
+	ti.jobID = jobID
+	ti.taskID = taskID
+	ti.logger = ti.logger.With(zap.Int64("task-id", globalTask.ID))
 
-	logutil.BgLogger().Info("job submitted to task queue",
-		zap.Int64("job-id", jobID),
-		zap.Int64("task-id", task.ID),
-		zap.String("data-size", units.BytesSize(float64(plan.TotalFileSize))),
-		zap.Int("thread-cnt", plan.ThreadCnt),
-		zap.Bool("global-sort", plan.IsGlobalSort()))
+	ti.logger.Info("job submitted to global task queue",
+		zap.Int64("job-id", jobID), zap.Int64("thread-cnt", plan.ThreadCnt))
 
-	return jobID, task, nil
+	return jobID, globalTask, nil
+}
+
+func (*DistImporter) taskKey() string {
+	// task key is meaningless to IMPORT INTO, so we use a random uuid.
+	return fmt.Sprintf("%s/%s", proto.ImportInto, uuid.New().String())
+}
+
+// JobID returns the job id.
+func (ti *DistImporter) JobID() int64 {
+	return ti.jobID
+}
+
+func getTaskMeta(ctx context.Context, jobID int64) (*TaskMeta, error) {
+	globalTaskManager, err := storage.GetTaskManager()
+	ctx = util.WithInternalSourceType(ctx, kv.InternalDistTask)
+	if err != nil {
+		return nil, err
+	}
+	taskKey := TaskKey(jobID)
+	globalTask, err := globalTaskManager.GetGlobalTaskByKey(ctx, taskKey)
+	if err != nil {
+		return nil, err
+	}
+	if globalTask == nil {
+		return nil, errors.Errorf("cannot find global task with key %s", taskKey)
+	}
+	var taskMeta TaskMeta
+	if err := json.Unmarshal(globalTask.Meta, &taskMeta); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return &taskMeta, nil
 }
 
 // GetTaskImportedRows gets the number of imported rows of a job.
 // Note: for finished job, we can get the number of imported rows from task meta.
 func GetTaskImportedRows(ctx context.Context, jobID int64) (uint64, error) {
-	taskManager, err := storage.GetTaskManager()
+	globalTaskManager, err := storage.GetTaskManager()
 	ctx = util.WithInternalSourceType(ctx, kv.InternalDistTask)
 	if err != nil {
 		return 0, err
 	}
 	taskKey := TaskKey(jobID)
-	task, err := taskManager.GetTaskByKeyWithHistory(ctx, taskKey)
+	task, err := globalTaskManager.GetGlobalTaskByKeyWithHistory(ctx, taskKey)
 	if err != nil {
 		return 0, err
+	}
+	if task == nil {
+		return 0, errors.Errorf("cannot find global task with key %s", taskKey)
 	}
 	taskMeta := TaskMeta{}
 	if err = json.Unmarshal(task.Meta, &taskMeta); err != nil {
@@ -136,7 +266,7 @@ func GetTaskImportedRows(ctx context.Context, jobID int64) (uint64, error) {
 	}
 	var importedRows uint64
 	if taskMeta.Plan.CloudStorageURI == "" {
-		subtasks, err := taskManager.GetSubtasksWithHistory(ctx, task.ID, proto.ImportStepImport)
+		subtasks, err := globalTaskManager.GetSubtasksForImportInto(ctx, task.ID, StepImport)
 		if err != nil {
 			return 0, err
 		}
@@ -148,7 +278,7 @@ func GetTaskImportedRows(ctx context.Context, jobID int64) (uint64, error) {
 			importedRows += subtaskMeta.Result.LoadedRowCnt
 		}
 	} else {
-		subtasks, err := taskManager.GetSubtasksWithHistory(ctx, task.ID, proto.ImportStepWriteAndIngest)
+		subtasks, err := globalTaskManager.GetSubtasksForImportInto(ctx, task.ID, StepWriteAndIngest)
 		if err != nil {
 			return 0, err
 		}

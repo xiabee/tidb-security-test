@@ -18,7 +18,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/asaskevich/govalidator"
 	"github.com/stretchr/testify/require"
 	pd "github.com/tikv/pd/client"
 )
@@ -31,7 +30,7 @@ type GlobalConfigTestSuite struct {
 
 func SetUpSuite() *GlobalConfigTestSuite {
 	s := &GlobalConfigTestSuite{}
-	s.rpc, s.client, s.cluster, _ = New("", nil)
+	s.rpc, s.client, s.cluster, _ = New("")
 	return s
 }
 
@@ -93,22 +92,4 @@ func (s *GlobalConfigTestSuite) TearDownSuite() {
 	s.client.Close()
 	s.rpc.Close()
 	s.cluster.Close()
-}
-
-func TestMockPDServiceDiscovery(t *testing.T) {
-	re := require.New(t)
-	pdAddrs := []string{"invalid_pd_address", "127.0.0.1:2379", "http://172.32.21.32:2379"}
-	for i, addr := range pdAddrs {
-		check := govalidator.IsURL(addr)
-		if i > 0 {
-			re.True(check)
-		} else {
-			re.False(check)
-		}
-	}
-	sd := NewMockPDServiceDiscovery(pdAddrs)
-	clis := sd.GetAllServiceClients()
-	re.Len(clis, 2)
-	re.Equal(clis[0].GetURL(), "http://127.0.0.1:2379")
-	re.Equal(clis[1].GetURL(), "http://172.32.21.32:2379")
 }

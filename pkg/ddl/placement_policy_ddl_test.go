@@ -15,7 +15,6 @@ package ddl_test
 
 import (
 	"context"
-	"math"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/ddl"
@@ -45,7 +44,7 @@ func testCreatePlacementPolicy(t *testing.T, ctx sessionctx.Context, d ddl.DDL, 
 		SchemaName: policyInfo.Name.L,
 		Type:       model.ActionCreatePlacementPolicy,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{policyInfo},
+		Args:       []interface{}{policyInfo},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	err := d.DoDDLJob(ctx, job)
@@ -119,14 +118,14 @@ func TestPlacementPolicyInUse(t *testing.T) {
 	t4.State = model.StatePublic
 	db1.Tables = append(db1.Tables, t4)
 
-	builder, err := infoschema.NewBuilder(dom, nil, infoschema.NewData()).InitWithDBInfos(
+	builder, err := infoschema.NewBuilder(dom, nil).InitWithDBInfos(
 		[]*model.DBInfo{db1, db2, dbP},
 		[]*model.PolicyInfo{p1, p2, p3, p4, p5},
 		nil,
 		1,
 	)
 	require.NoError(t, err)
-	is := builder.Build(math.MaxUint64)
+	is := builder.Build()
 
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
 	for _, policy := range []*model.PolicyInfo{p1, p2, p4, p5} {

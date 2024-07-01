@@ -44,12 +44,12 @@ type ProcessInfo struct {
 	ExpensiveLogTime      time.Time
 	ExpensiveTxnLogTime   time.Time
 	CurTxnCreateTime      time.Time
-	Plan                  any
+	Plan                  interface{}
 	StmtCtx               *stmtctx.StatementContext
 	RefCountOfStmtCtx     *stmtctx.ReferenceCount
 	MemTracker            *memory.Tracker
 	DiskTracker           *disk.Tracker
-	StatsInfo             func(any) map[string]uint64
+	StatsInfo             func(interface{}) map[string]uint64
 	RuntimeStatsColl      *execdetails.RuntimeStatsColl
 	User                  string
 	Digest                string
@@ -59,7 +59,6 @@ type ProcessInfo struct {
 	Port                  string
 	ResourceGroupName     string
 	SessionAlias          string
-	RedactSQL             string
 	IndexNames            []string
 	TableIDs              []int64
 	PlanExplainRows       [][]string
@@ -71,17 +70,12 @@ type ProcessInfo struct {
 	MaxExecutionTime uint64
 	State            uint16
 	Command          byte
-}
-
-// Clone return a shallow clone copy of this processInfo.
-func (pi *ProcessInfo) Clone() *ProcessInfo {
-	cp := *pi
-	return &cp
+	RedactSQL        bool
 }
 
 // ToRowForShow returns []interface{} for the row data of "SHOW [FULL] PROCESSLIST".
-func (pi *ProcessInfo) ToRowForShow(full bool) []any {
-	var info any
+func (pi *ProcessInfo) ToRowForShow(full bool) []interface{} {
+	var info interface{}
 	if len(pi.Info) > 0 {
 		if full {
 			info = pi.Info
@@ -90,7 +84,7 @@ func (pi *ProcessInfo) ToRowForShow(full bool) []any {
 		}
 	}
 	t := uint64(time.Since(pi.Time) / time.Second)
-	var db any
+	var db interface{}
 	if len(pi.DB) > 0 {
 		db = pi.DB
 	}
@@ -100,7 +94,7 @@ func (pi *ProcessInfo) ToRowForShow(full bool) []any {
 	} else {
 		host = pi.Host
 	}
-	return []any{
+	return []interface{}{
 		pi.ID,
 		pi.User,
 		host,
@@ -127,7 +121,7 @@ func (pi *ProcessInfo) txnStartTs(tz *time.Location) (txnStart string) {
 
 // ToRow returns []interface{} for the row data of
 // "SELECT * FROM INFORMATION_SCHEMA.PROCESSLIST".
-func (pi *ProcessInfo) ToRow(tz *time.Location) []any {
+func (pi *ProcessInfo) ToRow(tz *time.Location) []interface{} {
 	bytesConsumed := int64(0)
 	diskConsumed := int64(0)
 	if pi.StmtCtx != nil {
@@ -202,9 +196,9 @@ type SessionManager interface {
 	// GetAutoAnalyzeProcID returns processID for auto analyze
 	GetAutoAnalyzeProcID() uint64
 	// StoreInternalSession puts the internal session pointer to the map in the SessionManager.
-	StoreInternalSession(se any)
+	StoreInternalSession(se interface{})
 	// DeleteInternalSession deletes the internal session pointer from the map in the SessionManager.
-	DeleteInternalSession(se any)
+	DeleteInternalSession(se interface{})
 	// GetInternalSessionStartTSList gets all startTS of every transactions running in the current internal sessions.
 	GetInternalSessionStartTSList() []uint64
 	// CheckOldRunningTxn checks if there is an old transaction running in the current sessions

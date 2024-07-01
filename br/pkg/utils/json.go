@@ -28,7 +28,7 @@ func UnmarshalBackupMeta(data []byte) (*backuppb.BackupMeta, error) {
 	return fromJSONBackupMeta(jMeta)
 }
 
-type jsonValue any
+type jsonValue interface{}
 
 type jsonFile struct {
 	SHA256   string `json:"sha256,omitempty"`

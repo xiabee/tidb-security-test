@@ -18,7 +18,6 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/distsql"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -38,7 +37,7 @@ var _ exec.Executor = &ChecksumTableExec{}
 type ChecksumTableExec struct {
 	exec.BaseExecutor
 
-	tables map[int64]*checksumContext // tableID -> checksumContext
+	tables map[int64]*checksumContext
 	done   bool
 }
 
@@ -71,20 +70,11 @@ func (e *ChecksumTableExec) Open(ctx context.Context) error {
 
 	for i := 0; i < len(tasks); i++ {
 		result := <-resultCh
-		if result.err != nil {
-			err = result.err
+		if result.Error != nil {
+			err = result.Error
 			logutil.Logger(ctx).Error("checksum failed", zap.Error(err))
 			continue
 		}
-		logutil.Logger(ctx).Info(
-			"got one checksum result",
-			zap.Int64("tableID", result.tableID),
-			zap.Int64("physicalTableID", result.physicalTableID),
-			zap.Int64("indexID", result.indexID),
-			zap.Uint64("checksum", result.response.Checksum),
-			zap.Uint64("totalKvs", result.response.TotalKvs),
-			zap.Uint64("totalBytes", result.response.TotalBytes),
-		)
 		e.handleResult(result)
 	}
 	if err != nil {
@@ -101,56 +91,45 @@ func (e *ChecksumTableExec) Next(_ context.Context, req *chunk.Chunk) error {
 		return nil
 	}
 	for _, t := range e.tables {
-		req.AppendString(0, t.dbInfo.Name.O)
-		req.AppendString(1, t.tableInfo.Name.O)
-		req.AppendUint64(2, t.response.Checksum)
-		req.AppendUint64(3, t.response.TotalKvs)
-		req.AppendUint64(4, t.response.TotalBytes)
+		req.AppendString(0, t.DBInfo.Name.O)
+		req.AppendString(1, t.TableInfo.Name.O)
+		req.AppendUint64(2, t.Response.Checksum)
+		req.AppendUint64(3, t.Response.TotalKvs)
+		req.AppendUint64(4, t.Response.TotalBytes)
 	}
 	e.done = true
 	return nil
 }
 
 func (e *ChecksumTableExec) buildTasks() ([]*checksumTask, error) {
-	allTasks := make([][]*checksumTask, 0, len(e.tables))
-	taskCnt := 0
-	for _, t := range e.tables {
-		tasks, err := t.buildTasks(e.Ctx())
+	var tasks []*checksumTask
+	for id, t := range e.tables {
+		reqs, err := t.BuildRequests(e.Ctx())
 		if err != nil {
 			return nil, err
 		}
-		allTasks = append(allTasks, tasks)
-		taskCnt += len(tasks)
+		for _, req := range reqs {
+			tasks = append(tasks, &checksumTask{id, req})
+		}
 	}
-	ret := make([]*checksumTask, 0, taskCnt)
-	for _, task := range allTasks {
-		ret = append(ret, task...)
-	}
-	return ret, nil
+	return tasks, nil
 }
 
 func (e *ChecksumTableExec) handleResult(result *checksumResult) {
-	table := e.tables[result.tableID]
-	table.handleResponse(result.response)
+	table := e.tables[result.TableID]
+	table.HandleResponse(result.Response)
 }
 
 func (e *ChecksumTableExec) checksumWorker(taskCh <-chan *checksumTask, resultCh chan<- *checksumResult) {
 	for task := range taskCh {
-		result := &checksumResult{
-			tableID:         task.tableID,
-			physicalTableID: task.physicalTableID,
-			indexID:         task.indexID,
-		}
-		result.response, result.err = e.handleChecksumRequest(task.request)
+		result := &checksumResult{TableID: task.TableID}
+		result.Response, result.Error = e.handleChecksumRequest(task.Request)
 		resultCh <- result
 	}
 }
 
 func (e *ChecksumTableExec) handleChecksumRequest(req *kv.Request) (resp *tipb.ChecksumResponse, err error) {
-	if err = e.Ctx().GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-		return nil, err
-	}
-	ctx := distsql.WithSQLKvExecCounterInterceptor(context.TODO(), e.Ctx().GetSessionVars().StmtCtx.KvExecCounter)
+	ctx := distsql.WithSQLKvExecCounterInterceptor(context.TODO(), e.Ctx().GetSessionVars().StmtCtx)
 	res, err := distsql.Checksum(ctx, e.Ctx().GetClient(), req, e.Ctx().GetSessionVars().KVVars)
 	if err != nil {
 		return nil, err
@@ -159,7 +138,6 @@ func (e *ChecksumTableExec) handleChecksumRequest(req *kv.Request) (resp *tipb.C
 		if err1 := res.Close(); err1 != nil {
 			err = err1
 		}
-		failpoint.Inject("afterHandleChecksumRequest", nil)
 	}()
 
 	resp = &tipb.ChecksumResponse{}
@@ -177,58 +155,51 @@ func (e *ChecksumTableExec) handleChecksumRequest(req *kv.Request) (resp *tipb.C
 			return nil, err
 		}
 		updateChecksumResponse(resp, checksum)
-		if err = e.Ctx().GetSessionVars().SQLKiller.HandleSignal(); err != nil {
-			return nil, err
-		}
 	}
 
 	return resp, nil
 }
 
 type checksumTask struct {
-	tableID         int64
-	physicalTableID int64
-	indexID         int64
-	request         *kv.Request
+	TableID int64
+	Request *kv.Request
 }
 
 type checksumResult struct {
-	err             error
-	tableID         int64
-	physicalTableID int64
-	indexID         int64
-	response        *tipb.ChecksumResponse
+	Error    error
+	TableID  int64
+	Response *tipb.ChecksumResponse
 }
 
 type checksumContext struct {
-	dbInfo    *model.DBInfo
-	tableInfo *model.TableInfo
-	startTs   uint64
-	response  *tipb.ChecksumResponse
+	DBInfo    *model.DBInfo
+	TableInfo *model.TableInfo
+	StartTs   uint64
+	Response  *tipb.ChecksumResponse
 }
 
 func newChecksumContext(db *model.DBInfo, table *model.TableInfo, startTs uint64) *checksumContext {
 	return &checksumContext{
-		dbInfo:    db,
-		tableInfo: table,
-		startTs:   startTs,
-		response:  &tipb.ChecksumResponse{},
+		DBInfo:    db,
+		TableInfo: table,
+		StartTs:   startTs,
+		Response:  &tipb.ChecksumResponse{},
 	}
 }
 
-func (c *checksumContext) buildTasks(ctx sessionctx.Context) ([]*checksumTask, error) {
+func (c *checksumContext) BuildRequests(ctx sessionctx.Context) ([]*kv.Request, error) {
 	var partDefs []model.PartitionDefinition
-	if part := c.tableInfo.Partition; part != nil {
+	if part := c.TableInfo.Partition; part != nil {
 		partDefs = part.Definitions
 	}
 
-	reqs := make([]*checksumTask, 0, (len(c.tableInfo.Indices)+1)*(len(partDefs)+1))
-	if err := c.appendRequest4PhysicalTable(ctx, c.tableInfo.ID, c.tableInfo.ID, &reqs); err != nil {
+	reqs := make([]*kv.Request, 0, (len(c.TableInfo.Indices)+1)*(len(partDefs)+1))
+	if err := c.appendRequest(ctx, c.TableInfo.ID, &reqs); err != nil {
 		return nil, err
 	}
 
 	for _, partDef := range partDefs {
-		if err := c.appendRequest4PhysicalTable(ctx, c.tableInfo.ID, partDef.ID, &reqs); err != nil {
+		if err := c.appendRequest(ctx, partDef.ID, &reqs); err != nil {
 			return nil, err
 		}
 	}
@@ -236,50 +207,35 @@ func (c *checksumContext) buildTasks(ctx sessionctx.Context) ([]*checksumTask, e
 	return reqs, nil
 }
 
-func (c *checksumContext) appendRequest4PhysicalTable(
-	ctx sessionctx.Context,
-	tableID int64,
-	physicalTableID int64,
-	reqs *[]*checksumTask,
-) error {
-	req, err := c.buildTableRequest(ctx, physicalTableID)
+func (c *checksumContext) appendRequest(ctx sessionctx.Context, tableID int64, reqs *[]*kv.Request) error {
+	req, err := c.buildTableRequest(ctx, tableID)
 	if err != nil {
 		return err
 	}
 
-	*reqs = append(*reqs, &checksumTask{
-		tableID:         tableID,
-		physicalTableID: physicalTableID,
-		indexID:         -1,
-		request:         req,
-	})
-	for _, indexInfo := range c.tableInfo.Indices {
+	*reqs = append(*reqs, req)
+	for _, indexInfo := range c.TableInfo.Indices {
 		if indexInfo.State != model.StatePublic {
 			continue
 		}
-		req, err = c.buildIndexRequest(ctx, physicalTableID, indexInfo)
+		req, err = c.buildIndexRequest(ctx, tableID, indexInfo)
 		if err != nil {
 			return err
 		}
-		*reqs = append(*reqs, &checksumTask{
-			tableID:         tableID,
-			physicalTableID: physicalTableID,
-			indexID:         indexInfo.ID,
-			request:         req,
-		})
+		*reqs = append(*reqs, req)
 	}
 
 	return nil
 }
 
-func (c *checksumContext) buildTableRequest(ctx sessionctx.Context, physicalTableID int64) (*kv.Request, error) {
+func (c *checksumContext) buildTableRequest(ctx sessionctx.Context, tableID int64) (*kv.Request, error) {
 	checksum := &tipb.ChecksumRequest{
 		ScanOn:    tipb.ChecksumScanOn_Table,
 		Algorithm: tipb.ChecksumAlgorithm_Crc64_Xor,
 	}
 
 	var ranges []*ranger.Range
-	if c.tableInfo.IsCommonHandle {
+	if c.TableInfo.IsCommonHandle {
 		ranges = ranger.FullNotNullRange()
 	} else {
 		ranges = ranger.FullIntRange(false)
@@ -287,16 +243,16 @@ func (c *checksumContext) buildTableRequest(ctx sessionctx.Context, physicalTabl
 
 	var builder distsql.RequestBuilder
 	builder.SetResourceGroupTagger(ctx.GetSessionVars().StmtCtx.GetResourceGroupTagger())
-	return builder.SetHandleRanges(ctx.GetDistSQLCtx(), physicalTableID, c.tableInfo.IsCommonHandle, ranges).
+	return builder.SetHandleRanges(ctx.GetSessionVars().StmtCtx, tableID, c.TableInfo.IsCommonHandle, ranges).
 		SetChecksumRequest(checksum).
-		SetStartTS(c.startTs).
+		SetStartTS(c.StartTs).
 		SetConcurrency(ctx.GetSessionVars().DistSQLScanConcurrency()).
 		SetResourceGroupName(ctx.GetSessionVars().StmtCtx.ResourceGroupName).
 		SetExplicitRequestSourceType(ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 }
 
-func (c *checksumContext) buildIndexRequest(ctx sessionctx.Context, physicalTableID int64, indexInfo *model.IndexInfo) (*kv.Request, error) {
+func (c *checksumContext) buildIndexRequest(ctx sessionctx.Context, tableID int64, indexInfo *model.IndexInfo) (*kv.Request, error) {
 	checksum := &tipb.ChecksumRequest{
 		ScanOn:    tipb.ChecksumScanOn_Index,
 		Algorithm: tipb.ChecksumAlgorithm_Crc64_Xor,
@@ -306,17 +262,17 @@ func (c *checksumContext) buildIndexRequest(ctx sessionctx.Context, physicalTabl
 
 	var builder distsql.RequestBuilder
 	builder.SetResourceGroupTagger(ctx.GetSessionVars().StmtCtx.GetResourceGroupTagger())
-	return builder.SetIndexRanges(ctx.GetDistSQLCtx(), physicalTableID, indexInfo.ID, ranges).
+	return builder.SetIndexRanges(ctx.GetSessionVars().StmtCtx, tableID, indexInfo.ID, ranges).
 		SetChecksumRequest(checksum).
-		SetStartTS(c.startTs).
+		SetStartTS(c.StartTs).
 		SetConcurrency(ctx.GetSessionVars().DistSQLScanConcurrency()).
 		SetResourceGroupName(ctx.GetSessionVars().StmtCtx.ResourceGroupName).
 		SetExplicitRequestSourceType(ctx.GetSessionVars().ExplicitRequestSourceType).
 		Build()
 }
 
-func (c *checksumContext) handleResponse(update *tipb.ChecksumResponse) {
-	updateChecksumResponse(c.response, update)
+func (c *checksumContext) HandleResponse(update *tipb.ChecksumResponse) {
+	updateChecksumResponse(c.Response, update)
 }
 
 func getChecksumTableConcurrency(ctx sessionctx.Context) (int, error) {

@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/expression/contextstatic"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
@@ -105,13 +104,7 @@ func TestNewCopContextSingleIndex(t *testing.T) {
 			})
 		}
 
-		sctx := mock.NewContext()
-		copCtx, err := NewCopContextSingleIndex(
-			sctx.GetExprCtx(),
-			sctx.GetDistSQLCtx(),
-			sctx.GetSessionVars().StmtCtx.PushDownFlags(),
-			mockTableInfo, mockIdxInfo, "",
-		)
+		copCtx, err := NewCopContextSingleIndex(mockTableInfo, mockIdxInfo, mock.NewContext(), "")
 		require.NoError(t, err)
 		base := copCtx.GetBase()
 		require.Equal(t, "t", base.TableInfo.Name.L)
@@ -201,8 +194,7 @@ func TestCollectVirtualColumnOffsetsAndTypes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := contextstatic.NewStaticEvalContext()
-			gotOffsets, gotFt := collectVirtualColumnOffsetsAndTypes(ctx, tt.cols)
+			gotOffsets, gotFt := collectVirtualColumnOffsetsAndTypes(tt.cols)
 			require.Equal(t, gotOffsets, tt.offsets)
 			require.Equal(t, len(gotFt), len(tt.fieldTp))
 			for i, ft := range gotFt {

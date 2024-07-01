@@ -18,9 +18,6 @@ import (
 	"fmt"
 
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/cost"
-	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
 	"github.com/pingcap/tidb/pkg/util/tracing"
 )
 
@@ -90,7 +87,7 @@ const (
 	MemQuotaLbl = "memQuota"
 )
 
-func setPointGetPlanCostDetail(p *PointGetPlan, opt *optimizetrace.PhysicalOptimizeOp,
+func setPointGetPlanCostDetail(p *PointGetPlan, opt *physicalOptimizeOp,
 	rowSize, networkFactor, seekFactor float64) {
 	if opt == nil {
 		return
@@ -100,10 +97,10 @@ func setPointGetPlanCostDetail(p *PointGetPlan, opt *optimizetrace.PhysicalOptim
 		AddParam(NetworkFactorLbl, networkFactor).
 		AddParam(SeekFactorLbl, seekFactor).
 		SetDesc(fmt.Sprintf("%s*%s+%s", RowSizeLbl, NetworkFactorLbl, SeekFactorLbl))
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
-func setBatchPointGetPlanCostDetail(p *BatchPointGetPlan, opt *optimizetrace.PhysicalOptimizeOp,
+func setBatchPointGetPlanCostDetail(p *BatchPointGetPlan, opt *physicalOptimizeOp,
 	rowCount, rowSize, networkFactor, seekFactor float64, scanConcurrency int) {
 	if opt == nil {
 		return
@@ -116,10 +113,10 @@ func setBatchPointGetPlanCostDetail(p *BatchPointGetPlan, opt *optimizetrace.Phy
 		AddParam(ScanConcurrencyLbl, scanConcurrency).
 		SetDesc(fmt.Sprintf("(%s*%s*%s+%s*%s)/%s",
 			RowCountLbl, RowSizeLbl, NetworkFactorLbl, RowCountLbl, SeekFactorLbl, ScanConcurrencyLbl))
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
-func setPhysicalTableOrIndexScanCostDetail(p base.PhysicalPlan, opt *optimizetrace.PhysicalOptimizeOp,
+func setPhysicalTableOrIndexScanCostDetail(p PhysicalPlan, opt *physicalOptimizeOp,
 	rowCount, rowSize, scanFactor float64, costModelVersion int) {
 	if opt == nil {
 		return
@@ -140,10 +137,10 @@ func setPhysicalTableOrIndexScanCostDetail(p base.PhysicalPlan, opt *optimizetra
 		desc = fmt.Sprintf("%s*log2(%s)*%s", RowCountLbl, RowSizeLbl, ScanFactorLbl)
 	}
 	detail.SetDesc(desc)
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
-func setPhysicalTableReaderCostDetail(p *PhysicalTableReader, opt *optimizetrace.PhysicalOptimizeOp,
+func setPhysicalTableReaderCostDetail(p *PhysicalTableReader, opt *physicalOptimizeOp,
 	rowCount, rowSize, networkFactor, netSeekCost, tablePlanCost float64,
 	scanConcurrency int, storeType kv.StoreType) {
 	// tracer haven't support non tikv plan for now
@@ -159,10 +156,10 @@ func setPhysicalTableReaderCostDetail(p *PhysicalTableReader, opt *optimizetrace
 		AddParam(ScanConcurrencyLbl, scanConcurrency)
 	detail.SetDesc(fmt.Sprintf("(%s+%s*%s*%s+%s)/%s", TablePlanCostLbl,
 		RowCountLbl, RowSizeLbl, NetworkFactorLbl, NetSeekCostLbl, ScanConcurrencyLbl))
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
-func setPhysicalIndexReaderCostDetail(p *PhysicalIndexReader, opt *optimizetrace.PhysicalOptimizeOp,
+func setPhysicalIndexReaderCostDetail(p *PhysicalIndexReader, opt *physicalOptimizeOp,
 	rowCount, rowSize, networkFactor, netSeekCost, indexPlanCost float64,
 	scanConcurrency int) {
 	if opt == nil {
@@ -177,10 +174,10 @@ func setPhysicalIndexReaderCostDetail(p *PhysicalIndexReader, opt *optimizetrace
 		AddParam(ScanConcurrencyLbl, scanConcurrency)
 	detail.SetDesc(fmt.Sprintf("(%s+%s*%s*%s+%s)/%s", IndexPlanCostLbl,
 		RowCountLbl, RowSizeLbl, NetworkFactorLbl, NetSeekCostLbl, ScanConcurrencyLbl))
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
-func setPhysicalHashJoinCostDetail(p *PhysicalHashJoin, opt *optimizetrace.PhysicalOptimizeOp, spill bool,
+func setPhysicalHashJoinCostDetail(p *PhysicalHashJoin, opt *physicalOptimizeOp, spill bool,
 	buildCnt, probeCnt, cpuFactor, rowSize, numPairs,
 	cpuCost, probeCPUCost, memCost, diskCost, probeDiskCost,
 	diskFactor, memoryFactor, concurrencyFactor float64,
@@ -196,7 +193,7 @@ func setPhysicalHashJoinCostDetail(p *PhysicalHashJoin, opt *optimizetrace.Physi
 		DiskFactor:      diskFactor,
 		RowSize:         rowSize,
 		ProbeDiskCost: &HashJoinProbeDiskCostDetail{
-			SelectionFactor: cost.SelectionFactor,
+			SelectionFactor: SelectionFactor,
 			NumPairs:        numPairs,
 			HasConditions:   len(p.LeftConditions)+len(p.RightConditions) > 0,
 			Cost:            probeDiskCost,
@@ -218,7 +215,7 @@ func setPhysicalHashJoinCostDetail(p *PhysicalHashJoin, opt *optimizetrace.Physi
 		ProbeCost: &HashJoinProbeCostDetail{
 			NumPairs:        numPairs,
 			HasConditions:   len(p.LeftConditions)+len(p.RightConditions) > 0,
-			SelectionFactor: cost.SelectionFactor,
+			SelectionFactor: SelectionFactor,
 			ProbeRowCount:   probeCnt,
 			Cost:            probeCPUCost,
 		},
@@ -241,7 +238,7 @@ func setPhysicalHashJoinCostDetail(p *PhysicalHashJoin, opt *optimizetrace.Physi
 		AddParam(ProbeDiskCostDescLbl, diskCostDetail.probeDesc())
 
 	detail.SetDesc(fmt.Sprintf("%s+%s+%s+all children cost", CPUCostDetailLbl, MemCostDetailLbl, DiskCostDetailLbl))
-	appendPlanCostDetail4PhysicalOptimizeOp(opt, detail)
+	opt.appendPlanCostDetail(detail)
 }
 
 // HashJoinProbeCostDetail indicates probe cpu cost detail

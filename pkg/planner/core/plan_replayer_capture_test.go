@@ -21,7 +21,6 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -69,14 +68,14 @@ func getTableStats(sql string, t *testing.T, ctx sessionctx.Context, dom *domain
 	require.NoError(t, err)
 	sctx := core.MockContext()
 	sctx.GetSessionVars().EnablePlanReplayerCapture = true
-	builder, _ := core.NewPlanBuilder().Init(sctx, dom.InfoSchema(), hint.NewQBHintHandler(nil))
+	builder, _ := core.NewPlanBuilder().Init(sctx, dom.InfoSchema(), &hint.BlockHintProcessor{})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(dom.InfoSchema())
 	defer func() {
 		domain.GetDomain(sctx).StatsHandle().Close()
 	}()
 	plan, err := builder.Build(context.TODO(), stmt)
 	require.NoError(t, err)
-	_, _, err = core.DoOptimize(context.TODO(), sctx, builder.GetOptFlag(), plan.(base.LogicalPlan))
+	_, _, err = core.DoOptimize(context.TODO(), sctx, builder.GetOptFlag(), plan.(core.LogicalPlan))
 	require.NoError(t, err)
 	tableStats := sctx.GetSessionVars().StmtCtx.TableStats
 	r := make(map[int64]*statistics.Table)

@@ -15,6 +15,7 @@ package model
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -383,12 +384,13 @@ func IsIndexPrefixCovered(tbInfo *TableInfo, index *IndexInfo, cols ...CIStr) bo
 // for use of execution phase.
 const ExtraHandleID = -1
 
-// Deprecated: Use ExtraPhysTblID instead.
-// const ExtraPidColID = -2
+// ExtraPidColID is the column ID of column which store the partitionID decoded in global index values.
+const ExtraPidColID = -2
 
 // ExtraPhysTblID is the column ID of column that should be filled in with the physical table id.
 // Primarily used for table partition dynamic prune mode, to return which partition (physical table id) the row came from.
-// If used with a global index, the partition ID decoded from the key value will be filled in.
+// Using a dedicated id for this, since in the future ExtraPidColID and ExtraPhysTblID may be used for the same request.
+// Must be after ExtraPidColID!
 const ExtraPhysTblID = -3
 
 // ExtraRowChecksumID is the column ID of column which holds the row checksum info.
@@ -434,8 +436,8 @@ const (
 // ExtraHandleName is the name of ExtraHandle Column.
 var ExtraHandleName = NewCIStr("_tidb_rowid")
 
-// Deprecated: Use ExtraPhysTblIdName instead.
-// var ExtraPartitionIdName = NewCIStr("_tidb_pid") //nolint:revive
+// ExtraPartitionIdName is the name of ExtraPartitionId Column.
+var ExtraPartitionIdName = NewCIStr("_tidb_pid") //nolint:revive
 
 // ExtraPhysTblIdName is the name of ExtraPhysTblID Column.
 var ExtraPhysTblIdName = NewCIStr("_tidb_tid") //nolint:revive
@@ -492,9 +494,9 @@ type TableInfo struct {
 	// Because auto increment ID has schemaID as prefix,
 	// We need to save original schemaID to keep autoID unchanged
 	// while renaming a table from one database to another.
-	// Only set if table has been renamed across schemas
-	// Old name 'old_schema_id' is kept for backwards compatibility
-	AutoIDSchemaID int64 `json:"old_schema_id,omitempty"`
+	// TODO: Remove it.
+	// Now it only uses for compatibility with the old version that already uses this field.
+	OldSchemaID int64 `json:"old_schema_id,omitempty"`
 
 	// ShardRowIDBits specify if the implicit row ID is sharded.
 	ShardRowIDBits uint64
@@ -543,8 +545,6 @@ type TableInfo struct {
 
 	// Revision is per table schema's version, it will be increased when the schema changed.
 	Revision uint64 `json:"revision"`
-
-	DBID int64 `json:"-"`
 }
 
 // TableNameInfo provides meta data describing a table name info.
@@ -728,10 +728,11 @@ func (t *TableInfo) GetUpdateTime() time.Time {
 	return TSConvert2Time(t.UpdateTS)
 }
 
-// GetAutoIDSchemaID returns the schema ID that was used to create an allocator.
-func (t *TableInfo) GetAutoIDSchemaID(dbID int64) int64 {
-	if t.AutoIDSchemaID != 0 {
-		return t.AutoIDSchemaID
+// GetDBID returns the schema ID that is used to create an allocator.
+// TODO: Remove it after removing OldSchemaID.
+func (t *TableInfo) GetDBID(dbID int64) int64 {
+	if t.OldSchemaID != 0 {
+		return t.OldSchemaID
 	}
 	return dbID
 }
@@ -917,6 +918,21 @@ func NewExtraHandleColInfo() *ColumnInfo {
 	colInfo.SetFlen(flen)
 	colInfo.SetDecimal(decimal)
 
+	colInfo.SetCharset(charset.CharsetBin)
+	colInfo.SetCollate(charset.CollationBin)
+	return colInfo
+}
+
+// NewExtraPartitionIDColInfo mocks a column info for extra partition id column.
+func NewExtraPartitionIDColInfo() *ColumnInfo {
+	colInfo := &ColumnInfo{
+		ID:   ExtraPidColID,
+		Name: ExtraPartitionIdName,
+	}
+	colInfo.SetType(mysql.TypeLonglong)
+	flen, decimal := mysql.GetDefaultFieldLengthAndDecimal(mysql.TypeLonglong)
+	colInfo.SetFlen(flen)
+	colInfo.SetDecimal(decimal)
 	colInfo.SetCharset(charset.CharsetBin)
 	colInfo.SetCollate(charset.CollationBin)
 	return colInfo
@@ -1184,10 +1200,6 @@ type PartitionInfo struct {
 	// rather than pid.
 	Enable bool `json:"enable"`
 
-	// IsEmptyColumns is for syntax like `partition by key()`.
-	// When IsEmptyColums is true, it will not display column name in `show create table` stmt.
-	IsEmptyColumns bool `json:"is_empty_columns"`
-
 	Definitions []PartitionDefinition `json:"definitions"`
 	// AddingDefinitions is filled when adding partitions that is in the mid state.
 	AddingDefinitions []PartitionDefinition `json:"adding_definitions"`
@@ -1237,7 +1249,6 @@ func (pi *PartitionInfo) Clone() *PartitionInfo {
 }
 
 // GetNameByID gets the partition name by ID.
-// TODO: Remove the need for this function!
 func (pi *PartitionInfo) GetNameByID(id int64) string {
 	definitions := pi.Definitions
 	// do not convert this loop to `for _, def := range definitions`.
@@ -1716,7 +1727,7 @@ func (db *DBInfo) Copy() *DBInfo {
 
 // LessDBInfo is used for sorting DBInfo by DBInfo.Name.
 func LessDBInfo(a *DBInfo, b *DBInfo) int {
-	return strings.Compare(a.Name.L, b.Name.L)
+	return cmp.Compare(a.Name.L, b.Name.L)
 }
 
 // CIStr is case insensitive string.
@@ -1767,26 +1778,14 @@ func (cis *CIStr) MemoryUsage() (sum int64) {
 
 // TableItemID is composed by table ID and column/index ID
 type TableItemID struct {
-	TableID          int64
-	ID               int64
-	IsIndex          bool
-	IsSyncLoadFailed bool
+	TableID int64
+	ID      int64
+	IsIndex bool
 }
 
 // Key is used to generate unique key for TableItemID to use in the syncload
 func (t TableItemID) Key() string {
 	return fmt.Sprintf("%d#%d#%t", t.ID, t.TableID, t.IsIndex)
-}
-
-// StatsLoadItem represents the load unit for statistics's memory loading.
-type StatsLoadItem struct {
-	TableItemID
-	FullLoad bool
-}
-
-// Key is used to generate unique key for TableItemID to use in the syncload
-func (s StatsLoadItem) Key() string {
-	return fmt.Sprintf("%s#%t", s.TableItemID.Key(), s.FullLoad)
 }
 
 // PolicyRefInfo is the struct to refer the placement policy.

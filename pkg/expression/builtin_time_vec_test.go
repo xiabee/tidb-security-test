@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -34,7 +35,7 @@ func newPeriodGener() *periodGener {
 	return &periodGener{newDefaultRandGen()}
 }
 
-func (g *periodGener) gen() any {
+func (g *periodGener) gen() interface{} {
 	return int64((g.randGen.Intn(2500)+1)*100 + g.randGen.Intn(12) + 1)
 }
 
@@ -47,7 +48,7 @@ func newUnitStrGener() *unitStrGener {
 	return &unitStrGener{newDefaultRandGen()}
 }
 
-func (g *unitStrGener) gen() any {
+func (g *unitStrGener) gen() interface{} {
 	units := []string{
 		"MICROSECOND",
 		"SECOND",
@@ -67,7 +68,7 @@ func (g *unitStrGener) gen() any {
 // tzStrGener is used to generate strings which are timezones
 type tzStrGener struct{}
 
-func (g *tzStrGener) gen() any {
+func (g *tzStrGener) gen() interface{} {
 	tzs := []string{
 		"",
 		"GMT",
@@ -578,9 +579,9 @@ func BenchmarkVectorizedBuiltinTimeFunc(b *testing.B) {
 }
 
 func TestVecMonth(t *testing.T) {
-	ctx := createContext(t)
-	typeFlags := ctx.GetSessionVars().StmtCtx.TypeFlags()
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(typeFlags.WithTruncateAsWarning(true))
+	ctx := mock.NewContext()
+	ctx.GetSessionVars().SQLMode |= mysql.ModeNoZeroDate
+	ctx.GetSessionVars().StmtCtx.TruncateAsWarning = true
 	input := chunk.New([]*types.FieldType{types.NewFieldType(mysql.TypeDatetime)}, 3, 3)
 	input.Reset()
 	input.AppendTime(0, types.ZeroDate)
@@ -588,11 +589,11 @@ func TestVecMonth(t *testing.T) {
 	input.AppendTime(0, types.ZeroDate)
 
 	f, _, _, result := genVecBuiltinFuncBenchCase(ctx, ast.Month, vecExprBenchCase{retEvalType: types.ETInt, childrenTypes: []types.EvalType{types.ETDatetime}})
-	require.True(t, ctx.GetSessionVars().SQLMode.HasStrictMode())
-	require.NoError(t, vecEvalType(ctx, f, types.ETInt, input, result))
+	require.True(t, ctx.GetSessionVars().StrictSQLMode)
+	require.NoError(t, f.vecEvalInt(input, result))
 	require.Equal(t, 0, len(ctx.GetSessionVars().StmtCtx.GetWarnings()))
 
 	ctx.GetSessionVars().StmtCtx.InInsertStmt = true
-	ctx.GetSessionVars().StmtCtx.SetTypeFlags(typeFlags.WithTruncateAsWarning(false))
-	require.NoError(t, vecEvalType(ctx, f, types.ETInt, input, result))
+	ctx.GetSessionVars().StmtCtx.TruncateAsWarning = false
+	require.NoError(t, f.vecEvalInt(input, result))
 }

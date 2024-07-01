@@ -21,38 +21,25 @@ import (
 	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
-	"github.com/pingcap/tidb/pkg/util/intest"
 )
 
 // ExplainInfo implements the Expression interface.
-func (expr *ScalarFunction) ExplainInfo(ctx EvalContext) string {
-	return expr.explainInfo(ctx, false)
+func (expr *ScalarFunction) ExplainInfo() string {
+	return expr.explainInfo(false)
 }
 
-func (expr *ScalarFunction) explainInfo(ctx EvalContext, normalized bool) string {
-	// we only need ctx for non-normalized explain info.
-	intest.Assert(normalized || ctx != nil)
+func (expr *ScalarFunction) explainInfo(normalized bool) string {
 	var buffer bytes.Buffer
 	fmt.Fprintf(&buffer, "%s(", expr.FuncName.L)
-	// convert `in(_tidb_tid, -1)` to `in(_tidb_tid, dual)` whether normalized equals to true or false.
-	if expr.FuncName.L == ast.In {
-		args := expr.GetArgs()
-		if len(args) == 2 && strings.HasSuffix(args[0].ExplainNormalizedInfo(), model.ExtraPhysTblIdName.L) && args[1].(*Constant).Value.GetInt64() == -1 {
-			buffer.WriteString(args[0].ExplainNormalizedInfo() + ", dual)")
-			return buffer.String()
-		}
-	}
 	switch expr.FuncName.L {
 	case ast.Cast:
 		for _, arg := range expr.GetArgs() {
 			if normalized {
 				buffer.WriteString(arg.ExplainNormalizedInfo())
 			} else {
-				intest.Assert(ctx != nil)
-				buffer.WriteString(arg.ExplainInfo(ctx))
+				buffer.WriteString(arg.ExplainInfo())
 			}
 			buffer.WriteString(", ")
 			buffer.WriteString(expr.RetType.String())
@@ -62,8 +49,7 @@ func (expr *ScalarFunction) explainInfo(ctx EvalContext, normalized bool) string
 			if normalized {
 				buffer.WriteString(arg.ExplainNormalizedInfo())
 			} else {
-				intest.Assert(ctx != nil)
-				buffer.WriteString(arg.ExplainInfo(ctx))
+				buffer.WriteString(arg.ExplainInfo())
 			}
 			if i+1 < len(expr.GetArgs()) {
 				buffer.WriteString(", ")
@@ -76,76 +62,33 @@ func (expr *ScalarFunction) explainInfo(ctx EvalContext, normalized bool) string
 
 // ExplainNormalizedInfo implements the Expression interface.
 func (expr *ScalarFunction) ExplainNormalizedInfo() string {
-	return expr.explainInfo(nil, true)
-}
-
-// ExplainNormalizedInfo4InList implements the Expression interface.
-func (expr *ScalarFunction) ExplainNormalizedInfo4InList() string {
-	var buffer bytes.Buffer
-	fmt.Fprintf(&buffer, "%s(", expr.FuncName.L)
-	switch expr.FuncName.L {
-	case ast.Cast:
-		for _, arg := range expr.GetArgs() {
-			buffer.WriteString(arg.ExplainNormalizedInfo4InList())
-			buffer.WriteString(", ")
-			buffer.WriteString(expr.RetType.String())
-		}
-	case ast.In:
-		buffer.WriteString("...")
-	default:
-		for i, arg := range expr.GetArgs() {
-			buffer.WriteString(arg.ExplainNormalizedInfo4InList())
-			if i+1 < len(expr.GetArgs()) {
-				buffer.WriteString(", ")
-			}
-		}
-	}
-	buffer.WriteString(")")
-	return buffer.String()
-}
-
-// ColumnExplainInfo returns the explained info for column.
-func (col *Column) ColumnExplainInfo(normalized bool) string {
-	if normalized {
-		if col.OrigName != "" {
-			return col.OrigName
-		}
-		return "?"
-	}
-	return col.String()
+	return expr.explainInfo(true)
 }
 
 // ExplainInfo implements the Expression interface.
-func (col *Column) ExplainInfo(ctx EvalContext) string {
-	return col.ColumnExplainInfo(false)
+func (col *Column) ExplainInfo() string {
+	return col.String()
 }
 
 // ExplainNormalizedInfo implements the Expression interface.
 func (col *Column) ExplainNormalizedInfo() string {
-	return col.ColumnExplainInfo(true)
-}
-
-// ExplainNormalizedInfo4InList implements the Expression interface.
-func (col *Column) ExplainNormalizedInfo4InList() string {
-	return col.ColumnExplainInfo(true)
+	if col.OrigName != "" {
+		return col.OrigName
+	}
+	return "?"
 }
 
 // ExplainInfo implements the Expression interface.
-func (expr *Constant) ExplainInfo(ctx EvalContext) string {
-	dt, err := expr.Eval(ctx, chunk.Row{})
+func (expr *Constant) ExplainInfo() string {
+	dt, err := expr.Eval(chunk.Row{})
 	if err != nil {
-		return "not recognized const value"
+		return "not recognized const vanue"
 	}
 	return expr.format(dt)
 }
 
 // ExplainNormalizedInfo implements the Expression interface.
 func (expr *Constant) ExplainNormalizedInfo() string {
-	return "?"
-}
-
-// ExplainNormalizedInfo4InList implements the Expression interface.
-func (expr *Constant) ExplainNormalizedInfo4InList() string {
 	return "?"
 }
 
@@ -198,27 +141,18 @@ func ExplainExpressionList(exprs []Expression, schema *Schema) string {
 // SortedExplainExpressionList generates explain information for a list of expressions in order.
 // In some scenarios, the expr's order may not be stable when executing multiple times.
 // So we add a sort to make its explain result stable.
-func SortedExplainExpressionList(ctx EvalContext, exprs []Expression) []byte {
-	return sortedExplainExpressionList(ctx, exprs, false, false)
+func SortedExplainExpressionList(exprs []Expression) []byte {
+	return sortedExplainExpressionList(exprs, false)
 }
 
-// SortedExplainExpressionListIgnoreInlist generates explain information for a list of expressions in order.
-func SortedExplainExpressionListIgnoreInlist(exprs []Expression) []byte {
-	return sortedExplainExpressionList(nil, exprs, false, true)
-}
-
-func sortedExplainExpressionList(ctx EvalContext, exprs []Expression, normalized bool, ignoreInlist bool) []byte {
-	intest.Assert(ignoreInlist || normalized || ctx != nil)
+func sortedExplainExpressionList(exprs []Expression, normalized bool) []byte {
 	buffer := bytes.NewBufferString("")
 	exprInfos := make([]string, 0, len(exprs))
 	for _, expr := range exprs {
-		if ignoreInlist {
-			exprInfos = append(exprInfos, expr.ExplainNormalizedInfo4InList())
-		} else if normalized {
+		if normalized {
 			exprInfos = append(exprInfos, expr.ExplainNormalizedInfo())
 		} else {
-			intest.Assert(ctx != nil)
-			exprInfos = append(exprInfos, expr.ExplainInfo(ctx))
+			exprInfos = append(exprInfos, expr.ExplainInfo())
 		}
 	}
 	slices.Sort(exprInfos)
@@ -233,7 +167,7 @@ func sortedExplainExpressionList(ctx EvalContext, exprs []Expression, normalized
 
 // SortedExplainNormalizedExpressionList is same like SortedExplainExpressionList, but use for generating normalized information.
 func SortedExplainNormalizedExpressionList(exprs []Expression) []byte {
-	return sortedExplainExpressionList(nil, exprs, true, false)
+	return sortedExplainExpressionList(exprs, true)
 }
 
 // SortedExplainNormalizedScalarFuncList is same like SortedExplainExpressionList, but use for generating normalized information.
@@ -242,14 +176,14 @@ func SortedExplainNormalizedScalarFuncList(exprs []*ScalarFunction) []byte {
 	for i := range exprs {
 		expressions[i] = exprs[i]
 	}
-	return sortedExplainExpressionList(nil, expressions, true, false)
+	return sortedExplainExpressionList(expressions, true)
 }
 
 // ExplainColumnList generates explain information for a list of columns.
-func ExplainColumnList(ctx EvalContext, cols []*Column) []byte {
+func ExplainColumnList(cols []*Column) []byte {
 	buffer := bytes.NewBufferString("")
 	for i, col := range cols {
-		buffer.WriteString(col.ExplainInfo(ctx))
+		buffer.WriteString(col.ExplainInfo())
 		if i+1 < len(cols) {
 			buffer.WriteString(", ")
 		}

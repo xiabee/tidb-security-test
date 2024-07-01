@@ -60,18 +60,18 @@ var CallOnStmtRetryCount stringutil.StringerStr = "callOnStmtRetryCount"
 var AssertLockErr stringutil.StringerStr = "assertLockError"
 
 // RecordAssert is used only for test
-func RecordAssert(sctx sessionctx.Context, name string, value any) {
-	records, ok := sctx.Value(AssertRecordsKey).(map[string]any)
+func RecordAssert(sctx sessionctx.Context, name string, value interface{}) {
+	records, ok := sctx.Value(AssertRecordsKey).(map[string]interface{})
 	if !ok {
-		records = make(map[string]any)
+		records = make(map[string]interface{})
 		sctx.SetValue(AssertRecordsKey, records)
 	}
 	records[name] = value
 }
 
 // AssertTxnManagerInfoSchema is used only for test
-func AssertTxnManagerInfoSchema(sctx sessionctx.Context, is any) {
-	assertVersion := func(expected any) {
+func AssertTxnManagerInfoSchema(sctx sessionctx.Context, is interface{}) {
+	assertVersion := func(expected interface{}) {
 		if expected == nil {
 			return
 		}

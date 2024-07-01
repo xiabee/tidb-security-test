@@ -43,12 +43,7 @@ func getDDLSchemaVer(t *testing.T, d ddl.DDL) int64 {
 func restartWorkers(t *testing.T, store kv.Storage, d *domain.Domain) {
 	err := d.DDL().Stop()
 	require.NoError(t, err)
-	newDDL := ddl.NewDDL(context.Background(),
-		ddl.WithStore(d.Store()),
-		ddl.WithInfoCache(d.InfoCache()),
-		ddl.WithLease(d.DDL().GetLease()),
-		ddl.WithSchemaLoader(d),
-	)
+	newDDL := ddl.NewDDL(context.Background(), ddl.WithStore(d.Store()), ddl.WithInfoCache(d.InfoCache()), ddl.WithLease(d.DDL().GetLease()))
 	d.SetDDL(newDDL)
 	err = newDDL.Start(pools.NewResourcePool(func() (pools.Resource, error) {
 		session := testkit.NewTestKit(t, store).Session()
@@ -114,15 +109,18 @@ func TestSchemaResume(t *testing.T) {
 	require.NoError(t, err)
 	job := &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: dbInfo.Name.L,
 		Type:       model.ActionCreateSchema,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{dbInfo},
+		Args:       []interface{}{dbInfo},
 	}
 	testRunInterruptedJob(t, store, dom, job)
 	testCheckSchemaState(t, store, dbInfo, model.StatePublic)
 
-	job = buildDropSchemaJob(dbInfo)
+	job = &model.Job{
+		SchemaID:   dbInfo.ID,
+		Type:       model.ActionDropSchema,
+		BinlogInfo: &model.HistoryInfo{},
+	}
 	testRunInterruptedJob(t, store, dom, job)
 	testCheckSchemaState(t, store, dbInfo, model.StateNone)
 }
@@ -134,7 +132,18 @@ func TestStat(t *testing.T) {
 	require.NoError(t, err)
 	testCreateSchema(t, testkit.NewTestKit(t, store).Session(), dom.DDL(), dbInfo)
 
-	job := buildDropSchemaJob(dbInfo)
+	// TODO: Get this information from etcd.
+	//	m, err := d.Stats(nil)
+	//	c.Assert(err, IsNil)
+	//	c.Assert(m[ddlOwnerID], Equals, d.uuid)
+
+	job := &model.Job{
+		SchemaID:   dbInfo.ID,
+		Type:       model.ActionDropSchema,
+		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{true},
+	}
+
 	done := make(chan error, 1)
 	go runInterruptedJob(t, store, dom.DDL(), job, done)
 
@@ -149,6 +158,8 @@ LOOP:
 			restartWorkers(t, store, dom)
 			time.Sleep(time.Millisecond * 20)
 		case err := <-done:
+			// TODO: Get this information from etcd.
+			// m, err := d.Stats(nil)
 			require.Nil(t, err)
 			break LOOP
 		}
@@ -171,21 +182,17 @@ func TestTableResume(t *testing.T) {
 	require.NoError(t, err)
 	job := &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: dbInfo.Name.L,
 		TableID:    tblInfo.ID,
-		TableName:  tblInfo.Name.L,
 		Type:       model.ActionCreateTable,
 		BinlogInfo: &model.HistoryInfo{},
-		Args:       []any{tblInfo},
+		Args:       []interface{}{tblInfo},
 	}
 	testRunInterruptedJob(t, store, dom, job)
 	testCheckTableState(t, store, dbInfo, tblInfo, model.StatePublic)
 
 	job = &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: dbInfo.Name.L,
 		TableID:    tblInfo.ID,
-		TableName:  tblInfo.Name.L,
 		Type:       model.ActionDropTable,
 		BinlogInfo: &model.HistoryInfo{},
 	}

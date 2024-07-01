@@ -72,17 +72,31 @@ func LengthEncodedInt(buffer []byte, n uint64) []byte {
 
 // Uint16 dumps an uint16 as byte slice.
 func Uint16(buffer []byte, n uint16) []byte {
-	return binary.LittleEndian.AppendUint16(buffer, n)
+	buffer = append(buffer, byte(n))
+	buffer = append(buffer, byte(n>>8))
+	return buffer
 }
 
 // Uint32 dumps an uint32 as byte slice.
 func Uint32(buffer []byte, n uint32) []byte {
-	return binary.LittleEndian.AppendUint32(buffer, n)
+	buffer = append(buffer, byte(n))
+	buffer = append(buffer, byte(n>>8))
+	buffer = append(buffer, byte(n>>16))
+	buffer = append(buffer, byte(n>>24))
+	return buffer
 }
 
 // Uint64 dumps an uint64 as byte slice.
 func Uint64(buffer []byte, n uint64) []byte {
-	return binary.LittleEndian.AppendUint64(buffer, n)
+	buffer = append(buffer, byte(n))
+	buffer = append(buffer, byte(n>>8))
+	buffer = append(buffer, byte(n>>16))
+	buffer = append(buffer, byte(n>>24))
+	buffer = append(buffer, byte(n>>32))
+	buffer = append(buffer, byte(n>>40))
+	buffer = append(buffer, byte(n>>48))
+	buffer = append(buffer, byte(n>>56))
+	return buffer
 }
 
 // BinaryTime dumps a time as binary byte slice.

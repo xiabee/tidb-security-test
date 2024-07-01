@@ -18,6 +18,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/opentracing/opentracing-go"
@@ -115,7 +116,8 @@ func (h *restoreEBSMetaHelper) preRestore(ctx context.Context) error {
 	var (
 		tlsConf *tls.Config
 	)
-	if len(h.cfg.PD) == 0 {
+	pdAddress := strings.Join(h.cfg.PD, ",")
+	if len(pdAddress) == 0 {
 		return errors.Annotate(berrors.ErrInvalidArgument, "pd address can not be empty")
 	}
 
@@ -130,7 +132,7 @@ func (h *restoreEBSMetaHelper) preRestore(ctx context.Context) error {
 		}
 	}
 
-	controller, err := pdutil.NewPdController(ctx, h.cfg.PD, tlsConf, securityOption)
+	controller, err := pdutil.NewPdController(ctx, pdAddress, tlsConf, securityOption)
 	if err != nil {
 		log.Error("fail to create pd controller", zap.Error(err))
 		return errors.Trace(err)

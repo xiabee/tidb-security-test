@@ -19,7 +19,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	pd "github.com/tikv/pd/client/http"
 )
 
 func TestNewConstraints(t *testing.T) {
@@ -39,8 +38,8 @@ func TestNewConstraints(t *testing.T) {
 func TestAdd(t *testing.T) {
 	type TestCase struct {
 		name   string
-		labels []pd.LabelConstraint
-		label  pd.LabelConstraint
+		labels Constraints
+		label  Constraint
 		err    error
 	}
 	var tests []TestCase
@@ -67,8 +66,8 @@ func TestAdd(t *testing.T) {
 
 	tests = append(tests, TestCase{
 		"duplicated constraints should not stop conflicting constraints check",
-		append(labels, pd.LabelConstraint{
-			Op:     pd.NotIn,
+		append(labels, Constraint{
+			Op:     NotIn,
 			Key:    "zone",
 			Values: []string{"sh"},
 		}), label,
@@ -79,19 +78,19 @@ func TestAdd(t *testing.T) {
 	require.NoError(t, err)
 	tests = append(tests, TestCase{
 		"invalid label in operand",
-		labels, pd.LabelConstraint{Op: "["},
+		labels, Constraint{Op: "["},
 		nil,
 	})
 
 	tests = append(tests, TestCase{
 		"invalid label in operator",
-		[]pd.LabelConstraint{{Op: "["}}, label,
+		Constraints{{Op: "["}}, label,
 		nil,
 	})
 
 	tests = append(tests, TestCase{
 		"invalid label in both, same key",
-		[]pd.LabelConstraint{{Op: "[", Key: "dc"}}, pd.LabelConstraint{Op: "]", Key: "dc"},
+		Constraints{{Op: "[", Key: "dc"}}, Constraint{Op: "]", Key: "dc"},
 		ErrConflictingConstraints,
 	})
 
@@ -106,7 +105,7 @@ func TestAdd(t *testing.T) {
 	})
 
 	for _, test := range tests {
-		err := AddConstraint(&test.labels, test.label)
+		err := test.labels.Add(test.label)
 		comment := fmt.Sprintf("%s: %v", test.name, err)
 		if test.err == nil {
 			require.NoError(t, err, comment)
@@ -120,7 +119,7 @@ func TestAdd(t *testing.T) {
 func TestRestoreConstraints(t *testing.T) {
 	type TestCase struct {
 		name   string
-		input  []pd.LabelConstraint
+		input  Constraints
 		output string
 		err    error
 	}
@@ -128,7 +127,7 @@ func TestRestoreConstraints(t *testing.T) {
 
 	tests = append(tests, TestCase{
 		"normal1",
-		[]pd.LabelConstraint{},
+		Constraints{},
 		"",
 		nil,
 	})
@@ -139,14 +138,14 @@ func TestRestoreConstraints(t *testing.T) {
 	require.NoError(t, err)
 	tests = append(tests, TestCase{
 		"normal2",
-		[]pd.LabelConstraint{input1, input2},
+		Constraints{input1, input2},
 		`"+zone=bj","-zone=sh"`,
 		nil,
 	})
 
 	tests = append(tests, TestCase{
 		"error",
-		[]pd.LabelConstraint{{
+		Constraints{{
 			Op:     "[",
 			Key:    "dc",
 			Values: []string{"dc1"},
@@ -156,7 +155,7 @@ func TestRestoreConstraints(t *testing.T) {
 	})
 
 	for _, test := range tests {
-		res, err := RestoreConstraints(&test.input)
+		res, err := test.input.Restore()
 		comment := fmt.Sprintf("%s: %v", test.name, err)
 		if test.err == nil {
 			require.NoError(t, err, comment)

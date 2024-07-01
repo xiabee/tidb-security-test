@@ -19,7 +19,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/hack"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 var msgErrSelNotNil = "The selection vector of Chunk is not nil. Please file a bug to the TiDB Team"
@@ -47,10 +47,6 @@ type Chunk struct {
 
 	// requiredRows indicates how many rows the parent executor want.
 	requiredRows int
-
-	// inCompleteChunk means some of the columns in the chunk is not filled, used in
-	// join probe, the value will always be false unless set it explicitly
-	inCompleteChunk bool
 }
 
 // Capacity constants.
@@ -59,26 +55,9 @@ const (
 	ZeroCapacity    = 0
 )
 
-// NewEmptyChunk creates an empty chunk
-func NewEmptyChunk(fields []*types.FieldType) *Chunk {
-	chk := &Chunk{
-		columns: make([]*Column, 0, len(fields)),
-	}
-
-	for _, f := range fields {
-		chk.columns = append(chk.columns, NewEmptyColumn(f))
-	}
-	return chk
-}
-
 // NewChunkWithCapacity creates a new chunk with field types and capacity.
 func NewChunkWithCapacity(fields []*types.FieldType, capacity int) *Chunk {
 	return New(fields, capacity, capacity)
-}
-
-// NewChunkFromPoolWithCapacity creates a new chunk with field types and capacity from the pool.
-func NewChunkFromPoolWithCapacity(fields []*types.FieldType, initCap int) *Chunk {
-	return getChunkFromPool(initCap, fields)
 }
 
 // New creates a new chunk.
@@ -88,7 +67,7 @@ func NewChunkFromPoolWithCapacity(fields []*types.FieldType, initCap int) *Chunk
 func New(fields []*types.FieldType, capacity, maxChunkSize int) *Chunk {
 	chk := &Chunk{
 		columns:  make([]*Column, 0, len(fields)),
-		capacity: min(capacity, maxChunkSize),
+		capacity: mathutil.Min(capacity, maxChunkSize),
 		// set the default value of requiredRows to maxChunkSize to let chk.IsFull() behave
 		// like how we judge whether a chunk is full now, then the statement
 		// "chk.NumRows() < maxChunkSize"
@@ -106,14 +85,13 @@ func New(fields []*types.FieldType, capacity, maxChunkSize int) *Chunk {
 // created Chunk has the same data schema with the old Chunk.
 func renewWithCapacity(chk *Chunk, capacity, requiredRows int) *Chunk {
 	if chk.columns == nil {
-		return &Chunk{inCompleteChunk: chk.inCompleteChunk}
+		return &Chunk{}
 	}
 	return &Chunk{
-		columns:         renewColumns(chk.columns, capacity),
-		numVirtualRows:  0,
-		capacity:        capacity,
-		requiredRows:    requiredRows,
-		inCompleteChunk: chk.inCompleteChunk,
+		columns:        renewColumns(chk.columns, capacity),
+		numVirtualRows: 0,
+		capacity:       capacity,
+		requiredRows:   requiredRows,
 	}
 }
 
@@ -142,11 +120,10 @@ func renewColumns(oldCol []*Column, capacity int) []*Column {
 // but keep columns empty.
 func renewEmpty(chk *Chunk) *Chunk {
 	newChk := &Chunk{
-		columns:         nil,
-		numVirtualRows:  chk.numVirtualRows,
-		capacity:        chk.capacity,
-		requiredRows:    chk.requiredRows,
-		inCompleteChunk: chk.inCompleteChunk,
+		columns:        nil,
+		numVirtualRows: chk.numVirtualRows,
+		capacity:       chk.capacity,
+		requiredRows:   chk.requiredRows,
 	}
 	if chk.sel != nil {
 		newChk.sel = make([]int, len(chk.sel))
@@ -162,21 +139,6 @@ func (c *Chunk) resetForReuse() {
 	columns := c.columns[:0]
 	// Keep only the empty columns array space, reset other fields.
 	*c = Chunk{columns: columns}
-}
-
-// SetInCompleteChunk will set c.inCompleteChunk, used in join
-func (c *Chunk) SetInCompleteChunk(isInCompleteChunk bool) {
-	c.inCompleteChunk = isInCompleteChunk
-}
-
-// IsInCompleteChunk returns true if this chunk is inCompleteChunk, used only in test
-func (c *Chunk) IsInCompleteChunk() bool {
-	return c.inCompleteChunk
-}
-
-// GetNumVirtualRows return c.numVirtualRows, used only in test
-func (c *Chunk) GetNumVirtualRows() int {
-	return c.numVirtualRows
 }
 
 // MemoryUsage returns the total memory usage of a Chunk in bytes.
@@ -363,7 +325,7 @@ func reCalcCapacity(c *Chunk, maxChunkSize int) int {
 	if newCapacity == 0 {
 		newCapacity = InitialCapacity
 	}
-	return min(newCapacity, maxChunkSize)
+	return mathutil.Min(newCapacity, maxChunkSize)
 }
 
 // Capacity returns the capacity of the Chunk.
@@ -384,7 +346,7 @@ func (c *Chunk) NumRows() int {
 	if c.sel != nil {
 		return len(c.sel)
 	}
-	if c.inCompleteChunk || c.NumCols() == 0 {
+	if c.NumCols() == 0 {
 		return c.numVirtualRows
 	}
 	return c.columns[0].length
@@ -461,24 +423,6 @@ func appendCellByCell(dst *Column, src *Column, rowIdx int) {
 		dst.offsets = append(dst.offsets, int64(len(dst.data)))
 	}
 	dst.length++
-}
-
-// AppendCellFromRawData appends the cell from raw data
-func AppendCellFromRawData(dst *Column, rowData unsafe.Pointer, currentOffset int) int {
-	if dst.isFixed() {
-		elemLen := len(dst.elemBuf)
-		dst.data = append(dst.data, hack.GetBytesFromPtr(unsafe.Add(rowData, currentOffset), elemLen)...)
-		currentOffset += elemLen
-	} else {
-		elemLen := *(*uint64)(unsafe.Add(rowData, currentOffset))
-		if elemLen > 0 {
-			dst.data = append(dst.data, hack.GetBytesFromPtr(unsafe.Add(rowData, currentOffset+8), int(elemLen))...)
-		}
-		dst.offsets = append(dst.offsets, int64(len(dst.data)))
-		currentOffset += int(elemLen + 8)
-	}
-	dst.length++
-	return currentOffset
 }
 
 // Append appends rows in [begin, end) in another Chunk to a Chunk.
@@ -673,11 +617,6 @@ func (c *Chunk) SetSel(sel []int) {
 	c.sel = sel
 }
 
-// CloneEmpty returns an empty chunk that has the same schema with current chunk
-func (c *Chunk) CloneEmpty(maxCapacity int) *Chunk {
-	return renewWithCapacity(c, maxCapacity, maxCapacity)
-}
-
 // Reconstruct removes all filtered rows in this Chunk.
 func (c *Chunk) Reconstruct() {
 	if c.sel == nil {
@@ -718,9 +657,4 @@ func (c *Chunk) AppendPartialRows(colOff int, rows []Row) {
 			appendCellByCell(dstCol, srcRow.c.columns[i], srcRow.idx)
 		}
 	}
-}
-
-// Destroy is to destroy the Chunk and put Chunk into the pool
-func (c *Chunk) Destroy(initCap int, fields []*types.FieldType) {
-	putChunkFromPool(initCap, fields, c)
 }

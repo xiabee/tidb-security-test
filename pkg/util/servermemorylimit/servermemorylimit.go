@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	atomicutil "go.uber.org/atomic"
 	"go.uber.org/zap"
 )
@@ -111,20 +110,10 @@ func killSessIfNeeded(s *sessionToBeKilled, bt uint64, sm util.SessionManager) {
 						zap.String("sql text", fmt.Sprintf("%.100v", info.Info)),
 						zap.Int64("sql memory usage", info.MemTracker.BytesConsumed()))
 					s.lastLogTime = time.Now()
-
-					if seconds := time.Since(s.killStartTime) / time.Second; seconds >= 60 {
-						// If the SQL cannot be terminated after 60 seconds, it may be stuck in the network stack while writing packets to the client,
-						// encountering some bugs that cause it to hang, or failing to detect the kill signal.
-						// In this case, the resources can be reclaimed by calling the `Finish` method, and then we can start looking for the next SQL with the largest memory usage.
-						logutil.BgLogger().Warn(fmt.Sprintf("global memory controller failed to kill the top-consumer in %d seconds. Attempting to force close the executors.", seconds))
-						s.sessionTracker.Killer.FinishResultSet()
-						goto Succ
-					}
 				}
 				return
 			}
 		}
-	Succ:
 		s.reset()
 		IsKilling.Store(false)
 		memory.MemUsageTop1Tracker.CompareAndSwap(s.sessionTracker, nil)
@@ -168,7 +157,7 @@ func killSessIfNeeded(s *sessionToBeKilled, bt uint64, sm util.SessionManager) {
 				s.sqlStartTime = info.Time
 				s.isKilling = true
 				s.sessionTracker = t
-				t.Killer.SendKillSignal(sqlkiller.ServerMemoryExceeded)
+				t.NeedKill.Store(true)
 
 				killTime := time.Now()
 				SessionKillTotal.Add(1)

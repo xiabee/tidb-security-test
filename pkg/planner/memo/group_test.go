@@ -24,8 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/stretchr/testify/require"
@@ -75,12 +73,12 @@ func TestGroupDeleteAll(t *testing.T) {
 	require.True(t, g.Insert(NewGroupExpr(plannercore.LogicalLimit{}.Init(ctx, 0))))
 	require.True(t, g.Insert(NewGroupExpr(plannercore.LogicalProjection{}.Init(ctx, 0))))
 	require.Equal(t, 3, g.Equivalents.Len())
-	require.NotNil(t, g.GetFirstElem(pattern.OperandProjection))
+	require.NotNil(t, g.GetFirstElem(OperandProjection))
 	require.True(t, g.Exists(expr))
 
 	g.DeleteAll()
 	require.Equal(t, 0, g.Equivalents.Len())
-	require.Nil(t, g.GetFirstElem(pattern.OperandProjection))
+	require.Nil(t, g.GetFirstElem(OperandProjection))
 	require.False(t, g.Exists(expr))
 }
 
@@ -106,9 +104,9 @@ func TestGroupFingerPrint(t *testing.T) {
 		do := domain.GetDomain(ctx)
 		do.StatsHandle().Close()
 	}()
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
 	require.NoError(t, err)
-	logic1, ok := plan.(base.LogicalPlan)
+	logic1, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	// Plan tree should be: DataSource -> Selection -> Projection
@@ -142,7 +140,7 @@ func TestGroupFingerPrint(t *testing.T) {
 	// Insert two LogicalSelections with same conditions but different order.
 	require.Len(t, sel.Conditions, 2)
 	newSelection := plannercore.LogicalSelection{
-		Conditions: make([]expression.Expression, 2)}.Init(sel.SCtx(), sel.QueryBlockOffset())
+		Conditions: make([]expression.Expression, 2)}.Init(sel.SCtx(), sel.SelectBlockOffset())
 	newSelection.Conditions[0], newSelection.Conditions[1] = sel.Conditions[1], sel.Conditions[0]
 	newGroupExpr4 := NewGroupExpr(sel)
 	newGroupExpr5 := NewGroupExpr(newSelection)
@@ -172,19 +170,19 @@ func TestGroupGetFirstElem(t *testing.T) {
 	g.Insert(expr3)
 	g.Insert(expr4)
 
-	require.Equal(t, expr0, g.GetFirstElem(pattern.OperandProjection).Value.(*GroupExpr))
-	require.Equal(t, expr1, g.GetFirstElem(pattern.OperandLimit).Value.(*GroupExpr))
-	require.Equal(t, expr0, g.GetFirstElem(pattern.OperandAny).Value.(*GroupExpr))
+	require.Equal(t, expr0, g.GetFirstElem(OperandProjection).Value.(*GroupExpr))
+	require.Equal(t, expr1, g.GetFirstElem(OperandLimit).Value.(*GroupExpr))
+	require.Equal(t, expr0, g.GetFirstElem(OperandAny).Value.(*GroupExpr))
 }
 
 type fakeImpl struct {
-	plan base.PhysicalPlan
+	plan plannercore.PhysicalPlan
 }
 
 func (impl *fakeImpl) CalcCost(float64, ...Implementation) float64     { return 0 }
 func (impl *fakeImpl) SetCost(float64)                                 {}
 func (impl *fakeImpl) GetCost() float64                                { return 0 }
-func (impl *fakeImpl) GetPlan() base.PhysicalPlan                      { return impl.plan }
+func (impl *fakeImpl) GetPlan() plannercore.PhysicalPlan               { return impl.plan }
 func (impl *fakeImpl) AttachChildren(...Implementation) Implementation { return nil }
 func (impl *fakeImpl) GetCostLimit(float64, ...Implementation) float64 { return 0 }
 
@@ -206,6 +204,28 @@ func TestGetInsertGroupImpl(t *testing.T) {
 	require.Nil(t, g.GetImpl(orderProp))
 }
 
+func TestEngineTypeSet(t *testing.T) {
+	require.True(t, EngineAll.Contains(EngineTiDB))
+	require.True(t, EngineAll.Contains(EngineTiKV))
+	require.True(t, EngineAll.Contains(EngineTiFlash))
+
+	require.True(t, EngineTiDBOnly.Contains(EngineTiDB))
+	require.False(t, EngineTiDBOnly.Contains(EngineTiKV))
+	require.False(t, EngineTiDBOnly.Contains(EngineTiFlash))
+
+	require.False(t, EngineTiKVOnly.Contains(EngineTiDB))
+	require.True(t, EngineTiKVOnly.Contains(EngineTiKV))
+	require.False(t, EngineTiKVOnly.Contains(EngineTiFlash))
+
+	require.False(t, EngineTiFlashOnly.Contains(EngineTiDB))
+	require.False(t, EngineTiFlashOnly.Contains(EngineTiKV))
+	require.True(t, EngineTiFlashOnly.Contains(EngineTiFlash))
+
+	require.False(t, EngineTiKVOrTiFlash.Contains(EngineTiDB))
+	require.True(t, EngineTiKVOrTiFlash.Contains(EngineTiKV))
+	require.True(t, EngineTiKVOrTiFlash.Contains(EngineTiFlash))
+}
+
 func TestFirstElemAfterDelete(t *testing.T) {
 	ctx := plannercore.MockContext()
 	defer func() {
@@ -216,13 +236,13 @@ func TestFirstElemAfterDelete(t *testing.T) {
 	g := NewGroupWithSchema(oldExpr, expression.NewSchema())
 	newExpr := NewGroupExpr(plannercore.LogicalLimit{Count: 20}.Init(ctx, 0))
 	g.Insert(newExpr)
-	require.NotNil(t, g.GetFirstElem(pattern.OperandLimit))
-	require.Equal(t, oldExpr, g.GetFirstElem(pattern.OperandLimit).Value)
+	require.NotNil(t, g.GetFirstElem(OperandLimit))
+	require.Equal(t, oldExpr, g.GetFirstElem(OperandLimit).Value)
 	g.Delete(oldExpr)
-	require.NotNil(t, g.GetFirstElem(pattern.OperandLimit))
-	require.Equal(t, newExpr, g.GetFirstElem(pattern.OperandLimit).Value)
+	require.NotNil(t, g.GetFirstElem(OperandLimit))
+	require.Equal(t, newExpr, g.GetFirstElem(OperandLimit).Value)
 	g.Delete(newExpr)
-	require.Nil(t, g.GetFirstElem(pattern.OperandLimit))
+	require.Nil(t, g.GetFirstElem(OperandLimit))
 }
 
 func TestBuildKeyInfo(t *testing.T) {
@@ -239,9 +259,9 @@ func TestBuildKeyInfo(t *testing.T) {
 	// case 1: primary key has constant constraint
 	stmt1, err := p.ParseOneStmt("select a from t where a = 10", "", "")
 	require.NoError(t, err)
-	p1, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
+	p1, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
 	require.NoError(t, err)
-	logic1, ok := p1.(base.LogicalPlan)
+	logic1, ok := p1.(plannercore.LogicalPlan)
 	require.True(t, ok)
 	group1 := Convert2Group(logic1)
 	group1.BuildKeyInfo()
@@ -251,9 +271,9 @@ func TestBuildKeyInfo(t *testing.T) {
 	// case 2: group by column is key
 	stmt2, err := p.ParseOneStmt("select b, sum(a) from t group by b", "", "")
 	require.NoError(t, err)
-	p2, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt2, is)
+	p2, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt2, is)
 	require.NoError(t, err)
-	logic2, ok := p2.(base.LogicalPlan)
+	logic2, ok := p2.(plannercore.LogicalPlan)
 	require.True(t, ok)
 	group2 := Convert2Group(logic2)
 	group2.BuildKeyInfo()

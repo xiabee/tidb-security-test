@@ -30,8 +30,8 @@ import (
 func TestUnary(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     any
-		expected any
+		args     interface{}
+		expected interface{}
 		overflow bool
 		getErr   bool
 	}{
@@ -48,9 +48,9 @@ func TestUnary(t *testing.T) {
 	}()
 
 	for _, c := range cases {
-		f, err := newFunctionForTest(ctx, ast.UnaryMinus, primitiveValsToConstants(ctx, []any{c.args})...)
+		f, err := newFunctionForTest(ctx, ast.UnaryMinus, primitiveValsToConstants(ctx, []interface{}{c.args})...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if !c.getErr {
 			require.NoError(t, err)
 			if !c.overflow {
@@ -70,46 +70,46 @@ func TestUnary(t *testing.T) {
 func TestLogicAnd(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected int64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{1, 1}, 1, false, false},
-		{[]any{1, 0}, 0, false, false},
-		{[]any{0, 1}, 0, false, false},
-		{[]any{0, 0}, 0, false, false},
-		{[]any{2, -1}, 1, false, false},
-		{[]any{"a", "0"}, 0, false, false},
-		{[]any{"a", "1"}, 0, false, false},
-		{[]any{"1a", "0"}, 0, false, false},
-		{[]any{"1a", "1"}, 1, false, false},
-		{[]any{0, nil}, 0, false, false},
-		{[]any{nil, 0}, 0, false, false},
-		{[]any{nil, 1}, 0, true, false},
-		{[]any{0.001, 0}, 0, false, false},
-		{[]any{0.001, 1}, 1, false, false},
-		{[]any{nil, 0.000}, 0, false, false},
-		{[]any{nil, 0.001}, 0, true, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 0}, 0, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 1}, 1, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000000"), nil}, 0, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), nil}, 0, true, false},
+		{[]interface{}{1, 1}, 1, false, false},
+		{[]interface{}{1, 0}, 0, false, false},
+		{[]interface{}{0, 1}, 0, false, false},
+		{[]interface{}{0, 0}, 0, false, false},
+		{[]interface{}{2, -1}, 1, false, false},
+		{[]interface{}{"a", "0"}, 0, false, false},
+		{[]interface{}{"a", "1"}, 0, false, false},
+		{[]interface{}{"1a", "0"}, 0, false, false},
+		{[]interface{}{"1a", "1"}, 1, false, false},
+		{[]interface{}{0, nil}, 0, false, false},
+		{[]interface{}{nil, 0}, 0, false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
+		{[]interface{}{0.001, 0}, 0, false, false},
+		{[]interface{}{0.001, 1}, 1, false, false},
+		{[]interface{}{nil, 0.000}, 0, false, false},
+		{[]interface{}{nil, 0.001}, 0, true, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 0}, 0, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 1}, 1, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000000"), nil}, 0, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), nil}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LogicAnd, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -133,22 +133,22 @@ func TestLogicAnd(t *testing.T) {
 func TestLeftShift(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected uint64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123, 2}, uint64(492), false, false},
-		{[]any{-123, 2}, uint64(18446744073709551124), false, false},
-		{[]any{nil, 1}, 0, true, false},
+		{[]interface{}{123, 2}, uint64(492), false, false},
+		{[]interface{}{-123, 2}, uint64(18446744073709551124), false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LeftShift, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -165,22 +165,22 @@ func TestLeftShift(t *testing.T) {
 func TestRightShift(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected uint64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123, 2}, uint64(30), false, false},
-		{[]any{-123, 2}, uint64(4611686018427387873), false, false},
-		{[]any{nil, 1}, 0, true, false},
+		{[]interface{}{123, 2}, uint64(30), false, false},
+		{[]interface{}{-123, 2}, uint64(4611686018427387873), false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.RightShift, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -204,22 +204,22 @@ func TestRightShift(t *testing.T) {
 func TestBitXor(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected uint64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123, 321}, uint64(314), false, false},
-		{[]any{-123, 321}, uint64(18446744073709551300), false, false},
-		{[]any{nil, 1}, 0, true, false},
+		{[]interface{}{123, 321}, uint64(314), false, false},
+		{[]interface{}{-123, 321}, uint64(18446744073709551300), false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Xor, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -243,29 +243,29 @@ func TestBitXor(t *testing.T) {
 func TestBitOr(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected uint64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123, 321}, uint64(379), false, false},
-		{[]any{-123, 321}, uint64(18446744073709551557), false, false},
-		{[]any{nil, 1}, 0, true, false},
+		{[]interface{}{123, 321}, uint64(379), false, false},
+		{[]interface{}{-123, 321}, uint64(18446744073709551557), false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.Or, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -289,50 +289,50 @@ func TestBitOr(t *testing.T) {
 func TestLogicOr(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected int64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{1, 1}, 1, false, false},
-		{[]any{1, 0}, 1, false, false},
-		{[]any{0, 1}, 1, false, false},
-		{[]any{0, 0}, 0, false, false},
-		{[]any{2, -1}, 1, false, false},
-		{[]any{"a", "0"}, 0, false, false},
-		{[]any{"a", "1"}, 1, false, false},
-		{[]any{"1a", "0"}, 1, false, false},
-		{[]any{"1a", "1"}, 1, false, false},
-		{[]any{"0.0a", 0}, 0, false, false},
-		{[]any{"0.0001a", 0}, 1, false, false},
-		{[]any{1, nil}, 1, false, false},
-		{[]any{nil, 1}, 1, false, false},
-		{[]any{nil, 0}, 0, true, false},
-		{[]any{0.000, 0}, 0, false, false},
-		{[]any{0.001, 0}, 1, false, false},
-		{[]any{nil, 0.000}, 0, true, false},
-		{[]any{nil, 0.001}, 1, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000000"), 0}, 0, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000000"), 1}, 1, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000000"), nil}, 0, true, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 0}, 1, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 1}, 1, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), nil}, 1, false, false},
+		{[]interface{}{1, 1}, 1, false, false},
+		{[]interface{}{1, 0}, 1, false, false},
+		{[]interface{}{0, 1}, 1, false, false},
+		{[]interface{}{0, 0}, 0, false, false},
+		{[]interface{}{2, -1}, 1, false, false},
+		{[]interface{}{"a", "0"}, 0, false, false},
+		{[]interface{}{"a", "1"}, 1, false, false},
+		{[]interface{}{"1a", "0"}, 1, false, false},
+		{[]interface{}{"1a", "1"}, 1, false, false},
+		{[]interface{}{"0.0a", 0}, 0, false, false},
+		{[]interface{}{"0.0001a", 0}, 1, false, false},
+		{[]interface{}{1, nil}, 1, false, false},
+		{[]interface{}{nil, 1}, 1, false, false},
+		{[]interface{}{nil, 0}, 0, true, false},
+		{[]interface{}{0.000, 0}, 0, false, false},
+		{[]interface{}{0.001, 0}, 1, false, false},
+		{[]interface{}{nil, 0.000}, 0, true, false},
+		{[]interface{}{nil, 0.001}, 1, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000000"), 0}, 0, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000000"), 1}, 1, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000000"), nil}, 0, true, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 0}, 1, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 1}, 1, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), nil}, 1, false, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LogicOr, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -356,22 +356,22 @@ func TestLogicOr(t *testing.T) {
 func TestBitAnd(t *testing.T) {
 	ctx := createContext(t)
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected int64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123, 321}, 65, false, false},
-		{[]any{-123, 321}, 257, false, false},
-		{[]any{nil, 1}, 0, true, false},
+		{[]interface{}{123, 321}, 65, false, false},
+		{[]interface{}{-123, 321}, 257, false, false},
+		{[]interface{}{nil, 1}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.And, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -395,29 +395,29 @@ func TestBitAnd(t *testing.T) {
 func TestBitNeg(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected uint64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{123}, uint64(18446744073709551492), false, false},
-		{[]any{-123}, uint64(122), false, false},
-		{[]any{nil}, 0, true, false},
+		{[]interface{}{123}, uint64(18446744073709551492), false, false},
+		{[]interface{}{-123}, uint64(122), false, false},
+		{[]interface{}{nil}, 0, true, false},
 
-		{[]any{errors.New("must error")}, 0, false, true},
+		{[]interface{}{errors.New("must error")}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.BitNeg, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -441,37 +441,37 @@ func TestBitNeg(t *testing.T) {
 func TestUnaryNot(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected int64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{1}, 0, false, false},
-		{[]any{0}, 1, false, false},
-		{[]any{123}, 0, false, false},
-		{[]any{-123}, 0, false, false},
-		{[]any{"123"}, 0, false, false},
-		{[]any{float64(0.3)}, 0, false, false},
-		{[]any{"0.3"}, 0, false, false},
-		{[]any{types.NewDecFromFloatForTest(0.3)}, 0, false, false},
-		{[]any{nil}, 0, true, false},
-		{[]any{types.CreateBinaryJSON(int64(0))}, 1, false, false},
-		{[]any{types.CreateBinaryJSON(map[string]any{"test": "test"})}, 0, false, false},
+		{[]interface{}{1}, 0, false, false},
+		{[]interface{}{0}, 1, false, false},
+		{[]interface{}{123}, 0, false, false},
+		{[]interface{}{-123}, 0, false, false},
+		{[]interface{}{"123"}, 0, false, false},
+		{[]interface{}{float64(0.3)}, 0, false, false},
+		{[]interface{}{"0.3"}, 0, false, false},
+		{[]interface{}{types.NewDecFromFloatForTest(0.3)}, 0, false, false},
+		{[]interface{}{nil}, 0, true, false},
+		{[]interface{}{types.CreateBinaryJSON(int64(0))}, 1, false, false},
+		{[]interface{}{types.CreateBinaryJSON(map[string]interface{}{"test": "test"})}, 0, false, false},
 
-		{[]any{errors.New("must error")}, 0, false, true},
+		{[]interface{}{errors.New("must error")}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.UnaryNot, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {
@@ -495,84 +495,84 @@ func TestUnaryNot(t *testing.T) {
 func TestIsTrueOrFalse(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	testCases := []struct {
-		args    []any
-		isTrue  any
-		isFalse any
+		args    []interface{}
+		isTrue  interface{}
+		isFalse interface{}
 	}{
 		{
-			args:    []any{-12},
+			args:    []interface{}{-12},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{12},
+			args:    []interface{}{12},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{0},
+			args:    []interface{}{0},
 			isTrue:  0,
 			isFalse: 1,
 		},
 		{
-			args:    []any{float64(0)},
+			args:    []interface{}{float64(0)},
 			isTrue:  0,
 			isFalse: 1,
 		},
 		{
-			args:    []any{"aaa"},
+			args:    []interface{}{"aaa"},
 			isTrue:  0,
 			isFalse: 1,
 		},
 		{
-			args:    []any{""},
+			args:    []interface{}{""},
 			isTrue:  0,
 			isFalse: 1,
 		},
 		{
-			args:    []any{"0.3"},
+			args:    []interface{}{"0.3"},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{float64(0.3)},
+			args:    []interface{}{float64(0.3)},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{types.NewDecFromFloatForTest(0.3)},
+			args:    []interface{}{types.NewDecFromFloatForTest(0.3)},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{nil},
+			args:    []interface{}{nil},
 			isTrue:  0,
 			isFalse: 0,
 		},
 		{
-			args:    []any{types.NewDuration(0, 0, 0, 1000, 3)},
+			args:    []interface{}{types.NewDuration(0, 0, 0, 1000, 3)},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{types.NewDuration(0, 0, 0, 0, 3)},
+			args:    []interface{}{types.NewDuration(0, 0, 0, 0, 3)},
 			isTrue:  0,
 			isFalse: 1,
 		},
 		{
-			args:    []any{types.NewTime(types.FromDate(0, 0, 0, 0, 0, 0, 1000), mysql.TypeDatetime, 3)},
+			args:    []interface{}{types.NewTime(types.FromDate(0, 0, 0, 0, 0, 0, 1000), mysql.TypeDatetime, 3)},
 			isTrue:  1,
 			isFalse: 0,
 		},
 		{
-			args:    []any{types.NewTime(types.CoreTime(0), mysql.TypeTimestamp, 3)},
+			args:    []interface{}{types.NewTime(types.CoreTime(0), mysql.TypeTimestamp, 3)},
 			isTrue:  0,
 			isFalse: 1,
 		},
@@ -583,7 +583,7 @@ func TestIsTrueOrFalse(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, isTrueSig)
 
-		isTrue, err := evalBuiltinFunc(isTrueSig, ctx, chunk.Row{})
+		isTrue, err := evalBuiltinFunc(isTrueSig, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tc.isTrue), isTrue)
 	}
@@ -593,7 +593,7 @@ func TestIsTrueOrFalse(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, isFalseSig)
 
-		isFalse, err := evalBuiltinFunc(isFalseSig, ctx, chunk.Row{})
+		isFalse, err := evalBuiltinFunc(isFalseSig, chunk.Row{})
 		require.NoError(t, err)
 		testutil.DatumEqual(t, types.NewDatum(tc.isFalse), isFalse)
 	}
@@ -602,47 +602,47 @@ func TestIsTrueOrFalse(t *testing.T) {
 func TestLogicXor(t *testing.T) {
 	ctx := createContext(t)
 	sc := ctx.GetSessionVars().StmtCtx
-	oldTypeFlags := sc.TypeFlags()
+	origin := sc.IgnoreTruncate.Load()
 	defer func() {
-		sc.SetTypeFlags(oldTypeFlags)
+		sc.IgnoreTruncate.Store(origin)
 	}()
-	sc.SetTypeFlags(oldTypeFlags.WithIgnoreTruncateErr(true))
+	sc.IgnoreTruncate.Store(true)
 
 	cases := []struct {
-		args     []any
+		args     []interface{}
 		expected int64
 		isNil    bool
 		getErr   bool
 	}{
-		{[]any{1, 1}, 0, false, false},
-		{[]any{1, 0}, 1, false, false},
-		{[]any{0, 1}, 1, false, false},
-		{[]any{0, 0}, 0, false, false},
-		{[]any{2, -1}, 0, false, false},
-		{[]any{"a", "0"}, 0, false, false},
-		{[]any{"a", "1"}, 1, false, false},
-		{[]any{"1a", "0"}, 1, false, false},
-		{[]any{"1a", "1"}, 0, false, false},
-		{[]any{0, nil}, 0, true, false},
-		{[]any{nil, 0}, 0, true, false},
-		{[]any{nil, 1}, 0, true, false},
-		{[]any{0.5000, 0.4999}, 0, false, false},
-		{[]any{0.5000, 1.0}, 0, false, false},
-		{[]any{0.4999, 1.0}, 0, false, false},
-		{[]any{nil, 0.000}, 0, true, false},
-		{[]any{nil, 0.001}, 0, true, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 0.00001}, 0, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), 1}, 0, false, false},
-		{[]any{types.NewDecFromStringForTest("0.000000"), nil}, 0, true, false},
-		{[]any{types.NewDecFromStringForTest("0.000001"), nil}, 0, true, false},
+		{[]interface{}{1, 1}, 0, false, false},
+		{[]interface{}{1, 0}, 1, false, false},
+		{[]interface{}{0, 1}, 1, false, false},
+		{[]interface{}{0, 0}, 0, false, false},
+		{[]interface{}{2, -1}, 0, false, false},
+		{[]interface{}{"a", "0"}, 0, false, false},
+		{[]interface{}{"a", "1"}, 1, false, false},
+		{[]interface{}{"1a", "0"}, 1, false, false},
+		{[]interface{}{"1a", "1"}, 0, false, false},
+		{[]interface{}{0, nil}, 0, true, false},
+		{[]interface{}{nil, 0}, 0, true, false},
+		{[]interface{}{nil, 1}, 0, true, false},
+		{[]interface{}{0.5000, 0.4999}, 0, false, false},
+		{[]interface{}{0.5000, 1.0}, 0, false, false},
+		{[]interface{}{0.4999, 1.0}, 0, false, false},
+		{[]interface{}{nil, 0.000}, 0, true, false},
+		{[]interface{}{nil, 0.001}, 0, true, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 0.00001}, 0, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), 1}, 0, false, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000000"), nil}, 0, true, false},
+		{[]interface{}{types.NewDecFromStringForTest("0.000001"), nil}, 0, true, false},
 
-		{[]any{errors.New("must error"), 1}, 0, false, true},
+		{[]interface{}{errors.New("must error"), 1}, 0, false, true},
 	}
 
 	for _, c := range cases {
 		f, err := newFunctionForTest(ctx, ast.LogicXor, primitiveValsToConstants(ctx, c.args)...)
 		require.NoError(t, err)
-		d, err := f.Eval(ctx, chunk.Row{})
+		d, err := f.Eval(chunk.Row{})
 		if c.getErr {
 			require.Error(t, err)
 		} else {

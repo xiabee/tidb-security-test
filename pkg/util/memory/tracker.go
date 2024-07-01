@@ -25,8 +25,9 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/pkg/metrics"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	atomicutil "go.uber.org/atomic"
+	"go.uber.org/zap"
 )
 
 // TrackMemWhenExceeds is the threshold when memory usage needs to be tracked.
@@ -72,10 +73,9 @@ var (
 // The actions that could be triggered are: SpillDiskAction, SortAndSpillDiskAction, rateLimitAction,
 // PanicOnExceed, globalPanicOnExceed, LogOnExceed.
 type Tracker struct {
-	bytesLimit           atomic.Pointer[bytesLimits]
+	bytesLimit           atomic.Value
 	actionMuForHardLimit actionMu
 	actionMuForSoftLimit actionMu
-	Killer               *sqlkiller.SQLKiller
 	mu                   struct {
 		// The children memory trackers. If the Tracker is the Global Tracker, like executor.GlobalDiskUsageTracker,
 		// we wouldn't maintain its children in order to avoiding mutex contention.
@@ -92,8 +92,10 @@ type Tracker struct {
 	bytesReleased       int64             // Released bytes.
 	maxConsumed         atomicutil.Int64  // max number of bytes consumed during execution.
 	SessionID           atomicutil.Uint64 // SessionID indicates the sessionID the tracker is bound.
-	IsRootTrackerOfSess bool              // IsRootTrackerOfSess indicates whether this tracker is bound for session
-	isGlobal            bool              // isGlobal indicates whether this tracker is global tracker
+	NeedKill            atomic.Bool       // NeedKill indicates whether this session need kill because OOM
+	NeedKillReceived    sync.Once
+	IsRootTrackerOfSess bool // IsRootTrackerOfSess indicates whether this tracker is bound for session
+	isGlobal            bool // isGlobal indicates whether this tracker is global tracker
 }
 
 type actionMu struct {
@@ -177,7 +179,7 @@ func NewGlobalTracker(label int, bytesLimit int64) *Tracker {
 // CheckBytesLimit check whether the bytes limit of the tracker is equal to a value.
 // Only used in test.
 func (t *Tracker) CheckBytesLimit(val int64) bool {
-	return t.bytesLimit.Load().bytesHardLimit == val
+	return t.bytesLimit.Load().(*bytesLimits).bytesHardLimit == val
 }
 
 // SetBytesLimit sets the bytes limit for this tracker.
@@ -192,20 +194,20 @@ func (t *Tracker) SetBytesLimit(bytesLimit int64) {
 // GetBytesLimit gets the bytes limit for this tracker.
 // "bytesHardLimit <= 0" means no limit.
 func (t *Tracker) GetBytesLimit() int64 {
-	return t.bytesLimit.Load().bytesHardLimit
+	return t.bytesLimit.Load().(*bytesLimits).bytesHardLimit
 }
 
 // CheckExceed checks whether the consumed bytes is exceed for this tracker.
 func (t *Tracker) CheckExceed() bool {
-	bytesHardLimit := t.bytesLimit.Load().bytesHardLimit
+	bytesHardLimit := t.bytesLimit.Load().(*bytesLimits).bytesHardLimit
 	return atomic.LoadInt64(&t.bytesConsumed) >= bytesHardLimit && bytesHardLimit > 0
 }
 
 // SetActionOnExceed sets the action when memory usage exceeds bytesHardLimit.
 func (t *Tracker) SetActionOnExceed(a ActionOnExceed) {
 	t.actionMuForHardLimit.Lock()
-	defer t.actionMuForHardLimit.Unlock()
 	t.actionMuForHardLimit.actionOnExceed = a
+	t.actionMuForHardLimit.Unlock()
 }
 
 // FallbackOldAndSetNewAction sets the action when memory usage exceeds bytesHardLimit
@@ -319,7 +321,8 @@ func (t *Tracker) Detach() {
 		parent.actionMuForSoftLimit.Lock()
 		parent.actionMuForSoftLimit.actionOnExceed = nil
 		parent.actionMuForSoftLimit.Unlock()
-		parent.Killer.Reset()
+		parent.NeedKill.Store(false)
+		parent.NeedKillReceived = sync.Once{}
 	}
 	parent.remove(t)
 	t.mu.Lock()
@@ -406,7 +409,7 @@ func (t *Tracker) Consume(bs int64) {
 		}
 		bytesConsumed := atomic.AddInt64(&tracker.bytesConsumed, bs)
 		bytesReleased := atomic.LoadInt64(&tracker.bytesReleased)
-		limits := tracker.bytesLimit.Load()
+		limits := tracker.bytesLimit.Load().(*bytesLimits)
 		if bytesConsumed+bytesReleased >= limits.bytesHardLimit && limits.bytesHardLimit > 0 {
 			rootExceed = tracker
 		}
@@ -438,7 +441,31 @@ func (t *Tracker) Consume(bs int64) {
 		}
 	}
 
+	tryActionLastOne := func(mu *actionMu, tracker *Tracker) {
+		mu.Lock()
+		defer mu.Unlock()
+		if currentAction := mu.actionOnExceed; currentAction != nil {
+			for nextAction := currentAction.GetFallback(); nextAction != nil; {
+				currentAction = nextAction
+				nextAction = currentAction.GetFallback()
+			}
+			if action, ok := currentAction.(ActionCareInvoker); ok {
+				action.SetInvoker(Instance)
+			}
+			currentAction.Action(tracker)
+		}
+	}
+
 	if bs > 0 && sessionRootTracker != nil {
+		// Kill the Top1 session
+		if sessionRootTracker.NeedKill.Load() {
+			sessionRootTracker.NeedKillReceived.Do(
+				func() {
+					logutil.BgLogger().Warn("global memory controller, NeedKill signal is received successfully",
+						zap.Uint64("conn", sessionRootTracker.SessionID.Load()))
+				})
+			tryActionLastOne(&sessionRootTracker.actionMuForHardLimit, sessionRootTracker)
+		}
 		// Update the Top1 session
 		memUsage := sessionRootTracker.BytesConsumed()
 		limitSessMinSize := ServerMemoryLimitSessMinSize.Load()
@@ -453,36 +480,12 @@ func (t *Tracker) Consume(bs int64) {
 		}
 	}
 
-	if bs > 0 && sessionRootTracker != nil {
-		err := sessionRootTracker.Killer.HandleSignal()
-		if err != nil {
-			panic(err)
-		}
-	}
-
 	if bs > 0 && rootExceed != nil {
 		tryAction(&rootExceed.actionMuForHardLimit, rootExceed)
 	}
 
 	if bs > 0 && rootExceedForSoftLimit != nil {
 		tryAction(&rootExceedForSoftLimit.actionMuForSoftLimit, rootExceedForSoftLimit)
-	}
-}
-
-// HandleKillSignal checks if a kill signal has been sent to the session root tracker.
-// If a kill signal is detected, it panics with the error returned by the signal handler.
-func (t *Tracker) HandleKillSignal() {
-	var sessionRootTracker *Tracker
-	for tracker := t; tracker != nil; tracker = tracker.getParent() {
-		if tracker.IsRootTrackerOfSess {
-			sessionRootTracker = tracker
-		}
-	}
-	if sessionRootTracker != nil {
-		err := sessionRootTracker.Killer.HandleSignal()
-		if err != nil {
-			panic(err)
-		}
 	}
 }
 
@@ -509,7 +512,7 @@ func (t *Tracker) Release(bytes int64) {
 			// use fake ref instead of obj ref, otherwise obj will be reachable again and gc in next cycle
 			newRef := &finalizerRef{}
 			finalizer := func(tracker *Tracker) func(ref *finalizerRef) {
-				return func(*finalizerRef) {
+				return func(ref *finalizerRef) {
 					tracker.release(bytes) // finalizer func is called async
 				}
 			}
@@ -814,8 +817,8 @@ const (
 	LabelForChunkList int = -7
 	// LabelForGlobalSimpleLRUCache represents the label of the Global SimpleLRUCache
 	LabelForGlobalSimpleLRUCache int = -8
-	// LabelForChunkDataInDiskByRows represents the label of the chunk list in disk
-	LabelForChunkDataInDiskByRows int = -9
+	// LabelForChunkListInDisk represents the label of the chunk list in disk
+	LabelForChunkListInDisk int = -9
 	// LabelForRowContainer represents the label of the row container
 	LabelForRowContainer int = -10
 	// LabelForGlobalStorage represents the label of the Global Storage
@@ -856,12 +859,6 @@ const (
 	LabelForMemDB int = -28
 	// LabelForCursorFetch represents the label of the execution of cursor fetch
 	LabelForCursorFetch int = -29
-	// LabelForChunkDataInDiskByChunks represents the label of the chunk list in disk
-	LabelForChunkDataInDiskByChunks int = -30
-	// LabelForSortPartition represents the label of the sort partition
-	LabelForSortPartition int = -31
-	// LabelForHashTableInHashJoinV2 represents the label of the hash join v2's hash table
-	LabelForHashTableInHashJoinV2 int = -32
 )
 
 // MetricsTypes is used to get label for metrics

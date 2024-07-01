@@ -70,7 +70,7 @@ func TestNormalize(t *testing.T) {
 		{"insert into t values (1)", "insert into `t` values ( ? )"},
 	}
 	for _, test := range tests_for_generic_normalization_rules {
-		normalized := parser.Normalize(test.input, "ON")
+		normalized := parser.Normalize(test.input)
 		digest := parser.DigestNormalized(normalized)
 		require.Equal(t, test.expect, normalized)
 
@@ -92,29 +92,13 @@ func TestNormalize(t *testing.T) {
 		{"select * from t where a in(1, 2, 3)", "select * from `t` where `a` in ( ... )"},
 	}
 	for _, test := range tests_for_binding_specific_rules {
-		normalized := parser.NormalizeForBinding(test.input, false)
+		normalized := parser.NormalizeForBinding(test.input)
 		digest := parser.DigestNormalized(normalized)
 		require.Equal(t, test.expect, normalized)
 
 		normalized2, digest2 := parser.NormalizeDigestForBinding(test.input)
 		require.Equal(t, normalized, normalized2)
 		require.Equalf(t, digest.String(), digest2.String(), "%+v", test)
-	}
-}
-
-func TestNormalizeRedact(t *testing.T) {
-	cases := []struct {
-		input  string
-		expect string
-	}{
-		{"select * from t where a in (1)", "select * from `t` where `a` in ( ‹1› )"},
-		{"select * from t where a in (1, 3)", "select * from `t` where `a` in ( ‹1› , ‹3› )"},
-		{"select ? from b order by 2", "select ? from `b` order by ‹2›"},
-	}
-
-	for _, c := range cases {
-		normalized := parser.Normalize(c.input, "MARKER")
-		require.Equal(t, c.expect, normalized)
 	}
 }
 
@@ -178,7 +162,7 @@ func TestNormalizeDigest(t *testing.T) {
 		require.Equal(t, test.normalized, normalized)
 		require.Equal(t, test.digest, digest.String())
 
-		normalized = parser.Normalize(test.sql, "ON")
+		normalized = parser.Normalize(test.sql)
 		digest = parser.DigestNormalized(normalized)
 		require.Equal(t, test.normalized, normalized)
 		require.Equal(t, test.digest, digest.String())

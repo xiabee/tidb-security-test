@@ -17,7 +17,6 @@ package chunk
 import (
 	"fmt"
 	"math/bits"
-	"math/rand"
 	"reflect"
 	"time"
 	"unsafe"
@@ -83,18 +82,6 @@ func (DefaultColumnAllocator) NewColumn(ft *types.FieldType, capacity int) *Colu
 	return newColumn(getFixedLen(ft), capacity)
 }
 
-// NewEmptyColumn creates a new column with nothing.
-func NewEmptyColumn(ft *types.FieldType) *Column {
-	elemLen := getFixedLen(ft)
-	col := Column{}
-	if elemLen != VarElemLen {
-		col.elemBuf = make([]byte, elemLen)
-	} else {
-		col.offsets = append(col.offsets, 0)
-	}
-	return &col
-}
-
 // NewColumn creates a new column with the specific type and capacity.
 func NewColumn(ft *types.FieldType, capacity int) *Column {
 	return newColumn(getFixedLen(ft), capacity)
@@ -102,7 +89,7 @@ func NewColumn(ft *types.FieldType, capacity int) *Column {
 
 func newColumn(ts, capacity int) *Column {
 	var col *Column
-	if ts == VarElemLen {
+	if ts == varElemLen {
 		col = newVarLenColumn(capacity)
 	} else {
 		col = newFixedLenColumn(ts, capacity)
@@ -136,7 +123,7 @@ func (c *Column) typeSize() int {
 	if len(c.elemBuf) > 0 {
 		return len(c.elemBuf)
 	}
-	return VarElemLen
+	return varElemLen
 }
 
 func (c *Column) isFixed() bool {
@@ -166,11 +153,6 @@ func (c *Column) Reset(eType types.EvalType) {
 	}
 }
 
-// Rows returns the row number in current column
-func (c *Column) Rows() int {
-	return c.length
-}
-
 // reset resets the underlying data of this Column but doesn't modify its data type.
 func (c *Column) reset() {
 	c.length = 0
@@ -178,8 +160,6 @@ func (c *Column) reset() {
 	if len(c.offsets) > 0 {
 		// The first offset is always 0, it makes slicing the data easier, we need to keep it.
 		c.offsets = c.offsets[:1]
-	} else if !c.isFixed() {
-		c.offsets = append(c.offsets, 0)
 	}
 	c.data = c.data[:0]
 }
@@ -209,11 +189,6 @@ func (c *Column) CopyConstruct(dst *Column) *Column {
 	return newCol
 }
 
-// AppendNullBitmap append a null/notnull value to the column's null map
-func (c *Column) AppendNullBitmap(notNull bool) {
-	c.appendNullBitmap(notNull)
-}
-
 func (c *Column) appendNullBitmap(notNull bool) {
 	idx := c.length >> 3
 	if idx >= len(c.nullBitmap) {
@@ -223,30 +198,6 @@ func (c *Column) appendNullBitmap(notNull bool) {
 		pos := uint(c.length) & 7
 		c.nullBitmap[idx] |= byte(1 << pos)
 	}
-}
-
-// AppendCellNTimes append the pos-th Cell in source column to target column N times
-func (c *Column) AppendCellNTimes(src *Column, pos, times int) {
-	notNull := !src.IsNull(pos)
-	if times == 1 {
-		c.appendNullBitmap(notNull)
-	} else {
-		c.appendMultiSameNullBitmap(notNull, times)
-	}
-	if c.isFixed() {
-		elemLen := len(src.elemBuf)
-		offset := pos * elemLen
-		for i := 0; i < times; i++ {
-			c.data = append(c.data, src.data[offset:offset+elemLen]...)
-		}
-	} else {
-		start, end := src.offsets[pos], src.offsets[pos+1]
-		for i := 0; i < times; i++ {
-			c.data = append(c.data, src.data[start:end]...)
-			c.offsets = append(c.offsets, int64(len(c.data)))
-		}
-	}
-	c.length += times
 }
 
 // appendMultiSameNullBitmap appends multiple same bit value to `nullBitMap`.
@@ -272,22 +223,6 @@ func (c *Column) appendMultiSameNullBitmap(notNull bool, num int) {
 	numRedundantBits := uint(len(c.nullBitmap)*8 - c.length - num)
 	bitMask = byte(1<<(8-numRedundantBits)) - 1
 	c.nullBitmap[len(c.nullBitmap)-1] &= bitMask
-}
-
-// AppendNNulls append n nulls to the column
-func (c *Column) AppendNNulls(n int) {
-	c.appendMultiSameNullBitmap(false, n)
-	if c.isFixed() {
-		for i := 0; i < n; i++ {
-			c.data = append(c.data, c.elemBuf...)
-		}
-	} else {
-		currentLength := c.offsets[c.length]
-		for i := 0; i < n; i++ {
-			c.offsets = append(c.offsets, currentLength)
-		}
-	}
-	c.length += n
 }
 
 // AppendNull appends a null value into this Column.
@@ -825,14 +760,5 @@ func (c *Column) MergeNulls(cols ...*Column) {
 			// bit 0 is null, 1 is not null, so do AND operations here.
 			c.nullBitmap[i] &= col.nullBitmap[i]
 		}
-	}
-}
-
-// DestroyDataForTest destroies data in the column so that
-// we can test if data in column are deeply copied.
-func (c *Column) DestroyDataForTest() {
-	dataByteNum := len(c.data)
-	for i := 0; i < dataByteNum; i++ {
-		c.data[i] = byte(rand.Intn(256))
 	}
 }

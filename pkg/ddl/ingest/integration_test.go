@@ -85,7 +85,6 @@ func TestIngestError(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
-	tk.MustExec("set global tidb_enable_dist_task = 0")
 	defer ingesttestutil.InjectMockBackendMgr(t, store)()
 
 	tk.MustExec("set @@global.tidb_ddl_reorg_worker_cnt = 1;")
@@ -126,8 +125,6 @@ func TestAddIndexIngestPanic(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test;")
 	defer ingesttestutil.InjectMockBackendMgr(t, store)()
-
-	tk.MustExec("set global tidb_enable_dist_task = 0")
 
 	// Mock panic on coprocessor request sender.
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockCopSenderPanic", "return(true)"))
@@ -178,7 +175,7 @@ func TestAddIndexIngestCancel(t *testing.T) {
 	tk.MustGetErrCode("alter table t add index idx(b);", errno.ErrCancelledDDLJob)
 	require.True(t, cancelled)
 	dom.DDL().SetHook(defHook)
-	ok, err := ingest.LitBackCtxMgr.CheckMoreTasksAvailable()
+	ok, err := ingest.LitBackCtxMgr.CheckAvailable()
 	require.NoError(t, err)
 	require.True(t, ok)
 }
@@ -255,7 +252,7 @@ func TestAddIndexCancelOnNoneState(t *testing.T) {
 	}
 	dom.DDL().SetHook(hook.Clone())
 	tk.MustGetErrCode("alter table t add index idx1(c1)", errno.ErrCancelledDDLJob)
-	available, err := ingest.LitBackCtxMgr.CheckMoreTasksAvailable()
+	available, err := ingest.LitBackCtxMgr.CheckAvailable()
 	require.NoError(t, err)
 	require.True(t, available)
 }

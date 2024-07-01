@@ -12,7 +12,6 @@ approvers:
   - b41sh
   - bb7133
   - Benjamin2037
-  - BornChanger
   - breezewish
   - buchuitoudegou
   - c4pt0r
@@ -32,9 +31,7 @@ approvers:
   - dveeden
   - Ehco1996
   - ekexium
-  - elsa0520
   - eurekaka
-  - fixdb
   - francis0407
   - fzhedu
   - glorv
@@ -46,12 +43,10 @@ approvers:
   - hi-rustin
   - hicqu
   - holys
-  - hongyunyan
   - IANTHEREAL
   - ichn-hu
   - imtbkcat
   - jackysp
-  - jiyfhust
   - joccau
   - july2993
   - kennytm
@@ -60,7 +55,6 @@ approvers:
   - Leavrth
   - leoppro
   - lichunzhu
-  - lidezhu
   - Little-Wallace
   - liuzix
   - lonng
@@ -108,9 +102,7 @@ approvers:
   - you06
   - youjiali1995
   - YuJuncen
-  - ywqzzy
   - zanmato1984
-  - zhangjinpeng87
   - zhaoxinyu
   - zhouqiang-cl
   - zimulala
@@ -121,11 +113,14 @@ reviewers:
   - aytrack
   - ben1009
   - bobotu
+  - BornChanger
   - CabinfeverB
   - charleszheng44
   - ChenPeng2013
   - dhysum
+  - elsa0520
   - fengou1
+  - fixdb
   - fzzf678
   - iamxy
   - JmPotato
@@ -133,7 +128,6 @@ reviewers:
   - lamxTyler
   - LittleFall
   - longfangsong
-  - lyzx2001
   - mengxin9014
   - MoCuishle28
   - mornyx
@@ -149,8 +143,7 @@ reviewers:
   - TonsnakeLin
   - tsthght
   - TszKitLo40
-  - xzhangxian1008
-  - yibin87
+  - ywqzzy
   - zhangjinpeng1987
   - zhongzc
   - zhuo-zhi

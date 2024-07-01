@@ -180,11 +180,11 @@ func TestMergeHistogram(t *testing.T) {
 		require.Equal(t, tt.bucketNum, h.Len())
 		require.Equal(t, tt.leftNum+tt.rightNum, int64(h.TotalRowCount()))
 		expectLower := types.NewIntDatum(tt.leftLower)
-		cmp, err := h.GetLower(0).Compare(sc.TypeCtx(), &expectLower, collate.GetBinaryCollator())
+		cmp, err := h.GetLower(0).Compare(sc, &expectLower, collate.GetBinaryCollator())
 		require.NoError(t, err)
 		require.Equal(t, 0, cmp)
 		expectUpper := types.NewIntDatum(tt.rightLower + tt.rightNum - 1)
-		cmp, err = h.GetUpper(h.Len()-1).Compare(sc.TypeCtx(), &expectUpper, collate.GetBinaryCollator())
+		cmp, err = h.GetUpper(h.Len()-1).Compare(sc, &expectUpper, collate.GetBinaryCollator())
 		require.NoError(t, err)
 		require.Equal(t, 0, cmp)
 	}
@@ -456,7 +456,7 @@ func SubTestIndexRanges() func(*testing.T) {
 
 func encodeKey(key types.Datum) types.Datum {
 	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
-	buf, _ := codec.EncodeKey(sc.TimeZone(), nil, key)
+	buf, _ := codec.EncodeKey(sc, nil, key)
 	return types.NewBytesDatum(buf)
 }
 
@@ -482,7 +482,7 @@ func buildIndex(sctx sessionctx.Context, numBuckets, id int64, records sqlexec.R
 		}
 		for row := it.Begin(); row != it.End(); row = it.Next() {
 			datums := RowToDatums(row, records.Fields())
-			buf, err := codec.EncodeKey(sctx.GetSessionVars().StmtCtx.TimeZone(), nil, datums...)
+			buf, err := codec.EncodeKey(sctx.GetSessionVars().StmtCtx, nil, datums...)
 			if err != nil {
 				return 0, nil, nil, errors.Trace(err)
 			}
@@ -501,7 +501,7 @@ func SubTestBuild() func(*testing.T) {
 	return func(t *testing.T) {
 		s := createTestStatisticsSamples(t)
 		bucketCount := int64(256)
-		topNCount := 100
+		topNCount := 20
 		ctx := mock.NewContext()
 		sc := ctx.GetSessionVars().StmtCtx
 		sketch, _, err := buildFMSketch(sc, s.rc.(*recordSet).data, 1000)
@@ -537,7 +537,7 @@ func SubTestBuild() func(*testing.T) {
 		count = col.LessRowCount(nil, types.NewIntDatum(1))
 		require.Equal(t, 5, int(count))
 
-		colv2, topnv2, err := BuildHistAndTopN(ctx, int(bucketCount), topNCount, 2, collector, types.NewFieldType(mysql.TypeLonglong), true, nil, false)
+		colv2, topnv2, err := BuildHistAndTopN(ctx, int(bucketCount), topNCount, 2, collector, types.NewFieldType(mysql.TypeLonglong), true, nil)
 		require.NoError(t, err)
 		require.NotNil(t, topnv2.TopN)
 		// The most common one's occurrence is 9990, the second most common one's occurrence is 30.
@@ -650,7 +650,7 @@ func TestPruneTopN(t *testing.T) {
 	var totalNDV, nullCnt, sampleRows, totalRows int64
 
 	// case 1
-	topnIn = []TopNMeta{{[]byte{1}, 100_000}}
+	topnIn = []TopNMeta{{[]byte{1}, 100_000}, {[]byte{2}, 10}}
 	totalNDV = 2
 	nullCnt = 0
 	sampleRows = 100_010
@@ -674,8 +674,8 @@ func TestPruneTopN(t *testing.T) {
 
 	// case 3
 	topnIn = nil
-	for i := 0; i < 10; i++ {
-		topnIn = append(topnIn, TopNMeta{[]byte{byte(i)}, 10_000})
+	for i := 0; i < 100; i++ {
+		topnIn = append(topnIn, TopNMeta{[]byte{byte(i)}, 1_000})
 	}
 	totalNDV = 100
 	nullCnt = 0
@@ -683,32 +683,4 @@ func TestPruneTopN(t *testing.T) {
 	totalRows = 10_000_000
 	topnOut = pruneTopNItem(topnIn, totalNDV, nullCnt, sampleRows, totalRows)
 	require.Equal(t, topnIn, topnOut)
-
-	// case 4 - test TopN pruning for small table
-	topnIn = []TopNMeta{
-		{[]byte{1}, 3_000},
-		{[]byte{2}, 3_000},
-	}
-	totalNDV = 4002
-	nullCnt = 0
-	sampleRows = 10_000
-	totalRows = 10_000
-	topnOut = pruneTopNItem(topnIn, totalNDV, nullCnt, sampleRows, totalRows)
-	require.Equal(t, topnIn, topnOut)
-
-	// case 5 - test pruning of value=1
-	topnIn = nil
-	for i := 0; i < 10; i++ {
-		topnIn = append(topnIn, TopNMeta{[]byte{byte(i)}, 90})
-	}
-	topnPruned := topnIn
-	for i := 90; i < 150; i++ {
-		topnIn = append(topnIn, TopNMeta{[]byte{byte(i)}, 1})
-	}
-	totalNDV = 150
-	nullCnt = 0
-	sampleRows = 1500
-	totalRows = 1500
-	topnOut = pruneTopNItem(topnIn, totalNDV, nullCnt, sampleRows, totalRows)
-	require.Equal(t, topnPruned, topnOut)
 }

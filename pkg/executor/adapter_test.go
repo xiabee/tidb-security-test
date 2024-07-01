@@ -15,18 +15,32 @@
 package executor_test
 
 import (
-	"context"
-	"sync"
 	"testing"
+	"time"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/executor"
-	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/util"
 )
+
+func TestQueryTime(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+
+	costTime := time.Since(tk.Session().GetSessionVars().StartTime)
+	require.Less(t, costTime, time.Second)
+
+	tk.MustExec("drop table if exists t")
+	tk.MustExec("create table t(a int)")
+	tk.MustExec("insert into t values(1), (1), (1), (1), (1)")
+	tk.MustExec("select * from t t1 join t t2 on t1.a = t2.a")
+
+	costTime = time.Since(tk.Session().GetSessionVars().StartTime)
+	require.Less(t, costTime, time.Second)
+}
 
 func TestFormatSQL(t *testing.T) {
 	val := executor.FormatSQL("aaaa")
@@ -37,39 +51,4 @@ func TestFormatSQL(t *testing.T) {
 	variable.QueryLogMaxLen.Store(5)
 	val = executor.FormatSQL("aaaaaaaaaaaaaaaaaaaa")
 	require.Equal(t, "aaaaa(len:20)", val.String())
-}
-
-func TestContextCancelWhenReadFromCopIterator(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("create table t(a int)")
-	tk.MustExec("insert into t values(1)")
-
-	syncCh := make(chan struct{})
-	require.NoError(t, failpoint.EnableCall("github.com/pingcap/tidb/pkg/store/copr/CtxCancelBeforeReceive",
-		func(ctx context.Context) {
-			if ctx.Value("TestContextCancel") == "test" {
-				syncCh <- struct{}{}
-				<-syncCh
-			}
-		},
-	))
-	ctx := context.WithValue(context.Background(), "TestContextCancel", "test")
-	ctx, cancelFunc := context.WithCancel(ctx)
-	defer cancelFunc()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ctx = util.WithInternalSourceType(ctx, "scheduler")
-		rs, err := tk.Session().ExecuteInternal(ctx, "select * from test.t")
-		require.NoError(t, err)
-		_, err2 := session.ResultSetToStringSlice(ctx, tk.Session(), rs)
-		require.ErrorIs(t, err2, context.Canceled)
-	}()
-	<-syncCh
-	cancelFunc()
-	syncCh <- struct{}{}
-	wg.Wait()
 }

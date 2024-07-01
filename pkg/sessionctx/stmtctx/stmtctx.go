@@ -16,8 +16,10 @@ package stmtctx
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,20 +27,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	distsqlctx "github.com/pingcap/tidb/pkg/distsql/context"
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/domain/resourcegroup"
-	"github.com/pingcap/tidb/pkg/errctx"
+	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/statistics/handle/usage/indexusage"
-	"github.com/pingcap/tidb/pkg/types"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	typectx "github.com/pingcap/tidb/pkg/types/context"
 	"github.com/pingcap/tidb/pkg/util/disk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
-	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/intset"
 	"github.com/pingcap/tidb/pkg/util/linter/constructor"
@@ -48,9 +47,20 @@ import (
 	"github.com/pingcap/tidb/pkg/util/topsql/stmtstats"
 	"github.com/pingcap/tidb/pkg/util/tracing"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	"github.com/tikv/client-go/v2/util"
 	atomic2 "go.uber.org/atomic"
+	"go.uber.org/zap"
 	"golang.org/x/exp/maps"
 	"golang.org/x/sync/singleflight"
+)
+
+const (
+	// WarnLevelError represents level "Error" for 'SHOW WARNINGS' syntax.
+	WarnLevelError = "Error"
+	// WarnLevelWarning represents level "Warning" for 'SHOW WARNINGS' syntax.
+	WarnLevelWarning = "Warning"
+	// WarnLevelNote represents level "Note" for 'SHOW WARNINGS' syntax.
+	WarnLevelNote = "Note"
 )
 
 var taskIDAlloc uint64
@@ -61,12 +71,46 @@ func AllocateTaskID() uint64 {
 }
 
 // SQLWarn relates a sql warning and it's level.
-type SQLWarn = contextutil.SQLWarn
+type SQLWarn struct {
+	Level string
+	Err   error
+}
 
 type jsonSQLWarn struct {
 	Level  string        `json:"level"`
 	SQLErr *terror.Error `json:"err,omitempty"`
 	Msg    string        `json:"msg,omitempty"`
+}
+
+// MarshalJSON implements the Marshaler.MarshalJSON interface.
+func (warn *SQLWarn) MarshalJSON() ([]byte, error) {
+	w := &jsonSQLWarn{
+		Level: warn.Level,
+	}
+	e := errors.Cause(warn.Err)
+	switch x := e.(type) {
+	case *terror.Error:
+		// Omit outter errors because only the most inner error matters.
+		w.SQLErr = x
+	default:
+		w.Msg = e.Error()
+	}
+	return json.Marshal(w)
+}
+
+// UnmarshalJSON implements the Unmarshaler.UnmarshalJSON interface.
+func (warn *SQLWarn) UnmarshalJSON(data []byte) error {
+	var w jsonSQLWarn
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	warn.Level = w.Level
+	if w.SQLErr != nil {
+		warn.Err = w.SQLErr
+	} else {
+		warn.Err = errors.New(w.Msg)
+	}
+	return nil
 }
 
 // ReferenceCount indicates the reference count of StmtCtx.
@@ -112,64 +156,48 @@ type StatementContext struct {
 	// copying this object will make the copied TypeCtx field to refer a wrong `AppendWarnings` func.
 	_ nocopy.NoCopy
 
-	_ constructor.Constructor `ctor:"NewStmtCtxWithTimeZone,Reset"`
+	_ constructor.Constructor `ctor:"NewStmtCtx,NewStmtCtxWithTimeZone,Reset"`
 
-	ctxID uint64
-
-	// 	typeCtx is used to indicate how to make the type conversation.
-	typeCtx types.Context
-
-	// errCtx is used to indicate how to handle the errors
-	errCtx errctx.Context
-
-	// distSQLCtxCache is used to persist all variables and tools needed by the `distsql`
-	// this cache is set on `StatementContext` because it has to be updated after each statement.
-	distSQLCtxCache struct {
-		init sync.Once
-		dctx *distsqlctx.DistSQLContext
-	}
-
-	// rangerCtxCache is used to persist all variables and tools needed by the `ranger`
-	// this cache is set on `StatementContext` because it has to be updated after each statement.
-	// `rctx` uses `any` type to avoid cyclic dependency
-	rangerCtxCache struct {
-		init sync.Once
-		rctx any
-	}
-
-	// buildPBCtxCache is used to persist all variables and tools needed by the `ToPB`
-	// this cache is set on `StatementContext` because it has to be updated after each statement.
-	buildPBCtxCache struct {
-		init sync.Once
-		bctx any
-	}
+	// TypeCtx is used to indicate how make the type conversation.
+	TypeCtx typectx.Context
 
 	// Set the following variables before execution
-	hint.StmtHints
+	StmtHints
 
 	// IsDDLJobInQueue is used to mark whether the DDL job is put into the queue.
 	// If IsDDLJobInQueue is true, it means the DDL job is in the queue of storage, and it can be handled by the DDL worker.
-	IsDDLJobInQueue        bool
-	DDLJobID               int64
-	InInsertStmt           bool
-	InUpdateStmt           bool
-	InDeleteStmt           bool
-	InSelectStmt           bool
-	InLoadDataStmt         bool
-	InExplainStmt          bool
-	InExplainAnalyzeStmt   bool
-	ExplainFormat          string
-	InCreateOrAlterStmt    bool
-	InSetSessionStatesStmt bool
-	InPreparedPlanBuilding bool
-	InShowWarning          bool
-
-	contextutil.PlanCacheTracker
-	contextutil.RangeFallbackHandler
-
-	BatchCheck            bool
-	IgnoreExplainIDSuffix bool
-	MultiSchemaInfo       *model.MultiSchemaInfo
+	IsDDLJobInQueue               bool
+	IsRefineComparedConstant      bool
+	DDLJobID                      int64
+	InInsertStmt                  bool
+	InUpdateStmt                  bool
+	InDeleteStmt                  bool
+	InSelectStmt                  bool
+	InLoadDataStmt                bool
+	InExplainStmt                 bool
+	InExplainAnalyzeStmt          bool
+	ExplainFormat                 string
+	InCreateOrAlterStmt           bool
+	InSetSessionStatesStmt        bool
+	InPreparedPlanBuilding        bool
+	IgnoreTruncate                atomic2.Bool
+	IgnoreZeroInDate              bool
+	NoZeroDate                    bool
+	DupKeyAsWarning               bool
+	BadNullAsWarning              bool
+	DividedByZeroAsWarning        bool
+	TruncateAsWarning             bool
+	OverflowAsWarning             bool
+	ErrAutoincReadFailedAsWarning bool
+	InShowWarning                 bool
+	UseCache                      bool
+	CacheType                     PlanCacheType
+	BatchCheck                    bool
+	InNullRejectCheck             bool
+	AllowInvalidDate              bool
+	IgnoreNoPartition             bool
+	IgnoreExplainIDSuffix         bool
+	MultiSchemaInfo               *model.MultiSchemaInfo
 	// If the select statement was like 'select * from t as of timestamp ...' or in a stale read transaction
 	// or is affected by the tidb_read_staleness session variable, then the statement will be makred as isStaleness
 	// in stmtCtx
@@ -202,18 +230,18 @@ type StatementContext struct {
 		copied  uint64
 		touched uint64
 
-		message string
+		message  string
+		warnings []SQLWarn
+		// extraWarnings record the extra warnings and are only used by the slow log only now.
+		// If a warning is expected to be output only under some conditions (like in EXPLAIN or EXPLAIN VERBOSE) but it's
+		// not under such conditions now, it is considered as an extra warning.
+		// extraWarnings would not be printed through SHOW WARNINGS, but we want to always output them through the slow
+		// log to help diagnostics, so we store them here separately.
+		extraWarnings []SQLWarn
+
+		execDetails    execdetails.ExecDetails
+		detailsSummary execdetails.P90Summary
 	}
-	WarnHandler contextutil.WarnHandlerExt
-	// ExtraWarnHandler record the extra warnings and are only used by the slow log only now.
-	// If a warning is expected to be output only under some conditions (like in EXPLAIN or EXPLAIN VERBOSE) but it's
-	// not under such conditions now, it is considered as an extra warning.
-	// extraWarnings would not be printed through SHOW WARNINGS, but we want to always output them through the slow
-	// log to help diagnostics, so we store them here separately.
-	ExtraWarnHandler contextutil.WarnHandlerExt
-
-	execdetails.SyncExecDetails
-
 	// PrevAffectedRows is the affected-rows value(DDL is 0, DML is the number of affected rows).
 	PrevAffectedRows int64
 	// PrevLastInsertID is the last insert ID of previous statement.
@@ -233,16 +261,15 @@ type StatementContext struct {
 	DiskTracker  *disk.Tracker
 	// per statement resource group name
 	// hint /* +ResourceGroup(name) */ can change the statement group name
-	ResourceGroupName   string
-	RunawayChecker      *resourcegroup.RunawayChecker
-	IsTiFlash           atomic2.Bool
-	RuntimeStatsColl    *execdetails.RuntimeStatsColl
-	IndexUsageCollector *indexusage.StmtIndexUsageCollector
-	TableIDs            []int64
-	IndexNames          []string
-	StmtType            string
-	OriginalSQL         string
-	digestMemo          struct {
+	ResourceGroupName string
+	RunawayChecker    *resourcegroup.RunawayChecker
+	IsTiFlash         atomic2.Bool
+	RuntimeStatsColl  *execdetails.RuntimeStatsColl
+	TableIDs          []int64
+	IndexNames        []string
+	StmtType          string
+	OriginalSQL       string
+	digestMemo        struct {
 		sync.Once
 		normalized string
 		digest     *parser.Digest
@@ -265,11 +292,12 @@ type StatementContext struct {
 	binaryPlan     string
 	// To avoid cycle import, we use interface{} for the following two fields.
 	// flatPlan should be a *plannercore.FlatPhysicalPlan if it's not nil
-	flatPlan any
+	flatPlan interface{}
 	// plan should be a plannercore.Plan if it's not nil
-	plan any
+	plan interface{}
 
 	Tables                []TableEntry
+	PointExec             bool  // for point update cached execution, Constant expression need to set "paramMarker"
 	lockWaitStartTime     int64 // LockWaitStartTime stores the pessimistic lock wait start time
 	PessimisticLockWaited int32
 	LockKeysDuration      int64
@@ -284,12 +312,12 @@ type StatementContext struct {
 	// https://github.com/pingcap/tidb/issues/36159
 	stmtCache struct {
 		mu   sync.Mutex
-		data map[StmtCacheKey]any
+		data map[StmtCacheKey]interface{}
 	}
 
 	// Map to store all CTE storages of current SQL.
 	// Will clean up at the end of the execution.
-	CTEStorageMap any
+	CTEStorageMap interface{}
 
 	SetVarHintRestore map[string]string
 
@@ -318,7 +346,7 @@ type StatementContext struct {
 	OptimizerCETrace       []*tracing.CETraceRecord
 
 	EnableOptimizerDebugTrace bool
-	OptimizerDebugTrace       any
+	OptimizerDebugTrace       interface{}
 
 	// WaitLockLeaseTime is the duration of cached table read lease expiration time.
 	WaitLockLeaseTime time.Duration
@@ -336,7 +364,7 @@ type StatementContext struct {
 		// Timeout to wait for sync-load
 		Timeout time.Duration
 		// NeededItems stores the columns/indices whose stats are needed for planner.
-		NeededItems []model.StatsLoadItem
+		NeededItems []model.TableItemID
 		// ResultCh to receive stats loading results
 		ResultCh []<-chan singleflight.Result
 		// LoadStartTime is to record the load start time to calculate latency
@@ -357,13 +385,16 @@ type StatementContext struct {
 	IsReadOnly bool
 	// usedStatsInfo records version of stats of each table used in the query.
 	// It's a map of table physical id -> *UsedStatsInfoForTable
-	usedStatsInfo atomic.Pointer[UsedStatsInfo]
+	usedStatsInfo map[int64]*UsedStatsInfoForTable
 	// IsSyncStatsFailed indicates whether any failure happened during sync stats
 	IsSyncStatsFailed bool
 	// UseDynamicPruneMode indicates whether use UseDynamicPruneMode in query stmt
 	UseDynamicPruneMode bool
 	// ColRefFromPlan mark the column ref used by assignment in update statement.
 	ColRefFromUpdatePlan intset.FastIntSet
+
+	// RangeFallback indicates that building complete ranges exceeds the memory limit so it falls back to less accurate ranges such as full range.
+	RangeFallback bool
 
 	// IsExplainAnalyzeDML is true if the statement is "explain analyze DML executors", before responding the explain
 	// results to the client, the transaction should be committed first. See issue #37373 for more details.
@@ -388,11 +419,13 @@ type StatementContext struct {
 	}
 
 	// TableStats stores the visited runtime table stats by table id during query
-	TableStats map[int64]any
+	TableStats map[int64]interface{}
 	// useChunkAlloc indicates whether statement use chunk alloc
 	useChunkAlloc bool
 	// Check if TiFlash read engine is removed due to strict sql mode.
 	TiFlashEngineRemovedDueToStrictSQLMode bool
+	// CanonicalHashCode try to get the canonical hash code from expression.
+	CanonicalHashCode bool
 	// StaleTSOProvider is used to provide stale timestamp oracle for read-only transactions.
 	StaleTSOProvider struct {
 		sync.Mutex
@@ -401,130 +434,127 @@ type StatementContext struct {
 	}
 
 	// MDLRelatedTableIDs is used to store the table IDs that are related to the current MDL lock.
-	MDLRelatedTableIDs map[int64]struct{}
+	MDLRelatedTableIDs map[int64]int64
 }
-
-// DefaultStmtErrLevels is the default error levels for statement
-var DefaultStmtErrLevels = func() (l errctx.LevelMap) {
-	l[errctx.ErrGroupDividedByZero] = errctx.LevelWarn
-	return
-}()
 
 // NewStmtCtx creates a new statement context
 func NewStmtCtx() *StatementContext {
-	return NewStmtCtxWithTimeZone(time.UTC)
+	sc := &StatementContext{}
+	sc.TypeCtx = typectx.NewContext(typectx.StrictFlags, time.UTC, sc.AppendWarning)
+	return sc
 }
 
 // NewStmtCtxWithTimeZone creates a new StatementContext with the given timezone
 func NewStmtCtxWithTimeZone(tz *time.Location) *StatementContext {
-	intest.AssertNotNil(tz)
-	sc := &StatementContext{
-		ctxID: contextutil.GenContextID(),
-	}
-	sc.typeCtx = types.NewContext(types.DefaultStmtFlags, tz, sc)
-	sc.errCtx = newErrCtx(sc.typeCtx, DefaultStmtErrLevels, sc)
-	sc.PlanCacheTracker = contextutil.NewPlanCacheTracker(sc)
-	sc.RangeFallbackHandler = contextutil.NewRangeFallbackHandler(&sc.PlanCacheTracker, sc)
-	sc.WarnHandler = contextutil.NewStaticWarnHandler(0)
-	sc.ExtraWarnHandler = contextutil.NewStaticWarnHandler(0)
+	intest.Assert(tz)
+	sc := &StatementContext{}
+	sc.TypeCtx = typectx.NewContext(typectx.StrictFlags, tz, sc.AppendWarning)
 	return sc
 }
 
 // Reset resets a statement context
 func (sc *StatementContext) Reset() {
 	*sc = StatementContext{
-		ctxID: contextutil.GenContextID(),
+		TypeCtx: typectx.NewContext(typectx.StrictFlags, time.UTC, sc.AppendWarning),
 	}
-	sc.typeCtx = types.NewContext(types.DefaultStmtFlags, time.UTC, sc)
-	sc.errCtx = newErrCtx(sc.typeCtx, DefaultStmtErrLevels, sc)
-	sc.PlanCacheTracker = contextutil.NewPlanCacheTracker(sc)
-	sc.RangeFallbackHandler = contextutil.NewRangeFallbackHandler(&sc.PlanCacheTracker, sc)
-	sc.WarnHandler = contextutil.NewStaticWarnHandler(0)
-	sc.ExtraWarnHandler = contextutil.NewStaticWarnHandler(0)
-}
-
-// CtxID returns the context id of the statement
-func (sc *StatementContext) CtxID() uint64 {
-	return sc.ctxID
 }
 
 // TimeZone returns the timezone of the type context
 func (sc *StatementContext) TimeZone() *time.Location {
-	intest.AssertNotNil(sc)
-	if sc == nil {
-		return time.UTC
-	}
-
-	return sc.typeCtx.Location()
+	return sc.TypeCtx.Location()
 }
 
 // SetTimeZone sets the timezone
 func (sc *StatementContext) SetTimeZone(tz *time.Location) {
-	intest.AssertNotNil(tz)
-	sc.typeCtx = sc.typeCtx.WithLocation(tz)
-}
-
-// TypeCtx returns the type context
-func (sc *StatementContext) TypeCtx() types.Context {
-	return sc.typeCtx
-}
-
-// ErrCtx returns the error context
-func (sc *StatementContext) ErrCtx() errctx.Context {
-	return sc.errCtx
-}
-
-// SetErrLevels sets the error levels for statement
-// The argument otherLevels is used to set the error levels except truncate
-func (sc *StatementContext) SetErrLevels(otherLevels errctx.LevelMap) {
-	sc.errCtx = newErrCtx(sc.typeCtx, otherLevels, sc)
-}
-
-// ErrLevels returns the current `errctx.LevelMap`
-func (sc *StatementContext) ErrLevels() errctx.LevelMap {
-	return sc.errCtx.LevelMap()
-}
-
-// ErrGroupLevel returns the error level for the given error group
-func (sc *StatementContext) ErrGroupLevel(group errctx.ErrGroup) errctx.Level {
-	return sc.errCtx.LevelForGroup(group)
+	intest.Assert(tz)
+	sc.TypeCtx = sc.TypeCtx.WithLocation(tz)
 }
 
 // TypeFlags returns the type flags
-func (sc *StatementContext) TypeFlags() types.Flags {
-	return sc.typeCtx.Flags()
+func (sc *StatementContext) TypeFlags() typectx.Flags {
+	return sc.TypeCtx.Flags()
 }
 
 // SetTypeFlags sets the type flags
-func (sc *StatementContext) SetTypeFlags(flags types.Flags) {
-	sc.typeCtx = sc.typeCtx.WithFlags(flags)
-	sc.errCtx = newErrCtx(sc.typeCtx, sc.errCtx.LevelMap(), sc)
+func (sc *StatementContext) SetTypeFlags(flags typectx.Flags) {
+	sc.TypeCtx = sc.TypeCtx.WithFlags(flags)
 }
 
-// HandleTruncate ignores or returns the error based on the TypeContext inside.
-// TODO: replace this function with `HandleError`, for `TruncatedError` they should have the same effect.
-func (sc *StatementContext) HandleTruncate(err error) error {
-	return sc.typeCtx.HandleTruncate(err)
+// UpdateTypeFlags updates the flags of the type context
+func (sc *StatementContext) UpdateTypeFlags(fn func(typectx.Flags) typectx.Flags) {
+	flags := fn(sc.TypeCtx.Flags())
+	sc.TypeCtx = sc.TypeCtx.WithFlags(flags)
 }
 
-// HandleError handles the error based on `ErrCtx()`
-func (sc *StatementContext) HandleError(err error) error {
-	intest.AssertNotNil(sc)
-	if sc == nil {
-		return err
+// StmtHints are SessionVars related sql hints.
+type StmtHints struct {
+	// Hint Information
+	MemQuotaQuery           int64
+	MaxExecutionTime        uint64
+	ReplicaRead             byte
+	AllowInSubqToJoinAndAgg bool
+	NoIndexMergeHint        bool
+	StraightJoinOrder       bool
+	// EnableCascadesPlanner is use cascades planner for a single query only.
+	EnableCascadesPlanner bool
+	// ForceNthPlan indicates the PlanCounterTp number for finding physical plan.
+	// -1 for disable.
+	ForceNthPlan  int64
+	ResourceGroup string
+
+	// Hint flags
+	HasAllowInSubqToJoinAndAggHint bool
+	HasMemQuotaHint                bool
+	HasReplicaReadHint             bool
+	HasMaxExecutionTime            bool
+	HasEnableCascadesPlannerHint   bool
+	HasResourceGroup               bool
+	SetVars                        map[string]string
+
+	// the original table hints
+	OriginalTableHints []*ast.TableOptimizerHint
+}
+
+// TaskMapNeedBackUp indicates that whether we need to back up taskMap during physical optimizing.
+func (sh *StmtHints) TaskMapNeedBackUp() bool {
+	return sh.ForceNthPlan != -1
+}
+
+// Clone the StmtHints struct and returns the pointer of the new one.
+func (sh *StmtHints) Clone() *StmtHints {
+	var (
+		vars       map[string]string
+		tableHints []*ast.TableOptimizerHint
+	)
+	if len(sh.SetVars) > 0 {
+		vars = make(map[string]string, len(sh.SetVars))
+		for k, v := range sh.SetVars {
+			vars[k] = v
+		}
 	}
-	errCtx := sc.ErrCtx()
-	return errCtx.HandleError(err)
-}
-
-// HandleErrorWithAlias handles the error based on `ErrCtx()`
-func (sc *StatementContext) HandleErrorWithAlias(internalErr, err, warnErr error) error {
-	intest.AssertNotNil(sc)
-	if sc == nil {
-		return err
+	if len(sh.OriginalTableHints) > 0 {
+		tableHints = make([]*ast.TableOptimizerHint, len(sh.OriginalTableHints))
+		copy(tableHints, sh.OriginalTableHints)
 	}
-	errCtx := sc.ErrCtx()
-	return errCtx.HandleErrorWithAlias(internalErr, err, warnErr)
+	return &StmtHints{
+		MemQuotaQuery:                  sh.MemQuotaQuery,
+		MaxExecutionTime:               sh.MaxExecutionTime,
+		ReplicaRead:                    sh.ReplicaRead,
+		AllowInSubqToJoinAndAgg:        sh.AllowInSubqToJoinAndAgg,
+		NoIndexMergeHint:               sh.NoIndexMergeHint,
+		StraightJoinOrder:              sh.StraightJoinOrder,
+		EnableCascadesPlanner:          sh.EnableCascadesPlanner,
+		ForceNthPlan:                   sh.ForceNthPlan,
+		ResourceGroup:                  sh.ResourceGroup,
+		HasAllowInSubqToJoinAndAggHint: sh.HasAllowInSubqToJoinAndAggHint,
+		HasMemQuotaHint:                sh.HasMemQuotaHint,
+		HasReplicaReadHint:             sh.HasReplicaReadHint,
+		HasMaxExecutionTime:            sh.HasMaxExecutionTime,
+		HasEnableCascadesPlannerHint:   sh.HasEnableCascadesPlannerHint,
+		HasResourceGroup:               sh.HasResourceGroup,
+		SetVars:                        vars,
+		OriginalTableHints:             tableHints,
+	}
 }
 
 // StmtCacheKey represents the key type in the StmtCache.
@@ -540,11 +570,11 @@ const (
 )
 
 // GetOrStoreStmtCache gets the cached value of the given key if it exists, otherwise stores the value.
-func (sc *StatementContext) GetOrStoreStmtCache(key StmtCacheKey, value any) any {
+func (sc *StatementContext) GetOrStoreStmtCache(key StmtCacheKey, value interface{}) interface{} {
 	sc.stmtCache.mu.Lock()
 	defer sc.stmtCache.mu.Unlock()
 	if sc.stmtCache.data == nil {
-		sc.stmtCache.data = make(map[StmtCacheKey]any)
+		sc.stmtCache.data = make(map[StmtCacheKey]interface{})
 	}
 	if _, ok := sc.stmtCache.data[key]; !ok {
 		sc.stmtCache.data[key] = value
@@ -553,11 +583,11 @@ func (sc *StatementContext) GetOrStoreStmtCache(key StmtCacheKey, value any) any
 }
 
 // GetOrEvaluateStmtCache gets the cached value of the given key if it exists, otherwise calculate the value.
-func (sc *StatementContext) GetOrEvaluateStmtCache(key StmtCacheKey, valueEvaluator func() (any, error)) (any, error) {
+func (sc *StatementContext) GetOrEvaluateStmtCache(key StmtCacheKey, valueEvaluator func() (interface{}, error)) (interface{}, error) {
 	sc.stmtCache.mu.Lock()
 	defer sc.stmtCache.mu.Unlock()
 	if sc.stmtCache.data == nil {
-		sc.stmtCache.data = make(map[StmtCacheKey]any)
+		sc.stmtCache.data = make(map[StmtCacheKey]interface{})
 	}
 	if _, ok := sc.stmtCache.data[key]; !ok {
 		value, err := valueEvaluator()
@@ -580,7 +610,7 @@ func (sc *StatementContext) ResetInStmtCache(key StmtCacheKey) {
 func (sc *StatementContext) ResetStmtCache() {
 	sc.stmtCache.mu.Lock()
 	defer sc.stmtCache.mu.Unlock()
-	sc.stmtCache.data = make(map[StmtCacheKey]any)
+	sc.stmtCache.data = make(map[StmtCacheKey]interface{})
 }
 
 // SQLDigest gets normalized and digest for provided sql.
@@ -610,22 +640,22 @@ func (sc *StatementContext) GetPlanDigest() (normalized string, planDigest *pars
 }
 
 // GetPlan gets the plan field of stmtctx
-func (sc *StatementContext) GetPlan() any {
+func (sc *StatementContext) GetPlan() interface{} {
 	return sc.plan
 }
 
 // SetPlan sets the plan field of stmtctx
-func (sc *StatementContext) SetPlan(plan any) {
+func (sc *StatementContext) SetPlan(plan interface{}) {
 	sc.plan = plan
 }
 
 // GetFlatPlan gets the flatPlan field of stmtctx
-func (sc *StatementContext) GetFlatPlan() any {
+func (sc *StatementContext) GetFlatPlan() interface{} {
 	return sc.flatPlan
 }
 
 // SetFlatPlan sets the flatPlan field of stmtctx
-func (sc *StatementContext) SetFlatPlan(flat any) {
+func (sc *StatementContext) SetFlatPlan(flat interface{}) {
 	sc.flatPlan = flat
 }
 
@@ -722,14 +752,23 @@ const (
 	SessionNonPrepared
 )
 
-// SetHintWarning sets the hint warning and records the reason.
-func (sc *StatementContext) SetHintWarning(reason string) {
-	sc.AppendWarning(plannererrors.ErrInternal.FastGen(reason))
-}
-
-// SetHintWarningFromError sets the hint warning and records the reason.
-func (sc *StatementContext) SetHintWarningFromError(reason error) {
-	sc.AppendWarning(reason)
+// SetSkipPlanCache sets to skip the plan cache and records the reason.
+func (sc *StatementContext) SetSkipPlanCache(reason error) {
+	if !sc.UseCache {
+		return // avoid unnecessary warnings
+	}
+	sc.UseCache = false
+	switch sc.CacheType {
+	case DefaultNoCache:
+		sc.AppendWarning(errors.New("unknown cache type"))
+	case SessionPrepared:
+		sc.AppendWarning(errors.Errorf("skip prepared plan-cache: %s", reason.Error()))
+	case SessionNonPrepared:
+		if sc.InExplainStmt && sc.ExplainFormat == "plan_cache" {
+			// use "plan_cache" rather than types.ExplainFormatPlanCache to avoid import cycle
+			sc.AppendWarning(errors.Errorf("skip non-prepared plan-cache: %s", reason.Error()))
+		}
+	}
 }
 
 // TableEntry presents table in db.
@@ -863,17 +902,23 @@ func (sc *StatementContext) SetMessage(msg string) {
 
 // GetWarnings gets warnings.
 func (sc *StatementContext) GetWarnings() []SQLWarn {
-	return sc.WarnHandler.GetWarnings()
-}
-
-// CopyWarnings copies the warnings to the dst.
-func (sc *StatementContext) CopyWarnings(dst []SQLWarn) []SQLWarn {
-	return sc.WarnHandler.CopyWarnings(dst)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.mu.warnings
 }
 
 // TruncateWarnings truncates warnings begin from start and returns the truncated warnings.
 func (sc *StatementContext) TruncateWarnings(start int) []SQLWarn {
-	return sc.WarnHandler.TruncateWarnings(start)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sz := len(sc.mu.warnings) - start
+	if sz <= 0 {
+		return nil
+	}
+	ret := make([]SQLWarn, sz)
+	copy(ret, sc.mu.warnings[start:])
+	sc.mu.warnings = sc.mu.warnings[:start]
+	return ret
 }
 
 // WarningCount gets warning count.
@@ -881,62 +926,152 @@ func (sc *StatementContext) WarningCount() uint16 {
 	if sc.InShowWarning {
 		return 0
 	}
-	return uint16(sc.WarnHandler.WarningCount())
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return uint16(len(sc.mu.warnings))
 }
 
 // NumErrorWarnings gets warning and error count.
 func (sc *StatementContext) NumErrorWarnings() (ec uint16, wc int) {
-	return sc.WarnHandler.NumErrorWarnings()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	for _, w := range sc.mu.warnings {
+		if w.Level == WarnLevelError {
+			ec++
+		}
+	}
+	wc = len(sc.mu.warnings)
+	return
 }
 
 // SetWarnings sets warnings.
 func (sc *StatementContext) SetWarnings(warns []SQLWarn) {
-	sc.WarnHandler.SetWarnings(warns)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.mu.warnings = warns
 }
 
 // AppendWarning appends a warning with level 'Warning'.
 func (sc *StatementContext) AppendWarning(warn error) {
-	sc.WarnHandler.AppendWarning(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.warnings) < math.MaxUint16 {
+		sc.mu.warnings = append(sc.mu.warnings, SQLWarn{WarnLevelWarning, warn})
+	}
 }
 
 // AppendWarnings appends some warnings.
 func (sc *StatementContext) AppendWarnings(warns []SQLWarn) {
-	sc.WarnHandler.AppendWarnings(warns)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.warnings) < math.MaxUint16 {
+		sc.mu.warnings = append(sc.mu.warnings, warns...)
+	}
 }
 
 // AppendNote appends a warning with level 'Note'.
 func (sc *StatementContext) AppendNote(warn error) {
-	sc.WarnHandler.AppendNote(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.warnings) < math.MaxUint16 {
+		sc.mu.warnings = append(sc.mu.warnings, SQLWarn{WarnLevelNote, warn})
+	}
 }
 
 // AppendError appends a warning with level 'Error'.
 func (sc *StatementContext) AppendError(warn error) {
-	sc.WarnHandler.AppendError(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.warnings) < math.MaxUint16 {
+		sc.mu.warnings = append(sc.mu.warnings, SQLWarn{WarnLevelError, warn})
+	}
 }
 
 // GetExtraWarnings gets extra warnings.
 func (sc *StatementContext) GetExtraWarnings() []SQLWarn {
-	return sc.ExtraWarnHandler.GetWarnings()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	return sc.mu.extraWarnings
 }
 
 // SetExtraWarnings sets extra warnings.
 func (sc *StatementContext) SetExtraWarnings(warns []SQLWarn) {
-	sc.ExtraWarnHandler.SetWarnings(warns)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.mu.extraWarnings = warns
 }
 
 // AppendExtraWarning appends an extra warning with level 'Warning'.
 func (sc *StatementContext) AppendExtraWarning(warn error) {
-	sc.ExtraWarnHandler.AppendWarning(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelWarning, warn})
+	}
 }
 
 // AppendExtraNote appends an extra warning with level 'Note'.
 func (sc *StatementContext) AppendExtraNote(warn error) {
-	sc.ExtraWarnHandler.AppendNote(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelNote, warn})
+	}
 }
 
 // AppendExtraError appends an extra warning with level 'Error'.
 func (sc *StatementContext) AppendExtraError(warn error) {
-	sc.ExtraWarnHandler.AppendError(warn)
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if len(sc.mu.extraWarnings) < math.MaxUint16 {
+		sc.mu.extraWarnings = append(sc.mu.extraWarnings, SQLWarn{WarnLevelError, warn})
+	}
+}
+
+// HandleTruncate ignores or returns the error based on the StatementContext state.
+func (sc *StatementContext) HandleTruncate(err error) error {
+	// TODO: At present we have not checked whether the error can be ignored or treated as warning.
+	// We will do that later, and then append WarnDataTruncated instead of the error itself.
+	if err == nil {
+		return nil
+	}
+
+	err = errors.Cause(err)
+	if e, ok := err.(*errors.Error); !ok ||
+		(e.Code() != errno.ErrTruncatedWrongValue &&
+			e.Code() != errno.ErrDataTooLong &&
+			e.Code() != errno.ErrTruncatedWrongValueForField &&
+			e.Code() != errno.ErrWarnDataOutOfRange &&
+			e.Code() != errno.ErrDataOutOfRange &&
+			e.Code() != errno.ErrBadNumber &&
+			e.Code() != errno.ErrWrongValueForType &&
+			e.Code() != errno.ErrDatetimeFunctionOverflow &&
+			e.Code() != errno.WarnDataTruncated &&
+			e.Code() != errno.ErrIncorrectDatetimeValue) {
+		return err
+	}
+
+	if sc.IgnoreTruncate.Load() {
+		return nil
+	}
+	if sc.TruncateAsWarning {
+		sc.AppendWarning(err)
+		return nil
+	}
+	return err
+}
+
+// HandleOverflow treats ErrOverflow as warnings or returns the error based on the StmtCtx.OverflowAsWarning state.
+func (sc *StatementContext) HandleOverflow(err error, warnErr error) error {
+	if err == nil {
+		return nil
+	}
+
+	if sc.OverflowAsWarning {
+		sc.AppendWarning(warnErr)
+		return nil
+	}
+	return err
 }
 
 // resetMuForRetry resets the changed states of sc.mu during execution.
@@ -951,6 +1086,9 @@ func (sc *StatementContext) resetMuForRetry() {
 	sc.mu.copied = 0
 	sc.mu.touched = 0
 	sc.mu.message = ""
+	sc.mu.warnings = nil
+	sc.mu.execDetails = execdetails.ExecDetails{}
+	sc.mu.detailsSummary.Reset()
 }
 
 // ResetForRetry resets the changed states during execution.
@@ -961,12 +1099,63 @@ func (sc *StatementContext) ResetForRetry() {
 	sc.TableIDs = sc.TableIDs[:0]
 	sc.IndexNames = sc.IndexNames[:0]
 	sc.TaskID = AllocateTaskID()
-	sc.SyncExecDetails.Reset()
-	sc.WarnHandler.TruncateWarnings(0)
-	sc.ExtraWarnHandler.TruncateWarnings(0)
+}
 
-	// `TaskID` is reset, we'll need to reset distSQLCtx
-	sc.distSQLCtxCache.init = sync.Once{}
+// MergeExecDetails merges a single region execution details into self, used to print
+// the information in slow query log.
+func (sc *StatementContext) MergeExecDetails(details *execdetails.ExecDetails, commitDetails *util.CommitDetails) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if details != nil {
+		sc.mu.execDetails.CopTime += details.CopTime
+		sc.mu.execDetails.BackoffTime += details.BackoffTime
+		sc.mu.execDetails.RequestCount++
+		sc.MergeScanDetail(details.ScanDetail)
+		sc.MergeTimeDetail(details.TimeDetail)
+		detail := &execdetails.DetailsNeedP90{
+			BackoffSleep:  details.BackoffSleep,
+			BackoffTimes:  details.BackoffTimes,
+			CalleeAddress: details.CalleeAddress,
+			TimeDetail:    details.TimeDetail,
+		}
+		sc.mu.detailsSummary.Merge(detail)
+	}
+	if commitDetails != nil {
+		if sc.mu.execDetails.CommitDetail == nil {
+			sc.mu.execDetails.CommitDetail = commitDetails
+		} else {
+			sc.mu.execDetails.CommitDetail.Merge(commitDetails)
+		}
+	}
+}
+
+// MergeScanDetail merges scan details into self.
+func (sc *StatementContext) MergeScanDetail(scanDetail *util.ScanDetail) {
+	// Currently TiFlash cop task does not fill scanDetail, so need to skip it if scanDetail is nil
+	if scanDetail == nil {
+		return
+	}
+	if sc.mu.execDetails.ScanDetail == nil {
+		sc.mu.execDetails.ScanDetail = &util.ScanDetail{}
+	}
+	sc.mu.execDetails.ScanDetail.Merge(scanDetail)
+}
+
+// MergeTimeDetail merges time details into self.
+func (sc *StatementContext) MergeTimeDetail(timeDetail util.TimeDetail) {
+	sc.mu.execDetails.TimeDetail.ProcessTime += timeDetail.ProcessTime
+	sc.mu.execDetails.TimeDetail.WaitTime += timeDetail.WaitTime
+}
+
+// MergeLockKeysExecDetails merges lock keys execution details into self.
+func (sc *StatementContext) MergeLockKeysExecDetails(lockKeys *util.LockKeysDetails) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.mu.execDetails.LockKeysDetail == nil {
+		sc.mu.execDetails.LockKeysDetail = lockKeys
+	} else {
+		sc.mu.execDetails.LockKeysDetail.Merge(lockKeys)
+	}
 }
 
 // GetExecDetails gets the execution details for the statement.
@@ -974,15 +1163,30 @@ func (sc *StatementContext) GetExecDetails() execdetails.ExecDetails {
 	var details execdetails.ExecDetails
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	details = sc.SyncExecDetails.GetExecDetails()
+	details = sc.mu.execDetails
 	details.LockKeysDuration = time.Duration(atomic.LoadInt64(&sc.LockKeysDuration))
 	return details
+}
+
+// ShouldClipToZero indicates whether values less than 0 should be clipped to 0 for unsigned integer types.
+// This is the case for `insert`, `update`, `alter table`, `create table` and `load data infile` statements, when not in strict SQL mode.
+// see https://dev.mysql.com/doc/refman/5.7/en/out-of-range-and-overflow.html
+func (sc *StatementContext) ShouldClipToZero() bool {
+	return sc.InInsertStmt || sc.InLoadDataStmt || sc.InUpdateStmt || sc.InCreateOrAlterStmt || sc.IsDDLJobInQueue || sc.IsRefineComparedConstant
+}
+
+// ShouldIgnoreOverflowError indicates whether we should ignore the error when type conversion overflows,
+// so we can leave it for further processing like clipping values less than 0 to 0 for unsigned integer types.
+func (sc *StatementContext) ShouldIgnoreOverflowError() bool {
+	if (sc.InInsertStmt && sc.TruncateAsWarning) || sc.InLoadDataStmt {
+		return true
+	}
+	return false
 }
 
 // PushDownFlags converts StatementContext to tipb.SelectRequest.Flags.
 func (sc *StatementContext) PushDownFlags() uint64 {
 	var flags uint64
-	ec := sc.ErrCtx()
 	if sc.InInsertStmt {
 		flags |= model.FlagInInsertStmt
 	} else if sc.InUpdateStmt || sc.InDeleteStmt {
@@ -990,17 +1194,18 @@ func (sc *StatementContext) PushDownFlags() uint64 {
 	} else if sc.InSelectStmt {
 		flags |= model.FlagInSelectStmt
 	}
-	if sc.TypeFlags().IgnoreTruncateErr() {
+	if sc.IgnoreTruncate.Load() {
 		flags |= model.FlagIgnoreTruncate
-	} else if sc.TypeFlags().TruncateAsWarning() {
+	} else if sc.TruncateAsWarning {
 		flags |= model.FlagTruncateAsWarning
-		// TODO: remove this flag from TiKV.
+	}
+	if sc.OverflowAsWarning {
 		flags |= model.FlagOverflowAsWarning
 	}
-	if sc.TypeFlags().IgnoreZeroInDate() {
+	if sc.IgnoreZeroInDate {
 		flags |= model.FlagIgnoreZeroInDate
 	}
-	if ec.LevelForGroup(errctx.ErrGroupDividedByZero) != errctx.LevelError {
+	if sc.DividedByZeroAsWarning {
 		flags |= model.FlagDividedByZeroAsWarning
 	}
 	if sc.InLoadDataStmt {
@@ -1012,22 +1217,59 @@ func (sc *StatementContext) PushDownFlags() uint64 {
 	return flags
 }
 
-// InitFromPBFlagAndTz set the flag and timezone of StatementContext from a `tipb.SelectRequest.Flags` and `*time.Location`.
-func (sc *StatementContext) InitFromPBFlagAndTz(flags uint64, tz *time.Location) {
+// CopTasksDetails returns some useful information of cop-tasks during execution.
+func (sc *StatementContext) CopTasksDetails() *CopTasksDetails {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	n := sc.mu.detailsSummary.NumCopTasks
+	d := &CopTasksDetails{
+		NumCopTasks:       n,
+		MaxBackoffTime:    make(map[string]time.Duration),
+		AvgBackoffTime:    make(map[string]time.Duration),
+		P90BackoffTime:    make(map[string]time.Duration),
+		TotBackoffTime:    make(map[string]time.Duration),
+		TotBackoffTimes:   make(map[string]int),
+		MaxBackoffAddress: make(map[string]string),
+	}
+	if n == 0 {
+		return d
+	}
+	d.AvgProcessTime = sc.mu.execDetails.TimeDetail.ProcessTime / time.Duration(n)
+	d.AvgWaitTime = sc.mu.execDetails.TimeDetail.WaitTime / time.Duration(n)
+
+	d.P90ProcessTime = time.Duration((sc.mu.detailsSummary.ProcessTimePercentile.GetPercentile(0.9)))
+	d.MaxProcessTime = sc.mu.detailsSummary.ProcessTimePercentile.GetMax().D
+	d.MaxProcessAddress = sc.mu.detailsSummary.ProcessTimePercentile.GetMax().Addr
+
+	d.P90WaitTime = time.Duration((sc.mu.detailsSummary.WaitTimePercentile.GetPercentile(0.9)))
+	d.MaxWaitTime = sc.mu.detailsSummary.WaitTimePercentile.GetMax().D
+	d.MaxWaitAddress = sc.mu.detailsSummary.WaitTimePercentile.GetMax().Addr
+
+	for backoff, items := range sc.mu.detailsSummary.BackoffInfo {
+		if items == nil {
+			continue
+		}
+		n := items.ReqTimes
+		d.MaxBackoffAddress[backoff] = items.BackoffPercentile.GetMax().Addr
+		d.MaxBackoffTime[backoff] = items.BackoffPercentile.GetMax().D
+		d.P90BackoffTime[backoff] = time.Duration(items.BackoffPercentile.GetPercentile(0.9))
+
+		d.AvgBackoffTime[backoff] = items.TotBackoffTime / time.Duration(n)
+		d.TotBackoffTime[backoff] = items.TotBackoffTime
+		d.TotBackoffTimes[backoff] = items.TotBackoffTimes
+	}
+	return d
+}
+
+// SetFlagsFromPBFlag set the flag of StatementContext from a `tipb.SelectRequest.Flags`.
+func (sc *StatementContext) SetFlagsFromPBFlag(flags uint64) {
+	sc.IgnoreTruncate.Store((flags & model.FlagIgnoreTruncate) > 0)
+	sc.TruncateAsWarning = (flags & model.FlagTruncateAsWarning) > 0
 	sc.InInsertStmt = (flags & model.FlagInInsertStmt) > 0
 	sc.InSelectStmt = (flags & model.FlagInSelectStmt) > 0
-	sc.InDeleteStmt = (flags & model.FlagInUpdateOrDeleteStmt) > 0
-	levels := sc.ErrLevels()
-	levels[errctx.ErrGroupDividedByZero] = errctx.ResolveErrLevel(false,
-		(flags&model.FlagDividedByZeroAsWarning) > 0,
-	)
-	sc.SetErrLevels(levels)
-	sc.SetTimeZone(tz)
-	sc.SetTypeFlags(types.DefaultStmtFlags.
-		WithIgnoreTruncateErr((flags & model.FlagIgnoreTruncate) > 0).
-		WithTruncateAsWarning((flags & model.FlagTruncateAsWarning) > 0).
-		WithIgnoreZeroInDate((flags & model.FlagIgnoreZeroInDate) > 0).
-		WithAllowNegativeToUnsigned(!sc.InInsertStmt))
+	sc.OverflowAsWarning = (flags & model.FlagOverflowAsWarning) > 0
+	sc.IgnoreZeroInDate = (flags & model.FlagIgnoreZeroInDate) > 0
+	sc.DividedByZeroAsWarning = (flags & model.FlagDividedByZeroAsWarning) > 0
 }
 
 // GetLockWaitStartTime returns the statement pessimistic lock wait start time
@@ -1038,6 +1280,19 @@ func (sc *StatementContext) GetLockWaitStartTime() time.Time {
 		atomic.StoreInt64(&sc.lockWaitStartTime, startTime)
 	}
 	return time.Unix(0, startTime)
+}
+
+// RecordRangeFallback records range fallback.
+func (sc *StatementContext) RecordRangeFallback(rangeMaxSize int64) {
+	// If range fallback happens, it means ether the query is unreasonable(for example, several long IN lists) or tidb_opt_range_max_size is too small
+	// and the generated plan is probably suboptimal. In that case we don't put it into plan cache.
+	if sc.UseCache {
+		sc.SetSkipPlanCache(errors.Errorf("in-list is too long"))
+	}
+	if !sc.RangeFallback {
+		sc.AppendWarning(errors.Errorf("Memory capacity of %v bytes for 'tidb_opt_range_max_size' exceeded when building ranges. Less accurate ranges such as full range are chosen", rangeMaxSize))
+		sc.RangeFallback = true
+	}
 }
 
 // UseDynamicPartitionPrune indicates whether dynamic partition is used during the query
@@ -1092,79 +1347,65 @@ func (sc *StatementContext) AddSetVarHintRestore(name, val string) {
 	sc.SetVarHintRestore[name] = val
 }
 
+// CopTasksDetails collects some useful information of cop-tasks during execution.
+type CopTasksDetails struct {
+	NumCopTasks int
+
+	AvgProcessTime    time.Duration
+	P90ProcessTime    time.Duration
+	MaxProcessAddress string
+	MaxProcessTime    time.Duration
+
+	AvgWaitTime    time.Duration
+	P90WaitTime    time.Duration
+	MaxWaitAddress string
+	MaxWaitTime    time.Duration
+
+	MaxBackoffTime    map[string]time.Duration
+	MaxBackoffAddress map[string]string
+	AvgBackoffTime    map[string]time.Duration
+	P90BackoffTime    map[string]time.Duration
+	TotBackoffTime    map[string]time.Duration
+	TotBackoffTimes   map[string]int
+}
+
+// ToZapFields wraps the CopTasksDetails as zap.Fileds.
+func (d *CopTasksDetails) ToZapFields() (fields []zap.Field) {
+	if d.NumCopTasks == 0 {
+		return
+	}
+	fields = make([]zap.Field, 0, 10)
+	fields = append(fields, zap.Int("num_cop_tasks", d.NumCopTasks))
+	fields = append(fields, zap.String("process_avg_time", strconv.FormatFloat(d.AvgProcessTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("process_p90_time", strconv.FormatFloat(d.P90ProcessTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("process_max_time", strconv.FormatFloat(d.MaxProcessTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("process_max_addr", d.MaxProcessAddress))
+	fields = append(fields, zap.String("wait_avg_time", strconv.FormatFloat(d.AvgWaitTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("wait_p90_time", strconv.FormatFloat(d.P90WaitTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("wait_max_time", strconv.FormatFloat(d.MaxWaitTime.Seconds(), 'f', -1, 64)+"s"))
+	fields = append(fields, zap.String("wait_max_addr", d.MaxWaitAddress))
+	return fields
+}
+
 // GetUsedStatsInfo returns the map for recording the used stats during query.
 // If initIfNil is true, it will initialize it when this map is nil.
-func (sc *StatementContext) GetUsedStatsInfo(initIfNil bool) *UsedStatsInfo {
-	if sc.usedStatsInfo.Load() == nil && initIfNil {
-		sc.usedStatsInfo.CompareAndSwap(nil, &UsedStatsInfo{})
+func (sc *StatementContext) GetUsedStatsInfo(initIfNil bool) map[int64]*UsedStatsInfoForTable {
+	if sc.usedStatsInfo == nil && initIfNil {
+		sc.usedStatsInfo = make(map[int64]*UsedStatsInfoForTable)
 	}
-	return sc.usedStatsInfo.Load()
+	return sc.usedStatsInfo
 }
 
 // RecordedStatsLoadStatusCnt returns the total number of recorded column/index stats status, which is not full loaded.
 func (sc *StatementContext) RecordedStatsLoadStatusCnt() (cnt int) {
 	allStatus := sc.GetUsedStatsInfo(false)
-	for _, status := range allStatus.Values() {
+	for _, status := range allStatus {
 		if status == nil {
 			continue
 		}
 		cnt += status.recordedColIdxCount()
 	}
 	return
-}
-
-// TypeCtxOrDefault returns the reference to the `TypeCtx` inside the statement context.
-// If the statement context is nil, it'll return a newly created default type context.
-// **don't** use this function if you can make sure the `sc` is not nil. We should limit the usage of this function as
-// little as possible.
-func (sc *StatementContext) TypeCtxOrDefault() types.Context {
-	if sc != nil {
-		return sc.typeCtx
-	}
-
-	return types.DefaultStmtNoWarningContext
-}
-
-// GetOrInitDistSQLFromCache returns the `DistSQLContext` inside cache. If it didn't exist, return a new one created by
-// the `create` function.
-func (sc *StatementContext) GetOrInitDistSQLFromCache(create func() *distsqlctx.DistSQLContext) *distsqlctx.DistSQLContext {
-	sc.distSQLCtxCache.init.Do(func() {
-		sc.distSQLCtxCache.dctx = create()
-	})
-
-	return sc.distSQLCtxCache.dctx
-}
-
-// GetOrInitRangerCtxFromCache returns the `RangerContext` inside cache. If it didn't exist, return a new one created by
-// the `create` function.
-func (sc *StatementContext) GetOrInitRangerCtxFromCache(create func() any) any {
-	sc.rangerCtxCache.init.Do(func() {
-		sc.rangerCtxCache.rctx = create()
-	})
-
-	return sc.rangerCtxCache.rctx
-}
-
-// GetOrInitBuildPBCtxFromCache returns the `BuildPBContext` inside cache. If it didn't exist, return a new one created by
-// the `create` function. It uses the `any` to avoid cycle dependency.
-func (sc *StatementContext) GetOrInitBuildPBCtxFromCache(create func() any) any {
-	sc.buildPBCtxCache.init.Do(func() {
-		sc.buildPBCtxCache.bctx = create()
-	})
-
-	return sc.buildPBCtxCache.bctx
-}
-
-func newErrCtx(tc types.Context, otherLevels errctx.LevelMap, handler contextutil.WarnAppender) errctx.Context {
-	l := errctx.LevelError
-	if flags := tc.Flags(); flags.IgnoreTruncateErr() {
-		l = errctx.LevelIgnore
-	} else if flags.TruncateAsWarning() {
-		l = errctx.LevelWarn
-	}
-
-	otherLevels[errctx.ErrGroupTruncate] = l
-	return errctx.NewContextWithLevels(otherLevels, handler)
 }
 
 // UsedStatsInfoForTable records stats that are used during query and their information.
@@ -1176,7 +1417,6 @@ type UsedStatsInfoForTable struct {
 	ModifyCount           int64
 	ColumnStatsLoadStatus map[int64]string
 	IndexStatsLoadStatus  map[int64]string
-	ColAndIdxStatus       any
 }
 
 // FormatForExplain format the content in the format expected to be printed in the execution plan.
@@ -1281,52 +1521,6 @@ func (s *UsedStatsInfoForTable) collectFromColOrIdxStatus(
 
 func (s *UsedStatsInfoForTable) recordedColIdxCount() int {
 	return len(s.IndexStatsLoadStatus) + len(s.ColumnStatsLoadStatus)
-}
-
-// UsedStatsInfo is a map for recording the used stats during query.
-// The key is the table ID, and the value is the used stats info for the table.
-type UsedStatsInfo struct {
-	store sync.Map
-}
-
-// GetUsedInfo gets the used stats info for the table.
-func (u *UsedStatsInfo) GetUsedInfo(tableID int64) *UsedStatsInfoForTable {
-	v, ok := u.store.Load(tableID)
-	if !ok {
-		return nil
-	}
-	return v.(*UsedStatsInfoForTable)
-}
-
-// RecordUsedInfo records the used stats info for the table.
-func (u *UsedStatsInfo) RecordUsedInfo(tableID int64, info *UsedStatsInfoForTable) {
-	u.store.Store(tableID, info)
-}
-
-// Keys returns all the table IDs for the used stats info.
-func (u *UsedStatsInfo) Keys() []int64 {
-	var ret []int64
-	if u == nil {
-		return ret
-	}
-	u.store.Range(func(k, v any) bool {
-		ret = append(ret, k.(int64))
-		return true
-	})
-	return ret
-}
-
-// Values returns all the used stats info for the table.
-func (u *UsedStatsInfo) Values() []*UsedStatsInfoForTable {
-	var ret []*UsedStatsInfoForTable
-	if u == nil {
-		return ret
-	}
-	u.store.Range(func(k, v any) bool {
-		ret = append(ret, v.(*UsedStatsInfoForTable))
-		return true
-	})
-	return ret
 }
 
 // StatsLoadResult indicates result for StatsLoad

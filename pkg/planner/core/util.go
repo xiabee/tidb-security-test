@@ -17,20 +17,19 @@ package core
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/baseimpl"
+	"github.com/pingcap/tidb/pkg/planner/core/internal/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/tablecodec"
+	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/set"
 	"github.com/pingcap/tidb/pkg/util/size"
 )
@@ -67,7 +66,7 @@ func (a *AggregateFuncExtractor) Leave(n ast.Node) (ast.Node, bool) {
 }
 
 // WindowFuncExtractor visits Expr tree.
-// It converts ColumnNameExpr to WindowFuncExpr and collects WindowFuncExpr.
+// It converts ColunmNameExpr to WindowFuncExpr and collects WindowFuncExpr.
 type WindowFuncExtractor struct {
 	// WindowFuncs is the collected WindowFuncExprs.
 	windowFuncs []*ast.WindowFuncExpr
@@ -92,13 +91,70 @@ func (a *WindowFuncExtractor) Leave(n ast.Node) (ast.Node, bool) {
 	return n, true
 }
 
+// logicalSchemaProducer stores the schema for the logical plans who can produce schema directly.
+type logicalSchemaProducer struct {
+	schema *expression.Schema
+	names  types.NameSlice
+	baseLogicalPlan
+}
+
+// Schema implements the Plan.Schema interface.
+func (s *logicalSchemaProducer) Schema() *expression.Schema {
+	if s.schema == nil {
+		if len(s.Children()) == 1 {
+			// default implementation for plans has only one child: proprgate child schema.
+			// multi-children plans are likely to have particular implementation.
+			s.schema = s.Children()[0].Schema().Clone()
+		} else {
+			s.schema = expression.NewSchema()
+		}
+	}
+	return s.schema
+}
+
+func (s *logicalSchemaProducer) OutputNames() types.NameSlice {
+	if s.names == nil && len(s.Children()) == 1 {
+		// default implementation for plans has only one child: proprgate child `OutputNames`.
+		// multi-children plans are likely to have particular implementation.
+		s.names = s.Children()[0].OutputNames()
+	}
+	return s.names
+}
+
+func (s *logicalSchemaProducer) SetOutputNames(names types.NameSlice) {
+	s.names = names
+}
+
+// SetSchema implements the Plan.SetSchema interface.
+func (s *logicalSchemaProducer) SetSchema(schema *expression.Schema) {
+	s.schema = schema
+}
+
+func (s *logicalSchemaProducer) setSchemaAndNames(schema *expression.Schema, names types.NameSlice) {
+	s.schema = schema
+	s.names = names
+}
+
+// inlineProjection prunes unneeded columns inline a executor.
+func (s *logicalSchemaProducer) inlineProjection(parentUsedCols []*expression.Column, opt *logicalOptimizeOp) {
+	prunedColumns := make([]*expression.Column, 0)
+	used := expression.GetUsedList(parentUsedCols, s.Schema())
+	for i := len(used) - 1; i >= 0; i-- {
+		if !used[i] {
+			prunedColumns = append(prunedColumns, s.Schema().Columns[i])
+			s.schema.Columns = append(s.Schema().Columns[:i], s.Schema().Columns[i+1:]...)
+		}
+	}
+	appendColumnPruneTraceStep(s.self, prunedColumns, opt)
+}
+
 // physicalSchemaProducer stores the schema for the physical plans who can produce schema directly.
 type physicalSchemaProducer struct {
 	schema *expression.Schema
 	basePhysicalPlan
 }
 
-func (s *physicalSchemaProducer) cloneWithSelf(newSelf base.PhysicalPlan) (*physicalSchemaProducer, error) {
+func (s *physicalSchemaProducer) cloneWithSelf(newSelf PhysicalPlan) (*physicalSchemaProducer, error) {
 	base, err := s.basePhysicalPlan.cloneWithSelf(newSelf)
 	if err != nil {
 		return nil, err
@@ -142,7 +198,7 @@ func (s *physicalSchemaProducer) MemoryUsage() (sum int64) {
 type baseSchemaProducer struct {
 	schema *expression.Schema
 	names  types.NameSlice
-	baseimpl.Plan
+	base.Plan
 }
 
 // OutputNames returns the outputting names of each column.
@@ -195,7 +251,7 @@ func (p *LogicalMaxOneRow) Schema() *expression.Schema {
 	return s
 }
 
-func buildLogicalJoinSchema(joinType JoinType, join base.LogicalPlan) *expression.Schema {
+func buildLogicalJoinSchema(joinType JoinType, join LogicalPlan) *expression.Schema {
 	leftSchema := join.Children()[0].Schema()
 	switch joinType {
 	case SemiJoin, AntiSemiJoin:
@@ -215,7 +271,7 @@ func buildLogicalJoinSchema(joinType JoinType, join base.LogicalPlan) *expressio
 }
 
 // BuildPhysicalJoinSchema builds the schema of PhysicalJoin from it's children's schema.
-func BuildPhysicalJoinSchema(joinType JoinType, join base.PhysicalPlan) *expression.Schema {
+func BuildPhysicalJoinSchema(joinType JoinType, join PhysicalPlan) *expression.Schema {
 	leftSchema := join.Children()[0].Schema()
 	switch joinType {
 	case SemiJoin, AntiSemiJoin:
@@ -254,14 +310,14 @@ func GetStatsInfoFromFlatPlan(flat *FlatPhysicalPlan) map[string]uint64 {
 
 // GetStatsInfo gets the statistics info from a physical plan tree.
 // Deprecated: FlattenPhysicalPlan() + GetStatsInfoFromFlatPlan() is preferred.
-func GetStatsInfo(i any) map[string]uint64 {
+func GetStatsInfo(i interface{}) map[string]uint64 {
 	if i == nil {
 		// it's a workaround for https://github.com/pingcap/tidb/issues/17419
 		// To entirely fix this, uncomment the assertion in TestPreparedIssue17419
 		return nil
 	}
-	p := i.(base.Plan)
-	var physicalPlan base.PhysicalPlan
+	p := i.(Plan)
+	var physicalPlan PhysicalPlan
 	switch x := p.(type) {
 	case *Insert:
 		physicalPlan = x.SelectPlan
@@ -269,7 +325,7 @@ func GetStatsInfo(i any) map[string]uint64 {
 		physicalPlan = x.SelectPlan
 	case *Delete:
 		physicalPlan = x.SelectPlan
-	case base.PhysicalPlan:
+	case PhysicalPlan:
 		physicalPlan = x
 	}
 
@@ -330,7 +386,7 @@ func extractStringFromBoolSlice(slice []bool) string {
 	return strings.Join(l, ",")
 }
 
-func tableHasDirtyContent(ctx base.PlanContext, tableInfo *model.TableInfo) bool {
+func tableHasDirtyContent(ctx sessionctx.Context, tableInfo *model.TableInfo) bool {
 	pi := tableInfo.GetPartitionInfo()
 	if pi == nil {
 		return ctx.HasDirtyContent(tableInfo.ID)
@@ -345,8 +401,8 @@ func tableHasDirtyContent(ctx base.PlanContext, tableInfo *model.TableInfo) bool
 	return false
 }
 
-func clonePhysicalPlan(plans []base.PhysicalPlan) ([]base.PhysicalPlan, error) {
-	cloned := make([]base.PhysicalPlan, 0, len(plans))
+func clonePhysicalPlan(plans []PhysicalPlan) ([]PhysicalPlan, error) {
+	cloned := make([]PhysicalPlan, 0, len(plans))
 	for _, p := range plans {
 		c, err := p.Clone()
 		if err != nil {
@@ -357,69 +413,61 @@ func clonePhysicalPlan(plans []base.PhysicalPlan) ([]base.PhysicalPlan, error) {
 	return cloned, nil
 }
 
-// EncodeUniqueIndexKey encodes a unique index key.
-func EncodeUniqueIndexKey(ctx sessionctx.Context, tblInfo *model.TableInfo, idxInfo *model.IndexInfo, idxVals []types.Datum, tID int64) (_ []byte, err error) {
-	encodedIdxVals, err := EncodeUniqueIndexValuesForKey(ctx, tblInfo, idxInfo, idxVals)
-	if err != nil {
-		return nil, err
+// GetPhysID returns the physical table ID.
+func GetPhysID(tblInfo *model.TableInfo, partitionExpr *tables.PartitionExpr, d types.Datum) (int64, error) {
+	pi := tblInfo.GetPartitionInfo()
+	if pi == nil {
+		return tblInfo.ID, nil
 	}
-	return tablecodec.EncodeIndexSeekKey(tID, idxInfo.ID, encodedIdxVals), nil
-}
 
-// EncodeUniqueIndexValuesForKey encodes unique index values for a key.
-func EncodeUniqueIndexValuesForKey(ctx sessionctx.Context, tblInfo *model.TableInfo, idxInfo *model.IndexInfo, idxVals []types.Datum) (_ []byte, err error) {
-	sc := ctx.GetSessionVars().StmtCtx
-	for i := range idxVals {
-		colInfo := tblInfo.Columns[idxInfo.Columns[i].Offset]
-		// table.CastValue will append 0x0 if the string value's length is smaller than the BINARY column's length.
-		// So we don't use CastValue for string value for now.
-		// TODO: The first if branch should have been removed, because the functionality of set the collation of the datum
-		// have been moved to util/ranger (normal path) and getNameValuePairs/getPointGetValue (fast path). But this change
-		// will be cherry-picked to a hotfix, so we choose to be a bit conservative and keep this for now.
-		if colInfo.GetType() == mysql.TypeString || colInfo.GetType() == mysql.TypeVarString || colInfo.GetType() == mysql.TypeVarchar {
-			var str string
-			str, err = idxVals[i].ToString()
-			idxVals[i].SetString(str, idxVals[i].Collation())
-		} else if colInfo.GetType() == mysql.TypeEnum && (idxVals[i].Kind() == types.KindString || idxVals[i].Kind() == types.KindBytes || idxVals[i].Kind() == types.KindBinaryLiteral) {
-			var str string
-			var e types.Enum
-			str, err = idxVals[i].ToString()
-			if err != nil {
-				return nil, kv.ErrNotExist
-			}
-			e, err = types.ParseEnumName(colInfo.FieldType.GetElems(), str, colInfo.FieldType.GetCollate())
-			if err != nil {
-				return nil, kv.ErrNotExist
-			}
-			idxVals[i].SetMysqlEnum(e, colInfo.FieldType.GetCollate())
-		} else {
-			// If a truncated error or an overflow error is thrown when converting the type of `idxVal[i]` to
-			// the type of `colInfo`, the `idxVal` does not exist in the `idxInfo` for sure.
-			idxVals[i], err = table.CastValue(ctx, idxVals[i], colInfo, true, false)
-			if types.ErrOverflow.Equal(err) || types.ErrDataTooLong.Equal(err) ||
-				types.ErrTruncated.Equal(err) || types.ErrTruncatedWrongVal.Equal(err) {
-				return nil, kv.ErrNotExist
-			}
+	if partitionExpr == nil {
+		return tblInfo.ID, nil
+	}
+
+	switch pi.Type {
+	case model.PartitionTypeHash:
+		intVal := d.GetInt64()
+		partIdx := mathutil.Abs(intVal % int64(pi.Num))
+		return pi.Definitions[partIdx].ID, nil
+	case model.PartitionTypeKey:
+		if partitionExpr.ForKeyPruning == nil ||
+			len(pi.Columns) > 1 {
+			return 0, errors.Errorf("unsupported partition type in BatchGet")
 		}
+		// We need to change the partition column index!
+		col := &expression.Column{}
+		*col = *partitionExpr.KeyPartCols[0]
+		col.Index = 0
+		newKeyPartExpr := tables.ForKeyPruning{KeyPartCols: []*expression.Column{col}}
+		partIdx, err := newKeyPartExpr.LocateKeyPartition(pi.Num, []types.Datum{d})
 		if err != nil {
-			return nil, err
+			return 0, errors.Errorf("unsupported partition type in BatchGet")
+		}
+		return pi.Definitions[partIdx].ID, nil
+	case model.PartitionTypeRange:
+		// we've check the type assertions in func TryFastPlan
+		col, ok := partitionExpr.Expr.(*expression.Column)
+		if !ok {
+			return 0, errors.Errorf("unsupported partition type in BatchGet")
+		}
+		unsigned := mysql.HasUnsignedFlag(col.GetType().GetFlag())
+		ranges := partitionExpr.ForRangePruning
+		length := len(ranges.LessThan)
+		intVal := d.GetInt64()
+		partIdx := sort.Search(length, func(i int) bool {
+			return ranges.Compare(i, intVal, unsigned) > 0
+		})
+		if partIdx >= 0 && partIdx < length {
+			return pi.Definitions[partIdx].ID, nil
+		}
+	case model.PartitionTypeList:
+		isNull := false // we've guaranteed this in the build process of either TryFastPlan or buildBatchPointGet
+		intVal := d.GetInt64()
+		partIdx := partitionExpr.ForListPruning.LocatePartition(intVal, isNull)
+		if partIdx >= 0 {
+			return pi.Definitions[partIdx].ID, nil
 		}
 	}
 
-	encodedIdxVals, err := codec.EncodeKey(sc.TimeZone(), nil, idxVals...)
-	err = sc.HandleError(err)
-	if err != nil {
-		return nil, err
-	}
-	return encodedIdxVals, nil
-}
-
-// GetPushDownCtx creates a PushDownContext from PlanContext
-func GetPushDownCtx(pctx base.PlanContext) expression.PushDownContext {
-	return GetPushDownCtxFromBuildPBContext(pctx.GetBuildPBCtx())
-}
-
-// GetPushDownCtxFromBuildPBContext creates a PushDownContext from BuildPBContext
-func GetPushDownCtxFromBuildPBContext(bctx *base.BuildPBContext) expression.PushDownContext {
-	return expression.NewPushDownContext(bctx.GetExprCtx().GetEvalCtx(), bctx.GetClient(), bctx.InExplainStmt, bctx.WarnHandler, bctx.ExtraWarnghandler, bctx.GroupConcatMaxLen)
+	return 0, errors.Errorf("dual partition")
 }

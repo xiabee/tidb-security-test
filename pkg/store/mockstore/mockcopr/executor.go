@@ -26,7 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -404,9 +404,9 @@ func (e *selectionExec) Counts() []int64 {
 }
 
 // evalBool evaluates expression to a boolean value.
-func evalBool(exprs []expression.Expression, row []types.Datum, ctx sessionctx.Context) (bool, error) {
+func evalBool(exprs []expression.Expression, row []types.Datum, ctx *stmtctx.StatementContext) (bool, error) {
 	for _, expr := range exprs {
-		data, err := expr.Eval(ctx.GetExprCtx().GetEvalCtx(), chunk.MutRowFromDatums(row).ToRow())
+		data, err := expr.Eval(chunk.MutRowFromDatums(row).ToRow())
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -414,7 +414,8 @@ func evalBool(exprs []expression.Expression, row []types.Datum, ctx sessionctx.C
 			return false, nil
 		}
 
-		isBool, err := data.ToBool(ctx.GetSessionVars().StmtCtx.TypeCtx())
+		isBool, err := data.ToBool(ctx)
+		isBool, err = expression.HandleOverflowOnSelection(ctx, isBool, err)
 		if err != nil {
 			return false, errors.Trace(err)
 		}
@@ -442,7 +443,7 @@ func (e *selectionExec) Next(ctx context.Context) (value [][]byte, err error) {
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		match, err := evalBool(e.conditions, e.row, e.evalCtx.sctx)
+		match, err := evalBool(e.conditions, e.row, e.evalCtx.sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -541,7 +542,7 @@ func (e *topNExec) evalTopN(value [][]byte) error {
 		return errors.Trace(err)
 	}
 	for i, expr := range e.orderByExprs {
-		newRow.key[i], err = expr.Eval(e.evalCtx.sctx.GetExprCtx().GetEvalCtx(), chunk.MutRowFromDatums(e.row).ToRow())
+		newRow.key[i], err = expr.Eval(chunk.MutRowFromDatums(e.row).ToRow())
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -637,7 +638,7 @@ func getRowData(columns []*tipb.ColumnInfo, colIDs map[int64]int, handle int64, 
 			} else {
 				handleDatum = types.NewIntDatum(handle)
 			}
-			handleData, err1 := codec.EncodeValue(time.UTC, nil, handleDatum)
+			handleData, err1 := codec.EncodeValue(nil, nil, handleDatum)
 			if err1 != nil {
 				return nil, errors.Trace(err1)
 			}
@@ -661,10 +662,10 @@ func getRowData(columns []*tipb.ColumnInfo, colIDs map[int64]int, handle int64, 
 	return values, nil
 }
 
-func convertToExprs(sctx sessionctx.Context, fieldTps []*types.FieldType, pbExprs []*tipb.Expr) ([]expression.Expression, error) {
+func convertToExprs(sc *stmtctx.StatementContext, fieldTps []*types.FieldType, pbExprs []*tipb.Expr) ([]expression.Expression, error) {
 	exprs := make([]expression.Expression, 0, len(pbExprs))
 	for _, expr := range pbExprs {
-		e, err := expression.PBToExpr(sctx.GetExprCtx(), expr, fieldTps)
+		e, err := expression.PBToExpr(expr, fieldTps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}

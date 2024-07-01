@@ -15,26 +15,26 @@
 package domain
 
 import (
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 )
 
 // domainKeyType is a dummy type to avoid naming collision in context.
 type domainKeyType int
 
 // String defines a Stringer function for debugging and pretty printing.
-func (domainKeyType) String() string {
+func (k domainKeyType) String() string {
 	return "domain"
 }
 
 const domainKey domainKeyType = 0
 
 // BindDomain binds domain to context.
-func BindDomain(ctx contextutil.ValueStoreContext, domain *Domain) {
+func BindDomain(ctx sessionctx.Context, domain *Domain) {
 	ctx.SetValue(domainKey, domain)
 }
 
 // GetDomain gets domain from context.
-func GetDomain(ctx contextutil.ValueStoreContext) *Domain {
+func GetDomain(ctx sessionctx.Context) *Domain {
 	v, ok := ctx.Value(domainKey).(*Domain)
 	if !ok {
 		return nil

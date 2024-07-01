@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 	util2 "github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/util"
@@ -60,15 +60,13 @@ func TestSyncerSimple(t *testing.T) {
 	store, err := mockstore.NewMockStore()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Close()) }()
-	domain, err := session.GetDomain(store)
-	require.NoError(t, err)
 
 	cluster := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
 	defer cluster.Terminate(t)
 	cli := cluster.RandClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ic := infoschema.NewCache(nil, 2)
+	ic := infoschema.NewCache(2)
 	ic.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d := NewDDL(
 		ctx,
@@ -76,7 +74,6 @@ func TestSyncerSimple(t *testing.T) {
 		WithStore(store),
 		WithLease(testLease),
 		WithInfoCache(ic),
-		WithSchemaLoader(domain),
 	)
 	go func() {
 		require.NoError(t, d.OwnerManager().CampaignOwner())
@@ -93,7 +90,7 @@ func TestSyncerSimple(t *testing.T) {
 	key := util2.DDLAllSchemaVersions + "/" + d.OwnerManager().ID()
 	checkRespKV(t, 1, key, syncer.InitialVersion, resp.Kvs...)
 
-	ic2 := infoschema.NewCache(nil, 2)
+	ic2 := infoschema.NewCache(2)
 	ic2.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d1 := NewDDL(
 		ctx,
@@ -101,7 +98,6 @@ func TestSyncerSimple(t *testing.T) {
 		WithStore(store),
 		WithLease(testLease),
 		WithInfoCache(ic2),
-		WithSchemaLoader(domain),
 	)
 
 	go func() {
@@ -207,24 +203,33 @@ func TestPutKVToEtcdMono(t *testing.T) {
 	err = util2.PutKVToEtcdMono(ctx, cli, 3, "testKey", strconv.Itoa(3))
 	require.NoError(t, err)
 
-	eg := util.NewErrorGroupWithRecover()
+	eg := util.NewWaitGroupEnhancedWrapper("", nil, false)
+
+	var errCount atomic.Int64
 	for i := 0; i < 30; i++ {
-		eg.Go(func() error {
+		eg.Run(func() {
 			err := util2.PutKVToEtcdMono(ctx, cli, 1, "testKey", strconv.Itoa(5))
-			return err
-		})
+			if err != nil {
+				errCount.Add(1)
+			}
+		}, fmt.Sprintf("test_%v", i))
 	}
 	// PutKVToEtcdMono should be conflicted and get errors.
-	require.Error(t, eg.Wait())
+	eg.Wait()
+	require.True(t, errCount.Load() > 0)
 
-	eg = util.NewErrorGroupWithRecover()
+	errCount.Store(0)
+	eg = util.NewWaitGroupEnhancedWrapper("", nil, false)
 	for i := 0; i < 30; i++ {
-		eg.Go(func() error {
+		eg.Run(func() {
 			err := util2.PutKVToEtcd(ctx, cli, 1, "testKey", strconv.Itoa(5))
-			return err
-		})
+			if err != nil {
+				errCount.Add(1)
+			}
+		}, fmt.Sprintf("test_%v", i))
 	}
-	require.NoError(t, eg.Wait())
+	eg.Wait()
+	require.True(t, errCount.Load() == 0)
 
 	err = util2.PutKVToEtcdMono(ctx, cli, 3, "testKey", strconv.Itoa(1))
 	require.NoError(t, err)

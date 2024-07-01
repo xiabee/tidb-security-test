@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/stringutil"
@@ -36,8 +35,24 @@ const (
 )
 
 var (
-	_ base.ShowPredicateExtractor = &ShowBaseExtractor{}
+	_ ShowPredicateExtractor = &ShowBaseExtractor{}
 )
+
+// ShowPredicateExtractor is used to extract some predicates from `PatternLikeOrIlikeExpr` clause
+// and push the predicates down to the data retrieving on reading memory table stage when use ShowStmt.
+//
+// e.g:
+// SHOW COLUMNS FROM t LIKE '%abc%'
+// We must request all components from the memory table, and filter the result by the PatternLikeOrIlikeExpr predicate.
+//
+// it is a way to fix https://github.com/pingcap/tidb/issues/29910.
+type ShowPredicateExtractor interface {
+	// Extract predicates which can be pushed down and returns whether the extractor can extract predicates.
+	Extract() bool
+	explainInfo() string
+	Field() string
+	FieldPatternLike() collate.WildcardPattern
+}
 
 // ShowBaseExtractor is the definition of base extractor for derived predicates.
 type ShowBaseExtractor struct {
@@ -48,7 +63,7 @@ type ShowBaseExtractor struct {
 	fieldPattern string
 }
 
-func newShowBaseExtractor(showStatement ast.ShowStmt) base.ShowPredicateExtractor {
+func newShowBaseExtractor(showStatement ast.ShowStmt) ShowPredicateExtractor {
 	return &ShowBaseExtractor{ShowStmt: showStatement}
 }
 
@@ -81,8 +96,8 @@ func (e *ShowBaseExtractor) Extract() bool {
 	return false
 }
 
-// ExplainInfo implements the base.ShowPredicateExtractor interface.
-func (e *ShowBaseExtractor) ExplainInfo() string {
+// explainInfo implements the ShowPredicateExtractor interface.
+func (e *ShowBaseExtractor) explainInfo() string {
 	key := ""
 	switch e.ShowStmt.Tp {
 	case ast.ShowVariables, ast.ShowColumns:

@@ -17,11 +17,11 @@
 package localpool
 
 // Get gets an object from the pool.
-func (p *LocalPool) Get() any {
+func (p *LocalPool) Get() interface{} {
 	pid := procPin()
 	slot := p.slots[pid]
 	objLen := len(slot.objs)
-	var result any
+	var result interface{}
 	if objLen > 0 {
 		lastIdx := objLen - 1
 		result = slot.objs[lastIdx]
@@ -40,7 +40,7 @@ func (p *LocalPool) Get() any {
 
 // Put puts an object back to the pool.
 // It returns true if the pool is not full and the obj is successfully put into the pool.
-func (p *LocalPool) Put(obj any) bool {
+func (p *LocalPool) Put(obj interface{}) bool {
 	if p.resetFn != nil {
 		p.resetFn(obj)
 	}

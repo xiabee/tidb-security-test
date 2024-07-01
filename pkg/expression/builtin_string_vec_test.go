@@ -29,7 +29,7 @@ type randSpaceStrGener struct {
 	lenEnd   int
 }
 
-func (g *randSpaceStrGener) gen() any {
+func (g *randSpaceStrGener) gen() interface{} {
 	n := rand.Intn(g.lenEnd-g.lenBegin) + g.lenBegin
 	buf := make([]byte, n)
 	for i := range buf {

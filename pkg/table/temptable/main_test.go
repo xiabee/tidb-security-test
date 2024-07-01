@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
 		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
 		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
-		goleak.IgnoreTopFunction("github.com/bazelbuild/rules_go/go/tools/bzltestutil.RegisterTimeoutHandler.func1"),
 		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 	}
 	testsetup.SetupForCommonTest()
@@ -102,14 +101,14 @@ func newMockedSnapshot(retriever *mockedRetriever) *mockedSnapshot {
 	return &mockedSnapshot{mockedRetriever: retriever}
 }
 
-func (s *mockedSnapshot) SetOption(_ int, _ any) {
+func (s *mockedSnapshot) SetOption(_ int, _ interface{}) {
 	require.FailNow(s.t, "SetOption not supported")
 }
 
 type methodInvoke struct {
 	Method string
-	Args   []any
-	Ret    []any
+	Args   []interface{}
+	Ret    []interface{}
 }
 
 type mockedRetriever struct {
@@ -118,7 +117,7 @@ type mockedRetriever struct {
 	dataMap map[string][]byte
 	invokes []*methodInvoke
 
-	allowInvokes map[string]any
+	allowInvokes map[string]interface{}
 	errorMap     map[string]error
 }
 
@@ -150,7 +149,7 @@ func (r *mockedRetriever) InjectMethodError(method string, err error) *mockedRet
 }
 
 func (r *mockedRetriever) SetAllowedMethod(methods ...string) *mockedRetriever {
-	r.allowInvokes = make(map[string]any)
+	r.allowInvokes = make(map[string]interface{})
 	for _, m := range methods {
 		r.allowInvokes[m] = struct{}{}
 	}
@@ -174,7 +173,7 @@ func (r *mockedRetriever) Get(ctx context.Context, k kv.Key) (val []byte, err er
 			err = kv.ErrNotExist
 		}
 	}
-	r.appendInvoke("Get", []any{ctx, k}, []any{val, err})
+	r.appendInvoke("Get", []interface{}{ctx, k}, []interface{}{val, err})
 	return
 }
 
@@ -190,7 +189,7 @@ func (r *mockedRetriever) BatchGet(ctx context.Context, keys []kv.Key) (data map
 		}
 	}
 
-	r.appendInvoke("BatchGet", []any{ctx, keys}, []any{data, err})
+	r.appendInvoke("BatchGet", []interface{}{ctx, keys}, []interface{}{data, err})
 	return
 }
 
@@ -214,7 +213,7 @@ func (r *mockedRetriever) Iter(k kv.Key, upperBound kv.Key) (iter kv.Iterator, e
 		}
 		iter = mockIter
 	}
-	r.appendInvoke("Iter", []any{k, upperBound}, []any{iter, err})
+	r.appendInvoke("Iter", []interface{}{k, upperBound}, []interface{}{iter, err})
 	return
 }
 
@@ -234,11 +233,11 @@ func (r *mockedRetriever) IterReverse(k kv.Key, lowerBound kv.Key) (iter kv.Iter
 		}
 		iter = mockIter
 	}
-	r.appendInvoke("IterReverse", []any{k}, []any{iter, err})
+	r.appendInvoke("IterReverse", []interface{}{k}, []interface{}{iter, err})
 	return
 }
 
-func (r *mockedRetriever) appendInvoke(method string, args []any, ret []any) {
+func (r *mockedRetriever) appendInvoke(method string, args []interface{}, ret []interface{}) {
 	r.invokes = append(r.invokes, &methodInvoke{
 		Method: method,
 		Args:   args,

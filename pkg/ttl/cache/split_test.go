@@ -20,7 +20,6 @@ import (
 	"math"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/infoschema"
@@ -62,7 +61,7 @@ type mockPDClient struct {
 	regionsSorted bool
 }
 
-func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	if len(c.regions) == 0 {
 		return []*pd.Region{newMockRegion(1, []byte{}, []byte{0xFF, 0xFF})}, nil
 	}
@@ -102,10 +101,6 @@ func (c *mockPDClient) GetStore(_ context.Context, storeID uint64) (*metapb.Stor
 		Id:      storeID,
 		Address: fmt.Sprintf("127.0.0.%d", storeID),
 	}, nil
-}
-
-func (c *mockPDClient) GetClusterID(_ context.Context) uint64 {
-	return 1
 }
 
 type mockTiKVStore struct {
@@ -214,7 +209,7 @@ func bytesHandle(t *testing.T, data []byte) kv.Handle {
 }
 
 func commonHandle(t *testing.T, d ...types.Datum) kv.Handle {
-	encoded, err := codec.EncodeKey(time.UTC, nil, d...)
+	encoded, err := codec.EncodeKey(nil, nil, d...)
 	require.NoError(t, err)
 	h, err := kv.NewCommonHandle(encoded)
 	require.NoError(t, err)
@@ -606,7 +601,7 @@ func TestNoTTLSplitSupportTables(t *testing.T) {
 func TestGetNextBytesHandleDatum(t *testing.T) {
 	tblID := int64(7)
 	buildHandleBytes := func(data []byte) []byte {
-		handleBytes, err := codec.EncodeKey(time.UTC, nil, types.NewBytesDatum(data))
+		handleBytes, err := codec.EncodeKey(nil, nil, types.NewBytesDatum(data))
 		require.NoError(t, err)
 		return handleBytes
 	}
@@ -621,7 +616,7 @@ func TestGetNextBytesHandleDatum(t *testing.T) {
 
 	binaryDataStartPos := len(tablecodec.GenTableRecordPrefix(tblID)) + 1
 	cases := []struct {
-		key    any
+		key    interface{}
 		result []byte
 		isNull bool
 	}{
@@ -830,7 +825,7 @@ func TestGetNextBytesHandleDatum(t *testing.T) {
 func TestGetNextIntHandle(t *testing.T) {
 	tblID := int64(7)
 	cases := []struct {
-		key    any
+		key    interface{}
 		result int64
 		isNull bool
 	}{
@@ -935,7 +930,7 @@ func TestGetNextIntHandle(t *testing.T) {
 
 func TestGetNextIntDatumFromCommonHandle(t *testing.T) {
 	encode := func(tblID int64, d ...types.Datum) kv.Key {
-		encoded, err := codec.EncodeKey(time.UTC, nil, d...)
+		encoded, err := codec.EncodeKey(nil, nil, d...)
 		require.NoError(t, err)
 		h, err := kv.NewCommonHandle(encoded)
 		require.NoError(t, err)

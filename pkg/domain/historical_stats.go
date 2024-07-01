@@ -18,7 +18,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	domain_metrics "github.com/pingcap/tidb/pkg/domain/metrics"
-	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics/handle"
@@ -75,7 +74,7 @@ func (w *HistoricalStatsWorker) DumpHistoricalStats(tableID int64, statsHandle *
 	} else {
 		tblInfo = tbl.Meta()
 	}
-	dbInfo, existed := infoschema.SchemaByTable(is, tblInfo)
+	dbInfo, existed := is.SchemaByTable(tblInfo)
 	if !existed {
 		return errors.Errorf("cannot get DBInfo by TableID %d", tableID)
 	}

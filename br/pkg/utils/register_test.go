@@ -15,7 +15,6 @@ package utils
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -116,12 +115,8 @@ func TestTaskRegisterFailedGrant(t *testing.T) {
 		t.Log(task.MessageToUser())
 		require.Equal(t, "/tidb/brie/import/restore/test", task.Key)
 	}
-	require.True(t, len(list.Tasks) > 0)
-	err = register.Close(ctx)
-	// for flaky test, the lease would expire
-	if err != nil && !strings.Contains(err.Error(), "requested lease not found") {
-		require.NoError(t, err)
-	}
+
+	require.NoError(t, register.Close(ctx))
 }
 
 func TestTaskRegisterFailedReput(t *testing.T) {
@@ -158,10 +153,6 @@ func TestTaskRegisterFailedReput(t *testing.T) {
 		t.Log(task.MessageToUser())
 		require.Equal(t, "/tidb/brie/import/restore/test", task.Key)
 	}
-	require.True(t, len(list.Tasks) > 0)
-	err = register.Close(ctx)
-	// for flaky test, the lease would expire
-	if err != nil && !strings.Contains(err.Error(), "requested lease not found") {
-		require.NoError(t, err)
-	}
+
+	require.NoError(t, register.Close(ctx))
 }

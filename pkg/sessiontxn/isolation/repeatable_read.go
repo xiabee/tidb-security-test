@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
@@ -181,12 +180,12 @@ func (p *PessimisticRRTxnContextProvider) OnStmtErrorForNextAction(ctx context.C
 // Drawbacks: If the data has been changed since the ts we used, we need to retry.
 // One exception is insert operation, when it has no select plan, we do not fetch the latest ts immediately. We only update ts
 // if write conflict is incurred.
-func (p *PessimisticRRTxnContextProvider) AdviseOptimizeWithPlan(val any) (err error) {
+func (p *PessimisticRRTxnContextProvider) AdviseOptimizeWithPlan(val interface{}) (err error) {
 	if p.isTidbSnapshotEnabled() || p.isBeginStmtWithStaleRead() {
 		return nil
 	}
 
-	plan, ok := val.(base.Plan)
+	plan, ok := val.(plannercore.Plan)
 	if !ok {
 		return nil
 	}
@@ -204,7 +203,7 @@ func (p *PessimisticRRTxnContextProvider) AdviseOptimizeWithPlan(val any) (err e
 // Note: For point get and batch point get (name it plan), if one of the ancestor node is update/delete/physicalLock,
 // we should check whether the plan.Lock is true or false. See comments in needNotToBeOptimized.
 // inLockOrWriteStmt = true means one of the ancestor node is update/delete/physicalLock.
-func notNeedGetLatestTSFromPD(plan base.Plan, inLockOrWriteStmt bool) bool {
+func notNeedGetLatestTSFromPD(plan plannercore.Plan, inLockOrWriteStmt bool) bool {
 	switch v := plan.(type) {
 	case *plannercore.PointGetPlan:
 		// We do not optimize the point get/ batch point get if plan.lock = false and inLockOrWriteStmt = true.
@@ -214,7 +213,7 @@ func notNeedGetLatestTSFromPD(plan base.Plan, inLockOrWriteStmt bool) bool {
 		return !inLockOrWriteStmt || v.Lock
 	case *plannercore.BatchPointGetPlan:
 		return !inLockOrWriteStmt || v.Lock
-	case base.PhysicalPlan:
+	case plannercore.PhysicalPlan:
 		if len(v.Children()) == 0 {
 			return false
 		}

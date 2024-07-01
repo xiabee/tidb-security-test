@@ -24,7 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/tablecodec"
@@ -63,9 +63,6 @@ type UnionScanExec struct {
 	// used with dynamic prune mode
 	// < 0 if not used.
 	physTblIDIdx int
-
-	// partitionIDMap are only required by union scan with global index.
-	partitionIDMap map[int64]struct{}
 
 	keepOrder bool
 	compareExec
@@ -156,9 +153,8 @@ func (us *UnionScanExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 		mutableRow.SetDatums(row...)
 
-		sctx := us.Ctx()
 		for _, idx := range us.virtualColumnIndex {
-			datum, err := us.Schema().Columns[idx].EvalVirtualColumn(sctx.GetExprCtx().GetEvalCtx(), mutableRow.ToRow())
+			datum, err := us.Schema().Columns[idx].EvalVirtualColumn(mutableRow.ToRow())
 			if err != nil {
 				return err
 			}
@@ -175,7 +171,7 @@ func (us *UnionScanExec) Next(ctx context.Context, req *chunk.Chunk) error {
 			mutableRow.SetDatum(idx, castDatum)
 		}
 
-		matched, _, err := expression.EvalBool(us.Ctx().GetExprCtx().GetEvalCtx(), us.conditionsWithVirCol, mutableRow.ToRow())
+		matched, _, err := expression.EvalBool(us.Ctx(), us.conditionsWithVirCol, mutableRow.ToRow())
 		if err != nil {
 			return err
 		}
@@ -191,7 +187,7 @@ func (us *UnionScanExec) Close() error {
 	us.cursor4AddRows = nil
 	us.cursor4SnapshotRows = 0
 	us.snapshotRows = us.snapshotRows[:0]
-	return exec.Close(us.Children(0))
+	return us.Children(0).Close()
 }
 
 // getOneRow gets one result row from dirty table or child.
@@ -294,7 +290,7 @@ type compareExec struct {
 	usedIndex []int
 	desc      bool
 	// handleCols is the handle's position of the below scan plan.
-	handleCols plannerutil.HandleCols
+	handleCols plannercore.HandleCols
 }
 
 func (ce compareExec) compare(sctx *stmtctx.StatementContext, a, b []types.Datum) (ret int, err error) {
@@ -302,7 +298,7 @@ func (ce compareExec) compare(sctx *stmtctx.StatementContext, a, b []types.Datum
 	for _, colOff := range ce.usedIndex {
 		aColumn := a[colOff]
 		bColumn := b[colOff]
-		cmp, err = aColumn.Compare(sctx.TypeCtx(), &bColumn, ce.collators[colOff])
+		cmp, err = aColumn.Compare(sctx, &bColumn, ce.collators[colOff])
 		if err != nil {
 			return 0, err
 		}

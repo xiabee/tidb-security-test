@@ -112,7 +112,7 @@ func (s *schemaValidator) Restart() {
 	defer s.mux.Unlock()
 	s.isStarted = true
 	if s.do != nil {
-		// When this instance reconnects PD, we should record the latest schema version after mustReload(),
+		// When this instance reconnects PD, we should record the latest schema verion after mustReload(),
 		// to prevent write txns using a stale schema version by aborting them before commit.
 		// However, the problem still exists for read-only txns.
 		s.restartSchemaVer = s.do.InfoSchema().SchemaMetaVersion()
@@ -207,12 +207,12 @@ func (s *schemaValidator) isRelatedTablesChanged(currVer int64, tableIDs []int64
 		}
 	}
 	if len(changedTblMap) > 0 {
-		tblIDs := make([]int64, 0, len(changedTblMap))
+		tblIds := make([]int64, 0, len(changedTblMap))
 		for id := range changedTblMap {
-			tblIDs = append(tblIDs, id)
+			tblIds = append(tblIds, id)
 		}
-		slices.Sort(tblIDs)
-		logutil.BgLogger().Info("schema of tables in the transaction are changed", zap.Int64s("conflicted table IDs", tblIDs),
+		slices.Sort(tblIds)
+		logutil.BgLogger().Info("schema of tables in the transaction are changed", zap.Int64s("conflicted table IDs", tblIds),
 			zap.Int64("transaction schema", currVer), zap.Int64s("schema versions that changed the tables", changedSchemaVers))
 		return true
 	}

@@ -62,7 +62,7 @@ echo "current ts: $current_ts"
 i=0
 while true; do
     # extract the checkpoint ts of the log backup task. If there is some error, the checkpoint ts should be empty
-    log_backup_status=$(unset BR_LOG_TO_TERM && run_br --skip-goleak --pd $PD_ADDR log status --task-name integration_test --json 2>br.log)
+    log_backup_status=$(unset BR_LOG_TO_TERM && run_br --pd $PD_ADDR log status --task-name integration_test --json 2>/dev/null)
     echo "log backup status: $log_backup_status"
     checkpoint_ts=$(echo "$log_backup_status" | head -n 1 | jq 'if .[0].last_errors | length  == 0 then .[0].checkpoint else empty end')
     echo "checkpoint ts: $checkpoint_ts"
@@ -107,7 +107,9 @@ check_contains "restore log success summary"
 check_not_contains "rewrite delete range"
 echo "" > $res_file
 echo "check sql result"
-run_sql "select count(*) DELETE_RANGE_CNT from (select * from mysql.gc_delete_range union all select * from mysql.gc_delete_range_done) del_range group by ts order by DELETE_RANGE_CNT desc limit 1;"
+run_sql "select * from mysql.gc_delete_range"
+run_sql "select * from mysql.gc_delete_range_done"
+run_sql "select count(*) DELETE_RANGE_CNT from (select distinct start_key, end_key, ts from (select * from mysql.gc_delete_range union all select * from mysql.gc_delete_range_done)) del_range group by ts order by DELETE_RANGE_CNT desc limit 1;"
 expect_delete_range=$(($incremental_delete_range_count-$prepare_delete_range_count))
 check_contains "DELETE_RANGE_CNT: $expect_delete_range"
 ## check feature compatibility between PITR and accelerate indexing

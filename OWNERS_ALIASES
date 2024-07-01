@@ -68,8 +68,6 @@ aliases:
     - gmhdbjd
     - lichunzhu
     - okJiang
-    - lance6716
-    - tangenta
   sig-approvers-infoschema: # approvers for infoschema pkg
     - zimulala
     - wjhuang2016
@@ -84,7 +82,7 @@ aliases:
     - tangenta
     - wjhuang2016
     - ywqzzy
-    - zimulala    
+    - zimulala
   sig-approvers-owner: # approvers for `owner` pkg
     - Benjamin2037
     - lichunzhu
@@ -123,12 +121,3 @@ aliases:
     - Benjamin2037
     - gmhdbjd
     - lichunzhu
-  sig-approvers-planner: # approvers for planner module
-    - AilinKid
-    - elsa0520
-    - fixdb
-    - hawkingrei
-    - hi-rustin
-    - qw4990
-    - time-and-fate
-    - winoros

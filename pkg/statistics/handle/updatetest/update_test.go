@@ -26,10 +26,9 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/cardinality"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze/exec"
+	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze"
 	"github.com/pingcap/tidb/pkg/statistics/handle/usage"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -90,7 +89,7 @@ func TestSingleSessionInsert(t *testing.T) {
 	require.Equal(t, int64(rowCount1*2), stats1.RealtimeCount)
 
 	// Test IncreaseFactor.
-	count, err := cardinality.ColumnEqualRowCount(testKit.Session().GetPlanCtx(), stats1, types.NewIntDatum(1), tableInfo1.Columns[0].ID)
+	count, err := cardinality.ColumnEqualRowCount(testKit.Session(), stats1, types.NewIntDatum(1), tableInfo1.Columns[0].ID)
 	require.NoError(t, err)
 	require.Equal(t, float64(rowCount1*2), count)
 
@@ -297,7 +296,7 @@ func TestTxnWithFailure(t *testing.T) {
 func TestUpdatePartition(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	testKit := testkit.NewTestKit(t, store)
-	pruneMode, err := util.GetCurrentPruneMode(dom.StatsHandle().SPool())
+	pruneMode, err := dom.StatsHandle().GetCurrentPruneMode()
 	require.NoError(t, err)
 	testKit.MustQuery("select @@tidb_partition_prune_mode").Check(testkit.Rows(pruneMode))
 	testKit.MustExec("use test")
@@ -364,11 +363,11 @@ func TestAutoUpdate(t *testing.T) {
 		testKit.MustExec("use test")
 		testKit.MustExec("create table t (a varchar(20))")
 
-		exec.AutoAnalyzeMinCnt = 0
+		autoanalyze.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.2")
 		defer func() {
-			exec.AutoAnalyzeMinCnt = 1000
-			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.5")
+			autoanalyze.AutoAnalyzeMinCnt = 1000
+			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
 		do := dom
@@ -388,7 +387,7 @@ func TestAutoUpdate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, h.DumpStatsDeltaToKV(true))
 		require.NoError(t, h.Update(is))
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		stats = h.GetTableStats(tableInfo)
 		require.Equal(t, int64(5), stats.RealtimeCount)
@@ -406,7 +405,7 @@ func TestAutoUpdate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, h.DumpStatsDeltaToKV(true))
 		require.NoError(t, h.Update(is))
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		stats = h.GetTableStats(tableInfo)
 		require.Equal(t, int64(6), stats.RealtimeCount)
@@ -416,7 +415,7 @@ func TestAutoUpdate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, h.DumpStatsDeltaToKV(true))
 		require.NoError(t, h.Update(is))
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		stats = h.GetTableStats(tableInfo)
 		require.Equal(t, int64(7), stats.RealtimeCount)
@@ -426,7 +425,7 @@ func TestAutoUpdate(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, h.DumpStatsDeltaToKV(true))
 		require.NoError(t, h.Update(is))
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		stats = h.GetTableStats(tableInfo)
 		require.Equal(t, int64(8), stats.RealtimeCount)
@@ -445,7 +444,7 @@ func TestAutoUpdate(t *testing.T) {
 		tbl, err = is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 		require.NoError(t, err)
 		tableInfo = tbl.Meta()
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		testKit.MustExec("explain select * from t where a > 'a'")
 		require.NoError(t, h.LoadNeededHistograms())
@@ -469,11 +468,11 @@ func TestAutoUpdatePartition(t *testing.T) {
 		testKit.MustExec("create table t (a int) PARTITION BY RANGE (a) (PARTITION p0 VALUES LESS THAN (6))")
 		testKit.MustExec("analyze table t")
 
-		exec.AutoAnalyzeMinCnt = 0
+		autoanalyze.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.6")
 		defer func() {
-			exec.AutoAnalyzeMinCnt = 1000
-			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.5")
+			autoanalyze.AutoAnalyzeMinCnt = 1000
+			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
 		do := dom
@@ -491,7 +490,7 @@ func TestAutoUpdatePartition(t *testing.T) {
 		testKit.MustExec("insert into t values (1)")
 		require.NoError(t, h.DumpStatsDeltaToKV(true))
 		require.NoError(t, h.Update(is))
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		stats = h.GetPartitionStats(tableInfo, pi.Definitions[0].ID)
 		require.Equal(t, int64(1), stats.RealtimeCount)
 		require.Equal(t, int64(0), stats.ModifyCount)
@@ -514,11 +513,11 @@ func TestIssue25700(t *testing.T) {
 	tk.MustExec("drop table if exists t")
 	tk.MustExec("CREATE TABLE `t` ( `ldecimal` decimal(32,4) DEFAULT NULL, `rdecimal` decimal(32,4) DEFAULT NULL, `gen_col` decimal(36,4) GENERATED ALWAYS AS (`ldecimal` + `rdecimal`) VIRTUAL, `col_timestamp` timestamp(3) NULL DEFAULT NULL ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;")
 	tk.MustExec("analyze table t")
-	tk.MustExec("INSERT INTO `t` (`ldecimal`, `rdecimal`, `col_timestamp`) VALUES (2265.2200, 9843.4100, '1999-12-31 16:00:00')" + strings.Repeat(", (2265.2200, 9843.4100, '1999-12-31 16:00:00')", int(exec.AutoAnalyzeMinCnt)))
+	tk.MustExec("INSERT INTO `t` (`ldecimal`, `rdecimal`, `col_timestamp`) VALUES (2265.2200, 9843.4100, '1999-12-31 16:00:00')" + strings.Repeat(", (2265.2200, 9843.4100, '1999-12-31 16:00:00')", int(autoanalyze.AutoAnalyzeMinCnt)))
 	require.NoError(t, dom.StatsHandle().DumpStatsDeltaToKV(true))
 	require.NoError(t, dom.StatsHandle().Update(dom.InfoSchema()))
 
-	require.True(t, dom.StatsHandle().HandleAutoAnalyze())
+	require.True(t, dom.StatsHandle().HandleAutoAnalyze(dom.InfoSchema()))
 	require.Equal(t, "finished", tk.MustQuery("show analyze status").Rows()[1][7])
 }
 
@@ -562,8 +561,6 @@ func TestSplitRange(t *testing.T) {
 			result:  "[8,9)",
 		},
 	}
-	sc := new(stmtctx.StatementContext)
-	sc.SetTimeZone(time.UTC)
 	for _, test := range tests {
 		ranges := make([]*ranger.Range, 0, len(test.points)/2)
 		for i := 0; i < len(test.points); i += 2 {
@@ -575,7 +572,7 @@ func TestSplitRange(t *testing.T) {
 				Collators:   collate.GetBinaryCollatorSlice(1),
 			})
 		}
-		ranges, _ = h.SplitRange(sc, ranges, false)
+		ranges, _ = h.SplitRange(nil, ranges, false)
 		var ranStrs []string
 		for _, ran := range ranges {
 			ranStrs = append(ranStrs, ran.String())
@@ -633,7 +630,9 @@ func TestLoadHistCorrelation(t *testing.T) {
 	h.Clear()
 	require.NoError(t, h.Update(dom.InfoSchema()))
 	result := testKit.MustQuery("show stats_histograms where Table_name = 't'")
-	require.Len(t, result.Rows(), 0)
+	// After https://github.com/pingcap/tidb/pull/37444, `show stats_histograms` displays the columns whose hist/topn/cmsketch
+	// are not loaded and their stats status is allEvicted.
+	require.Len(t, result.Rows(), 1)
 	testKit.MustExec("explain select * from t where c = 1")
 	require.NoError(t, h.LoadNeededHistograms())
 	result = testKit.MustQuery("show stats_histograms where Table_name = 't'")
@@ -646,8 +645,9 @@ func BenchmarkHandleAutoAnalyze(b *testing.B) {
 	testKit := testkit.NewTestKit(b, store)
 	testKit.MustExec("use test")
 	h := dom.StatsHandle()
+	is := dom.InfoSchema()
 	for i := 0; i < b.N; i++ {
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 	}
 }
 
@@ -700,6 +700,7 @@ func TestMergeTopN(t *testing.T) {
 
 		topNs := make([]*statistics.TopN, 0, topnNum)
 		res := make(map[int]uint64)
+		rand.Seed(time.Now().Unix())
 		for i := 0; i < topnNum; i++ {
 			topN := statistics.NewTopN(n)
 			occur := make(map[int]bool)
@@ -750,30 +751,30 @@ func TestStatsVariables(t *testing.T) {
 	h := dom.StatsHandle()
 	sctx := tk.Session().(sessionctx.Context)
 
-	pruneMode, err := util.GetCurrentPruneMode(h.SPool())
+	pruneMode, err := h.GetCurrentPruneMode()
 	require.NoError(t, err)
 	require.Equal(t, string(variable.Dynamic), pruneMode)
 	err = util.UpdateSCtxVarsForStats(sctx)
 	require.NoError(t, err)
 	require.Equal(t, 2, sctx.GetSessionVars().AnalyzeVersion)
-	require.Equal(t, false, sctx.GetSessionVars().EnableHistoricalStats)
+	require.Equal(t, true, sctx.GetSessionVars().EnableHistoricalStats)
 	require.Equal(t, string(variable.Dynamic), sctx.GetSessionVars().PartitionPruneMode.Load())
 	require.Equal(t, false, sctx.GetSessionVars().EnableAnalyzeSnapshot)
 	require.Equal(t, true, sctx.GetSessionVars().SkipMissingPartitionStats)
 
 	tk.MustExec(`set global tidb_analyze_version=1`)
 	tk.MustExec(`set global tidb_partition_prune_mode='static'`)
-	tk.MustExec(`set global tidb_enable_historical_stats=1`)
+	tk.MustExec(`set global tidb_enable_historical_stats=0`)
 	tk.MustExec(`set global tidb_enable_analyze_snapshot=1`)
 	tk.MustExec(`set global tidb_skip_missing_partition_stats=0`)
 
-	pruneMode, err = util.GetCurrentPruneMode(h.SPool())
+	pruneMode, err = h.GetCurrentPruneMode()
 	require.NoError(t, err)
 	require.Equal(t, string(variable.Static), pruneMode)
 	err = util.UpdateSCtxVarsForStats(sctx)
 	require.NoError(t, err)
 	require.Equal(t, 1, sctx.GetSessionVars().AnalyzeVersion)
-	require.Equal(t, true, sctx.GetSessionVars().EnableHistoricalStats)
+	require.Equal(t, false, sctx.GetSessionVars().EnableHistoricalStats)
 	require.Equal(t, string(variable.Static), sctx.GetSessionVars().PartitionPruneMode.Load())
 	require.Equal(t, true, sctx.GetSessionVars().EnableAnalyzeSnapshot)
 	require.Equal(t, false, sctx.GetSessionVars().SkipMissingPartitionStats)
@@ -802,11 +803,11 @@ func TestAutoUpdatePartitionInDynamicOnlyMode(t *testing.T) {
 		testKit.MustExec("set @@tidb_analyze_version = 2")
 		testKit.MustExec("analyze table t")
 
-		exec.AutoAnalyzeMinCnt = 0
+		autoanalyze.AutoAnalyzeMinCnt = 0
 		testKit.MustExec("set global tidb_auto_analyze_ratio = 0.1")
 		defer func() {
-			exec.AutoAnalyzeMinCnt = 1000
-			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.5")
+			autoanalyze.AutoAnalyzeMinCnt = 1000
+			testKit.MustExec("set global tidb_auto_analyze_ratio = 0.0")
 		}()
 
 		require.NoError(t, h.Update(is))
@@ -831,7 +832,7 @@ func TestAutoUpdatePartitionInDynamicOnlyMode(t *testing.T) {
 		require.Equal(t, int64(3), partitionStats.RealtimeCount)
 		require.Equal(t, int64(1), partitionStats.ModifyCount)
 
-		h.HandleAutoAnalyze()
+		h.HandleAutoAnalyze(is)
 		require.NoError(t, h.Update(is))
 		globalStats = h.GetTableStats(tableInfo)
 		partitionStats = h.GetPartitionStats(tableInfo, pi.Definitions[0].ID)
@@ -848,9 +849,9 @@ func TestAutoAnalyzeRatio(t *testing.T) {
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
-	exec.AutoAnalyzeMinCnt = 0
+	autoanalyze.AutoAnalyzeMinCnt = 0
 	defer func() {
-		exec.AutoAnalyzeMinCnt = 1000
+		autoanalyze.AutoAnalyzeMinCnt = 1000
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
@@ -882,19 +883,19 @@ func TestAutoAnalyzeRatio(t *testing.T) {
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
 	require.Equal(t, getStatsHealthy(), 44)
-	require.True(t, h.HandleAutoAnalyze())
+	require.True(t, h.HandleAutoAnalyze(is))
 
 	tk.MustExec("delete from t limit 12")
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
 	require.Equal(t, getStatsHealthy(), 61)
-	require.False(t, h.HandleAutoAnalyze())
+	require.False(t, h.HandleAutoAnalyze(is))
 
 	tk.MustExec("delete from t limit 4")
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
 	require.Equal(t, getStatsHealthy(), 48)
-	require.True(t, h.HandleAutoAnalyze())
+	require.True(t, h.HandleAutoAnalyze(dom.InfoSchema()))
 }
 
 func TestDumpColumnStatsUsage(t *testing.T) {
@@ -921,12 +922,12 @@ func TestDumpColumnStatsUsage(t *testing.T) {
 	// t1.a is collected as predicate column
 	rows := tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't1'").Rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, []any{"test", "t1", "", "a"}, rows[0][:4])
+	require.Equal(t, []interface{}{"test", "t1", "", "a"}, rows[0][:4])
 	require.True(t, rows[0][4].(string) != "<nil>")
 	require.True(t, rows[0][5].(string) == "<nil>")
 	rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't2'").Rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, []any{"test", "t2", "", "b"}, rows[0][:4])
+	require.Equal(t, []interface{}{"test", "t2", "", "b"}, rows[0][:4])
 	require.True(t, rows[0][4].(string) != "<nil>")
 	require.True(t, rows[0][5].(string) == "<nil>")
 
@@ -937,10 +938,10 @@ func TestDumpColumnStatsUsage(t *testing.T) {
 	// Check both of them behave as expected.
 	rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't1'").Rows()
 	require.Len(t, rows, 2)
-	require.Equal(t, []any{"test", "t1", "", "a"}, rows[0][:4])
+	require.Equal(t, []interface{}{"test", "t1", "", "a"}, rows[0][:4])
 	require.True(t, rows[0][4].(string) != "<nil>")
 	require.True(t, rows[0][5].(string) != "<nil>")
-	require.Equal(t, []any{"test", "t1", "", "b"}, rows[1][:4])
+	require.Equal(t, []interface{}{"test", "t1", "", "b"}, rows[1][:4])
 	require.True(t, rows[1][4].(string) != "<nil>")
 	require.True(t, rows[1][5].(string) != "<nil>")
 
@@ -953,7 +954,7 @@ func TestDumpColumnStatsUsage(t *testing.T) {
 		require.NoError(t, h.DumpColStatsUsageToKV())
 		rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't3'").Rows()
 		require.Len(t, rows, 1)
-		require.Equal(t, []any{"test", "t3", "global", "a"}, rows[0][:4])
+		require.Equal(t, []interface{}{"test", "t3", "global", "a"}, rows[0][:4])
 		require.True(t, rows[0][4].(string) != "<nil>")
 		require.True(t, rows[0][5].(string) == "<nil>")
 	}
@@ -966,12 +967,12 @@ func TestDumpColumnStatsUsage(t *testing.T) {
 	require.NoError(t, h.DumpColStatsUsageToKV())
 	rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't1'").Rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, []any{"test", "t1", "", "b"}, rows[0][:4])
+	require.Equal(t, []interface{}{"test", "t1", "", "b"}, rows[0][:4])
 	require.True(t, rows[0][4].(string) != "<nil>")
 	require.True(t, rows[0][5].(string) == "<nil>")
 	rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't2'").Rows()
 	require.Len(t, rows, 1)
-	require.Equal(t, []any{"test", "t2", "", "a"}, rows[0][:4])
+	require.Equal(t, []interface{}{"test", "t2", "", "a"}, rows[0][:4])
 	require.True(t, rows[0][4].(string) != "<nil>")
 	require.True(t, rows[0][5].(string) == "<nil>")
 }
@@ -1001,7 +1002,7 @@ func TestCollectPredicateColumnsFromExecute(t *testing.T) {
 			require.NoError(t, h.DumpColStatsUsageToKV())
 			rows := tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't1'").Rows()
 			require.Len(t, rows, 1)
-			require.Equal(t, []any{"test", "t1", "", "a"}, rows[0][:4])
+			require.Equal(t, []interface{}{"test", "t1", "", "a"}, rows[0][:4])
 			require.True(t, rows[0][4].(string) != "<nil>")
 			require.True(t, rows[0][5].(string) == "<nil>")
 
@@ -1018,7 +1019,7 @@ func TestCollectPredicateColumnsFromExecute(t *testing.T) {
 				require.NoError(t, h.DumpColStatsUsageToKV())
 				rows = tk.MustQuery("show column_stats_usage where db_name = 'test' and table_name = 't1'").Rows()
 				require.Len(t, rows, 1)
-				require.Equal(t, []any{"test", "t1", "", "a"}, rows[0][:4])
+				require.Equal(t, []interface{}{"test", "t1", "", "a"}, rows[0][:4])
 				require.True(t, rows[0][4].(string) != "<nil>")
 				require.True(t, rows[0][5].(string) == "<nil>")
 			}
@@ -1076,9 +1077,9 @@ func TestStatsLockUnlockForAutoAnalyze(t *testing.T) {
 
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
-	exec.AutoAnalyzeMinCnt = 0
+	autoanalyze.AutoAnalyzeMinCnt = 0
 	defer func() {
-		exec.AutoAnalyzeMinCnt = 1000
+		autoanalyze.AutoAnalyzeMinCnt = 1000
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
@@ -1101,7 +1102,7 @@ func TestStatsLockUnlockForAutoAnalyze(t *testing.T) {
 	tk.MustExec("insert into t values (1)" + strings.Repeat(", (1)", 10))
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
-	require.True(t, h.HandleAutoAnalyze())
+	require.True(t, h.HandleAutoAnalyze(is))
 
 	tbl, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.Nil(t, err)
@@ -1116,7 +1117,7 @@ func TestStatsLockUnlockForAutoAnalyze(t *testing.T) {
 	tk.MustExec("delete from t limit 12")
 	require.NoError(t, h.DumpStatsDeltaToKV(true))
 	require.NoError(t, h.Update(is))
-	require.False(t, h.HandleAutoAnalyze())
+	require.False(t, h.HandleAutoAnalyze(is))
 
 	tblStats1 := h.GetTableStats(tbl.Meta())
 	require.Equal(t, tblStats, tblStats1)
@@ -1276,15 +1277,15 @@ func TestNotDumpSysTable(t *testing.T) {
 func TestAutoAnalyzePartitionTableAfterAddingIndex(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
-	oriMinCnt := exec.AutoAnalyzeMinCnt
+	oriMinCnt := autoanalyze.AutoAnalyzeMinCnt
 	oriStart := tk.MustQuery("select @@tidb_auto_analyze_start_time").Rows()[0][0].(string)
 	oriEnd := tk.MustQuery("select @@tidb_auto_analyze_end_time").Rows()[0][0].(string)
 	defer func() {
-		exec.AutoAnalyzeMinCnt = oriMinCnt
+		autoanalyze.AutoAnalyzeMinCnt = oriMinCnt
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_start_time='%v'", oriStart))
 		tk.MustExec(fmt.Sprintf("set global tidb_auto_analyze_end_time='%v'", oriEnd))
 	}()
-	exec.AutoAnalyzeMinCnt = 0
+	autoanalyze.AutoAnalyzeMinCnt = 0
 	tk.MustExec("set global tidb_auto_analyze_start_time='00:00 +0000'")
 	tk.MustExec("set global tidb_auto_analyze_end_time='23:59 +0000'")
 	tk.MustExec("set global tidb_analyze_version = 2")
@@ -1297,13 +1298,13 @@ func TestAutoAnalyzePartitionTableAfterAddingIndex(t *testing.T) {
 	tk.MustExec("set session tidb_analyze_version = 2")
 	tk.MustExec("set session tidb_partition_prune_mode = 'dynamic'")
 	tk.MustExec("analyze table t")
-	require.False(t, h.HandleAutoAnalyze())
+	require.False(t, h.HandleAutoAnalyze(dom.InfoSchema()))
 	tk.MustExec("alter table t add index idx(a)")
 	tbl, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tblInfo := tbl.Meta()
 	idxInfo := tblInfo.Indices[0]
 	require.Nil(t, h.GetTableStats(tblInfo).Indices[idxInfo.ID])
-	require.True(t, h.HandleAutoAnalyze())
+	require.True(t, h.HandleAutoAnalyze(dom.InfoSchema()))
 	require.NotNil(t, h.GetTableStats(tblInfo).Indices[idxInfo.ID])
 }

@@ -5,7 +5,6 @@
 //
 //	mockgen -package mock github.com/pingcap/tidb/pkg/util/sqlexec RestrictedSQLExecutor
 //
-
 // Package mock is a generated GoMock package.
 package mock
 
@@ -40,11 +39,6 @@ func NewMockRestrictedSQLExecutor(ctrl *gomock.Controller) *MockRestrictedSQLExe
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockRestrictedSQLExecutor) EXPECT() *MockRestrictedSQLExecutorMockRecorder {
 	return m.recorder
-}
-
-// ISGOMOCK indicates that this struct is a gomock mock.
-func (m *MockRestrictedSQLExecutor) ISGOMOCK() struct{} {
-	return struct{}{}
 }
 
 // ExecRestrictedSQL mocks base method.

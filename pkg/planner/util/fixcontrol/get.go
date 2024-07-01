@@ -20,14 +20,6 @@ import (
 )
 
 const (
-	// Fix33031 controls whether to disallow plan cache for partitioned
-	// tables (both prepared statments and non-prepared statements)
-	// See #33031
-	Fix33031 uint64 = 33031
-	// Fix43817 controls whether to allow optimizer to evaluate non-correlated sub-queries in the optimization phase.
-	// If it is not allowed, the optimizer will return a particular error when encountering non-correlated sub-queries.
-	// This fix-control is mainly for Index Advisor.
-	Fix43817 uint64 = 43817
 	// Fix44262 controls whether to allow to use dynamic-mode to access partitioning tables without global-stats (#44262).
 	Fix44262 uint64 = 44262
 	// Fix44389 controls whether to consider non-point ranges of some CNF item when building ranges.
@@ -42,18 +34,8 @@ const (
 	Fix44855 uint64 = 44855
 	// Fix45132 controls whether to use access range row count to determine access path on the Skyline pruning.
 	Fix45132 uint64 = 45132
-	// Fix45822 controls whether to eliminate apply operator.
-	Fix45822 uint64 = 45822
-	// Fix45798 controls whether to cache plans that access generated columns.
-	Fix45798 uint64 = 45798
 	// Fix46177 controls whether to explore enforced plans for DataSource if it has already found an unenforced plan.
 	Fix46177 uint64 = 46177
-	// Fix49736 controls whether to force the optimizer to use plan cache even if there is risky optimization.
-	// This fix-control is test-only.
-	Fix49736 uint64 = 49736
-	// Fix52869 controls whether to disable the limitation that index merge path won't be generated automatically when
-	// there exist other single-index access paths that do range scan.
-	Fix52869 uint64 = 52869
 )
 
 // GetStr fetches the given key from the fix control map as a string type.

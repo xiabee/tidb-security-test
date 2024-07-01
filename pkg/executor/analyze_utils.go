@@ -17,6 +17,7 @@ package executor
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/pingcap/errors"
@@ -24,49 +25,9 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/store/helper"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/tiancaiamao/gp"
+	"github.com/pingcap/tidb/pkg/util/memory"
 	"go.uber.org/atomic"
-	"go.uber.org/zap"
 )
-
-func adaptiveAnlayzeDistSQLConcurrency(ctx context.Context, sctx sessionctx.Context) int {
-	concurrency := sctx.GetSessionVars().AnalyzeDistSQLScanConcurrency()
-	if concurrency > 0 {
-		return concurrency
-	}
-	tikvStore, ok := sctx.GetStore().(helper.Storage)
-	if !ok {
-		logutil.BgLogger().Warn("Information about TiKV store status can be gotten only when the storage is TiKV")
-		return variable.DefAnalyzeDistSQLScanConcurrency
-	}
-	tikvHelper := &helper.Helper{
-		Store:       tikvStore,
-		RegionCache: tikvStore.GetRegionCache(),
-	}
-	pdCli, err := tikvHelper.TryGetPDHTTPClient()
-	if err != nil {
-		logutil.BgLogger().Warn("fail to TryGetPDHTTPClient", zap.Error(err))
-		return variable.DefAnalyzeDistSQLScanConcurrency
-	}
-	storesStat, err := pdCli.GetStores(ctx)
-	if err != nil {
-		logutil.BgLogger().Warn("fail to get stores info", zap.Error(err))
-		return variable.DefAnalyzeDistSQLScanConcurrency
-	}
-	if storesStat.Count <= 5 {
-		return variable.DefAnalyzeDistSQLScanConcurrency
-	} else if storesStat.Count <= 10 {
-		return storesStat.Count
-	} else if storesStat.Count <= 20 {
-		return storesStat.Count * 2
-	} else if storesStat.Count <= 50 {
-		return storesStat.Count * 3
-	}
-	return storesStat.Count * 4
-}
 
 func getIntFromSessionVars(ctx sessionctx.Context, name string) (int, error) {
 	sessionVars := ctx.GetSessionVars()
@@ -93,10 +54,13 @@ func isAnalyzeWorkerPanic(err error) bool {
 	return err == errAnalyzeWorkerPanic || err == errAnalyzeOOM
 }
 
-func getAnalyzePanicErr(r any) error {
+func getAnalyzePanicErr(r interface{}) error {
 	if msg, ok := r.(string); ok {
 		if msg == globalPanicAnalyzeMemoryExceed {
 			return errors.Trace(errAnalyzeOOM)
+		}
+		if strings.Contains(msg, memory.PanicMemoryExceedWarnMsg) {
+			return errors.Errorf("%s, %s", msg, errAnalyzeOOM)
 		}
 	}
 	if err, ok := r.(error); ok {
@@ -143,17 +107,16 @@ func (w *analyzeResultsNotifyWaitGroupWrapper) Run(exec func()) {
 // notifyErrorWaitGroupWrapper is a wrapper for sync.WaitGroup
 // Please add all goroutine count when to `Add` to avoid exiting in advance.
 type notifyErrorWaitGroupWrapper struct {
-	*util.WaitGroupPool
+	sync.WaitGroup
 	notify chan error
 	cnt    atomic.Uint64
 }
 
 // newNotifyErrorWaitGroupWrapper is to create notifyErrorWaitGroupWrapper
-func newNotifyErrorWaitGroupWrapper(gp *gp.Pool, notify chan error) *notifyErrorWaitGroupWrapper {
+func newNotifyErrorWaitGroupWrapper(notify chan error) *notifyErrorWaitGroupWrapper {
 	return &notifyErrorWaitGroupWrapper{
-		WaitGroupPool: util.NewWaitGroupPool(gp),
-		notify:        notify,
-		cnt:           *atomic.NewUint64(0),
+		notify: notify,
+		cnt:    *atomic.NewUint64(0),
 	}
 }
 

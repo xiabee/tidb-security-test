@@ -16,11 +16,12 @@ package globalstats
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/util/hack"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 )
 
 // StatsWrapper wrapper stats
@@ -38,7 +39,7 @@ func NewStatsWrapper(hg []*statistics.Histogram, topN []*statistics.TopN) *Stats
 }
 
 type topnStatsMergeWorker struct {
-	killer *sqlkiller.SQLKiller
+	killed *uint32
 	taskCh <-chan *TopnStatsMergeTask
 	respCh chan<- *TopnStatsMergeResponse
 	// the stats in the wrapper should only be read during the worker
@@ -55,7 +56,7 @@ func NewTopnStatsMergeWorker(
 	taskCh <-chan *TopnStatsMergeTask,
 	respCh chan<- *TopnStatsMergeResponse,
 	wrapper *StatsWrapper,
-	killer *sqlkiller.SQLKiller) *topnStatsMergeWorker {
+	killed *uint32) *topnStatsMergeWorker {
 	worker := &topnStatsMergeWorker{
 		taskCh:  taskCh,
 		respCh:  respCh,
@@ -63,7 +64,7 @@ func NewTopnStatsMergeWorker(
 	}
 	worker.statsWrapper = wrapper
 	worker.shardMutex = make([]sync.Mutex, len(wrapper.AllHg))
-	worker.killer = killer
+	worker.killed = killed
 	return worker
 }
 
@@ -103,8 +104,8 @@ func (worker *topnStatsMergeWorker) Run(timeZone *time.Location, isIndex bool, v
 		datumMap := statistics.NewDatumMapCache()
 		for i, topN := range checkTopNs {
 			i = i + start
-			if err := worker.killer.HandleSignal(); err != nil {
-				resp.Err = err
+			if atomic.LoadUint32(worker.killed) == 1 {
+				resp.Err = errors.Trace(statistics.ErrQueryInterrupted)
 				worker.respCh <- resp
 				return
 			}
@@ -126,8 +127,8 @@ func (worker *topnStatsMergeWorker) Run(timeZone *time.Location, isIndex bool, v
 				// 1. Check the topN first.
 				// 2. If the topN doesn't contain the value corresponding to encodedVal. We should check the histogram.
 				for j := 0; j < partNum; j++ {
-					if err := worker.killer.HandleSignal(); err != nil {
-						resp.Err = err
+					if atomic.LoadUint32(worker.killed) == 1 {
+						resp.Err = errors.Trace(statistics.ErrQueryInterrupted)
 						worker.respCh <- resp
 						return
 					}

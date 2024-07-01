@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -136,8 +135,6 @@ func TestDropNotNullColumn(t *testing.T) {
 	tk.MustExec("insert into t2 values(3, '11:22:33')")
 	tk.MustExec("create table t3 (id int, d json not null)")
 	tk.MustExec("insert into t3 values(4, d)")
-	tk.MustExec("create table t4 (id int, e varchar(256) default (REPLACE(UPPER(UUID()), '-', '')) not null)")
-	tk.MustExec("insert into t4 values(4, 3)")
 
 	tk1 := testkit.NewTestKit(t, store)
 	tk1.MustExec("use test")
@@ -163,8 +160,6 @@ func TestDropNotNullColumn(t *testing.T) {
 				_, checkErr = tk1.Exec("insert into t2 set id = 3")
 			case 3:
 				_, checkErr = tk1.Exec("insert into t3 set id = 4")
-			case 4:
-				_, checkErr = tk1.Exec("insert into t4 set id = 5")
 			}
 		}
 	}
@@ -180,9 +175,6 @@ func TestDropNotNullColumn(t *testing.T) {
 	require.NoError(t, checkErr)
 	sqlNum++
 	tk.MustExec("alter table t3 drop column d")
-	require.NoError(t, checkErr)
-	sqlNum++
-	tk.MustExec("alter table t4 drop column e")
 	require.NoError(t, checkErr)
 	d.SetHook(originalCallback)
 	tk.MustExec("drop table t, t1, t2, t3")
@@ -297,7 +289,7 @@ func TestTwoStates(t *testing.T) {
 }
 
 type stateCase struct {
-	session            sessiontypes.Session
+	session            session.Session
 	rawStmt            ast.StmtNode
 	stmt               sqlexec.Statement
 	expectedExecErr    string

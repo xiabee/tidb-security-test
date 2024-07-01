@@ -72,11 +72,11 @@ func (s *mockPubSubDataSinkStream) Context() context.Context {
 	return context.Background()
 }
 
-func (s *mockPubSubDataSinkStream) SendMsg(m any) error {
+func (s *mockPubSubDataSinkStream) SendMsg(m interface{}) error {
 	return nil
 }
 
-func (s *mockPubSubDataSinkStream) RecvMsg(m any) error {
+func (s *mockPubSubDataSinkStream) RecvMsg(m interface{}) error {
 	return nil
 }
 

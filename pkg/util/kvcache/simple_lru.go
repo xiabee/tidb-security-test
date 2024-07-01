@@ -27,7 +27,8 @@ type Key interface {
 }
 
 // Value is the interface that every value in LRU Cache should implement.
-type Value any
+type Value interface {
+}
 
 // cacheEntry wraps Key and Value. It's the value of list.Element.
 type cacheEntry struct {

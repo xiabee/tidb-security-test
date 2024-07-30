@@ -273,21 +273,20 @@ func TestClearCache(t *testing.T) {
 		return nil
 	}
 	failedStoreID := uint64(0)
-	hasFailed := false
+	hasFailed := atomic.NewBool(false)
 	for _, s := range c.stores {
 		s.clientMu.Lock()
+		sid := s.GetID()
 		s.onGetRegionCheckpoint = func(glftrr *logbackup.GetLastFlushTSOfRegionRequest) error {
-			// mark this store cache cleared
-			failedStoreID = s.GetID()
-			if !hasFailed {
-				hasFailed = true
+			// mark one store failed is enough
+			if hasFailed.CompareAndSwap(false, true) {
+				// mark this store cache cleared
+				failedStoreID = sid
 				return errors.New("failed to get checkpoint")
 			}
 			return nil
 		}
 		s.clientMu.Unlock()
-		// mark one store failed is enough
-		break
 	}
 	env := newTestEnv(c, t)
 	adv := streamhelper.NewCheckpointAdvancer(env)
@@ -494,11 +493,11 @@ func TestEnableCheckPointLimit(t *testing.T) {
 		Ranges: rngs,
 	}
 	log.Info("Start Time:", zap.Uint64("StartTs", env.task.Info.StartTs))
+
 	adv := streamhelper.NewCheckpointAdvancer(env)
 	adv.UpdateConfigWith(func(c *config.Config) {
 		c.CheckPointLagLimit = 1 * time.Minute
 	})
-
 	c.advanceClusterTimeBy(1 * time.Minute)
 	c.advanceCheckpointBy(1 * time.Minute)
 	adv.StartTaskListener(ctx)
@@ -517,6 +516,7 @@ func TestCheckPointLagged(t *testing.T) {
 	c.splitAndScatter("01", "02", "022", "023", "033", "04", "043")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	env := newTestEnv(c, t)
 	rngs := env.ranges
 	if len(rngs) == 0 {
@@ -769,56 +769,4 @@ func TestAddTaskWithLongRunTask3(t *testing.T) {
 		err := adv.OnTick(ctx)
 		return err == nil
 	}, 5*time.Second, 300*time.Millisecond)
-}
-
-func TestOwnershipLost(t *testing.T) {
-	c := createFakeCluster(t, 4, false)
-	c.splitAndScatter(manyRegions(0, 10240)...)
-	installSubscribeSupport(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	env := newTestEnv(c, t)
-	adv := streamhelper.NewCheckpointAdvancer(env)
-	adv.OnStart(ctx)
-	adv.OnBecomeOwner(ctx)
-	require.NoError(t, adv.OnTick(ctx))
-	c.advanceCheckpoints()
-	c.flushAll()
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/streamhelper/subscription.listenOver.aboutToSend", "pause")
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/streamhelper/FlushSubscriber.Clear.timeoutMs", "return(500)")
-	wg := new(sync.WaitGroup)
-	wg.Add(adv.TEST_registerCallbackForSubscriptions(wg.Done))
-	cancel()
-	failpoint.Disable("github.com/pingcap/tidb/br/pkg/streamhelper/subscription.listenOver.aboutToSend")
-	wg.Wait()
-}
-
-func TestSubscriptionPanic(t *testing.T) {
-	c := createFakeCluster(t, 4, false)
-	c.splitAndScatter(manyRegions(0, 20)...)
-	installSubscribeSupport(c)
-	ctx, cancel := context.WithCancel(context.Background())
-	env := newTestEnv(c, t)
-	adv := streamhelper.NewCheckpointAdvancer(env)
-	adv.OnStart(ctx)
-	adv.OnBecomeOwner(ctx)
-	wg := new(sync.WaitGroup)
-	wg.Add(adv.TEST_registerCallbackForSubscriptions(wg.Done))
-
-	require.NoError(t, adv.OnTick(ctx))
-	failpoint.Enable("github.com/pingcap/tidb/br/pkg/streamhelper/subscription.listenOver.aboutToSend", "5*panic")
-	ckpt := c.advanceCheckpoints()
-	c.flushAll()
-	cnt := 0
-	for {
-		require.NoError(t, adv.OnTick(ctx))
-		cnt++
-		if env.checkpoint >= ckpt {
-			break
-		}
-		if cnt > 100 {
-			t.Fatalf("After 100 times, the progress cannot be advanced.")
-		}
-	}
-	cancel()
-	wg.Wait()
 }

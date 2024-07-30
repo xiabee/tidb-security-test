@@ -18,25 +18,14 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 // ExplainAggFunc generates explain information for a aggregation function.
-func ExplainAggFunc(agg *AggFuncDesc, normalized bool) string {
+func ExplainAggFunc(ctx expression.EvalContext, agg *AggFuncDesc, normalized bool) string {
 	var buffer bytes.Buffer
-	showMode := false
-	failpoint.Inject("show-agg-mode", func(v failpoint.Value) {
-		if v.(bool) {
-			showMode = true
-		}
-	})
-	if showMode {
-		fmt.Fprintf(&buffer, "%s(%s,", agg.Name, agg.Mode.ToString())
-	} else {
-		fmt.Fprintf(&buffer, "%s(", agg.Name)
-	}
-
+	fmt.Fprintf(&buffer, "%s(", agg.Name)
 	if agg.HasDistinct {
 		buffer.WriteString("distinct ")
 	}
@@ -49,13 +38,13 @@ func ExplainAggFunc(agg *AggFuncDesc, normalized bool) string {
 						if normalized {
 							fmt.Fprintf(&buffer, "%s desc", item.Expr.ExplainNormalizedInfo())
 						} else {
-							fmt.Fprintf(&buffer, "%s desc", item.Expr.ExplainInfo())
+							fmt.Fprintf(&buffer, "%s desc", item.Expr.ExplainInfo(ctx))
 						}
 					} else {
 						if normalized {
 							fmt.Fprintf(&buffer, "%s", item.Expr.ExplainNormalizedInfo())
 						} else {
-							fmt.Fprintf(&buffer, "%s", item.Expr.ExplainInfo())
+							fmt.Fprintf(&buffer, "%s", item.Expr.ExplainInfo(ctx))
 						}
 					}
 
@@ -71,7 +60,7 @@ func ExplainAggFunc(agg *AggFuncDesc, normalized bool) string {
 		if normalized {
 			buffer.WriteString(arg.ExplainNormalizedInfo())
 		} else {
-			buffer.WriteString(arg.ExplainInfo())
+			buffer.WriteString(arg.ExplainInfo(ctx))
 		}
 	}
 	buffer.WriteString(")")

@@ -19,6 +19,7 @@ import (
 	"sync"
 
 	infoschema_metrics "github.com/pingcap/tidb/pkg/infoschema/metrics"
+	"github.com/pingcap/tidb/pkg/meta/autoid"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
 )
@@ -33,6 +34,9 @@ type InfoCache struct {
 
 	// emptySchemaVersions stores schema version which has no schema_diff.
 	emptySchemaVersions map[int64]struct{}
+
+	r    autoid.Requirement
+	Data *Data
 }
 
 type schemaAndTimestamp struct {
@@ -41,10 +45,13 @@ type schemaAndTimestamp struct {
 }
 
 // NewCache creates a new InfoCache.
-func NewCache(capacity int) *InfoCache {
+func NewCache(r autoid.Requirement, capacity int) *InfoCache {
+	infoData := NewData()
 	return &InfoCache{
 		cache:               make([]schemaAndTimestamp, 0, capacity),
 		emptySchemaVersions: make(map[int64]struct{}),
+		r:                   r,
+		Data:                infoData,
 	}
 }
 
@@ -223,7 +230,8 @@ func (h *InfoCache) Insert(is InfoSchema, schemaTS uint64) bool {
 	})
 
 	// cached entry
-	if i < len(h.cache) && h.cache[i].infoschema.SchemaMetaVersion() == version {
+	if i < len(h.cache) && h.cache[i].infoschema.SchemaMetaVersion() == version &&
+		IsV2(h.cache[i].infoschema) == IsV2(is) {
 		// update timestamp if it is not 0 and cached one is 0
 		if schemaTS > 0 && h.cache[i].timestamp == 0 {
 			h.cache[i].timestamp = int64(schemaTS)

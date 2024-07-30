@@ -83,8 +83,11 @@ func CheckDataConsistency(
 	if t.Meta().GetPartitionInfo() != nil {
 		return nil
 	}
+	if txn.IsPipelined() {
+		return nil
+	}
 	if sh == 0 {
-		// some implementations of MemBuffer doesn't support staging, e.g. that in br/pkg/lightning/backend/kv
+		// some implementations of MemBuffer doesn't support staging, e.g. that in pkg/lightning/backend/kv
 		return nil
 	}
 	indexMutations, rowInsertion, err := collectTableMutationsFromBufferStage(t, memBuffer, sh)
@@ -300,7 +303,7 @@ func checkRowInsertionConsistency(
 
 	for columnID, decodedDatum := range decodedData {
 		inputDatum := rowToInsert[columnIDToInfo[columnID].Offset]
-		cmp, err := decodedDatum.Compare(sessVars.StmtCtx, &inputDatum, collate.GetCollator(decodedDatum.Collation()))
+		cmp, err := decodedDatum.Compare(sessVars.StmtCtx.TypeCtx(), &inputDatum, collate.GetCollator(decodedDatum.Collation()))
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -398,7 +401,7 @@ func CompareIndexAndVal(sctx *stmtctx.StatementContext, rowVal types.Datum, idxV
 		count := bj.GetElemCount()
 		for elemIdx := 0; elemIdx < count; elemIdx++ {
 			jsonDatum := types.NewJSONDatum(bj.ArrayGetElem(elemIdx))
-			cmpRes, err = jsonDatum.Compare(sctx, &idxVal, collate.GetBinaryCollator())
+			cmpRes, err = jsonDatum.Compare(sctx.TypeCtx(), &idxVal, collate.GetBinaryCollator())
 			if err != nil {
 				return 0, errors.Trace(err)
 			}
@@ -407,7 +410,7 @@ func CompareIndexAndVal(sctx *stmtctx.StatementContext, rowVal types.Datum, idxV
 			}
 		}
 	} else {
-		cmpRes, err = idxVal.Compare(sctx, &rowVal, collator)
+		cmpRes, err = idxVal.Compare(sctx.TypeCtx(), &rowVal, collator)
 	}
 	return cmpRes, err
 }

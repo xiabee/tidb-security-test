@@ -346,7 +346,7 @@ func appendDatumForChecksum(loc *time.Location, buf []byte, dat *data.Datum, typ
 		out = binary.LittleEndian.AppendUint64(buf, dat.GetMysqlSet().Value)
 	case mysql.TypeBit:
 		// ticdc transforms a bit value as the following way, no need to handle truncate error here.
-		v, _ := dat.GetBinaryLiteral().ToInt(nil)
+		v, _ := dat.GetBinaryLiteral().ToInt(data.DefaultStmtNoWarningContext)
 		out = binary.LittleEndian.AppendUint64(buf, v)
 	case mysql.TypeJSON:
 		out = appendLengthValue(buf, []byte(dat.GetMysqlJSON().String()))

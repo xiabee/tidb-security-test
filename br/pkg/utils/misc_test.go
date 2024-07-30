@@ -147,7 +147,6 @@ func TestWithCleanUp(t *testing.T) {
 
 	case1 := func() (err error) {
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint:all_revive
 			return err1
 		})
 		return nil
@@ -156,7 +155,6 @@ func TestWithCleanUp(t *testing.T) {
 
 	case2 := func() (err error) {
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint:all_revive
 			return err1
 		})
 		return err2
@@ -165,7 +163,6 @@ func TestWithCleanUp(t *testing.T) {
 
 	case3 := func() (err error) {
 		defer WithCleanUp(&err, time.Second, func(ctx context.Context) error {
-			//nolint:all_revive
 			return nil
 		})
 		return nil

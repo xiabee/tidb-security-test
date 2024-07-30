@@ -53,7 +53,7 @@ import (
 	autoid "github.com/pingcap/tidb/pkg/autoid_service"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/domain/resourcegroup"
+	"github.com/pingcap/tidb/pkg/executor/mppcoordmanager"
 	"github.com/pingcap/tidb/pkg/extension"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/metrics"
@@ -71,6 +71,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/fastrand"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/pingcap/tidb/pkg/util/sys/linux"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	uatomic "go.uber.org/atomic"
@@ -134,7 +135,7 @@ type Server struct {
 	health         *uatomic.Bool
 
 	sessionMapMutex     sync.Mutex
-	internalSessions    map[interface{}]struct{}
+	internalSessions    map[any]struct{}
 	autoIDService       *autoid.Service
 	authTokenCancelFunc context.CancelFunc
 	wg                  sync.WaitGroup
@@ -233,7 +234,6 @@ func (s *Server) newConn(conn net.Conn) *clientConn {
 	}
 	cc.setConn(conn)
 	cc.salt = fastrand.Buf(20)
-	metrics.ConnGauge.WithLabelValues(resourcegroup.DefaultResourceGroupName).Inc()
 	return cc
 }
 
@@ -427,7 +427,7 @@ func (s *Server) reportConfig() {
 
 // Run runs the server.
 func (s *Server) Run(dom *domain.Domain) error {
-	metrics.ServerEventCounter.WithLabelValues(metrics.EventStart).Inc()
+	metrics.ServerEventCounter.WithLabelValues(metrics.ServerStart).Inc()
 	s.reportConfig()
 
 	// Start HTTP API to report tidb info such as TPS.
@@ -437,6 +437,7 @@ func (s *Server) Run(dom *domain.Domain) error {
 			log.Error("failed to create the server", zap.Error(err), zap.Stack("stack"))
 			return err
 		}
+		mppcoordmanager.InstanceMPPCoordinatorManager.InitServerAddr(s.GetStatusServerAddr())
 	}
 	if config.GetGlobalConfig().Performance.ForceInitStats && dom != nil {
 		<-dom.StatsHandle().InitStatsDone
@@ -618,7 +619,7 @@ func (s *Server) closeListener() {
 		s.authTokenCancelFunc()
 	}
 	s.wg.Wait()
-	metrics.ServerEventCounter.WithLabelValues(metrics.EventClose).Inc()
+	metrics.ServerEventCounter.WithLabelValues(metrics.ServerStop).Inc()
 }
 
 // Close closes the server.
@@ -641,6 +642,7 @@ func (s *Server) registerConn(conn *clientConn) bool {
 		return false
 	}
 	s.clients[conn.connectionID] = conn
+	metrics.ConnGauge.WithLabelValues(conn.getCtx().GetSessionVars().ResourceGroupName).Inc()
 	return true
 }
 
@@ -761,10 +763,6 @@ func (cc *clientConn) connectInfo() *variable.ConnectionInfo {
 		connType = variable.ConnTypeTLS
 		sslVersionNum := cc.tlsConn.ConnectionState().Version
 		switch sslVersionNum {
-		case tls.VersionTLS10:
-			sslVersion = "TLSv1.0"
-		case tls.VersionTLS11:
-			sslVersion = "TLSv1.1"
 		case tls.VersionTLS12:
 			sslVersion = "TLSv1.2"
 		case tls.VersionTLS13:
@@ -926,9 +924,9 @@ func (s *Server) GetTLSConfig() *tls.Config {
 func killQuery(conn *clientConn, maxExecutionTime bool) {
 	sessVars := conn.ctx.GetSessionVars()
 	if maxExecutionTime {
-		atomic.StoreUint32(&sessVars.Killed, 2)
+		sessVars.SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
 	} else {
-		atomic.StoreUint32(&sessVars.Killed, 1)
+		sessVars.SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
 	}
 	conn.mu.RLock()
 	cancelFunc := conn.mu.cancelFunc
@@ -1032,7 +1030,7 @@ func (s *Server) GetAutoAnalyzeProcID() uint64 {
 
 // StoreInternalSession implements SessionManager interface.
 // @param addr	The address of a session.session struct variable
-func (s *Server) StoreInternalSession(se interface{}) {
+func (s *Server) StoreInternalSession(se any) {
 	s.sessionMapMutex.Lock()
 	s.internalSessions[se] = struct{}{}
 	s.sessionMapMutex.Unlock()
@@ -1040,7 +1038,7 @@ func (s *Server) StoreInternalSession(se interface{}) {
 
 // DeleteInternalSession implements SessionManager interface.
 // @param addr	The address of a session.session struct variable
-func (s *Server) DeleteInternalSession(se interface{}) {
+func (s *Server) DeleteInternalSession(se any) {
 	s.sessionMapMutex.Lock()
 	delete(s.internalSessions, se)
 	s.sessionMapMutex.Unlock()
@@ -1064,7 +1062,7 @@ func (s *Server) GetInternalSessionStartTSList() []uint64 {
 }
 
 // InternalSessionExists is used for test
-func (s *Server) InternalSessionExists(se interface{}) bool {
+func (s *Server) InternalSessionExists(se any) bool {
 	s.sessionMapMutex.Lock()
 	_, ok := s.internalSessions[se]
 	s.sessionMapMutex.Unlock()

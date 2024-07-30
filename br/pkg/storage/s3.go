@@ -34,6 +34,7 @@ import (
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
+	"github.com/pingcap/tidb/pkg/util/prefetch"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 )
@@ -288,22 +289,10 @@ func autoNewCred(qs *backuppb.S3) (cred *credentials.Credentials, err error) {
 func createOssRAMCred() (*credentials.Credentials, error) {
 	cred, err := aliproviders.NewInstanceMetadataProvider().Retrieve()
 	if err != nil {
-		log.Warn("failed to get aliyun ram credential", zap.Error(err))
-		return nil, nil
+		return nil, errors.Annotate(err, "Alibaba RAM Provider Retrieve")
 	}
-	var aliCred, ok = cred.(*alicred.StsTokenCredential)
-	if !ok {
-		return nil, errors.Errorf("invalid credential type %T", cred)
-	}
-	newCred := credentials.NewChainCredentials([]credentials.Provider{
-		&credentials.EnvProvider{},
-		&credentials.SharedCredentialsProvider{},
-		&credentials.StaticProvider{Value: credentials.Value{AccessKeyID: aliCred.AccessKeyId, SecretAccessKey: aliCred.AccessKeySecret, SessionToken: aliCred.AccessKeyStsToken, ProviderName: ""}},
-	})
-	if _, err := newCred.Get(); err != nil {
-		return nil, errors.Trace(err)
-	}
-	return newCred, nil
+	ncred := cred.(*alicred.StsTokenCredential)
+	return credentials.NewStaticCredentials(ncred.AccessKeyId, ncred.AccessKeySecret, ncred.AccessKeyStsToken), nil
 }
 
 // NewS3Storage initialize a new s3 storage for metadata.
@@ -754,6 +743,7 @@ func (rs *S3Storage) URI() string {
 func (rs *S3Storage) Open(ctx context.Context, path string, o *ReaderOption) (ExternalFileReader, error) {
 	start := int64(0)
 	end := int64(0)
+	prefetchSize := 0
 	if o != nil {
 		if o.StartOffset != nil {
 			start = *o.StartOffset
@@ -761,17 +751,22 @@ func (rs *S3Storage) Open(ctx context.Context, path string, o *ReaderOption) (Ex
 		if o.EndOffset != nil {
 			end = *o.EndOffset
 		}
+		prefetchSize = o.PrefetchSize
 	}
 	reader, r, err := rs.open(ctx, path, start, end)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	if prefetchSize > 0 {
+		reader = prefetch.NewReader(reader, o.PrefetchSize)
+	}
 	return &s3ObjectReader{
-		storage:   rs,
-		name:      path,
-		reader:    reader,
-		ctx:       ctx,
-		rangeInfo: r,
+		storage:      rs,
+		name:         path,
+		reader:       reader,
+		ctx:          ctx,
+		rangeInfo:    r,
+		prefetchSize: prefetchSize,
 	}, nil
 }
 
@@ -895,20 +890,30 @@ type s3ObjectReader struct {
 	// reader context used for implement `io.Seek`
 	// currently, lightning depends on package `xitongsys/parquet-go` to read parquet file and it needs `io.Seeker`
 	// See: https://github.com/xitongsys/parquet-go/blob/207a3cee75900b2b95213627409b7bac0f190bb3/source/source.go#L9-L10
-	ctx      context.Context
-	retryCnt int
+	ctx          context.Context
+	prefetchSize int
 }
 
 // Read implement the io.Reader interface.
 func (r *s3ObjectReader) Read(p []byte) (n int, err error) {
+	retryCnt := 0
 	maxCnt := r.rangeInfo.End + 1 - r.pos
+	if maxCnt == 0 {
+		return 0, io.EOF
+	}
 	if maxCnt > int64(len(p)) {
 		maxCnt = int64(len(p))
 	}
 	n, err = r.reader.Read(p[:maxCnt])
 	// TODO: maybe we should use !errors.Is(err, io.EOF) here to avoid error lint, but currently, pingcap/errors
 	// doesn't implement this method yet.
-	if err != nil && errors.Cause(err) != io.EOF && r.retryCnt < maxErrorRetries { //nolint:errorlint
+	for err != nil && errors.Cause(err) != io.EOF && retryCnt < maxErrorRetries { //nolint:errorlint
+		log.L().Warn(
+			"read s3 object failed, will retry",
+			zap.String("file", r.name),
+			zap.Int("retryCnt", retryCnt),
+			zap.Error(err),
+		)
 		// if can retry, reopen a new reader and try read again
 		end := r.rangeInfo.End + 1
 		if end == r.rangeInfo.Size {
@@ -922,7 +927,10 @@ func (r *s3ObjectReader) Read(p []byte) (n int, err error) {
 			return
 		}
 		r.reader = newReader
-		r.retryCnt++
+		if r.prefetchSize > 0 {
+			r.reader = prefetch.NewReader(r.reader, r.prefetchSize)
+		}
+		retryCnt++
 		n, err = r.reader.Read(p[:maxCnt])
 	}
 
@@ -991,6 +999,9 @@ func (r *s3ObjectReader) Seek(offset int64, whence int) (int64, error) {
 		return 0, errors.Trace(err)
 	}
 	r.reader = newReader
+	if r.prefetchSize > 0 {
+		r.reader = prefetch.NewReader(r.reader, r.prefetchSize)
+	}
 	r.rangeInfo = info
 	r.pos = realOffset
 	return realOffset, nil
@@ -1062,6 +1073,7 @@ func (rs *S3Storage) Create(ctx context.Context, name string, option *WriterOpti
 		}
 	} else {
 		up := s3manager.NewUploaderWithClient(rs.svc, func(u *s3manager.Uploader) {
+			u.PartSize = option.PartSize
 			u.Concurrency = option.Concurrency
 			u.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(option.Concurrency * hardcodedS3ChunkSize)
 		})
@@ -1085,7 +1097,11 @@ func (rs *S3Storage) Create(ctx context.Context, name string, option *WriterOpti
 		}()
 		uploader = s3Writer
 	}
-	uploaderWriter := newBufferedWriter(uploader, WriteBufferSize, NoCompression)
+	bufSize := WriteBufferSize
+	if option != nil && option.PartSize > 0 {
+		bufSize = int(option.PartSize)
+	}
+	uploaderWriter := newBufferedWriter(uploader, bufSize, NoCompression)
 	return uploaderWriter, nil
 }
 
@@ -1104,6 +1120,9 @@ func (rs *S3Storage) Rename(ctx context.Context, oldFileName, newFileName string
 	}
 	return nil
 }
+
+// Close implements ExternalStorage interface.
+func (*S3Storage) Close() {}
 
 // retryerWithLog wrappes the client.DefaultRetryer, and logging when retry triggered.
 type retryerWithLog struct {

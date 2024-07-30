@@ -27,11 +27,10 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/util/callback"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/session"
+	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sync/errgroup"
 )
 
 func TestGetDDLJobs(t *testing.T) {
@@ -140,7 +139,7 @@ func TestIsJobRollbackable(t *testing.T) {
 	}
 }
 
-func enQueueDDLJobs(t *testing.T, sess session.Session, txn kv.Transaction, jobType model.ActionType, start, end int) {
+func enQueueDDLJobs(t *testing.T, sess sessiontypes.Session, txn kv.Transaction, jobType model.ActionType, start, end int) {
 	for i := start; i < end; i++ {
 		job := &model.Job{
 			ID:       int64(i),
@@ -150,46 +149,6 @@ func enQueueDDLJobs(t *testing.T, sess session.Session, txn kv.Transaction, jobT
 		err := addDDLJobs(sess, txn, job)
 		require.NoError(t, err)
 	}
-}
-
-func TestCreateViewConcurrently(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-
-	tk.MustExec("create table t (a int);")
-	tk.MustExec("create view v as select * from t;")
-	var (
-		counterErr error
-		counter    int
-	)
-	ddl.OnDDLCreateViewForTest = func(job *model.Job) {
-		counter++
-		if counter > 1 {
-			counterErr = fmt.Errorf("create view job should not run concurrently")
-			return
-		}
-	}
-	ddl.AfterDeliverToWorkerForTest = func(job *model.Job) {
-		if job.Type == model.ActionCreateView {
-			counter--
-		}
-	}
-	var eg errgroup.Group
-	for i := 0; i < 5; i++ {
-		eg.Go(func() error {
-			newTk := testkit.NewTestKit(t, store)
-			_, err := newTk.Exec("use test")
-			if err != nil {
-				return err
-			}
-			_, err = newTk.Exec("create or replace view v as select * from t;")
-			return err
-		})
-	}
-	err := eg.Wait()
-	require.NoError(t, err)
-	require.NoError(t, counterErr)
 }
 
 func TestCreateDropCreateTable(t *testing.T) {

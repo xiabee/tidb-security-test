@@ -20,7 +20,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
@@ -191,7 +190,7 @@ func deriveCoercibilityForColumn(c *Column) Coercibility {
 	return CoercibilityImplicit
 }
 
-func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression, retType types.EvalType, argTps ...types.EvalType) (ec *ExprCollation, err error) {
+func deriveCollation(ctx BuildContext, funcName string, args []Expression, retType types.EvalType, argTps ...types.EvalType) (ec *ExprCollation, err error) {
 	switch funcName {
 	case ast.Concat, ast.ConcatWS, ast.Lower, ast.Lcase, ast.Reverse, ast.Upper, ast.Ucase, ast.Quote, ast.Coalesce, ast.Greatest, ast.Least:
 		return CheckAndDeriveCollationFromExprs(ctx, funcName, retType, args...)
@@ -241,7 +240,7 @@ func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression,
 			return CheckAndDeriveCollationFromExprs(ctx, funcName, types.ETInt, args...)
 		}
 	case ast.DateFormat, ast.TimeFormat:
-		charsetInfo, collation := ctx.GetSessionVars().GetCharsetInfo()
+		charsetInfo, collation := ctx.GetCharsetInfo()
 		return &ExprCollation{args[1].Coercibility(), args[1].Repertoire(), charsetInfo, collation}, nil
 	case ast.Cast:
 		// We assume all the cast are implicit.
@@ -249,7 +248,7 @@ func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression,
 		// Non-string type cast to string type should use @@character_set_connection and @@collation_connection.
 		// String type cast to string type should keep its original charset and collation. It should not happen.
 		if retType == types.ETString && argTps[0] != types.ETString {
-			ec.Charset, ec.Collation = ctx.GetSessionVars().GetCharsetInfo()
+			ec.Charset, ec.Collation = ctx.GetCharsetInfo()
 		}
 		return ec, nil
 	case ast.Case:
@@ -282,7 +281,7 @@ func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression,
 	case ast.Format, ast.Space, ast.ToBase64, ast.UUID, ast.Hex, ast.MD5, ast.SHA, ast.SHA2, ast.SM3:
 		// should return ASCII repertoire, MySQL's doc says it depends on character_set_connection, but it not true from its source code.
 		ec = &ExprCollation{Coer: CoercibilityCoercible, Repe: ASCII}
-		ec.Charset, ec.Collation = ctx.GetSessionVars().GetCharsetInfo()
+		ec.Charset, ec.Collation = ctx.GetCharsetInfo()
 		return ec, nil
 	case ast.JSONPretty, ast.JSONQuote:
 		// JSON function always return utf8mb4 and utf8mb4_bin.
@@ -292,7 +291,7 @@ func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression,
 
 	ec = &ExprCollation{CoercibilityNumeric, ASCII, charset.CharsetBin, charset.CollationBin}
 	if retType == types.ETString {
-		ec.Charset, ec.Collation = ctx.GetSessionVars().GetCharsetInfo()
+		ec.Charset, ec.Collation = ctx.GetCharsetInfo()
 		ec.Coer = CoercibilityCoercible
 		if ec.Charset != charset.CharsetASCII {
 			ec.Repe = UNICODE
@@ -302,7 +301,7 @@ func deriveCollation(ctx sessionctx.Context, funcName string, args []Expression,
 }
 
 // CheckAndDeriveCollationFromExprs derives collation information from these expressions, return error if derives collation error.
-func CheckAndDeriveCollationFromExprs(ctx sessionctx.Context, funcName string, evalType types.EvalType, args ...Expression) (et *ExprCollation, err error) {
+func CheckAndDeriveCollationFromExprs(ctx BuildContext, funcName string, evalType types.EvalType, args ...Expression) (et *ExprCollation, err error) {
 	ec := inferCollation(args...)
 	if ec == nil {
 		return nil, illegalMixCollationErr(funcName, args)
@@ -313,7 +312,7 @@ func CheckAndDeriveCollationFromExprs(ctx sessionctx.Context, funcName string, e
 	}
 
 	if evalType == types.ETString && ec.Coer == CoercibilityNumeric {
-		ec.Charset, ec.Collation = ctx.GetSessionVars().GetCharsetInfo()
+		ec.Charset, ec.Collation = ctx.GetCharsetInfo()
 		ec.Coer = CoercibilityCoercible
 		ec.Repe = ASCII
 	}
@@ -322,10 +321,48 @@ func CheckAndDeriveCollationFromExprs(ctx sessionctx.Context, funcName string, e
 		return nil, illegalMixCollationErr(funcName, args)
 	}
 
-	return ec, nil
+	return fixStringTypeForMaxLength(funcName, args, ec), nil
 }
 
-func safeConvert(ctx sessionctx.Context, ec *ExprCollation, args ...Expression) bool {
+// fixStringTypeForMaxLength changes the type of string from `VARCHAR` to `MEDIUM BLOB` or `LONG BLOB` according to the max length of
+// the argument. However, as TiDB doesn't have `MaxLength` for `FieldType`, this function handles the logic manually for different types. Now it only
+// handles the `JSON` type, because in MySQL, `JSON` type has a big max length and will lead to `LONG BLOB` in many situations.
+// To learn more about this case, read the discussion under https://github.com/pingcap/tidb/issues/52833
+//
+// TODO: also consider types other than `JSON`. And also think about when it'll become `MEDIUM BLOB`. This function only handles the collation, but
+// not change the type and binary flag.
+// TODO: some function will generate big values, like `repeat` and `space`. They should be handled according to the argument if it's a constant.
+func fixStringTypeForMaxLength(funcName string, args []Expression, ec *ExprCollation) *ExprCollation {
+	// Be careful that the `args` is not all arguments of the `funcName`. You should check `deriveCollation` function to see which arguments are passed
+	// to the `CheckAndDeriveCollationFromExprs` function, and then passed here.
+	shouldChangeToBin := false
+
+	switch funcName {
+	case ast.Reverse, ast.Lower, ast.Upper, ast.SubstringIndex, ast.Trim, ast.Quote, ast.InsertFunc, ast.Substr, ast.Repeat, ast.Replace:
+		shouldChangeToBin = args[0].GetType().EvalType() == types.ETJson
+	case ast.Concat, ast.ConcatWS, ast.Elt, ast.MakeSet:
+		for _, arg := range args {
+			if arg.GetType().EvalType() == types.ETJson {
+				shouldChangeToBin = true
+				break
+			}
+		}
+	case ast.ExportSet:
+		if len(args) >= 2 {
+			shouldChangeToBin = args[0].GetType().EvalType() == types.ETJson || args[1].GetType().EvalType() == types.ETJson
+		}
+		if len(args) >= 3 {
+			shouldChangeToBin = shouldChangeToBin || args[2].GetType().EvalType() == types.ETJson
+		}
+	}
+
+	if shouldChangeToBin {
+		ec.Collation = collate.ConvertAndGetBinCollation(ec.Collation)
+	}
+	return ec
+}
+
+func safeConvert(ctx BuildContext, ec *ExprCollation, args ...Expression) bool {
 	enc := charset.FindEncodingTakeUTF8AsNoop(ec.Charset)
 	for _, arg := range args {
 		if arg.GetType().GetCharset() == ec.Charset {
@@ -338,7 +375,7 @@ func safeConvert(ctx sessionctx.Context, ec *ExprCollation, args ...Expression) 
 		}
 
 		if c, ok := arg.(*Constant); ok {
-			str, isNull, err := c.EvalString(ctx, chunk.Row{})
+			str, isNull, err := c.EvalString(ctx.GetEvalCtx(), chunk.Row{})
 			if err != nil {
 				return false
 			}

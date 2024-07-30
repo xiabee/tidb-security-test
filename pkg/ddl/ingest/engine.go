@@ -21,12 +21,11 @@ import (
 	"sync/atomic"
 
 	"github.com/google/uuid"
-	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend"
-	"github.com/pingcap/tidb/br/pkg/lightning/backend/kv"
-	"github.com/pingcap/tidb/br/pkg/lightning/common"
-	"github.com/pingcap/tidb/br/pkg/lightning/config"
 	tidbkv "github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/lightning/backend"
+	"github.com/pingcap/tidb/pkg/lightning/backend/kv"
+	"github.com/pingcap/tidb/pkg/lightning/common"
+	"github.com/pingcap/tidb/pkg/lightning/config"
 	"github.com/pingcap/tidb/pkg/util/generic"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
@@ -145,11 +144,6 @@ func (ei *engineInfo) ImportAndClean() error {
 		ei.closedEngine = closeEngine
 	}
 	if ei.closedEngine != nil {
-		failpoint.Inject("mockDMLExecutionStateBeforeImport", func(_ failpoint.Value) {
-			if MockDMLExecutionStateBeforeImport != nil {
-				MockDMLExecutionStateBeforeImport()
-			}
-		})
 		// Ingest data to TiKV.
 		logutil.Logger(ei.ctx).Info(LitInfoStartImport, zap.Int64("job ID", ei.jobID),
 			zap.Int64("index ID", ei.indexID),

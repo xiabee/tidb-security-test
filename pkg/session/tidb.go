@@ -35,6 +35,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	session_metrics "github.com/pingcap/tidb/pkg/session/metrics"
+	"github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
@@ -74,17 +75,15 @@ func (dm *domainMap) Get(store kv.Storage) (d *domain.Domain, err error) {
 
 	ddlLease := time.Duration(atomic.LoadInt64(&schemaLease))
 	statisticLease := time.Duration(atomic.LoadInt64(&statsLease))
-	idxUsageSyncLease := GetIndexUsageSyncLease()
 	planReplayerGCLease := GetPlanReplayerGCLease()
 	err = util.RunWithRetry(util.DefaultMaxRetries, util.RetryInterval, func() (retry bool, err1 error) {
 		logutil.BgLogger().Info("new domain",
 			zap.String("store", store.UUID()),
 			zap.Stringer("ddl lease", ddlLease),
-			zap.Stringer("stats lease", statisticLease),
-			zap.Stringer("index usage sync lease", idxUsageSyncLease))
+			zap.Stringer("stats lease", statisticLease))
 		factory := createSessionFunc(store)
 		sysFactory := createSessionWithDomainFunc(store)
-		d = domain.NewDomain(store, ddlLease, statisticLease, idxUsageSyncLease, planReplayerGCLease, factory)
+		d = domain.NewDomain(store, ddlLease, statisticLease, planReplayerGCLease, factory)
 
 		var ddlInjector func(ddl.DDL) *schematracker.Checker
 		if injector, ok := store.(schematracker.StorageDDLInjector); ok {
@@ -135,11 +134,6 @@ var (
 	// statsLease is the time for reload stats table.
 	statsLease = int64(3 * time.Second)
 
-	// indexUsageSyncLease is the time for index usage synchronization.
-	// Because we have not completed GC and other functions, we set it to 0.
-	// TODO: Set indexUsageSyncLease to 60s.
-	indexUsageSyncLease = int64(0 * time.Second)
-
 	// planReplayerGCLease is the time for plan replayer gc.
 	planReplayerGCLease = int64(10 * time.Minute)
 )
@@ -175,16 +169,6 @@ func SetSchemaLease(lease time.Duration) {
 // SetStatsLease changes the default stats lease time for loading stats info.
 func SetStatsLease(lease time.Duration) {
 	atomic.StoreInt64(&statsLease, int64(lease))
-}
-
-// SetIndexUsageSyncLease changes the default index usage sync lease time for loading info.
-func SetIndexUsageSyncLease(lease time.Duration) {
-	atomic.StoreInt64(&indexUsageSyncLease, int64(lease))
-}
-
-// GetIndexUsageSyncLease returns the index usage sync lease time.
-func GetIndexUsageSyncLease() time.Duration {
-	return time.Duration(atomic.LoadInt64(&indexUsageSyncLease))
 }
 
 // SetPlanReplayerGCLease changes the default plan repalyer gc lease time.
@@ -376,7 +360,7 @@ func GetRows4Test(ctx context.Context, _ sessionctx.Context, rs sqlexec.RecordSe
 }
 
 // ResultSetToStringSlice changes the RecordSet to [][]string.
-func ResultSetToStringSlice(ctx context.Context, s Session, rs sqlexec.RecordSet) ([][]string, error) {
+func ResultSetToStringSlice(ctx context.Context, s types.Session, rs sqlexec.RecordSet) ([][]string, error) {
 	rows, err := GetRows4Test(ctx, s, rs)
 	if err != nil {
 		return nil, err

@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/cteutil"
@@ -136,7 +137,7 @@ func (e *CTEExec) Close() (firstErr error) {
 				ok := v.(bool)
 				if ok {
 					// mock an oom panic, returning ErrMemoryExceedForQuery for error identification in recovery work.
-					panic(memory.PanicMemoryExceedWarnMsg)
+					panic(exeerrors.ErrMemoryExceedForQuery)
 				}
 			})
 			// closeProducer() only close seedExec and recursiveExec, will not touch resTbl.
@@ -213,7 +214,7 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 	if p.seedExec == nil {
 		return errors.New("seedExec for CTEExec is nil")
 	}
-	if err = p.seedExec.Open(ctx); err != nil {
+	if err = exec.Open(ctx, p.seedExec); err != nil {
 		return err
 	}
 
@@ -224,13 +225,13 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 	p.diskTracker.AttachTo(p.ctx.GetSessionVars().StmtCtx.DiskTracker)
 
 	if p.recursiveExec != nil {
-		if err = p.recursiveExec.Open(ctx); err != nil {
+		if err = exec.Open(ctx, p.recursiveExec); err != nil {
 			return err
 		}
 		// For non-recursive CTE, the result will be put into resTbl directly.
 		// So no need to build iterOutTbl.
 		// Construct iterOutTbl in Open() instead of buildCTE(), because its destruct is in Close().
-		recursiveTypes := p.recursiveExec.Base().RetFieldTypes()
+		recursiveTypes := p.recursiveExec.RetFieldTypes()
 		p.iterOutTbl = cteutil.NewStorageRowContainer(recursiveTypes, cteExec.MaxChunkSize())
 		if err = p.iterOutTbl.OpenAndRef(); err != nil {
 			return err
@@ -240,7 +241,7 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 	if p.isDistinct {
 		p.hashTbl = newConcurrentMapHashTable()
 		p.hCtx = &hashContext{
-			allTypes: cteExec.Base().RetFieldTypes(),
+			allTypes: cteExec.RetFieldTypes(),
 		}
 		// We use all columns to compute hash.
 		p.hCtx.keyColIdx = make([]int, len(p.hCtx.allTypes))
@@ -252,10 +253,11 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 }
 
 func (p *cteProducer) closeProducer() (firstErr error) {
-	err := p.seedExec.Close()
+	err := exec.Close(p.seedExec)
 	firstErr = setFirstErr(firstErr, err, "close seedExec err")
+
 	if p.recursiveExec != nil {
-		err = p.recursiveExec.Close()
+		err = exec.Close(p.recursiveExec)
 		firstErr = setFirstErr(firstErr, err, "close recursiveExec err")
 
 		// `iterInTbl` and `resTbl` are shared by multiple operators,
@@ -372,7 +374,7 @@ func (p *cteProducer) produce(ctx context.Context) (err error) {
 func (p *cteProducer) computeSeedPart(ctx context.Context) (err error) {
 	defer func() {
 		if r := recover(); r != nil && err == nil {
-			err = errors.Errorf("%v", r)
+			err = util.GetRecoverError(r)
 		}
 	}()
 	failpoint.Inject("testCTESeedPanic", nil)
@@ -411,7 +413,7 @@ func (p *cteProducer) computeSeedPart(ctx context.Context) (err error) {
 func (p *cteProducer) computeRecursivePart(ctx context.Context) (err error) {
 	defer func() {
 		if r := recover(); r != nil && err == nil {
-			err = errors.Errorf("%v", r)
+			err = util.GetRecoverError(r)
 		}
 	}()
 	failpoint.Inject("testCTERecursivePanic", nil)
@@ -465,10 +467,10 @@ func (p *cteProducer) computeRecursivePart(ctx context.Context) (err error) {
 			}
 			// Make sure iterInTbl is setup before Close/Open,
 			// because some executors will read iterInTbl in Open() (like IndexLookupJoin).
-			if err = p.recursiveExec.Close(); err != nil {
+			if err = exec.Close(p.recursiveExec); err != nil {
 				return
 			}
-			if err = p.recursiveExec.Open(ctx); err != nil {
+			if err = exec.Open(ctx, p.recursiveExec); err != nil {
 				return
 			}
 		} else {
@@ -633,7 +635,7 @@ func (p *cteProducer) computeChunkHash(chk *chunk.Chunk) (sel []int, err error) 
 	}
 
 	for i := 0; i < chk.NumCols(); i++ {
-		if err = codec.HashChunkSelected(p.ctx.GetSessionVars().StmtCtx, p.hCtx.hashVals,
+		if err = codec.HashChunkSelected(p.ctx.GetSessionVars().StmtCtx.TypeCtx(), p.hCtx.hashVals,
 			chk, p.hCtx.allTypes[i], i, p.hCtx.buf, p.hCtx.hasNull,
 			hashBitMap, false); err != nil {
 			return nil, err
@@ -715,13 +717,10 @@ func (p *cteProducer) checkHasDup(probeKey uint64,
 	curChk *chunk.Chunk,
 	storage cteutil.Storage,
 	hashTbl baseHashTable) (hasDup bool, err error) {
-	ptrs := hashTbl.Get(probeKey)
+	entry := hashTbl.Get(probeKey)
 
-	if len(ptrs) == 0 {
-		return false, nil
-	}
-
-	for _, ptr := range ptrs {
+	for ; entry != nil; entry = entry.next {
+		ptr := entry.ptr
 		var matchedRow chunk.Row
 		if curChk != nil {
 			matchedRow = curChk.GetRow(int(ptr.RowIdx))
@@ -731,7 +730,7 @@ func (p *cteProducer) checkHasDup(probeKey uint64,
 		if err != nil {
 			return false, err
 		}
-		isEqual, err := codec.EqualChunkRow(p.ctx.GetSessionVars().StmtCtx,
+		isEqual, err := codec.EqualChunkRow(p.ctx.GetSessionVars().StmtCtx.TypeCtx(),
 			row, p.hCtx.allTypes, p.hCtx.keyColIdx,
 			matchedRow, p.hCtx.allTypes, p.hCtx.keyColIdx)
 		if err != nil {

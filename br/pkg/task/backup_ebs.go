@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/config"
 	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
-	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
@@ -34,7 +33,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
+	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"github.com/spf13/pflag"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
@@ -101,7 +100,7 @@ func RunBackupEBS(c context.Context, g glue.Glue, cfg *BackupConfig) error {
 	storeCount := backupInfo.GetStoreCount()
 	if storeCount == 0 {
 		log.Info("nothing to backup")
-		return errors.Trace(errors.Annotate(berrors.ErrInvalidArgument, "store count is 0"))
+		return nil
 	}
 
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
@@ -208,9 +207,9 @@ func RunBackupEBS(c context.Context, g glue.Glue, cfg *BackupConfig) error {
 
 	// Step.2 starts call ebs snapshot api to back up volume data.
 	// NOTE: we should start snapshot in specify order.
-	volumeCount := storeCount * backupInfo.GetTiKVVolumeCount()
-	progress := g.StartProgress(ctx, "backup", int64(volumeCount)*100, !cfg.LogProgress)
-	go progressFileWriterRoutine(ctx, progress, int64(volumeCount)*100, cfg.ProgressFile)
+
+	progress := g.StartProgress(ctx, "backup", int64(storeCount)*100, !cfg.LogProgress)
+	go progressFileWriterRoutine(ctx, progress, int64(storeCount)*100, cfg.ProgressFile)
 
 	ec2Session, err := aws.NewEC2Session(cfg.CloudAPIConcurrency, cfg.S3.Region)
 	if err != nil {
@@ -341,8 +340,8 @@ func isRegionsHasHole(allRegions []*metapb.Region) bool {
 }
 
 func waitUntilAllScheduleStopped(ctx context.Context, cfg Config, allStores []*metapb.Store, mgr *conn.Mgr) ([]*metapb.Region, error) {
-	concurrency := mathutil.Min(len(allStores), common.MaxStoreConcurrency)
-	workerPool := utils.NewWorkerPool(uint(concurrency), "collect schedule info")
+	concurrency := min(len(allStores), common.MaxStoreConcurrency)
+	workerPool := tidbutil.NewWorkerPool(uint(concurrency), "collect schedule info")
 	eg, ectx := errgroup.WithContext(ctx)
 
 	// init this slice with guess that there are 100 leaders on each store

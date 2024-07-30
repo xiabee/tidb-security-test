@@ -552,12 +552,8 @@ func (n *DeallocateStmt) Accept(v Visitor) (Node, bool) {
 
 // Prepared represents a prepared statement.
 type Prepared struct {
-	Stmt          StmtNode
-	StmtType      string
-	Params        []ParamMarkerExpr
-	SchemaVersion int64
-	CachedPlan    interface{}
-	CachedNames   interface{}
+	Stmt     StmtNode
+	StmtType string
 }
 
 // ExecuteStmt is a statement to execute PreparedStmt.
@@ -840,7 +836,7 @@ func (n *VariableAssignment) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteName(n.Name)
 		ctx.WritePlain("=")
 	}
-	if n.Name == TiDBCloudStorageURI && ctx.Flags.HasRestoreWithRedacted() {
+	if n.Name == TiDBCloudStorageURI {
 		// need to redact the url for safety when `show processlist;`
 		ctx.WritePlain(RedactURL(n.Value.(ValueExpr).GetString()))
 	} else if err := n.Value.Restore(ctx); err != nil {
@@ -1126,7 +1122,7 @@ func (n *SetStmt) Accept(v Visitor) (Node, bool) {
 func (n *SetStmt) SecureText() string {
 	redactedStmt := *n
 	var sb strings.Builder
-	_ = redactedStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags|format.RestoreWithRedacted, &sb))
+	_ = redactedStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
 	return sb.String()
 }
 
@@ -2312,7 +2308,7 @@ type AdminStmtType int
 
 // Admin statement types.
 const (
-	AdminShowDDL = iota + 1
+	AdminShowDDL AdminStmtType = iota + 1
 	AdminCheckTable
 	AdminShowDDLJobs
 	AdminCancelDDLJobs
@@ -2335,16 +2331,60 @@ const (
 	AdminCaptureBindings
 	AdminEvolveBindings
 	AdminReloadBindings
-	AdminShowTelemetry
-	AdminResetTelemetryID
 	AdminReloadStatistics
 	AdminFlushPlanCache
+	AdminSetBDRRole
+	AdminShowBDRRole
+	AdminUnsetBDRRole
 )
 
 // HandleRange represents a range where handle value >= Begin and < End.
 type HandleRange struct {
 	Begin int64
 	End   int64
+}
+
+// BDRRole represents the role of the cluster in BDR mode.
+type BDRRole string
+
+const (
+	BDRRolePrimary   BDRRole = "primary"
+	BDRRoleSecondary BDRRole = "secondary"
+	BDRRoleNone      BDRRole = ""
+)
+
+// DeniedByBDR checks whether the DDL is denied by BDR.
+func DeniedByBDR(role BDRRole, action model.ActionType, job *model.Job) (denied bool) {
+	ddlType, ok := model.ActionBDRMap[action]
+	switch role {
+	case BDRRolePrimary:
+		if !ok {
+			return true
+		}
+
+		// Can't add unique index on primary role.
+		if job != nil && (action == model.ActionAddIndex || action == model.ActionAddPrimaryKey) &&
+			len(job.Args) >= 1 && job.Args[0].(bool) {
+			// job.Args[0] is unique when job.Type is ActionAddIndex or ActionAddPrimaryKey.
+			return true
+		}
+
+		if ddlType == model.SafeDDL || ddlType == model.UnmanagementDDL {
+			return false
+		}
+	case BDRRoleSecondary:
+		if !ok {
+			return true
+		}
+		if ddlType == model.UnmanagementDDL {
+			return false
+		}
+	default:
+		// if user do not set bdr role, we will not deny any ddl as `none`
+		return false
+	}
+
+	return true
 }
 
 type StatementScope int
@@ -2434,6 +2474,7 @@ type AdminStmt struct {
 	Where          ExprNode
 	StatementScope StatementScope
 	LimitSimple    LimitSimple
+	BDRRole        BDRRole
 }
 
 // Restore implements Node interface.
@@ -2574,10 +2615,6 @@ func (n *AdminStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("EVOLVE BINDINGS")
 	case AdminReloadBindings:
 		ctx.WriteKeyWord("RELOAD BINDINGS")
-	case AdminShowTelemetry:
-		ctx.WriteKeyWord("SHOW TELEMETRY")
-	case AdminResetTelemetryID:
-		ctx.WriteKeyWord("RESET TELEMETRY_ID")
 	case AdminReloadStatistics:
 		ctx.WriteKeyWord("RELOAD STATS_EXTENDED")
 	case AdminFlushPlanCache:
@@ -2588,6 +2625,19 @@ func (n *AdminStmt) Restore(ctx *format.RestoreCtx) error {
 		} else if n.StatementScope == StatementScopeGlobal {
 			ctx.WriteKeyWord("FLUSH GLOBAL PLAN_CACHE")
 		}
+	case AdminSetBDRRole:
+		switch n.BDRRole {
+		case BDRRolePrimary:
+			ctx.WriteKeyWord("SET BDR ROLE PRIMARY")
+		case BDRRoleSecondary:
+			ctx.WriteKeyWord("SET BDR ROLE SECONDARY")
+		default:
+			return errors.New("Unsupported BDR role")
+		}
+	case AdminShowBDRRole:
+		ctx.WriteKeyWord("SHOW BDR ROLE")
+	case AdminUnsetBDRRole:
+		ctx.WriteKeyWord("UNSET BDR ROLE")
 	default:
 		return errors.New("Unsupported AdminStmt type")
 	}
@@ -3536,45 +3586,6 @@ func (n *BRIEStmt) SecureText() string {
 	var sb strings.Builder
 	_ = redactedStmt.Restore(format.NewRestoreCtx(format.DefaultRestoreFlags, &sb))
 	return sb.String()
-}
-
-type LoadDataActionTp int
-
-const (
-	LoadDataPause LoadDataActionTp = iota
-	LoadDataResume
-	LoadDataCancel
-	LoadDataDrop
-)
-
-// LoadDataActionStmt represent PAUSE/RESUME/CANCEL/DROP LOAD DATA JOB statement.
-type LoadDataActionStmt struct {
-	stmtNode
-
-	Tp    LoadDataActionTp
-	JobID int64
-}
-
-func (n *LoadDataActionStmt) Accept(v Visitor) (Node, bool) {
-	newNode, _ := v.Enter(n)
-	return v.Leave(newNode)
-}
-
-func (n *LoadDataActionStmt) Restore(ctx *format.RestoreCtx) error {
-	switch n.Tp {
-	case LoadDataPause:
-		ctx.WriteKeyWord("PAUSE LOAD DATA JOB ")
-	case LoadDataResume:
-		ctx.WriteKeyWord("RESUME LOAD DATA JOB ")
-	case LoadDataCancel:
-		ctx.WriteKeyWord("CANCEL LOAD DATA JOB ")
-	case LoadDataDrop:
-		ctx.WriteKeyWord("DROP LOAD DATA JOB ")
-	default:
-		return errors.Errorf("invalid load data action type: %d", n.Tp)
-	}
-	ctx.WritePlainf("%d", n.JobID)
-	return nil
 }
 
 type ImportIntoActionTp string

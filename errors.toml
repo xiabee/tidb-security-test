@@ -51,6 +51,11 @@ error = '''
 invalid metafile: %s
 '''
 
+["BR:Common:ErrInvalidRange"]
+error = '''
+invalid restore range
+'''
+
 ["BR:Common:ErrUndefinedDbOrTable"]
 error = '''
 undefined restore databases or tables
@@ -176,6 +181,11 @@ error = '''
 PD leader not found
 '''
 
+["BR:PD:ErrPDUknownScatterResult"]
+error = '''
+failed to wait region splitted
+'''
+
 ["BR:PD:ErrPDUpdateFailed"]
 error = '''
 failed to update PD
@@ -219,11 +229,6 @@ incompatible system table
 ["BR:Restore:ErrRestoreInvalidBackup"]
 error = '''
 invalid backup
-'''
-
-["BR:Restore:ErrRestoreInvalidRange"]
-error = '''
-invalid restore range
 '''
 
 ["BR:Restore:ErrRestoreInvalidRewrite"]
@@ -561,9 +566,19 @@ error = '''
 encode kv error in file %s at offset %d
 '''
 
+["Lightning:Restore:ErrFoundDataConflictRecords"]
+error = '''
+found data conflict records in table %s, primary key is '%s', row data is '%s'
+'''
+
 ["Lightning:Restore:ErrFoundDuplicateKey"]
 error = '''
 found duplicate key '%s', value '%s'
+'''
+
+["Lightning:Restore:ErrFoundIndexConflictRecords"]
+error = '''
+found index conflict records in table %s, index name is '%s', unique key is '%s', primary key is '%s'
 '''
 
 ["Lightning:Restore:ErrInvalidMetaStatus"]
@@ -986,6 +1001,11 @@ error = '''
 This partition function is not allowed
 '''
 
+["ddl:1566"]
+error = '''
+Not allowed to use NULL value in VALUES LESS THAN
+'''
+
 ["ddl:1567"]
 error = '''
 Incorrect partition name
@@ -1261,6 +1281,11 @@ error = '''
 Check constraint '%s' refers to non-existing column '%s'.
 '''
 
+["ddl:3822"]
+error = '''
+Duplicate check constraint name '%s'.
+'''
+
 ["ddl:3823"]
 error = '''
 Column '%s' cannot be used in a check constraint '%s': needed in a foreign key constraint referential action.
@@ -1514,6 +1539,11 @@ Job [%v] can't be resumed: %s
 ["ddl:8262"]
 error = '''
 Job [%v] has already been paused
+'''
+
+["ddl:8263"]
+error = '''
+The operation is not allowed while the bdr role of this cluster is set to %s.
 '''
 
 ["domain:8027"]
@@ -1881,6 +1911,16 @@ error = '''
 BRIE Job %d not found
 '''
 
+["executor:8175"]
+error = '''
+Your query has been cancelled due to exceeding the allowed memory limit for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again.[conn=%d]
+'''
+
+["executor:8176"]
+error = '''
+Your query has been cancelled due to exceeding the allowed memory limit for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again.[conn=%d]
+'''
+
 ["executor:8212"]
 error = '''
 Failed to split region ranges: %s
@@ -1946,6 +1986,11 @@ error = '''
 Division by 0
 '''
 
+["expression:1426"]
+error = '''
+Too big precision %d specified for column '%-.192s'. Maximum is %d.
+'''
+
 ["expression:1582"]
 error = '''
 Incorrect parameter count in the call to native function '%-.192s'
@@ -1996,11 +2041,6 @@ error = '''
 Invalid JSON text: %-.192s
 '''
 
-["json:3141"]
-error = '''
-Invalid JSON text in argument %d to function %s: "%s" at position %d.
-'''
-
 ["json:3143"]
 error = '''
 Invalid JSON path expression. The error is around character position %d.
@@ -2013,7 +2053,7 @@ Cannot create a JSON value from a string with CHARACTER SET '%s'.
 
 ["json:3149"]
 error = '''
-In this situation, path expressions may not contain the * and ** tokens or an array range.
+In this situation, path expressions may not contain the * and ** tokens or range selection.
 '''
 
 ["json:3150"]
@@ -2034,11 +2074,6 @@ JSON documents may not contain NULL member names.
 ["json:3165"]
 error = '''
 A path expression is not a path to a cell in an array.
-'''
-
-["json:3853"]
-error = '''
-Invalid JSON type in argument %d to function %s; an %s is required.
 '''
 
 ["json:8067"]
@@ -3236,16 +3271,6 @@ error = '''
 Invalid size for column '%s'.
 '''
 
-["types:3153"]
-error = '''
-The path expression '$' is not allowed in this context.
-'''
-
-["types:3154"]
-error = '''
-The oneOrAll argument to %s may take these values: 'one' or 'all'.
-'''
-
 ["types:8029"]
 error = '''
 Bad Number
@@ -3253,7 +3278,7 @@ Bad Number
 
 ["types:8030"]
 error = '''
-Cast to signed converted positive out-of-range integer to it's negative complement
+Cast to signed converted positive out-of-range integer to its negative complement
 '''
 
 ["types:8031"]

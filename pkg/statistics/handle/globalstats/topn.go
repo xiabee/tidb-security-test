@@ -17,13 +17,13 @@ package globalstats
 import (
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/util/hack"
+	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/tiancaiamao/gp"
 )
 
@@ -34,10 +34,11 @@ func mergeGlobalStatsTopN(gp *gp.Pool, sc sessionctx.Context, wrapper *StatsWrap
 		return nil, nil, wrapper.AllHg, nil
 	}
 	mergeConcurrency := sc.GetSessionVars().AnalyzePartitionMergeConcurrency
-	killed := &sc.GetSessionVars().Killed
+	killer := &sc.GetSessionVars().SQLKiller
+
 	// use original method if concurrency equals 1 or for version1
 	if mergeConcurrency < 2 {
-		return MergePartTopN2GlobalTopN(timeZone, version, wrapper.AllTopN, n, wrapper.AllHg, isIndex, killed)
+		return MergePartTopN2GlobalTopN(timeZone, version, wrapper.AllTopN, n, wrapper.AllHg, isIndex, killer)
 	}
 	batchSize := len(wrapper.AllTopN) / mergeConcurrency
 	if batchSize < 1 {
@@ -45,15 +46,24 @@ func mergeGlobalStatsTopN(gp *gp.Pool, sc sessionctx.Context, wrapper *StatsWrap
 	} else if batchSize > MaxPartitionMergeBatchSize {
 		batchSize = MaxPartitionMergeBatchSize
 	}
-	return MergeGlobalStatsTopNByConcurrency(gp, mergeConcurrency, batchSize, wrapper, timeZone, version, n, isIndex, killed)
+	return MergeGlobalStatsTopNByConcurrency(gp, mergeConcurrency, batchSize, wrapper, timeZone, version, n, isIndex, killer)
 }
 
-// MergeGlobalStatsTopNByConcurrency merge partition topN by concurrency
-// To merge global stats topn by concurrency, we will separate the partition topn in concurrency part and deal it with different worker.
-// mergeConcurrency is used to control the total concurrency of the running worker, and mergeBatchSize is sued to control
-// the partition size for each worker to solve it
-func MergeGlobalStatsTopNByConcurrency(gp *gp.Pool, mergeConcurrency, mergeBatchSize int, wrapper *StatsWrapper,
-	timeZone *time.Location, version int, n uint32, isIndex bool, killed *uint32) (*statistics.TopN,
+// MergeGlobalStatsTopNByConcurrency merge partition topN by concurrency.
+// To merge global stats topN by concurrency,
+// we will separate the partition topN in concurrency part and deal it with different worker.
+// mergeConcurrency is used to control the total concurrency of the running worker,
+// and mergeBatchSize is sued to control the partition size for each worker to solve it
+func MergeGlobalStatsTopNByConcurrency(
+	gp *gp.Pool,
+	mergeConcurrency, mergeBatchSize int,
+	wrapper *StatsWrapper,
+	timeZone *time.Location,
+	version int,
+	n uint32,
+	isIndex bool,
+	killer *sqlkiller.SQLKiller,
+) (*statistics.TopN,
 	[]statistics.TopNMeta, []*statistics.Histogram, error) {
 	if len(wrapper.AllTopN) < mergeConcurrency {
 		mergeConcurrency = len(wrapper.AllTopN)
@@ -72,7 +82,7 @@ func MergeGlobalStatsTopNByConcurrency(gp *gp.Pool, mergeConcurrency, mergeBatch
 	taskNum := len(tasks)
 	taskCh := make(chan *TopnStatsMergeTask, taskNum)
 	respCh := make(chan *TopnStatsMergeResponse, taskNum)
-	worker := NewTopnStatsMergeWorker(taskCh, respCh, wrapper, killed)
+	worker := NewTopnStatsMergeWorker(taskCh, respCh, wrapper, killer)
 	for i := 0; i < mergeConcurrency; i++ {
 		wg.Add(1)
 		gp.Go(func() {
@@ -114,8 +124,11 @@ func MergeGlobalStatsTopNByConcurrency(gp *gp.Pool, mergeConcurrency, mergeBatch
 // MergePartTopN2GlobalTopN is used to merge the partition-level topN to global-level topN.
 // The input parameters:
 //  1. `topNs` are the partition-level topNs to be merged.
-//  2. `n` is the size of the global-level topN. Notice: This value can be 0 and has no default value, we must explicitly specify this value.
-//  3. `hists` are the partition-level histograms. Some values not in topN may be placed in the histogram. We need it here to make the value in the global-level TopN more accurate.
+//  2. `n` is the size of the global-level topN.
+//     Notice: This value can be 0 and has no default value, we must explicitly specify this value.
+//  3. `hists` are the partition-level histograms.
+//     Some values not in topN may be placed in the histogram.
+//     We need it here to make the value in the global-level TopN more accurate.
 //
 // The output parameters:
 //  1. `*TopN` is the final global-level topN.
@@ -130,7 +143,7 @@ func MergePartTopN2GlobalTopN(
 	n uint32,
 	hists []*statistics.Histogram,
 	isIndex bool,
-	killed *uint32,
+	killer *sqlkiller.SQLKiller,
 ) (*statistics.TopN, []statistics.TopNMeta, []*statistics.Histogram, error) {
 	partNum := len(topNs)
 	// Different TopN structures may hold the same value, we have to merge them.
@@ -139,12 +152,14 @@ func MergePartTopN2GlobalTopN(
 	// The datum is used to find the value in the histogram.
 	datumMap := statistics.NewDatumMapCache()
 	for i, topN := range topNs {
-		if atomic.LoadUint32(killed) == 1 {
-			return nil, nil, nil, errors.Trace(statistics.ErrQueryInterrupted)
+		if err := killer.HandleSignal(); err != nil {
+			return nil, nil, nil, err
 		}
+		// Ignore the empty topN.
 		if topN.TotalCount() == 0 {
 			continue
 		}
+
 		for _, val := range topN.TopN {
 			encodedVal := hack.String(val.Encoded)
 			_, exists := counter[encodedVal]
@@ -153,13 +168,15 @@ func MergePartTopN2GlobalTopN(
 				// We have already calculated the encodedVal from the histogram, so just continue to next topN value.
 				continue
 			}
+
 			// We need to check whether the value corresponding to encodedVal is contained in other partition-level stats.
 			// 1. Check the topN first.
 			// 2. If the topN doesn't contain the value corresponding to encodedVal. We should check the histogram.
 			for j := 0; j < partNum; j++ {
-				if atomic.LoadUint32(killed) == 1 {
-					return nil, nil, nil, errors.Trace(statistics.ErrQueryInterrupted)
+				if err := killer.HandleSignal(); err != nil {
+					return nil, nil, nil, err
 				}
+
 				if (j == i && version >= 2) || topNs[j].FindTopN(val.Encoded) != -1 {
 					continue
 				}
@@ -182,6 +199,7 @@ func MergePartTopN2GlobalTopN(
 			}
 		}
 	}
+
 	numTop := len(counter)
 	if numTop == 0 {
 		return nil, nil, hists, nil

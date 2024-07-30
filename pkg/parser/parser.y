@@ -333,6 +333,7 @@ import (
 	backend               "BACKEND"
 	backup                "BACKUP"
 	backups               "BACKUPS"
+	bdr                   "BDR"
 	begin                 "BEGIN"
 	bernoulli             "BERNOULLI"
 	binding               "BINDING"
@@ -583,6 +584,7 @@ import (
 	san                   "SAN"
 	savepoint             "SAVEPOINT"
 	second                "SECOND"
+	secondary             "SECONDARY"
 	secondaryEngine       "SECONDARY_ENGINE"
 	secondaryLoad         "SECONDARY_LOAD"
 	secondaryUnload       "SECONDARY_UNLOAD"
@@ -665,6 +667,7 @@ import (
 	undefined             "UNDEFINED"
 	unicodeSym            "UNICODE"
 	unknown               "UNKNOWN"
+	unset                 "UNSET"
 	user                  "USER"
 	validation            "VALIDATION"
 	value                 "VALUE"
@@ -730,6 +733,7 @@ import (
 	learner               "LEARNER"
 	learnerConstraints    "LEARNER_CONSTRAINTS"
 	learners              "LEARNERS"
+	log                   "LOG"
 	low                   "LOW"
 	max                   "MAX"
 	medium                "MEDIUM"
@@ -864,8 +868,6 @@ import (
 	statsLocked                "STATS_LOCKED"
 	statsMeta                  "STATS_META"
 	statsTopN                  "STATS_TOPN"
-	telemetry                  "TELEMETRY"
-	telemetryID                "TELEMETRY_ID"
 	tidb                       "TIDB"
 	tiFlash                    "TIFLASH"
 	topn                       "TOPN"
@@ -1000,6 +1002,7 @@ import (
 	CallStmt                   "CALL statement"
 	IndexAdviseStmt            "INDEX ADVISE statement"
 	ImportIntoStmt             "IMPORT INTO statement"
+	ImportFromSelectStmt       "SELECT statement of IMPORT INTO"
 	KillStmt                   "Kill statement"
 	LoadDataStmt               "Load data statement"
 	LoadStatsStmt              "Load statistic statement"
@@ -1007,6 +1010,7 @@ import (
 	UnlockStatsStmt            "Unlock statistic statement"
 	LockTablesStmt             "Lock tables statement"
 	NonTransactionalDMLStmt    "Non-transactional DML statement"
+	OptimizeTableStmt          "OPTIMIZE statement"
 	PlanReplayerStmt           "Plan replayer statement"
 	PreparedStmt               "PreparedStmt"
 	ProcedureProcStmt          "The entrance of procedure statements which contains all kinds of statements in procedure"
@@ -1046,10 +1050,7 @@ import (
 	UpdateStmtNoWith           "Update statement without CTE clause"
 	HelpStmt                   "HELP statement"
 	ShardableStmt              "Shardable statement that can be used in non-transactional DMLs"
-	PauseLoadDataStmt          "PAUSE LOAD DATA JOB statement"
-	ResumeLoadDataStmt         "RESUME LOAD DATA JOB statement"
 	CancelImportStmt           "CANCEL IMPORT JOB statement"
-	DropLoadDataStmt           "DROP LOAD DATA JOB statement"
 	ProcedureUnlabeledBlock    "The statement block without label in procedure"
 	ProcedureBlockContent      "The statement block in procedure expressed with 'Begin ... End'"
 	SimpleWhenThen             "Procedure case when then"
@@ -1095,6 +1096,7 @@ import (
 	AuthOption                             "User auth option"
 	AutoRandomOpt                          "Auto random option"
 	Boolean                                "Boolean (0, 1, false, true)"
+	BDRRole                                "BDR role (primary, secondary)"
 	OptionalBraces                         "optional braces"
 	CastType                               "Cast function target type"
 	CharsetOpt                             "CHARACTER SET option in LOAD DATA"
@@ -1210,6 +1212,7 @@ import (
 	LocalOpt                               "Local opt"
 	LockClause                             "Alter table lock clause"
 	LogTypeOpt                             "Optional log type used in FLUSH statements"
+	LowPriorityOpt                         "LOAD DATA low priority option"
 	MaxValPartOpt                          "MAXVALUE partition option"
 	NullPartOpt                            "NULL Partition option"
 	NumLiteral                             "Num/Int/Float/Decimal Literal"
@@ -1544,6 +1547,7 @@ import (
 	EncryptionOpt     "Encryption option 'Y' or 'N'"
 	FirstOrNext       "FIRST or NEXT"
 	RowOrRows         "ROW or ROWS"
+	Replica           "{REPLICA | SLAVE}"
 
 %type	<ident>
 	Identifier                      "identifier or unreserved keyword"
@@ -2978,23 +2982,23 @@ FlashbackToTimestampStmt:
 	"FLASHBACK" "CLUSTER" toTimestamp stringLit
 	{
 		$$ = &ast.FlashBackToTimestampStmt{
-			FlashbackTS: ast.NewValueExpr($4, "", ""),
+			FlashbackTS:  ast.NewValueExpr($4, "", ""),
 			FlashbackTSO: 0,
 		}
 	}
 |	"FLASHBACK" "TABLE" TableNameList toTimestamp stringLit
 	{
 		$$ = &ast.FlashBackToTimestampStmt{
-			Tables:      $3.([]*ast.TableName),
-			FlashbackTS: ast.NewValueExpr($5, "", ""),
+			Tables:       $3.([]*ast.TableName),
+			FlashbackTS:  ast.NewValueExpr($5, "", ""),
 			FlashbackTSO: 0,
 		}
 	}
 |	"FLASHBACK" DatabaseSym DBName toTimestamp stringLit
 	{
 		$$ = &ast.FlashBackToTimestampStmt{
-			DBName:      model.NewCIStr($3),
-			FlashbackTS: ast.NewValueExpr($5, "", ""),
+			DBName:       model.NewCIStr($3),
+			FlashbackTS:  ast.NewValueExpr($5, "", ""),
 			FlashbackTSO: 0,
 		}
 	}
@@ -3002,20 +3006,20 @@ FlashbackToTimestampStmt:
 	{
 		if tsoValue, ok := $4.(uint64); ok && tsoValue > 0 {
 			$$ = &ast.FlashBackToTimestampStmt{
-        		FlashbackTSO: tsoValue,
-        	}
+				FlashbackTSO: tsoValue,
+			}
 		} else {
-    		yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $4))
-    		return 1
+			yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $4))
+			return 1
 		}
 	}
 |	"FLASHBACK" "TABLE" TableNameList toTSO LengthNum
 	{
 		if tsoValue, ok := $5.(uint64); ok && tsoValue > 0 {
 			$$ = &ast.FlashBackToTimestampStmt{
-            	Tables:      $3.([]*ast.TableName),
-            	FlashbackTSO: tsoValue,
-            }
+				Tables:       $3.([]*ast.TableName),
+				FlashbackTSO: tsoValue,
+			}
 		} else {
 			yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $5))
 			return 1
@@ -3025,15 +3029,14 @@ FlashbackToTimestampStmt:
 	{
 		if tsoValue, ok := $5.(uint64); ok && tsoValue > 0 {
 			$$ = &ast.FlashBackToTimestampStmt{
-            	DBName:      model.NewCIStr($3),
-            	FlashbackTSO: tsoValue,
+				DBName:       model.NewCIStr($3),
+				FlashbackTSO: tsoValue,
 			}
 		} else {
 			yylex.AppendError(yylex.Errorf("Invalid TSO value provided: %d", $5))
 			return 1
 		}
 	}
-
 
 /*******************************************************************
  *
@@ -3148,76 +3151,82 @@ SplitSyntaxOption:
 	}
 
 AnalyzeTableStmt:
-	"ANALYZE" "TABLE" TableNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt
+	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt
 	{
-		$$ = &ast.AnalyzeTableStmt{TableNames: $3.([]*ast.TableName), ColumnChoice: $4.(model.ColumnChoice), AnalyzeOpts: $5.([]ast.AnalyzeOpt)}
+		$$ = &ast.AnalyzeTableStmt{TableNames: $4.([]*ast.TableName), NoWriteToBinLog: $2.(bool), ColumnChoice: $5.(model.ColumnChoice), AnalyzeOpts: $6.([]ast.AnalyzeOpt)}
 	}
-|	"ANALYZE" "TABLE" TableName "INDEX" IndexNameList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "INDEX" IndexNameList AnalyzeOptionListOpt
 	{
-		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$3.(*ast.TableName)}, IndexNames: $5.([]model.CIStr), IndexFlag: true, AnalyzeOpts: $6.([]ast.AnalyzeOpt)}
+		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$4.(*ast.TableName)}, NoWriteToBinLog: $2.(bool), IndexNames: $6.([]model.CIStr), IndexFlag: true, AnalyzeOpts: $7.([]ast.AnalyzeOpt)}
 	}
-|	"ANALYZE" "INCREMENTAL" "TABLE" TableName "INDEX" IndexNameList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "INCREMENTAL" "TABLE" TableName "INDEX" IndexNameList AnalyzeOptionListOpt
 	{
-		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$4.(*ast.TableName)}, IndexNames: $6.([]model.CIStr), IndexFlag: true, Incremental: true, AnalyzeOpts: $7.([]ast.AnalyzeOpt)}
+		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$5.(*ast.TableName)}, NoWriteToBinLog: $2.(bool), IndexNames: $7.([]model.CIStr), IndexFlag: true, Incremental: true, AnalyzeOpts: $8.([]ast.AnalyzeOpt)}
 	}
-|	"ANALYZE" "TABLE" TableName "PARTITION" PartitionNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "PARTITION" PartitionNameList AllColumnsOrPredicateColumnsOpt AnalyzeOptionListOpt
 	{
-		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$3.(*ast.TableName)}, PartitionNames: $5.([]model.CIStr), ColumnChoice: $6.(model.ColumnChoice), AnalyzeOpts: $7.([]ast.AnalyzeOpt)}
+		$$ = &ast.AnalyzeTableStmt{TableNames: []*ast.TableName{$4.(*ast.TableName)}, NoWriteToBinLog: $2.(bool), PartitionNames: $6.([]model.CIStr), ColumnChoice: $7.(model.ColumnChoice), AnalyzeOpts: $8.([]ast.AnalyzeOpt)}
 	}
-|	"ANALYZE" "TABLE" TableName "PARTITION" PartitionNameList "INDEX" IndexNameList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "PARTITION" PartitionNameList "INDEX" IndexNameList AnalyzeOptionListOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:     []*ast.TableName{$3.(*ast.TableName)},
-			PartitionNames: $5.([]model.CIStr),
-			IndexNames:     $7.([]model.CIStr),
-			IndexFlag:      true,
-			AnalyzeOpts:    $8.([]ast.AnalyzeOpt),
+			TableNames:      []*ast.TableName{$4.(*ast.TableName)},
+			NoWriteToBinLog: $2.(bool),
+			PartitionNames:  $6.([]model.CIStr),
+			IndexNames:      $8.([]model.CIStr),
+			IndexFlag:       true,
+			AnalyzeOpts:     $9.([]ast.AnalyzeOpt),
 		}
 	}
-|	"ANALYZE" "INCREMENTAL" "TABLE" TableName "PARTITION" PartitionNameList "INDEX" IndexNameList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "INCREMENTAL" "TABLE" TableName "PARTITION" PartitionNameList "INDEX" IndexNameList AnalyzeOptionListOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:     []*ast.TableName{$4.(*ast.TableName)},
-			PartitionNames: $6.([]model.CIStr),
-			IndexNames:     $8.([]model.CIStr),
-			IndexFlag:      true,
-			Incremental:    true,
-			AnalyzeOpts:    $9.([]ast.AnalyzeOpt),
+			TableNames:      []*ast.TableName{$5.(*ast.TableName)},
+			NoWriteToBinLog: $2.(bool),
+			PartitionNames:  $7.([]model.CIStr),
+			IndexNames:      $9.([]model.CIStr),
+			IndexFlag:       true,
+			Incremental:     true,
+			AnalyzeOpts:     $10.([]ast.AnalyzeOpt),
 		}
 	}
-|	"ANALYZE" "TABLE" TableName "UPDATE" "HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "UPDATE" "HISTOGRAM" "ON" IdentList AnalyzeOptionListOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:         []*ast.TableName{$3.(*ast.TableName)},
-			ColumnNames:        $7.([]model.CIStr),
-			AnalyzeOpts:        $8.([]ast.AnalyzeOpt),
+			TableNames:         []*ast.TableName{$4.(*ast.TableName)},
+			NoWriteToBinLog:    $2.(bool),
+			ColumnNames:        $8.([]model.CIStr),
+			AnalyzeOpts:        $9.([]ast.AnalyzeOpt),
 			HistogramOperation: ast.HistogramOperationUpdate,
 		}
 	}
-|	"ANALYZE" "TABLE" TableName "DROP" "HISTOGRAM" "ON" IdentList
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "DROP" "HISTOGRAM" "ON" IdentList
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:         []*ast.TableName{$3.(*ast.TableName)},
-			ColumnNames:        $7.([]model.CIStr),
+			TableNames:         []*ast.TableName{$4.(*ast.TableName)},
+			NoWriteToBinLog:    $2.(bool),
+			ColumnNames:        $8.([]model.CIStr),
 			HistogramOperation: ast.HistogramOperationDrop,
 		}
 	}
-|	"ANALYZE" "TABLE" TableName "COLUMNS" IdentList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "COLUMNS" IdentList AnalyzeOptionListOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:   []*ast.TableName{$3.(*ast.TableName)},
-			ColumnNames:  $5.([]model.CIStr),
-			ColumnChoice: model.ColumnList,
-			AnalyzeOpts:  $6.([]ast.AnalyzeOpt)}
+			TableNames:      []*ast.TableName{$4.(*ast.TableName)},
+			NoWriteToBinLog: $2.(bool),
+			ColumnNames:     $6.([]model.CIStr),
+			ColumnChoice:    model.ColumnList,
+			AnalyzeOpts:     $7.([]ast.AnalyzeOpt)}
 	}
-|	"ANALYZE" "TABLE" TableName "PARTITION" PartitionNameList "COLUMNS" IdentList AnalyzeOptionListOpt
+|	"ANALYZE" NoWriteToBinLogAliasOpt "TABLE" TableName "PARTITION" PartitionNameList "COLUMNS" IdentList AnalyzeOptionListOpt
 	{
 		$$ = &ast.AnalyzeTableStmt{
-			TableNames:     []*ast.TableName{$3.(*ast.TableName)},
-			PartitionNames: $5.([]model.CIStr),
-			ColumnNames:    $7.([]model.CIStr),
-			ColumnChoice:   model.ColumnList,
-			AnalyzeOpts:    $8.([]ast.AnalyzeOpt)}
+			TableNames:      []*ast.TableName{$4.(*ast.TableName)},
+			NoWriteToBinLog: $2.(bool),
+			PartitionNames:  $6.([]model.CIStr),
+			ColumnNames:     $8.([]model.CIStr),
+			ColumnChoice:    model.ColumnList,
+			AnalyzeOpts:     $9.([]ast.AnalyzeOpt)}
 	}
 
 AllColumnsOrPredicateColumnsOpt:
@@ -3944,6 +3953,13 @@ BuiltinFunction:
 		}
 	}
 |	identifier '(' ExpressionList ')'
+	{
+		$$ = &ast.FuncCallExpr{
+			FnName: model.NewCIStr($1),
+			Args:   $3.([]ast.ExprNode),
+		}
+	}
+|	"REPLACE" '(' ExpressionList ')'
 	{
 		$$ = &ast.FuncCallExpr{
 			FnName: model.NewCIStr($1),
@@ -5858,39 +5874,12 @@ OptionLevel:
 		$$ = ast.BRIEOptionLevelRequired
 	}
 
-PauseLoadDataStmt:
-	"PAUSE" "LOAD" "DATA" "JOB" Int64Num
-	{
-		$$ = &ast.LoadDataActionStmt{
-			Tp:    ast.LoadDataPause,
-			JobID: $5.(int64),
-		}
-	}
-
-ResumeLoadDataStmt:
-	"RESUME" "LOAD" "DATA" "JOB" Int64Num
-	{
-		$$ = &ast.LoadDataActionStmt{
-			Tp:    ast.LoadDataResume,
-			JobID: $5.(int64),
-		}
-	}
-
 CancelImportStmt:
 	"CANCEL" "IMPORT" "JOB" Int64Num
 	{
 		$$ = &ast.ImportIntoActionStmt{
 			Tp:    ast.ImportIntoCancel,
 			JobID: $4.(int64),
-		}
-	}
-
-DropLoadDataStmt:
-	"DROP" "LOAD" "DATA" "JOB" Int64Num
-	{
-		$$ = &ast.LoadDataActionStmt{
-			Tp:    ast.LoadDataDrop,
-			JobID: $5.(int64),
 		}
 	}
 
@@ -6574,6 +6563,7 @@ UnReservedKeyword:
 |	"AFTER"
 |	"ALWAYS"
 |	"AVG"
+|	"BDR"
 |	"BEGIN"
 |	"BIT"
 |	"BOOL"
@@ -6673,6 +6663,7 @@ UnReservedKeyword:
 |	"TSO"
 |	"UNBOUNDED"
 |	"UNKNOWN"
+|	"UNSET"
 |	"VALUE" %prec lowerThanValueKeyword
 |	"WARNINGS"
 |	"YEAR"
@@ -6809,6 +6800,7 @@ UnReservedKeyword:
 |	"STORAGE"
 |	"DISK"
 |	"STATS_SAMPLE_PAGES"
+|	"SECONDARY"
 |	"SECONDARY_ENGINE"
 |	"SECONDARY_LOAD"
 |	"SECONDARY_UNLOAD"
@@ -6957,8 +6949,6 @@ TiDBKeyword:
 |	"STATS_HEALTHY"
 |	"STATS_LOCKED"
 |	"HISTOGRAMS_IN_FLIGHT"
-|	"TELEMETRY"
-|	"TELEMETRY_ID"
 |	"TIDB"
 |	"TIFLASH"
 |	"TOPN"
@@ -6997,6 +6987,7 @@ NotKeywordToken:
 |	"INPLACE"
 |	"INSTANT"
 |	"INTERNAL"
+|	"LOG"
 |	"MIN"
 |	"MAX"
 |	"NOW"
@@ -7871,6 +7862,7 @@ FunctionNameConflict:
 |	"HOUR"
 |	"IF"
 |	"INTERVAL"
+|	"LOG"
 |	"FORMAT"
 |	"LEFT"
 |	"MICROSECOND"
@@ -8813,7 +8805,16 @@ TableName:
 	}
 |	Identifier '.' Identifier
 	{
-		$$ = &ast.TableName{Schema: model.NewCIStr($1), Name: model.NewCIStr($3)}
+		schema := $1
+		if isInCorrectIdentifierName(schema) {
+			yylex.AppendError(ErrWrongDBName.GenWithStackByArgs(schema))
+			return 1
+		}
+		$$ = &ast.TableName{Schema: model.NewCIStr(schema), Name: model.NewCIStr($3)}
+	}
+|	'*' '.' Identifier
+	{
+		$$ = &ast.TableName{Schema: model.NewCIStr("*"), Name: model.NewCIStr($3)}
 	}
 
 TableNameList:
@@ -10262,8 +10263,8 @@ SetOprStmtWoutLimitOrderBy:
 			setOprList2 = []ast.Node{x}
 			with2 = x.With
 		case *ast.SetOprStmt:
-		    // child setOprStmt's limit and order should also make sense
-		    // we should separate it out from other normal SetOprSelectList.
+			// child setOprStmt's limit and order should also make sense
+			// we should separate it out from other normal SetOprSelectList.
 			setOprList2 = x.SelectList.Selects
 			with2 = x.With
 			limit2 = x.Limit
@@ -10367,7 +10368,7 @@ SetOprStmtWithLimitOrderBy:
 		var setOprList []ast.Node
 		switch x := $1.(*ast.SubqueryExpr).Query.(type) {
 		case *ast.SelectStmt:
-			setOprList = []ast.Node{&ast.SetOprSelectList{Selects: []ast.Node{x}}}
+			setOprList = []ast.Node{&ast.SetOprSelectList{Selects: []ast.Node{x}, With: x.With}}
 		case *ast.SetOprStmt:
 			setOprList = []ast.Node{&ast.SetOprSelectList{Selects: x.SelectList.Selects, With: x.With, Limit: x.Limit, OrderBy: x.OrderBy}}
 		}
@@ -10940,6 +10941,16 @@ AdminStmtLimitOpt:
 		$$ = &ast.LimitSimple{Offset: $4.(uint64), Count: $2.(uint64)}
 	}
 
+BDRRole:
+	"PRIMARY"
+	{
+		$$ = ast.BDRRolePrimary
+	}
+|	"SECONDARY"
+	{
+		$$ = ast.BDRRoleSecondary
+	}
+
 AdminStmt:
 	"ADMIN" "SHOW" "DDL"
 	{
@@ -11137,23 +11148,30 @@ AdminStmt:
 			Tp: ast.AdminReloadStatistics,
 		}
 	}
-|	"ADMIN" "SHOW" "TELEMETRY"
-	{
-		$$ = &ast.AdminStmt{
-			Tp: ast.AdminShowTelemetry,
-		}
-	}
-|	"ADMIN" "RESET" "TELEMETRY_ID"
-	{
-		$$ = &ast.AdminStmt{
-			Tp: ast.AdminResetTelemetryID,
-		}
-	}
 |	"ADMIN" "FLUSH" StatementScope "PLAN_CACHE"
 	{
 		$$ = &ast.AdminStmt{
 			Tp:             ast.AdminFlushPlanCache,
 			StatementScope: $3.(ast.StatementScope),
+		}
+	}
+|	"ADMIN" "SET" "BDR" "ROLE" BDRRole
+	{
+		$$ = &ast.AdminStmt{
+			Tp:      ast.AdminSetBDRRole,
+			BDRRole: $5.(ast.BDRRole),
+		}
+	}
+|	"ADMIN" "SHOW" "BDR" "ROLE"
+	{
+		$$ = &ast.AdminStmt{
+			Tp: ast.AdminShowBDRRole,
+		}
+	}
+|	"ADMIN" "UNSET" "BDR" "ROLE"
+	{
+		$$ = &ast.AdminStmt{
+			Tp: ast.AdminUnsetBDRRole,
 		}
 	}
 
@@ -11336,9 +11354,25 @@ ShowStmt:
 		}
 	}
 |	"SHOW" "MASTER" "STATUS"
+	// "SHOW MASTER STATUS" was deprecated in MySQL 8.2.0 in favor of "SHOW BINARY LOG STATUS"
 	{
 		$$ = &ast.ShowStmt{
 			Tp: ast.ShowMasterStatus,
+		}
+	}
+|	"SHOW" "BINARY" "LOG" "STATUS"
+	{
+		$$ = &ast.ShowStmt{
+			Tp: ast.ShowBinlogStatus,
+		}
+	}
+|	"SHOW" Replica "STATUS"
+	// From MySQL 8.0.22, use SHOW REPLICA STATUS in place of SHOW SLAVE STATUS,
+	// which is deprecated from that release. In releases before MySQL 8.0.22,
+	// use SHOW SLAVE STATUS.
+	{
+		$$ = &ast.ShowStmt{
+			Tp: ast.ShowReplicaStatus,
 		}
 	}
 |	"SHOW" OptFull "PROCESSLIST"
@@ -11816,6 +11850,10 @@ ShowTableAliasOpt:
 		$$ = $2.(*ast.TableName)
 	}
 
+Replica:
+	"REPLICA"
+|	"SLAVE"
+
 FlushStmt:
 	"FLUSH" NoWriteToBinLogAliasOpt FlushOption
 	{
@@ -12057,10 +12095,8 @@ Statement:
 |	RestartStmt
 |	HelpStmt
 |	NonTransactionalDMLStmt
-|	PauseLoadDataStmt
-|	ResumeLoadDataStmt
+|	OptimizeTableStmt
 |	CancelImportStmt
-|	DropLoadDataStmt
 
 TraceableStmt:
 	DeleteFromStmt
@@ -12114,6 +12150,7 @@ ExplainableStmt:
 		$$ = sel
 	}
 |	AlterTableStmt
+|	ImportIntoStmt
 
 StatementList:
 	Statement
@@ -13798,6 +13835,20 @@ CreateBindingStmt:
 
 		$$ = x
 	}
+|	"CREATE" GlobalScope "BINDING" "USING" BindableStmt
+	{
+		startOffset := parser.startOffset(&yyS[yypt])
+		hintedStmt := $5
+		hintedStmt.SetText(parser.lexer.client, strings.TrimSpace(parser.src[startOffset:]))
+
+		x := &ast.CreateBindingStmt{
+			OriginNode:  hintedStmt,
+			HintedNode:  hintedStmt,
+			GlobalScope: $2.(bool),
+		}
+
+		$$ = x
+	}
 |	"CREATE" GlobalScope "BINDING" "FROM" "HISTORY" "USING" "PLAN" "DIGEST" stringLit
 	{
 		x := &ast.CreateBindingStmt{
@@ -14293,23 +14344,24 @@ RevokeRoleStmt:
  * for load stmt with format see https://github.com/pingcap/tidb/issues/40499
  *******************************************************************************************/
 LoadDataStmt:
-	"LOAD" "DATA" LocalOpt "INFILE" stringLit FormatOpt DuplicateOpt "INTO" "TABLE" TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt LoadDataOptionListOpt
+	"LOAD" "DATA" LowPriorityOpt LocalOpt "INFILE" stringLit FormatOpt DuplicateOpt "INTO" "TABLE" TableName CharsetOpt Fields Lines IgnoreLines ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt LoadDataOptionListOpt
 	{
 		x := &ast.LoadDataStmt{
+			LowPriority:        $3.(bool),
 			FileLocRef:         ast.FileLocServerOrRemote,
-			Path:               $5,
-			Format:             $6.(*string),
-			OnDuplicate:        $7.(ast.OnDuplicateKeyHandlingType),
-			Table:              $10.(*ast.TableName),
-			Charset:            $11.(*string),
-			FieldsInfo:         $12.(*ast.FieldsClause),
-			LinesInfo:          $13.(*ast.LinesClause),
-			IgnoreLines:        $14.(*uint64),
-			ColumnsAndUserVars: $15.([]*ast.ColumnNameOrUserVar),
-			ColumnAssignments:  $16.([]*ast.Assignment),
-			Options:            $17.([]*ast.LoadDataOpt),
+			Path:               $6,
+			Format:             $7.(*string),
+			OnDuplicate:        $8.(ast.OnDuplicateKeyHandlingType),
+			Table:              $11.(*ast.TableName),
+			Charset:            $12.(*string),
+			FieldsInfo:         $13.(*ast.FieldsClause),
+			LinesInfo:          $14.(*ast.LinesClause),
+			IgnoreLines:        $15.(*uint64),
+			ColumnsAndUserVars: $16.([]*ast.ColumnNameOrUserVar),
+			ColumnAssignments:  $17.([]*ast.Assignment),
+			Options:            $18.([]*ast.LoadDataOpt),
 		}
-		if $3 != nil {
+		if $4 != nil {
 			x.FileLocRef = ast.FileLocClient
 			// See https://dev.mysql.com/doc/refman/5.7/en/load-data.html#load-data-duplicate-key-handling
 			// If you do not specify IGNORE or REPLACE modifier , then we set default behavior to IGNORE when LOCAL modifier is specified
@@ -14326,6 +14378,15 @@ LoadDataStmt:
 		x.Columns = columns
 
 		$$ = x
+	}
+
+LowPriorityOpt:
+	{
+		$$ = false
+	}
+|	"LOW_PRIORITY"
+	{
+		$$ = true
 	}
 
 FormatOpt:
@@ -14580,6 +14641,54 @@ ImportIntoStmt:
 			Options:            $9.([]*ast.LoadDataOpt),
 		}
 	}
+|	"IMPORT" "INTO" TableName ColumnNameOrUserVarListOptWithBrackets LoadDataSetSpecOpt "FROM" ImportFromSelectStmt LoadDataOptionListOpt
+	/* LoadDataSetSpecOpt is used to avoid shift/reduce conflict, we don't support it actually */
+	{
+		st := &ast.ImportIntoStmt{
+			Table:              $3.(*ast.TableName),
+			ColumnsAndUserVars: $4.([]*ast.ColumnNameOrUserVar),
+			Select:             $7.(ast.ResultSetNode),
+			Options:            $8.([]*ast.LoadDataOpt),
+		}
+		for _, cu := range st.ColumnsAndUserVars {
+			if cu.ColumnName == nil {
+				yylex.AppendError(yylex.Errorf("Cannot use user variable(%s) in IMPORT INTO FROM SELECT statement.", cu.UserVar.Name))
+				return 1
+			}
+		}
+		if $5.([]*ast.Assignment) != nil {
+			yylex.AppendError(yylex.Errorf("Cannot use SET clause in IMPORT INTO FROM SELECT statement."))
+			return 1
+		}
+		$$ = st
+	}
+
+ImportFromSelectStmt:
+	SelectStmt
+	{
+		$$ = $1
+	}
+|	SetOprStmt
+	{
+		$$ = $1
+	}
+|	SelectStmtWithClause
+	{
+		$$ = $1
+	}
+|	SubSelect
+	{
+		var sel ast.ResultSetNode
+		switch x := $1.(*ast.SubqueryExpr).Query.(type) {
+		case *ast.SelectStmt:
+			x.IsInBraces = true
+			sel = x
+		case *ast.SetOprStmt:
+			x.IsInBraces = true
+			sel = x
+		}
+		$$ = sel.(ast.StmtNode)
+	}
 
 /*********************************************************************
  * Lock/Unlock Tables
@@ -14682,6 +14791,21 @@ OptionalShardColumn:
 |	"ON" ColumnName
 	{
 		$$ = $2.(*ast.ColumnName)
+	}
+
+/********************************************************************
+ * OptimizeTableStmt
+ *
+ * OPTIMIZE [NO_WRITE_TO_BINLOG | LOCAL]
+ *     TABLE tbl_name [, tbl_name] ...
+ *******************************************************************/
+OptimizeTableStmt:
+	"OPTIMIZE" NoWriteToBinLogAliasOpt TableOrTables TableNameList
+	{
+		$$ = &ast.OptimizeTableStmt{
+			Tables:          $4.([]*ast.TableName),
+			NoWriteToBinLog: $2.(bool),
+		}
 	}
 
 /********************************************************************

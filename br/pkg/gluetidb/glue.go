@@ -18,6 +18,7 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/session"
+	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
@@ -50,7 +51,7 @@ type Glue struct {
 }
 
 type tidbSession struct {
-	se session.Session
+	se sessiontypes.Session
 }
 
 // GetDomain implements glue.Glue.
@@ -167,7 +168,7 @@ func (gs *tidbSession) Execute(ctx context.Context, sql string) error {
 	return gs.ExecuteInternal(ctx, sql)
 }
 
-func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+func (gs *tidbSession) ExecuteInternal(ctx context.Context, sql string, args ...any) error {
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	rs, err := gs.se.ExecuteInternal(ctx, sql, args...)
 	if err != nil {
@@ -237,7 +238,7 @@ func (gs *tidbSession) showCreatePlacementPolicy(policy *model.PolicyInfo) strin
 
 // mockSession is used for test.
 type mockSession struct {
-	se         session.Session
+	se         sessiontypes.Session
 	globalVars map[string]string
 }
 
@@ -251,7 +252,7 @@ func (s *mockSession) Execute(ctx context.Context, sql string) error {
 	return s.ExecuteInternal(ctx, sql)
 }
 
-func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error {
+func (s *mockSession) ExecuteInternal(ctx context.Context, sql string, args ...any) error {
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	rs, err := s.se.ExecuteInternal(ctx, sql, args...)
 	if err != nil {
@@ -313,11 +314,11 @@ func (s *mockSession) GetGlobalVariable(name string) (string, error) {
 
 // MockGlue only used for test
 type MockGlue struct {
-	se         session.Session
+	se         sessiontypes.Session
 	GlobalVars map[string]string
 }
 
-func (m *MockGlue) SetSession(se session.Session) {
+func (m *MockGlue) SetSession(se sessiontypes.Session) {
 	m.se = se
 }
 

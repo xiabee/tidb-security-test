@@ -15,7 +15,6 @@ package model
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -494,9 +493,9 @@ type TableInfo struct {
 	// Because auto increment ID has schemaID as prefix,
 	// We need to save original schemaID to keep autoID unchanged
 	// while renaming a table from one database to another.
-	// TODO: Remove it.
-	// Now it only uses for compatibility with the old version that already uses this field.
-	OldSchemaID int64 `json:"old_schema_id,omitempty"`
+	// Only set if table has been renamed across schemas
+	// Old name 'old_schema_id' is kept for backwards compatibility
+	AutoIDSchemaID int64 `json:"old_schema_id,omitempty"`
 
 	// ShardRowIDBits specify if the implicit row ID is sharded.
 	ShardRowIDBits uint64
@@ -545,6 +544,8 @@ type TableInfo struct {
 
 	// Revision is per table schema's version, it will be increased when the schema changed.
 	Revision uint64 `json:"revision"`
+
+	DBID int64 `json:"-"`
 }
 
 // TableNameInfo provides meta data describing a table name info.
@@ -728,11 +729,10 @@ func (t *TableInfo) GetUpdateTime() time.Time {
 	return TSConvert2Time(t.UpdateTS)
 }
 
-// GetDBID returns the schema ID that is used to create an allocator.
-// TODO: Remove it after removing OldSchemaID.
-func (t *TableInfo) GetDBID(dbID int64) int64 {
-	if t.OldSchemaID != 0 {
-		return t.OldSchemaID
+// GetAutoIDSchemaID returns the schema ID that was used to create an allocator.
+func (t *TableInfo) GetAutoIDSchemaID(dbID int64) int64 {
+	if t.AutoIDSchemaID != 0 {
+		return t.AutoIDSchemaID
 	}
 	return dbID
 }
@@ -1200,6 +1200,10 @@ type PartitionInfo struct {
 	// rather than pid.
 	Enable bool `json:"enable"`
 
+	// IsEmptyColumns is for syntax like `partition by key()`.
+	// When IsEmptyColums is true, it will not display column name in `show create table` stmt.
+	IsEmptyColumns bool `json:"is_empty_columns"`
+
 	Definitions []PartitionDefinition `json:"definitions"`
 	// AddingDefinitions is filled when adding partitions that is in the mid state.
 	AddingDefinitions []PartitionDefinition `json:"adding_definitions"`
@@ -1249,6 +1253,7 @@ func (pi *PartitionInfo) Clone() *PartitionInfo {
 }
 
 // GetNameByID gets the partition name by ID.
+// TODO: Remove the need for this function!
 func (pi *PartitionInfo) GetNameByID(id int64) string {
 	definitions := pi.Definitions
 	// do not convert this loop to `for _, def := range definitions`.
@@ -1727,7 +1732,7 @@ func (db *DBInfo) Copy() *DBInfo {
 
 // LessDBInfo is used for sorting DBInfo by DBInfo.Name.
 func LessDBInfo(a *DBInfo, b *DBInfo) int {
-	return cmp.Compare(a.Name.L, b.Name.L)
+	return strings.Compare(a.Name.L, b.Name.L)
 }
 
 // CIStr is case insensitive string.
@@ -1778,14 +1783,26 @@ func (cis *CIStr) MemoryUsage() (sum int64) {
 
 // TableItemID is composed by table ID and column/index ID
 type TableItemID struct {
-	TableID int64
-	ID      int64
-	IsIndex bool
+	TableID          int64
+	ID               int64
+	IsIndex          bool
+	IsSyncLoadFailed bool
 }
 
 // Key is used to generate unique key for TableItemID to use in the syncload
 func (t TableItemID) Key() string {
 	return fmt.Sprintf("%d#%d#%t", t.ID, t.TableID, t.IsIndex)
+}
+
+// StatsLoadItem represents the load unit for statistics's memory loading.
+type StatsLoadItem struct {
+	TableItemID
+	FullLoad bool
+}
+
+// Key is used to generate unique key for TableItemID to use in the syncload
+func (s StatsLoadItem) Key() string {
+	return fmt.Sprintf("%s#%t", s.TableItemID.Key(), s.FullLoad)
 }
 
 // PolicyRefInfo is the struct to refer the placement policy.

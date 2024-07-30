@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -203,7 +204,7 @@ func (e *ProjectionExec) unParallelExecute(ctx context.Context, chk *chunk.Chunk
 	if e.childResult.NumRows() == 0 {
 		return nil
 	}
-	err = e.evaluatorSuit.Run(e.Ctx(), e.childResult, chk)
+	err = e.evaluatorSuit.Run(e.Ctx().GetExprCtx().GetEvalCtx(), e.Ctx().GetSessionVars().EnableVectorizedExpression, e.childResult, chk)
 	return err
 }
 
@@ -447,7 +448,7 @@ func (w *projectionWorker) run(ctx context.Context) {
 		}
 
 		mSize := output.chk.MemoryUsage() + input.chk.MemoryUsage()
-		err := w.evaluatorSuit.Run(w.sctx, input.chk, output.chk)
+		err := w.evaluatorSuit.Run(w.sctx.GetExprCtx().GetEvalCtx(), w.sctx.GetSessionVars().EnableVectorizedExpression, input.chk, output.chk)
 		failpoint.Inject("ConsumeRandomPanic", nil)
 		w.proj.memTracker.Consume(output.chk.MemoryUsage() + input.chk.MemoryUsage() - mSize)
 		output.done <- err
@@ -460,9 +461,9 @@ func (w *projectionWorker) run(ctx context.Context) {
 	}
 }
 
-func recoveryProjection(output *projectionOutput, r interface{}) {
+func recoveryProjection(output *projectionOutput, r any) {
 	if output != nil {
-		output.done <- errors.Errorf("%v", r)
+		output.done <- util.GetRecoverError(r)
 	}
 	logutil.BgLogger().Error("projection executor panicked", zap.String("error", fmt.Sprintf("%v", r)), zap.Stack("stack"))
 }

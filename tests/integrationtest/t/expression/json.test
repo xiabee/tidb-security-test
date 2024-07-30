@@ -248,7 +248,18 @@ select
 		json_length('[]'),
 		json_length('{"a": 1}'),
 		json_length('{"a": 1, "b": 2}'),
-		json_length('[1, 2, 3]');
+		json_length('[1, 2, 3]'),
+		json_length('{}', '$'),
+		json_length('1', '$'),
+		json_length(null, '$'),
+		json_length(null, 'fdfd'),
+		json_length('{}', null),
+		json_length('1', '$.a'),
+		json_length('{}', '$.a');
+-- error 3143
+select json_length('{}', 'fsdfds');
+-- error 3143
+select json_length('1', 'fsdfds');
 # issue 16267
 select json_array(922337203685477580) =  json_array(922337203685477581);
 
@@ -343,7 +354,7 @@ select json_storage_free(NULL);
 select json_storage_free('{}');
 select json_storage_free('1');
 select json_storage_free('{"a": "b"}');
--- error 1064
+-- error 3140
 select json_storage_free('{"c":["a","b"]');
 
 # TestJSONExtractFromLast
@@ -359,6 +370,17 @@ select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[1 to 100]');
 select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[0 to last]');
 select json_extract('[{"a": [1,2,3,4]}]', '$[0].a[0 to 2]');
 
+# TestCastJSONStringToInteger
+drop table if exists t;
+create table t (a json);
+insert into t values ('"-1"');
+insert into t values ('"18446744073709551615"');
+insert into t values ('"18446744073709552000"');
+-- sorted_result
+select a, cast(a as unsigned) from t;
+-- sorted_result
+select a, cast(a as signed) from t;
+
 # TestCastBinaryStringToJSON
 select cast(binary 'aa' as json);
 drop table if exists t;
@@ -371,46 +393,3 @@ select 1 from t where cast(vc as json) = '1';
 select 1 from t where cast(c as json) = '1';
 select 1 from t where cast(BINARY vc as json) = '1';
 select 1 from t where cast(BINARY c as json) = '1';
-
-# Test argment errors
-# https://github.com/pingcap/tidb/issues/53799
--- error 3146
-SELECT JSON_CONTAINS(123, '');
--- error 3146
-SELECT JSON_CONTAINS('{}', 123);
--- error 3146
-SELECT JSON_OVERLAPS(123, '');
--- error 3146
-SELECT JSON_OVERLAPS('{}', 123);
--- error 3146
-SELECT 'abc' MEMBER OF(123);
--- error 3154
-SELECT JSON_SEARCH('{}',3,4);
--- error 3143
-SELECT JSON_ARRAY_APPEND('[]','abc','def');
--- error 3143
-SELECT JSON_ARRAY_INSERT('{}','abc','def');
--- error 3153
-SELECT JSON_REMOVE('{}','$');
--- error 3149
-SELECT JSON_REMOVE('{}','$.*');
--- error 3149
-SELECT JSON_SET('{}','$.*','');
--- error 3154
-SELECT JSON_CONTAINS_PATH('{}', 'on', '$.a');
--- error 3154
-SELECT JSON_SEARCH('{}', 'on', '$.a');
--- error 3158
-SELECT JSON_OBJECT(NULL,'abc');
--- error 3146
-SELECT JSON_SCHEMA_VALID(1, '{}');
--- error 3146
-SELECT JSON_SCHEMA_VALID('{}', 1);
--- error 3141
-SELECT JSON_SCHEMA_VALID('','{}');
--- error 3141
-SELECT JSON_SCHEMA_VALID('{}','');
--- error 3141
-SELECT JSON_SCHEMA_VALID('', NULL);
--- error 3853
-SELECT JSON_SCHEMA_VALID('1','{}');

@@ -5,11 +5,11 @@ package backup_test
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"testing"
 	"time"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/kvproto/pkg/errorpb"
@@ -21,12 +21,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/pdutil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
-	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
@@ -41,6 +37,7 @@ type testBackup struct {
 	cancel context.CancelFunc
 
 	mockPDClient pd.Client
+	mockCluster  *testutils.MockCluster
 	mockGlue     *gluetidb.MockGlue
 	backupClient *backup.Client
 
@@ -49,15 +46,15 @@ type testBackup struct {
 }
 
 func createBackupSuite(t *testing.T) *testBackup {
-	tikvClient, _, pdClient, err := testutils.NewMockTiKV("", nil)
+	tikvClient, mockCluster, pdClient, err := testutils.NewMockTiKV("", nil)
 	require.NoError(t, err)
 	s := new(testBackup)
 	s.mockGlue = &gluetidb.MockGlue{}
 	s.mockPDClient = pdClient
+	s.mockCluster = mockCluster
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	mockMgr := &conn.Mgr{PdController: &pdutil.PdController{}}
 	mockMgr.SetPDClient(s.mockPDClient)
-	mockMgr.SetHTTP([]string{"test"}, nil)
 	s.backupClient = backup.NewBackupClient(s.ctx, mockMgr)
 
 	s.cluster, err = mock.NewCluster()
@@ -131,91 +128,6 @@ func TestGetTS(t *testing.T) {
 	require.Equal(t, backupts, ts)
 }
 
-func TestBuildTableRangeIntHandle(t *testing.T) {
-	type Case struct {
-		ids []int64
-		trs []kv.KeyRange
-	}
-	low := codec.EncodeInt(nil, math.MinInt64)
-	high := kv.Key(codec.EncodeInt(nil, math.MaxInt64)).PrefixNext()
-	cases := []Case{
-		{ids: []int64{1}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-		}},
-		{ids: []int64{1, 2, 3}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-			{StartKey: tablecodec.EncodeRowKey(2, low), EndKey: tablecodec.EncodeRowKey(2, high)},
-			{StartKey: tablecodec.EncodeRowKey(3, low), EndKey: tablecodec.EncodeRowKey(3, high)},
-		}},
-		{ids: []int64{1, 3}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-			{StartKey: tablecodec.EncodeRowKey(3, low), EndKey: tablecodec.EncodeRowKey(3, high)},
-		}},
-	}
-	for _, cs := range cases {
-		t.Log(cs)
-		tbl := &model.TableInfo{Partition: &model.PartitionInfo{Enable: true}}
-		for _, id := range cs.ids {
-			tbl.Partition.Definitions = append(tbl.Partition.Definitions,
-				model.PartitionDefinition{ID: id})
-		}
-		ranges, err := backup.BuildTableRanges(tbl)
-		require.NoError(t, err)
-		require.Equal(t, cs.trs, ranges)
-	}
-
-	tbl := &model.TableInfo{ID: 7}
-	ranges, err := backup.BuildTableRanges(tbl)
-	require.NoError(t, err)
-	require.Equal(t, []kv.KeyRange{
-		{StartKey: tablecodec.EncodeRowKey(7, low), EndKey: tablecodec.EncodeRowKey(7, high)},
-	}, ranges)
-}
-
-func TestBuildTableRangeCommonHandle(t *testing.T) {
-	type Case struct {
-		ids []int64
-		trs []kv.KeyRange
-	}
-	low, err_l := codec.EncodeKey(nil, nil, []types.Datum{types.MinNotNullDatum()}...)
-	require.NoError(t, err_l)
-	high, err_h := codec.EncodeKey(nil, nil, []types.Datum{types.MaxValueDatum()}...)
-	require.NoError(t, err_h)
-	high = kv.Key(high).PrefixNext()
-	cases := []Case{
-		{ids: []int64{1}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-		}},
-		{ids: []int64{1, 2, 3}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-			{StartKey: tablecodec.EncodeRowKey(2, low), EndKey: tablecodec.EncodeRowKey(2, high)},
-			{StartKey: tablecodec.EncodeRowKey(3, low), EndKey: tablecodec.EncodeRowKey(3, high)},
-		}},
-		{ids: []int64{1, 3}, trs: []kv.KeyRange{
-			{StartKey: tablecodec.EncodeRowKey(1, low), EndKey: tablecodec.EncodeRowKey(1, high)},
-			{StartKey: tablecodec.EncodeRowKey(3, low), EndKey: tablecodec.EncodeRowKey(3, high)},
-		}},
-	}
-	for _, cs := range cases {
-		t.Log(cs)
-		tbl := &model.TableInfo{Partition: &model.PartitionInfo{Enable: true}, IsCommonHandle: true}
-		for _, id := range cs.ids {
-			tbl.Partition.Definitions = append(tbl.Partition.Definitions,
-				model.PartitionDefinition{ID: id})
-		}
-		ranges, err := backup.BuildTableRanges(tbl)
-		require.NoError(t, err)
-		require.Equal(t, cs.trs, ranges)
-	}
-
-	tbl := &model.TableInfo{ID: 7, IsCommonHandle: true}
-	ranges, err_r := backup.BuildTableRanges(tbl)
-	require.NoError(t, err_r)
-	require.Equal(t, []kv.KeyRange{
-		{StartKey: tablecodec.EncodeRowKey(7, low), EndKey: tablecodec.EncodeRowKey(7, high)},
-	}, ranges)
-}
-
 func TestOnBackupRegionErrorResponse(t *testing.T) {
 	type Case struct {
 		storeID           uint64
@@ -252,64 +164,6 @@ func TestOnBackupRegionErrorResponse(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
-}
-func TestGetHistoryDDLJobs(t *testing.T) {
-	s := createBackupSuite(t)
-
-	tk := testkit.NewTestKit(t, s.cluster.Storage)
-	lastTS1, err := s.cluster.GetOracle().GetTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
-	require.NoErrorf(t, err, "Error get last ts: %s", err)
-	tk.MustExec("CREATE DATABASE IF NOT EXISTS test_db;")
-	tk.MustExec("CREATE TABLE IF NOT EXISTS test_db.test_table (c1 INT);")
-	lastTS2, err := s.cluster.GetOracle().GetTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
-	require.NoErrorf(t, err, "Error get last ts: %s", err)
-	tk.MustExec("RENAME TABLE test_db.test_table to test_db.test_table1;")
-	tk.MustExec("DROP TABLE test_db.test_table1;")
-	tk.MustExec("DROP DATABASE test_db;")
-	tk.MustExec("CREATE DATABASE test_db;")
-	tk.MustExec("USE test_db;")
-	tk.MustExec("CREATE TABLE test_table1 (c2 CHAR(255));")
-	tk.MustExec("RENAME TABLE test_table1 to test_table;")
-	tk.MustExec("RENAME TABLE test_table to test_table2;")
-	tk.MustExec("RENAME TABLE test_table2 to test_table;")
-	lastTS3, err := s.cluster.GetOracle().GetTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
-	require.NoErrorf(t, err, "Error get last ts: %s", err)
-	tk.MustExec("TRUNCATE TABLE test_table;")
-	ts, err := s.cluster.GetOracle().GetTimestamp(context.Background(), &oracle.Option{TxnScope: oracle.GlobalTxnScope})
-	require.NoErrorf(t, err, "Error get last ts: %s", err)
-
-	checkFn := func(lastTS uint64, ts uint64, jobsCount int) {
-		cipher := backuppb.CipherInfo{CipherType: encryptionpb.EncryptionMethod_PLAINTEXT}
-		metaWriter := metautil.NewMetaWriter(s.storage, metautil.MetaFileSize, false, "", &cipher)
-		ctx := context.Background()
-		metaWriter.StartWriteMetasAsync(ctx, metautil.AppendDDL)
-		s.mockGlue.SetSession(tk.Session())
-		err = backup.WriteBackupDDLJobs(metaWriter, s.mockGlue, s.cluster.Storage, lastTS, ts, false)
-		require.NoErrorf(t, err, "Error get ddl jobs: %s", err)
-		err = metaWriter.FinishWriteMetas(ctx, metautil.AppendDDL)
-		require.NoError(t, err, "Flush failed", err)
-		err = metaWriter.FlushBackupMeta(ctx)
-		require.NoError(t, err, "Finally flush backup meta failed", err)
-
-		metaBytes, err := s.storage.ReadFile(ctx, metautil.MetaFile)
-		require.NoError(t, err)
-		mockMeta := &backuppb.BackupMeta{}
-		err = proto.Unmarshal(metaBytes, mockMeta)
-		require.NoError(t, err)
-		// check the schema version
-		metaReader := metautil.NewMetaReader(mockMeta, s.storage, &cipher)
-		allDDLJobsBytes, err := metaReader.ReadDDLs(ctx)
-		require.NoError(t, err)
-		var allDDLJobs []*model.Job
-		err = json.Unmarshal(allDDLJobsBytes, &allDDLJobs)
-		require.NoError(t, err)
-		require.Len(t, allDDLJobs, jobsCount)
-	}
-
-	checkFn(lastTS1, ts, 11)
-	checkFn(lastTS2, ts, 9)
-	checkFn(lastTS1, lastTS2, 2)
-	checkFn(lastTS3, ts, 1)
 }
 
 func TestSkipUnsupportedDDLJob(t *testing.T) {
@@ -391,4 +245,64 @@ func TestCheckBackupIsLocked(t *testing.T) {
 	err = backup.CheckBackupStorageIsLocked(ctx, s.storage)
 	require.Error(t, err)
 	require.Regexp(t, "backup lock file and sst file exist in(.+)", err.Error())
+}
+
+func TestFindTargetPeer(t *testing.T) {
+	s := createBackupSuite(t)
+
+	ctx := context.Background()
+	testutils.BootstrapWithMultiRegions(s.mockCluster, []byte("g"), []byte("n"), []byte("t"))
+
+	leader1, err := s.backupClient.FindTargetPeer(ctx, []byte("a"), false, nil)
+	require.NoError(t, err)
+
+	leader2, err := s.backupClient.FindTargetPeer(ctx, []byte("b"), false, nil)
+	require.NoError(t, err)
+
+	// check passed keys on same region
+	require.Equal(t, leader1.GetId(), leader2.GetId())
+
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"hasLeader\")")
+
+	leader, err := s.backupClient.FindTargetPeer(ctx, []byte("m"), false, nil)
+	require.NoError(t, err)
+	// check passed keys on find leader after retry
+	require.Equal(t, 42, int(leader.GetId()))
+
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
+
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "return(\"noLeader\")")
+
+	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, nil)
+	// check passed keys with error on find leader after retry
+	require.ErrorContains(t, err, "cannot find leader")
+
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
+
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"hasPeer\")")
+
+	storeIDMap := make(map[uint64]struct{})
+	storeIDMap[42] = struct{}{}
+	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, storeIDMap)
+	require.NoError(t, err)
+	// check passed keys with target peer
+	require.Equal(t, 43, int(leader.GetId()))
+
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
+
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer", "return(2)")
+	failpoint.Enable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer", "1*return(\"nil\")->1*return(\"noPeer\")")
+
+	leader, err = s.backupClient.FindTargetPeer(ctx, []byte("m"), false, storeIDMap)
+	// check passed keys with error and cannot find target peer
+	require.ErrorContains(t, err, "cannot find leader")
+
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/retry-state-on-find-target-peer")
+	failpoint.Disable("github.com/pingcap/tidb/br/pkg/backup/return-region-on-find-target-peer")
 }

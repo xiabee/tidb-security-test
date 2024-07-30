@@ -54,6 +54,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/arena"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
+	"github.com/pingcap/tidb/pkg/util/plancodec"
+	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	promtestutils "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	tikverr "github.com/tikv/client-go/v2/error"
@@ -722,16 +724,26 @@ func TestConnExecutionTimeout(t *testing.T) {
 	tk.MustQuery("select SLEEP(1);").Check(testkit.Rows("0"))
 	err := tk.QueryToErr("select * FROM testTable2 WHERE SLEEP(1);")
 	require.Equal(t, "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded", err.Error())
+	// Test executor stats when execution time exceeded.
+	tk.MustExec("set @@tidb_slow_log_threshold=300")
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/store/mockstore/unistore/unistoreRPCSlowByInjestSleep", `return(150)`))
+	err = tk.QueryToErr("select /*+ max_execution_time(600), set_var(tikv_client_read_timeout=100) */ * from testTable2")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/store/mockstore/unistore/unistoreRPCSlowByInjestSleep"))
+	require.Error(t, err)
+	require.Equal(t, "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded", err.Error())
+	planInfo, err := plancodec.DecodePlan(tk.Session().GetSessionVars().StmtCtx.GetEncodedPlan())
+	require.NoError(t, err)
+	require.Regexp(t, "TableReader.*cop_task: {num: .*num_rpc:.*, total_time:.*", planInfo)
 
 	// Killed because of max execution time, reset Killed to 0.
-	atomic.CompareAndSwapUint32(&tk.Session().GetSessionVars().Killed, 2, 0)
+	tk.Session().GetSessionVars().SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
 	tk.MustExec("set @@max_execution_time = 0;")
 	tk.MustQuery("select * FROM testTable2 WHERE SLEEP(1);").Check(testkit.Rows())
 	err = tk.QueryToErr("select /*+ MAX_EXECUTION_TIME(100)*/  * FROM testTable2 WHERE  SLEEP(1);")
 	require.Equal(t, "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded", err.Error())
 
 	// Killed because of max execution time, reset Killed to 0.
-	atomic.CompareAndSwapUint32(&tk.Session().GetSessionVars().Killed, 2, 0)
+	tk.Session().GetSessionVars().SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
 	err = cc.handleQuery(context.Background(), "select * FROM testTable2 WHERE SLEEP(1);")
 	require.NoError(t, err)
 
@@ -740,7 +752,7 @@ func TestConnExecutionTimeout(t *testing.T) {
 	err = cc.handleQuery(context.Background(), "select /*+ set_var(max_execution_time=100) */ age, sleep(1) from testTable2 union all select age, 1 from testTable2")
 	require.Equal(t, "[executor:3024]Query execution was interrupted, maximum statement execution time exceeded", err.Error())
 	// Killed because of max execution time, reset Killed to 0.
-	atomic.CompareAndSwapUint32(&tk.Session().GetSessionVars().Killed, 2, 0)
+	tk.Session().GetSessionVars().SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
 	tk.MustExec("set @@max_execution_time = 500;")
 
 	err = cc.handleQuery(context.Background(), "alter table testTable2 add index idx(age);")
@@ -826,7 +838,7 @@ func TestPrefetchPointKeys4Update(t *testing.T) {
 	require.True(t, txn.Valid())
 	snap := txn.GetSnapshot()
 	//nolint:forcetypeassert
-	require.Equal(t, 4, snap.(snapshotCache).SnapCacheHitCount())
+	require.Equal(t, 6, snap.(snapshotCache).SnapCacheHitCount())
 	tk.MustExec("commit")
 	tk.MustQuery("select * from prefetch").Check(testkit.Rows("1 1 2", "2 2 4", "3 3 4"))
 
@@ -876,7 +888,7 @@ func TestPrefetchPointKeys4Delete(t *testing.T) {
 	require.True(t, txn.Valid())
 	snap := txn.GetSnapshot()
 	//nolint:forcetypeassert
-	require.Equal(t, 4, snap.(snapshotCache).SnapCacheHitCount())
+	require.Equal(t, 6, snap.(snapshotCache).SnapCacheHitCount())
 	tk.MustExec("commit")
 	tk.MustQuery("select * from prefetch").Check(testkit.Rows("4 4 4", "5 5 5", "6 6 6"))
 
@@ -955,6 +967,8 @@ func TestPrefetchPartitionTable(t *testing.T) {
 	query := "delete from prefetch where a = 2;" +
 		"delete from prefetch where a = 3;" +
 		"delete from prefetch where a in (4,5);"
+	// TODO: refactor the build code and extract the partition pruning one,
+	// so it can be called in prefetchPointPlanKeys
 	err := cc.handleQuery(ctx, query)
 	require.NoError(t, err)
 	txn, err := tk.Session().Txn(false)
@@ -1621,25 +1635,25 @@ func TestAuthSessionTokenPlugin(t *testing.T) {
 	}
 	err = cc.handleAuthPlugin(ctx, &resp)
 	require.NoError(t, err)
-	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin)
+	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin, resp.ZstdLevel)
 	require.NoError(t, err)
 
 	// login succeeds even if the password expires now
 	tk.MustExec("ALTER USER auth_session_token PASSWORD EXPIRE")
-	err = cc.openSessionAndDoAuth([]byte{}, mysql.AuthNativePassword)
+	err = cc.openSessionAndDoAuth([]byte{}, mysql.AuthNativePassword, 0)
 	require.ErrorContains(t, err, "Your password has expired")
-	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin)
+	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin, resp.ZstdLevel)
 	require.NoError(t, err)
 
 	// wrong token should fail
 	tokenBytes[0] ^= 0xff
-	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin)
+	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin, resp.ZstdLevel)
 	require.ErrorContains(t, err, "Access denied")
 	tokenBytes[0] ^= 0xff
 
 	// using the token to auth with another user should fail
 	cc.user = "another_user"
-	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin)
+	err = cc.openSessionAndDoAuth(resp.Auth, resp.AuthPlugin, resp.ZstdLevel)
 	require.ErrorContains(t, err, "Access denied")
 }
 
@@ -2002,6 +2016,38 @@ func TestEmptyOrgName(t *testing.T) {
 	}
 
 	testDispatch(t, inputs, 0)
+}
+
+func TestStats(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	stats := &compressionStats{}
+
+	// No compression
+	vars := tk.Session().GetSessionVars()
+	m, err := stats.Stats(vars)
+	require.NoError(t, err)
+	require.Equal(t, "OFF", m["Compression"])
+	require.Equal(t, "", m["Compression_algorithm"])
+	require.Equal(t, 0, m["Compression_level"])
+
+	// zlib compression
+	vars.CompressionAlgorithm = mysql.CompressionZlib
+	m, err = stats.Stats(vars)
+	require.NoError(t, err)
+	require.Equal(t, "ON", m["Compression"])
+	require.Equal(t, "zlib", m["Compression_algorithm"])
+	require.Equal(t, mysql.ZlibCompressDefaultLevel, m["Compression_level"])
+
+	// zstd compression, with level 1
+	vars.CompressionAlgorithm = mysql.CompressionZstd
+	vars.CompressionLevel = 1
+	m, err = stats.Stats(vars)
+	require.NoError(t, err)
+	require.Equal(t, "ON", m["Compression"])
+	require.Equal(t, "zstd", m["Compression_algorithm"])
+	require.Equal(t, 1, m["Compression_level"])
 }
 
 func TestCloseConn(t *testing.T) {

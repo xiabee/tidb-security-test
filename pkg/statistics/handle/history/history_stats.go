@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics/handle/cache"
 	"github.com/pingcap/tidb/pkg/statistics/handle/storage"
+	"github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
@@ -29,12 +30,12 @@ import (
 
 // statsHistoryImpl implements util.StatsHistory.
 type statsHistoryImpl struct {
-	statsHandle util.StatsHandle
+	statsHandle types.StatsHandle
 }
 
 // NewStatsHistory creates a new StatsHistory.
-func NewStatsHistory(statsHandle util.StatsHandle,
-) util.StatsHistory {
+func NewStatsHistory(statsHandle types.StatsHandle,
+) types.StatsHistory {
 	return &statsHistoryImpl{
 		statsHandle: statsHandle,
 	}
@@ -135,7 +136,10 @@ func RecordHistoricalStatsToStorage(sctx sessionctx.Context, physicalID int64, j
 		version = js.Version
 	} else {
 		for _, p := range js.Partitions {
-			version = max(version, p.Version)
+			version = p.Version
+			if version != 0 {
+				break
+			}
 		}
 	}
 	blocks, err := storage.JSONTableToBlocks(js, maxColumnSize)
@@ -144,10 +148,9 @@ func RecordHistoricalStatsToStorage(sctx sessionctx.Context, physicalID int64, j
 	}
 
 	ts := time.Now().Format("2006-01-02 15:04:05.999999")
-	const sql = "INSERT INTO mysql.stats_history(table_id, stats_data, seq_no, version, create_time) VALUES (%?, %?, %?, %?, %?)" +
-		"ON DUPLICATE KEY UPDATE stats_data=%?, create_time=%?"
+	const sql = "INSERT INTO mysql.stats_history(table_id, stats_data, seq_no, version, create_time) VALUES (%?, %?, %?, %?, %?)"
 	for i := 0; i < len(blocks); i++ {
-		if _, err = util.Exec(sctx, sql, physicalID, blocks[i], i, version, ts, blocks[i], ts); err != nil {
+		if _, err := util.Exec(sctx, sql, physicalID, blocks[i], i, version, ts); err != nil {
 			return 0, errors.Trace(err)
 		}
 	}

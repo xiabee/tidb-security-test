@@ -16,7 +16,7 @@ package aggregation
 
 import (
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
+	exprctx "github.com/pingcap/tidb/pkg/expression/context"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/mvmap"
@@ -27,14 +27,14 @@ type distinctChecker struct {
 	existingKeys *mvmap.MVMap
 	key          []byte
 	vals         [][]byte
-	sc           *stmtctx.StatementContext
+	ctx          exprctx.EvalContext
 }
 
 // createDistinctChecker creates a new distinct checker.
-func createDistinctChecker(sc *stmtctx.StatementContext) *distinctChecker {
+func createDistinctChecker(ctx exprctx.EvalContext) *distinctChecker {
 	return &distinctChecker{
 		existingKeys: mvmap.NewMVMap(),
-		sc:           sc,
+		ctx:          ctx,
 	}
 }
 
@@ -42,7 +42,9 @@ func createDistinctChecker(sc *stmtctx.StatementContext) *distinctChecker {
 func (d *distinctChecker) Check(values []types.Datum) (bool, error) {
 	d.key = d.key[:0]
 	var err error
-	d.key, err = codec.EncodeValue(d.sc, d.key, values...)
+	d.key, err = codec.EncodeValue(d.ctx.Location(), d.key, values...)
+	ec := d.ctx.ErrCtx()
+	err = ec.HandleError(err)
 	if err != nil {
 		return false, err
 	}
@@ -55,7 +57,7 @@ func (d *distinctChecker) Check(values []types.Datum) (bool, error) {
 }
 
 // calculateSum adds v to sum.
-func calculateSum(sc *stmtctx.StatementContext, sum, v types.Datum) (data types.Datum, err error) {
+func calculateSum(ctx types.Context, sum, v types.Datum) (data types.Datum, err error) {
 	// for avg and sum calculation
 	// avg and sum use decimal for integer and decimal type, use float for others
 	// see https://dev.mysql.com/doc/refman/5.7/en/group-by-functions.html
@@ -64,7 +66,7 @@ func calculateSum(sc *stmtctx.StatementContext, sum, v types.Datum) (data types.
 	case types.KindNull:
 	case types.KindInt64, types.KindUint64:
 		var d *types.MyDecimal
-		d, err = v.ToDecimal(sc)
+		d, err = v.ToDecimal(ctx)
 		if err == nil {
 			data = types.NewDecimalDatum(d)
 		}
@@ -72,7 +74,7 @@ func calculateSum(sc *stmtctx.StatementContext, sum, v types.Datum) (data types.
 		v.Copy(&data)
 	default:
 		var f float64
-		f, err = v.ToFloat64(sc)
+		f, err = v.ToFloat64(ctx)
 		if err == nil {
 			data = types.NewFloat64Datum(f)
 		}

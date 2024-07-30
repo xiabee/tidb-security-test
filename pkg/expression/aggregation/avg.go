@@ -15,6 +15,7 @@
 package aggregation
 
 import (
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
@@ -27,20 +28,20 @@ type avgFunction struct {
 	aggFunction
 }
 
-func (af *avgFunction) updateAvg(sc *stmtctx.StatementContext, evalCtx *AggEvaluateContext, row chunk.Row) error {
+func (af *avgFunction) updateAvg(ctx types.Context, evalCtx *AggEvaluateContext, row chunk.Row) error {
 	a := af.Args[1]
-	value, err := a.Eval(row)
+	value, err := a.Eval(evalCtx.Ctx, row)
 	if err != nil {
 		return err
 	}
 	if value.IsNull() {
 		return nil
 	}
-	evalCtx.Value, err = calculateSum(sc, evalCtx.Value, value)
+	evalCtx.Value, err = calculateSum(ctx, evalCtx.Value, value)
 	if err != nil {
 		return err
 	}
-	count, err := af.Args[0].Eval(row)
+	count, err := af.Args[0].Eval(evalCtx.Ctx, row)
 	if err != nil {
 		return err
 	}
@@ -48,10 +49,11 @@ func (af *avgFunction) updateAvg(sc *stmtctx.StatementContext, evalCtx *AggEvalu
 	return nil
 }
 
-func (af *avgFunction) ResetContext(sc *stmtctx.StatementContext, evalCtx *AggEvaluateContext) {
+func (af *avgFunction) ResetContext(ctx expression.EvalContext, evalCtx *AggEvaluateContext) {
 	if af.HasDistinct {
-		evalCtx.DistinctChecker = createDistinctChecker(sc)
+		evalCtx.DistinctChecker = createDistinctChecker(ctx)
 	}
+	evalCtx.Ctx = ctx
 	evalCtx.Value.SetNull()
 	evalCtx.Count = 0
 }
@@ -60,9 +62,9 @@ func (af *avgFunction) ResetContext(sc *stmtctx.StatementContext, evalCtx *AggEv
 func (af *avgFunction) Update(evalCtx *AggEvaluateContext, sc *stmtctx.StatementContext, row chunk.Row) (err error) {
 	switch af.Mode {
 	case Partial1Mode, CompleteMode:
-		err = af.updateSum(sc, evalCtx, row)
+		err = af.updateSum(sc.TypeCtx(), evalCtx, row)
 	case Partial2Mode, FinalMode:
-		err = af.updateAvg(sc, evalCtx, row)
+		err = af.updateAvg(sc.TypeCtx(), evalCtx, row)
 	case DedupMode:
 		panic("DedupMode is not supported now.")
 	}
@@ -80,7 +82,7 @@ func (af *avgFunction) GetResult(evalCtx *AggEvaluateContext) (d types.Datum) {
 		x := evalCtx.Value.GetMysqlDecimal()
 		y := types.NewDecFromInt(evalCtx.Count)
 		to := new(types.MyDecimal)
-		err := types.DecimalDiv(x, y, to, types.DivFracIncr)
+		err := types.DecimalDiv(x, y, to, evalCtx.Ctx.GetDivPrecisionIncrement())
 		terror.Log(err)
 		frac := af.RetTp.GetDecimal()
 		if frac == -1 {

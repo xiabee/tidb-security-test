@@ -40,6 +40,7 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
+	"github.com/pingcap/tidb/pkg/executor/mppcoordmanager"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
@@ -104,7 +105,7 @@ func TestRegionIndexRange(t *testing.T) {
 		}
 		expectIndexValues = append(expectIndexValues, str)
 	}
-	encodedValue, err := codec.EncodeKey(stmtctx.NewStmtCtxWithTimeZone(time.Local), nil, indexValues...)
+	encodedValue, err := codec.EncodeKey(stmtctx.NewStmtCtxWithTimeZone(time.Local).TimeZone(), nil, indexValues...)
 	require.NoError(t, err)
 
 	startKey := tablecodec.EncodeIndexSeekKey(sTableID, sIndex, encodedValue)
@@ -171,7 +172,7 @@ func TestRegionCommonHandleRange(t *testing.T) {
 		}
 		expectIndexValues = append(expectIndexValues, str)
 	}
-	encodedValue, err := codec.EncodeKey(stmtctx.NewStmtCtxWithTimeZone(time.Local), nil, indexValues...)
+	encodedValue, err := codec.EncodeKey(stmtctx.NewStmtCtxWithTimeZone(time.Local).TimeZone(), nil, indexValues...)
 	require.NoError(t, err)
 
 	startKey := tablecodec.EncodeRowKey(sTableID, encodedValue)
@@ -615,7 +616,7 @@ func TestGetTableMVCC(t *testing.T) {
 	resp, err = ts.FetchStatus("/mvcc/key/tidb/test/1?decode=true")
 	require.NoError(t, err)
 	decoder = json.NewDecoder(resp.Body)
-	var data3 map[string]interface{}
+	var data3 map[string]any
 	err = decoder.Decode(&data3)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
@@ -627,7 +628,7 @@ func TestGetTableMVCC(t *testing.T) {
 	resp, err = ts.FetchStatus("/mvcc/key/tidb/pt(p0)/42?decode=true")
 	require.NoError(t, err)
 	decoder = json.NewDecoder(resp.Body)
-	var data4 map[string]interface{}
+	var data4 map[string]any
 	err = decoder.Decode(&data4)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
@@ -648,7 +649,7 @@ func TestGetTableMVCC(t *testing.T) {
 	resp, err = ts.FetchStatus("/mvcc/key/tidb/t?a=1.1&b=111&decode=1")
 	require.NoError(t, err)
 	decoder = json.NewDecoder(resp.Body)
-	var data5 map[string]interface{}
+	var data5 map[string]any
 	err = decoder.Decode(&data5)
 	require.NoError(t, err)
 	require.NotNil(t, data4["key"])
@@ -705,7 +706,7 @@ func TestDecodeColumnValue(t *testing.T) {
 	}
 	rd := rowcodec.Encoder{Enable: true}
 	sc := stmtctx.NewStmtCtxWithTimeZone(time.UTC)
-	bs, err := tablecodec.EncodeRow(sc, row, colIDs, nil, nil, &rd)
+	bs, err := tablecodec.EncodeRow(sc.TimeZone(), row, colIDs, nil, nil, &rd)
 	require.NoError(t, err)
 	require.NotNil(t, bs)
 	bin := base64.StdEncoding.EncodeToString(bs)
@@ -715,7 +716,7 @@ func TestDecodeColumnValue(t *testing.T) {
 		resp, err := ts.FetchStatus(path)
 		require.NoErrorf(t, err, "url: %v", ts.StatusURL(path))
 		decoder := json.NewDecoder(resp.Body)
-		var data interface{}
+		var data any
 		err = decoder.Decode(&data)
 		require.NoErrorf(t, err, "url: %v\ndata: %v", ts.StatusURL(path), data)
 		require.NoError(t, resp.Body.Close())
@@ -852,7 +853,7 @@ func TestGetSchema(t *testing.T) {
 	err = decoder.Decode(&dbs)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
-	expects := []string{"information_schema", "metrics_schema", "mysql", "performance_schema", "test", "tidb"}
+	expects := []string{"information_schema", "metrics_schema", "mysql", "performance_schema", "sys", "test", "tidb"}
 	names := make([]string, len(dbs))
 	for i, v := range dbs {
 		names[i] = v.Name.L
@@ -1449,7 +1450,7 @@ func testUpgradeShow(t *testing.T, ts *basicHTTPHandlerTestSuite) {
 			},
 		},
 	}
-	makeFailpointRes := func(v interface{}) string {
+	makeFailpointRes := func(v any) string {
 		bytes, err := json.Marshal(v)
 		require.NoError(t, err)
 		return fmt.Sprintf("return(`%s`)", string(bytes))
@@ -1501,4 +1502,14 @@ func testUpgradeShow(t *testing.T, ts *basicHTTPHandlerTestSuite) {
 	mockedAllServerInfos["s2"].GitHash = mockedAllServerInfos["s0"].GitHash
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/domain/infosync/mockGetAllServerInfo", makeFailpointRes(mockedAllServerInfos)))
 	checkUpgradeShow(3, 100, 0)
+}
+
+func TestIssue52608(t *testing.T) {
+	ts := createBasicHTTPHandlerTestSuite()
+
+	ts.startServer(t)
+	defer ts.stopServer(t)
+	on, addr := mppcoordmanager.InstanceMPPCoordinatorManager.GetServerAddr()
+	require.Equal(t, on, true)
+	require.Equal(t, addr[:10], "127.0.0.1:")
 }

@@ -2,19 +2,17 @@ load("@io_bazel_rules_go//go:def.bzl", "go_test")
 
 go_test(
     name = "brietest_test",
-    timeout = "moderate",
+    timeout = "long",
     srcs = [
         "backup_restore_test.go",
         "binlog_test.go",
         "brie_test.go",
         "main_test.go",
         "operator_test.go",
-        "pdutil_test.go",
     ],
     flaky = True,
     race = "on",
     deps = [
-        "//br/pkg/pdutil",
         "//br/pkg/task",
         "//br/pkg/task/operator",
         "//pkg/config",

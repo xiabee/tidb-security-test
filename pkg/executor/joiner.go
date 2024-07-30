@@ -106,6 +106,11 @@ type joiner interface {
 	// parameter passed to `onMissMatch`.
 	onMissMatch(hasNull bool, outer chunk.Row, chk *chunk.Chunk)
 
+	// isSemiJoinWithoutCondition returns if it's a semi join and has no condition.
+	// If true, at most one matched row is needed to match inners, which can optimize a lot when
+	// there are a lot of matched rows.
+	isSemiJoinWithoutCondition() bool
+
 	// Clone deep copies a joiner.
 	Clone() joiner
 }
@@ -256,7 +261,7 @@ func (j *baseJoiner) makeShallowJoinRow(isRightJoin bool, inner, outer chunk.Row
 // indicates whether the outer row matches any inner rows.
 func (j *baseJoiner) filter(input, output *chunk.Chunk, outerColLen int, lUsed, rUsed []int) (bool, error) {
 	var err error
-	j.selected, err = expression.VectorizedFilter(j.ctx, j.conditions, chunk.NewIterator4Chunk(input), j.selected)
+	j.selected, err = expression.VectorizedFilter(j.ctx.GetExprCtx().GetEvalCtx(), j.ctx.GetSessionVars().EnableVectorizedExpression, j.conditions, chunk.NewIterator4Chunk(input), j.selected)
 	if err != nil {
 		return false, err
 	}
@@ -296,7 +301,7 @@ func (j *baseJoiner) filterAndCheckOuterRowStatus(
 	input, output *chunk.Chunk, innerColsLen int, outerRowStatus []outerRowStatusFlag,
 	lUsed, rUsed []int) ([]outerRowStatusFlag, error) {
 	var err error
-	j.selected, j.isNull, err = expression.VectorizedFilterConsiderNull(j.ctx, j.conditions, chunk.NewIterator4Chunk(input), j.selected, j.isNull)
+	j.selected, j.isNull, err = expression.VectorizedFilterConsiderNull(j.ctx.GetExprCtx().GetEvalCtx(), j.ctx.GetSessionVars().EnableVectorizedExpression, j.conditions, chunk.NewIterator4Chunk(input), j.selected, j.isNull)
 	if err != nil {
 		return nil, err
 	}
@@ -371,12 +376,13 @@ func (j *semiJoiner) tryToMatchInners(outer chunk.Row, inners chunk.Iterator, ch
 		return true, false, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		j.makeShallowJoinRow(j.outerIsRight, inner, outer)
 
 		// For SemiJoin, we can safely treat null result of join conditions as false,
 		// so we ignore the nullness returned by EvalBool here.
-		matched, _, err = expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, _, err = expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -400,11 +406,12 @@ func (j *semiJoiner) tryToMatchOuters(outers chunk.Iterator, inner chunk.Row, ch
 		}
 		return outerRowStatus, nil
 	}
+	exprCtx := j.ctx.GetExprCtx()
 	for outer := outers.Current(); outer != outers.End() && numToAppend > 0; outer, numToAppend = outers.Next(), numToAppend-1 {
 		j.makeShallowJoinRow(j.outerIsRight, inner, outer)
 		// For SemiJoin, we can safely treat null result of join conditions as false,
 		// so we ignore the nullness returned by EvalBool here.
-		matched, _, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, _, err := expression.EvalBool(exprCtx.GetEvalCtx(), j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return outerRowStatus, err
 		}
@@ -420,6 +427,10 @@ func (j *semiJoiner) tryToMatchOuters(outers chunk.Iterator, inner chunk.Row, ch
 }
 
 func (*semiJoiner) onMissMatch(bool, chunk.Row, *chunk.Chunk) {}
+
+func (j *semiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(j.conditions) == 0
+}
 
 // Clone implements joiner interface.
 func (j *semiJoiner) Clone() joiner {
@@ -458,9 +469,10 @@ func (naaj *nullAwareAntiSemiJoiner) tryToMatchInners(outer chunk.Row, inners ch
 		inners.ReachEnd()
 		return true, false, nil
 	}
+	evalCtx := naaj.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		naaj.makeShallowJoinRow(naaj.outerIsRight, inner, outer)
-		valid, _, err := expression.EvalBool(naaj.ctx, naaj.conditions, naaj.shallowRow.ToRow())
+		valid, _, err := expression.EvalBool(evalCtx, naaj.conditions, naaj.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -485,6 +497,10 @@ func (naaj *nullAwareAntiSemiJoiner) onMissMatch(_ bool, outer chunk.Row, chk *c
 	chk.AppendRowByColIdxs(outer, naaj.lUsed)
 }
 
+func (naaj *nullAwareAntiSemiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(naaj.conditions) == 0
+}
+
 func (naaj *nullAwareAntiSemiJoiner) Clone() joiner {
 	return &nullAwareAntiSemiJoiner{baseJoiner: naaj.baseJoiner.Clone()}
 }
@@ -504,10 +520,11 @@ func (j *antiSemiJoiner) tryToMatchInners(outer chunk.Row, inners chunk.Iterator
 		return true, false, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		j.makeShallowJoinRow(j.outerIsRight, inner, outer)
 
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -530,9 +547,10 @@ func (j *antiSemiJoiner) tryToMatchOuters(outers chunk.Iterator, inner chunk.Row
 		}
 		return outerRowStatus, nil
 	}
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for outer := outers.Current(); outer != outers.End() && numToAppend > 0; outer, numToAppend = outers.Next(), numToAppend-1 {
 		j.makeShallowJoinRow(j.outerIsRight, inner, outer)
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return outerRowStatus, err
 		}
@@ -552,6 +570,10 @@ func (j *antiSemiJoiner) onMissMatch(hasNull bool, outer chunk.Row, chk *chunk.C
 	if !hasNull {
 		chk.AppendRowByColIdxs(outer, j.lUsed)
 	}
+}
+
+func (j *antiSemiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(j.conditions) == 0
 }
 
 func (j *antiSemiJoiner) Clone() joiner {
@@ -574,10 +596,11 @@ func (j *leftOuterSemiJoiner) tryToMatchInners(outer chunk.Row, inners chunk.Ite
 		return true, false, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		j.makeShallowJoinRow(false, inner, outer)
 
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -603,9 +626,10 @@ func (j *leftOuterSemiJoiner) tryToMatchOuters(outers chunk.Iterator, inner chun
 		return outerRowStatus, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for ; outer != outers.End() && numToAppend > 0; outer, numToAppend = outers.Next(), numToAppend-1 {
 		j.makeShallowJoinRow(false, inner, outer)
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return nil, err
 		}
@@ -636,6 +660,10 @@ func (j *leftOuterSemiJoiner) onMissMatch(hasNull bool, outer chunk.Row, chk *ch
 	}
 }
 
+func (j *leftOuterSemiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(j.conditions) == 0
+}
+
 func (j *leftOuterSemiJoiner) Clone() joiner {
 	return &leftOuterSemiJoiner{baseJoiner: j.baseJoiner.Clone()}
 }
@@ -659,10 +687,12 @@ func (naal *nullAwareAntiLeftOuterSemiJoiner) tryToMatchInners(outer chunk.Row, 
 		inners.ReachEnd()
 		return true, false, nil
 	}
+
+	evalCtx := naal.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		naal.makeShallowJoinRow(false, inner, outer)
 
-		valid, _, err := expression.EvalBool(naal.ctx, naal.conditions, naal.shallowRow.ToRow())
+		valid, _, err := expression.EvalBool(evalCtx, naal.conditions, naal.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -708,8 +738,12 @@ func (*nullAwareAntiLeftOuterSemiJoiner) tryToMatchOuters(chunk.Iterator, chunk.
 	return nil, err
 }
 
+func (naal *nullAwareAntiLeftOuterSemiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(naal.conditions) == 0
+}
+
 func (naal *nullAwareAntiLeftOuterSemiJoiner) Clone() joiner {
-	return &antiLeftOuterSemiJoiner{baseJoiner: naal.baseJoiner.Clone()}
+	return &nullAwareAntiLeftOuterSemiJoiner{baseJoiner: naal.baseJoiner.Clone()}
 }
 
 type antiLeftOuterSemiJoiner struct {
@@ -728,10 +762,11 @@ func (j *antiLeftOuterSemiJoiner) tryToMatchInners(outer chunk.Row, inners chunk
 		return true, false, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for inner := inners.Current(); inner != inners.End(); inner = inners.Next() {
 		j.makeShallowJoinRow(false, inner, outer)
 
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return false, false, err
 		}
@@ -757,9 +792,10 @@ func (j *antiLeftOuterSemiJoiner) tryToMatchOuters(outers chunk.Iterator, inner 
 		return outerRowStatus, nil
 	}
 
+	evalCtx := j.ctx.GetExprCtx().GetEvalCtx()
 	for i := 0; outer != outers.End() && numToAppend > 0; outer, numToAppend, i = outers.Next(), numToAppend-1, i+1 {
 		j.makeShallowJoinRow(false, inner, outer)
-		matched, isNull, err := expression.EvalBool(j.ctx, j.conditions, j.shallowRow.ToRow())
+		matched, isNull, err := expression.EvalBool(evalCtx, j.conditions, j.shallowRow.ToRow())
 		if err != nil {
 			return nil, err
 		}
@@ -791,6 +827,10 @@ func (j *antiLeftOuterSemiJoiner) onMissMatch(hasNull bool, outer chunk.Row, chk
 	} else {
 		chk.AppendInt64(lWide, 1)
 	}
+}
+
+func (j *antiLeftOuterSemiJoiner) isSemiJoinWithoutCondition() bool {
+	return len(j.conditions) == 0
 }
 
 func (j *antiLeftOuterSemiJoiner) Clone() joiner {
@@ -872,6 +912,10 @@ func (j *leftOuterJoiner) onMissMatch(_ bool, outer chunk.Row, chk *chunk.Chunk)
 	chk.AppendPartialRowByColIdxs(lWide, j.defaultInner, j.rUsed)
 }
 
+func (*leftOuterJoiner) isSemiJoinWithoutCondition() bool {
+	return false
+}
+
 func (j *leftOuterJoiner) Clone() joiner {
 	return &leftOuterJoiner{baseJoiner: j.baseJoiner.Clone()}
 }
@@ -945,6 +989,10 @@ func (j *rightOuterJoiner) tryToMatchOuters(outers chunk.Iterator, inner chunk.R
 func (j *rightOuterJoiner) onMissMatch(_ bool, outer chunk.Row, chk *chunk.Chunk) {
 	lWide := chk.AppendRowByColIdxs(j.defaultInner, j.lUsed)
 	chk.AppendPartialRowByColIdxs(lWide, outer, j.rUsed)
+}
+
+func (*rightOuterJoiner) isSemiJoinWithoutCondition() bool {
+	return false
 }
 
 func (j *rightOuterJoiner) Clone() joiner {
@@ -1029,6 +1077,10 @@ func (j *innerJoiner) tryToMatchOuters(outers chunk.Iterator, inner chunk.Row, c
 }
 
 func (*innerJoiner) onMissMatch(bool, chunk.Row, *chunk.Chunk) {}
+
+func (*innerJoiner) isSemiJoinWithoutCondition() bool {
+	return false
+}
 
 func (j *innerJoiner) Clone() joiner {
 	return &innerJoiner{baseJoiner: j.baseJoiner.Clone()}

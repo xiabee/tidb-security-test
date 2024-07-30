@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,7 +65,7 @@ func TestSyncerSimple(t *testing.T) {
 	cli := cluster.RandClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ic := infoschema.NewCache(2)
+	ic := infoschema.NewCache(nil, 2)
 	ic.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d := NewDDL(
 		ctx,
@@ -90,7 +89,7 @@ func TestSyncerSimple(t *testing.T) {
 	key := util2.DDLAllSchemaVersions + "/" + d.OwnerManager().ID()
 	checkRespKV(t, 1, key, syncer.InitialVersion, resp.Kvs...)
 
-	ic2 := infoschema.NewCache(2)
+	ic2 := infoschema.NewCache(nil, 2)
 	ic2.Insert(infoschema.MockInfoSchemaWithSchemaVer(nil, 0), 0)
 	d1 := NewDDL(
 		ctx,
@@ -203,33 +202,24 @@ func TestPutKVToEtcdMono(t *testing.T) {
 	err = util2.PutKVToEtcdMono(ctx, cli, 3, "testKey", strconv.Itoa(3))
 	require.NoError(t, err)
 
-	eg := util.NewWaitGroupEnhancedWrapper("", nil, false)
-
-	var errCount atomic.Int64
+	eg := util.NewErrorGroupWithRecover()
 	for i := 0; i < 30; i++ {
-		eg.Run(func() {
+		eg.Go(func() error {
 			err := util2.PutKVToEtcdMono(ctx, cli, 1, "testKey", strconv.Itoa(5))
-			if err != nil {
-				errCount.Add(1)
-			}
-		}, fmt.Sprintf("test_%v", i))
+			return err
+		})
 	}
 	// PutKVToEtcdMono should be conflicted and get errors.
-	eg.Wait()
-	require.True(t, errCount.Load() > 0)
+	require.Error(t, eg.Wait())
 
-	errCount.Store(0)
-	eg = util.NewWaitGroupEnhancedWrapper("", nil, false)
+	eg = util.NewErrorGroupWithRecover()
 	for i := 0; i < 30; i++ {
-		eg.Run(func() {
+		eg.Go(func() error {
 			err := util2.PutKVToEtcd(ctx, cli, 1, "testKey", strconv.Itoa(5))
-			if err != nil {
-				errCount.Add(1)
-			}
-		}, fmt.Sprintf("test_%v", i))
+			return err
+		})
 	}
-	eg.Wait()
-	require.True(t, errCount.Load() == 0)
+	require.NoError(t, eg.Wait())
 
 	err = util2.PutKVToEtcdMono(ctx, cli, 3, "testKey", strconv.Itoa(1))
 	require.NoError(t, err)

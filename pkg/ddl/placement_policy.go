@@ -119,7 +119,7 @@ func getPlacementPolicyByName(d *ddlCtx, t *meta.Meta, policyName model.CIStr) (
 	}
 
 	is := d.infoCache.GetLatest()
-	if is != nil && is.SchemaMetaVersion() == currVer {
+	if is.SchemaMetaVersion() == currVer {
 		// Use cached policy.
 		policy, ok := is.PolicyByName(policyName)
 		if ok {
@@ -276,67 +276,41 @@ func updateExistPlacementPolicy(t *meta.Meta, policy *model.PolicyInfo) error {
 		return errors.Trace(err)
 	}
 
-	_, partIDs, tblInfos, err := getPlacementPolicyDependedObjectsIDs(t, policy)
+	dbIDs, partIDs, tblInfos, err := getPlacementPolicyDependedObjectsIDs(t, policy)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	// build bundle from new placement policy.
-	bundle, err := placement.NewBundleFromOptions(policy.PlacementSettings)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	// Do the http request only when the rules is existed.
-	bundles := make([]*placement.Bundle, 0, len(tblInfos)+len(partIDs)+2)
-	// Reset bundle for tables (including the default rule for partition).
-	for _, tbl := range tblInfos {
-		cp := bundle.Clone()
-		ids := []int64{tbl.ID}
-		if tbl.Partition != nil {
-			for _, pDef := range tbl.Partition.Definitions {
-				ids = append(ids, pDef.ID)
-			}
-		}
-		bundles = append(bundles, cp.Reset(placement.RuleIndexTable, ids))
-	}
-	// Reset bundle for partitions.
-	for _, id := range partIDs {
-		cp := bundle.Clone()
-		bundles = append(bundles, cp.Reset(placement.RuleIndexPartition, []int64{id}))
-	}
-
-	resetRangeFn := func(ctx context.Context, rangeName string) error {
-		rangeBundleID := placement.TiDBBundleRangePrefixForGlobal
-		if rangeName == placement.KeyRangeMeta {
-			rangeBundleID = placement.TiDBBundleRangePrefixForMeta
-		}
-		policyName, err := GetRangePlacementPolicyName(ctx, rangeBundleID)
+	if len(dbIDs)+len(tblInfos)+len(partIDs) != 0 {
+		// build bundle from new placement policy.
+		bundle, err := placement.NewBundleFromOptions(policy.PlacementSettings)
 		if err != nil {
-			return err
+			return errors.Trace(err)
 		}
-		if policyName == policy.Name.L {
+		// Do the http request only when the rules is existed.
+		bundles := make([]*placement.Bundle, 0, len(tblInfos)+len(partIDs))
+		// Reset bundle for tables (including the default rule for partition).
+		for _, tbl := range tblInfos {
 			cp := bundle.Clone()
-			bundles = append(bundles, cp.RebuildForRange(rangeName, policyName))
+			ids := []int64{tbl.ID}
+			if tbl.Partition != nil {
+				for _, pDef := range tbl.Partition.Definitions {
+					ids = append(ids, pDef.ID)
+				}
+			}
+			bundles = append(bundles, cp.Reset(placement.RuleIndexTable, ids))
 		}
-		return nil
-	}
-	// Reset range "global".
-	err = resetRangeFn(context.TODO(), placement.KeyRangeGlobal)
-	if err != nil {
-		return err
-	}
-	// Reset range "meta".
-	err = resetRangeFn(context.TODO(), placement.KeyRangeMeta)
-	if err != nil {
-		return err
-	}
-
-	if len(bundles) > 0 {
+		// Reset bundle for partitions.
+		for _, id := range partIDs {
+			cp := bundle.Clone()
+			bundles = append(bundles, cp.Reset(placement.RuleIndexPartition, []int64{id}))
+		}
 		err = infosync.PutRuleBundlesWithDefaultRetry(context.TODO(), bundles)
 		if err != nil {
 			return errors.Wrapf(err, "failed to notify PD the placement rules")
 		}
 	}
+
 	return nil
 }
 
@@ -346,7 +320,7 @@ func checkPlacementPolicyNotInUse(d *ddlCtx, t *meta.Meta, policy *model.PolicyI
 		return err
 	}
 	is := d.infoCache.GetLatest()
-	if is != nil && is.SchemaMetaVersion() == currVer {
+	if is.SchemaMetaVersion() == currVer {
 		err = CheckPlacementPolicyNotInUseFromInfoSchema(is, policy)
 	} else {
 		err = CheckPlacementPolicyNotInUseFromMeta(t, policy)
@@ -376,13 +350,18 @@ func CheckPlacementPolicyNotInUseFromInfoSchema(is infoschema.InfoSchema, policy
 
 // checkPlacementPolicyNotInUseFromRange checks whether the placement policy is used by the special range.
 func checkPlacementPolicyNotInUseFromRange(policy *model.PolicyInfo) error {
-	checkFn := func(rangeBundleID string) error {
-		policyName, err := GetRangePlacementPolicyName(context.TODO(), rangeBundleID)
+	checkFn := func(rangeName string) error {
+		bundle, err := infosync.GetRuleBundle(context.TODO(), rangeName)
 		if err != nil {
 			return err
 		}
-		if policyName == policy.Name.L {
-			return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+		if bundle == nil {
+			return nil
+		}
+		for _, rule := range bundle.Rules {
+			if strings.Contains(rule.ID, policy.Name.L) {
+				return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
+			}
 		}
 		return nil
 	}
@@ -467,22 +446,4 @@ func checkPlacementPolicyNotUsedByTable(tblInfo *model.TableInfo, policy *model.
 	}
 
 	return nil
-}
-
-// GetRangePlacementPolicyName get the placement policy name used by range.
-// rangeBundleID is limited to TiDBBundleRangePrefixForGlobal and TiDBBundleRangePrefixForMeta.
-func GetRangePlacementPolicyName(ctx context.Context, rangeBundleID string) (string, error) {
-	bundle, err := infosync.GetRuleBundle(ctx, rangeBundleID)
-	if err != nil {
-		return "", err
-	}
-	if bundle == nil || len(bundle.Rules) == 0 {
-		return "", nil
-	}
-	rule := bundle.Rules[0]
-	pos := strings.LastIndex(rule.ID, "_rule_")
-	if pos > 0 {
-		return rule.ID[:pos], nil
-	}
-	return "", nil
 }

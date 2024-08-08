@@ -28,13 +28,14 @@ import (
 	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
 	"github.com/pingcap/tidb/pkg/disttask/framework/storage"
 	"github.com/pingcap/tidb/pkg/testkit"
+	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util/backoff"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
 )
 
 func TestHandle(t *testing.T) {
-	testkit.EnableFailPoint(t, "github.com/pingcap/tidb/pkg/util/cpu/mockNumCpu", "return(8)")
+	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/util/cpu/mockNumCpu", "return(8)")
 
 	ctx := util.WithInternalSourceType(context.Background(), "handle_test")
 
@@ -59,9 +60,8 @@ func TestHandle(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorContains(t, waitedTask.Error, "unknown task type")
 
-	task, err = mgr.GetTaskByID(ctx, 1)
+	task, err = mgr.GetTaskByID(ctx, task.ID)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), task.ID)
 	require.Equal(t, "1", task.Key)
 	require.Equal(t, proto.TaskTypeExample, task.Type)
 	// no scheduler registered.
@@ -74,7 +74,6 @@ func TestHandle(t *testing.T) {
 
 	task, err = handle.SubmitTask(ctx, "2", proto.TaskTypeExample, 2, "", proto.EmptyMeta)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), task.ID)
 	require.Equal(t, "2", task.Key)
 
 	// submit same task.
@@ -88,7 +87,6 @@ func TestHandle(t *testing.T) {
 	// submit task with same key
 	task, err = handle.SubmitTask(ctx, "3", proto.TaskTypeExample, 2, "", proto.EmptyMeta)
 	require.NoError(t, err)
-	require.Equal(t, int64(3), task.ID)
 	require.NoError(t, mgr.TransferTasks2History(ctx, []*proto.Task{task}))
 	task, err = handle.SubmitTask(ctx, "3", proto.TaskTypeExample, 2, "", proto.EmptyMeta)
 	require.Nil(t, task)

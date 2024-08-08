@@ -44,6 +44,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/session/cursor"
 	"github.com/pingcap/tidb/pkg/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	util2 "github.com/pingcap/tidb/pkg/util"
@@ -770,6 +771,16 @@ func (is *InfoSyncer) ReportMinStartTS(store kv.Storage) {
 		if info.CurTxnStartTS > startTSLowerLimit && info.CurTxnStartTS < minStartTS {
 			minStartTS = info.CurTxnStartTS
 		}
+
+		if info.CursorTracker != nil {
+			info.CursorTracker.RangeCursor(func(c cursor.Handle) bool {
+				startTS := c.GetState().StartTS
+				if startTS > startTSLowerLimit && startTS < minStartTS {
+					minStartTS = startTS
+				}
+				return true
+			})
+		}
 	}
 
 	for _, innerTS := range innerSessionStartTSList {
@@ -1249,16 +1260,18 @@ func ConfigureTiFlashPDForPartitions(accel bool, definitions *[]model.PartitionD
 }
 
 // StoreInternalSession is the entry function for store an internal session to SessionManager.
-func StoreInternalSession(se any) {
+// return whether the session is stored successfully.
+func StoreInternalSession(se any) bool {
 	is, err := getGlobalInfoSyncer()
 	if err != nil {
-		return
+		return false
 	}
 	sm := is.GetSessionManager()
 	if sm == nil {
-		return
+		return false
 	}
 	sm.StoreInternalSession(se)
+	return true
 }
 
 // DeleteInternalSession is the entry function for delete an internal session from SessionManager.

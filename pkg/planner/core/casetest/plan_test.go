@@ -15,6 +15,7 @@
 package casetest
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/core"
+	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
@@ -81,7 +83,7 @@ func TestPreferRangeScan(t *testing.T) {
 		tk.MustExec(tt)
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(core.Plan)
+		p, ok := info.Plan.(base.Plan)
 		require.True(t, ok)
 		normalized, digest := core.NormalizePlan(p)
 
@@ -132,7 +134,7 @@ func TestNormalizedPlan(t *testing.T) {
 		tk.MustExec(tt)
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(core.Plan)
+		p, ok := info.Plan.(base.Plan)
 		require.True(t, ok)
 		normalized, digest := core.NormalizePlan(p)
 
@@ -178,13 +180,13 @@ func TestPlanDigest4InList(t *testing.T) {
 			tk.MustExec(query1)
 			info1 := tk.Session().ShowProcess()
 			require.NotNil(t, info1)
-			p1, ok := info1.Plan.(core.Plan)
+			p1, ok := info1.Plan.(base.Plan)
 			require.True(t, ok)
 			_, digest1 := core.NormalizePlan(p1)
 			tk.MustExec(query2)
 			info2 := tk.Session().ShowProcess()
 			require.NotNil(t, info2)
-			p2, ok := info2.Plan.(core.Plan)
+			p2, ok := info2.Plan.(base.Plan)
 			require.True(t, ok)
 			_, digest2 := core.NormalizePlan(p2)
 			require.Equal(t, digest1, digest2)
@@ -216,13 +218,13 @@ func TestIssue47634(t *testing.T) {
 			tk.MustExec(query1)
 			info1 := tk.Session().ShowProcess()
 			require.NotNil(t, info1)
-			p1, ok := info1.Plan.(core.Plan)
+			p1, ok := info1.Plan.(base.Plan)
 			require.True(t, ok)
 			_, digest1 := core.NormalizePlan(p1)
 			tk.MustExec(query2)
 			info2 := tk.Session().ShowProcess()
 			require.NotNil(t, info2)
-			p2, ok := info2.Plan.(core.Plan)
+			p2, ok := info2.Plan.(base.Plan)
 			require.True(t, ok)
 			_, digest2 := core.NormalizePlan(p2)
 			require.Equal(t, digest1, digest2)
@@ -237,7 +239,7 @@ func TestNormalizedPlanForDiffStore(t *testing.T) {
 	tk.MustExec("drop table if exists t1")
 	tk.MustExec("create table t1 (a int, b int, c int, primary key(a))")
 	tk.MustExec("insert into t1 values(1,1,1), (2,2,2), (3,3,3)")
-	tbl, err := dom.InfoSchema().TableByName(model.CIStr{O: "test", L: "test"}, model.CIStr{O: "t1", L: "t1"})
+	tbl, err := dom.InfoSchema().TableByName(context.Background(), model.CIStr{O: "test", L: "test"}, model.CIStr{O: "t1", L: "t1"})
 	require.NoError(t, err)
 	// Set the hacked TiFlash replica for explain tests.
 	tbl.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{Count: 1, Available: true}

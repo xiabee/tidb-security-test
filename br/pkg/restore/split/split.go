@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	goerrors "errors"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -36,7 +37,7 @@ const (
 	ScanRegionPaginationLimit = 128
 )
 
-func CheckRegionConsistency(startKey, endKey []byte, regions []*RegionInfo) error {
+func checkRegionConsistency(startKey, endKey []byte, regions []*RegionInfo) error {
 	// current pd can't guarantee the consistency of returned regions
 	if len(regions) == 0 {
 		return errors.Annotatef(berrors.ErrPDBatchScanRegion, "scan region return empty result, startKey: %s, endKey: %s",
@@ -112,7 +113,7 @@ func PaginateScanRegion(
 			var batch []*RegionInfo
 			batch, err = client.ScanRegions(ctx, scanStartKey, endKey, limit)
 			if err != nil {
-				err = errors.Annotatef(berrors.ErrPDBatchScanRegion, "scan regions from start-key:%s, err: %s",
+				err = errors.Annotatef(berrors.ErrPDBatchScanRegion.Wrap(err), "scan regions from start-key:%s, err: %s",
 					redact.Key(scanStartKey), err.Error())
 				return err
 			}
@@ -135,7 +136,7 @@ func PaginateScanRegion(
 		}
 		lastRegions = regions
 
-		if err = CheckRegionConsistency(startKey, endKey, regions); err != nil {
+		if err = checkRegionConsistency(startKey, endKey, regions); err != nil {
 			log.Warn("failed to scan region, retrying",
 				logutil.ShortError(err),
 				zap.Int("regionLength", len(regions)))
@@ -147,8 +148,8 @@ func PaginateScanRegion(
 	return lastRegions, err
 }
 
-// CheckPartRegionConsistency only checks the continuity of regions and the first region consistency.
-func CheckPartRegionConsistency(startKey, endKey []byte, regions []*RegionInfo) error {
+// checkPartRegionConsistency only checks the continuity of regions and the first region consistency.
+func checkPartRegionConsistency(startKey, endKey []byte, regions []*RegionInfo) error {
 	// current pd can't guarantee the consistency of returned regions
 	if len(regions) == 0 {
 		return errors.Annotatef(berrors.ErrPDBatchScanRegion,
@@ -198,7 +199,7 @@ func ScanRegionsWithRetry(
 			return err
 		}
 
-		if err = CheckPartRegionConsistency(startKey, endKey, regions); err != nil {
+		if err = checkPartRegionConsistency(startKey, endKey, regions); err != nil {
 			log.Warn("failed to scan region, retrying", logutil.ShortError(err))
 			return err
 		}
@@ -227,7 +228,8 @@ func NewWaitRegionOnlineBackoffer() *WaitRegionOnlineBackoffer {
 // NextBackoff returns a duration to wait before retrying again
 func (b *WaitRegionOnlineBackoffer) NextBackoff(err error) time.Duration {
 	// TODO(lance6716): why we only backoff when the error is ErrPDBatchScanRegion?
-	if berrors.ErrPDBatchScanRegion.Equal(err) {
+	var perr *errors.Error
+	if goerrors.As(err, &perr) && berrors.ErrPDBatchScanRegion.ID() == perr.ID() {
 		// it needs more time to wait splitting the regions that contains data in PITR.
 		// 2s * 150
 		delayTime := b.Stat.ExponentialBackoff()
@@ -292,7 +294,7 @@ func (b *BackoffMayNotCountBackoffer) Attempt() int {
 	return b.state.Attempt()
 }
 
-// GetSplitKeysOfRegions checks every input key is necessary to split region on
+// getSplitKeysOfRegions checks every input key is necessary to split region on
 // it. Returns a map from region to split keys belongs to it.
 //
 // The key will be skipped if it's the region boundary.
@@ -302,7 +304,7 @@ func (b *BackoffMayNotCountBackoffer) Attempt() int {
 // - sortedRegions are continuous and sorted in ascending order by start key.
 // - sortedRegions can cover all keys in sortedKeys.
 // PaginateScanRegion should satisfy the above prerequisites.
-func GetSplitKeysOfRegions(
+func getSplitKeysOfRegions(
 	sortedKeys [][]byte,
 	sortedRegions []*RegionInfo,
 	isRawKV bool,

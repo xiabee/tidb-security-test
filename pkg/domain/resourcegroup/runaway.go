@@ -110,12 +110,13 @@ func GenRunawayQueriesStmt(records []*RunawayRecord) (string, []any) {
 type QuarantineRecord struct {
 	ID                int64
 	ResourceGroupName string
-	StartTime         time.Time
-	EndTime           time.Time
-	Watch             rmpb.RunawayWatchType
-	WatchText         string
-	Source            string
-	Action            rmpb.RunawayAction
+	// startTime and endTime are in UTC.
+	StartTime time.Time
+	EndTime   time.Time
+	Watch     rmpb.RunawayWatchType
+	WatchText string
+	Source    string
+	Action    rmpb.RunawayAction
 }
 
 // GetRecordKey is used to get the key in ttl cache.
@@ -255,7 +256,7 @@ func (rm *RunawayManager) MarkSyncerInitialized() {
 }
 
 // DeriveChecker derives a RunawayChecker from the given resource group
-func (rm *RunawayManager) DeriveChecker(resourceGroupName, originalSQL, sqlDigest, planDigest string) *RunawayChecker {
+func (rm *RunawayManager) DeriveChecker(resourceGroupName, originalSQL, sqlDigest, planDigest string, startTime time.Time) *RunawayChecker {
 	group, err := rm.resourceGroupCtl.GetResourceGroup(resourceGroupName)
 	if err != nil || group == nil {
 		logutil.BgLogger().Warn("cannot setup up runaway checker", zap.Error(err))
@@ -272,7 +273,7 @@ func (rm *RunawayManager) DeriveChecker(resourceGroupName, originalSQL, sqlDiges
 		rm.metricsMap.Store(resourceGroupName, counter)
 	}
 	counter.Inc()
-	return newRunawayChecker(rm, resourceGroupName, group.RunawaySettings, originalSQL, sqlDigest, planDigest)
+	return newRunawayChecker(rm, resourceGroupName, group.RunawaySettings, originalSQL, sqlDigest, planDigest, startTime)
 }
 
 func (rm *RunawayManager) markQuarantine(resourceGroupName, convict string, watchType rmpb.RunawayWatchType, action rmpb.RunawayAction, ttl time.Duration, now *time.Time) {
@@ -304,6 +305,11 @@ func (rm *RunawayManager) markQuarantine(resourceGroupName, convict string, watc
 	}
 }
 
+// IsSyncerInitialized is only used for test.
+func (rm *RunawayManager) IsSyncerInitialized() bool {
+	return rm.syncerInitialized.Load()
+}
+
 func (rm *RunawayManager) addWatchList(record *QuarantineRecord, ttl time.Duration, force bool) {
 	key := record.GetRecordKey()
 	// This is a pre-check, because we generally believe that in most cases, we will not add a watch list to a key repeatedly.
@@ -312,7 +318,7 @@ func (rm *RunawayManager) addWatchList(record *QuarantineRecord, ttl time.Durati
 		rm.queryLock.Lock()
 		defer rm.queryLock.Unlock()
 		if item != nil {
-			// check the ID because of the eariler scan.
+			// check the ID because of the earlier scan.
 			if item.ID == record.ID {
 				return
 			}
@@ -322,7 +328,7 @@ func (rm *RunawayManager) addWatchList(record *QuarantineRecord, ttl time.Durati
 	} else {
 		if item == nil {
 			rm.queryLock.Lock()
-			// When watchlist get record, it will check whether the record is stale, so add new record if returns nil.
+			// When watchList get record, it will check whether the record is stale, so add new record if returns nil.
 			if rm.watchList.Get(key) == nil {
 				rm.watchList.Set(key, record, ttl)
 			} else {
@@ -335,7 +341,7 @@ func (rm *RunawayManager) addWatchList(record *QuarantineRecord, ttl time.Durati
 			defer rm.queryLock.Unlock()
 			rm.watchList.Set(key, record, ttl)
 		} else if item.ID != record.ID {
-			// check the ID because of the eariler scan.
+			// check the ID because of the earlier scan.
 			rm.staleQuarantineRecord <- record
 		}
 	}
@@ -447,6 +453,9 @@ func (rm *RunawayManager) examineWatchList(resourceGroupName string, convict str
 
 // Stop stops the watchList which is a ttlcache.
 func (rm *RunawayManager) Stop() {
+	if rm == nil {
+		return
+	}
 	if rm.watchList != nil {
 		rm.watchList.Stop()
 	}
@@ -463,10 +472,12 @@ type RunawayChecker struct {
 	deadline time.Time
 	setting  *rmpb.RunawaySettings
 
-	marked atomic.Bool
+	markedByRule  atomic.Bool
+	markedByWatch bool
+	watchAction   rmpb.RunawayAction
 }
 
-func newRunawayChecker(manager *RunawayManager, resourceGroupName string, setting *rmpb.RunawaySettings, originalSQL, sqlDigest, planDigest string) *RunawayChecker {
+func newRunawayChecker(manager *RunawayManager, resourceGroupName string, setting *rmpb.RunawaySettings, originalSQL, sqlDigest, planDigest string, startTime time.Time) *RunawayChecker {
 	c := &RunawayChecker{
 		manager:           manager,
 		resourceGroupName: resourceGroupName,
@@ -474,10 +485,11 @@ func newRunawayChecker(manager *RunawayManager, resourceGroupName string, settin
 		sqlDigest:         sqlDigest,
 		planDigest:        planDigest,
 		setting:           setting,
-		marked:            atomic.Bool{},
+		markedByRule:      atomic.Bool{},
+		markedByWatch:     false,
 	}
 	if setting != nil {
-		c.deadline = time.Now().Add(time.Duration(setting.Rule.ExecElapsedTimeMs) * time.Millisecond)
+		c.deadline = startTime.Add(time.Duration(setting.Rule.ExecElapsedTimeMs) * time.Millisecond)
 	}
 	return c
 }
@@ -493,15 +505,16 @@ func (r *RunawayChecker) BeforeExecutor() error {
 			if action == rmpb.RunawayAction_NoneAction && r.setting != nil {
 				action = r.setting.Action
 			}
-			if r.marked.CompareAndSwap(false, true) {
-				now := time.Now()
-				r.markRunaway(RunawayMatchTypeWatch, action, &now)
-			}
+			r.markedByWatch = true
+			now := time.Now()
+			r.watchAction = action
+			r.markRunaway(RunawayMatchTypeWatch, action, &now)
 			// If no match action, it will do nothing.
 			switch action {
 			case rmpb.RunawayAction_Kill:
 				return exeerrors.ErrResourceGroupQueryRunawayQuarantine
 			case rmpb.RunawayAction_CoolDown:
+				// This action should be done in BeforeCopRequest.
 				return nil
 			case rmpb.RunawayAction_DryRun:
 				return nil
@@ -514,12 +527,18 @@ func (r *RunawayChecker) BeforeExecutor() error {
 
 // BeforeCopRequest checks runaway and modifies the request if necessary before sending coprocessor request.
 func (r *RunawayChecker) BeforeCopRequest(req *tikvrpc.Request) error {
-	if r.setting == nil {
+	if r.setting == nil && !r.markedByWatch {
 		return nil
 	}
-	marked := r.marked.Load()
+	marked := r.markedByRule.Load()
 	if !marked {
 		// note: now we don't check whether query is in watch list again.
+		if r.markedByWatch {
+			if r.watchAction == rmpb.RunawayAction_CoolDown {
+				req.ResourceControlContext.OverridePriority = 1 // set priority to lowest
+			}
+		}
+
 		now := time.Now()
 		until := r.deadline.Sub(now)
 		if until > 0 {
@@ -532,9 +551,11 @@ func (r *RunawayChecker) BeforeCopRequest(req *tikvrpc.Request) error {
 			return nil
 		}
 		// execution time exceeds the threshold, mark the query as runaway
-		if r.marked.CompareAndSwap(false, true) {
+		if r.markedByRule.CompareAndSwap(false, true) {
 			r.markRunaway(RunawayMatchTypeIdentify, r.setting.Action, &now)
-			r.markQuarantine(&now)
+			if !r.markedByWatch {
+				r.markQuarantine(&now)
+			}
 		}
 	}
 	switch r.setting.Action {
@@ -556,16 +577,18 @@ func (r *RunawayChecker) CheckCopRespError(err error) error {
 		return err
 	}
 	if strings.HasPrefix(err.Error(), "Coprocessor task terminated due to exceeding the deadline") {
-		if !r.marked.Load() {
+		if !r.markedByRule.Load() {
 			now := time.Now()
-			if r.deadline.Before(now) && r.marked.CompareAndSwap(false, true) {
+			if r.deadline.Before(now) && r.markedByRule.CompareAndSwap(false, true) {
 				r.markRunaway(RunawayMatchTypeIdentify, r.setting.Action, &now)
-				r.markQuarantine(&now)
+				if !r.markedByWatch {
+					r.markQuarantine(&now)
+				}
 				return exeerrors.ErrResourceGroupQueryRunawayInterrupted
 			}
 		}
 		// Due to concurrency, check again.
-		if r.marked.Load() {
+		if r.markedByRule.Load() {
 			return exeerrors.ErrResourceGroupQueryRunawayInterrupted
 		}
 	}

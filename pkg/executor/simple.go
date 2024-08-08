@@ -39,10 +39,10 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/querywatch"
 	executor_metrics "github.com/pingcap/tidb/pkg/executor/metrics"
 	"github.com/pingcap/tidb/pkg/expression"
+	"github.com/pingcap/tidb/pkg/extension"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/model"
@@ -183,7 +183,7 @@ func (e *SimpleExec) Next(ctx context.Context, _ *chunk.Chunk) (err error) {
 		// We just ignore it.
 		return nil
 	case *ast.DropStatsStmt:
-		err = e.executeDropStats(x)
+		err = e.executeDropStats(ctx, x)
 	case *ast.SetRoleStmt:
 		err = e.executeSetRole(x)
 	case *ast.RevokeRoleStmt:
@@ -1167,16 +1167,23 @@ func (e *SimpleExec) executeCreateUser(ctx context.Context, s *ast.CreateUserStm
 				return err
 			}
 		}
-		pwd, ok := spec.EncodedPassword()
-
-		if !ok {
-			return errors.Trace(exeerrors.ErrPasswordFormat)
-		}
+		var pluginImpl *extension.AuthPlugin
 
 		switch authPlugin {
 		case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, mysql.AuthTiDBAuthToken, mysql.AuthLDAPSimple, mysql.AuthLDAPSASL:
 		default:
-			return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+			found := false
+			if extensions, err := extension.GetExtensions(); err != nil {
+				return exeerrors.ErrPluginIsNotLoaded.GenWithStack(err.Error())
+			} else if pluginImpl, found = extensions.GetAuthPlugins()[authPlugin]; !found {
+				// If the plugin is not a registered extension auth plugin, return error
+				return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+			}
+		}
+
+		pwd, ok := encodePassword(spec, pluginImpl)
+		if !ok {
+			return errors.Trace(exeerrors.ErrPasswordFormat)
 		}
 
 		recordTokenIssuer := tokenIssuer
@@ -1624,10 +1631,14 @@ func passwordVerification(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, 
 	return true, canDeleteNum, nil
 }
 
-func checkPasswordReusePolicy(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, userDetail *userInfo, sctx sessionctx.Context, authPlugin string) error {
+func checkPasswordReusePolicy(ctx context.Context, sqlExecutor sqlexec.SQLExecutor, userDetail *userInfo, sctx sessionctx.Context, authPlugin string, authPlugins map[string]*extension.AuthPlugin) error {
 	if strings.EqualFold(authPlugin, mysql.AuthTiDBAuthToken) || strings.EqualFold(authPlugin, mysql.AuthLDAPSASL) || strings.EqualFold(authPlugin, mysql.AuthLDAPSimple) {
 		// AuthTiDBAuthToken is the token login method on the cloud,
 		// and the Password Reuse Policy does not take effect.
+		return nil
+	}
+	// Skip password reuse checks for extension auth plugins
+	if _, ok := authPlugins[authPlugin]; ok {
 		return nil
 	}
 	// read password reuse info from mysql.user and global variables.
@@ -1810,6 +1821,12 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 			if spec.AuthOpt.AuthPlugin == "" {
 				spec.AuthOpt.AuthPlugin = currentAuthPlugin
 			}
+			extensions, err := extension.GetExtensions()
+			if err != nil {
+				return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(err.Error())
+			}
+			authPlugins := extensions.GetAuthPlugins()
+			var authPluginImpl *extension.AuthPlugin
 			switch spec.AuthOpt.AuthPlugin {
 			case mysql.AuthNativePassword, mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password, mysql.AuthSocket, mysql.AuthLDAPSimple, mysql.AuthLDAPSASL, "":
 				authTokenOptionHandler = noNeedAuthTokenOptions
@@ -1818,7 +1835,10 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 					authTokenOptionHandler = RequireAuthTokenOptions
 				}
 			default:
-				return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+				found := false
+				if authPluginImpl, found = authPlugins[spec.AuthOpt.AuthPlugin]; !found {
+					return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(spec.AuthOpt.AuthPlugin)
+				}
 			}
 			// changing the auth method prunes history.
 			if spec.AuthOpt.AuthPlugin != currentAuthPlugin {
@@ -1836,7 +1856,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 					return err
 				}
 			}
-			pwd, ok := spec.EncodedPassword()
+			pwd, ok := encodePassword(spec, authPluginImpl)
 			if !ok {
 				return errors.Trace(exeerrors.ErrPasswordFormat)
 			}
@@ -1851,7 +1871,7 @@ func (e *SimpleExec) executeAlterUser(ctx context.Context, s *ast.AlterUserStmt)
 					pwd:        pwd,
 					authString: spec.AuthOpt.AuthString,
 				}
-				err := checkPasswordReusePolicy(ctx, sqlExecutor, userDetail, e.Ctx(), spec.AuthOpt.AuthPlugin)
+				err := checkPasswordReusePolicy(ctx, sqlExecutor, userDetail, e.Ctx(), spec.AuthOpt.AuthPlugin, authPlugins)
 				if err != nil {
 					return err
 				}
@@ -2475,7 +2495,8 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 		checker := privilege.GetPrivilegeManager(e.Ctx())
 		activeRoles := e.Ctx().GetSessionVars().ActiveRoles
 		if checker != nil && !checker.RequestVerification(activeRoles, "", "", "", mysql.SuperPriv) {
-			return exeerrors.ErrDBaccessDenied.GenWithStackByArgs(u, h, "mysql")
+			currUser := e.Ctx().GetSessionVars().User
+			return exeerrors.ErrDBaccessDenied.GenWithStackByArgs(currUser.Username, currUser.Hostname, "mysql")
 		}
 	}
 	exists, err := userExistsInternal(ctx, sqlExecutor, u, h)
@@ -2502,6 +2523,11 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 			return err
 		}
 	}
+	extensions, err := extension.GetExtensions()
+	if err != nil {
+		return exeerrors.ErrPluginIsNotLoaded.GenWithStackByArgs(err.Error())
+	}
+	authPlugins := extensions.GetAuthPlugins()
 	var pwd string
 	switch authplugin {
 	case mysql.AuthCachingSha2Password, mysql.AuthTiDBSM3Password:
@@ -2510,7 +2536,13 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 		e.Ctx().GetSessionVars().StmtCtx.AppendNote(exeerrors.ErrSetPasswordAuthPlugin.FastGenByArgs(u, h))
 		pwd = ""
 	default:
-		pwd = auth.EncodePassword(s.Password)
+		if pluginImpl, ok := authPlugins[authplugin]; ok {
+			if pwd, ok = pluginImpl.GenerateAuthString(s.Password); !ok {
+				return exeerrors.ErrPasswordFormat.GenWithStackByArgs()
+			}
+		} else {
+			pwd = auth.EncodePassword(s.Password)
+		}
 	}
 
 	// for Support Password Reuse Policy.
@@ -2531,7 +2563,7 @@ func (e *SimpleExec) executeSetPwd(ctx context.Context, s *ast.SetPwdStmt) error
 			pwd:        pwd,
 			authString: s.Password,
 		}
-		err := checkPasswordReusePolicy(ctx, sqlExecutor, userDetail, e.Ctx(), authplugin)
+		err := checkPasswordReusePolicy(ctx, sqlExecutor, userDetail, e.Ctx(), authplugin, authPlugins)
 		if err != nil {
 			return err
 		}
@@ -2715,7 +2747,7 @@ func (e *SimpleExec) executeAlterInstance(s *ast.AlterInstanceStmt) error {
 	return nil
 }
 
-func (e *SimpleExec) executeDropStats(s *ast.DropStatsStmt) (err error) {
+func (e *SimpleExec) executeDropStats(ctx context.Context, s *ast.DropStatsStmt) (err error) {
 	h := domain.GetDomain(e.Ctx()).StatsHandle()
 	var statsIDs []int64
 	// TODO: GLOBAL option will be deprecated. Also remove this condition when the syntax is removed
@@ -2741,7 +2773,7 @@ func (e *SimpleExec) executeDropStats(s *ast.DropStatsStmt) (err error) {
 	if err := h.DeleteTableStatsFromKV(statsIDs); err != nil {
 		return err
 	}
-	return h.Update(e.Ctx().GetInfoSchema().(infoschema.InfoSchema))
+	return h.Update(ctx, e.Ctx().GetInfoSchema().(infoschema.InfoSchema))
 }
 
 func (e *SimpleExec) autoNewTxn() bool {
@@ -2881,20 +2913,16 @@ func (e *SimpleExec) executeAdminUnsetBDRRole() error {
 }
 
 func (e *SimpleExec) executeSetResourceGroupName(s *ast.SetResourceGroupStmt) error {
-	originalResourceGroup := e.Ctx().GetSessionVars().ResourceGroupName
+	var name string
 	if s.Name.L != "" {
 		if _, ok := e.is.ResourceGroupByName(s.Name); !ok {
 			return infoschema.ErrResourceGroupNotExists.GenWithStackByArgs(s.Name.O)
 		}
-		e.Ctx().GetSessionVars().ResourceGroupName = s.Name.L
+		name = s.Name.L
 	} else {
-		e.Ctx().GetSessionVars().ResourceGroupName = resourcegroup.DefaultResourceGroupName
+		name = resourcegroup.DefaultResourceGroupName
 	}
-	newResourceGroup := e.Ctx().GetSessionVars().ResourceGroupName
-	if originalResourceGroup != newResourceGroup {
-		metrics.ConnGauge.WithLabelValues(originalResourceGroup).Dec()
-		metrics.ConnGauge.WithLabelValues(newResourceGroup).Inc()
-	}
+	e.Ctx().GetSessionVars().SetResourceGroupName(name)
 	return nil
 }
 

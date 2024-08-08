@@ -48,6 +48,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/planner"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
+	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
@@ -303,7 +304,7 @@ func TestCheckIndex(t *testing.T) {
 	require.True(t, ok)
 
 	tblName := model.NewCIStr("t")
-	tbl, err := is.TableByName(db, tblName)
+	tbl, err := is.TableByName(context.Background(), db, tblName)
 	require.NoError(t, err)
 	tbInfo := tbl.Meta()
 
@@ -392,7 +393,7 @@ func setColValue(t *testing.T, txn kv.Transaction, key kv.Key, v types.Datum) {
 	colIDs := []int64{2, 3}
 	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	rd := rowcodec.Encoder{Enable: true}
-	value, err := tablecodec.EncodeRow(sc.TimeZone(), row, colIDs, nil, nil, &rd)
+	value, err := tablecodec.EncodeRow(sc.TimeZone(), row, colIDs, nil, nil, nil, &rd)
 	require.NoError(t, err)
 	err = txn.Set(key, value)
 	require.NoError(t, err)
@@ -418,7 +419,7 @@ func TestTimestampDefaultValueTimeZone(t *testing.T) {
 	// Test the column's version is greater than ColumnInfoVersion1.
 	is := domain.GetDomain(tk.Session()).InfoSchema()
 	require.NotNil(t, is)
-	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	tb, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tb.Cols()[1].Version = model.ColumnInfoVersion1 + 1
 	tk.MustExec("insert into t set a=3")
@@ -679,7 +680,7 @@ func TestIssue19148(t *testing.T) {
 	tk.MustExec("create table t(a decimal(16, 2));")
 	tk.MustExec("select * from t where a > any_value(a);")
 	is := domain.GetDomain(tk.Session()).InfoSchema()
-	tblInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
+	tblInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	require.Zero(t, tblInfo.Meta().Columns[0].GetFlag())
 }
@@ -721,7 +722,7 @@ func TestUnreasonablyClose(t *testing.T) {
 	// To enable the shuffleExec operator.
 	tk.MustExec("set @@tidb_merge_join_concurrency=4")
 
-	var opsNeedsCovered = []plannercore.PhysicalPlan{
+	var opsNeedsCovered = []base.PhysicalPlan{
 		&plannercore.PhysicalHashJoin{},
 		&plannercore.PhysicalMergeJoin{},
 		&plannercore.PhysicalIndexJoin{},
@@ -788,8 +789,8 @@ func TestUnreasonablyClose(t *testing.T) {
 
 		// This for loop level traverses the plan tree to get which operators are covered.
 		var hasCTE bool
-		for child := []plannercore.PhysicalPlan{p.(plannercore.PhysicalPlan)}; len(child) != 0; {
-			newChild := make([]plannercore.PhysicalPlan, 0, len(child))
+		for child := []base.PhysicalPlan{p.(base.PhysicalPlan)}; len(child) != 0; {
+			newChild := make([]base.PhysicalPlan, 0, len(child))
 			for _, ch := range child {
 				found := false
 				for k, t := range opsNeedsCovered {
@@ -1315,7 +1316,7 @@ func TestApplyCache(t *testing.T) {
 	tk.MustExec("use test;")
 	tk.MustExec("set tidb_cost_model_version=2")
 	tk.MustExec("drop table if exists t;")
-	tk.MustExec("create table t(a int);")
+	tk.MustExec("create table t(a int, index idx(a));")
 	tk.MustExec("insert into t values (1),(1),(1),(1),(1),(1),(1),(1),(1);")
 	tk.MustExec("analyze table t;")
 	result := tk.MustQuery("explain analyze SELECT count(a) FROM (SELECT (SELECT min(a) FROM t as t2 WHERE t2.a > t1.a) AS a from t as t1) t;")
@@ -1335,7 +1336,7 @@ func TestApplyCache(t *testing.T) {
 	require.Equal(t, "cache:ON, cacheHitRatio:88.889%", value[ind:])
 
 	tk.MustExec("drop table if exists t;")
-	tk.MustExec("create table t(a int);")
+	tk.MustExec("create table t(a int, index idx(a));")
 	tk.MustExec("insert into t values (1),(2),(3),(4),(5),(6),(7),(8),(9);")
 	tk.MustExec("analyze table t;")
 	result = tk.MustQuery("explain analyze SELECT count(a) FROM (SELECT (SELECT min(a) FROM t as t2 WHERE t2.a > t1.a) AS a from t as t1) t;")
@@ -1370,7 +1371,7 @@ func TestCollectDMLRuntimeStats(t *testing.T) {
 	getRootStats := func() string {
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(plannercore.Plan)
+		p, ok := info.Plan.(base.Plan)
 		require.True(t, ok)
 		stats := tk.Session().GetSessionVars().StmtCtx.RuntimeStatsColl.GetRootStats(p.ID())
 		return stats.String()
@@ -1499,7 +1500,7 @@ func TestGetResultRowsCount(t *testing.T) {
 		}
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(plannercore.Plan)
+		p, ok := info.Plan.(base.Plan)
 		require.True(t, ok)
 		cnt := executor.GetResultRowsCount(tk.Session().GetSessionVars().StmtCtx, p)
 		require.Equal(t, ca.row, cnt, fmt.Sprintf("sql: %v", ca.sql))
@@ -1885,21 +1886,60 @@ func TestLowResolutionTSORead(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@autocommit=1")
 	tk.MustExec("use test")
-	tk.MustExec("create table low_resolution_tso(a int)")
+	tk.MustExec("create table low_resolution_tso(a int key)")
 	tk.MustExec("insert low_resolution_tso values (1)")
 
 	// enable low resolution tso
-	require.False(t, tk.Session().GetSessionVars().LowResolutionTSO)
+	require.False(t, tk.Session().GetSessionVars().UseLowResolutionTSO())
 	tk.MustExec("set @@tidb_low_resolution_tso = 'on'")
-	require.True(t, tk.Session().GetSessionVars().LowResolutionTSO)
+	require.True(t, tk.Session().GetSessionVars().UseLowResolutionTSO())
 
-	time.Sleep(3 * time.Second)
-	tk.MustQuery("select * from low_resolution_tso").Check(testkit.Rows("1"))
+	tk.MustQuery("select * from low_resolution_tso")
 	err := tk.ExecToErr("update low_resolution_tso set a = 2")
 	require.Error(t, err)
 	tk.MustExec("set @@tidb_low_resolution_tso = 'off'")
 	tk.MustExec("update low_resolution_tso set a = 2")
 	tk.MustQuery("select * from low_resolution_tso").Check(testkit.Rows("2"))
+
+	// Test select for update could not be executed when `tidb_low_resolution_tso` is enabled.
+	type testCase struct {
+		optimistic bool
+		pointGet   bool
+	}
+	cases := []testCase{
+		{true, true},
+		{true, false},
+		{false, true},
+		{false, false},
+	}
+	tk.MustExec("set @@tidb_low_resolution_tso = 'on'")
+	for _, test := range cases {
+		if test.optimistic {
+			tk.MustExec("begin optimistic")
+		} else {
+			tk.MustExec("begin")
+		}
+		var err error
+		if test.pointGet {
+			err = tk.ExecToErr("select * from low_resolution_tso where a = 1 for update")
+		} else {
+			err = tk.ExecToErr("select * from low_resolution_tso for update")
+		}
+		require.Error(t, err)
+		tk.MustExec("rollback")
+	}
+	tk.MustQuery("select * from low_resolution_tso for update")
+	tk.MustQuery("select * from low_resolution_tso where a = 1 for update")
+
+	origPessimisticAutoCommit := config.GetGlobalConfig().PessimisticTxn.PessimisticAutoCommit.Load()
+	config.GetGlobalConfig().PessimisticTxn.PessimisticAutoCommit.Store(true)
+	defer func() {
+		config.GetGlobalConfig().PessimisticTxn.PessimisticAutoCommit.Store(origPessimisticAutoCommit)
+	}()
+	err = tk.ExecToErr("select * from low_resolution_tso where a = 1 for update")
+	require.Error(t, err)
+	err = tk.ExecToErr("select * from low_resolution_tso for update")
+	require.Error(t, err)
 }
 
 func TestAdapterStatement(t *testing.T) {
@@ -1942,8 +1982,7 @@ func TestIsPointGet(t *testing.T) {
 		require.NoError(t, err)
 		p, _, err := planner.Optimize(context.TODO(), ctx, stmtNode, preprocessorReturn.InfoSchema)
 		require.NoError(t, err)
-		ret, err := plannercore.IsPointGetWithPKOrUniqueKeyByAutoCommit(ctx.GetSessionVars(), p)
-		require.NoError(t, err)
+		ret := plannercore.IsPointGetWithPKOrUniqueKeyByAutoCommit(ctx.GetSessionVars(), p)
 		require.Equal(t, result, ret)
 	}
 }
@@ -1983,8 +2022,7 @@ func TestClusteredIndexIsPointGet(t *testing.T) {
 		require.NoError(t, err)
 		p, _, err := planner.Optimize(context.TODO(), ctx, stmtNode, preprocessorReturn.InfoSchema)
 		require.NoError(t, err)
-		ret, err := plannercore.IsPointGetWithPKOrUniqueKeyByAutoCommit(ctx.GetSessionVars(), p)
-		require.NoError(t, err)
+		ret := plannercore.IsPointGetWithPKOrUniqueKeyByAutoCommit(ctx.GetSessionVars(), p)
 		require.Equal(t, result, ret)
 	}
 }
@@ -2516,7 +2554,7 @@ func TestAdmin(t *testing.T) {
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
 	require.NotNil(t, is)
-	tb, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("admin_test"))
+	tb, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("admin_test"))
 	require.NoError(t, err)
 	require.Len(t, tb.Indices(), 1)
 	_, err = tb.Indices()[0].Create(mock.NewContext().GetTableCtx(), txn, types.MakeDatums(int64(10)), kv.IntHandle(1), nil)
@@ -2625,7 +2663,7 @@ func TestIsFastPlan(t *testing.T) {
 		}
 		info := tk.Session().ShowProcess()
 		require.NotNil(t, info)
-		p, ok := info.Plan.(plannercore.Plan)
+		p, ok := info.Plan.(base.Plan)
 		require.True(t, ok)
 		ok = executor.IsFastPlan(p)
 		require.Equal(t, ca.isFastPlan, ok)
@@ -2947,4 +2985,20 @@ func TestIssue48756(t *testing.T) {
 		"Warning 1292 Incorrect time value: '120120519090607'",
 		"Warning 1105 ",
 	))
+}
+
+func TestIssue50308(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t(a timestamp);")
+	tk.MustExec("insert ignore into t values(cast('2099-01-01' as date));")
+	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning 1292 Incorrect timestamp value: '2099-01-01' for column 'a' at row 1"))
+	tk.MustQuery("select * from t;").Check(testkit.Rows("0000-00-00 00:00:00"))
+	tk.MustExec("delete from t")
+	tk.MustExec("insert into t values('2000-01-01');")
+	tk.MustGetErrMsg("update t set a=cast('2099-01-01' as date)", "[types:1292]Incorrect timestamp value: '2099-01-01'")
+	tk.MustExec("update ignore t set a=cast('2099-01-01' as date);")
+	tk.MustQuery("show warnings").Check(testkit.RowsWithSep("|", "Warning 1292 Incorrect timestamp value: '2099-01-01'"))
+	tk.MustQuery("select * from t;").Check(testkit.Rows("0000-00-00 00:00:00"))
 }

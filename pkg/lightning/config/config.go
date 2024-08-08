@@ -175,7 +175,17 @@ func (d *DBStore) adjust(
 	}
 
 	if d.Security == nil {
-		d.Security = s
+		d.Security = &Security{
+			CAPath:                   s.CAPath,
+			CertPath:                 s.CertPath,
+			KeyPath:                  s.KeyPath,
+			CABytes:                  s.CABytes,
+			CertBytes:                s.CertBytes,
+			KeyBytes:                 s.KeyBytes,
+			RedactInfoLog:            s.RedactInfoLog,
+			TLSConfig:                s.TLSConfig,
+			AllowFallbackToPlaintext: s.AllowFallbackToPlaintext,
+		}
 	}
 
 	switch d.TLS {
@@ -202,9 +212,9 @@ func (d *DBStore) adjust(
 		d.Security.TLSConfig = nil
 		d.Security.CAPath = ""
 		d.Security.CertPath = ""
-		d.Security.KeyPath = ""
 		d.Security.CABytes = nil
 		d.Security.CertBytes = nil
+		d.Security.KeyPath = ""
 		d.Security.KeyBytes = nil
 	default:
 		return common.ErrInvalidConfig.GenWithStack("unsupported `tidb.tls` config %s", d.TLS)
@@ -606,7 +616,7 @@ const (
 	// ReplaceOnDup indicates using REPLACE INTO to insert data for TiDB backend.
 	// ReplaceOnDup records all duplicate records, remove some rows with conflict
 	// and reserve other rows that can be kept and not cause conflict anymore for local backend.
-	// Users need to analyze the lightning_task_info.conflict_error_v3 table to check whether the reserved data
+	// Users need to analyze the lightning_task_info.conflict_view table to check whether the reserved data
 	// cater to their need and check whether they need to add back the correct rows.
 	ReplaceOnDup
 	// IgnoreOnDup indicates using INSERT IGNORE INTO to insert data for TiDB backend.

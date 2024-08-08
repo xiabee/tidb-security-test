@@ -69,6 +69,8 @@ type engineManager struct {
 	logger         log.Logger
 }
 
+var inMemTest = false
+
 func newEngineManager(config BackendConfig, storeHelper StoreHelper, logger log.Logger) (_ *engineManager, err error) {
 	var duplicateDB *pebble.DB
 	defer func() {
@@ -94,12 +96,17 @@ func newEngineManager(config BackendConfig, storeHelper StoreHelper, logger log.
 		alloc.RefCnt = new(atomic.Int64)
 		LastAlloc = alloc
 	}
+	var opts = make([]membuf.Option, 0, 1)
+	if !inMemTest {
+		// otherwise, we use the default allocator that can be tracked by golang runtime.
+		opts = append(opts, membuf.WithAllocator(alloc))
+	}
 	return &engineManager{
 		BackendConfig:  config,
 		StoreHelper:    storeHelper,
 		engines:        sync.Map{},
 		externalEngine: map[uuid.UUID]common.Engine{},
-		bufferPool:     membuf.NewPool(membuf.WithAllocator(alloc)),
+		bufferPool:     membuf.NewPool(opts...),
 		duplicateDB:    duplicateDB,
 		keyAdapter:     keyAdapter,
 		logger:         logger,
@@ -194,10 +201,10 @@ func (em *engineManager) flushAllEngines(parentCtx context.Context) (err error) 
 
 func (em *engineManager) openEngineDB(engineUUID uuid.UUID, readOnly bool) (*pebble.DB, error) {
 	opt := &pebble.Options{
-		MemTableSize: em.MemTableSize,
+		MemTableSize: uint64(em.MemTableSize),
 		// the default threshold value may cause write stall.
 		MemTableStopWritesThreshold: 8,
-		MaxConcurrentCompactions:    16,
+		MaxConcurrentCompactions:    func() int { return 16 },
 		// set threshold to half of the max open files to avoid trigger compaction
 		L0CompactionThreshold: math.MaxInt32,
 		L0StopWritesThreshold: math.MaxInt32,
@@ -498,7 +505,11 @@ func (em *engineManager) localWriter(_ context.Context, cfg *backend.LocalWriter
 		return nil, errors.Errorf("could not find engine for %s", engineUUID.String())
 	}
 	engine := e.(*Engine)
-	return openLocalWriter(cfg, engine, em.GetTiKVCodec(), em.LocalWriterMemCacheSize, em.bufferPool.NewBuffer())
+	memCacheSize := em.LocalWriterMemCacheSize
+	if cfg.Local.MemCacheSize > 0 {
+		memCacheSize = cfg.Local.MemCacheSize
+	}
+	return openLocalWriter(cfg, engine, em.GetTiKVCodec(), memCacheSize, em.bufferPool.NewBuffer())
 }
 
 func (em *engineManager) engineFileSizes() (res []backend.EngineFileSize) {
@@ -525,7 +536,10 @@ func (em *engineManager) close() {
 
 	if em.duplicateDB != nil {
 		// Check if there are duplicates that are not collected.
-		iter := em.duplicateDB.NewIter(&pebble.IterOptions{})
+		iter, err := em.duplicateDB.NewIter(&pebble.IterOptions{})
+		if err != nil {
+			em.logger.Panic("fail to create iterator")
+		}
 		hasDuplicates := iter.First()
 		allIsWell := true
 		if err := iter.Error(); err != nil {

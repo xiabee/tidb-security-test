@@ -333,6 +333,7 @@ func TestGetSplitKeyPerRegion(t *testing.T) {
 		[]byte("g"),
 		[]byte("j"),
 		[]byte("l"),
+		[]byte("m"),
 	}
 	sortedRegions := []*RegionInfo{
 		{
@@ -357,7 +358,7 @@ func TestGetSplitKeyPerRegion(t *testing.T) {
 			},
 		},
 	}
-	result := GetSplitKeysOfRegions(sortedKeys, sortedRegions, false)
+	result := getSplitKeysOfRegions(sortedKeys, sortedRegions, false)
 	require.Equal(t, 3, len(result))
 	require.Equal(t, [][]byte{[]byte("b"), []byte("d")}, result[sortedRegions[0]])
 	require.Equal(t, [][]byte{[]byte("g"), []byte("j")}, result[sortedRegions[1]])
@@ -414,7 +415,7 @@ func TestGetSplitKeyPerRegion(t *testing.T) {
 		slices.SortFunc(expected[i], bytes.Compare)
 	}
 
-	got := GetSplitKeysOfRegions(sortedKeys, sortedRegions, false)
+	got := getSplitKeysOfRegions(sortedKeys, sortedRegions, false)
 	require.Equal(t, len(expected), len(got))
 	for region, gotKeys := range got {
 		require.Equal(t, expected[region.Region.GetId()], gotKeys)
@@ -684,8 +685,74 @@ func TestRegionConsistency(t *testing.T) {
 		},
 	}
 	for _, ca := range cases {
-		err := CheckRegionConsistency(ca.startKey, ca.endKey, ca.regions)
+		err := checkRegionConsistency(ca.startKey, ca.endKey, ca.regions)
 		require.Error(t, err)
 		require.Regexp(t, ca.err, err.Error())
+	}
+}
+
+func regionInfo(startKey, endKey string) *RegionInfo {
+	return &RegionInfo{
+		Region: &metapb.Region{
+			StartKey: []byte(startKey),
+			EndKey:   []byte(endKey),
+		},
+	}
+}
+
+func TestSplitCheckPartRegionConsistency(t *testing.T) {
+	var (
+		startKey []byte = []byte("a")
+		endKey   []byte = []byte("f")
+		err      error
+	)
+	err = checkPartRegionConsistency(startKey, endKey, nil)
+	require.Error(t, err)
+	err = checkPartRegionConsistency(startKey, endKey, []*RegionInfo{
+		regionInfo("b", "c"),
+	})
+	require.Error(t, err)
+	err = checkPartRegionConsistency(startKey, endKey, []*RegionInfo{
+		regionInfo("a", "c"),
+		regionInfo("d", "e"),
+	})
+	require.Error(t, err)
+	err = checkPartRegionConsistency(startKey, endKey, []*RegionInfo{
+		regionInfo("a", "c"),
+		regionInfo("c", "d"),
+	})
+	require.NoError(t, err)
+	err = checkPartRegionConsistency(startKey, endKey, []*RegionInfo{
+		regionInfo("a", "c"),
+		regionInfo("c", "d"),
+		regionInfo("d", "f"),
+	})
+	require.NoError(t, err)
+	err = checkPartRegionConsistency(startKey, endKey, []*RegionInfo{
+		regionInfo("a", "c"),
+		regionInfo("c", "z"),
+	})
+	require.NoError(t, err)
+}
+
+func TestScanRegionsWithRetry(t *testing.T) {
+	ctx := context.Background()
+	mockPDClient := NewMockPDClientForSplit()
+	mockClient := &pdClient{
+		client: mockPDClient,
+	}
+
+	{
+		_, err := ScanRegionsWithRetry(ctx, mockClient, []byte("1"), []byte("0"), 0)
+		require.Error(t, err)
+	}
+
+	{
+		mockPDClient.SetRegions([][]byte{{}, []byte("1"), []byte("2"), []byte("3"), []byte("4"), {}})
+		regions, err := ScanRegionsWithRetry(ctx, mockClient, []byte("1"), []byte("3"), 0)
+		require.NoError(t, err)
+		require.Len(t, regions, 2)
+		require.Equal(t, []byte("1"), regions[0].Region.StartKey)
+		require.Equal(t, []byte("2"), regions[1].Region.StartKey)
 	}
 }

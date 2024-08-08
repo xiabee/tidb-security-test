@@ -821,7 +821,7 @@ select /*+ inl_merge_join(t2) */ t1.b, t2.b from t1 join t2 where t1.b=t2.b;
 b	b
 a	A
 Level	Code	Message
-Warning	1815	Optimizer Hint /*+ INL_MERGE_JOIN(t2) */ is inapplicable
+Warning	1815	The INDEX MERGE JOIN hint is deprecated for usage, try other hints.
 drop table if exists a, b;
 create table a(i int, k varbinary(40), v int, primary key(i, k) clustered);
 create table b(i int, k varchar(40), v int, primary key(i, k) clustered);
@@ -1991,18 +1991,6 @@ LOCATE('bar' collate utf8mb4_0900_ai_ci, 'FOOBAR' collate utf8mb4_0900_ai_ci)
 select 'FOOBAR' collate utf8mb4_0900_ai_ci REGEXP 'foo.*' collate utf8mb4_0900_ai_ci;
 'FOOBAR' collate utf8mb4_0900_ai_ci REGEXP 'foo.*' collate utf8mb4_0900_ai_ci
 1
-select cast(compress('b') as char);
-cast(compress('b') as char)
-NULL
-Level	Code	Message
-Warning	3854	Cannot convert string '   x\x9C...' from binary to utf8mb4
-set sql_mode='';
-select cast(compress('b') as char);
-cast(compress('b') as char)
-   x
-Level	Code	Message
-Warning	3854	Cannot convert string '   x\x9C...' from binary to utf8mb4
-set sql_mode=DEFAULT;
 set names utf8mb4 collate utf8mb4_0900_ai_ci;
 select reverse(cast('[]' as json)) between 'W' and 'm';
 reverse(cast('[]' as json)) between 'W' and 'm'
@@ -2068,3 +2056,15 @@ select export_set(3,cast('[]' as json),'2','-',8) between 'W' and 'm';
 export_set(3,cast('[]' as json),'2','-',8) between 'W' and 'm'
 1
 set names default;
+select cast(compress('b') as char);
+cast(compress('b') as char)
+NULL
+Level	Code	Message
+Warning	3854	Cannot convert string '   x\x9C...' from binary to utf8mb4
+set sql_mode='';
+select cast(compress('b') as char);
+cast(compress('b') as char)
+   x
+Level	Code	Message
+Warning	3854	Cannot convert string '   x\x9C...' from binary to utf8mb4
+set sql_mode=DEFAULT;

@@ -8,15 +8,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pingcap/errors"
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/metrics"
-	"go.uber.org/atomic"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/metrics"
 	"go.uber.org/zap"
 )
 
@@ -38,7 +38,7 @@ type storeCollector struct {
 
 	input chan RegionWithLeader
 	// the oneshot error reporter.
-	err *atomic.Error
+	err *atomic.Value
 	// whether the recv and send loop has exited.
 	doneMessenger chan struct{}
 	onSuccess     onSuccessHook
@@ -58,18 +58,26 @@ func newStoreCollector(storeID uint64, srv LogBackupService) *storeCollector {
 		batchSize:     defaultBatchSize,
 		service:       srv,
 		input:         make(chan RegionWithLeader, defaultBatchSize),
-		err:           new(atomic.Error),
+		err:           new(atomic.Value),
 		doneMessenger: make(chan struct{}),
 		regionMap:     make(map[uint64]kv.KeyRange),
 	}
 }
 
 func (c *storeCollector) reportErr(err error) {
-	if oldErr := c.err.Load(); oldErr != nil {
+	if oldErr := c.Err(); oldErr != nil {
 		log.Warn("reporting error twice, ignoring", logutil.AShortError("old", err), logutil.AShortError("new", oldErr))
 		return
 	}
 	c.err.Store(err)
+}
+
+func (c *storeCollector) Err() error {
+	err, ok := c.err.Load().(error)
+	if !ok {
+		return nil
+	}
+	return err
 }
 
 func (c *storeCollector) setOnSuccessHook(hook onSuccessHook) {
@@ -158,7 +166,7 @@ func (c *storeCollector) spawn(ctx context.Context) func(context.Context) (Store
 			return StoreCheckpoints{}, cx.Err()
 		case <-c.doneMessenger:
 		}
-		if err := c.err.Load(); err != nil {
+		if err := c.Err(); err != nil {
 			return StoreCheckpoints{}, err
 		}
 		sc := StoreCheckpoints{
@@ -296,7 +304,7 @@ func (c *clusterCollector) CollectRegion(r RegionWithLeader) error {
 	case sc.input <- r:
 		return nil
 	case <-sc.doneMessenger:
-		err := sc.err.Load()
+		err := sc.Err()
 		if err != nil {
 			c.cancel()
 		}

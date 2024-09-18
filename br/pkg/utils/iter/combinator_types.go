@@ -5,13 +5,13 @@ package iter
 import (
 	"context"
 
-	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
 
 type chunkMappingCfg struct {
 	chunkSize uint
-	quota     *util.WorkerPool
+	quota     *utils.WorkerPool
 }
 
 type chunkMapping[T, R any] struct {
@@ -126,22 +126,4 @@ func (j *join[T]) TryNext(ctx context.Context) IterResult[T] {
 	}
 	j.current = nr.Item
 	return j.TryNext(ctx)
-}
-
-type withIndex[T any] struct {
-	inner TryNextor[T]
-	index int
-}
-
-func (wi *withIndex[T]) TryNext(ctx context.Context) IterResult[Indexed[T]] {
-	r := wi.inner.TryNext(ctx)
-	if r.Finished || r.Err != nil {
-		return convertDoneOrErrResult[T, Indexed[T]](r)
-	}
-	res := Emit(Indexed[T]{
-		Index: wi.index,
-		Item:  r.Item,
-	})
-	wi.index += 1
-	return res
 }

@@ -4,7 +4,6 @@ package logutil
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,8 +13,8 @@ import (
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/util/redact"
+	"github.com/pingcap/tidb/br/pkg/redact"
+	"github.com/pingcap/tidb/kv"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -40,7 +39,7 @@ func (abb AbbreviatedArrayMarshaler) MarshalLogArray(encoder zapcore.ArrayEncode
 
 // AbbreviatedArray constructs a field that abbreviates an array of elements.
 func AbbreviatedArray(
-	key string, elements any, marshalFunc func(any) []string,
+	key string, elements interface{}, marshalFunc func(interface{}) []string,
 ) zap.Field {
 	return zap.Array(key, AbbreviatedArrayMarshaler(marshalFunc(elements)))
 }
@@ -61,24 +60,7 @@ func (file zapFileMarshaler) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	return nil
 }
 
-func AbbreviatedStringers[T fmt.Stringer](key string, stringers []T) zap.Field {
-	if len(stringers) < 4 {
-		return zap.Stringers(key, stringers)
-	}
-	return zap.Array(key, zapcore.ArrayMarshalerFunc(func(ae zapcore.ArrayEncoder) error {
-		ae.AppendString(stringers[0].String())
-		ae.AppendString(fmt.Sprintf("(skip %d)", len(stringers)-2))
-		ae.AppendString(stringers[len(stringers)-1].String())
-		return nil
-	}))
-}
-
 type zapFilesMarshaler []*backuppb.File
-
-// MarshalLogObjectForFiles is an internal util function to zap something having `Files` field.
-func MarshalLogObjectForFiles(files []*backuppb.File, encoder zapcore.ObjectEncoder) error {
-	return zapFilesMarshaler(files).MarshalLogObject(encoder)
-}
 
 func (fs zapFilesMarshaler) MarshalLogObject(encoder zapcore.ObjectEncoder) error {
 	total := len(fs)
@@ -275,7 +257,7 @@ func WarnTerm(message string, fields ...zap.Field) {
 }
 
 // RedactAny constructs a redacted field that carries an interface{}.
-func RedactAny(fieldKey string, key any) zap.Field {
+func RedactAny(fieldKey string, key interface{}) zap.Field {
 	if redact.NeedRedact() {
 		return zap.String(fieldKey, "?")
 	}
@@ -290,6 +272,7 @@ func Redact(field zap.Field) zap.Field {
 	return field
 }
 
+// StringifyRangeOf returns a stringer for the key range.
 func StringifyRangeOf(start, end []byte) StringifyRange {
 	return StringifyRange{StartKey: start, EndKey: end}
 }
@@ -324,7 +307,7 @@ func (rng StringifyRange) String() string {
 	} else {
 		endKey = redact.Key(rng.EndKey)
 	}
-	sb.WriteString(redact.Value(endKey))
+	sb.WriteString(redact.String(endKey))
 	sb.WriteString(")")
 	return sb.String()
 }
@@ -337,22 +320,4 @@ func StringifyMany[T fmt.Stringer](items []T) zapcore.ArrayMarshaler {
 		}
 		return nil
 	})
-}
-
-// HexBytes is a wrapper which make a byte sequence printed by the hex format.
-type HexBytes []byte
-
-var (
-	_ fmt.Stringer   = HexBytes{}
-	_ json.Marshaler = HexBytes{}
-)
-
-// String implements fmt.Stringer.
-func (b HexBytes) String() string {
-	return hex.EncodeToString(b)
-}
-
-// MarshalJSON implements json.Marshaler.
-func (b HexBytes) MarshalJSON() ([]byte, error) {
-	return json.Marshal(hex.EncodeToString(b))
 }

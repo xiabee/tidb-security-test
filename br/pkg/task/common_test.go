@@ -9,11 +9,10 @@ import (
 
 	backup "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
-	kvconfig "github.com/pingcap/tidb/br/pkg/config"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/config"
-	filter "github.com/pingcap/tidb/pkg/util/table-filter"
+	"github.com/pingcap/tidb/config"
+	filter "github.com/pingcap/tidb/util/table-filter"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/require"
 )
@@ -208,19 +207,15 @@ func expectedDefaultRestoreConfig() RestoreConfig {
 	return RestoreConfig{
 		Config: defaultConfig,
 		RestoreCommonConfig: RestoreCommonConfig{Online: false,
-			Granularity:               "fine-grained",
-			MergeSmallRegionSizeBytes: kvconfig.ConfigTerm[uint64]{Value: 0x6000000},
-			MergeSmallRegionKeyCount:  kvconfig.ConfigTerm[uint64]{Value: 0xea600},
-			WithSysTable:              true,
+			MergeSmallRegionSizeBytes: 0x6000000,
+			MergeSmallRegionKeyCount:  0xea600,
+			WithSysTable:              false,
 			ResetSysUsers:             []string{"cloud_admin", "root"}},
 		NoSchema:            false,
-		LoadStats:           true,
 		PDConcurrency:       0x1,
-		StatsConcurrency:    0xc,
 		BatchFlushInterval:  16000000000,
 		DdlBatchSize:        0x80,
 		WithPlacementPolicy: "STRICT",
-		UseCheckpoint:       true,
 	}
 }
 

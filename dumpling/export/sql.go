@@ -17,12 +17,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/version"
+	dbconfig "github.com/pingcap/tidb/config"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"github.com/pingcap/tidb/dumpling/log"
-	dbconfig "github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	pd "github.com/tikv/pd/client/http"
+	"github.com/pingcap/tidb/errno"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/store/helper"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 )
@@ -756,7 +756,7 @@ func ShowMasterStatus(db *sql.Conn) ([]string, error) {
 		}
 		fieldNum := len(cols)
 		oneRow = make([]string, fieldNum)
-		addr := make([]any, fieldNum)
+		addr := make([]interface{}, fieldNum)
 		for i := range oneRow {
 			addr[i] = &oneRow[i]
 		}
@@ -778,7 +778,7 @@ func GetSpecifiedColumnValueAndClose(rows *sql.Rows, columnName string) ([]strin
 	defer rows.Close()
 	var strs []string
 	columns, _ := rows.Columns()
-	addr := make([]any, len(columns))
+	addr := make([]interface{}, len(columns))
 	oneRow := make([]sql.NullString, len(columns))
 	fieldIndex := -1
 	for i, col := range columns {
@@ -813,7 +813,7 @@ func GetSpecifiedColumnValuesAndClose(rows *sql.Rows, columnName ...string) ([][
 	if err != nil {
 		return strs, errors.Trace(err)
 	}
-	addr := make([]any, len(columns))
+	addr := make([]interface{}, len(columns))
 	oneRow := make([]sql.NullString, len(columns))
 	fieldIndexMp := make(map[int]int)
 	for i, col := range columns {
@@ -947,10 +947,10 @@ func isUnknownSystemVariableErr(err error) bool {
 
 // resetDBWithSessionParams will return a new sql.DB as a replacement for input `db` with new session parameters.
 // If returned error is nil, the input `db` will be closed.
-func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Config, params map[string]any) (*sql.DB, error) {
-	support := make(map[string]any)
+func resetDBWithSessionParams(tctx *tcontext.Context, db *sql.DB, cfg *mysql.Config, params map[string]interface{}) (*sql.DB, error) {
+	support := make(map[string]interface{})
 	for k, v := range params {
-		var pv any
+		var pv interface{}
 		if str, ok := v.(string); ok {
 			if pvi, err := strconv.ParseInt(str, 10, 64); err == nil {
 				pv = pvi
@@ -1206,7 +1206,7 @@ func buildOrderByClauseString(handleColNames []string) string {
 	return fmt.Sprintf("ORDER BY %s", strings.Join(quotaCols, separator))
 }
 
-func buildLockTablesSQL(allTables DatabaseTables, blockList map[string]map[string]any) string {
+func buildLockTablesSQL(allTables DatabaseTables, blockList map[string]map[string]interface{}) string {
 	// ,``.`` READ has 11 bytes, "LOCK TABLE" has 10 bytes
 	estimatedCap := len(allTables)*11 + 10
 	s := bytes.NewBuffer(make([]byte, 0, estimatedCap))
@@ -1252,7 +1252,7 @@ func simpleQuery(conn *sql.Conn, query string, handleOneRow func(*sql.Rows) erro
 	return simpleQueryWithArgs(context.Background(), conn, handleOneRow, query)
 }
 
-func simpleQueryWithArgs(ctx context.Context, conn *sql.Conn, handleOneRow func(*sql.Rows) error, query string, args ...any) error {
+func simpleQueryWithArgs(ctx context.Context, conn *sql.Conn, handleOneRow func(*sql.Rows) error, query string, args ...interface{}) error {
 	var (
 		rows *sql.Rows
 		err  error
@@ -1343,7 +1343,7 @@ func detectEstimateRows(tctx *tcontext.Context, db *BaseConn, query string, fiel
 		if err != nil {
 			return errors.Trace(err)
 		}
-		addr := make([]any, len(columns))
+		addr := make([]interface{}, len(columns))
 		oneRow = make([]sql.NullString, len(columns))
 		fieldIndex = -1
 	found:
@@ -1548,9 +1548,10 @@ func GetDBInfo(db *sql.Conn, tables map[string]map[string]struct{}) ([]*model.DB
 		}
 		last := len(schemas) - 1
 		if last < 0 || schemas[last].Name.O != tableSchema {
-			dbInfo := &model.DBInfo{Name: model.CIStr{O: tableSchema}}
-			dbInfo.Deprecated.Tables = make([]*model.TableInfo, 0, len(tables[tableSchema]))
-			schemas = append(schemas, dbInfo)
+			schemas = append(schemas, &model.DBInfo{
+				Name:   model.CIStr{O: tableSchema},
+				Tables: make([]*model.TableInfo, 0, len(tables[tableSchema])),
+			})
 			last++
 		}
 		var partition *model.PartitionInfo
@@ -1565,7 +1566,7 @@ func GetDBInfo(db *sql.Conn, tables map[string]map[string]struct{}) ([]*model.DB
 				}
 			}
 		}
-		schemas[last].Deprecated.Tables = append(schemas[last].Deprecated.Tables, &model.TableInfo{
+		schemas[last].Tables = append(schemas[last].Tables, &model.TableInfo{
 			ID:        tidbTableID,
 			Name:      model.CIStr{O: tableName},
 			Partition: partition,
@@ -1577,19 +1578,19 @@ func GetDBInfo(db *sql.Conn, tables map[string]map[string]struct{}) ([]*model.DB
 
 // GetRegionInfos get region info including regionID, start key, end key from database sql interface.
 // start key, end key includes information to help split table
-func GetRegionInfos(db *sql.Conn) (*pd.RegionsInfo, error) {
+func GetRegionInfos(db *sql.Conn) (*helper.RegionsInfo, error) {
 	const tableRegionSQL = "SELECT REGION_ID,START_KEY,END_KEY FROM INFORMATION_SCHEMA.TIKV_REGION_STATUS ORDER BY START_KEY;"
 	var (
 		regionID         int64
 		startKey, endKey string
 	)
-	regionsInfo := &pd.RegionsInfo{Regions: make([]pd.RegionInfo, 0)}
+	regionsInfo := &helper.RegionsInfo{Regions: make([]helper.RegionInfo, 0)}
 	err := simpleQuery(db, tableRegionSQL, func(rows *sql.Rows) error {
 		err := rows.Scan(&regionID, &startKey, &endKey)
 		if err != nil {
 			return errors.Trace(err)
 		}
-		regionsInfo.Regions = append(regionsInfo.Regions, pd.RegionInfo{
+		regionsInfo.Regions = append(regionsInfo.Regions, helper.RegionInfo{
 			ID:       regionID,
 			StartKey: startKey,
 			EndKey:   endKey,

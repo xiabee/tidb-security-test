@@ -5,11 +5,11 @@ package glue
 import (
 	"context"
 
-	"github.com/pingcap/tidb/pkg/ddl"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/ddl"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/sessionctx"
 	pd "github.com/tikv/pd/client"
 )
 
@@ -41,10 +41,9 @@ type Glue interface {
 // Session is an abstraction of the session.Session interface.
 type Session interface {
 	Execute(ctx context.Context, sql string) error
-	ExecuteInternal(ctx context.Context, sql string, args ...any) error
+	ExecuteInternal(ctx context.Context, sql string, args ...interface{}) error
 	CreateDatabase(ctx context.Context, schema *model.DBInfo) error
-	CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo,
-		cs ...ddl.CreateTableOption) error
+	CreateTable(ctx context.Context, dbName model.CIStr, table *model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error
 	CreatePlacementPolicy(ctx context.Context, policy *model.PolicyInfo) error
 	Close()
 	GetGlobalVariable(name string) (string, error)
@@ -53,8 +52,7 @@ type Session interface {
 
 // BatchCreateTableSession is an interface to batch create table parallelly
 type BatchCreateTableSession interface {
-	CreateTables(ctx context.Context, tables map[string][]*model.TableInfo,
-		cs ...ddl.CreateTableOption) error
+	CreateTables(ctx context.Context, tables map[string][]*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error
 }
 
 // Progress is an interface recording the current execution progress.

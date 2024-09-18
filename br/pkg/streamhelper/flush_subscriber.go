@@ -17,8 +17,8 @@ import (
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
-	"github.com/pingcap/tidb/pkg/metrics"
-	"github.com/pingcap/tidb/pkg/util/codec"
+	"github.com/pingcap/tidb/metrics"
+	"github.com/pingcap/tidb/util/codec"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
@@ -131,8 +131,7 @@ func (f *FlushSubscriber) HandleErrors(ctx context.Context) {
 		err := sub.loadError()
 		if err != nil {
 			retry := f.canBeRetried(err)
-			log.Warn("Meet error.", zap.String("category", "log backup flush subscriber"),
-				logutil.ShortError(err), zap.Bool("can-retry?", retry), zap.Uint64("store", id))
+			log.Warn("[log backup flush subscriber] Meet error.", logutil.ShortError(err), zap.Bool("can-retry?", retry), zap.Uint64("store", id))
 			if retry {
 				sub.connect(f.masterCtx, f.dialer)
 			}
@@ -225,8 +224,7 @@ func (s *subscription) connect(ctx context.Context, dialer LogBackupService) {
 }
 
 func (s *subscription) doConnect(ctx context.Context, dialer LogBackupService) error {
-	log.Info("Adding subscription.", zap.String("category", "log backup subscription manager"),
-		zap.Uint64("store", s.storeID), zap.Uint64("boot", s.storeBootAt))
+	log.Info("[log backup subscription manager] Adding subscription.", zap.Uint64("store", s.storeID), zap.Uint64("boot", s.storeBootAt))
 	// We should shutdown the background task firstly.
 	// Once it yields some error during shuting down, the error won't be brought to next run.
 	s.close(ctx)
@@ -319,8 +317,7 @@ func (s *subscription) listenOver(ctx context.Context, cli eventStream) {
 				return
 			}
 		}
-		metrics.RegionCheckpointSubscriptionEvent.WithLabelValues(
-			strconv.Itoa(int(storeID))).Observe(float64(len(msg.Events)))
+		metrics.RegionCheckpointSubscriptionEvent.WithLabelValues(strconv.Itoa(int(storeID))).Add(float64(len(msg.Events)))
 	}
 }
 

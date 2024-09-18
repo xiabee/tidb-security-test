@@ -24,17 +24,17 @@ import (
 	"time"
 
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/sessiontxn"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/table/tables"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
 
 // After add column finished, check the records in the table.
-func (s *ddlSuite) checkAddColumn(t *testing.T, rowID int64, defaultVal any, updatedVal any) {
+func (s *ddlSuite) checkAddColumn(t *testing.T, rowID int64, defaultVal interface{}, updatedVal interface{}) {
 	ctx := s.ctx
 	err := sessiontxn.NewTxn(goctx.Background(), ctx)
 	require.NoError(t, err)
@@ -84,7 +84,7 @@ func (s *ddlSuite) checkAddColumn(t *testing.T, rowID int64, defaultVal any, upd
 	require.Greater(t, deleteCount, int64(0))
 }
 
-func (s *ddlSuite) checkDropColumn(t *testing.T, rowID int64, alterColumn *table.Column, updateDefault any) {
+func (s *ddlSuite) checkDropColumn(t *testing.T, rowID int64, alterColumn *table.Column, updateDefault interface{}) {
 	ctx := s.ctx
 	err := sessiontxn.NewTxn(goctx.Background(), ctx)
 	require.NoError(t, err)
@@ -140,7 +140,7 @@ func TestColumn(t *testing.T) {
 		Query      string
 		ColumnName string
 		Add        bool
-		Default    any
+		Default    interface{}
 	}{
 		{"alter table test_column add column c3 int default -1", "c3", true, int64(-1)},
 		{"alter table test_column drop column c3", "c3", false, nil},

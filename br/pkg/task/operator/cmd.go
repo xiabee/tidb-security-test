@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 )
 
 func dialPD(ctx context.Context, cfg *task.Config) (*pdutil.PdController, error) {
+	pdAddrs := strings.Join(cfg.PD, ",")
 	var tc *tls.Config
 	if cfg.TLS.IsEnabled() {
 		var err error
@@ -34,7 +36,7 @@ func dialPD(ctx context.Context, cfg *task.Config) (*pdutil.PdController, error)
 			return nil, err
 		}
 	}
-	mgr, err := pdutil.NewPdController(ctx, cfg.PD, tc, cfg.TLS.ToPDSecurityOption())
+	mgr, err := pdutil.NewPdController(ctx, pdAddrs, tc, cfg.TLS.ToPDSecurityOption())
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +224,7 @@ func pauseGCKeeper(cx *AdaptEnvForSnapshotBackupContext) (err error) {
 			ID:  sp.ID,
 			TTL: 0,
 		}
+		//nolint: all_revive,revive // There is a false positive on returning in `defer`.
 		return utils.UpdateServiceSafePoint(ctx, cx.pdMgr.GetPDClient(), cancelSP)
 	})
 	// Note: in fact we can directly return here.

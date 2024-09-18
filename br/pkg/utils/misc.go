@@ -30,13 +30,12 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/parser/types"
+	"github.com/pingcap/tidb/parser/mysql"
+	"github.com/pingcap/tidb/parser/types"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -45,7 +44,6 @@ const (
 	// (How about network partition between TiKV and PD? Even that is rare.)
 	// Also note that the offline threshold in PD is 20s, see
 	// https://github.com/tikv/pd/blob/c40e319f50822678cda71ae62ee2fd70a9cac010/pkg/core/store.go#L523
-
 	storeDisconnectionDuration = 100 * time.Second
 )
 
@@ -108,7 +106,7 @@ func IsTypeCompatible(src types.FieldType, target types.FieldType) bool {
 }
 
 func GRPCConn(ctx context.Context, storeAddr string, tlsConf *tls.Config, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
-	secureOpt := grpc.WithTransportCredentials(insecure.NewCredentials())
+	secureOpt := grpc.WithInsecure()
 	if tlsConf != nil {
 		secureOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConf))
 	}
@@ -131,10 +129,7 @@ func GRPCConn(ctx context.Context, storeAddr string, tlsConf *tls.Config, opts .
 // Some versions of PD may not set the store state in the gRPC response.
 // We need to check it manually.
 func CheckStoreLiveness(s *metapb.Store) error {
-	// note: offline store is also considered as alive.
-	// because the real meaning of offline is "Going Offline".
-	// https://docs.pingcap.com/tidb/v7.5/tidb-scheduling#information-collection
-	if s.State != metapb.StoreState_Up && s.State != metapb.StoreState_Offline {
+	if s.State != metapb.StoreState_Up {
 		return errors.Annotatef(berrors.ErrKVStorage, "the store state isn't up, it is %s", s.State)
 	}
 	// If the field isn't present (the default value), skip this check.

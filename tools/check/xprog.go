@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build ignore
-
 package main
 
 import (
@@ -48,7 +46,7 @@ func main() {
 		os.Exit(-3)
 	}
 
-	// github.com/pingcap/tidb/pkg/util/topsql.test => util/topsql
+	// github.com/pingcap/tidb/util/topsql.test => util/topsql
 	pkg = pkg[len(prefix) : len(pkg)-len(".test")]
 
 	_, file := filepath.Split(pkg)
@@ -75,7 +73,7 @@ func getPackageInfo(dir string) string {
 	defer f.Close()
 
 	r := bufio.NewReader(f)
-	// packagefile github.com/pingcap/tidb/pkg/session.test=/home/genius/.cache/go-build/fb/fb1587cce5727fa9461131eab8260a52878da04f5c8da49dd3c7b2d941430c63-d
+	// packagefile github.com/pingcap/tidb/session.test=/home/genius/.cache/go-build/fb/fb1587cce5727fa9461131eab8260a52878da04f5c8da49dd3c7b2d941430c63-d
 	line, _, err := r.ReadLine()
 	if err != nil {
 		os.Exit(-2)

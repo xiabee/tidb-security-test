@@ -9,14 +9,13 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/coreos/go-semver/semver"
 	"github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/br/pkg/version"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/util/promutil"
+	"github.com/pingcap/tidb/parser"
+	"github.com/pingcap/tidb/util/promutil"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
@@ -228,70 +227,6 @@ func TestUnregisterMetrics(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSetDefaultSessionParams(t *testing.T) {
-	testCases := []struct {
-		si             version.ServerInfo
-		sessionParams  map[string]any
-		expectedParams map[string]any
-	}{
-		{
-			si: version.ServerInfo{
-				ServerType:    version.ServerTypeTiDB,
-				HasTiKV:       true,
-				ServerVersion: semver.New("6.1.0"),
-			},
-			sessionParams: map[string]any{
-				"tidb_snapshot": "2020-01-01 00:00:00",
-			},
-			expectedParams: map[string]any{
-				"tidb_snapshot": "2020-01-01 00:00:00",
-			},
-		},
-		{
-			si: version.ServerInfo{
-				ServerType:    version.ServerTypeTiDB,
-				HasTiKV:       true,
-				ServerVersion: semver.New("6.2.0"),
-			},
-			sessionParams: map[string]any{
-				"tidb_snapshot": "2020-01-01 00:00:00",
-			},
-			expectedParams: map[string]any{
-				"tidb_enable_paging": "ON",
-				"tidb_snapshot":      "2020-01-01 00:00:00",
-			},
-		},
-		{
-			si: version.ServerInfo{
-				ServerType:    version.ServerTypeTiDB,
-				HasTiKV:       true,
-				ServerVersion: semver.New("6.2.0"),
-			},
-			sessionParams: map[string]any{
-				"tidb_enable_paging": "OFF",
-				"tidb_snapshot":      "2020-01-01 00:00:00",
-			},
-			expectedParams: map[string]any{
-				"tidb_enable_paging": "OFF",
-				"tidb_snapshot":      "2020-01-01 00:00:00",
-			},
-		},
-		{
-			si: version.ServerInfo{
-				ServerType:    version.ServerTypeMySQL,
-				ServerVersion: semver.New("8.0.32"),
-			},
-			sessionParams:  map[string]any{},
-			expectedParams: map[string]any{},
-		},
-	}
-
-	for _, testCase := range testCases {
-		setDefaultSessionParams(testCase.si, testCase.sessionParams)
-		require.Equal(t, testCase.expectedParams, testCase.sessionParams)
-	}
-}
-
 func TestSetSessionParams(t *testing.T) {
 	// case 1: fail to set tidb_snapshot, should return error with hint
 	db, mock, err := sqlmock.New()
@@ -340,7 +275,7 @@ func TestSetSessionParams(t *testing.T) {
 	}
 	conf.Snapshot = ""
 	conf.Consistency = ConsistencyTypeFlush
-	conf.SessionParams = map[string]any{
+	conf.SessionParams = map[string]interface{}{
 		"mock": "UTC",
 	}
 	d.dbHandle = db

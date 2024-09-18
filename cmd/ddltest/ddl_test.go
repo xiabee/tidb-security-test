@@ -33,22 +33,21 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/session"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/sessiontxn"
-	"github.com/pingcap/tidb/pkg/store"
-	tidbdriver "github.com/pingcap/tidb/pkg/store/driver"
-	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/table/tables"
-	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/domain"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/parser/terror"
+	"github.com/pingcap/tidb/session"
+	"github.com/pingcap/tidb/sessionctx"
+	"github.com/pingcap/tidb/sessionctx/variable"
+	"github.com/pingcap/tidb/sessiontxn"
+	"github.com/pingcap/tidb/store"
+	tidbdriver "github.com/pingcap/tidb/store/driver"
+	"github.com/pingcap/tidb/table"
+	"github.com/pingcap/tidb/table/tables"
+	"github.com/pingcap/tidb/testkit"
+	"github.com/pingcap/tidb/types"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -77,7 +76,7 @@ type server struct {
 type ddlSuite struct {
 	store kv.Storage
 	dom   *domain.Domain
-	s     sessiontypes.Session
+	s     session.Session
 	ctx   sessionctx.Context
 
 	m     sync.Mutex
@@ -388,7 +387,7 @@ func isRetryError(err error) bool {
 	return false
 }
 
-func (s *ddlSuite) exec(query string, args ...any) (sql.Result, error) {
+func (s *ddlSuite) exec(query string, args ...interface{}) (sql.Result, error) {
 	for {
 		server := s.getServer()
 		r, err := server.db.Exec(query, args...)
@@ -405,7 +404,7 @@ func (s *ddlSuite) exec(query string, args ...any) (sql.Result, error) {
 	}
 }
 
-func (s *ddlSuite) mustExec(query string, args ...any) sql.Result {
+func (s *ddlSuite) mustExec(query string, args ...interface{}) sql.Result {
 	r, err := s.exec(query, args...)
 	if err != nil {
 		log.Fatal("[mustExec fail]query",
@@ -418,7 +417,7 @@ func (s *ddlSuite) mustExec(query string, args ...any) sql.Result {
 	return r
 }
 
-func (s *ddlSuite) execInsert(query string, args ...any) sql.Result {
+func (s *ddlSuite) execInsert(query string, args ...interface{}) sql.Result {
 	for {
 		r, err := s.exec(query, args...)
 		if err == nil {
@@ -441,7 +440,7 @@ func (s *ddlSuite) execInsert(query string, args ...any) sql.Result {
 	}
 }
 
-func (s *ddlSuite) query(query string, args ...any) (*sql.Rows, error) {
+func (s *ddlSuite) query(query string, args ...interface{}) (*sql.Rows, error) {
 	for {
 		server := s.getServer()
 		r, err := server.db.Query(query, args...)
@@ -491,25 +490,25 @@ func (s *ddlSuite) runDDL(sql string) chan error {
 }
 
 func (s *ddlSuite) getTable(t *testing.T, name string) table.Table {
-	tbl, err := domain.GetDomain(s.ctx).InfoSchema().TableByName(goctx.Background(), model.NewCIStr("test_ddl"), model.NewCIStr(name))
+	tbl, err := domain.GetDomain(s.ctx).InfoSchema().TableByName(model.NewCIStr("test_ddl"), model.NewCIStr(name))
 	require.NoError(t, err)
 	return tbl
 }
 
-func dumpRows(t *testing.T, rows *sql.Rows) [][]any {
+func dumpRows(t *testing.T, rows *sql.Rows) [][]interface{} {
 	cols, err := rows.Columns()
 	require.NoError(t, err)
-	var ay [][]any
+	var ay [][]interface{}
 	for rows.Next() {
-		v := make([]any, len(cols))
+		v := make([]interface{}, len(cols))
 		for i := range v {
-			v[i] = new(any)
+			v[i] = new(interface{})
 		}
 		err = rows.Scan(v...)
 		require.NoError(t, err)
 
 		for i := range v {
-			v[i] = *(v[i].(*any))
+			v[i] = *(v[i].(*interface{}))
 		}
 		ay = append(ay, v)
 	}
@@ -519,7 +518,7 @@ func dumpRows(t *testing.T, rows *sql.Rows) [][]any {
 	return ay
 }
 
-func matchRows(t *testing.T, rows *sql.Rows, expected [][]any) {
+func matchRows(t *testing.T, rows *sql.Rows, expected [][]interface{}) {
 	ay := dumpRows(t, rows)
 	require.Equalf(t, len(expected), len(ay), "%v", expected)
 	for i := range ay {
@@ -527,7 +526,7 @@ func matchRows(t *testing.T, rows *sql.Rows, expected [][]any) {
 	}
 }
 
-func match(t *testing.T, row []any, expected ...any) {
+func match(t *testing.T, row []interface{}, expected ...interface{}) {
 	require.Equal(t, len(expected), len(row))
 	for i := range row {
 		if row[i] == nil {
@@ -590,7 +589,7 @@ func TestSimple(t *testing.T) {
 
 		rows, err := s.query("select c1 from test_simple limit 1")
 		require.NoError(t, err)
-		matchRows(t, rows, [][]any{{1}})
+		matchRows(t, rows, [][]interface{}{{1}})
 
 		done = s.runDDL("drop table if exists test_simple")
 		err = <-done
@@ -1157,5 +1156,6 @@ func addEnvPath(newPath string) {
 }
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
 	_ = store.Register("tikv", tidbdriver.TiKVDriver{})
 }

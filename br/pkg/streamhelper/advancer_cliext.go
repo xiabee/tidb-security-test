@@ -17,8 +17,8 @@ import (
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/util/redact"
+	"github.com/pingcap/tidb/br/pkg/redact"
+	"github.com/pingcap/tidb/kv"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
@@ -144,8 +144,7 @@ func (t AdvancerExt) startListen(ctx context.Context, rev int64, ch chan<- TaskE
 	handleResponse := func(resp clientv3.WatchResponse) bool {
 		events, err := t.eventFromWatch(ctx, resp)
 		if err != nil {
-			log.Warn("Meet error during receiving the task event.",
-				zap.String("category", "log backup advancer"), logutil.ShortError(err))
+			log.Warn("[log backup advancer] Meet error during receiving the task event.", logutil.ShortError(err))
 			ch <- errorEvent(err)
 			return false
 		}
@@ -282,8 +281,7 @@ func (t AdvancerExt) UploadV3GlobalCheckpointForTask(ctx context.Context, taskNa
 	}
 
 	if checkpoint < oldValue {
-		log.Warn("skipping upload global checkpoint", zap.String("category", "log backup advancer"),
-			zap.Uint64("old", oldValue), zap.Uint64("new", checkpoint))
+		log.Warn("[log backup advancer] skipping upload global checkpoint", zap.Uint64("old", oldValue), zap.Uint64("new", checkpoint))
 		return nil
 	}
 

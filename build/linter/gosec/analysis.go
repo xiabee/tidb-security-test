@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
-	"io"
+	"io/ioutil"
 	"log"
 	"strconv"
 
@@ -41,11 +41,10 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	gasConfig := gosec.NewConfig()
 	enabledRules := rules.Generate(func(id string) bool {
 		if id == "G104" || id == "G103" || id == "G101" || id == "G201" {
@@ -53,7 +52,7 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		return false
 	})
-	logger := log.New(io.Discard, "", 0)
+	logger := log.New(ioutil.Discard, "", 0)
 	analyzer := gosec.NewAnalyzer(gasConfig, logger)
 	analyzer.LoadRules(enabledRules.Builders())
 

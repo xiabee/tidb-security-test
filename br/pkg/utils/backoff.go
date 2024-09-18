@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"io"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -30,10 +29,6 @@ const (
 	downloadSSTWaitInterval    = 1 * time.Second
 	downloadSSTMaxWaitInterval = 4 * time.Second
 
-	backupSSTRetryTimes      = 5
-	backupSSTWaitInterval    = 2 * time.Second
-	backupSSTMaxWaitInterval = 3 * time.Second
-
 	resetTSRetryTime       = 32
 	resetTSWaitInterval    = 50 * time.Millisecond
 	resetTSMaxWaitInterval = 2 * time.Second
@@ -43,27 +38,10 @@ const (
 	resetTSMaxWaitIntervalExt = 300 * time.Second
 
 	// region heartbeat are 10 seconds by default, if some region has 2 heartbeat missing (15 seconds), it appear to be a network issue between PD and TiKV.
-	FlashbackRetryTime       = 3
-	FlashbackWaitInterval    = 3 * time.Second
-	FlashbackMaxWaitInterval = 15 * time.Second
-
-	ChecksumRetryTime       = 8
-	ChecksumWaitInterval    = 1 * time.Second
-	ChecksumMaxWaitInterval = 30 * time.Second
-
-	gRPC_Cancel = "the client connection is closing"
+	flashbackRetryTime       = 3
+	flashbackWaitInterval    = 3000 * time.Millisecond
+	flashbackMaxWaitInterval = 15 * time.Second
 )
-
-// At least, there are two possible cancel() call,
-// one from go context, another from gRPC, here we retry when gRPC cancel with connection closing
-func isGRPCCancel(err error) bool {
-	if s, ok := status.FromError(err); ok {
-		if strings.Contains(s.Message(), gRPC_Cancel) {
-			return true
-		}
-	}
-	return false
-}
 
 // ConstantBackoff is a backoffer that retry forever until success.
 type ConstantBackoff time.Duration
@@ -91,15 +69,6 @@ type RetryState struct {
 	nextBackoff time.Duration
 }
 
-// InitialRetryState make the initial state for retrying.
-func InitialRetryState(maxRetryTimes int, initialBackoff, maxBackoff time.Duration) RetryState {
-	return RetryState{
-		maxRetry:    maxRetryTimes,
-		maxBackoff:  maxBackoff,
-		nextBackoff: initialBackoff,
-	}
-}
-
 // Whether in the current state we can retry.
 func (rs *RetryState) ShouldRetry() bool {
 	return rs.retryTimes < rs.maxRetry
@@ -120,15 +89,34 @@ func (rs *RetryState) GiveUp() {
 	rs.retryTimes = rs.maxRetry
 }
 
-// ReduceRetry reduces retry times for 1.
-func (rs *RetryState) ReduceRetry() {
-	rs.retryTimes--
+// InitialRetryState make the initial state for retrying.
+func InitialRetryState(maxRetryTimes int, initialBackoff, maxBackoff time.Duration) RetryState {
+	return RetryState{
+		maxRetry:    maxRetryTimes,
+		maxBackoff:  maxBackoff,
+		nextBackoff: initialBackoff,
+	}
+}
+
+// RecordRetry simply record retry times, and no backoff
+func (rs *RetryState) RecordRetry() {
+	rs.retryTimes++
+}
+
+// RetryTimes returns the retry times.
+// usage: unit test.
+func (rs *RetryState) RetryTimes() int {
+	return rs.retryTimes
 }
 
 // Attempt implements the `Backoffer`.
 // TODO: Maybe use this to replace the `exponentialBackoffer` (which is nearly homomorphic to this)?
 func (rs *RetryState) Attempt() int {
 	return rs.maxRetry - rs.retryTimes
+}
+
+func (rs *RetryState) StopRetry() {
+	rs.retryTimes = rs.maxRetry
 }
 
 // NextBackoff implements the `Backoffer`.
@@ -163,17 +151,12 @@ func NewDownloadSSTBackoffer() Backoffer {
 	return NewBackoffer(downloadSSTRetryTimes, downloadSSTWaitInterval, downloadSSTMaxWaitInterval, errContext)
 }
 
-func NewBackupSSTBackoffer() Backoffer {
-	errContext := NewErrorContext("backup sst", 3)
-	return NewBackoffer(backupSSTRetryTimes, backupSSTWaitInterval, backupSSTMaxWaitInterval, errContext)
-}
-
 func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 	// we don't care storeID here.
 	errs := multierr.Errors(err)
 	lastErr := errs[len(errs)-1]
-	res := HandleUnknownBackupError(lastErr.Error(), 0, bo.errContext)
-	if res.Strategy == StrategyRetry {
+	res := bo.errContext.HandleErrorMsg(lastErr.Error(), 0)
+	if res.Strategy == RetryStrategy {
 		bo.delayTime = 2 * bo.delayTime
 		bo.attempt--
 	} else {
@@ -188,17 +171,9 @@ func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 			bo.attempt = 0
 		default:
 			switch status.Code(e) {
-			case codes.Unavailable, codes.Aborted, codes.DeadlineExceeded, codes.ResourceExhausted, codes.Internal:
+			case codes.Unavailable, codes.Aborted:
 				bo.delayTime = 2 * bo.delayTime
 				bo.attempt--
-			case codes.Canceled:
-				if isGRPCCancel(lastErr) {
-					bo.delayTime = 2 * bo.delayTime
-					bo.attempt--
-				} else {
-					bo.delayTime = 0
-					bo.attempt = 0
-				}
 			default:
 				// Unexpected error
 				bo.delayTime = 0
@@ -281,36 +256,26 @@ func (bo *pdReqBackoffer) Attempt() int {
 	return bo.attempt
 }
 
-type DiskCheckBackoffer struct {
+type flashbackBackoffer struct {
 	attempt      int
 	delayTime    time.Duration
 	maxDelayTime time.Duration
 }
 
-func NewDiskCheckBackoffer() Backoffer {
-	return &DiskCheckBackoffer{
-		attempt:      resetTSRetryTime,
-		delayTime:    resetTSWaitInterval,
-		maxDelayTime: resetTSMaxWaitInterval,
+// NewBackoffer creates a new controller regulating a truncated exponential backoff.
+func NewFlashBackBackoffer() Backoffer {
+	return &flashbackBackoffer{
+		attempt:      flashbackRetryTime,
+		delayTime:    flashbackWaitInterval,
+		maxDelayTime: flashbackMaxWaitInterval,
 	}
 }
 
-func (bo *DiskCheckBackoffer) NextBackoff(err error) time.Duration {
-	e := errors.Cause(err)
-	switch e { // nolint:errorlint
-	case nil, context.Canceled, context.DeadlineExceeded, berrors.ErrKVDiskFull:
-		bo.delayTime = 0
-		bo.attempt = 0
-	case berrors.ErrPDInvalidResponse:
-		bo.delayTime = 2 * bo.delayTime
-		bo.attempt--
-	default:
-		bo.delayTime = 2 * bo.delayTime
-		if bo.attempt > 5 {
-			bo.attempt = 5
-		}
-		bo.attempt--
-	}
+// retry 3 times when prepare flashback failure.
+func (bo *flashbackBackoffer) NextBackoff(err error) time.Duration {
+	bo.delayTime = 2 * bo.delayTime
+	bo.attempt--
+	log.Warn("region may not ready to serve, retry it...", zap.Error(err))
 
 	if bo.delayTime > bo.maxDelayTime {
 		return bo.maxDelayTime
@@ -318,6 +283,6 @@ func (bo *DiskCheckBackoffer) NextBackoff(err error) time.Duration {
 	return bo.delayTime
 }
 
-func (bo *DiskCheckBackoffer) Attempt() int {
+func (bo *flashbackBackoffer) Attempt() int {
 	return bo.attempt
 }

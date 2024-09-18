@@ -6,11 +6,13 @@ go_library(
     importpath = "github.com/pingcap/tidb/br/pkg/trace",
     visibility = ["//visibility:public"],
     deps = [
+        "//util/cmp",
         "@com_github_cheynewallace_tabby//:tabby",
         "@com_github_opentracing_opentracing_go//:opentracing-go",
         "@com_github_pingcap_log//:log",
         "@com_sourcegraph_sourcegraph_appdash//:appdash",
         "@com_sourcegraph_sourcegraph_appdash//opentracing",
+        "@org_golang_x_exp//slices",
         "@org_uber_go_zap//:zap",
     ],
 )
@@ -25,7 +27,7 @@ go_test(
     embed = [":trace"],
     flaky = True,
     deps = [
-        "//pkg/testkit/testsetup",
+        "//testkit/testsetup",
         "@com_github_opentracing_opentracing_go//:opentracing-go",
         "@com_github_stretchr_testify//require",
         "@org_uber_go_goleak//:goleak",

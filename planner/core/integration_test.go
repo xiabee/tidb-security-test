@@ -1440,6 +1440,20 @@ func TestKeepOrderHintWithBinding(t *testing.T) {
 	require.Equal(t, len(res), 0)
 }
 
+func TestIssue54870(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustExec("use test")
+	tk.MustExec(`create table t (id int,
+deleted_at datetime(3) NOT NULL DEFAULT '1970-01-01 01:00:01.000',
+is_deleted tinyint(1) GENERATED ALWAYS AS ((deleted_at > _utf8mb4'1970-01-01 01:00:01.000')) VIRTUAL NOT NULL,
+key k(id, is_deleted))`)
+	tk.MustExec(`begin`)
+	tk.MustExec(`insert into t (id, deleted_at) values (1, now())`)
+	tk.MustHavePlan(`select 1 from t where id=1 and is_deleted=true`, "IndexRangeScan")
+}
+
 func TestViewHint(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -8782,4 +8796,12 @@ FROM (
 WHERE res.state != 2
 ORDER BY res.branch_id;
 `, errno.ErrNotSupportedYet)
+}
+
+func TestIssue40285(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("CREATE TABLE t(col1 enum('p5', '9a33x') NOT NULL DEFAULT 'p5',col2 tinyblob DEFAULT NULL) ENGINE = InnoDB DEFAULT CHARSET = latin1 COLLATE = latin1_bin;")
+	tk.MustQuery("(select last_value(col1) over () as r0 from t) union all (select col2 as r0 from t);")
 }

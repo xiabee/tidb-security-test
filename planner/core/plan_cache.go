@@ -15,6 +15,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 
 	"github.com/pingcap/errors"
@@ -79,7 +80,7 @@ func planCachePreprocess(ctx context.Context, sctx sessionctx.Context, isGeneral
 	// step 3: add metadata lock and check each table's schema version
 	schemaNotMatch := false
 	for i := 0; i < len(stmt.dbName); i++ {
-		_, ok := is.TableByID(stmt.tbls[i].Meta().ID)
+		tbl, ok := is.TableByID(stmt.tbls[i].Meta().ID)
 		if !ok {
 			tblByName, err := is.TableByName(stmt.dbName[i], stmt.tbls[i].Meta().Name)
 			if err != nil {
@@ -94,7 +95,12 @@ func planCachePreprocess(ctx context.Context, sctx sessionctx.Context, isGeneral
 			schemaNotMatch = true
 			continue
 		}
-		if stmt.tbls[i].Meta().Revision != newTbl.Meta().Revision {
+		// The revision of tbl and newTbl may not be the same.
+		// Example:
+		// The version of stmt.tbls[i] is taken from the prepare statement and is revision v1.
+		// When stmt.tbls[i] is locked in MDL, the revision of newTbl is also v1.
+		// The revision of tbl is v2. The reason may have other statements trigger "tryLockMDLAndUpdateSchemaIfNecessary" before, leading to tbl revision update.
+		if stmt.tbls[i].Meta().Revision != newTbl.Meta().Revision || (tbl != nil && tbl.Meta().Revision != newTbl.Meta().Revision) {
 			schemaNotMatch = true
 		}
 		stmt.tbls[i] = newTbl
@@ -110,6 +116,7 @@ func planCachePreprocess(ctx context.Context, sctx sessionctx.Context, isGeneral
 		stmtAst.CachedPlan = nil
 		stmt.Executor = nil
 		stmt.ColumnInfos = nil
+		stmt.planCacheKey = nil
 		// If the schema version has changed we need to preprocess it again,
 		// if this time it failed, the real reason for the error is schema changed.
 		// Example:
@@ -184,7 +191,7 @@ func GetPlanFromSessionPlanCache(ctx context.Context, sctx sessionctx.Context,
 
 	paramTypes := parseParamTypes(sctx, params)
 
-	if stmtCtx.UseCache && stmtAst.CachedPlan != nil { // for point query plan
+	if stmtCtx.UseCache && stmtAst.CachedPlan != nil && bytes.Equal(stmt.planCacheKey.Hash(), cacheKey.Hash()) { // for point query plan
 		if plan, names, ok, err := getPointQueryPlan(stmtAst, sessVars, stmtCtx); ok {
 			return plan, names, err
 		}
@@ -326,6 +333,7 @@ func generateNewPlan(ctx context.Context, sctx sessionctx.Context, isGeneralPlan
 		}
 		cached := NewPlanCacheValue(p, names, stmtCtx.TblInfo2UnionScan, paramTypes, &stmtCtx.StmtHints)
 		stmt.NormalizedPlan, stmt.PlanDigest = NormalizePlan(p)
+		stmt.planCacheKey = cacheKey
 		stmtCtx.SetPlan(p)
 		stmtCtx.SetPlanDigest(stmt.NormalizedPlan, stmt.PlanDigest)
 		sctx.GetPlanCache(isGeneralPlanCache).Put(cacheKey, cached, paramTypes)
@@ -843,6 +851,7 @@ func IsPointPlanShortPathOK(sctx sessionctx.Context, is infoschema.InfoSchema, s
 	if stmtAst.SchemaVersion != is.SchemaMetaVersion() {
 		stmtAst.CachedPlan = nil
 		stmt.ColumnInfos = nil
+		stmt.planCacheKey = nil
 		return false, nil
 	}
 	// maybe we'd better check cached plan type here, current

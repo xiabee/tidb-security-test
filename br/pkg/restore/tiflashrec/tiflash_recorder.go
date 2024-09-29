@@ -21,10 +21,10 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/infoschema"
-	"github.com/pingcap/tidb/parser/ast"
-	"github.com/pingcap/tidb/parser/format"
-	"github.com/pingcap/tidb/parser/model"
+	"github.com/pingcap/tidb/pkg/infoschema"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/format"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"go.uber.org/zap"
 )
 
@@ -50,6 +50,14 @@ func New() *TiFlashRecorder {
 	return &TiFlashRecorder{
 		items: map[int64]model.TiFlashReplicaInfo{},
 	}
+}
+
+func (r *TiFlashRecorder) Load(items map[int64]model.TiFlashReplicaInfo) {
+	r.items = items
+}
+
+func (r *TiFlashRecorder) GetItems() map[int64]model.TiFlashReplicaInfo {
+	return r.items
 }
 
 func (r *TiFlashRecorder) AddTable(tableID int64, replica model.TiFlashReplicaInfo) {
@@ -87,7 +95,7 @@ func (r *TiFlashRecorder) GenerateResetAlterTableDDLs(info infoschema.InfoSchema
 			log.Warn("Table do not exist, skipping", zap.Int64("id", id))
 			return
 		}
-		schema, ok := info.SchemaByTable(table.Meta())
+		schema, ok := infoschema.SchemaByTable(info, table.Meta())
 		if !ok {
 			log.Warn("Schema do not exist, skipping", zap.Int64("id", id), zap.Stringer("table", table.Meta().Name))
 			return
@@ -127,7 +135,7 @@ func (r *TiFlashRecorder) GenerateAlterTableDDLs(info infoschema.InfoSchema) []s
 			log.Warn("Table do not exist, skipping", zap.Int64("id", id))
 			return
 		}
-		schema, ok := info.SchemaByTable(table.Meta())
+		schema, ok := infoschema.SchemaByTable(info, table.Meta())
 		if !ok {
 			log.Warn("Schema do not exist, skipping", zap.Int64("id", id), zap.Stringer("table", table.Meta().Name))
 			return

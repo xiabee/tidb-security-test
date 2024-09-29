@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"text/tabwriter"
 	"time"
 
 	"github.com/cheynewallace/tabby"
 	"github.com/opentracing/opentracing-go"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/util/cmp"
 	"go.uber.org/zap"
-	"golang.org/x/exp/slices"
 	"sourcegraph.com/sourcegraph/appdash"
 	traceImpl "sourcegraph.com/sourcegraph/appdash/opentracing"
 )
@@ -97,7 +96,7 @@ func dfsTree(t *appdash.Trace, prefix string, isLast bool, tub *tabby.Tabby) {
 		if jevent, err := j.TimespanEvent(); err == nil {
 			jstart = jevent.Start()
 		}
-		return cmp.Compare(istart.UnixNano(), jstart.UnixNano())
+		return istart.Compare(jstart)
 	})
 
 	for i, sp := range t.Sub {

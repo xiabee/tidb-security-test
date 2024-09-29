@@ -19,7 +19,7 @@ import (
 	"context"
 	"encoding/hex"
 	"io"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -32,7 +32,7 @@ import (
 	"github.com/pingcap/log"
 	. "github.com/pingcap/tidb/br/pkg/backup/prepare_snap"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/store/mockstore/unistore"
+	"github.com/pingcap/tidb/pkg/store/mockstore/unistore"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/tikv"
 	pd "github.com/tikv/pd/client"
@@ -124,8 +124,9 @@ func (s *mockStore) Recv() (*brpb.PrepareSnapshotBackupResponse, error) {
 		case err, ok := <-s.injectConnErr:
 			if ok {
 				return nil, err
+			} else {
+				s.injectConnErr = nil
 			}
-			s.injectConnErr = nil
 		}
 	}
 }
@@ -239,8 +240,8 @@ func (m *mockStores) AssertSafeForBackup(t *testing.T) {
 		}
 		store.mu.Unlock()
 	}
-	sort.Slice(res, func(a, b int) bool {
-		return bytes.Compare(res[a][0], res[b][0]) < 0
+	slices.SortFunc(res, func(a, b rng) int {
+		return bytes.Compare(a[0], b[0])
 	})
 	for i := 1; i < len(res); i++ {
 		if bytes.Compare(res[i-1][1], res[i][0]) < 0 {
@@ -264,7 +265,7 @@ func (m *mockStores) AssertIsNormalMode(t *testing.T) {
 
 func fakeCluster(t *testing.T, nodes int, keys ...[]byte) pd.Client {
 	tmp := t.TempDir()
-	_, pdc, cluster, err := unistore.New(tmp)
+	_, pdc, cluster, err := unistore.New(tmp, nil)
 	unistore.BootstrapWithMultiStores(cluster, nodes)
 	require.NoError(t, err)
 	cluster.SplitArbitrary(keys...)
@@ -281,7 +282,7 @@ func dummyRegions(size int) [][]byte {
 		}
 		res = append(res, s)
 	}
-	sort.Slice(res, func(i, j int) bool { return bytes.Compare(res[i], res[j]) < 0 })
+	slices.SortFunc(res, bytes.Compare)
 	return res
 }
 

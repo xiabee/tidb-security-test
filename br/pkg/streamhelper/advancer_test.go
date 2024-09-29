@@ -15,11 +15,10 @@ import (
 	backup "github.com/pingcap/kvproto/pkg/brpb"
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/br/pkg/redact"
 	"github.com/pingcap/tidb/br/pkg/streamhelper"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/config"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
-	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -194,6 +193,29 @@ func TestOneStoreFailure(t *testing.T) {
 	require.Equal(t, cp, env.checkpoint)
 }
 
+func TestGCServiceSafePoint(t *testing.T) {
+	req := require.New(t)
+	c := createFakeCluster(t, 4, true)
+	ctx := context.Background()
+	c.splitAndScatter("01", "02", "022", "023", "033", "04", "043")
+	env := newTestEnv(c, t)
+
+	adv := streamhelper.NewCheckpointAdvancer(env)
+	adv.StartTaskListener(ctx)
+	cp := c.advanceCheckpoints()
+	c.flushAll()
+
+	req.NoError(adv.OnTick(ctx))
+	req.Equal(env.serviceGCSafePoint, cp-1)
+
+	env.unregisterTask()
+	req.Eventually(func() bool {
+		env.fakeCluster.mu.Lock()
+		defer env.fakeCluster.mu.Unlock()
+		return env.serviceGCSafePoint != 0 && env.serviceGCSafePointDeleted
+	}, 3*time.Second, 100*time.Millisecond)
+}
+
 func TestTaskRanges(t *testing.T) {
 	log.SetLevel(zapcore.DebugLevel)
 	c := createFakeCluster(t, 4, true)
@@ -245,27 +267,26 @@ func TestClearCache(t *testing.T) {
 	c.splitAndScatter("0012", "0034", "0048")
 
 	clearedCache := make(map[uint64]bool)
-	c.onGetClient = func(u uint64) error {
+	c.onClearCache = func(u uint64) error {
 		// make store u cache cleared
 		clearedCache[u] = true
 		return nil
 	}
 	failedStoreID := uint64(0)
-	hasFailed := false
+	hasFailed := atomic.NewBool(false)
 	for _, s := range c.stores {
 		s.clientMu.Lock()
+		sid := s.GetID()
 		s.onGetRegionCheckpoint = func(glftrr *logbackup.GetLastFlushTSOfRegionRequest) error {
-			// mark this store cache cleared
-			failedStoreID = s.GetID()
-			if hasFailed {
-				hasFailed = true
+			// mark one store failed is enough
+			if hasFailed.CompareAndSwap(false, true) {
+				// mark this store cache cleared
+				failedStoreID = sid
 				return errors.New("failed to get checkpoint")
 			}
 			return nil
 		}
 		s.clientMu.Unlock()
-		// mark one store failed is enough
-		break
 	}
 	env := newTestEnv(c, t)
 	adv := streamhelper.NewCheckpointAdvancer(env)
@@ -274,7 +295,7 @@ func TestClearCache(t *testing.T) {
 	shouldFinishInTime(t, time.Second, "ticking", func() {
 		err = adv.OnTick(ctx)
 	})
-	req.NoError(err)
+	req.Error(err)
 	req.True(failedStoreID > 0, "failed to mark the cluster: ")
 	req.Equal(clearedCache[failedStoreID], true)
 }
@@ -291,7 +312,6 @@ func TestBlocked(t *testing.T) {
 		s.onGetRegionCheckpoint = func(glftrr *logbackup.GetLastFlushTSOfRegionRequest) error {
 			// blocking the thread.
 			// this may happen when TiKV goes down or too busy.
-			//nolint:nilness
 			<-(chan struct{})(nil)
 			return nil
 		}
@@ -801,36 +821,4 @@ func TestSubscriptionPanic(t *testing.T) {
 	}
 	cancel()
 	wg.Wait()
-}
-
-func TestRedactBackend(t *testing.T) {
-	info := new(backup.StreamBackupTaskInfo)
-	info.Name = "test"
-	info.Storage = &backup.StorageBackend{
-		Backend: &backup.StorageBackend_S3{
-			S3: &backup.S3{
-				Endpoint:        "http://",
-				Bucket:          "test",
-				Prefix:          "test",
-				AccessKey:       "12abCD!@#[]{}?/\\",
-				SecretAccessKey: "12abCD!@#[]{}?/\\",
-			},
-		},
-	}
-
-	redacted := redact.TaskInfoRedacted{Info: info}
-	require.Equal(t, "storage:<s3:<endpoint:\"http://\" bucket:\"test\" prefix:\"test\" access_key:\"[REDACTED]\" secret_access_key:\"[REDACTED]\" > > name:\"test\" ", redacted.String())
-
-	info.Storage = &backup.StorageBackend{
-		Backend: &backup.StorageBackend_Gcs{
-			Gcs: &backup.GCS{
-				Endpoint:        "http://",
-				Bucket:          "test",
-				Prefix:          "test",
-				CredentialsBlob: "12abCD!@#[]{}?/\\",
-			},
-		},
-	}
-	redacted = redact.TaskInfoRedacted{Info: info}
-	require.Equal(t, "storage:<gcs:<endpoint:\"http://\" bucket:\"test\" prefix:\"test\" CredentialsBlob:\"[REDACTED]\" > > name:\"test\" ", redacted.String())
 }

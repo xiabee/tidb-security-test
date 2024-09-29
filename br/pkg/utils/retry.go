@@ -10,13 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cznic/mathutil"
 	"github.com/google/uuid"
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
-	tmysql "github.com/pingcap/tidb/errno"
-	"github.com/pingcap/tidb/parser/terror"
+	tmysql "github.com/pingcap/tidb/pkg/errno"
+	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
@@ -32,6 +31,7 @@ var retryableServerError = []string{
 	"body write aborted",
 	"error during dispatch",
 	"put object timeout",
+	"timeout after",
 	"internalerror",
 	"not read from or written to within the timeout period",
 	"<code>requesttimeout</code>",
@@ -246,6 +246,32 @@ func WithRetryV2[T any](
 	return *new(T), allErrors // nolint:wrapcheck
 }
 
+// WithRetryReturnLastErr is like WithRetry but the returned error is the last
+// error during retry rather than a multierr.
+func WithRetryReturnLastErr(
+	ctx context.Context,
+	retryableFunc RetryableFunc,
+	backoffer Backoffer,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var lastErr error
+	for backoffer.Attempt() > 0 {
+		lastErr = retryableFunc()
+		if lastErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(backoffer.NextBackoff(lastErr)):
+		}
+	}
+
+	return lastErr
+}
+
 // MessageIsRetryableStorageError checks whether the message returning from TiKV is retryable ExternalStorageError.
 func MessageIsRetryableStorageError(msg string) bool {
 	msgLower := strings.ToLower(msg)
@@ -330,7 +356,7 @@ func (r *RetryWithBackoffer) BackOff() error {
 // That intent will be fulfilled when calling `BackOff`.
 func (r *RetryWithBackoffer) RequestBackOff(ms int) {
 	r.mu.Lock()
-	r.nextBackoff = mathutil.Max(r.nextBackoff, ms)
+	r.nextBackoff = max(r.nextBackoff, ms)
 	r.mu.Unlock()
 }
 

@@ -4,12 +4,14 @@ package streamhelper
 
 import (
 	"context"
+	"math"
 	"time"
 
+	"github.com/pingcap/errors"
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/config"
-	"github.com/pingcap/tidb/util/engine"
+	"github.com/pingcap/tidb/pkg/config"
+	"github.com/pingcap/tidb/pkg/util/engine"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/txnkv/txnlock"
@@ -17,6 +19,11 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
+)
+
+const (
+	logBackupServiceID    = "log-backup-coordinator"
+	logBackupSafePointTTL = 24 * time.Hour
 )
 
 // Env is the interface required by the advancer.
@@ -37,6 +44,27 @@ type PDRegionScanner struct {
 	pd.Client
 }
 
+// Updates the service GC safe point for the cluster.
+// Returns the minimal service GC safe point across all services.
+// If the arguments is `0`, this would remove the service safe point.
+func (c PDRegionScanner) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
+	minimalSafePoint, err := c.UpdateServiceGCSafePoint(
+		ctx, logBackupServiceID, int64(logBackupSafePointTTL.Seconds()), at)
+	if err != nil {
+		return 0, errors.Annotate(err, "failed to block gc until")
+	}
+	if minimalSafePoint > at {
+		return 0, errors.Errorf("minimal safe point %d is greater than the target %d", minimalSafePoint, at)
+	}
+	return at, nil
+}
+
+func (c PDRegionScanner) UnblockGC(ctx context.Context) error {
+	// set ttl to 0, means remove the safe point.
+	_, err := c.UpdateServiceGCSafePoint(ctx, logBackupServiceID, 0, math.MaxUint64)
+	return err
+}
+
 // TODO: It should be able to synchoronize the current TS with the PD.
 func (c PDRegionScanner) FetchCurrentTS(ctx context.Context) (uint64, error) {
 	return oracle.ComposeTS(time.Now().UnixMilli(), 0), nil
@@ -44,7 +72,8 @@ func (c PDRegionScanner) FetchCurrentTS(ctx context.Context) (uint64, error) {
 
 // RegionScan gets a list of regions, starts from the region that contains key.
 // Limit limits the maximum number of regions returned.
-func (c PDRegionScanner) RegionScan(ctx context.Context, key []byte, endKey []byte, limit int) ([]RegionWithLeader, error) {
+func (c PDRegionScanner) RegionScan(ctx context.Context, key, endKey []byte, limit int) ([]RegionWithLeader, error) {
+	//nolint:staticcheck
 	rs, err := c.Client.ScanRegions(ctx, key, endKey, limit)
 	if err != nil {
 		return nil, err

@@ -29,6 +29,7 @@ var testDataMap = make(testdata.BookKeeper)
 func TestMain(m *testing.M) {
 	testsetup.SetupForCommonTest()
 	flag.Parse()
+	testDataMap.LoadTestSuiteData("testdata", "outer2inner")
 	testDataMap.LoadTestSuiteData("testdata", "derive_topn_from_window")
 	testDataMap.LoadTestSuiteData("testdata", "join_reorder_suite")
 	testDataMap.LoadTestSuiteData("testdata", "predicate_pushdown_suite")
@@ -48,6 +49,10 @@ func TestMain(m *testing.M) {
 	}
 
 	goleak.VerifyTestMain(testmain.WrapTestingM(m, callback), opts...)
+}
+
+func GetOuter2InnerSuiteData() testdata.TestData {
+	return testDataMap["outer2inner"]
 }
 
 func GetDerivedTopNSuiteData() testdata.TestData {

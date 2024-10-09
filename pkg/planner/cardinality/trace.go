@@ -96,7 +96,7 @@ func exprToString(ctx expression.EvalContext, e expression.Expression) (string, 
 		buffer.WriteString(")")
 		return buffer.String(), nil
 	case *expression.Column:
-		return expr.StringWithCtx(perrors.RedactLogDisable), nil
+		return expr.StringWithCtx(ctx, perrors.RedactLogDisable), nil
 	case *expression.CorrelatedColumn:
 		return "", errors.New("tracing for correlated columns not supported now")
 	case *expression.Constant:

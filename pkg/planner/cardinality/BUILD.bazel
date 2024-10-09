@@ -41,7 +41,6 @@ go_library(
         "//pkg/util/tracing",
         "@com_github_pingcap_errors//:errors",
         "@com_github_pingcap_failpoint//:failpoint",
-        "@org_golang_x_exp//maps",
         "@org_uber_go_zap//:zap",
     ],
 )
@@ -71,6 +70,8 @@ go_test(
         "//pkg/parser/model",
         "//pkg/parser/mysql",
         "//pkg/planner/core",
+        "//pkg/planner/core/base",
+        "//pkg/planner/core/operator/logicalop",
         "//pkg/session",
         "//pkg/sessionctx",
         "//pkg/sessionctx/stmtctx",

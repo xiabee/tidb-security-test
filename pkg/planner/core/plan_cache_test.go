@@ -1760,7 +1760,7 @@ func TestFixControl33031(t *testing.T) {
 	tk.MustExec(`set @a = 1`)
 	tk.MustQuery(`execute stmt using @a`).Check(testkit.Rows("1 1"))
 	require.False(t, tk.Session().GetSessionVars().FoundInPlanCache)
-	tk.MustQuery(`show warnings`).Check(testkit.Rows("Warning 1105 skip plan-cache: plan rebuild failed, Fix33031 fix-control set and partitioned table in cached Point Get plan", "Warning 1105 skip plan-cache: plan rebuild failed, Fix33031 fix-control set and partitioned table in cached Point Get plan"))
+	tk.MustQuery(`show warnings`).Check(testkit.Rows("Warning 1105 skip plan-cache: plan rebuild failed, Fix33031 fix-control set and partitioned table in cached Point Get plan"))
 	tk.MustExec(`set @@tidb_opt_fix_control = "33031:OFF"`)
 	tk.MustExec(`set @a = 2`)
 	tk.MustQuery(`execute stmt using @a`).Check(testkit.Rows("2 2"))
@@ -1850,6 +1850,89 @@ partition by hash (a) partitions 3`)
 	tk.MustQuery(`show warnings`).Check(testkit.Rows("Warning 1105 skip prepared plan-cache: query accesses partitioned tables is un-cacheable if tidb_partition_pruning_mode = 'static'"))
 }
 
+func TestIndexRange(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`use test`)
+
+	tk.MustExec(`CREATE TABLE t0 (id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY)`)
+	tk.MustExec(`CREATE TABLE t1(c0 FLOAT ZEROFILL, PRIMARY KEY(c0));`)
+	tk.MustExec(`INSERT INTO t0 (id) VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11);`)
+	tk.MustExec("INSERT INTO t1(c0) VALUES (1);")
+	tk.MustExec(`set tidb_enable_non_prepared_plan_cache=1;`)
+	tk.MustQuery(`SELECT t0.* FROM t0 WHERE (id = 1 or id = 9223372036854775808);`).Check(testkit.Rows("1"))
+	tk.MustQuery("SELECT t1.c0 FROM t1 WHERE t1.c0!=BIN(-1);").Check(testkit.Rows("1"))
+}
+
+func TestPlanCacheDirtyTables(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec(`use test`)
+
+	for _, t1Dirty := range []bool{true, false} {
+		for _, t2Dirty := range []bool{true, false} {
+			tk.MustExec(`create table t1 (a int);`)
+			tk.MustExec(`create table t2 (a int);`)
+			tk.MustExec(`begin`)
+			tk.MustExec(`prepare st from 'select 1 from t1, t2'`)
+			if t1Dirty {
+				tk.MustExec(`insert into t1 values (1)`)
+			}
+			if t2Dirty {
+				tk.MustExec(`insert into t2 values (1)`)
+			}
+			tk.MustExec(`execute st`) // generate a cached plan with t1Dirty & t2Dirty
+			tk.MustExec(`commit`)
+
+			// test cases
+			for _, testT1Dirty := range []bool{true, false} {
+				for _, testT2Dirty := range []bool{true, false} {
+					tk.MustExec(`begin`)
+					if testT1Dirty {
+						tk.MustExec(`insert into t1 values (1)`)
+					}
+					if testT2Dirty {
+						tk.MustExec(`insert into t2 values (1)`)
+					}
+					tk.MustExec(`execute st`)
+
+					if testT1Dirty == t1Dirty && testT2Dirty == t2Dirty {
+						tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("1"))
+					} else {
+						tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0"))
+					}
+
+					tk.MustExec(`commit`)
+				}
+			}
+			tk.MustExec(`drop table t1, t2`)
+		}
+	}
+}
+
+func TestInstancePlanCacheAcrossSession(t *testing.T) {
+	ctx := context.WithValue(context.Background(), plannercore.PlanCacheKeyEnableInstancePlanCache{}, true)
+	store := testkit.CreateMockStore(t)
+	tk1 := testkit.NewTestKit(t, store)
+	tk1.MustExec(`use test`)
+	tk1.MustExec(`create table t (a int)`)
+	tk1.MustExec(`insert into t values (1), (2), (3), (4), (5)`)
+	tk1.MustExecWithContext(ctx, `prepare st from 'select a from t where a < ?'`)
+	tk1.MustExecWithContext(ctx, `set @a=2`)
+	tk1.MustQueryWithContext(ctx, `execute st using @a`).Sort().Check(testkit.Rows(`1`))
+	tk1.MustExecWithContext(ctx, `set @a=3`)
+	tk1.MustQueryWithContext(ctx, `execute st using @a`).Sort().Check(testkit.Rows(`1`, `2`))
+	tk1.MustQueryWithContext(ctx, `select @@last_plan_from_cache`).Check(testkit.Rows("1"))
+
+	// session2 can share session1's cached plan
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExecWithContext(ctx, `use test`)
+	tk2.MustExecWithContext(ctx, `prepare st from 'select a from t where a < ?'`)
+	tk2.MustExecWithContext(ctx, `set @a=4`)
+	tk2.MustQueryWithContext(ctx, `execute st using @a`).Sort().Check(testkit.Rows(`1`, `2`, `3`))
+	tk2.MustQueryWithContext(ctx, `select @@last_plan_from_cache`).Check(testkit.Rows("1"))
+}
+
 func TestIssue54652(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -1868,21 +1951,5 @@ func TestIssue54652(t *testing.T) {
 	tk.MustExec(`begin`)
 	tk.MustExec(`execute st using @pk`)
 	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("0")) // can't reuse since it's in txn now.
-	tk.MustExec(`execute st using @pk`)
-	tk.MustQuery(`select @@last_plan_from_cache`).Check(testkit.Rows("1")) // can reuse since it's in txn now.
 	tk.MustExec(`commit`)
-}
-
-func TestIndexRange(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec(`use test`)
-
-	tk.MustExec(`CREATE TABLE t0 (id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY)`)
-	tk.MustExec(`CREATE TABLE t1(c0 FLOAT ZEROFILL, PRIMARY KEY(c0));`)
-	tk.MustExec(`INSERT INTO t0 (id) VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11);`)
-	tk.MustExec("INSERT INTO t1(c0) VALUES (1);")
-	tk.MustExec(`set tidb_enable_non_prepared_plan_cache=1;`)
-	tk.MustQuery(`SELECT t0.* FROM t0 WHERE (id = 1 or id = 9223372036854775808);`).Check(testkit.Rows("1"))
-	tk.MustQuery("SELECT t1.c0 FROM t1 WHERE t1.c0!=BIN(-1);").Check(testkit.Rows("1"))
 }

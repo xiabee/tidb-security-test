@@ -69,6 +69,7 @@ import (
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/session/txninfo"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	statsutil "github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/fastrand"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -120,7 +121,7 @@ type Server struct {
 	driver            IDriver
 	listener          net.Listener
 	socket            net.Listener
-	concurrentLimiter *TokenLimiter
+	concurrentLimiter *util.TokenLimiter
 
 	rwlock  sync.RWMutex
 	clients map[uint64]*clientConn
@@ -202,7 +203,7 @@ func (s *Server) ConnectionCount() int {
 	return cnt
 }
 
-func (s *Server) getToken() *Token {
+func (s *Server) getToken() *util.Token {
 	start := time.Now()
 	tok := s.concurrentLimiter.Get()
 	metrics.TokenGauge.Inc()
@@ -211,7 +212,7 @@ func (s *Server) getToken() *Token {
 	return tok
 }
 
-func (s *Server) releaseToken(token *Token) {
+func (s *Server) releaseToken(token *util.Token) {
 	s.concurrentLimiter.Put(token)
 	metrics.TokenGauge.Dec()
 }
@@ -244,7 +245,7 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 	s := &Server{
 		cfg:               cfg,
 		driver:            driver,
-		concurrentLimiter: NewTokenLimiter(cfg.TokenLimit),
+		concurrentLimiter: util.NewTokenLimiter(cfg.TokenLimit),
 		clients:           make(map[uint64]*clientConn),
 		internalSessions:  make(map[any]struct{}, 100),
 		health:            uatomic.NewBool(false),
@@ -892,8 +893,9 @@ func (s *Server) GetConAttrs(user *auth.UserIdentity) map[uint64]map[string]stri
 }
 
 // Kill implements the SessionManager interface.
-func (s *Server) Kill(connectionID uint64, query bool, maxExecutionTime bool) {
-	logutil.BgLogger().Info("kill", zap.Uint64("conn", connectionID), zap.Bool("query", query))
+func (s *Server) Kill(connectionID uint64, query bool, maxExecutionTime bool, runaway bool) {
+	logutil.BgLogger().Info("kill", zap.Uint64("conn", connectionID),
+		zap.Bool("query", query), zap.Bool("maxExecutionTime", maxExecutionTime), zap.Bool("runawayExceed", runaway))
 	metrics.ServerEventCounter.WithLabelValues(metrics.EventKill).Inc()
 
 	s.rwlock.RLock()
@@ -908,8 +910,15 @@ func (s *Server) Kill(connectionID uint64, query bool, maxExecutionTime bool) {
 		// Mark the client connection status as WaitShutdown, when clientConn.Run detect
 		// this, it will end the dispatch loop and exit.
 		conn.setStatus(connStatusWaitShutdown)
+		if conn.bufReadConn != nil {
+			// When attempting to 'kill connection' and TiDB is stuck in the network stack while writing packets,
+			// we can quickly exit the network stack and terminate the SQL execution by setting WriteDeadline.
+			if err := conn.bufReadConn.SetWriteDeadline(time.Now()); err != nil {
+				logutil.BgLogger().Warn("error setting write deadline for kill.", zap.Error(err))
+			}
+		}
 	}
-	killQuery(conn, maxExecutionTime)
+	killQuery(conn, maxExecutionTime, runaway)
 }
 
 // UpdateTLSConfig implements the SessionManager interface.
@@ -922,9 +931,11 @@ func (s *Server) GetTLSConfig() *tls.Config {
 	return (*tls.Config)(atomic.LoadPointer(&s.tlsConfig))
 }
 
-func killQuery(conn *clientConn, maxExecutionTime bool) {
+func killQuery(conn *clientConn, maxExecutionTime, runaway bool) {
 	sessVars := conn.ctx.GetSessionVars()
-	if maxExecutionTime {
+	if runaway {
+		sessVars.SQLKiller.SendKillSignal(sqlkiller.RunawayQueryExceeded)
+	} else if maxExecutionTime {
 		sessVars.SQLKiller.SendKillSignal(sqlkiller.MaxExecTimeExceeded)
 	} else {
 		sessVars.SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
@@ -941,6 +952,7 @@ func killQuery(conn *clientConn, maxExecutionTime bool) {
 			logutil.BgLogger().Warn("error setting read deadline for kill.", zap.Error(err))
 		}
 	}
+	sessVars.SQLKiller.FinishResultSet()
 }
 
 // KillSysProcesses kill sys processes such as auto analyze.
@@ -966,7 +978,7 @@ func (s *Server) KillAllConnections() {
 		if err := conn.closeWithoutLock(); err != nil {
 			terror.Log(err)
 		}
-		killQuery(conn, false)
+		killQuery(conn, false, false)
 	}
 
 	s.KillSysProcesses()
@@ -1024,11 +1036,6 @@ func (s *Server) ServerID() uint64 {
 	return s.dom.ServerID()
 }
 
-// GetAutoAnalyzeProcID implements SessionManager interface.
-func (s *Server) GetAutoAnalyzeProcID() uint64 {
-	return s.dom.GetAutoAnalyzeProcID()
-}
-
 // StoreInternalSession implements SessionManager interface.
 // @param addr	The address of a session.session struct variable
 func (s *Server) StoreInternalSession(se any) {
@@ -1050,10 +1057,9 @@ func (s *Server) GetInternalSessionStartTSList() []uint64 {
 	s.sessionMapMutex.Lock()
 	defer s.sessionMapMutex.Unlock()
 	tsList := make([]uint64, 0, len(s.internalSessions))
-	analyzeProcID := s.GetAutoAnalyzeProcID()
 	for se := range s.internalSessions {
 		if ts, processInfoID := session.GetStartTSFromSession(se); ts != 0 {
-			if processInfoID == analyzeProcID {
+			if statsutil.GlobalAutoAnalyzeProcessList.Contains(processInfoID) {
 				continue
 			}
 			tsList = append(tsList, ts)
@@ -1126,6 +1132,6 @@ func (s *Server) KillNonFlashbackClusterConn() {
 	}
 	s.rwlock.RUnlock()
 	for _, id := range connIDs {
-		s.Kill(id, false, false)
+		s.Kill(id, false, false, false)
 	}
 }

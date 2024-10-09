@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
+	"github.com/pingcap/tidb/pkg/executor/join"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -181,12 +182,12 @@ type cteProducer struct {
 	iterInTbl  cteutil.Storage
 	iterOutTbl cteutil.Storage
 
-	hashTbl baseHashTable
+	hashTbl join.BaseHashTable
 
 	// UNION ALL or UNION DISTINCT.
 	isDistinct bool
 	curIter    int
-	hCtx       *hashContext
+	hCtx       *join.HashContext
 	sel        []int
 
 	// Limit related info.
@@ -239,14 +240,14 @@ func (p *cteProducer) openProducer(ctx context.Context, cteExec *CTEExec) (err e
 	}
 
 	if p.isDistinct {
-		p.hashTbl = newConcurrentMapHashTable()
-		p.hCtx = &hashContext{
-			allTypes: cteExec.RetFieldTypes(),
+		p.hashTbl = join.NewConcurrentMapHashTable()
+		p.hCtx = &join.HashContext{
+			AllTypes: cteExec.RetFieldTypes(),
 		}
 		// We use all columns to compute hash.
-		p.hCtx.keyColIdx = make([]int, len(p.hCtx.allTypes))
-		for i := range p.hCtx.keyColIdx {
-			p.hCtx.keyColIdx[i] = i
+		p.hCtx.KeyColIdx = make([]int, len(p.hCtx.AllTypes))
+		for i := range p.hCtx.KeyColIdx {
+			p.hCtx.KeyColIdx[i] = i
 		}
 	}
 	return nil
@@ -554,7 +555,7 @@ func (p *cteProducer) resetTracker() {
 
 func (p *cteProducer) reopenTbls() (err error) {
 	if p.isDistinct {
-		p.hashTbl = newConcurrentMapHashTable()
+		p.hashTbl = join.NewConcurrentMapHashTable()
 	}
 	// Normally we need to setup tracker after calling Reopen(),
 	// But reopen resTbl means we need to call produce() again, it will setup tracker.
@@ -593,7 +594,7 @@ func setupCTEStorageTracker(tbl cteutil.Storage, ctx sessionctx.Context, parentM
 
 func (p *cteProducer) tryDedupAndAdd(chk *chunk.Chunk,
 	storage cteutil.Storage,
-	hashTbl baseHashTable) (res *chunk.Chunk, err error) {
+	hashTbl join.BaseHashTable) (res *chunk.Chunk, err error) {
 	if p.isDistinct {
 		if chk, err = p.deduplicate(chk, storage, hashTbl); err != nil {
 			return nil, err
@@ -606,10 +607,10 @@ func (p *cteProducer) tryDedupAndAdd(chk *chunk.Chunk,
 // Use the returned sel to choose the computed hash values.
 func (p *cteProducer) computeChunkHash(chk *chunk.Chunk) (sel []int, err error) {
 	numRows := chk.NumRows()
-	p.hCtx.initHash(numRows)
+	p.hCtx.InitHash(numRows)
 	// Continue to reset to make sure all hasher is new.
-	for i := numRows; i < len(p.hCtx.hashVals); i++ {
-		p.hCtx.hashVals[i].Reset()
+	for i := numRows; i < len(p.hCtx.HashVals); i++ {
+		p.hCtx.HashVals[i].Reset()
 	}
 	sel = chk.Sel()
 	var hashBitMap []bool
@@ -635,8 +636,8 @@ func (p *cteProducer) computeChunkHash(chk *chunk.Chunk) (sel []int, err error) 
 	}
 
 	for i := 0; i < chk.NumCols(); i++ {
-		if err = codec.HashChunkSelected(p.ctx.GetSessionVars().StmtCtx.TypeCtx(), p.hCtx.hashVals,
-			chk, p.hCtx.allTypes[i], i, p.hCtx.buf, p.hCtx.hasNull,
+		if err = codec.HashChunkSelected(p.ctx.GetSessionVars().StmtCtx.TypeCtx(), p.hCtx.HashVals,
+			chk, p.hCtx.AllTypes[i], i, p.hCtx.Buf, p.hCtx.HasNull,
 			hashBitMap, false); err != nil {
 			return nil, err
 		}
@@ -648,14 +649,14 @@ func (p *cteProducer) computeChunkHash(chk *chunk.Chunk) (sel []int, err error) 
 // Duplicated rows are only marked to be removed by sel in Chunk, instead of really deleted.
 func (p *cteProducer) deduplicate(chk *chunk.Chunk,
 	storage cteutil.Storage,
-	hashTbl baseHashTable) (chkNoDup *chunk.Chunk, err error) {
+	hashTbl join.BaseHashTable) (chkNoDup *chunk.Chunk, err error) {
 	numRows := chk.NumRows()
 	if numRows == 0 {
 		return chk, nil
 	}
 
 	// 1. Compute hash values for chunk.
-	chkHashTbl := newConcurrentMapHashTable()
+	chkHashTbl := join.NewConcurrentMapHashTable()
 	selOri, err := p.computeChunkHash(chk)
 	if err != nil {
 		return nil, err
@@ -665,7 +666,7 @@ func (p *cteProducer) deduplicate(chk *chunk.Chunk,
 	// This sel is for filtering rows duplicated in cur chk.
 	selChk := make([]int, 0, numRows)
 	for i := 0; i < numRows; i++ {
-		key := p.hCtx.hashVals[selOri[i]].Sum64()
+		key := p.hCtx.HashVals[selOri[i]].Sum64()
 		row := chk.GetRow(i)
 
 		hasDup, err := p.checkHasDup(key, row, chk, storage, chkHashTbl)
@@ -688,7 +689,7 @@ func (p *cteProducer) deduplicate(chk *chunk.Chunk,
 	// This sel is for filtering rows duplicated in cteutil.Storage.
 	selStorage := make([]int, 0, len(selChk))
 	for i := 0; i < len(selChk); i++ {
-		key := p.hCtx.hashVals[selChk[i]].Sum64()
+		key := p.hCtx.HashVals[selChk[i]].Sum64()
 		row := chk.GetRow(i)
 
 		hasDup, err := p.checkHasDup(key, row, nil, storage, hashTbl)
@@ -716,11 +717,11 @@ func (p *cteProducer) checkHasDup(probeKey uint64,
 	row chunk.Row,
 	curChk *chunk.Chunk,
 	storage cteutil.Storage,
-	hashTbl baseHashTable) (hasDup bool, err error) {
+	hashTbl join.BaseHashTable) (hasDup bool, err error) {
 	entry := hashTbl.Get(probeKey)
 
-	for ; entry != nil; entry = entry.next {
-		ptr := entry.ptr
+	for ; entry != nil; entry = entry.Next {
+		ptr := entry.Ptr
 		var matchedRow chunk.Row
 		if curChk != nil {
 			matchedRow = curChk.GetRow(int(ptr.RowIdx))
@@ -731,8 +732,8 @@ func (p *cteProducer) checkHasDup(probeKey uint64,
 			return false, err
 		}
 		isEqual, err := codec.EqualChunkRow(p.ctx.GetSessionVars().StmtCtx.TypeCtx(),
-			row, p.hCtx.allTypes, p.hCtx.keyColIdx,
-			matchedRow, p.hCtx.allTypes, p.hCtx.keyColIdx)
+			row, p.hCtx.AllTypes, p.hCtx.KeyColIdx,
+			matchedRow, p.hCtx.AllTypes, p.hCtx.KeyColIdx)
 		if err != nil {
 			return false, err
 		}

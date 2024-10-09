@@ -24,9 +24,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/lightning/backend"
 	"github.com/pingcap/tidb/pkg/lightning/backend/local"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	pd "github.com/tikv/pd/client"
@@ -49,7 +47,7 @@ func NewMockBackendCtxMgr(sessCtxProvider func() sessionctx.Context) *MockBacken
 }
 
 // CheckMoreTasksAvailable implements BackendCtxMgr.CheckMoreTaskAvailable interface.
-func (m *MockBackendCtxMgr) CheckMoreTasksAvailable() (bool, error) {
+func (m *MockBackendCtxMgr) CheckMoreTasksAvailable(context.Context) (bool, error) {
 	return len(m.runningJobs) == 0, nil
 }
 
@@ -107,18 +105,14 @@ type MockBackendCtx struct {
 }
 
 // Register implements BackendCtx.Register interface.
-func (m *MockBackendCtx) Register(indexIDs []int64, _ []bool, _ *model.TableInfo) ([]Engine, error) {
-	logutil.DDLIngestLogger().Info("mock backend ctx register", zap.Int64("jobID", m.jobID), zap.Int64s("indexIDs", indexIDs))
-	ret := make([]Engine, 0, len(indexIDs))
-	for range indexIDs {
-		ret = append(ret, &MockEngineInfo{sessCtx: m.sessCtx, mu: &m.mu})
-	}
-	return ret, nil
+func (m *MockBackendCtx) Register(jobID, indexID int64, _, _ string) (Engine, error) {
+	logutil.DDLIngestLogger().Info("mock backend ctx register", zap.Int64("jobID", jobID), zap.Int64("indexID", indexID))
+	return &MockEngineInfo{sessCtx: m.sessCtx, mu: &m.mu}, nil
 }
 
-// UnregisterEngines implements BackendCtx.UnregisterEngines interface.
-func (*MockBackendCtx) UnregisterEngines() {
-	logutil.DDLIngestLogger().Info("mock backend ctx unregister")
+// Unregister implements BackendCtx.Unregister interface.
+func (*MockBackendCtx) Unregister(jobID, indexID int64) {
+	logutil.DDLIngestLogger().Info("mock backend ctx unregister", zap.Int64("jobID", jobID), zap.Int64("indexID", indexID))
 }
 
 // CollectRemoteDuplicateRows implements BackendCtx.CollectRemoteDuplicateRows interface.
@@ -127,8 +121,18 @@ func (*MockBackendCtx) CollectRemoteDuplicateRows(indexID int64, _ table.Table) 
 	return nil
 }
 
+// FinishImport implements BackendCtx.FinishImport interface.
+func (*MockBackendCtx) FinishImport(indexID int64, _ bool, _ table.Table) error {
+	logutil.DDLIngestLogger().Info("mock backend ctx finish import", zap.Int64("indexID", indexID))
+	return nil
+}
+
+// ResetWorkers implements BackendCtx.ResetWorkers interface.
+func (*MockBackendCtx) ResetWorkers(_ int64) {
+}
+
 // Flush implements BackendCtx.Flush interface.
-func (*MockBackendCtx) Flush(mode FlushMode) (flushed, imported bool, err error) {
+func (*MockBackendCtx) Flush(_ int64, _ FlushMode) (flushed bool, imported bool, err error) {
 	return false, false, nil
 }
 
@@ -182,6 +186,11 @@ func (*MockEngineInfo) Flush() error {
 	return nil
 }
 
+// ImportAndClean implements Engine.ImportAndClean interface.
+func (*MockEngineInfo) ImportAndClean() error {
+	return nil
+}
+
 // Clean implements Engine.Clean interface.
 func (*MockEngineInfo) Clean() {
 }
@@ -192,7 +201,7 @@ func (m *MockEngineInfo) SetHook(onWrite func(key, val []byte)) {
 }
 
 // CreateWriter implements Engine.CreateWriter interface.
-func (m *MockEngineInfo) CreateWriter(id int, _ *backend.LocalWriterConfig) (Writer, error) {
+func (m *MockEngineInfo) CreateWriter(id int) (Writer, error) {
 	logutil.DDLIngestLogger().Info("mock engine info create writer", zap.Int("id", id))
 	return &MockWriter{sessCtx: m.sessCtx, mu: m.mu, onWrite: m.onWrite}, nil
 }
@@ -232,6 +241,11 @@ func (m *MockWriter) WriteRow(_ context.Context, key, idxVal []byte, _ kv.Handle
 // LockForWrite implements Writer.LockForWrite interface.
 func (*MockWriter) LockForWrite() func() {
 	return func() {}
+}
+
+// Close implements Writer.Close interface.
+func (*MockWriter) Close(_ context.Context) error {
+	return nil
 }
 
 // MockExecAfterWriteRow is only used for test.

@@ -645,9 +645,10 @@ func (tr *TableImporter) preprocessEngine(
 	hasAutoIncrementAutoID := common.TableHasAutoRowID(tr.tableInfo.Core) &&
 		tr.tableInfo.Core.AutoRandomBits == 0 && tr.tableInfo.Core.ShardRowIDBits == 0 &&
 		tr.tableInfo.Core.Partition == nil
-	dataWriterCfg := &backend.LocalWriterConfig{}
-	dataWriterCfg.Local.IsKVSorted = hasAutoIncrementAutoID
-	dataWriterCfg.TiDB.TableName = tr.tableName
+	dataWriterCfg := &backend.LocalWriterConfig{
+		IsKVSorted: hasAutoIncrementAutoID,
+		TableName:  tr.tableName,
+	}
 
 	logTask := tr.logger.With(zap.Int32("engineNumber", engineID)).Begin(zap.InfoLevel, "encode kv data and write")
 	dataEngineCfg := &backend.EngineConfig{
@@ -757,9 +758,7 @@ ChunkLoop:
 			break
 		}
 
-		writerCfg := &backend.LocalWriterConfig{}
-		writerCfg.TiDB.TableName = tr.tableName
-		indexWriter, err := indexEngine.LocalWriter(ctx, writerCfg)
+		indexWriter, err := indexEngine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: tr.tableName})
 		if err != nil {
 			_, _ = dataWriter.Close(ctx)
 			setError(err)
@@ -1189,9 +1188,7 @@ func getChunkCompressedSizeForParquet(
 	chunk *checkpoints.ChunkCheckpoint,
 	store storage.ExternalStorage,
 ) (int64, error) {
-	reader, err := mydump.OpenReader(ctx, &chunk.FileMeta, store, storage.DecompressConfig{
-		ZStdDecodeConcurrency: 1,
-	})
+	reader, err := mydump.OpenReader(ctx, &chunk.FileMeta, store, storage.DecompressConfig{})
 	if err != nil {
 		return 0, errors.Trace(err)
 	}

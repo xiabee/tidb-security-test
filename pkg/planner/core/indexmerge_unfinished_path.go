@@ -360,7 +360,7 @@ func buildIntoAccessPath(
 					accessFilters,
 					idxCols,
 					unfinishedPath.index,
-					ds.TableStats.HistColl,
+					ds.tableStats.HistColl,
 				)
 				if err != nil || !ok || (isIntersection && len(paths) > 1) {
 					continue
@@ -417,6 +417,6 @@ func buildIntoAccessPath(
 	}
 
 	// 3. Build the final access path
-	ret := ds.buildPartialPathUp4MVIndex(partialPaths, false, tableFilter, ds.TableStats.HistColl)
+	ret := ds.buildPartialPathUp4MVIndex(partialPaths, false, tableFilter, ds.tableStats.HistColl)
 	return ret
 }

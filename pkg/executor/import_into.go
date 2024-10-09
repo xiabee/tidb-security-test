@@ -45,6 +45,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+var (
+	// TestCancelFunc for test.
+	TestCancelFunc context.CancelFunc
+)
+
 const unknownImportedRowCount = -1
 
 // ImportIntoExec represents a IMPORT INTO executor.
@@ -119,7 +124,12 @@ func (e *ImportIntoExec) Next(ctx context.Context, req *chunk.Chunk) (err error)
 		return err
 	}
 
-	failpoint.InjectCall("cancellableCtx", &ctx)
+	failpoint.Inject("cancellableCtx", func() {
+		// KILL is not implemented in testkit, so we use a fail-point to simulate it.
+		newCtx, cancel := context.WithCancel(ctx)
+		ctx = newCtx
+		TestCancelFunc = cancel
+	})
 
 	jobID, task, err := e.submitTask(ctx)
 	if err != nil {

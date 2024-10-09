@@ -24,10 +24,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/kv"
+	planctx "github.com/pingcap/tidb/pkg/planner/context"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	rangerctx "github.com/pingcap/tidb/pkg/util/ranger/context"
 )
 
 // MutableRanges represents a range may change after it is created.
@@ -96,8 +96,8 @@ func (ran *Range) Clone() *Range {
 }
 
 // IsPoint returns if the range is a point.
-func (ran *Range) IsPoint(sctx *rangerctx.RangerContext) bool {
-	return ran.isPoint(sctx.TypeCtx, sctx.RegardNULLAsPoint)
+func (ran *Range) IsPoint(sctx planctx.PlanContext) bool {
+	return ran.isPoint(sctx.GetSessionVars().StmtCtx.TypeCtx(), sctx.GetSessionVars().RegardNULLAsPoint)
 }
 
 func (ran *Range) isPoint(tc types.Context, regardNullAsPoint bool) bool {
@@ -173,15 +173,38 @@ func HasFullRange(ranges []*Range, unsignedIntHandle bool) bool {
 	return false
 }
 
+func dealWithRedact(input string, redact string) string {
+	if input == "-inf" || input == "+inf" {
+		return input
+	}
+	if redact == errors.RedactLogDisable {
+		return input
+	} else if redact == errors.RedactLogEnable {
+		return "?"
+	}
+	return fmt.Sprintf("‹%s›", input)
+}
+
 // String implements the Stringer interface.
+// don't use it in the product.
 func (ran *Range) String() string {
+	return ran.string(errors.RedactLogDisable)
+}
+
+// Redact is to print the range with redacting sensitive data.
+func (ran *Range) Redact(redact string) string {
+	return ran.string(redact)
+}
+
+// String implements the Stringer interface.
+func (ran *Range) string(redact string) string {
 	lowStrs := make([]string, 0, len(ran.LowVal))
 	for _, d := range ran.LowVal {
-		lowStrs = append(lowStrs, formatDatum(d, true))
+		lowStrs = append(lowStrs, dealWithRedact(formatDatum(d, true), redact))
 	}
 	highStrs := make([]string, 0, len(ran.LowVal))
 	for _, d := range ran.HighVal {
-		highStrs = append(highStrs, formatDatum(d, false))
+		highStrs = append(highStrs, dealWithRedact(formatDatum(d, false), redact))
 	}
 	l, r := "[", "]"
 	if ran.LowExclude {
@@ -280,83 +303,4 @@ func formatDatum(d types.Datum, isLeftSide bool) string {
 		return fmt.Sprintf("\"%v\"", d.GetValue())
 	}
 	return fmt.Sprintf("%v", d.GetValue())
-}
-
-// Check if a list of Datum is a prefix of another list of Datum. This is useful for checking if
-// lower/upper bound of a range is a subset of another.
-func prefix(tc types.Context, superValue []types.Datum, supValue []types.Datum, length int, collators []collate.Collator) bool {
-	for i := 0; i < length; i++ {
-		cmp, err := superValue[i].Compare(tc, &supValue[i], collators[i])
-		if (err != nil) || (cmp != 0) {
-			return false
-		}
-	}
-	return true
-}
-
-// Subset checks if a list of ranges(rs) is a subset of another list of ranges(superRanges).
-// This is true if every range in the first list is a subset of any
-// range in the second list. Also, we check if all elements of superRanges are covered.
-func (rs Ranges) Subset(tc types.Context, superRanges Ranges) bool {
-	var subset bool
-	superRangesCovered := make([]bool, len(superRanges))
-	if len(rs) == 0 {
-		return len(superRanges) == 0
-	} else if len(superRanges) == 0 {
-		// unrestricted superRanges and restricted rs
-		return true
-	}
-
-	for _, subRange := range rs {
-		subset = false
-		for i, superRange := range superRanges {
-			if subRange.Subset(tc, superRange) {
-				subset = true
-				superRangesCovered[i] = true
-				break
-			}
-		}
-		if !subset {
-			return false
-		}
-	}
-	for i := 0; i < len(superRangesCovered); i++ {
-		if !superRangesCovered[i] {
-			return false
-		}
-	}
-
-	return true
-}
-
-// Subset for Range type, check if range(ran)  is a subset of another range(superRange).
-// This is done by:
-//   - Both ran and superRange have the same collators. This is not needed for the current code path.
-//     But, it is used here for future use of the function.
-//   - Checking if the lower/upper bound of superRange covers the corresponding lower/upper bound of ran.
-//     Thus include checking open/closed inetrvals.
-func (ran *Range) Subset(tc types.Context, superRange *Range) bool {
-	if len(ran.LowVal) < len(superRange.LowVal) {
-		return false
-	}
-
-	// Make sure both ran and superRange have the same collations.
-	// The current code path for this function always will have same collation
-	// for ran and superRange. It is added here for future
-	// use of the function.
-	for i := 0; i < len(superRange.LowVal); i++ {
-		if ran.Collators[i] != superRange.Collators[i] {
-			return false
-		}
-	}
-
-	// Either superRange is closed or both ranges have the same open/close setting.
-	lowExcludeOK := !superRange.LowExclude || ran.LowExclude == superRange.LowExclude
-	highExcludeOK := !superRange.HighExclude || ran.HighExclude == superRange.HighExclude
-	if !lowExcludeOK || !highExcludeOK {
-		return false
-	}
-
-	return prefix(tc, superRange.LowVal, ran.LowVal, len(superRange.LowVal), ran.Collators) &&
-		prefix(tc, superRange.HighVal, ran.HighVal, len(superRange.LowVal), ran.Collators)
 }

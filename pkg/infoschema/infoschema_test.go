@@ -575,13 +575,6 @@ func TestBuildBundle(t *testing.T) {
 	assertBundle(is, tbl1.Meta().ID, tb1Bundle)
 	assertBundle(is, tbl2.Meta().ID, nil)
 	assertBundle(is, p1.ID, p1Bundle)
-
-	if len(db.Tables) == 0 {
-		tbls := is.SchemaTables(db.Name)
-		for _, tbl := range tbls {
-			db.Tables = append(db.Tables, tbl.Meta())
-		}
-	}
 	builder, err := infoschema.NewBuilder(dom, nil, infoschema.NewData()).InitWithDBInfos([]*model.DBInfo{db}, is.AllPlacementPolicies(), is.AllResourceGroups(), is.SchemaMetaVersion())
 	require.NoError(t, err)
 	is2 := builder.Build(math.MaxUint64)
@@ -966,8 +959,7 @@ func TestEnableInfoSchemaV2(t *testing.T) {
 
 	// Check the InfoSchema used is V2.
 	is := domain.GetDomain(tk.Session()).InfoSchema()
-	isV2, _ := infoschema.IsV2(is)
-	require.True(t, isV2)
+	require.True(t, infoschema.IsV2(is))
 
 	// Execute some basic operations under infoschema v2.
 	tk.MustQuery("show tables").Check(testkit.Rows("v2"))
@@ -986,8 +978,7 @@ func TestEnableInfoSchemaV2(t *testing.T) {
 
 	tk.MustExec("drop table v1")
 	is = domain.GetDomain(tk.Session()).InfoSchema()
-	isV2, _ = infoschema.IsV2(is)
-	require.False(t, isV2)
+	require.False(t, infoschema.IsV2(is))
 }
 
 type infoschemaTestContext struct {

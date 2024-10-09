@@ -19,12 +19,12 @@ import (
 	"context"
 	"fmt"
 
+	perrors "github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
+	"github.com/pingcap/tidb/pkg/planner/util"
 )
 
 // canProjectionBeEliminatedLoose checks whether a projection can be eliminated,
@@ -114,7 +114,7 @@ func ResolveExprAndReplace(origin expression.Expression, replace map[string]*exp
 	}
 }
 
-func doPhysicalProjectionElimination(p base.PhysicalPlan) base.PhysicalPlan {
+func doPhysicalProjectionElimination(p PhysicalPlan) PhysicalPlan {
 	for i, child := range p.Children() {
 		p.Children()[i] = doPhysicalProjectionElimination(child)
 	}
@@ -149,7 +149,7 @@ func doPhysicalProjectionElimination(p base.PhysicalPlan) base.PhysicalPlan {
 
 // eliminatePhysicalProjection should be called after physical optimization to
 // eliminate the redundant projection left after logical projection elimination.
-func eliminatePhysicalProjection(p base.PhysicalPlan) base.PhysicalPlan {
+func eliminatePhysicalProjection(p PhysicalPlan) PhysicalPlan {
 	failpoint.Inject("DisableProjectionPostOptimization", func(val failpoint.Value) {
 		if val.(bool) {
 			failpoint.Return(p)
@@ -171,14 +171,14 @@ type projectionEliminator struct {
 }
 
 // optimize implements the logicalOptRule interface.
-func (pe *projectionEliminator) optimize(_ context.Context, lp base.LogicalPlan, opt *optimizetrace.LogicalOptimizeOp) (base.LogicalPlan, bool, error) {
+func (pe *projectionEliminator) optimize(_ context.Context, lp LogicalPlan, opt *util.LogicalOptimizeOp) (LogicalPlan, bool, error) {
 	planChanged := false
 	root := pe.eliminate(lp, make(map[string]*expression.Column), false, opt)
 	return root, planChanged, nil
 }
 
 // eliminate eliminates the redundant projection in a logical plan.
-func (pe *projectionEliminator) eliminate(p base.LogicalPlan, replace map[string]*expression.Column, canEliminate bool, opt *optimizetrace.LogicalOptimizeOp) base.LogicalPlan {
+func (pe *projectionEliminator) eliminate(p LogicalPlan, replace map[string]*expression.Column, canEliminate bool, opt *util.LogicalOptimizeOp) LogicalPlan {
 	// LogicalCTE's logical optimization is independent.
 	if _, ok := p.(*LogicalCTE); ok {
 		return p
@@ -199,9 +199,9 @@ func (pe *projectionEliminator) eliminate(p base.LogicalPlan, replace map[string
 	// replace logical plan schema
 	switch x := p.(type) {
 	case *LogicalJoin:
-		x.SetSchema(buildLogicalJoinSchema(x.JoinType, x))
+		x.schema = buildLogicalJoinSchema(x.JoinType, x)
 	case *LogicalApply:
-		x.SetSchema(buildLogicalJoinSchema(x.JoinType, x))
+		x.schema = buildLogicalJoinSchema(x.JoinType, x)
 	default:
 		for _, dst := range p.Schema().Columns {
 			resolveColumnAndReplace(dst, replace)
@@ -218,7 +218,7 @@ func (pe *projectionEliminator) eliminate(p base.LogicalPlan, replace map[string
 				proj.Exprs[i] = ReplaceColumnOfExpr(proj.Exprs[i], child, child.Schema())
 				foldedExpr := expression.FoldConstant(ctx.GetExprCtx(), proj.Exprs[i])
 				// the folded expr should have the same null flag with the original expr, especially for the projection under union, so forcing it here.
-				foldedExpr.GetType(ctx.GetExprCtx().GetEvalCtx()).SetFlag((foldedExpr.GetType(ctx.GetExprCtx().GetEvalCtx()).GetFlag() & ^mysql.NotNullFlag) | (proj.Exprs[i].GetType(ctx.GetExprCtx().GetEvalCtx()).GetFlag() & mysql.NotNullFlag))
+				foldedExpr.GetType().SetFlag((foldedExpr.GetType().GetFlag() & ^mysql.NotNullFlag) | (proj.Exprs[i].GetType().GetFlag() & mysql.NotNullFlag))
 				proj.Exprs[i] = foldedExpr
 			}
 			p.Children()[0] = child.Children()[0]
@@ -253,7 +253,7 @@ func ReplaceColumnOfExpr(expr expression.Expression, proj *LogicalProjection, sc
 	return expr
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (p *LogicalJoin) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, equalExpr := range p.EqualConditions {
 		ResolveExprAndReplace(equalExpr, replace)
@@ -269,14 +269,14 @@ func (p *LogicalJoin) ReplaceExprColumns(replace map[string]*expression.Column) 
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (p *LogicalProjection) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, expr := range p.Exprs {
 		ResolveExprAndReplace(expr, replace)
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (la *LogicalAggregation) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, agg := range la.AggFuncs {
 		for _, aggExpr := range agg.Args {
@@ -291,14 +291,14 @@ func (la *LogicalAggregation) ReplaceExprColumns(replace map[string]*expression.
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (p *LogicalSelection) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, expr := range p.Conditions {
 		ResolveExprAndReplace(expr, replace)
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (la *LogicalApply) ReplaceExprColumns(replace map[string]*expression.Column) {
 	la.LogicalJoin.ReplaceExprColumns(replace)
 	for _, coCol := range la.CorCols {
@@ -309,21 +309,21 @@ func (la *LogicalApply) ReplaceExprColumns(replace map[string]*expression.Column
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (ls *LogicalSort) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, byItem := range ls.ByItems {
 		ResolveExprAndReplace(byItem.Expr, replace)
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (lt *LogicalTopN) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, byItem := range lt.ByItems {
 		ResolveExprAndReplace(byItem.Expr, replace)
 	}
 }
 
-// ReplaceExprColumns implements base.LogicalPlan interface.
+// ReplaceExprColumns implements LogicalPlan interface.
 func (p *LogicalWindow) ReplaceExprColumns(replace map[string]*expression.Column) {
 	for _, desc := range p.WindowFuncDescs {
 		for _, arg := range desc.Args {
@@ -342,7 +342,7 @@ func (*projectionEliminator) name() string {
 	return "projection_eliminate"
 }
 
-func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *optimizetrace.LogicalOptimizeOp) {
+func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *util.LogicalOptimizeOp) {
 	action := func() string {
 		buffer := bytes.NewBufferString(
 			fmt.Sprintf("%v_%v is eliminated, %v_%v's expressions changed into[", child.TP(), child.ID(), parent.TP(), parent.ID()))
@@ -350,7 +350,7 @@ func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *opti
 			if i > 0 {
 				buffer.WriteString(",")
 			}
-			buffer.WriteString(expr.String())
+			buffer.WriteString(expr.StringWithCtx(perrors.RedactLogDisable))
 		}
 		buffer.WriteString("]")
 		return buffer.String()
@@ -361,7 +361,7 @@ func appendDupProjEliminateTraceStep(parent, child *LogicalProjection, opt *opti
 	opt.AppendStepToCurrent(child.ID(), child.TP(), reason, action)
 }
 
-func appendProjEliminateTraceStep(proj *LogicalProjection, opt *optimizetrace.LogicalOptimizeOp) {
+func appendProjEliminateTraceStep(proj *LogicalProjection, opt *util.LogicalOptimizeOp) {
 	reason := func() string {
 		return fmt.Sprintf("%v_%v's Exprs are all Columns", proj.TP(), proj.ID())
 	}

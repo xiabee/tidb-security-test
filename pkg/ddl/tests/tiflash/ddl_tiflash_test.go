@@ -52,7 +52,6 @@ import (
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/testutils"
 	"github.com/tikv/client-go/v2/tikv"
-	pd "github.com/tikv/pd/client"
 	"go.uber.org/zap"
 )
 
@@ -802,20 +801,6 @@ func TestAlterDatabaseBasic(t *testing.T) {
 
 	// There is less TiFlash store
 	tk.MustGetErrMsg("alter database tiflash_ddl set tiflash replica 3", "the tiflash replica count: 3 should be less than the total tiflash server count: 2")
-
-	// Test Issue #51990, alter database skip set tiflash replica on sequence and view.
-	tk.MustExec("create database tiflash_ddl_skip;")
-	tk.MustExec("use tiflash_ddl_skip")
-	tk.MustExec("create table t (id int);")
-	tk.MustExec("create sequence t_seq;")
-	tk.MustExec("create view t_view as select id from t;")
-	tk.MustExec("create global temporary table t_temp (id int) on commit delete rows;")
-	tk.MustExec("alter database tiflash_ddl_skip set tiflash replica 1;")
-	require.Equal(t, "In total 4 tables: 1 succeed, 0 failed, 3 skipped", tk.Session().GetSessionVars().StmtCtx.GetMessage())
-	tk.MustQuery(`show warnings;`).Sort().Check(testkit.Rows(
-		"Note 1347 'tiflash_ddl_skip.t_seq' is not BASE TABLE",
-		"Note 1347 'tiflash_ddl_skip.t_view' is not BASE TABLE",
-		"Note 8006 `set on tiflash` is unsupported on temporary tables."))
 }
 
 func execWithTimeout(t *testing.T, tk *testkit.TestKit, to time.Duration, sql string) (bool, error) {
@@ -1391,7 +1376,7 @@ type TestDDLCallback struct {
 	*ddl.BaseCallback
 	// We recommended to pass the domain parameter to the test ddl callback, it will ensure
 	// domain to reload schema before your ddl stepping into the next state change.
-	Do ddl.SchemaLoader
+	Do ddl.DomainReloader
 
 	// Only need this for now
 	OnJobRunBeforeExported func(*model.Job)
@@ -1461,9 +1446,9 @@ func TestTiFlashReorgPartition(t *testing.T) {
 				_ = job.DecodeArgs(&dummy, &partInfo)
 				ctx := context.Background()
 				stores, _ := pdCli.GetAllStores(ctx)
-				for _, pDef := range partInfo.Definitions {
-					startKey, endKey := tablecodec.GetTableHandleKeyRange(pDef.ID)
-					regions, _ := pdCli.BatchScanRegions(ctx, []pd.KeyRange{{StartKey: startKey, EndKey: endKey}}, -1)
+				for _, pd := range partInfo.Definitions {
+					startKey, endKey := tablecodec.GetTableHandleKeyRange(pd.ID)
+					regions, _ := pdCli.ScanRegions(ctx, startKey, endKey, -1)
 					for i := range regions {
 						// similar as storeHasEngineTiFlashLabel
 						for _, store := range stores {

@@ -212,7 +212,7 @@ func TestGCServiceSafePoint(t *testing.T) {
 	req.Eventually(func() bool {
 		env.fakeCluster.mu.Lock()
 		defer env.fakeCluster.mu.Unlock()
-		return env.serviceGCSafePoint != 0 && env.serviceGCSafePointDeleted
+		return env.serviceGCSafePoint == 0
 	}, 3*time.Second, 100*time.Millisecond)
 }
 

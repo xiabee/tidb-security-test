@@ -67,6 +67,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx/sysproctrack"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics/handle"
+	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
 	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/ttl/ttlworker"
@@ -240,27 +241,20 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	}
 	// fetch the commit timestamp of the schema diff
 	schemaTs, err := do.getTimestampForSchemaVersionWithNonEmptyDiff(m, neededSchemaVersion, startTS)
+	schemaTsOrStartTs := schemaTs
 	if err != nil {
 		logutil.BgLogger().Warn("failed to get schema version", zap.Error(err), zap.Int64("version", neededSchemaVersion))
 		schemaTs = 0
+		schemaTsOrStartTs = startTS
 	}
 
 	if is := do.infoCache.GetByVersion(neededSchemaVersion); is != nil {
-		isV2, raw := infoschema.IsV2(is)
-		if isV2 {
-			// Copy the infoschema V2 instance and update its ts.
-			// For example, the DDL run 30 minutes ago, GC happened 10 minutes ago. If we use
-			// that infoschema it would get error "GC life time is shorter than transaction
-			// duration" when visiting TiKV.
-			// So we keep updating the ts of the infoschema v2.
-			is = raw.CloneAndUpdateTS(startTS)
-		}
-
 		// try to insert here as well to correct the schemaTs if previous is wrong
 		// the insert method check if schemaTs is zero
 		do.infoCache.Insert(is, schemaTs)
 
 		enableV2 := variable.SchemaCacheSize.Load() > 0
+		isV2 := infoschema.IsV2(is)
 		if enableV2 == isV2 {
 			return is, true, 0, nil, nil
 		}
@@ -277,16 +271,14 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	// 1. Not first time bootstrap loading, which needs a full load.
 	// 2. It is newer than the current one, so it will be "the current one" after this function call.
 	// 3. There are less 100 diffs.
-	// 4. No regenerated schema diff.
+	// 4. No regenrated schema diff.
 	startTime := time.Now()
 	if currentSchemaVersion != 0 && neededSchemaVersion > currentSchemaVersion && neededSchemaVersion-currentSchemaVersion < LoadSchemaDiffVersionGapThreshold {
-		is, relatedChanges, diffTypes, err := do.tryLoadSchemaDiffs(m, currentSchemaVersion, neededSchemaVersion, startTS)
+		is, relatedChanges, diffTypes, err := do.tryLoadSchemaDiffs(m, currentSchemaVersion, neededSchemaVersion, schemaTsOrStartTs)
 		if err == nil {
 			infoschema_metrics.LoadSchemaDurationLoadDiff.Observe(time.Since(startTime).Seconds())
-			isV2, _ := infoschema.IsV2(is)
 			do.infoCache.Insert(is, schemaTs)
 			logutil.BgLogger().Info("diff load InfoSchema success",
-				zap.Bool("isV2", isV2),
 				zap.Int64("currentSchemaVersion", currentSchemaVersion),
 				zap.Int64("neededSchemaVersion", neededSchemaVersion),
 				zap.Duration("start time", time.Since(startTime)),
@@ -314,6 +306,8 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 	if err != nil {
 		return nil, false, currentSchemaVersion, nil, err
 	}
+	// clear data
+	do.infoCache.Data = infoschema.NewData()
 	newISBuilder, err := infoschema.NewBuilder(do, do.sysFacHack, do.infoCache.Data).InitWithDBInfos(schemas, policies, resourceGroups, neededSchemaVersion)
 	if err != nil {
 		return nil, false, currentSchemaVersion, nil, err
@@ -324,7 +318,7 @@ func (do *Domain) loadInfoSchema(startTS uint64) (infoschema.InfoSchema, bool, i
 		zap.Int64("neededSchemaVersion", neededSchemaVersion),
 		zap.Duration("start time", time.Since(startTime)))
 
-	is := newISBuilder.Build(startTS)
+	is := newISBuilder.Build(schemaTs)
 	do.infoCache.Insert(is, schemaTs)
 	return is, false, currentSchemaVersion, nil, nil
 }
@@ -436,14 +430,7 @@ func (*Domain) fetchSchemasWithTables(schemas []*model.DBInfo, m *meta.Meta, don
 			infoschema.ConvertCharsetCollateToLowerCaseIfNeed(tbl)
 			// Check whether the table is in repair mode.
 			if domainutil.RepairInfo.InRepairMode() && domainutil.RepairInfo.CheckAndFetchRepairedTable(di, tbl) {
-				if tbl.State != model.StatePublic {
-					// Do not load it because we are reparing the table and the table info could be `bad`
-					// before repair is done.
-					continue
-				}
-				// If the state is public, it means that the DDL job is done, but the table
-				// haven't been deleted from the repair table list.
-				// Since the repairment is done and table is visible, we should load it.
+				continue
 			}
 			di.Tables = append(di.Tables, tbl)
 		}
@@ -455,7 +442,7 @@ func (*Domain) fetchSchemasWithTables(schemas []*model.DBInfo, m *meta.Meta, don
 // Return true if the schema is loaded successfully.
 // Return false if the schema can not be loaded by schema diff, then we need to do full load.
 // The second returned value is the delta updated table and partition IDs.
-func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64, startTS uint64) (infoschema.InfoSchema, *transaction.RelatedSchemaChange, []string, error) {
+func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64, schemaTS uint64) (infoschema.InfoSchema, *transaction.RelatedSchemaChange, []string, error) {
 	var diffs []*model.SchemaDiff
 	for usedVersion < newVersion {
 		usedVersion++
@@ -482,7 +469,6 @@ func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64
 	diffTypes := make([]string, 0, len(diffs))
 	for _, diff := range diffs {
 		if diff.RegenerateSchemaMap {
-			do.infoCache.Data = infoschema.NewData()
 			return nil, nil, nil, errors.Errorf("Meets a schema diff with RegenerateSchemaMap flag")
 		}
 		ids, err := builder.ApplyDiff(m, diff)
@@ -499,7 +485,7 @@ func (do *Domain) tryLoadSchemaDiffs(m *meta.Meta, usedVersion, newVersion int64
 		}
 	}
 
-	is := builder.Build(startTS)
+	is := builder.Build(schemaTS)
 	relatedChange := transaction.RelatedSchemaChange{}
 	relatedChange.PhyTblIDS = phyTblIDs
 	relatedChange.ActionTypes = actions
@@ -521,7 +507,7 @@ func (do *Domain) InfoSchema() infoschema.InfoSchema {
 
 // GetSnapshotInfoSchema gets a snapshot information schema.
 func (do *Domain) GetSnapshotInfoSchema(snapshotTS uint64) (infoschema.InfoSchema, error) {
-	// if the snapshotTS is new enough, we can get infoschema directly through snapshotTS.
+	// if the snapshotTS is new enough, we can get infoschema directly through sanpshotTS.
 	if is := do.infoCache.GetBySnapshotTS(snapshotTS); is != nil {
 		return is, nil
 	}
@@ -623,7 +609,7 @@ func (do *Domain) Reload() error {
 	is, hitCache, oldSchemaVersion, changes, err := do.loadInfoSchema(version)
 	if err != nil {
 		if version = getFlashbackStartTSFromErrorMsg(err); version != 0 {
-			// use the latest available version to create domain
+			// use the lastest available version to create domain
 			version--
 			is, hitCache, oldSchemaVersion, changes, err = do.loadInfoSchema(version)
 		}
@@ -798,6 +784,22 @@ func (do *Domain) topologySyncerKeeper() {
 	}
 }
 
+// CheckAutoAnalyzeWindows checks the auto analyze windows and kill the auto analyze process if it is not in the window.
+func (do *Domain) CheckAutoAnalyzeWindows() {
+	se, err := do.sysSessionPool.Get()
+
+	if err != nil {
+		logutil.BgLogger().Warn("get system session failed", zap.Error(err))
+		return
+	}
+	// Make sure the session is new.
+	sctx := se.(sessionctx.Context)
+	defer do.sysSessionPool.Put(se)
+	if !autoanalyze.CheckAutoAnalyzeWindow(sctx) {
+		do.SysProcTracker().KillSysProcess(do.GetAutoAnalyzeProcID())
+	}
+}
+
 func (do *Domain) refreshMDLCheckTableInfo() {
 	se, err := do.sysSessionPool.Get()
 
@@ -814,8 +816,7 @@ func (do *Domain) refreshMDLCheckTableInfo() {
 	defer do.sysSessionPool.Put(se)
 	exec := sctx.GetRestrictedSQLExecutor()
 	domainSchemaVer := do.InfoSchema().SchemaMetaVersion()
-	rows, _, err := exec.ExecRestrictedSQL(kv.WithInternalSourceType(context.Background(), kv.InternalTxnMeta), nil,
-		fmt.Sprintf("select job_id, version, table_ids from mysql.tidb_mdl_info where version <= %d", domainSchemaVer))
+	rows, _, err := exec.ExecRestrictedSQL(kv.WithInternalSourceType(context.Background(), kv.InternalTxnMeta), nil, fmt.Sprintf("select job_id, version, table_ids from mysql.tidb_mdl_info where version <= %d", domainSchemaVer))
 	if err != nil {
 		logutil.BgLogger().Warn("get mdl info from tidb_mdl_info failed", zap.Error(err))
 		return
@@ -959,7 +960,7 @@ func (do *Domain) loadSchemaInLoop(ctx context.Context, lease time.Duration) {
 			}
 			// The schema maybe changed, must reload schema then the schema validator can restart.
 			exitLoop := do.mustReload()
-			// domain is closed.
+			// domain is cosed.
 			if exitLoop {
 				logutil.BgLogger().Error("domain is closed, exit loadSchemaInLoop")
 				return
@@ -978,7 +979,7 @@ func (do *Domain) loadSchemaInLoop(ctx context.Context, lease time.Duration) {
 }
 
 // mustRestartSyncer tries to restart the SchemaSyncer.
-// It returns until it's successful or the domain is stopped.
+// It returns until it's successful or the domain is stoped.
 func (do *Domain) mustRestartSyncer(ctx context.Context) error {
 	syncer := do.ddl.SchemaSyncer()
 
@@ -1212,7 +1213,6 @@ func (do *Domain) Init(
 		ddl.WithInfoCache(do.infoCache),
 		ddl.WithHook(callback),
 		ddl.WithLease(ddlLease),
-		ddl.WithSchemaLoader(do),
 	)
 
 	failpoint.Inject("MockReplaceDDL", func(val failpoint.Value) {
@@ -2109,7 +2109,7 @@ func (do *Domain) GetHistoricalStatsWorker() *HistoricalStatsWorker {
 	return do.historicalStatsWorker
 }
 
-// EnableDumpHistoricalStats used to control whether enable dump stats for unit test
+// EnableDumpHistoricalStats used to control whether enbale dump stats for unit test
 var enableDumpHistoricalStats atomic.Bool
 
 // StartHistoricalStatsWorker start historical workers running
@@ -2304,7 +2304,6 @@ func (do *Domain) StartLoadStatsSubWorkers(ctxList []sessionctx.Context) {
 		do.wg.Add(1)
 		go statsHandle.SubLoadWorker(ctx, do.exit, do.wg)
 	}
-	logutil.BgLogger().Info("start load stats sub workers", zap.Int("worker count", len(ctxList)))
 }
 
 func (do *Domain) newOwnerManager(prompt, ownerKey string) owner.Manager {
@@ -2479,6 +2478,7 @@ func (do *Domain) updateStatsWorker(_ sessionctx.Context, owner owner.Manager) {
 			if err != nil {
 				logutil.BgLogger().Debug("GC stats failed", zap.Error(err))
 			}
+			do.CheckAutoAnalyzeWindows()
 		case <-dumpColStatsUsageTicker.C:
 			err := statsHandle.DumpColStatsUsageToKV()
 			if err != nil {

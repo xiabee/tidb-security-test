@@ -1188,6 +1188,26 @@ func TestIssue33175(t *testing.T) {
 	tk.MustQuery("select * from tmp2 where id <= -1 or id > 0 order by id asc;").Check(testkit.Rows("-2", "-1", "1", "2"))
 }
 
+func TestIssue35083(t *testing.T) {
+	defer func() {
+		variable.SetSysVar(variable.TiDBOptProjectionPushDown, variable.BoolToOnOff(config.GetGlobalConfig().Performance.ProjectionPushDown))
+	}()
+	defer config.RestoreFunc()()
+	config.UpdateGlobal(func(conf *config.Config) {
+		conf.Performance.ProjectionPushDown = true
+	})
+	variable.SetSysVar(variable.TiDBOptProjectionPushDown, variable.BoolToOnOff(config.GetGlobalConfig().Performance.ProjectionPushDown))
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t1 (a varchar(100), b int)")
+	tk.MustQuery("select @@tidb_opt_projection_push_down").Check(testkit.Rows("1"))
+	tk.MustQuery("explain format = 'brief' select cast(a as datetime) from t1").Check(testkit.Rows(
+		"TableReader 10000.00 root  data:Projection",
+		"└─Projection 10000.00 cop[tikv]  cast(test.t1.a, datetime BINARY)->Column#4",
+		"  └─TableFullScan 10000.00 cop[tikv] table:t1 keep order:false, stats:pseudo"))
+}
+
 func TestRepeatPushDownToTiFlash(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -2188,12 +2208,13 @@ func TestIssue46556(t *testing.T) {
 	tk.MustExec(`CREATE definer='root'@'localhost' VIEW v0(c0) AS SELECT NULL FROM t0 GROUP BY NULL;`)
 	tk.MustExec(`SELECT t0.c0 FROM t0 NATURAL JOIN v0 WHERE v0.c0 LIKE v0.c0;`) // no error
 	tk.MustQuery(`explain format='brief' SELECT t0.c0 FROM t0 NATURAL JOIN v0 WHERE v0.c0 LIKE v0.c0`).Check(
-		testkit.Rows(`HashJoin 0.00 root  inner join, equal:[eq(Column#5, test.t0.c0)]`,
-			`├─Projection(Build) 0.00 root  <nil>->Column#5`,
+		testkit.Rows(`HashJoin 0.00 root  inner join, equal:[eq(Column#9, Column#10)]`,
+			`├─Projection(Build) 0.00 root  <nil>->Column#9`,
 			`│ └─TableDual 0.00 root  rows:0`,
-			`└─TableReader(Probe) 7992.00 root  data:Selection`,
-			`  └─Selection 7992.00 cop[tikv]  like(test.t0.c0, test.t0.c0, 92), not(isnull(test.t0.c0))`,
-			`    └─TableFullScan 10000.00 cop[tikv] table:t0 keep order:false, stats:pseudo`))
+			`└─Projection(Probe) 9990.00 root  test.t0.c0, cast(test.t0.c0, double BINARY)->Column#10`,
+			`  └─TableReader 9990.00 root  data:Selection`,
+			`    └─Selection 9990.00 cop[tikv]  not(isnull(test.t0.c0))`,
+			`      └─TableFullScan 10000.00 cop[tikv] table:t0 keep order:false, stats:pseudo`))
 }
 
 // https://github.com/pingcap/tidb/issues/41458
@@ -2234,6 +2255,26 @@ func TestIssue41458(t *testing.T) {
 		op := fields[0]
 		require.Equalf(t, expectedRes[i], op, fmt.Sprintf("Mismatch at index %d.", i))
 	}
+}
+
+func TestIssue54213(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustExec(`use test`)
+	tk.MustExec(`CREATE TABLE tb (
+  object_id bigint(20),
+  a bigint(20) ,
+  b bigint(20) ,
+  c bigint(20) ,
+  PRIMARY KEY (object_id),
+  KEY ab (a,b))`)
+	tk.MustQuery(`explain select count(1) from (select /*+ force_index(tb, ab) */ 1 from tb where a=1 and b=1 limit 100) a`).Check(
+		testkit.Rows("StreamAgg_11 1.00 root  funcs:count(1)->Column#6",
+			"└─Limit_12 0.10 root  offset:0, count:100",
+			"  └─IndexReader_16 0.10 root  index:Limit_15",
+			"    └─Limit_15 0.10 cop[tikv]  offset:0, count:100",
+			"      └─IndexRangeScan_14 0.10 cop[tikv] table:tb, index:ab(a, b) range:[1 1,1 1], keep order:false, stats:pseudo"))
 }
 
 func TestIssue48257(t *testing.T) {
@@ -2299,6 +2340,68 @@ func TestIssue48257(t *testing.T) {
 		"TableReader 1.00 root  data:TableFullScan",
 		"└─TableFullScan 1.00 cop[tikv] table:t1 keep order:false",
 	))
+}
+
+func TestIssue54870(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+
+	tk.MustExec("use test")
+	tk.MustExec(`create table t (id int,
+deleted_at datetime(3) NOT NULL DEFAULT '1970-01-01 01:00:01.000',
+is_deleted tinyint(1) GENERATED ALWAYS AS ((deleted_at > _utf8mb4'1970-01-01 01:00:01.000')) VIRTUAL NOT NULL,
+key k(id, is_deleted))`)
+	tk.MustExec(`begin`)
+	tk.MustExec(`insert into t (id, deleted_at) values (1, now())`)
+	tk.MustHavePlan(`select 1 from t where id=1 and is_deleted=true`, "IndexRangeScan")
+}
+
+func TestIssue53951(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec(`CREATE TABLE gholla_dummy1 (
+  id varchar(10) NOT NULL,
+  mark int,
+  deleted_at datetime(3) NOT NULL DEFAULT '1970-01-01 01:00:01.000',
+  account_id varchar(10) NOT NULL,
+  metastore_id varchar(10) NOT NULL,
+  is_deleted tinyint(1) GENERATED ALWAYS AS ((deleted_at > _utf8mb4'1970-01-01 01:00:01.000')) VIRTUAL NOT NULL,
+  PRIMARY KEY (account_id,metastore_id,id),
+  KEY isDeleted_accountId_metastoreId (is_deleted,account_id,metastore_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;`)
+	tk.MustExec(`CREATE TABLE gholla_dummy2 (
+  id varchar(10) NOT NULL,
+  mark int,
+  deleted_at datetime(3) NOT NULL DEFAULT '1970-01-01 01:00:01.000',
+  account_id varchar(10) NOT NULL,
+  metastore_id varchar(10) NOT NULL,
+  is_deleted tinyint(1) GENERATED ALWAYS AS ((deleted_at > _utf8mb4'1970-01-01 01:00:01.000')) VIRTUAL NOT NULL,
+  PRIMARY KEY (account_id,metastore_id,id),
+  KEY isDeleted_accountId_metastoreId (is_deleted,account_id,metastore_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin; `)
+	tk.MustExec(`INSERT INTO gholla_dummy1 (id,mark,deleted_at,account_id,metastore_id) VALUES ('ABC', 1, '1970-01-01 01:00:01.000', 'ABC', 'ABC');`)
+	tk.MustExec(`INSERT INTO gholla_dummy2 (id,mark,deleted_at,account_id,metastore_id) VALUES ('ABC', 1, '1970-01-01 01:00:01.000', 'ABC', 'ABC');`)
+	tk.MustExec(`start transaction;`)
+	tk.MustExec(`update gholla_dummy2 set deleted_at = NOW(), mark=2 where account_id = 'ABC' and metastore_id = 'ABC' and id = 'ABC';`)
+	tk.MustQuery(`select
+  /*+ INL_JOIN(g1, g2) */
+  g1.account_id,
+  g2.mark
+from
+  gholla_dummy1 g1 FORCE INDEX(isDeleted_accountId_metastoreId)
+STRAIGHT_JOIN
+  gholla_dummy2 g2 FORCE INDEX (PRIMARY)
+ON
+  g1.account_id = g2.account_id AND
+  g1.metastore_id = g2.metastore_id AND
+  g1.id = g2.id
+WHERE
+  g1.account_id = 'ABC' AND
+  g1.metastore_id = 'ABC' AND
+  g1.is_deleted = FALSE AND
+  g2.is_deleted = FALSE;`).Check(testkit.Rows()) // empty result, no error
+	tk.MustExec(`rollback`)
 }
 
 func TestIssue52472(t *testing.T) {

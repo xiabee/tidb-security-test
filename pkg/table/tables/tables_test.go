@@ -426,8 +426,7 @@ func TestHiddenColumn(t *testing.T) {
 	colInfo[1].Hidden = true
 	colInfo[3].Hidden = true
 	colInfo[5].Hidden = true
-	tc := tb.(*tables.TableCommon)
-	tc.ClearColumnsCache()
+
 	// Basic test
 	cols := tb.VisibleCols()
 	require.NotNil(t, table.FindCol(cols, "a"))
@@ -590,6 +589,9 @@ func TestAddRecordWithCtx(t *testing.T) {
 	require.Nil(t, sessiontxn.NewTxn(context.Background(), tk.Session()))
 	_, err = tk.Session().Txn(true)
 	require.NoError(t, err)
+	recordCtx := tables.NewCommonAddRecordCtx(len(tb.Cols()))
+	tables.SetAddRecordCtx(tk.Session(), recordCtx)
+	defer tables.ClearAddRecordCtx(tk.Session())
 
 	records := [][]types.Datum{types.MakeDatums(uint64(1), "abc"), types.MakeDatums(uint64(2), "abcd")}
 	for _, r := range records {
@@ -693,11 +695,15 @@ func TestViewColumns(t *testing.T) {
 	for _, testCase := range testCases {
 		tk.MustQuery(testCase.query).Check(testkit.RowsWithSep("|", testCase.expected...))
 	}
+	tk.MustExec("create view v1 as select (select a from t) as col from dual")
+	tk.MustQuery("select column_name, table_name from information_schema.columns where table_name='v1'").Check(
+		testkit.RowsWithSep("|", "col|v1"))
 	tk.MustExec("drop table if exists t")
 	for _, testCase := range testCases {
 		require.Len(t, tk.MustQuery(testCase.query).Rows(), 0)
 		tk.MustQuery("show warnings").Sort().Check(testkit.RowsWithSep("|",
 			"Warning|1356|View 'test.v' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them",
+			"Warning|1356|View 'test.v1' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them",
 			"Warning|1356|View 'test.va' references invalid table(s) or column(s) or function(s) or definer/invoker of view lack rights to use them"))
 	}
 

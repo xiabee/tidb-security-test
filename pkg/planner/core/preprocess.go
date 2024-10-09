@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/privilege"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -148,9 +147,7 @@ const (
 	inPrepare preprocessorFlag = 1 << iota
 	// inTxnRetry is set when visiting in transaction retry.
 	inTxnRetry
-	// inCreateOrDropTable is set when visiting create/drop table/view/sequence,
-	// rename table, alter table add foreign key, and BR restore.
-	// TODO need a better name to clarify it's meaning
+	// inCreateOrDropTable is set when visiting create/drop table statement.
 	inCreateOrDropTable
 	// parentIsJoin is set when visiting node's parent is join.
 	parentIsJoin
@@ -245,7 +242,6 @@ func (p *preprocessor) Enter(in ast.Node) (out ast.Node, skipChildren bool) {
 		if node.With != nil {
 			p.preprocessWith.cteStack = append(p.preprocessWith.cteStack, node.With.CTEs)
 		}
-		p.checkSelectNoopFuncs(node)
 	case *ast.SetOprStmt:
 		if node.With != nil {
 			p.preprocessWith.cteStack = append(p.preprocessWith.cteStack, node.With.CTEs)
@@ -710,6 +706,30 @@ func checkAutoIncrementOp(colDef *ast.ColumnDef, index int) (bool, error) {
 	return hasAutoIncrement, nil
 }
 
+func isConstraintKeyTp(constraints []*ast.Constraint, colDef *ast.ColumnDef) bool {
+	for _, c := range constraints {
+		// ignore constraint check
+		if c.Tp == ast.ConstraintCheck {
+			continue
+		}
+		if c.Keys[0].Expr != nil {
+			continue
+		}
+		// If the constraint as follows: primary key(c1, c2)
+		// we only support c1 column can be auto_increment.
+		if colDef.Name.Name.L != c.Keys[0].Column.Name.L {
+			continue
+		}
+		switch c.Tp {
+		case ast.ConstraintPrimaryKey, ast.ConstraintKey, ast.ConstraintIndex,
+			ast.ConstraintUniq, ast.ConstraintUniqIndex, ast.ConstraintUniqKey:
+			return true
+		}
+	}
+
+	return false
+}
+
 func (p *preprocessor) checkAutoIncrement(stmt *ast.CreateTableStmt) {
 	autoIncrementCols := make(map[*ast.ColumnDef]bool)
 
@@ -929,8 +949,6 @@ func (p *preprocessor) checkCreateTableGrammar(stmt *ast.CreateTableStmt) {
 	}
 	if stmt.Select != nil {
 		// FIXME: a temp error noticing 'not implemented' (issue 4754)
-		// Note: if we implement it later, please clear it's MDL related tables for
-		// it like what CREATE VIEW does.
 		p.err = errors.New("'CREATE TABLE ... SELECT' is not implemented yet")
 		return
 	} else if len(stmt.Cols) == 0 && stmt.ReferTable == nil {
@@ -1130,31 +1148,6 @@ func (p *preprocessor) checkCreateIndexGrammar(stmt *ast.CreateIndexStmt) {
 		return
 	}
 	p.err = checkIndexInfo(stmt.IndexName, stmt.IndexPartSpecifications)
-}
-
-func (p *preprocessor) checkSelectNoopFuncs(stmt *ast.SelectStmt) {
-	noopFuncsMode := p.sctx.GetSessionVars().NoopFuncsMode
-	if noopFuncsMode == variable.OnInt {
-		return
-	}
-	if stmt.SelectStmtOpts != nil && stmt.SelectStmtOpts.CalcFoundRows {
-		err := expression.ErrFunctionsNoopImpl.GenWithStackByArgs("SQL_CALC_FOUND_ROWS")
-		if noopFuncsMode == variable.OffInt {
-			p.err = err
-			return
-		}
-		// NoopFuncsMode is Warn, append an error
-		p.sctx.GetSessionVars().StmtCtx.AppendWarning(err)
-	}
-	if stmt.LockInfo != nil && stmt.LockInfo.LockType == ast.SelectLockForShare {
-		err := expression.ErrFunctionsNoopImpl.GenWithStackByArgs("LOCK IN SHARE MODE")
-		if noopFuncsMode == variable.OffInt {
-			p.err = err
-			return
-		}
-		// NoopFuncsMode is Warn, append an error
-		p.sctx.GetSessionVars().StmtCtx.AppendWarning(err)
-	}
 }
 
 func (p *preprocessor) checkGroupBy(stmt *ast.GroupByClause) {
@@ -1767,7 +1760,6 @@ func (p *preprocessor) updateStateFromStaleReadProcessor() error {
 				if err := txnManager.OnStmtStart(context.TODO(), txnManager.GetCurrentStmt()); err != nil {
 					return err
 				}
-				p.sctx.GetSessionVars().TxnCtx.StaleReadTs = p.LastSnapshotTS
 			}
 		}
 	}
@@ -1803,7 +1795,7 @@ func (p *preprocessor) hasAutoConvertWarning(colDef *ast.ColumnDef) bool {
 	return false
 }
 
-func tryLockMDLAndUpdateSchemaIfNecessary(sctx base.PlanContext, dbName model.CIStr, tbl table.Table, is infoschema.InfoSchema) (table.Table, error) {
+func tryLockMDLAndUpdateSchemaIfNecessary(sctx PlanContext, dbName model.CIStr, tbl table.Table, is infoschema.InfoSchema) (table.Table, error) {
 	if !sctx.GetSessionVars().TxnCtx.EnableMDL {
 		return tbl, nil
 	}

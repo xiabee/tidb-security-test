@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
@@ -57,7 +56,7 @@ func getMPPQueryTS(ctx sessionctx.Context) uint64 {
 	return mppQueryInfo.QueryTS.Load()
 }
 
-func collectPlanIDs(plan base.PhysicalPlan, ids []int) []int {
+func collectPlanIDs(plan plannercore.PhysicalPlan, ids []int) []int {
 	ids = append(ids, plan.ID())
 	for _, child := range plan.Children() {
 		ids = collectPlanIDs(child, ids)
@@ -69,7 +68,7 @@ func collectPlanIDs(plan base.PhysicalPlan, ids []int) []int {
 type MPPGather struct {
 	exec.BaseExecutor
 	is           infoschema.InfoSchema
-	originalPlan base.PhysicalPlan
+	originalPlan plannercore.PhysicalPlan
 	startTS      uint64
 	mppQueryID   kv.MPPQueryID
 	respIter     distsql.SelectResult

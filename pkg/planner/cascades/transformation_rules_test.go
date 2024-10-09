@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/memo"
 	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
@@ -49,7 +48,7 @@ func testGroupToString(t *testing.T, input []string, output []struct {
 		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
-		logic, ok := plan.(base.LogicalPlan)
+		logic, ok := plan.(plannercore.LogicalPlan)
 		require.True(t, ok)
 
 		logic, err = optimizer.onPhasePreprocessing(ctx, logic)
@@ -101,7 +100,7 @@ func TestAggPushDownGather(t *testing.T) {
 		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
-		logic, ok := plan.(base.LogicalPlan)
+		logic, ok := plan.(plannercore.LogicalPlan)
 		require.True(t, ok)
 
 		logic, err = optimizer.onPhasePreprocessing(ctx, logic)

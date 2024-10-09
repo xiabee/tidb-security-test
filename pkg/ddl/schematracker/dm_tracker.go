@@ -230,7 +230,7 @@ func (d SchemaTracker) CreateTable(ctx sessionctx.Context, s *ast.CreateTableStm
 		onExist = ddl.OnExistIgnore
 	}
 
-	return d.CreateTableWithInfo(ctx, schema.Name, tbInfo, nil, onExist)
+	return d.CreateTableWithInfo(ctx, schema.Name, tbInfo, onExist)
 }
 
 // CreateTableWithInfo implements the DDL interface.
@@ -238,7 +238,6 @@ func (d SchemaTracker) CreateTableWithInfo(
 	_ sessionctx.Context,
 	dbName model.CIStr,
 	info *model.TableInfo,
-	_ []model.InvolvingSchemaInfo,
 	cs ...ddl.CreateTableWithInfoConfigurier,
 ) error {
 	c := ddl.GetCreateTableWithInfoConfig(cs)
@@ -265,7 +264,7 @@ func (d SchemaTracker) CreateTableWithInfo(
 
 // CreateView implements the DDL interface.
 func (d SchemaTracker) CreateView(ctx sessionctx.Context, s *ast.CreateViewStmt) error {
-	viewInfo, err := ddl.BuildViewInfo(s)
+	viewInfo, err := ddl.BuildViewInfo(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -291,7 +290,7 @@ func (d SchemaTracker) CreateView(ctx sessionctx.Context, s *ast.CreateViewStmt)
 		onExist = ddl.OnExistReplace
 	}
 
-	return d.CreateTableWithInfo(ctx, s.ViewName.Schema, tbInfo, nil, onExist)
+	return d.CreateTableWithInfo(ctx, s.ViewName.Schema, tbInfo, onExist)
 }
 
 // DropTable implements the DDL interface.
@@ -726,7 +725,7 @@ func (d SchemaTracker) handleModifyColumn(
 	tblInfo.AutoRandomBits = updatedAutoRandomBits
 	oldCol := table.FindCol(t.Cols(), originalColName.L).ColumnInfo
 
-	originDefVal, err := ddl.GetOriginDefaultValueForModifyColumn(sctx.GetExprCtx(), newColInfo, oldCol)
+	originDefVal, err := ddl.GetOriginDefaultValueForModifyColumn(sctx, newColInfo, oldCol)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1190,7 +1189,7 @@ func (SchemaTracker) AlterResourceGroup(_ sessionctx.Context, _ *ast.AlterResour
 // BatchCreateTableWithInfo implements the DDL interface, it will call CreateTableWithInfo for each table.
 func (d SchemaTracker) BatchCreateTableWithInfo(ctx sessionctx.Context, schema model.CIStr, info []*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	for _, tableInfo := range info {
-		if err := d.CreateTableWithInfo(ctx, schema, tableInfo, nil, cs...); err != nil {
+		if err := d.CreateTableWithInfo(ctx, schema, tableInfo, cs...); err != nil {
 			return err
 		}
 	}

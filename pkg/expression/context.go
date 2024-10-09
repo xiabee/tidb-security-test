@@ -19,9 +19,10 @@ import (
 
 	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/expression/context"
+	"github.com/pingcap/tidb/pkg/expression/contextopt"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
 	"github.com/pingcap/tidb/pkg/util/intest"
 )
 
@@ -66,7 +67,7 @@ func warningCount(ctx EvalContext) int {
 	return ctx.WarningCount()
 }
 
-func truncateWarnings(ctx EvalContext, start int) []contextutil.SQLWarn {
+func truncateWarnings(ctx EvalContext, start int) []stmtctx.SQLWarn {
 	return ctx.TruncateWarnings(start)
 }
 
@@ -95,9 +96,16 @@ func wrapEvalAssert(ctx EvalContext, fn builtinFunc) (ret *assertionEvalContext)
 }
 
 func checkEvalCtx(ctx EvalContext) {
+	loc := ctx.Location().String()
 	tc := ctx.TypeCtx()
-	intest.Assert(ctx.Location() == tc.Location(),
-		"location is not equal, ctxLoc: %s, tcLoc: %s", ctx.Location(), tc.Location())
+	tcLoc := tc.Location().String()
+	intest.Assert(loc == tcLoc, "location mismatch, evalCtx: %s, typeCtx: %s", loc, tcLoc)
+	if ctx.GetOptionalPropSet().Contains(context.OptPropSessionVars) {
+		vars, err := contextopt.SessionVarsPropReader{}.GetSessionVars(ctx)
+		intest.AssertNoError(err)
+		stmtLoc := vars.StmtCtx.TimeZone().String()
+		intest.Assert(loc == stmtLoc, "location mismatch, evalCtx: %s, stmtCtx: %s", loc, stmtLoc)
+	}
 }
 
 func (ctx *assertionEvalContext) GetOptionalPropProvider(key OptionalEvalPropKey) (OptionalEvalPropProvider, bool) {
@@ -112,4 +120,11 @@ func (ctx *assertionEvalContext) GetOptionalPropProvider(key OptionalEvalPropKey
 		key, ctx.fn,
 	)
 	return ctx.EvalContext.GetOptionalPropProvider(key)
+}
+
+// StringerWithCtx is the interface for expressions that can be stringified with context.
+type StringerWithCtx interface {
+	// StringWithCtx returns the string representation of the expression with context.
+	// NOTE: any implementation of `StringWithCtx` should not panic if the context is nil.
+	StringWithCtx(redact string) string
 }

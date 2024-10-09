@@ -20,10 +20,8 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/statistics/asyncload"
-	"github.com/pingcap/tidb/pkg/util/filter"
+	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/util/intset"
 	"golang.org/x/exp/maps"
 )
@@ -53,7 +51,7 @@ type columnStatsUsageCollector struct {
 	// cols is used to store columns collected from expressions and saves some allocation.
 	cols []*expression.Column
 
-	// visitedPhysTblIDs all ds.PhysicalTableID that have been visited.
+	// visitedPhysTblIDs all ds.physicalTableID that have been visited.
 	// It's always collected, even collectHistNeededColumns is not set.
 	visitedPhysTblIDs *intset.FastIntSet
 
@@ -124,13 +122,9 @@ func (c *columnStatsUsageCollector) updateColMapFromExpressions(col *expression.
 }
 
 func (c *columnStatsUsageCollector) collectPredicateColumnsForDataSource(ds *DataSource) {
-	// Skip all system tables.
-	if filter.IsSystemSchema(ds.DBName.L) {
-		return
-	}
 	// For partition tables, no matter whether it is static or dynamic pruning mode, we use table ID rather than partition ID to
 	// set TableColumnID.TableID. In this way, we keep the set of predicate columns consistent between different partitions and global table.
-	tblID := ds.TableInfo.ID
+	tblID := ds.TableInfo().ID
 	if c.collectVisitedTable {
 		c.visitedtbls[tblID] = struct{}{}
 	}
@@ -138,8 +132,8 @@ func (c *columnStatsUsageCollector) collectPredicateColumnsForDataSource(ds *Dat
 		tblColID := model.TableItemID{TableID: tblID, ID: col.ID, IsIndex: false}
 		c.colMap[col.UniqueID] = map[model.TableItemID]struct{}{tblColID: {}}
 	}
-	// We should use `PushedDownConds` here. `AllConds` is used for partition pruning, which doesn't need stats.
-	c.addPredicateColumnsFromExpressions(ds.PushedDownConds)
+	// We should use `pushedDownConds` here. `allConds` is used for partition pruning, which doesn't need stats.
+	c.addPredicateColumnsFromExpressions(ds.pushedDownConds)
 }
 
 func (c *columnStatsUsageCollector) collectPredicateColumnsForJoin(p *LogicalJoin) {
@@ -178,16 +172,16 @@ func (c *columnStatsUsageCollector) collectPredicateColumnsForUnionAll(p *Logica
 }
 
 func (c *columnStatsUsageCollector) addHistNeededColumns(ds *DataSource) {
-	c.visitedPhysTblIDs.Insert(int(ds.PhysicalTableID))
+	c.visitedPhysTblIDs.Insert(int(ds.physicalTableID))
 	if c.collectMode&collectHistNeededColumns == 0 {
 		return
 	}
 	if c.collectVisitedTable {
-		tblID := ds.TableInfo.ID
+		tblID := ds.TableInfo().ID
 		c.visitedtbls[tblID] = struct{}{}
 	}
 	stats := domain.GetDomain(ds.SCtx()).StatsHandle()
-	tblStats := stats.GetPartitionStats(ds.TableInfo, ds.PhysicalTableID)
+	tblStats := stats.GetPartitionStats(ds.tableInfo, ds.physicalTableID)
 	skipPseudoCheckForTest := false
 	failpoint.Inject("disablePseudoCheck", func() {
 		skipPseudoCheckForTest = true
@@ -196,7 +190,7 @@ func (c *columnStatsUsageCollector) addHistNeededColumns(ds *DataSource) {
 	if tblStats.Pseudo && !skipPseudoCheckForTest {
 		return
 	}
-	columns := expression.ExtractColumnsFromExpressions(c.cols[:0], ds.PushedDownConds, nil)
+	columns := expression.ExtractColumnsFromExpressions(c.cols[:0], ds.pushedDownConds, nil)
 
 	colIDSet := intset.NewFastIntSet()
 
@@ -206,18 +200,18 @@ func (c *columnStatsUsageCollector) addHistNeededColumns(ds *DataSource) {
 		if col.ID < 0 {
 			continue
 		}
-		tblColID := model.TableItemID{TableID: ds.PhysicalTableID, ID: col.ID, IsIndex: false}
+		tblColID := model.TableItemID{TableID: ds.physicalTableID, ID: col.ID, IsIndex: false}
 		colIDSet.Insert(int(col.ID))
 		c.histNeededCols[tblColID] = true
 	}
-	for _, column := range ds.TableInfo.Columns {
+	for _, column := range ds.tableInfo.Columns {
 		// If the column is plan-generated one, Skip it.
 		// TODO: we may need to consider the ExtraHandle.
 		if column.ID < 0 {
 			continue
 		}
 		if !column.Hidden {
-			tblColID := model.TableItemID{TableID: ds.PhysicalTableID, ID: column.ID, IsIndex: false}
+			tblColID := model.TableItemID{TableID: ds.physicalTableID, ID: column.ID, IsIndex: false}
 			if _, ok := c.histNeededCols[tblColID]; !ok {
 				c.histNeededCols[tblColID] = false
 			}
@@ -225,7 +219,7 @@ func (c *columnStatsUsageCollector) addHistNeededColumns(ds *DataSource) {
 	}
 }
 
-func (c *columnStatsUsageCollector) collectFromPlan(lp base.LogicalPlan) {
+func (c *columnStatsUsageCollector) collectFromPlan(lp LogicalPlan) {
 	for _, child := range lp.Children() {
 		c.collectFromPlan(child)
 	}
@@ -348,15 +342,16 @@ func (c *columnStatsUsageCollector) collectFromPlan(lp base.LogicalPlan) {
 // predicate indicates whether to collect predicate columns and histNeeded indicates whether to collect histogram-needed columns.
 // First return value: predicate columns (nil if predicate is false)
 // Second return value: histogram-needed columns (nil if histNeeded is false)
-// Third return value: ds.PhysicalTableID from all DataSource (always collected)
-func CollectColumnStatsUsage(lp base.LogicalPlan, histNeeded bool) (
+// Third return value: ds.physicalTableID from all DataSource (always collected)
+func CollectColumnStatsUsage(lp LogicalPlan, predicate, histNeeded bool) (
 	[]model.TableItemID,
 	[]model.StatsLoadItem,
 	*intset.FastIntSet,
 ) {
 	var mode uint64
-	// Always collect predicate columns.
-	mode |= collectPredicateColumns
+	if predicate {
+		mode |= collectPredicateColumns
+	}
 	if histNeeded {
 		mode |= collectHistNeededColumns
 	}
@@ -440,14 +435,16 @@ func CollectColumnStatsUsage(lp base.LogicalPlan, histNeeded bool) (
 		if histNeeded {
 			collector.histNeededCols[*colToTriggerLoad] = true
 		} else {
-			asyncload.AsyncLoadHistogramNeededItems.Insert(*colToTriggerLoad, true)
+			statistics.HistogramNeededItems.Insert(*colToTriggerLoad, true)
 		}
 	})
 	var (
 		predicateCols  []model.TableItemID
 		histNeededCols []model.StatsLoadItem
 	)
-	predicateCols = maps.Keys(collector.predicateCols)
+	if predicate {
+		predicateCols = maps.Keys(collector.predicateCols)
+	}
 	if histNeeded {
 		histNeededCols = itemSet2slice(collector.histNeededCols)
 	}

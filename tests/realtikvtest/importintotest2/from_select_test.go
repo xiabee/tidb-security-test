@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/importer"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 )
 
@@ -52,7 +51,7 @@ func (s *mockGCSSuite) TestImportFromSelectBasic() {
 	s.tk.MustQuery("select * from dst").Check(testkit.Rows("6 cccccc", "7 dddddd"))
 
 	// parallel
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/util/cpu/mockNumCpu", `return(8)`)
+	testkit.EnableFailPoint(s.T(), "github.com/pingcap/tidb/pkg/util/cpu/mockNumCpu", `return(8)`)
 	s.tk.MustExec("truncate table src")
 	s.tk.MustExec("truncate table dst")
 	var count = 5000

@@ -24,7 +24,6 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"hash"
 	"io"
@@ -121,7 +120,7 @@ func (c *aesDecryptFunctionClass) getFunction(ctx BuildContext, args []Expressio
 	if err != nil {
 		return nil, err
 	}
-	bf.tp.SetFlen(args[0].GetType(ctx.GetEvalCtx()).GetFlen()) // At most.
+	bf.tp.SetFlen(args[0].GetType().GetFlen()) // At most.
 	types.SetBinChsClnFlag(bf.tp)
 
 	blockMode := ctx.GetBlockEncryptionMode()
@@ -256,7 +255,7 @@ func (c *aesEncryptFunctionClass) getFunction(ctx BuildContext, args []Expressio
 	if err != nil {
 		return nil, err
 	}
-	bf.tp.SetFlen(aes.BlockSize * (args[0].GetType(ctx.GetEvalCtx()).GetFlen()/aes.BlockSize + 1)) // At most.
+	bf.tp.SetFlen(aes.BlockSize * (args[0].GetType().GetFlen()/aes.BlockSize + 1)) // At most.
 	types.SetBinChsClnFlag(bf.tp)
 
 	blockMode := ctx.GetBlockEncryptionMode()
@@ -389,7 +388,7 @@ func (c *decodeFunctionClass) getFunction(ctx BuildContext, args []Expression) (
 		return nil, err
 	}
 
-	bf.tp.SetFlen(args[0].GetType(ctx.GetEvalCtx()).GetFlen())
+	bf.tp.SetFlen(args[0].GetType().GetFlen())
 	sig := &builtinDecodeSig{bf}
 	sig.setPbCode(tipb.ScalarFuncSig_Decode)
 	return sig, nil
@@ -452,7 +451,7 @@ func (c *encodeFunctionClass) getFunction(ctx BuildContext, args []Expression) (
 		return nil, err
 	}
 
-	bf.tp.SetFlen(args[0].GetType(ctx.GetEvalCtx()).GetFlen())
+	bf.tp.SetFlen(args[0].GetType().GetFlen())
 	sig := &builtinEncodeSig{bf}
 	sig.setPbCode(tipb.ScalarFuncSig_Encode)
 	return sig, nil
@@ -544,7 +543,7 @@ func (b *builtinPasswordSig) evalString(ctx EvalContext, row chunk.Row) (val str
 	// We should append a warning here because function "PASSWORD" is deprecated since MySQL 5.7.6.
 	// See https://dev.mysql.com/doc/refman/5.7/en/encryption-functions.html#function_password
 	tc := typeCtx(ctx)
-	tc.AppendWarning(errDeprecatedSyntaxNoReplacement.FastGenByArgs("PASSWORD", ""))
+	tc.AppendWarning(errDeprecatedSyntaxNoReplacement.FastGenByArgs("PASSWORD"))
 
 	return auth.EncodePassword(pass), false, nil
 }
@@ -636,8 +635,7 @@ func (b *builtinMD5Sig) evalString(ctx EvalContext, row chunk.Row) (string, bool
 		return "", isNull, err
 	}
 	sum := md5.Sum([]byte(arg)) // #nosec G401
-	hexStr := hex.EncodeToString(sum[:])
-
+	hexStr := fmt.Sprintf("%x", sum)
 	return hexStr, false, nil
 }
 
@@ -848,7 +846,7 @@ func (c *compressFunctionClass) getFunction(ctx BuildContext, args []Expression)
 	if err != nil {
 		return nil, err
 	}
-	srcLen := args[0].GetType(ctx.GetEvalCtx()).GetFlen()
+	srcLen := args[0].GetType().GetFlen()
 	compressBound := srcLen + (srcLen >> 12) + (srcLen >> 14) + (srcLen >> 25) + 13
 	if compressBound > mysql.MaxBlobWidth {
 		compressBound = mysql.MaxBlobWidth

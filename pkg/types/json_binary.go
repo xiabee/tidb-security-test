@@ -237,16 +237,8 @@ func (bj BinaryJSON) GetOpaque() Opaque {
 	}
 }
 
-// GetTime gets the time value with default fsp
-//
-// Deprecated: use GetTimeWithFsp instead. The `BinaryJSON` doesn't contain the fsp information, so the caller
-// should always provide the fsp.
+// GetTime gets the time value
 func (bj BinaryJSON) GetTime() Time {
-	return bj.GetTimeWithFsp(DefaultFsp)
-}
-
-// GetTimeWithFsp gets the time value with given fsp
-func (bj BinaryJSON) GetTimeWithFsp(fsp int) Time {
 	coreTime := CoreTime(bj.GetUint64())
 
 	tp := mysql.TypeDate
@@ -256,7 +248,7 @@ func (bj BinaryJSON) GetTimeWithFsp(fsp int) Time {
 		tp = mysql.TypeTimestamp
 	}
 
-	return NewTime(coreTime, tp, fsp)
+	return NewTime(coreTime, tp, DefaultFsp)
 }
 
 // GetDuration gets the duration value

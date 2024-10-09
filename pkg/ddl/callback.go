@@ -49,7 +49,6 @@ type Callback interface {
 	// OnChanged is called after a ddl statement is finished.
 	OnChanged(err error) error
 	// OnSchemaStateChanged is called after a schema state is changed.
-	// only called inside tests.
 	OnSchemaStateChanged(schemaVer int64)
 	// OnJobRunBefore is called before running job.
 	OnJobRunBefore(job *model.Job)
@@ -60,9 +59,9 @@ type Callback interface {
 	// OnWatched is called after watching owner is completed.
 	OnWatched(ctx context.Context)
 	// OnGetJobBefore is called before getting job.
-	OnGetJobBefore()
+	OnGetJobBefore(jobType string)
 	// OnGetJobAfter is called after getting job.
-	OnGetJobAfter(job *model.Job)
+	OnGetJobAfter(jobType string, job *model.Job)
 }
 
 // BaseCallback implements Callback.OnChanged interface.
@@ -100,12 +99,12 @@ func (*BaseCallback) OnWatched(_ context.Context) {
 }
 
 // OnGetJobBefore implements Callback.OnGetJobBefore interface.
-func (*BaseCallback) OnGetJobBefore() {
+func (*BaseCallback) OnGetJobBefore(_ string) {
 	// Nothing to do.
 }
 
 // OnGetJobAfter implements Callback.OnGetJobAfter interface.
-func (*BaseCallback) OnGetJobAfter(_ *model.Job) {
+func (*BaseCallback) OnGetJobAfter(_ string, _ *model.Job) {
 	// Nothing to do.
 }
 
@@ -113,8 +112,8 @@ func (*BaseCallback) OnGetJobAfter(_ *model.Job) {
 func (*BaseCallback) OnUpdateReorgInfo(_ *model.Job, _ int64) {
 }
 
-// SchemaLoader is used to avoid import loop, the only impl is domain currently.
-type SchemaLoader interface {
+// DomainReloader is used to avoid import loop.
+type DomainReloader interface {
 	Reload() error
 }
 
@@ -129,7 +128,7 @@ type ReorgCallback interface {
 // DefaultCallback is the default callback that TiDB will use.
 type DefaultCallback struct {
 	*BaseCallback
-	do SchemaLoader
+	do DomainReloader
 }
 
 // OnChanged overrides ddl Callback interface.
@@ -155,7 +154,7 @@ func (c *DefaultCallback) OnSchemaStateChanged(_ int64) {
 	}
 }
 
-func newDefaultCallBack(do SchemaLoader) Callback {
+func newDefaultCallBack(do DomainReloader) Callback {
 	return &DefaultCallback{BaseCallback: &BaseCallback{}, do: do}
 }
 
@@ -167,7 +166,7 @@ func newDefaultCallBack(do SchemaLoader) Callback {
 // ctc is named from column type change, here after we call them ctc for short.
 type ctcCallback struct {
 	*BaseCallback
-	do SchemaLoader
+	do DomainReloader
 }
 
 // OnChanged overrides ddl Callback interface.
@@ -206,14 +205,14 @@ func (*ctcCallback) OnJobRunBefore(job *model.Job) {
 	}
 }
 
-func newCTCCallBack(do SchemaLoader) Callback {
+func newCTCCallBack(do DomainReloader) Callback {
 	return &ctcCallback{do: do}
 }
 
 // ****************************** End of CTC DDL Callback Instance ***************************************************
 
 var (
-	customizedCallBackRegisterMap = map[string]func(do SchemaLoader) Callback{}
+	customizedCallBackRegisterMap = map[string]func(do DomainReloader) Callback{}
 )
 
 func init() {
@@ -223,7 +222,7 @@ func init() {
 }
 
 // GetCustomizedHook get the hook registered in the hookMap.
-func GetCustomizedHook(s string) (func(do SchemaLoader) Callback, error) {
+func GetCustomizedHook(s string) (func(do DomainReloader) Callback, error) {
 	s = strings.ToLower(s)
 	s = strings.TrimSpace(s)
 	fact, ok := customizedCallBackRegisterMap[s]

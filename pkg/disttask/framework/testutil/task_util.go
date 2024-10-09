@@ -28,29 +28,19 @@ import (
 
 // CreateSubTask adds a new task to subtask table.
 // used for testing.
-func CreateSubTask(t *testing.T, gm *storage.TaskManager, taskID int64, step proto.Step, execID string, meta []byte, tp proto.TaskType, concurrency int) int64 {
-	return InsertSubtask(t, gm, taskID, step, execID, meta, proto.SubtaskStatePending, tp, concurrency)
+func CreateSubTask(t *testing.T, gm *storage.TaskManager, taskID int64, step proto.Step, execID string, meta []byte, tp proto.TaskType, concurrency int) {
+	InsertSubtask(t, gm, taskID, step, execID, meta, proto.SubtaskStatePending, tp, concurrency)
 }
 
 // InsertSubtask adds a new subtask of any state to subtask table.
-func InsertSubtask(t *testing.T, gm *storage.TaskManager, taskID int64, step proto.Step, execID string, meta []byte, state proto.SubtaskState, tp proto.TaskType, concurrency int) int64 {
+func InsertSubtask(t *testing.T, gm *storage.TaskManager, taskID int64, step proto.Step, execID string, meta []byte, state proto.SubtaskState, tp proto.TaskType, concurrency int) {
 	ctx := context.Background()
 	ctx = util.WithInternalSourceType(ctx, "table_test")
-	var id int64
 	require.NoError(t, gm.WithNewSession(func(se sessionctx.Context) error {
 		_, err := sqlexec.ExecSQL(ctx, se.GetSQLExecutor(), `
 			insert into mysql.tidb_background_subtask(`+storage.InsertSubtaskColumns+`) values`+
 			`(%?, %?, %?, %?, %?, %?, %?, NULL, CURRENT_TIMESTAMP(), '{}', '{}')`,
 			step, taskID, execID, meta, state, proto.Type2Int(tp), concurrency)
-		if err != nil {
-			return err
-		}
-		rs, err := sqlexec.ExecSQL(ctx, se.GetSQLExecutor(), "select @@last_insert_id")
-		if err != nil {
-			return err
-		}
-		id = rs[0].GetInt64(0)
-		return nil
+		return err
 	}))
-	return id
 }

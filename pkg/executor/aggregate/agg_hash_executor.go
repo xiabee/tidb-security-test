@@ -236,11 +236,7 @@ func (e *HashAggExec) Open(ctx context.Context) error {
 	if err := e.BaseExecutor.Open(ctx); err != nil {
 		return err
 	}
-	return e.OpenSelf()
-}
 
-// OpenSelf just opens the hash aggregation executor.
-func (e *HashAggExec) OpenSelf() error {
 	e.prepared.Store(false)
 
 	if e.memTracker != nil {
@@ -295,7 +291,6 @@ func (e *HashAggExec) initPartialWorkers(partialConcurrency int, finalConcurrenc
 			partialResultsMap[i] = make(aggfuncs.AggPartialResultMapper)
 		}
 
-		partialResultsBuffer, groupKeyBuf := getBuffer()
 		e.partialWorkers[i] = HashAggPartialWorker{
 			baseHashAggWorker:    newBaseHashAggWorker(e.finishCh, e.PartialAggFuncs, e.MaxChunkSize(), e.memTracker),
 			idForTest:            i,
@@ -304,12 +299,12 @@ func (e *HashAggExec) initPartialWorkers(partialConcurrency int, finalConcurrenc
 			outputChs:            e.partialOutputChs,
 			giveBackCh:           e.inputCh,
 			BInMaps:              make([]int, finalConcurrency),
-			partialResultsBuffer: *partialResultsBuffer,
+			partialResultsBuffer: make([][]aggfuncs.PartialResult, 0, 2048),
 			globalOutputCh:       e.finalOutputCh,
 			partialResultsMap:    partialResultsMap,
 			groupByItems:         e.GroupByItems,
 			chk:                  exec.TryNewCacheChunk(e.Children(0)),
-			groupKeyBuf:          *groupKeyBuf,
+			groupKey:             make([][]byte, 0, 8),
 			serializeHelpers:     aggfuncs.NewSerializeHelper(),
 			isSpillPrepared:      false,
 			spillHelper:          e.spillHelper,
@@ -347,7 +342,9 @@ func (e *HashAggExec) initFinalWorkers(finalConcurrency int) {
 			inputCh:                    e.partialOutputChs[i],
 			outputCh:                   e.finalOutputCh,
 			finalResultHolderCh:        make(chan *chunk.Chunk, 1),
+			rowBuffer:                  make([]types.Datum, 0, e.Schema().Len()),
 			mutableRow:                 chunk.MutRowFromTypes(exec.RetTypes(e)),
+			groupKeys:                  make([][]byte, 0, 8),
 			spillHelper:                e.spillHelper,
 			restoredAggResultMapperMem: 0,
 		}
@@ -398,9 +395,14 @@ func (e *HashAggExec) initForParallelExec(ctx sessionctx.Context) error {
 		spillChunkFieldTypes[i] = types.NewFieldType(mysql.TypeVarString)
 	}
 	spillChunkFieldTypes[baseRetTypeNum] = types.NewFieldType(mysql.TypeString)
-	e.spillHelper = newSpillHelper(e.memTracker, e.PartialAggFuncs, func() *chunk.Chunk {
+
+	var err error
+	e.spillHelper, err = newSpillHelper(e.memTracker, e.PartialAggFuncs, e.FinalAggFuncs, func() *chunk.Chunk {
 		return chunk.New(spillChunkFieldTypes, e.InitCap(), e.MaxChunkSize())
 	}, spillChunkFieldTypes)
+	if err != nil {
+		return err
+	}
 
 	if isTrackerEnabled && isParallelHashAggSpillEnabled {
 		if e.diskTracker != nil {

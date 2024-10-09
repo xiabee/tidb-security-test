@@ -17,6 +17,7 @@ package expression
 import (
 	"bytes"
 	goJSON "encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -475,14 +476,7 @@ func (b *builtinJSONQuoteSig) vecEvalString(ctx EvalContext, input *chunk.Chunk,
 			result.AppendNull()
 			continue
 		}
-		buffer := &bytes.Buffer{}
-		encoder := goJSON.NewEncoder(buffer)
-		encoder.SetEscapeHTML(false)
-		err = encoder.Encode(buf.GetString(i))
-		if err != nil {
-			return err
-		}
-		result.AppendString(string(bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))))
+		result.AppendString(strconv.Quote(buf.GetString(i)))
 	}
 	return nil
 }
@@ -1099,7 +1093,7 @@ func (b *builtinJSONMergeSig) vecEvalJSON(ctx EvalContext, input *chunk.Chunk, r
 				continue
 			}
 			tc := typeCtx(ctx)
-			tc.AppendWarning(errDeprecatedSyntaxNoReplacement.FastGenByArgs("JSON_MERGE", ""))
+			tc.AppendWarning(errDeprecatedSyntaxNoReplacement.FastGenByArgs("JSON_MERGE"))
 		}
 	}
 

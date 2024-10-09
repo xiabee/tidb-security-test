@@ -18,9 +18,7 @@ import (
 	"context"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/util"
-	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
 )
 
 /*
@@ -41,7 +39,7 @@ This rule reorders results by modifying or injecting a Sort operator:
 type resultReorder struct {
 }
 
-func (rs *resultReorder) optimize(_ context.Context, lp base.LogicalPlan, _ *optimizetrace.LogicalOptimizeOp) (base.LogicalPlan, bool, error) {
+func (rs *resultReorder) optimize(_ context.Context, lp LogicalPlan, _ *util.LogicalOptimizeOp) (LogicalPlan, bool, error) {
 	planChanged := false
 	ordered := rs.completeSort(lp)
 	if !ordered {
@@ -50,7 +48,7 @@ func (rs *resultReorder) optimize(_ context.Context, lp base.LogicalPlan, _ *opt
 	return lp, planChanged, nil
 }
 
-func (rs *resultReorder) completeSort(lp base.LogicalPlan) bool {
+func (rs *resultReorder) completeSort(lp LogicalPlan) bool {
 	if rs.isInputOrderKeeper(lp) {
 		return rs.completeSort(lp.Children()[0])
 	} else if sort, ok := lp.(*LogicalSort); ok {
@@ -75,7 +73,7 @@ func (rs *resultReorder) completeSort(lp base.LogicalPlan) bool {
 	return false
 }
 
-func (rs *resultReorder) injectSort(lp base.LogicalPlan) base.LogicalPlan {
+func (rs *resultReorder) injectSort(lp LogicalPlan) LogicalPlan {
 	if rs.isInputOrderKeeper(lp) {
 		lp.SetChildren(rs.injectSort(lp.Children()[0]))
 		return lp
@@ -96,7 +94,7 @@ func (rs *resultReorder) injectSort(lp base.LogicalPlan) base.LogicalPlan {
 	return sort
 }
 
-func (*resultReorder) isInputOrderKeeper(lp base.LogicalPlan) bool {
+func (*resultReorder) isInputOrderKeeper(lp LogicalPlan) bool {
 	switch lp.(type) {
 	case *LogicalSelection, *LogicalProjection, *LogicalLimit:
 		return true
@@ -105,7 +103,7 @@ func (*resultReorder) isInputOrderKeeper(lp base.LogicalPlan) bool {
 }
 
 // extractHandleCols does the best effort to get the handle column.
-func (rs *resultReorder) extractHandleCol(lp base.LogicalPlan) *expression.Column {
+func (rs *resultReorder) extractHandleCol(lp LogicalPlan) *expression.Column {
 	switch x := lp.(type) {
 	case *LogicalSelection, *LogicalLimit:
 		handleCol := rs.extractHandleCol(lp.Children()[0])
@@ -117,7 +115,7 @@ func (rs *resultReorder) extractHandleCol(lp base.LogicalPlan) *expression.Colum
 			return handleCol
 		}
 	case *DataSource:
-		if x.TableInfo.IsCommonHandle {
+		if x.tableInfo.IsCommonHandle {
 			// Currently we deliberately don't support common handle case for simplicity.
 			return nil
 		}

@@ -27,11 +27,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/property"
-	"github.com/pingcap/tidb/pkg/planner/util"
-	"github.com/pingcap/tidb/pkg/planner/util/costusage"
-	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/table"
@@ -194,12 +190,12 @@ type Execute struct {
 	Params   []expression.Expression
 	PrepStmt *PlanCacheStmt
 	Stmt     ast.StmtNode
-	Plan     base.Plan
+	Plan     Plan
 }
 
 // Check if result of GetVar expr is BinaryLiteral
 // Because GetVar use String to represent BinaryLiteral, here we need to convert string back to BinaryLiteral.
-func isGetVarBinaryLiteral(sctx base.PlanContext, expr expression.Expression) (res bool) {
+func isGetVarBinaryLiteral(sctx PlanContext, expr expression.Expression) (res bool) {
 	scalarFunc, ok := expr.(*expression.ScalarFunction)
 	if ok && scalarFunc.FuncName.L == ast.GetVar {
 		name, isNull, err := scalarFunc.GetArgs()[0].EvalString(sctx.GetExprCtx().GetEvalCtx(), chunk.Row{})
@@ -361,7 +357,7 @@ type Insert struct {
 
 	GenCols InsertGeneratedColumns
 
-	SelectPlan base.PhysicalPlan
+	SelectPlan PhysicalPlan
 
 	IsReplace bool
 
@@ -427,7 +423,7 @@ type Update struct {
 
 	VirtualAssignmentsOffset int
 
-	SelectPlan base.PhysicalPlan
+	SelectPlan PhysicalPlan
 
 	TblColPosInfos TblColPosInfoSlice
 
@@ -475,7 +471,7 @@ type Delete struct {
 
 	IsMultiTable bool
 
-	SelectPlan base.PhysicalPlan
+	SelectPlan PhysicalPlan
 
 	TblColPosInfos TblColPosInfoSlice
 
@@ -521,7 +517,7 @@ type V2AnalyzeOptions struct {
 
 // AnalyzeColumnsTask is used for analyze columns.
 type AnalyzeColumnsTask struct {
-	HandleCols       util.HandleCols
+	HandleCols       HandleCols
 	CommonHandleInfo *model.IndexInfo
 	ColsInfo         []*model.ColumnInfo
 	TblInfo          *model.TableInfo
@@ -590,7 +586,7 @@ type ImportInto struct {
 	GenCols InsertGeneratedColumns
 	Stmt    string
 
-	SelectPlan base.PhysicalPlan
+	SelectPlan PhysicalPlan
 }
 
 // LoadStats represents a load stats plan.
@@ -681,7 +677,7 @@ type DDL struct {
 type SelectInto struct {
 	baseSchemaProducer
 
-	TargetPlan base.Plan
+	TargetPlan Plan
 	IntoOpt    *ast.SelectIntoOption
 	LineFieldsInfo
 }
@@ -765,7 +761,7 @@ func JSONToString(j []*ExplainInfoForEncode) (string, error) {
 type Explain struct {
 	baseSchemaProducer
 
-	TargetPlan       base.Plan
+	TargetPlan       Plan
 	Format           string
 	Analyze          bool
 	ExecStmt         ast.StmtNode
@@ -776,7 +772,7 @@ type Explain struct {
 }
 
 // GetExplainRowsForPlan get explain rows for plan.
-func GetExplainRowsForPlan(plan base.Plan) (rows [][]string) {
+func GetExplainRowsForPlan(plan Plan) (rows [][]string) {
 	explain := &Explain{
 		TargetPlan: plan,
 		Format:     types.ExplainFormatROW,
@@ -857,21 +853,21 @@ func (e *Explain) RenderResult() error {
 		return nil
 	}
 
-	if e.Analyze && e.Format == types.ExplainFormatTrueCardCost {
+	if e.Analyze && strings.ToLower(e.Format) == types.ExplainFormatTrueCardCost {
 		// true_card_cost mode is used to calibrate the cost model.
-		pp, ok := e.TargetPlan.(base.PhysicalPlan)
+		pp, ok := e.TargetPlan.(PhysicalPlan)
 		if ok {
 			if _, err := getPlanCost(pp, property.RootTaskType,
-				optimizetrace.NewDefaultPlanCostOption().WithCostFlag(costusage.CostFlagRecalculate|costusage.CostFlagUseTrueCardinality|costusage.CostFlagTrace)); err != nil {
+				NewDefaultPlanCostOption().WithCostFlag(CostFlagRecalculate|CostFlagUseTrueCardinality|CostFlagTrace)); err != nil {
 				return err
 			}
 			if pp.SCtx().GetSessionVars().CostModelVersion == modelVer2 {
 				// output cost formula and factor costs through warning under model ver2 and true_card_cost mode for cost calibration.
-				cost, _ := pp.GetPlanCostVer2(property.RootTaskType, optimizetrace.NewDefaultPlanCostOption())
-				if cost.GetTrace() != nil {
-					trace := cost.GetTrace()
-					pp.SCtx().GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf("cost formula: %v", trace.GetFormula()))
-					data, err := json.Marshal(trace.GetFactorCosts())
+				cost, _ := pp.getPlanCostVer2(property.RootTaskType, NewDefaultPlanCostOption())
+				if cost.trace != nil {
+					trace := cost.trace
+					pp.SCtx().GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf("cost formula: %v", trace.formula))
+					data, err := json.Marshal(trace.factorCosts)
 					if err != nil {
 						pp.SCtx().GetSessionVars().StmtCtx.AppendWarning(errors.NewNoStackErrorf("marshal factor costs error %v", err))
 					}
@@ -881,7 +877,7 @@ func (e *Explain) RenderResult() error {
 					factors := defaultVer2Factors.tolist()
 					weights := make(map[string]float64)
 					for _, factor := range factors {
-						if factorCost, ok := trace.GetFactorCosts()[factor.Name]; ok && factor.Value > 0 {
+						if factorCost, ok := trace.factorCosts[factor.Name]; ok && factor.Value > 0 {
 							weights[factor.Name] = factorCost / factor.Value // cost = [factors] * [weights]
 						}
 					}
@@ -898,10 +894,10 @@ func (e *Explain) RenderResult() error {
 	}
 
 	if strings.ToLower(e.Format) == types.ExplainFormatCostTrace {
-		if pp, ok := e.TargetPlan.(base.PhysicalPlan); ok {
+		if pp, ok := e.TargetPlan.(PhysicalPlan); ok {
 			// trigger getPlanCost again with CostFlagTrace to record all cost formulas
 			if _, err := getPlanCost(pp, property.RootTaskType,
-				optimizetrace.NewDefaultPlanCostOption().WithCostFlag(costusage.CostFlagRecalculate|costusage.CostFlagTrace)); err != nil {
+				NewDefaultPlanCostOption().WithCostFlag(CostFlagRecalculate|CostFlagTrace)); err != nil {
 				return err
 			}
 		}
@@ -921,7 +917,7 @@ func (e *Explain) RenderResult() error {
 			}
 		}
 	case types.ExplainFormatDOT:
-		if physicalPlan, ok := e.TargetPlan.(base.PhysicalPlan); ok {
+		if physicalPlan, ok := e.TargetPlan.(PhysicalPlan); ok {
 			e.prepareDotInfo(physicalPlan)
 		}
 	case types.ExplainFormatHint:
@@ -1021,7 +1017,7 @@ func (e *Explain) explainFlatOpInRowFormat(flatOp *FlatOperator) {
 	e.prepareOperatorInfo(flatOp.Origin, taskTp, textTreeExplainID)
 }
 
-func getRuntimeInfoStr(ctx base.PlanContext, p base.Plan, runtimeStatsColl *execdetails.RuntimeStatsColl) (actRows, analyzeInfo, memoryInfo, diskInfo string) {
+func getRuntimeInfoStr(ctx PlanContext, p Plan, runtimeStatsColl *execdetails.RuntimeStatsColl) (actRows, analyzeInfo, memoryInfo, diskInfo string) {
 	if runtimeStatsColl == nil {
 		runtimeStatsColl = ctx.GetSessionVars().StmtCtx.RuntimeStatsColl
 		if runtimeStatsColl == nil {
@@ -1052,7 +1048,7 @@ func getRuntimeInfoStr(ctx base.PlanContext, p base.Plan, runtimeStatsColl *exec
 	return
 }
 
-func getRuntimeInfo(ctx base.PlanContext, p base.Plan, runtimeStatsColl *execdetails.RuntimeStatsColl) (
+func getRuntimeInfo(ctx PlanContext, p Plan, runtimeStatsColl *execdetails.RuntimeStatsColl) (
 	rootStats *execdetails.RootRuntimeStats,
 	copStats *execdetails.CopRuntimeStats,
 	memTracker *memory.Tracker,
@@ -1077,7 +1073,7 @@ func getRuntimeInfo(ctx base.PlanContext, p base.Plan, runtimeStatsColl *execdet
 
 // prepareOperatorInfo generates the following information for every plan:
 // operator id, estimated rows, task type, access object and other operator info.
-func (e *Explain) prepareOperatorInfo(p base.Plan, taskType, id string) {
+func (e *Explain) prepareOperatorInfo(p Plan, taskType, id string) {
 	if p.ExplainID().String() == "_0" {
 		return
 	}
@@ -1087,21 +1083,21 @@ func (e *Explain) prepareOperatorInfo(p base.Plan, taskType, id string) {
 	var row []string
 	if e.Analyze || e.RuntimeStatsColl != nil {
 		row = []string{id, estRows}
-		if e.Format == types.ExplainFormatVerbose || e.Format == types.ExplainFormatTrueCardCost || e.Format == types.ExplainFormatCostTrace {
+		if strings.ToLower(e.Format) == types.ExplainFormatVerbose || strings.ToLower(e.Format) == types.ExplainFormatTrueCardCost || strings.ToLower(e.Format) == types.ExplainFormatCostTrace {
 			row = append(row, estCost)
 		}
-		if e.Format == types.ExplainFormatTrueCardCost || e.Format == types.ExplainFormatCostTrace {
+		if strings.ToLower(e.Format) == types.ExplainFormatTrueCardCost || strings.ToLower(e.Format) == types.ExplainFormatCostTrace {
 			row = append(row, costFormula)
 		}
 		actRows, analyzeInfo, memoryInfo, diskInfo := getRuntimeInfoStr(e.SCtx(), p, e.RuntimeStatsColl)
 		row = append(row, actRows, taskType, accessObject, analyzeInfo, operatorInfo, memoryInfo, diskInfo)
 	} else {
 		row = []string{id, estRows}
-		if e.Format == types.ExplainFormatVerbose || e.Format == types.ExplainFormatTrueCardCost ||
-			e.Format == types.ExplainFormatCostTrace {
+		if strings.ToLower(e.Format) == types.ExplainFormatVerbose || strings.ToLower(e.Format) == types.ExplainFormatTrueCardCost ||
+			strings.ToLower(e.Format) == types.ExplainFormatCostTrace {
 			row = append(row, estCost)
 		}
-		if e.Format == types.ExplainFormatCostTrace {
+		if strings.ToLower(e.Format) == types.ExplainFormatCostTrace {
 			row = append(row, costFormula)
 		}
 		row = append(row, taskType, accessObject, operatorInfo)
@@ -1109,7 +1105,7 @@ func (e *Explain) prepareOperatorInfo(p base.Plan, taskType, id string) {
 	e.Rows = append(e.Rows, row)
 }
 
-func (e *Explain) prepareOperatorInfoForJSONFormat(p base.Plan, taskType, id string, explainID string) *ExplainInfoForEncode {
+func (e *Explain) prepareOperatorInfoForJSONFormat(p Plan, taskType, id string, explainID string) *ExplainInfoForEncode {
 	if p.ExplainID().String() == "_0" {
 		return nil
 	}
@@ -1130,7 +1126,7 @@ func (e *Explain) prepareOperatorInfoForJSONFormat(p base.Plan, taskType, id str
 	return jsonRow
 }
 
-func (e *Explain) getOperatorInfo(p base.Plan, id string) (estRows, estCost, costFormula, accessObject, operatorInfo string) {
+func (e *Explain) getOperatorInfo(p Plan, id string) (estRows, estCost, costFormula, accessObject, operatorInfo string) {
 	// For `explain for connection` statement, `e.ExplainRows` will be set.
 	for _, row := range e.ExplainRows {
 		if len(row) < 5 {
@@ -1141,20 +1137,20 @@ func (e *Explain) getOperatorInfo(p base.Plan, id string) (estRows, estCost, cos
 		}
 	}
 
-	pp, isPhysicalPlan := p.(base.PhysicalPlan)
+	pp, isPhysicalPlan := p.(PhysicalPlan)
 	estRows = "N/A"
 	estCost = "N/A"
 	costFormula = "N/A"
 	if isPhysicalPlan {
-		estRows = strconv.FormatFloat(pp.GetEstRowCountForDisplay(), 'f', 2, 64)
+		estRows = strconv.FormatFloat(pp.getEstRowCountForDisplay(), 'f', 2, 64)
 		if e.SCtx() != nil && e.SCtx().GetSessionVars().CostModelVersion == modelVer2 {
-			costVer2, _ := pp.GetPlanCostVer2(property.RootTaskType, optimizetrace.NewDefaultPlanCostOption())
-			estCost = strconv.FormatFloat(costVer2.GetCost(), 'f', 2, 64)
-			if costVer2.GetTrace() != nil {
-				costFormula = costVer2.GetTrace().GetFormula()
+			costVer2, _ := pp.getPlanCostVer2(property.RootTaskType, NewDefaultPlanCostOption())
+			estCost = strconv.FormatFloat(costVer2.cost, 'f', 2, 64)
+			if costVer2.trace != nil {
+				costFormula = costVer2.trace.formula
 			}
 		} else {
-			planCost, _ := getPlanCost(pp, property.RootTaskType, optimizetrace.NewDefaultPlanCostOption())
+			planCost, _ := getPlanCost(pp, property.RootTaskType, NewDefaultPlanCostOption())
 			estCost = strconv.FormatFloat(planCost, 'f', 2, 64)
 		}
 	} else if si := p.StatsInfo(); si != nil {
@@ -1174,7 +1170,7 @@ func (e *Explain) getOperatorInfo(p base.Plan, id string) (estRows, estCost, cos
 }
 
 // BinaryPlanStrFromFlatPlan generates the compressed and encoded binary plan from a FlatPhysicalPlan.
-func BinaryPlanStrFromFlatPlan(explainCtx base.PlanContext, flat *FlatPhysicalPlan) string {
+func BinaryPlanStrFromFlatPlan(explainCtx PlanContext, flat *FlatPhysicalPlan) string {
 	binary := binaryDataFromFlatPlan(explainCtx, flat)
 	if binary == nil {
 		return ""
@@ -1187,7 +1183,7 @@ func BinaryPlanStrFromFlatPlan(explainCtx base.PlanContext, flat *FlatPhysicalPl
 	return str
 }
 
-func binaryDataFromFlatPlan(explainCtx base.PlanContext, flat *FlatPhysicalPlan) *tipb.ExplainData {
+func binaryDataFromFlatPlan(explainCtx PlanContext, flat *FlatPhysicalPlan) *tipb.ExplainData {
 	if len(flat.Main) == 0 {
 		return nil
 	}
@@ -1212,7 +1208,7 @@ func binaryDataFromFlatPlan(explainCtx base.PlanContext, flat *FlatPhysicalPlan)
 	return res
 }
 
-func binaryOpTreeFromFlatOps(explainCtx base.PlanContext, ops FlatPlanTree) *tipb.ExplainOperator {
+func binaryOpTreeFromFlatOps(explainCtx PlanContext, ops FlatPlanTree) *tipb.ExplainOperator {
 	s := make([]tipb.ExplainOperator, len(ops))
 	for i, op := range ops {
 		binaryOpFromFlatOp(explainCtx, op, &s[i])
@@ -1223,9 +1219,9 @@ func binaryOpTreeFromFlatOps(explainCtx base.PlanContext, ops FlatPlanTree) *tip
 	return &s[0]
 }
 
-func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tipb.ExplainOperator) {
-	out.Name = fop.Origin.ExplainID().String()
-	switch fop.Label {
+func binaryOpFromFlatOp(explainCtx PlanContext, op *FlatOperator, out *tipb.ExplainOperator) {
+	out.Name = op.Origin.ExplainID().String()
+	switch op.Label {
 	case BuildSide:
 		out.Labels = []tipb.OperatorLabel{tipb.OperatorLabel_buildSide}
 	case ProbeSide:
@@ -1235,7 +1231,7 @@ func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tip
 	case RecursivePart:
 		out.Labels = []tipb.OperatorLabel{tipb.OperatorLabel_recursivePart}
 	}
-	switch fop.StoreType {
+	switch op.StoreType {
 	case kv.TiDB:
 		out.StoreType = tipb.StoreType_tidb
 	case kv.TiKV:
@@ -1243,10 +1239,10 @@ func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tip
 	case kv.TiFlash:
 		out.StoreType = tipb.StoreType_tiflash
 	}
-	if fop.IsRoot {
+	if op.IsRoot {
 		out.TaskType = tipb.TaskType_root
 	} else {
-		switch fop.ReqType {
+		switch op.ReqType {
 		case Cop:
 			out.TaskType = tipb.TaskType_cop
 		case BatchCop:
@@ -1256,16 +1252,16 @@ func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tip
 		}
 	}
 
-	if fop.IsPhysicalPlan {
-		p := fop.Origin.(base.PhysicalPlan)
-		out.Cost, _ = getPlanCost(p, property.RootTaskType, optimizetrace.NewDefaultPlanCostOption())
-		out.EstRows = p.GetEstRowCountForDisplay()
-	} else if statsInfo := fop.Origin.StatsInfo(); statsInfo != nil {
+	if op.IsPhysicalPlan {
+		p := op.Origin.(PhysicalPlan)
+		out.Cost, _ = getPlanCost(p, property.RootTaskType, NewDefaultPlanCostOption())
+		out.EstRows = p.getEstRowCountForDisplay()
+	} else if statsInfo := op.Origin.StatsInfo(); statsInfo != nil {
 		out.EstRows = statsInfo.RowCount
 	}
 
 	// Runtime info
-	rootStats, copStats, memTracker, diskTracker := getRuntimeInfo(explainCtx, fop.Origin, nil)
+	rootStats, copStats, memTracker, diskTracker := getRuntimeInfo(explainCtx, op.Origin, nil)
 	if rootStats != nil {
 		basic, groups := rootStats.MergeStats()
 		if basic != nil {
@@ -1295,14 +1291,14 @@ func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tip
 	}
 
 	// Operator info
-	if plan, ok := fop.Origin.(dataAccesser); ok {
+	if plan, ok := op.Origin.(dataAccesser); ok {
 		out.OperatorInfo = plan.OperatorInfo(false)
 	} else {
-		out.OperatorInfo = fop.Origin.ExplainInfo()
+		out.OperatorInfo = op.Origin.ExplainInfo()
 	}
 
 	// Access object
-	switch p := fop.Origin.(type) {
+	switch p := op.Origin.(type) {
 	case dataAccesser:
 		ao := p.AccessObject()
 		if ao != nil {
@@ -1316,7 +1312,7 @@ func binaryOpFromFlatOp(explainCtx base.PlanContext, fop *FlatOperator, out *tip
 	}
 }
 
-func (e *Explain) prepareDotInfo(p base.PhysicalPlan) {
+func (e *Explain) prepareDotInfo(p PhysicalPlan) {
 	buffer := bytes.NewBufferString("")
 	fmt.Fprintf(buffer, "\ndigraph %s {\n", p.ExplainID())
 	e.prepareTaskDot(p, "root", buffer)
@@ -1325,7 +1321,7 @@ func (e *Explain) prepareDotInfo(p base.PhysicalPlan) {
 	e.Rows = append(e.Rows, []string{buffer.String()})
 }
 
-func (e *Explain) prepareTaskDot(p base.PhysicalPlan, taskTp string, buffer *bytes.Buffer) {
+func (e *Explain) prepareTaskDot(p PhysicalPlan, taskTp string, buffer *bytes.Buffer) {
 	fmt.Fprintf(buffer, "subgraph cluster%v{\n", p.ID())
 	buffer.WriteString("node [style=filled, color=lightgrey]\n")
 	buffer.WriteString("color=black\n")
@@ -1339,10 +1335,10 @@ func (e *Explain) prepareTaskDot(p base.PhysicalPlan, taskTp string, buffer *byt
 		fmt.Fprintf(buffer, "\"%s\"\n", p.ExplainID())
 	}
 
-	var copTasks []base.PhysicalPlan
+	var copTasks []PhysicalPlan
 	var pipelines []string
 
-	for planQueue := []base.PhysicalPlan{p}; len(planQueue) > 0; planQueue = planQueue[1:] {
+	for planQueue := []PhysicalPlan{p}; len(planQueue) > 0; planQueue = planQueue[1:] {
 		curPlan := planQueue[0]
 		switch copPlan := curPlan.(type) {
 		case *PhysicalTableReader:
@@ -1386,9 +1382,9 @@ func (e *Explain) prepareTaskDot(p base.PhysicalPlan, taskTp string, buffer *byt
 //  1. ctx is auto commit tagged
 //  2. session is not InTxn
 //  3. plan is point get by pk, or point get by unique index (no double read)
-func IsPointGetWithPKOrUniqueKeyByAutoCommit(vars *variable.SessionVars, p base.Plan) bool {
+func IsPointGetWithPKOrUniqueKeyByAutoCommit(vars *variable.SessionVars, p Plan) (bool, error) {
 	if !IsAutoCommitTxn(vars) {
-		return false
+		return false, nil
 	}
 
 	// check plan
@@ -1399,22 +1395,22 @@ func IsPointGetWithPKOrUniqueKeyByAutoCommit(vars *variable.SessionVars, p base.
 	switch v := p.(type) {
 	case *PhysicalIndexReader:
 		indexScan := v.IndexPlans[0].(*PhysicalIndexScan)
-		return indexScan.IsPointGetByUniqueKey(vars.StmtCtx.TypeCtx())
+		return indexScan.IsPointGetByUniqueKey(vars.StmtCtx.TypeCtx()), nil
 	case *PhysicalTableReader:
 		tableScan, ok := v.TablePlans[0].(*PhysicalTableScan)
 		if !ok {
-			return false
+			return false, nil
 		}
 		isPointRange := len(tableScan.Ranges) == 1 && tableScan.Ranges[0].IsPointNonNullable(vars.StmtCtx.TypeCtx())
 		if !isPointRange {
-			return false
+			return false, nil
 		}
 		pkLength := 1
 		if tableScan.Table.IsCommonHandle {
 			pkIdx := tables.FindPrimaryIndex(tableScan.Table)
 			pkLength = len(pkIdx.Columns)
 		}
-		return len(tableScan.Ranges[0].LowVal) == pkLength
+		return len(tableScan.Ranges[0].LowVal) == pkLength, nil
 	case *PointGetPlan:
 		// If the PointGetPlan needs to read data using unique index (double read), we
 		// can't use max uint64, because using math.MaxUint64 can't guarantee repeatable-read
@@ -1423,14 +1419,14 @@ func IsPointGetWithPKOrUniqueKeyByAutoCommit(vars *variable.SessionVars, p base.
 		// because math.MaxUint64 always make cacheData invalid.
 		noSecondRead := v.IndexInfo == nil || (v.IndexInfo.Primary && v.TblInfo.IsCommonHandle)
 		if !noSecondRead {
-			return false
+			return false, nil
 		}
 		if v.TblInfo != nil && (v.TblInfo.TableCacheStatusType != model.TableCacheStatusDisable) {
-			return false
+			return false, nil
 		}
-		return true
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 

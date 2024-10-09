@@ -1063,14 +1063,18 @@ GROUP BY
 	}
 
 	noRecordTables := make([]string, 0)
-	ch := is.ListTablesWithSpecialAttribute(infoschema.TTLAttribute)
-	for _, v := range ch {
-		for _, tblInfo := range v.TableInfos {
+	for _, dbName := range is.AllSchemaNames() {
+		for _, tbl := range is.SchemaTables(dbName) {
+			tblInfo := tbl.Meta()
+			if tblInfo.TTLInfo == nil {
+				continue
+			}
+
 			interval, err := tblInfo.TTLInfo.GetJobInterval()
 			if err != nil {
 				logutil.Logger(ctx).Error("failed to get table's job interval",
 					zap.Error(err),
-					zap.String("db", v.DBName),
+					zap.String("db", dbName.String()),
 					zap.String("table", tblInfo.Name.String()),
 				)
 				interval = time.Hour

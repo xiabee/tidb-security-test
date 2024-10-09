@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/executor/join"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -300,9 +299,9 @@ func TestIssue18572_1(t *testing.T) {
 	tk.MustExec("insert into t1 values(1, 1);")
 	tk.MustExec("insert into t1 select * from t1;")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinInnerWorkerErr", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinInnerWorkerErr", "return"))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinInnerWorkerErr"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinInnerWorkerErr"))
 	}()
 
 	rs, err := tk.Exec("select /*+ inl_hash_join(t1) */ * from t1 right join t1 t2 on t1.b=t2.b;")
@@ -321,9 +320,9 @@ func TestIssue18572_2(t *testing.T) {
 	tk.MustExec("insert into t1 values(1, 1);")
 	tk.MustExec("insert into t1 select * from t1;")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinOuterWorkerErr", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinOuterWorkerErr", "return"))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinOuterWorkerErr"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinOuterWorkerErr"))
 	}()
 
 	rs, err := tk.Exec("select /*+ inl_hash_join(t1) */ * from t1 right join t1 t2 on t1.b=t2.b;")
@@ -342,9 +341,9 @@ func TestIssue18572_3(t *testing.T) {
 	tk.MustExec("insert into t1 values(1, 1);")
 	tk.MustExec("insert into t1 select * from t1;")
 
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinBuildErr", "return"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinBuildErr", "return"))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/testIndexHashJoinBuildErr"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/testIndexHashJoinBuildErr"))
 	}()
 
 	rs, err := tk.Exec("select /*+ inl_hash_join(t1) */ * from t1 right join t1 t2 on t1.b=t2.b;")
@@ -416,16 +415,16 @@ func TestIssue20270(t *testing.T) {
 	tk.MustExec("create table t1(c1 int, c2 int)")
 	tk.MustExec("insert into t values(1,1),(2,2)")
 	tk.MustExec("insert into t1 values(2,3),(4,4)")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/killedInJoin2Chunk", "return(true)"))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/killedInJoin2Chunk", "return(true)"))
 	err := tk.QueryToErr("select /*+ HASH_JOIN(t, t1) */ * from t left join t1 on t.c1 = t1.c1 where t.c1 = 1 or t1.c2 > 20")
 	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/killedInJoin2Chunk"))
-	err = failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/killedInJoin2ChunkForOuterHashJoin", "return(true)")
+	require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/killedInJoin2Chunk"))
+	err = failpoint.Enable("github.com/pingcap/tidb/pkg/executor/killedInJoin2ChunkForOuterHashJoin", "return(true)")
 	require.NoError(t, err)
 	tk.MustExec("insert into t1 values(1,30),(2,40)")
 	err = tk.QueryToErr("select /*+ HASH_JOIN_BUILD(t) */ * from t left outer join t1 on t.c1 = t1.c1 where t.c1 = 1 or t1.c2 > 20")
 	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	err = failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/killedInJoin2ChunkForOuterHashJoin")
+	err = failpoint.Disable("github.com/pingcap/tidb/pkg/executor/killedInJoin2ChunkForOuterHashJoin")
 	require.NoError(t, err)
 }
 
@@ -449,209 +448,32 @@ func TestIssue31129(t *testing.T) {
 	tk.MustExec("analyze table s")
 
 	// Test IndexNestedLoopHashJoin keepOrder.
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/TestIssue31129"
+	fpName := "github.com/pingcap/tidb/pkg/executor/TestIssue31129"
 	require.NoError(t, failpoint.Enable(fpName, "return"))
 	err := tk.QueryToErr("select /*+ INL_HASH_JOIN(s) */ * from t left join s on t.a=s.a order by t.pk")
 	require.True(t, strings.Contains(err.Error(), "TestIssue31129"))
 	require.NoError(t, failpoint.Disable(fpName))
 
 	// Test IndexNestedLoopHashJoin build hash table panic.
-	fpName = "github.com/pingcap/tidb/pkg/executor/join/IndexHashJoinBuildHashTablePanic"
+	fpName = "github.com/pingcap/tidb/pkg/executor/IndexHashJoinBuildHashTablePanic"
 	require.NoError(t, failpoint.Enable(fpName, `panic("IndexHashJoinBuildHashTablePanic")`))
 	err = tk.QueryToErr("select /*+ INL_HASH_JOIN(s) */ * from t left join s on t.a=s.a order by t.pk")
 	require.True(t, strings.Contains(err.Error(), "IndexHashJoinBuildHashTablePanic"))
 	require.NoError(t, failpoint.Disable(fpName))
 
 	// Test IndexNestedLoopHashJoin fetch inner fail.
-	fpName = "github.com/pingcap/tidb/pkg/executor/join/IndexHashJoinFetchInnerResultsErr"
+	fpName = "github.com/pingcap/tidb/pkg/executor/IndexHashJoinFetchInnerResultsErr"
 	require.NoError(t, failpoint.Enable(fpName, "return"))
 	err = tk.QueryToErr("select /*+ INL_HASH_JOIN(s) */ * from t left join s on t.a=s.a order by t.pk")
 	require.True(t, strings.Contains(err.Error(), "IndexHashJoinFetchInnerResultsErr"))
 	require.NoError(t, failpoint.Disable(fpName))
 
 	// Test IndexNestedLoopHashJoin build hash table panic and IndexNestedLoopHashJoin fetch inner fail at the same time.
-	fpName1, fpName2 := "github.com/pingcap/tidb/pkg/executor/join/IndexHashJoinBuildHashTablePanic", "github.com/pingcap/tidb/pkg/executor/join/IndexHashJoinFetchInnerResultsErr"
+	fpName1, fpName2 := "github.com/pingcap/tidb/pkg/executor/IndexHashJoinBuildHashTablePanic", "github.com/pingcap/tidb/pkg/executor/IndexHashJoinFetchInnerResultsErr"
 	require.NoError(t, failpoint.Enable(fpName1, `panic("IndexHashJoinBuildHashTablePanic")`))
 	require.NoError(t, failpoint.Enable(fpName2, "return"))
 	err = tk.QueryToErr("select /*+ INL_HASH_JOIN(s) */ * from t left join s on t.a=s.a order by t.pk")
 	require.True(t, strings.Contains(err.Error(), "IndexHashJoinBuildHashTablePanic"))
 	require.NoError(t, failpoint.Disable(fpName1))
 	require.NoError(t, failpoint.Disable(fpName2))
-}
-
-func TestFinalizeCurrentSegPanic(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2")
-	tk.MustExec("create table t1 (a int, b int, c int)")
-	tk.MustExec("create table t2 (a int, b int, c int)")
-	tk.MustExec("insert into t1 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	tk.MustExec("insert into t2 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/finalizeCurrentSegPanic"
-	require.NoError(t, failpoint.Enable(fpName, "panic(\"finalizeCurrentSegPanic\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName))
-	}()
-	err := tk.QueryToErr("select /*+ hash_join(t1)*/ * from t1 join t2 on t1.a = t2.a and t1.b = t2.b")
-	require.EqualError(t, err, "failpoint panic: finalizeCurrentSegPanic")
-}
-
-func TestSplitPartitionPanic(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2")
-	tk.MustExec("create table t1 (a int, b int, c int)")
-	tk.MustExec("create table t2 (a int, b int, c int)")
-	tk.MustExec("insert into t1 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	tk.MustExec("insert into t2 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/splitPartitionPanic"
-	require.NoError(t, failpoint.Enable(fpName, "panic(\"splitPartitionPanic\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName))
-	}()
-	err := tk.QueryToErr("select /*+ hash_join(t1)*/ * from t1 join t2 on t1.a = t2.a and t1.b = t2.b")
-	require.EqualError(t, err, "failpoint panic: splitPartitionPanic")
-}
-
-func TestProcessOneProbeChunkPanic(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2")
-	tk.MustExec("create table t1 (a int, b int, c int)")
-	tk.MustExec("create table t2 (a int, b int, c int)")
-	tk.MustExec("insert into t1 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	tk.MustExec("insert into t2 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/processOneProbeChunkPanic"
-	require.NoError(t, failpoint.Enable(fpName, "panic(\"processOneProbeChunkPanic\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName))
-	}()
-	err := tk.QueryToErr("select /*+ hash_join(t1)*/ * from t1 join t2 on t1.a = t2.a and t1.b = t2.b")
-	require.EqualError(t, err, "failpoint panic: processOneProbeChunkPanic")
-}
-
-func TestCreateTasksPanic(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2")
-	tk.MustExec("create table t1 (a int, b int, c int)")
-	tk.MustExec("create table t2 (a int, b int, c int)")
-	tk.MustExec("insert into t1 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	tk.MustExec("insert into t2 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/createTasksPanic"
-	require.NoError(t, failpoint.Enable(fpName, "panic(\"createTasksPanic\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName))
-	}()
-	err := tk.QueryToErr("select /*+ hash_join(t1)*/ * from t1 join t2 on t1.a = t2.a and t1.b = t2.b")
-	require.EqualError(t, err, "failpoint panic: createTasksPanic")
-}
-
-func TestBuildHashTablePanic(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2")
-	tk.MustExec("create table t1 (a int, b int, c int)")
-	tk.MustExec("create table t2 (a int, b int, c int)")
-	tk.MustExec("insert into t1 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	tk.MustExec("insert into t2 values (1, 1, 1), (1, 2, 2), (2, 1, 3), (2, 2, 4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	fpName := "github.com/pingcap/tidb/pkg/executor/join/buildHashTablePanic"
-	require.NoError(t, failpoint.Enable(fpName, "panic(\"buildHashTablePanic\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName))
-	}()
-	err := tk.QueryToErr("select /*+ hash_join(t1)*/ * from t1 join t2 on t1.a = t2.a and t1.b = t2.b")
-	require.EqualError(t, err, "failpoint panic: buildHashTablePanic")
-}
-
-func TestKillDuringProbe(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t;")
-	tk.MustExec("drop table if exists t1;")
-	tk.MustExec("create table t(c1 int, c2 int)")
-	tk.MustExec("create table t1(c1 int, c2 int)")
-	tk.MustExec("insert into t values(1,1),(2,2)")
-	tk.MustExec("insert into t1 values(2,3),(4,4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/killedDuringProbe", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/killedDuringProbe"))
-	}()
-	// inner join
-	err := tk.QueryToErr("select /*+ HASH_JOIN(t, t1) */ * from t join t1 on t.c1 = t1.c1")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	// left outer join with outer to build
-	err = tk.QueryToErr("select /*+ HASH_JOIN(t, t1) */ * from t left join t1 on t.c1 = t1.c1 where t.c1 = 1 or t1.c2 > 20")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	// left outer join with inner to build
-	err = tk.QueryToErr("select /*+ HASH_JOIN_BUILD(t) */ * from t left outer join t1 on t.c1 = t1.c1 where t.c1 = 1 or t1.c2 > 20")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	tk.MustExec("insert into t1 values(1,30),(2,40)")
-	// left outer join with inner to build
-	err = tk.QueryToErr("select /*+ HASH_JOIN_BUILD(t) */ * from t left outer join t1 on t.c1 = t1.c1 where t.c1 = 1 or t1.c2 > 20")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-}
-
-func TestKillDuringBuild(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t;")
-	tk.MustExec("drop table if exists t1;")
-	tk.MustExec("create table t(c1 int, c2 int)")
-	tk.MustExec("create table t1(c1 int, c2 int)")
-	tk.MustExec("insert into t values(1,1),(2,2)")
-	tk.MustExec("insert into t1 values(2,3),(4,4)")
-	join.EnableHashJoinV2.Store(true)
-	defer func() {
-		join.EnableHashJoinV2.Store(false)
-	}()
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/join/killedDuringBuild", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/join/killedDuringBuild"))
-	}()
-	// inner join
-	err := tk.QueryToErr("select /*+ HASH_JOIN(t, t1) */ * from t join t1 on t.c1 = t1.c1")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	// left outer join with outer to build
-	err = tk.QueryToErr("select /*+ HASH_JOIN(t, t1) */ * from t left join t1 on t.c1 = t1.c1")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
-	// left outer join with inner to build
-	err = tk.QueryToErr("select /*+ HASH_JOIN_BUILD(t) */ * from t left outer join t1 on t.c1 = t1.c1")
-	require.Equal(t, exeerrors.ErrQueryInterrupted, err)
 }

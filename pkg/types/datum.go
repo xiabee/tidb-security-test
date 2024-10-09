@@ -1095,7 +1095,6 @@ func ProduceStrWithSpecifiedTp(s string, tp *FieldType, ctx Context, padZero boo
 		// overflowed part is all whitespaces
 		var overflowed string
 		var characterLen int
-		var needCalculateLen bool
 
 		// For  mysql.TypeTinyBlob, mysql.TypeMediumBlob, mysql.TypeLongBlob, mysql.TypeBlob(defined in tidb)
 		// and tinytext, text, mediumtext, longtext(not explicitly defined in tidb, corresponding to blob(s) in tidb) flen is the store length limit regardless of charset.
@@ -1127,29 +1126,25 @@ func ProduceStrWithSpecifiedTp(s string, tp *FieldType, ctx Context, padZero boo
 					s = truncateStr(s, truncateLen)
 				}
 			default:
-				if len(s) > flen {
-					characterLen = utf8.RuneCountInString(s)
-					if characterLen > flen {
-						// 1. If len(s) is 0 and flen is 0, truncateLen will be 0, don't truncate s.
-						//    CREATE TABLE t (a char(0));
-						//    INSERT INTO t VALUES (``);
-						// 2. If len(s) is 10 and flen is 0, truncateLen will be 0 too, but we still need to truncate s.
-						//    SELECT 1, CAST(1234 AS CHAR(0));
-						// So truncateLen is not a suitable variable to determine to do truncate or not.
-						var runeCount int
-						var truncateLen int
-						for i := range s {
-							if runeCount == flen {
-								truncateLen = i
-								break
-							}
-							runeCount++
+				characterLen = utf8.RuneCountInString(s)
+				if characterLen > flen {
+					// 1. If len(s) is 0 and flen is 0, truncateLen will be 0, don't truncate s.
+					//    CREATE TABLE t (a char(0));
+					//    INSERT INTO t VALUES (``);
+					// 2. If len(s) is 10 and flen is 0, truncateLen will be 0 too, but we still need to truncate s.
+					//    SELECT 1, CAST(1234 AS CHAR(0));
+					// So truncateLen is not a suitable variable to determine to do truncate or not.
+					var runeCount int
+					var truncateLen int
+					for i := range s {
+						if runeCount == flen {
+							truncateLen = i
+							break
 						}
-						overflowed = s[truncateLen:]
-						s = truncateStr(s, truncateLen)
-					} else {
-						needCalculateLen = true
+						runeCount++
 					}
+					overflowed = s[truncateLen:]
+					s = truncateStr(s, truncateLen)
 				}
 			}
 		} else if len(s) > flen {
@@ -1159,18 +1154,12 @@ func ProduceStrWithSpecifiedTp(s string, tp *FieldType, ctx Context, padZero boo
 		}
 
 		if len(overflowed) != 0 {
-			trimmed := strings.TrimRight(overflowed, " \t\n\r")
-			if len(trimmed) == 0 && !IsBinaryStr(tp) && IsTypeChar(tp.GetType()) {
+			trimed := strings.TrimRight(overflowed, " \t\n\r")
+			if len(trimed) == 0 && !IsBinaryStr(tp) && IsTypeChar(tp.GetType()) {
 				if tp.GetType() == mysql.TypeVarchar {
-					if needCalculateLen {
-						characterLen = utf8.RuneCountInString(s)
-					}
 					ctx.AppendWarning(ErrTruncated.FastGen("Data truncated, field len %d, data len %d", flen, characterLen))
 				}
 			} else {
-				if needCalculateLen {
-					characterLen = utf8.RuneCountInString(s)
-				}
 				err = ErrDataTooLong.FastGen("Data Too Long, field len %d, data len %d", flen, characterLen)
 			}
 		}

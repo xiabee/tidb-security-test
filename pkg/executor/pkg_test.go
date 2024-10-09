@@ -21,7 +21,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/executor/internal/testutil"
-	"github.com/pingcap/tidb/pkg/executor/join"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -63,22 +62,22 @@ func TestNestedLoopApply(t *testing.T) {
 	outerFilter := expression.NewFunctionInternal(sctx, ast.LT, types.NewFieldType(mysql.TypeTiny), col0, con)
 	innerFilter := outerFilter.Clone()
 	otherFilter := expression.NewFunctionInternal(sctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), col0, col1)
-	joiner := join.NewJoiner(sctx, plannercore.InnerJoin, false,
+	joiner := newJoiner(sctx, plannercore.InnerJoin, false,
 		make([]types.Datum, innerExec.Schema().Len()), []expression.Expression{otherFilter},
 		exec.RetTypes(outerExec), exec.RetTypes(innerExec), nil, false)
 	joinSchema := expression.NewSchema(col0, col1)
-	join := &join.NestedLoopApplyExec{
+	join := &NestedLoopApplyExec{
 		BaseExecutor: exec.NewBaseExecutor(sctx, joinSchema, 0),
-		OuterExec:    outerExec,
-		InnerExec:    innerExec,
-		OuterFilter:  []expression.Expression{outerFilter},
-		InnerFilter:  []expression.Expression{innerFilter},
-		Joiner:       joiner,
-		Sctx:         sctx,
+		outerExec:    outerExec,
+		innerExec:    innerExec,
+		outerFilter:  []expression.Expression{outerFilter},
+		innerFilter:  []expression.Expression{innerFilter},
+		joiner:       joiner,
+		ctx:          sctx,
 	}
-	join.InnerList = chunk.NewList(exec.RetTypes(innerExec), innerExec.InitCap(), innerExec.MaxChunkSize())
-	join.InnerChunk = exec.NewFirstChunk(innerExec)
-	join.OuterChunk = exec.NewFirstChunk(outerExec)
+	join.innerList = chunk.NewList(exec.RetTypes(innerExec), innerExec.InitCap(), innerExec.MaxChunkSize())
+	join.innerChunk = exec.NewFirstChunk(innerExec)
+	join.outerChunk = exec.NewFirstChunk(outerExec)
 	joinChk := exec.NewFirstChunk(join)
 	it := chunk.NewIterator4Chunk(joinChk)
 	for rowIdx := 1; ; {

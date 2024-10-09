@@ -20,7 +20,6 @@ go_library(
         "//pkg/parser/mysql",
         "//pkg/parser/terror",
         "//pkg/planner/core",
-        "//pkg/planner/core/base",
         "//pkg/sessionctx",
         "//pkg/sessionctx/binloginfo",
         "//pkg/sessionctx/variable",

@@ -48,7 +48,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/privilege"
 	"github.com/pingcap/tidb/pkg/privilege/privileges"
 	"github.com/pingcap/tidb/pkg/session/txninfo"
@@ -94,7 +93,7 @@ type memtableRetriever struct {
 	rowIdx      int
 	retrieved   bool
 	initialized bool
-	extractor   base.MemTablePredicateExtractor
+	extractor   plannercore.MemTablePredicateExtractor
 	is          infoschema.InfoSchema
 	memTracker  *memory.Tracker
 }
@@ -535,7 +534,7 @@ func (e *memtableRetriever) setDataFromReferConst(sctx sessionctx.Context, schem
 
 func (e *memtableRetriever) updateStatsCacheIfNeed() bool {
 	for _, col := range e.columns {
-		// only the following columns need stats cache.
+		// only the following columns need stats cahce.
 		if col.Name.O == "AVG_ROW_LENGTH" || col.Name.O == "DATA_LENGTH" || col.Name.O == "INDEX_LENGTH" || col.Name.O == "TABLE_ROWS" {
 			return true
 		}
@@ -854,15 +853,15 @@ func (e *hugeMemTableRetriever) setDataForColumnsWithOneTable(
 }
 
 func (e *hugeMemTableRetriever) dataForColumnsInTable(ctx context.Context, sctx sessionctx.Context, schema *model.DBInfo, tbl *model.TableInfo, priv mysql.PrivilegeType, extractor *plannercore.ColumnsTableExtractor) {
-	is := sessiontxn.GetTxnManager(sctx).GetTxnInfoSchema()
 	if tbl.IsView() {
 		e.viewMu.Lock()
 		_, ok := e.viewSchemaMap[tbl.ID]
 		if !ok {
-			var viewLogicalPlan base.Plan
+			var viewLogicalPlan plannercore.Plan
 			internalCtx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
 			// Build plan is not thread safe, there will be concurrency on sessionctx.
 			if err := runWithSystemSession(internalCtx, sctx, func(s sessionctx.Context) error {
+				is := sessiontxn.GetTxnManager(s).GetTxnInfoSchema()
 				planBuilder, _ := plannercore.NewPlanBuilder().Init(s.GetPlanCtx(), is, hint.NewQBHintHandler(nil))
 				var err error
 				viewLogicalPlan, err = planBuilder.BuildDataSourceFromView(ctx, schema.Name, tbl, nil, nil)
@@ -922,7 +921,7 @@ ForColumnsTag:
 				idx := expression.FindFieldNameIdxByColName(e.viewOutputNamesMap[tbl.ID], col.Name.L)
 				if idx >= 0 {
 					col1 := e.viewSchemaMap[tbl.ID].Columns[idx]
-					ft = col1.GetType(sctx.GetExprCtx().GetEvalCtx())
+					ft = col1.GetType()
 				}
 			}
 			e.viewMu.RUnlock()
@@ -1249,7 +1248,6 @@ func (e *memtableRetriever) setDataFromIndexes(ctx sessionctx.Context, schemas [
 					0,            // INDEX_ID
 					"YES",        // IS_VISIBLE
 					"YES",        // CLUSTERED
-					0,            // IS_GLOBAL
 				)
 				rows = append(rows, record)
 			}
@@ -1295,7 +1293,6 @@ func (e *memtableRetriever) setDataFromIndexes(ctx sessionctx.Context, schemas [
 						idxInfo.ID,      // INDEX_ID
 						visible,         // IS_VISIBLE
 						isClustered,     // CLUSTERED
-						idxInfo.Global,  // IS_GLOBAL
 					)
 					rows = append(rows, record)
 				}
@@ -1758,7 +1755,7 @@ func keyColumnUsageInTable(schema model.CIStr, table *model.TableInfo) [][]types
 				col.Name.O,            // COLUMN_NAME
 				i+1,                   // ORDINAL_POSITION,
 				1,                     // POSITION_IN_UNIQUE_CONSTRAINT
-				fk.RefSchema.O,        // REFERENCED_TABLE_SCHEMA
+				schema.O,              // REFERENCED_TABLE_SCHEMA
 				fk.RefTable.O,         // REFERENCED_TABLE_NAME
 				fkRefCol,              // REFERENCED_COLUMN_NAME
 			)
@@ -1768,18 +1765,20 @@ func keyColumnUsageInTable(schema model.CIStr, table *model.TableInfo) [][]types
 	return rows
 }
 
-func ensureSchemaTables(is infoschema.InfoSchema, schemaNames []model.CIStr) []*model.DBInfo {
-	// For infoschema v2, Tables of DBInfo could be missing.
-	res := make([]*model.DBInfo, 0, len(schemaNames))
-	for _, dbName := range schemaNames {
-		dbInfoRaw, _ := is.SchemaByName(dbName)
-		dbInfo := dbInfoRaw.Clone()
-		dbInfo.Tables = dbInfo.Tables[:0]
-		tbls := is.SchemaTables(dbName)
-		for _, tbl := range tbls {
-			dbInfo.Tables = append(dbInfo.Tables, tbl.Meta())
+func ensureSchemaTables(is infoschema.InfoSchema, schemas []*model.DBInfo) []*model.DBInfo {
+	res := schemas[:0]
+	for _, db := range schemas {
+		if len(db.Tables) == 0 {
+			// For infoschema v2, Tables of DBInfo could be missing.
+			dbInfo := db.Clone()
+			tbls := is.SchemaTables(db.Name)
+			for _, tbl := range tbls {
+				dbInfo.Tables = append(dbInfo.Tables, tbl.Meta())
+			}
+			res = append(res, dbInfo)
+		} else {
+			res = append(res, db)
 		}
-		res = append(res, dbInfo)
 	}
 	return res
 }
@@ -1825,8 +1824,8 @@ func (e *memtableRetriever) setDataForTiKVRegionStatus(ctx context.Context, sctx
 			return err
 		}
 	}
-	schemaNames := is.AllSchemaNames()
-	schemas := ensureSchemaTables(is, schemaNames)
+	schemas := is.AllSchemas()
+	schemas = ensureSchemaTables(is, schemas)
 	tableInfos := tikvHelper.GetRegionsTableInfo(allRegionsInfo, schemas)
 	for i := range allRegionsInfo.Regions {
 		regionTableList := tableInfos[allRegionsInfo.Regions[i].ID]
@@ -3465,8 +3464,8 @@ func (e *memtableRetriever) setDataFromRunawayWatches(sctx sessionctx.Context) e
 		row := types.MakeDatums(
 			watch.ID,
 			watch.ResourceGroupName,
-			watch.StartTime.Local().Format(time.DateTime),
-			watch.EndTime.Local().Format(time.DateTime),
+			watch.StartTime.UTC().Format(time.DateTime),
+			watch.EndTime.UTC().Format(time.DateTime),
 			rmpb.RunawayWatchType_name[int32(watch.Watch)],
 			watch.WatchText,
 			watch.Source,

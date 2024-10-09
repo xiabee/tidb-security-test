@@ -25,7 +25,6 @@ go_library(
         "//pkg/sessionctx",
         "//pkg/store/mockstore",
         "//pkg/testkit",
-        "//pkg/testkit/testfailpoint",
         "//pkg/util",
         "//pkg/util/logutil",
         "//pkg/util/sqlexec",

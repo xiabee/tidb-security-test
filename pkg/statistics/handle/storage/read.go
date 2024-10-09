@@ -28,7 +28,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/statistics/asyncload"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
 	statstypes "github.com/pingcap/tidb/pkg/statistics/handle/types"
 	"github.com/pingcap/tidb/pkg/statistics/handle/util"
@@ -565,7 +564,7 @@ func LoadHistogram(sctx sessionctx.Context, tableID int64, isIndex int, histID i
 
 // LoadNeededHistograms will load histograms for those needed columns/indices.
 func LoadNeededHistograms(sctx sessionctx.Context, statsCache statstypes.StatsCache, loadFMSketch bool) (err error) {
-	items := asyncload.AsyncLoadHistogramNeededItems.AllItems()
+	items := statistics.HistogramNeededItems.AllItems()
 	for _, item := range items {
 		if !item.IsIndex {
 			err = loadNeededColumnHistograms(sctx, statsCache, item.TableItemID, loadFMSketch, item.FullLoad)
@@ -582,12 +581,12 @@ func LoadNeededHistograms(sctx sessionctx.Context, statsCache statstypes.StatsCa
 
 // CleanFakeItemsForShowHistInFlights cleans the invalid inserted items.
 func CleanFakeItemsForShowHistInFlights(statsCache statstypes.StatsCache) int {
-	items := asyncload.AsyncLoadHistogramNeededItems.AllItems()
+	items := statistics.HistogramNeededItems.AllItems()
 	reallyNeeded := 0
 	for _, item := range items {
 		tbl, ok := statsCache.Get(item.TableID)
 		if !ok {
-			asyncload.AsyncLoadHistogramNeededItems.Delete(item.TableItemID)
+			statistics.HistogramNeededItems.Delete(item.TableItemID)
 			continue
 		}
 		loadNeeded := false
@@ -599,7 +598,7 @@ func CleanFakeItemsForShowHistInFlights(statsCache statstypes.StatsCache) int {
 			loadNeeded = loadNeeded && analyzed
 		}
 		if !loadNeeded {
-			asyncload.AsyncLoadHistogramNeededItems.Delete(item.TableItemID)
+			statistics.HistogramNeededItems.Delete(item.TableItemID)
 			continue
 		}
 		reallyNeeded++
@@ -615,13 +614,13 @@ func loadNeededColumnHistograms(sctx sessionctx.Context, statsCache statstypes.S
 	var colInfo *model.ColumnInfo
 	_, loadNeeded, analyzed := tbl.ColumnIsLoadNeeded(col.ID, true)
 	if !loadNeeded || !analyzed {
-		asyncload.AsyncLoadHistogramNeededItems.Delete(col)
+		statistics.HistogramNeededItems.Delete(col)
 		return nil
 	}
 	colInfo = tbl.ColAndIdxExistenceMap.GetCol(col.ID)
 	hg, _, statsVer, _, err := HistMetaFromStorageWithHighPriority(sctx, &col, colInfo)
 	if hg == nil || err != nil {
-		asyncload.AsyncLoadHistogramNeededItems.Delete(col)
+		statistics.HistogramNeededItems.Delete(col)
 		return err
 	}
 	var (
@@ -675,7 +674,7 @@ func loadNeededColumnHistograms(sctx sessionctx.Context, statsCache statstypes.S
 	}
 	tbl.Columns[col.ID] = colHist
 	statsCache.UpdateStatsCache([]*statistics.Table{tbl}, nil)
-	asyncload.AsyncLoadHistogramNeededItems.Delete(col)
+	statistics.HistogramNeededItems.Delete(col)
 	if col.IsSyncLoadFailed {
 		logutil.BgLogger().Warn("Hist for column should already be loaded as sync but not found.",
 			zap.Int64("table_id", colHist.PhysicalID),
@@ -692,12 +691,12 @@ func loadNeededIndexHistograms(sctx sessionctx.Context, statsCache statstypes.St
 	}
 	_, loadNeeded := tbl.IndexIsLoadNeeded(idx.ID)
 	if !loadNeeded {
-		asyncload.AsyncLoadHistogramNeededItems.Delete(idx)
+		statistics.HistogramNeededItems.Delete(idx)
 		return nil
 	}
 	hgMeta, lastAnalyzePos, statsVer, flag, err := HistMetaFromStorageWithHighPriority(sctx, &idx, nil)
 	if hgMeta == nil || err != nil {
-		asyncload.AsyncLoadHistogramNeededItems.Delete(idx)
+		statistics.HistogramNeededItems.Delete(idx)
 		return err
 	}
 	idxInfo := tbl.ColAndIdxExistenceMap.GetIndex(idx.ID)
@@ -734,12 +733,12 @@ func loadNeededIndexHistograms(sctx sessionctx.Context, statsCache statstypes.St
 	tbl.LastAnalyzeVersion = max(tbl.LastAnalyzeVersion, idxHist.LastUpdateVersion)
 	statsCache.UpdateStatsCache([]*statistics.Table{tbl}, nil)
 	if idx.IsSyncLoadFailed {
-		logutil.BgLogger().Warn("Hist for index should already be loaded as sync but not found.",
+		logutil.BgLogger().Warn("Hist for column should already be loaded as sync but not found.",
 			zap.Int64("table_id", idx.TableID),
-			zap.Int64("index_id", idxHist.Info.ID),
-			zap.String("index_name", idxHist.Info.Name.O))
+			zap.Int64("column_id", idxHist.Info.ID),
+			zap.String("column_name", idxHist.Info.Name.O))
 	}
-	asyncload.AsyncLoadHistogramNeededItems.Delete(idx)
+	statistics.HistogramNeededItems.Delete(idx)
 	return nil
 }
 

@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
@@ -47,7 +46,7 @@ type AnalyzeColumnsExec struct {
 
 	tableInfo     *model.TableInfo
 	colsInfo      []*model.ColumnInfo
-	handleCols    plannerutil.HandleCols
+	handleCols    core.HandleCols
 	commonHandle  *model.IndexInfo
 	resultHandler *tableResultHandler
 	indexes       []*model.IndexInfo
@@ -158,7 +157,7 @@ func (e *AnalyzeColumnsExec) buildStats(ranges []*ranger.Range, needExtStats boo
 		handleHist = &statistics.Histogram{}
 		handleCms = statistics.NewCMSketch(int32(e.opts[ast.AnalyzeOptCMSketchDepth]), int32(e.opts[ast.AnalyzeOptCMSketchWidth]))
 		handleTopn = statistics.NewTopN(int(e.opts[ast.AnalyzeOptNumTopN]))
-		handleFms = statistics.NewFMSketch(statistics.MaxSketchSize)
+		handleFms = statistics.NewFMSketch(maxSketchSize)
 		if e.analyzePB.IdxReq.Version != nil {
 			statsVer = int(*e.analyzePB.IdxReq.Version)
 		}
@@ -168,7 +167,7 @@ func (e *AnalyzeColumnsExec) buildStats(ranges []*ranger.Range, needExtStats boo
 	for i := range collectors {
 		collectors[i] = &statistics.SampleCollector{
 			IsMerger:      true,
-			FMSketch:      statistics.NewFMSketch(statistics.MaxSketchSize),
+			FMSketch:      statistics.NewFMSketch(maxSketchSize),
 			MaxSampleSize: int64(e.opts[ast.AnalyzeOptNumSamples]),
 			CMSketch:      statistics.NewCMSketch(int32(e.opts[ast.AnalyzeOptCMSketchDepth]), int32(e.opts[ast.AnalyzeOptCMSketchWidth])),
 		}
@@ -380,7 +379,7 @@ func (e *AnalyzeColumnsExecV1) analyzeColumnsPushDownV1() *statistics.AnalyzeRes
 	}
 }
 
-func hasPkHist(handleCols plannerutil.HandleCols) bool {
+func hasPkHist(handleCols core.HandleCols) bool {
 	return handleCols != nil && handleCols.IsInt()
 }
 

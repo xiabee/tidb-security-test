@@ -309,7 +309,6 @@ func (e *DDLExec) executeCreateView(ctx context.Context, s *ast.CreateViewStmt) 
 		return exeerrors.ErrViewInvalid.GenWithStackByArgs(s.ViewName.Schema.L, s.ViewName.Name.L)
 	}
 
-	e.Ctx().GetSessionVars().ClearRelatedTableForMDL()
 	return domain.GetDomain(e.Ctx()).DDL().CreateView(e.Ctx(), s)
 }
 
@@ -680,13 +679,7 @@ func (e *DDLExec) getRecoverDBByName(schemaName model.CIStr) (recoverSchemaInfo 
 					OldTableName:  tblInfo.Name.L,
 				})
 			}
-			recoverSchemaInfo = &ddl.RecoverSchemaInfo{
-				DBInfo:          schemaInfo,
-				RecoverTabsInfo: recoverTabsInfo,
-				DropJobID:       job.ID,
-				SnapshotTS:      job.StartTS,
-				OldSchemaName:   schemaName,
-			}
+			recoverSchemaInfo = &ddl.RecoverSchemaInfo{DBInfo: schemaInfo, RecoverTabsInfo: recoverTabsInfo, DropJobID: job.ID, SnapshotTS: job.StartTS, OldSchemaName: schemaName}
 			return true, nil
 		}
 		return false, nil

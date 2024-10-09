@@ -880,9 +880,7 @@ const (
 	// LabelForChunkDataInDiskByChunks represents the label of the chunk list in disk
 	LabelForChunkDataInDiskByChunks int = -30
 	// LabelForSortPartition represents the label of the sort partition
-	LabelForSortPartition int = -31
-	// LabelForHashTableInHashJoinV2 represents the label of the hash join v2's hash table
-	LabelForHashTableInHashJoinV2 int = -32
+	LabelForSortPartition = -31
 )
 
 // MetricsTypes is used to get label for metrics

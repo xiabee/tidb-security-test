@@ -23,7 +23,6 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/stretchr/testify/require"
 )
@@ -77,9 +76,9 @@ func getStatsLoadItem(t *testing.T, is infoschema.InfoSchema, item model.StatsLo
 	return str
 }
 
-func checkColumnStatsUsageForPredicates(t *testing.T, is infoschema.InfoSchema, lp base.LogicalPlan, expected []string, comment string) {
+func checkColumnStatsUsageForPredicates(t *testing.T, is infoschema.InfoSchema, lp LogicalPlan, expected []string, comment string) {
 	var tblColIDs []model.TableItemID
-	tblColIDs, _, _ = CollectColumnStatsUsage(lp, false)
+	tblColIDs, _, _ = CollectColumnStatsUsage(lp, true, false)
 	cols := make([]string, 0, len(tblColIDs))
 	for _, tblColID := range tblColIDs {
 		col := getColumnName(t, is, tblColID, comment)
@@ -89,9 +88,9 @@ func checkColumnStatsUsageForPredicates(t *testing.T, is infoschema.InfoSchema, 
 	require.Equal(t, expected, cols, comment)
 }
 
-func checkColumnStatsUsageForStatsLoad(t *testing.T, is infoschema.InfoSchema, lp base.LogicalPlan, expected []string, comment string) {
+func checkColumnStatsUsageForStatsLoad(t *testing.T, is infoschema.InfoSchema, lp LogicalPlan, expected []string, comment string) {
 	var loadItems []model.StatsLoadItem
-	_, loadItems, _ = CollectColumnStatsUsage(lp, true)
+	_, loadItems, _ = CollectColumnStatsUsage(lp, false, true)
 	cols := make([]string, 0, len(loadItems))
 	for _, item := range loadItems {
 		col := getStatsLoadItem(t, is, item, comment)
@@ -99,29 +98,6 @@ func checkColumnStatsUsageForStatsLoad(t *testing.T, is infoschema.InfoSchema, l
 	}
 	sort.Strings(cols)
 	require.Equal(t, expected, cols, comment+", we get %v", cols)
-}
-
-func TestSkipSystemTables(t *testing.T) {
-	sql := "select * from mysql.stats_meta where a > 1"
-	res := []string{}
-	s := createPlannerSuite()
-	defer s.Close()
-	ctx := context.Background()
-	stmt, err := s.p.ParseOneStmt(sql, "", "")
-	require.NoError(t, err)
-	err = Preprocess(context.Background(), s.sctx, stmt, WithPreprocessorReturn(&PreprocessorReturn{InfoSchema: s.is}))
-	require.NoError(t, err)
-	builder, _ := NewPlanBuilder().Init(s.ctx, s.is, hint.NewQBHintHandler(nil))
-	p, err := builder.Build(ctx, stmt)
-	require.NoError(t, err)
-	lp, ok := p.(base.LogicalPlan)
-	require.True(t, ok)
-	// We check predicate columns twice, before and after logical optimization. Some logical plan patterns may occur before
-	// logical optimization while others may occur after logical optimization.
-	checkColumnStatsUsageForPredicates(t, s.is, lp, res, sql)
-	lp, err = logicalOptimize(ctx, builder.GetOptFlag(), lp)
-	require.NoError(t, err)
-	checkColumnStatsUsageForPredicates(t, s.is, lp, res, sql)
 }
 
 func TestCollectPredicateColumns(t *testing.T) {
@@ -304,7 +280,7 @@ func TestCollectPredicateColumns(t *testing.T) {
 		builder, _ := NewPlanBuilder().Init(s.ctx, s.is, hint.NewQBHintHandler(nil))
 		p, err := builder.Build(ctx, stmt)
 		require.NoError(t, err, comment)
-		lp, ok := p.(base.LogicalPlan)
+		lp, ok := p.(LogicalPlan)
 		require.True(t, ok, comment)
 		// We check predicate columns twice, before and after logical optimization. Some logical plan patterns may occur before
 		// logical optimization while others may occur after logical optimization.
@@ -389,7 +365,7 @@ func TestCollectHistNeededColumns(t *testing.T) {
 		builder, _ := NewPlanBuilder().Init(s.ctx, s.is, hint.NewQBHintHandler(nil))
 		p, err := builder.Build(ctx, stmt)
 		require.NoError(t, err, comment)
-		lp, ok := p.(base.LogicalPlan)
+		lp, ok := p.(LogicalPlan)
 		require.True(t, ok, comment)
 		flags := builder.GetOptFlag()
 		// JoinReOrder may need columns stats so collecting hist-needed columns must happen before JoinReOrder.

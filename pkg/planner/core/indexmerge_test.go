@@ -18,11 +18,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/util/hint"
@@ -59,7 +59,7 @@ func getIndexMergePathDigest(paths []*util.AccessPath, startIndex int) string {
 			if j > 0 {
 				idxMergeDisgest += ","
 			}
-			idxMergeDisgest += path.TableFilters[j].String()
+			idxMergeDisgest += path.TableFilters[j].StringWithCtx(errors.RedactLogDisable)
 		}
 		idxMergeDisgest += "]}"
 	}
@@ -95,9 +95,9 @@ func TestIndexMergePathGeneration(t *testing.T) {
 			continue
 		}
 		require.NoError(t, err)
-		p, err = logicalOptimize(ctx, builder.optFlag, p.(base.LogicalPlan))
+		p, err = logicalOptimize(ctx, builder.optFlag, p.(LogicalPlan))
 		require.NoError(t, err)
-		lp := p.(base.LogicalPlan)
+		lp := p.(LogicalPlan)
 		var ds *DataSource
 		for ds == nil {
 			switch v := lp.(type) {
@@ -108,10 +108,10 @@ func TestIndexMergePathGeneration(t *testing.T) {
 			}
 		}
 		ds.SCtx().GetSessionVars().SetEnableIndexMerge(true)
-		idxMergeStartIndex := len(ds.PossibleAccessPaths)
-		_, err = lp.RecursiveDeriveStats(nil)
+		idxMergeStartIndex := len(ds.possibleAccessPaths)
+		_, err = lp.recursiveDeriveStats(nil)
 		require.NoError(t, err)
-		result := getIndexMergePathDigest(ds.PossibleAccessPaths, idxMergeStartIndex)
+		result := getIndexMergePathDigest(ds.possibleAccessPaths, idxMergeStartIndex)
 		testdata.OnRecord(func() {
 			output[i] = result
 		})

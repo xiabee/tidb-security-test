@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/go-units"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -293,7 +292,7 @@ func TestShowStatusSnapshot(t *testing.T) {
 	UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointValue, safePointComment)
 	tk.MustExec(updateSafePoint)
 
-	for _, cacheSize := range []int{units.GiB, 0} {
+	for _, cacheSize := range []int{1024, 0} {
 		tk.MustExec("set @@global.tidb_schema_cache_size = ?", cacheSize)
 		tk.MustExec("create table t (a int);")
 		snapshotTime := time.Now()
@@ -407,7 +406,7 @@ func TestShowAnalyzeStatus(t *testing.T) {
 	require.Equal(t, "test", rows[0][0])
 	require.Equal(t, "t", rows[0][1])
 	require.Equal(t, "", rows[0][2])
-	require.Equal(t, "analyze table all columns with 256 buckets, 100 topn, 1 samplerate", rows[0][3])
+	require.Equal(t, "analyze table all columns with 256 buckets, 500 topn, 1 samplerate", rows[0][3])
 	require.Equal(t, "2", rows[0][4])
 	checkTime := func(val any) {
 		str, ok := val.(string)

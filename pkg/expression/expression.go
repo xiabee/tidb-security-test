@@ -17,10 +17,9 @@ package expression
 import (
 	goJSON "encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/errctx"
-	exprctx "github.com/pingcap/tidb/pkg/expression/context"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -197,7 +196,7 @@ type Expression interface {
 	EvalJSON(ctx EvalContext, row chunk.Row) (val types.BinaryJSON, isNull bool, err error)
 
 	// GetType gets the type that the expression returns.
-	GetType(ctx EvalContext) *types.FieldType
+	GetType() *types.FieldType
 
 	// Clone copies an expression totally.
 	Clone() Expression
@@ -220,7 +219,7 @@ type Expression interface {
 	// resolveIndices is called inside the `ResolveIndices` It will perform on the expression itself.
 	resolveIndices(schema *Schema) error
 
-	// ResolveIndicesByVirtualExpr resolves indices by the given schema in terms of virtual expression. It will copy the original expression and return the copied one.
+	// ResolveIndicesByVirtualExpr resolves indices by the given schema in terms of virual expression. It will copy the original expression and return the copied one.
 	ResolveIndicesByVirtualExpr(ctx EvalContext, schema *Schema) (Expression, bool)
 
 	// resolveIndicesByVirtualExpr is called inside the `ResolveIndicesByVirtualExpr` It will perform on the expression itself.
@@ -252,6 +251,9 @@ type Expression interface {
 
 	// MemoryUsage return the memory usage of Expression
 	MemoryUsage() int64
+
+	// StringWithCtx returns the string representation of the expression with context.
+	StringWithCtx(redact string) string
 }
 
 // CNFExprs stands for a CNF expression.
@@ -289,13 +291,13 @@ func IsEQCondFromIn(expr Expression) bool {
 }
 
 // ExprNotNull checks if an expression is possible to be null.
-func ExprNotNull(ctx EvalContext, expr Expression) bool {
+func ExprNotNull(expr Expression) bool {
 	if c, ok := expr.(*Constant); ok {
 		return !c.Value.IsNull()
 	}
 	// For ScalarFunction, the result would not be correct until we support maintaining
 	// NotNull flag for it.
-	return mysql.HasNotNullFlag(expr.GetType(ctx).GetFlag())
+	return mysql.HasNotNullFlag(expr.GetType().GetFlag())
 }
 
 // EvalBool evaluates expression list to a boolean value. The first returned value
@@ -401,7 +403,7 @@ func VecEvalBool(ctx EvalContext, vecEnabled bool, exprList CNFExprs, input *chu
 	isZero := allocZeroSlice(n)
 	defer deallocateZeroSlice(isZero)
 	for _, expr := range exprList {
-		tp := expr.GetType(ctx)
+		tp := expr.GetType()
 		eType := tp.EvalType()
 		if CanImplicitEvalReal(expr) {
 			eType = types.ETReal
@@ -635,7 +637,7 @@ func EvalExpr(ctx EvalContext, vecEnabled bool, expr Expression, evalType types.
 		case types.ETDecimal:
 			err = expr.VecEvalDecimal(ctx, input, result)
 		default:
-			err = fmt.Errorf("invalid eval type %v", expr.GetType(ctx).EvalType())
+			err = fmt.Errorf("invalid eval type %v", expr.GetType().EvalType())
 		}
 	} else {
 		ind, n := 0, input.NumRows()
@@ -743,7 +745,7 @@ func EvalExpr(ctx EvalContext, vecEnabled bool, expr Expression, evalType types.
 				ind++
 			}
 		default:
-			err = fmt.Errorf("invalid eval type %v", expr.GetType(ctx).EvalType())
+			err = fmt.Errorf("invalid eval type %v", expr.GetType().EvalType())
 		}
 	}
 	return
@@ -866,9 +868,9 @@ func SplitDNFItems(onExpr Expression) []Expression {
 // If the Expression is a non-constant value, it means the result is unknown.
 func EvaluateExprWithNull(ctx BuildContext, schema *Schema, expr Expression) Expression {
 	if MaybeOverOptimized4PlanCache(ctx, []Expression{expr}) {
-		ctx.SetSkipPlanCache(fmt.Sprintf("%v affects null check", expr.String()))
+		ctx.SetSkipPlanCache(errors.NewNoStackErrorf("%v affects null check", expr.StringWithCtx(errors.RedactLogDisable)))
 	}
-	if ctx.IsInNullRejectCheck() {
+	if ctx.GetSessionVars().StmtCtx.InNullRejectCheck {
 		expr, _ = evaluateExprWithNullInNullRejectCheck(ctx, schema, expr)
 		return expr
 	}
@@ -1009,6 +1011,8 @@ func TableInfo2SchemaAndNames(ctx BuildContext, dbName model.CIStr, tbl *model.T
 }
 
 // ColumnInfos2ColumnsAndNames converts the ColumnInfo to the *Column and NameSlice.
+// This function is **unsafe** to be called concurrently, unless the `IgnoreTruncate` has been set to `true`. The only
+// known case which will call this function concurrently is `CheckTableExec`. Ref #18408 and #42341.
 func ColumnInfos2ColumnsAndNames(ctx BuildContext, dbName, tblName model.CIStr, colInfos []*model.ColumnInfo, tblInfo *model.TableInfo) ([]*Column, types.NameSlice, error) {
 	columns := make([]*Column, 0, len(colInfos))
 	names := make([]*types.FieldName, 0, len(colInfos))
@@ -1023,7 +1027,7 @@ func ColumnInfos2ColumnsAndNames(ctx BuildContext, dbName, tblName model.CIStr, 
 		newCol := &Column{
 			RetType:  col.FieldType.Clone(),
 			ID:       col.ID,
-			UniqueID: ctx.AllocPlanColumnID(),
+			UniqueID: ctx.GetSessionVars().AllocPlanColumnID(),
 			Index:    col.Offset,
 			OrigName: names[i].String(),
 			IsHidden: col.Hidden,
@@ -1032,16 +1036,17 @@ func ColumnInfos2ColumnsAndNames(ctx BuildContext, dbName, tblName model.CIStr, 
 	}
 	// Resolve virtual generated column.
 	mockSchema := NewSchema(columns...)
+	// Ignore redundant warning here.
+	flags := ctx.GetSessionVars().StmtCtx.TypeFlags()
+	if !flags.IgnoreTruncateErr() {
+		defer func() {
+			ctx.GetSessionVars().StmtCtx.SetTypeFlags(flags)
+		}()
+		ctx.GetSessionVars().StmtCtx.SetTypeFlags(flags.WithIgnoreTruncateErr(true))
+	}
 
-	truncateIgnored := false
 	for i, col := range colInfos {
 		if col.IsVirtualGenerated() {
-			if !truncateIgnored {
-				// Ignore redundant warning here.
-				ctx = exprctx.CtxWithHandleTruncateErrLevel(ctx, errctx.LevelIgnore)
-				truncateIgnored = true
-			}
-
 			expr, err := generatedexpr.ParseExpression(col.GeneratedExprString)
 			if err != nil {
 				return nil, nil, errors.Trace(err)
@@ -1092,7 +1097,7 @@ func IsBinaryLiteral(expr Expression) bool {
 // The `wrapForInt` indicates whether we need to wrapIsTrue for non-logical Expression with int type.
 // TODO: remove this function. ScalarFunction should be newed in one place.
 func wrapWithIsTrue(ctx BuildContext, keepNull bool, arg Expression, wrapForInt bool) (Expression, error) {
-	if arg.GetType(ctx.GetEvalCtx()).EvalType() == types.ETInt {
+	if arg.GetType().EvalType() == types.ETInt {
 		if !wrapForInt {
 			return arg, nil
 		}
@@ -1150,12 +1155,12 @@ func wrapWithIsTrue(ctx BuildContext, keepNull bool, arg Expression, wrapForInt 
 // +----------------------+
 // The expected `decimal` and `length` of the outer cast_as_double need to be
 // propagated to the inner div.
-func PropagateType(ctx EvalContext, evalType types.EvalType, args ...Expression) {
+func PropagateType(evalType types.EvalType, args ...Expression) {
 	switch evalType {
 	case types.ETReal:
 		expr := args[0]
-		oldFlen, oldDecimal := expr.GetType(ctx).GetFlen(), expr.GetType(ctx).GetDecimal()
-		newFlen, newDecimal := setDataTypeDouble(expr.GetType(ctx).GetDecimal())
+		oldFlen, oldDecimal := expr.GetType().GetFlen(), expr.GetType().GetDecimal()
+		newFlen, newDecimal := setDataTypeDouble(expr.GetType().GetDecimal())
 		// For float(M,D), double(M,D) or decimal(M,D), M must be >= D.
 		if newFlen < newDecimal {
 			newFlen = oldFlen - oldDecimal + newDecimal
@@ -1171,7 +1176,7 @@ func PropagateType(ctx EvalContext, evalType types.EvalType, args ...Expression)
 				newCol.(*CorrelatedColumn).RetType = col.RetType.Clone()
 				args[0] = newCol
 			}
-			if args[0].GetType(ctx).GetType() == mysql.TypeNewDecimal {
+			if args[0].GetType().GetType() == mysql.TypeNewDecimal {
 				if newDecimal > mysql.MaxDecimalScale {
 					newDecimal = mysql.MaxDecimalScale
 				}
@@ -1191,8 +1196,8 @@ func PropagateType(ctx EvalContext, evalType types.EvalType, args ...Expression)
 					}
 				}
 			}
-			args[0].GetType(ctx).SetFlenUnderLimit(newFlen)
-			args[0].GetType(ctx).SetDecimalUnderLimit(newDecimal)
+			args[0].GetType().SetFlenUnderLimit(newFlen)
+			args[0].GetType().SetDecimalUnderLimit(newDecimal)
 		}
 	}
 }
@@ -1227,4 +1232,19 @@ func Args2Expressions4Test(args ...any) []Expression {
 		exprs[i] = &Constant{Value: d, RetType: ft}
 	}
 	return exprs
+}
+
+// StringifyExpressionsWithCtx turns a slice of expressions into string
+func StringifyExpressionsWithCtx(ctx EvalContext, exprs []Expression) string {
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, expr := range exprs {
+		sb.WriteString(expr.StringWithCtx(errors.RedactLogDisable))
+
+		if i != len(exprs)-1 {
+			sb.WriteString(" ")
+		}
+	}
+	sb.WriteString("]")
+	return sb.String()
 }

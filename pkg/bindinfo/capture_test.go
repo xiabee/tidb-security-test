@@ -662,7 +662,6 @@ func TestCaptureTableFilterValid(t *testing.T) {
 }
 
 func TestCaptureWildcardFilter(t *testing.T) {
-	t.Skip("the old implementation of Capture is considered as deprecated")
 	store, dom := testkit.CreateMockStoreAndDomain(t)
 
 	tk := testkit.NewTestKit(t, store)

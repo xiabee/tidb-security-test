@@ -20,11 +20,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/intest"
+	"github.com/pingcap/tidb/pkg/util/redact"
 )
 
 // ExplainInfo implements the Expression interface.
@@ -37,14 +38,6 @@ func (expr *ScalarFunction) explainInfo(ctx EvalContext, normalized bool) string
 	intest.Assert(normalized || ctx != nil)
 	var buffer bytes.Buffer
 	fmt.Fprintf(&buffer, "%s(", expr.FuncName.L)
-	// convert `in(_tidb_tid, -1)` to `in(_tidb_tid, dual)` whether normalized equals to true or false.
-	if expr.FuncName.L == ast.In {
-		args := expr.GetArgs()
-		if len(args) == 2 && strings.HasSuffix(args[0].ExplainNormalizedInfo(), model.ExtraPhysTblIdName.L) && args[1].(*Constant).Value.GetInt64() == -1 {
-			buffer.WriteString(args[0].ExplainNormalizedInfo() + ", dual)")
-			return buffer.String()
-		}
-	}
 	switch expr.FuncName.L {
 	case ast.Cast:
 		for _, arg := range expr.GetArgs() {
@@ -112,7 +105,15 @@ func (col *Column) ColumnExplainInfo(normalized bool) string {
 		}
 		return "?"
 	}
-	return col.String()
+	return col.StringWithCtx(errors.RedactLogDisable)
+}
+
+// ColumnExplainInfoNormalized returns the normalized explained info for column.
+func (col *Column) ColumnExplainInfoNormalized() string {
+	if col.OrigName != "" {
+		return col.OrigName
+	}
+	return "?"
 }
 
 // ExplainInfo implements the Expression interface.
@@ -132,9 +133,20 @@ func (col *Column) ExplainNormalizedInfo4InList() string {
 
 // ExplainInfo implements the Expression interface.
 func (expr *Constant) ExplainInfo(ctx EvalContext) string {
+	redact := ctx.GetTiDBRedactLog()
+	if redact == errors.RedactLogEnable {
+		return "?"
+	}
 	dt, err := expr.Eval(ctx, chunk.Row{})
 	if err != nil {
 		return "not recognized const value"
+	}
+	if redact == errors.RedactLogMarker {
+		builder := new(strings.Builder)
+		builder.WriteString("‹")
+		builder.WriteString(expr.format(dt))
+		builder.WriteString("›")
+		return builder.String()
 	}
 	return expr.format(dt)
 }
@@ -161,32 +173,32 @@ func (expr *Constant) format(dt types.Datum) string {
 }
 
 // ExplainExpressionList generates explain information for a list of expressions.
-func ExplainExpressionList(exprs []Expression, schema *Schema) string {
+func ExplainExpressionList(exprs []Expression, schema *Schema, redactMode string) string {
 	builder := &strings.Builder{}
 	for i, expr := range exprs {
 		switch expr.(type) {
 		case *Column, *CorrelatedColumn:
-			builder.WriteString(expr.String())
-			if expr.String() != schema.Columns[i].String() {
+			builder.WriteString(expr.StringWithCtx(redactMode))
+			if expr.StringWithCtx(redactMode) != schema.Columns[i].StringWithCtx(redactMode) {
 				// simple col projected again with another uniqueID without origin name.
 				builder.WriteString("->")
-				builder.WriteString(schema.Columns[i].String())
+				builder.WriteString(schema.Columns[i].StringWithCtx(redactMode))
 			}
 		case *Constant:
-			v := expr.String()
+			v := expr.StringWithCtx(errors.RedactLogDisable)
 			length := 64
 			if len(v) < length {
-				builder.WriteString(v)
+				redact.WriteRedact(builder, v, redactMode)
 			} else {
-				builder.WriteString(v[:length])
+				redact.WriteRedact(builder, v[:length], redactMode)
 				fmt.Fprintf(builder, "(len:%d)", len(v))
 			}
 			builder.WriteString("->")
-			builder.WriteString(schema.Columns[i].String())
+			builder.WriteString(schema.Columns[i].StringWithCtx(redactMode))
 		default:
-			builder.WriteString(expr.String())
+			builder.WriteString(expr.StringWithCtx(redactMode))
 			builder.WriteString("->")
-			builder.WriteString(schema.Columns[i].String())
+			builder.WriteString(schema.Columns[i].StringWithCtx(redactMode))
 		}
 		if i+1 < len(exprs) {
 			builder.WriteString(", ")

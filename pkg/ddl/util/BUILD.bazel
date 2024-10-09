@@ -16,7 +16,6 @@ go_library(
         "//pkg/parser/terror",
         "//pkg/sessionctx",
         "//pkg/sessionctx/variable",
-        "//pkg/table/tables",
         "//pkg/util/chunk",
         "//pkg/util/mock",
         "//pkg/util/sqlexec",

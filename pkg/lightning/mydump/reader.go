@@ -91,9 +91,7 @@ func ExportStatement(ctx context.Context, store storage.ExternalStorage,
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		store = storage.WithCompression(store, compressType, storage.DecompressConfig{
-			ZStdDecodeConcurrency: 1,
-		})
+		store = storage.WithCompression(store, compressType, storage.DecompressConfig{})
 	}
 	fd, err := store.Open(ctx, sqlFile.FileMeta.Path, nil)
 	if err != nil {

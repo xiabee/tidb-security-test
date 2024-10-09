@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 
+	perrors "github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -76,6 +77,7 @@ func (p *PhysicalIndexScan) ExplainNormalizedInfo() string {
 
 // OperatorInfo implements dataAccesser interface.
 func (p *PhysicalIndexScan) OperatorInfo(normalized bool) string {
+	redact := p.SCtx().GetSessionVars().EnableRedactLog
 	var buffer strings.Builder
 	if len(p.rangeInfo) > 0 {
 		if !normalized {
@@ -94,7 +96,7 @@ func (p *PhysicalIndexScan) OperatorInfo(normalized bool) string {
 				if i != 0 {
 					buffer.WriteString(" ")
 				}
-				buffer.WriteString(expr.String())
+				buffer.WriteString(expr.StringWithCtx(redact))
 			}
 			buffer.WriteString("], ")
 		}
@@ -104,7 +106,7 @@ func (p *PhysicalIndexScan) OperatorInfo(normalized bool) string {
 		} else if !p.isFullScan() {
 			buffer.WriteString("range:")
 			for _, idxRange := range p.Ranges {
-				buffer.WriteString(idxRange.String())
+				buffer.WriteString(idxRange.Redact(redact))
 				buffer.WriteString(", ")
 			}
 		}
@@ -182,6 +184,7 @@ func (p *PhysicalTableScan) ExplainNormalizedInfo() string {
 
 // OperatorInfo implements dataAccesser interface.
 func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
+	redact := p.SCtx().GetSessionVars().EnableRedactLog
 	var buffer strings.Builder
 	if len(p.rangeInfo) > 0 {
 		if !normalized {
@@ -200,7 +203,7 @@ func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
 				if i != 0 {
 					buffer.WriteString(" ")
 				}
-				buffer.WriteString(AccessCondition.String())
+				buffer.WriteString(AccessCondition.StringWithCtx(redact))
 			}
 			buffer.WriteString("], ")
 		}
@@ -210,7 +213,7 @@ func (p *PhysicalTableScan) OperatorInfo(normalized bool) string {
 		} else if !p.isFullScan() {
 			buffer.WriteString("range:")
 			for _, idxRange := range p.Ranges {
-				buffer.WriteString(idxRange.String())
+				buffer.WriteString(idxRange.Redact(redact))
 				buffer.WriteString(", ")
 			}
 		}
@@ -374,7 +377,8 @@ func (p *PhysicalSelection) ExplainNormalizedInfo() string {
 
 // ExplainInfo implements Plan interface.
 func (p *PhysicalProjection) ExplainInfo() string {
-	exprStr := expression.ExplainExpressionList(p.Exprs, p.schema)
+	enableRedactLog := p.SCtx().GetSessionVars().EnableRedactLog
+	exprStr := expression.ExplainExpressionList(p.Exprs, p.schema, enableRedactLog)
 	if p.TiFlashFineGrainedShuffleStreamCount > 0 {
 		exprStr += fmt.Sprintf(", stream_count: %d", p.TiFlashFineGrainedShuffleStreamCount)
 	}
@@ -383,22 +387,23 @@ func (p *PhysicalProjection) ExplainInfo() string {
 
 func (p *PhysicalExpand) explainInfoV2() string {
 	sb := strings.Builder{}
+	enableRedactLog := p.SCtx().GetSessionVars().EnableRedactLog
 	for i, oneL := range p.LevelExprs {
 		if i == 0 {
 			sb.WriteString("level-projection:")
 			sb.WriteString("[")
-			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema))
+			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema, enableRedactLog))
 			sb.WriteString("]")
 		} else {
 			sb.WriteString(",[")
-			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema))
+			sb.WriteString(expression.ExplainExpressionList(oneL, p.schema, enableRedactLog))
 			sb.WriteString("]")
 		}
 	}
 	sb.WriteString("; schema: [")
 	colStrs := make([]string, 0, len(p.schema.Columns))
 	for _, col := range p.schema.Columns {
-		colStrs = append(colStrs, col.String())
+		colStrs = append(colStrs, col.StringWithCtx(perrors.RedactLogDisable))
 	}
 	sb.WriteString(strings.Join(colStrs, ","))
 	sb.WriteString("]")
@@ -433,12 +438,18 @@ func (p *PhysicalSort) ExplainInfo() string {
 
 // ExplainInfo implements Plan interface.
 func (p *PhysicalLimit) ExplainInfo() string {
+	redact := p.SCtx().GetSessionVars().EnableRedactLog
 	buffer := bytes.NewBufferString("")
 	if len(p.GetPartitionBy()) > 0 {
 		buffer = explainPartitionBy(buffer, p.GetPartitionBy(), false)
-		fmt.Fprintf(buffer, ", offset:%v, count:%v", p.Offset, p.Count)
-	} else {
+		fmt.Fprintf(buffer, ", ")
+	}
+	if redact == perrors.RedactLogDisable {
 		fmt.Fprintf(buffer, "offset:%v, count:%v", p.Offset, p.Count)
+	} else if redact == perrors.RedactLogMarker {
+		fmt.Fprintf(buffer, "offset:‹%v›, count:‹%v›", p.Offset, p.Count)
+	} else if redact == perrors.RedactLogEnable {
+		fmt.Fprintf(buffer, "offset:?, count:?")
 	}
 	return buffer.String()
 }
@@ -452,9 +463,9 @@ func (p *PhysicalExpand) ExplainInfo() string {
 	str.WriteString("group set num:")
 	str.WriteString(strconv.FormatInt(int64(len(p.GroupingSets)), 10))
 	str.WriteString(", groupingID:")
-	str.WriteString(p.GroupingIDCol.String())
+	str.WriteString(p.GroupingIDCol.StringWithCtx(perrors.RedactLogDisable))
 	str.WriteString(", ")
-	str.WriteString(p.GroupingSets.String())
+	str.WriteString(p.GroupingSets.StringWithCtx(perrors.RedactLogDisable))
 	return str.String()
 }
 
@@ -593,7 +604,7 @@ func (p *PhysicalHashJoin) explainInfo(normalized bool) string {
 			return expression.SortedExplainNormalizedExpressionList(exprs)
 		}
 	}
-
+	redact := p.SCtx().GetSessionVars().EnableRedactLog
 	buffer := new(strings.Builder)
 
 	if len(p.EqualConditions) == 0 {
@@ -617,7 +628,7 @@ func (p *PhysicalHashJoin) explainInfo(normalized bool) string {
 				if i != 0 {
 					buffer.WriteString(" ")
 				}
-				buffer.WriteString(EqualConditions.String())
+				buffer.WriteString(EqualConditions.StringWithCtx(redact))
 			}
 			buffer.WriteString("]")
 		}
@@ -632,7 +643,7 @@ func (p *PhysicalHashJoin) explainInfo(normalized bool) string {
 				if i != 0 {
 					buffer.WriteString(" ")
 				}
-				buffer.WriteString(NAEqualCondition.String())
+				buffer.WriteString(NAEqualCondition.StringWithCtx(redact))
 			}
 			buffer.WriteString("]")
 		}
@@ -647,7 +658,7 @@ func (p *PhysicalHashJoin) explainInfo(normalized bool) string {
 				if i != 0 {
 					buffer.WriteString(" ")
 				}
-				buffer.WriteString(LeftConditions.String())
+				buffer.WriteString(LeftConditions.StringWithCtx(redact))
 			}
 			buffer.WriteString("]")
 		}
@@ -704,7 +715,7 @@ func (p *PhysicalMergeJoin) explainInfo(normalized bool) string {
 		if normalized {
 			fmt.Fprintf(buffer, ", left cond:%s", expression.SortedExplainNormalizedExpressionList(p.LeftConditions))
 		} else {
-			fmt.Fprintf(buffer, ", left cond:%s", p.LeftConditions)
+			fmt.Fprintf(buffer, ", left cond:%s", sortedExplainExpressionList(evalCtx, p.LeftConditions))
 		}
 	}
 	if len(p.RightConditions) > 0 {
@@ -752,7 +763,14 @@ func (p *PhysicalTopN) ExplainInfo() string {
 		}
 		buffer = explainByItems(p.SCtx().GetExprCtx().GetEvalCtx(), buffer, p.ByItems)
 	}
-	fmt.Fprintf(buffer, ", offset:%v, count:%v", p.Offset, p.Count)
+	switch p.SCtx().GetSessionVars().EnableRedactLog {
+	case perrors.RedactLogDisable:
+		fmt.Fprintf(buffer, ", offset:%v, count:%v", p.Offset, p.Count)
+	case perrors.RedactLogMarker:
+		fmt.Fprintf(buffer, ", offset:‹%v›, count:‹%v›", p.Offset, p.Count)
+	case perrors.RedactLogEnable:
+		fmt.Fprintf(buffer, ", offset:?, count:?")
+	}
 	return buffer.String()
 }
 
@@ -793,7 +811,14 @@ func (p *PhysicalWindow) formatFrameBound(buffer *bytes.Buffer, bound *FrameBoun
 			fmt.Fprintf(buffer, "%s", sf.GetArgs()[1].ExplainInfo(evalCtx))
 		}
 	} else {
-		fmt.Fprintf(buffer, "%d", bound.Num)
+		switch p.SCtx().GetSessionVars().EnableRedactLog {
+		case perrors.RedactLogDisable:
+			fmt.Fprintf(buffer, "%d", bound.Num)
+		case perrors.RedactLogMarker:
+			fmt.Fprintf(buffer, "‹%d›", bound.Num)
+		case perrors.RedactLogEnable:
+			fmt.Fprintf(buffer, "?")
+		}
 	}
 	if bound.Type == ast.Preceding {
 		buffer.WriteString(" preceding")
@@ -870,7 +895,7 @@ func formatWindowFuncDescs(buffer *bytes.Buffer, descs []*aggregation.WindowFunc
 		if i != 0 {
 			buffer.WriteString(", ")
 		}
-		fmt.Fprintf(buffer, "%v->%v", desc, schema.Columns[winFuncStartIdx+i])
+		fmt.Fprintf(buffer, "%v->%v", desc.StringWithCtx(perrors.RedactLogDisable), schema.Columns[winFuncStartIdx+i])
 	}
 	return buffer
 }
@@ -918,7 +943,8 @@ func (p *LogicalAggregation) ExplainInfo() string {
 
 // ExplainInfo implements Plan interface.
 func (p *LogicalProjection) ExplainInfo() string {
-	return expression.ExplainExpressionList(p.Exprs, p.Schema())
+	enableRedactLog := p.SCtx().GetSessionVars().EnableRedactLog
+	return expression.ExplainExpressionList(p.Exprs, p.schema, enableRedactLog)
 }
 
 // ExplainInfo implements Plan interface.
@@ -942,14 +968,14 @@ func (p *LogicalTableDual) ExplainInfo() string {
 // ExplainInfo implements Plan interface.
 func (ds *DataSource) ExplainInfo() string {
 	buffer := bytes.NewBufferString("")
-	tblName := ds.TableInfo.Name.O
+	tblName := ds.tableInfo.Name.O
 	if ds.TableAsName != nil && ds.TableAsName.O != "" {
 		tblName = ds.TableAsName.O
 	}
 	fmt.Fprintf(buffer, "table:%s", tblName)
-	if ds.PartitionDefIdx != nil {
-		if pi := ds.TableInfo.GetPartitionInfo(); pi != nil {
-			fmt.Fprintf(buffer, ", partition:%s", pi.Definitions[*ds.PartitionDefIdx].Name.O)
+	if ds.partitionDefIdx != nil {
+		if pi := ds.tableInfo.GetPartitionInfo(); pi != nil {
+			fmt.Fprintf(buffer, ", partition:%s", pi.Definitions[*ds.partitionDefIdx].Name.O)
 		}
 	}
 	return buffer.String()
@@ -1068,8 +1094,8 @@ func (p *LogicalLimit) ExplainInfo() string {
 // ExplainInfo implements Plan interface.
 func (p *LogicalTableScan) ExplainInfo() string {
 	buffer := bytes.NewBufferString(p.Source.ExplainInfo())
-	if p.Source.HandleCols != nil {
-		fmt.Fprintf(buffer, ", pk col:%s", p.Source.HandleCols)
+	if p.Source.handleCols != nil {
+		fmt.Fprintf(buffer, ", pk col:%s", p.Source.handleCols)
 	}
 	if len(p.AccessConds) > 0 {
 		fmt.Fprintf(buffer, ", cond:%v", p.AccessConds)
@@ -1084,7 +1110,7 @@ func (p *LogicalIndexScan) ExplainInfo() string {
 	if len(index.Columns) > 0 {
 		buffer.WriteString(", index:")
 		for i, idxCol := range index.Columns {
-			if tblCol := p.Source.TableInfo.Columns[idxCol.Offset]; tblCol.Hidden {
+			if tblCol := p.Source.tableInfo.Columns[idxCol.Offset]; tblCol.Hidden {
 				buffer.WriteString(tblCol.GeneratedExprString)
 			} else {
 				buffer.WriteString(idxCol.Name.O)
@@ -1109,6 +1135,9 @@ func (p *TiKVSingleGather) ExplainInfo() string {
 	return buffer.String()
 }
 
+// MetricTableTimeFormat is the time format for metric table explain and format.
+const MetricTableTimeFormat = "2006-01-02 15:04:05.999"
+
 // ExplainInfo implements Plan interface.
 func (p *PhysicalMemTable) ExplainInfo() string {
 	accessObject, operatorInfo := p.AccessObject().String(), p.OperatorInfo(false)
@@ -1121,7 +1150,7 @@ func (p *PhysicalMemTable) ExplainInfo() string {
 // OperatorInfo implements dataAccesser interface.
 func (p *PhysicalMemTable) OperatorInfo(_ bool) string {
 	if p.Extractor != nil {
-		return p.Extractor.ExplainInfo(p)
+		return p.Extractor.explainInfo(p)
 	}
 	return ""
 }

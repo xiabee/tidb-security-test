@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl/placement"
 	distsqlctx "github.com/pingcap/tidb/pkg/distsql/context"
 	"github.com/pingcap/tidb/pkg/errctx"
-	infoschema "github.com/pingcap/tidb/pkg/infoschema/context"
+	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -45,7 +45,7 @@ import (
 // It is called before we issue a kv request by "Select".
 type RequestBuilder struct {
 	kv.Request
-	is  infoschema.MetaOnlyInfoSchema
+	is  infoschema.InfoSchema
 	err error
 }
 
@@ -340,7 +340,11 @@ func (builder *RequestBuilder) SetTiDBServerID(serverID uint64) *RequestBuilder 
 
 // SetFromInfoSchema sets the following fields from infoSchema:
 // "bundles"
-func (builder *RequestBuilder) SetFromInfoSchema(is infoschema.MetaOnlyInfoSchema) *RequestBuilder {
+func (builder *RequestBuilder) SetFromInfoSchema(pis any) *RequestBuilder {
+	is, ok := pis.(infoschema.InfoSchema)
+	if !ok {
+		return builder
+	}
 	builder.is = is
 	builder.Request.SchemaVar = is.SchemaMetaVersion()
 	return builder
@@ -383,13 +387,13 @@ func (builder *RequestBuilder) verifyTxnScope() error {
 		if !valid {
 			var tblName string
 			var partName string
-			tblInfo, _, partInfo := builder.is.FindTableInfoByPartitionID(phyTableID)
+			tblInfo, _, partInfo := builder.is.FindTableByPartitionID(phyTableID)
 			if tblInfo != nil && partInfo != nil {
-				tblName = tblInfo.Name.String()
+				tblName = tblInfo.Meta().Name.String()
 				partName = partInfo.Name.String()
 			} else {
-				tblInfo, _ = builder.is.TableInfoByID(phyTableID)
-				tblName = tblInfo.Name.String()
+				tblInfo, _ = builder.is.TableByID(phyTableID)
+				tblName = tblInfo.Meta().Name.String()
 			}
 			err := fmt.Errorf("table %v can not be read by %v txn_scope", tblName, txnScope)
 			if len(partName) > 0 {
@@ -699,7 +703,7 @@ func CommonHandleRangesToKVRanges(dctx *distsqlctx.DistSQLContext, tids []int64,
 }
 
 // VerifyTxnScope verify whether the txnScope and visited physical table break the leader rule's dcLocation.
-func VerifyTxnScope(txnScope string, physicalTableID int64, is infoschema.MetaOnlyInfoSchema) bool {
+func VerifyTxnScope(txnScope string, physicalTableID int64, is infoschema.InfoSchema) bool {
 	if txnScope == "" || txnScope == kv.GlobalTxnScope {
 		return true
 	}

@@ -19,12 +19,9 @@ import (
 	"fmt"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	// import core pkg first to call its init func.
-	_ "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/planner/property"
-	"github.com/pingcap/tidb/pkg/planner/util/utilfuncp"
 )
 
 // ExploreMark is uses to mark whether a Group or GroupExpr has
@@ -184,7 +181,7 @@ func (g *Group) InsertImpl(prop *property.PhysicalProperty, impl Implementation)
 }
 
 // Convert2GroupExpr converts a logical plan to a GroupExpr.
-func Convert2GroupExpr(node base.LogicalPlan) *GroupExpr {
+func Convert2GroupExpr(node plannercore.LogicalPlan) *GroupExpr {
 	e := NewGroupExpr(node)
 	e.Children = make([]*Group, 0, len(node.Children()))
 	for _, child := range node.Children() {
@@ -195,7 +192,7 @@ func Convert2GroupExpr(node base.LogicalPlan) *GroupExpr {
 }
 
 // Convert2Group converts a logical plan to a Group.
-func Convert2Group(node base.LogicalPlan) *Group {
+func Convert2Group(node plannercore.LogicalPlan) *Group {
 	e := Convert2GroupExpr(node)
 	g := NewGroupWithSchema(e, node.Schema())
 	// Stats property for `Group` would be computed after exploration phase.
@@ -223,5 +220,5 @@ func (g *Group) BuildKeyInfo() {
 		g.Prop.Schema.Keys = childSchema[0].Keys
 	}
 	e.ExprNode.BuildKeyInfo(g.Prop.Schema, childSchema)
-	g.Prop.MaxOneRow = e.ExprNode.MaxOneRow() || utilfuncp.HasMaxOneRowUtil(e.ExprNode, childMaxOneRow)
+	g.Prop.MaxOneRow = e.ExprNode.MaxOneRow() || plannercore.HasMaxOneRow(e.ExprNode, childMaxOneRow)
 }

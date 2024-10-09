@@ -16,7 +16,6 @@ package pattern
 
 import (
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 )
 
 // Operand is the node of a pattern tree, it represents a logical expression operator.
@@ -74,7 +73,7 @@ const (
 )
 
 // GetOperand maps logical plan operator to Operand.
-func GetOperand(p base.LogicalPlan) Operand {
+func GetOperand(p plannercore.LogicalPlan) Operand {
 	switch p.(type) {
 	case *plannercore.LogicalApply:
 		return OperandApply

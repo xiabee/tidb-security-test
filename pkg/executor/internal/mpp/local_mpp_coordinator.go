@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/store/copr"
@@ -107,7 +106,7 @@ type localMppCoordinator struct {
 	ctx          context.Context
 	sessionCtx   sessionctx.Context
 	is           infoschema.InfoSchema
-	originalPlan base.PhysicalPlan
+	originalPlan plannercore.PhysicalPlan
 	reqMap       map[int64]*mppRequestReport
 
 	cancelFunc context.CancelFunc
@@ -152,7 +151,7 @@ type localMppCoordinator struct {
 }
 
 // NewLocalMPPCoordinator creates a new localMppCoordinator instance
-func NewLocalMPPCoordinator(ctx context.Context, sctx sessionctx.Context, is infoschema.InfoSchema, plan base.PhysicalPlan, planIDs []int, startTS uint64, mppQueryID kv.MPPQueryID, gatherID uint64, coordinatorAddr string, memTracker *memory.Tracker) *localMppCoordinator {
+func NewLocalMPPCoordinator(ctx context.Context, sctx sessionctx.Context, is infoschema.InfoSchema, plan plannercore.PhysicalPlan, planIDs []int, startTS uint64, mppQueryID kv.MPPQueryID, gatherID uint64, coordinatorAddr string, memTracker *memory.Tracker) *localMppCoordinator {
 	if sctx.GetSessionVars().ChooseMppVersion() < kv.MppVersionV2 {
 		coordinatorAddr = ""
 	}
@@ -182,7 +181,7 @@ func NewLocalMPPCoordinator(ctx context.Context, sctx sessionctx.Context, is inf
 }
 
 func (c *localMppCoordinator) appendMPPDispatchReq(pf *plannercore.Fragment) error {
-	dagReq, err := builder.ConstructDAGReq(c.sessionCtx, []base.PhysicalPlan{pf.ExchangeSender}, kv.TiFlash)
+	dagReq, err := builder.ConstructDAGReq(c.sessionCtx, []plannercore.PhysicalPlan{pf.ExchangeSender}, kv.TiFlash)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -337,7 +336,7 @@ func (c *localMppCoordinator) fixTaskForCTEStorageAndReader(exec *tipb.Executor,
 
 // DFS to check if plan needs report execution summary through ReportMPPTaskStatus mpp service
 // Currently, return true if plan contains limit operator
-func needReportExecutionSummary(plan base.PhysicalPlan) bool {
+func needReportExecutionSummary(plan plannercore.PhysicalPlan) bool {
 	switch x := plan.(type) {
 	case *plannercore.PhysicalLimit:
 		return true

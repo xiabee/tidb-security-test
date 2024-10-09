@@ -121,8 +121,9 @@ func GenLogFields(costTime time.Duration, info *ProcessInfo, needTruncateSQL boo
 	logFields = append(logFields, zap.String("cost_time", strconv.FormatFloat(costTime.Seconds(), 'f', -1, 64)+"s"))
 	execDetail := info.StmtCtx.GetExecDetails()
 	logFields = append(logFields, execDetail.ToZapFields()...)
-	copTaskInfo := info.StmtCtx.CopTasksDetails()
-	logFields = append(logFields, copTaskInfo.ToZapFields()...)
+	if copTaskInfo := info.StmtCtx.CopTasksDetails(); copTaskInfo != nil {
+		logFields = append(logFields, copTaskInfo.ToZapFields()...)
+	}
 	if statsInfo := info.StatsInfo(info.Plan); len(statsInfo) > 0 {
 		var buf strings.Builder
 		firstComma := false

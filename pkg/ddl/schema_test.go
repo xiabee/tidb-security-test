@@ -41,9 +41,7 @@ import (
 func testCreateTable(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *model.DBInfo, tblInfo *model.TableInfo) *model.Job {
 	job := &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: dbInfo.Name.L,
 		TableID:    tblInfo.ID,
-		TableName:  tblInfo.Name.L,
 		Type:       model.ActionCreateTable,
 		BinlogInfo: &model.HistoryInfo{},
 		Args:       []any{tblInfo},
@@ -140,10 +138,6 @@ func testCreateSchema(t *testing.T, ctx sessionctx.Context, d ddl.DDL, dbInfo *m
 		Type:       model.ActionCreateSchema,
 		BinlogInfo: &model.HistoryInfo{},
 		Args:       []any{dbInfo},
-		InvolvingSchemaInfo: []model.InvolvingSchemaInfo{{
-			Database: dbInfo.Name.L,
-			Table:    model.InvolvingAll,
-		}},
 	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	require.NoError(t, d.DoDDLJob(ctx, job))
@@ -161,10 +155,6 @@ func buildDropSchemaJob(dbInfo *model.DBInfo) *model.Job {
 		Type:       model.ActionDropSchema,
 		BinlogInfo: &model.HistoryInfo{},
 		Args:       []any{true},
-		InvolvingSchemaInfo: []model.InvolvingSchemaInfo{{
-			Database: dbInfo.Name.L,
-			Table:    model.InvolvingAll,
-		}},
 	}
 }
 
@@ -271,7 +261,6 @@ func TestSchema(t *testing.T) {
 	// Drop a non-existent database.
 	job = &model.Job{
 		SchemaID:   dbInfo.ID,
-		SchemaName: "test_schema",
 		Type:       model.ActionDropSchema,
 		BinlogInfo: &model.HistoryInfo{},
 	}
@@ -301,7 +290,6 @@ func TestSchemaWaitJob(t *testing.T) {
 		ddl.WithStore(store),
 		ddl.WithInfoCache(domain.InfoCache()),
 		ddl.WithLease(testLease),
-		ddl.WithSchemaLoader(domain),
 	)
 	err := d2.Start(pools.NewResourcePool(func() (pools.Resource, error) {
 		session := testkit.NewTestKit(t, store).Session()
@@ -331,24 +319,13 @@ func TestSchemaWaitJob(t *testing.T) {
 	genIDs, err := genGlobalIDs(store, 1)
 	require.NoError(t, err)
 	schemaID := genIDs[0]
-	doDDLJobErr(t, schemaID, 0, "test_schema", "", model.ActionCreateSchema, []any{dbInfo}, testkit.NewTestKit(t, store).Session(), d2, store)
+	doDDLJobErr(t, schemaID, 0, model.ActionCreateSchema, []any{dbInfo}, testkit.NewTestKit(t, store).Session(), d2, store)
 }
 
-func doDDLJobErr(
-	t *testing.T,
-	schemaID, tableID int64,
-	schemaName, tableName string,
-	tp model.ActionType,
-	args []any,
-	ctx sessionctx.Context,
-	d ddl.DDL,
-	store kv.Storage,
-) *model.Job {
+func doDDLJobErr(t *testing.T, schemaID, tableID int64, tp model.ActionType, args []any, ctx sessionctx.Context, d ddl.DDL, store kv.Storage) *model.Job {
 	job := &model.Job{
 		SchemaID:   schemaID,
-		SchemaName: schemaName,
 		TableID:    tableID,
-		TableName:  tableName,
 		Type:       tp,
 		Args:       args,
 		BinlogInfo: &model.HistoryInfo{},
@@ -374,19 +351,20 @@ func testCheckJobCancelled(t *testing.T, store kv.Storage, job *model.Job, state
 func TestRenameTableAutoIDs(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk1 := testkit.NewTestKit(t, store)
-	tk2 := testkit.NewTestKit(t, store)
-	tk3 := testkit.NewTestKit(t, store)
+
 	dbName := "RenameTableAutoIDs"
 	tk1.MustExec(`create schema ` + dbName)
 	tk1.MustExec(`create schema ` + dbName + "2")
 	tk1.MustExec(`use ` + dbName)
-	tk2.MustExec(`use ` + dbName)
-	tk3.MustExec(`use ` + dbName)
 	tk1.MustExec(`CREATE TABLE t (a int auto_increment primary key nonclustered, b varchar(255), key (b)) AUTO_ID_CACHE 100`)
 	tk1.MustExec(`insert into t values (11,11),(2,2),(null,12)`)
 	tk1.MustExec(`insert into t values (null,18)`)
 	tk1.MustQuery(`select _tidb_rowid, a, b from t`).Sort().Check(testkit.Rows("13 11 11", "14 2 2", "15 12 12", "17 16 18"))
 
+	tk2 := testkit.NewTestKit(t, store)
+	tk2.MustExec(`use ` + dbName)
+	tk3 := testkit.NewTestKit(t, store)
+	tk3.MustExec(`use ` + dbName)
 	waitFor := func(col int, tableName, s string) {
 		for {
 			tk4 := testkit.NewTestKit(t, store)

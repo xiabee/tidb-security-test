@@ -30,17 +30,15 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/cardinality"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/cost"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/debugtrace"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/statistics/asyncload"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	h "github.com/pingcap/tidb/pkg/util/hint"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/ranger"
@@ -76,7 +74,7 @@ func (p *LogicalMemTable) DeriveStats(_ []*property.StatsInfo, selfSchema *expre
 	stats := &property.StatsInfo{
 		RowCount:     float64(statsTable.RealtimeCount),
 		ColNDVs:      make(map[int64]float64, len(p.TableInfo.Columns)),
-		HistColl:     statsTable.GenerateHistCollFromColumnInfo(p.TableInfo, p.Schema().Columns),
+		HistColl:     statsTable.GenerateHistCollFromColumnInfo(p.TableInfo, p.schema.Columns),
 		StatsVersion: statistics.PseudoVersion,
 	}
 	for _, col := range selfSchema.Columns {
@@ -118,20 +116,64 @@ func (p *LogicalShowDDLJobs) DeriveStats(_ []*property.StatsInfo, selfSchema *ex
 }
 
 // RecursiveDeriveStats4Test is a exporter just for test.
-func RecursiveDeriveStats4Test(p base.LogicalPlan) (*property.StatsInfo, error) {
-	return p.RecursiveDeriveStats(nil)
+func RecursiveDeriveStats4Test(p LogicalPlan) (*property.StatsInfo, error) {
+	return p.recursiveDeriveStats(nil)
 }
 
 // GetStats4Test is a exporter just for test.
-func GetStats4Test(p base.LogicalPlan) *property.StatsInfo {
+func GetStats4Test(p LogicalPlan) *property.StatsInfo {
 	return p.StatsInfo()
+}
+
+func (p *baseLogicalPlan) recursiveDeriveStats(colGroups [][]*expression.Column) (*property.StatsInfo, error) {
+	childStats := make([]*property.StatsInfo, len(p.children))
+	childSchema := make([]*expression.Schema, len(p.children))
+	cumColGroups := p.self.ExtractColGroups(colGroups)
+	for i, child := range p.children {
+		childProfile, err := child.recursiveDeriveStats(cumColGroups)
+		if err != nil {
+			return nil, err
+		}
+		childStats[i] = childProfile
+		childSchema[i] = child.Schema()
+	}
+	return p.self.DeriveStats(childStats, p.self.Schema(), childSchema, colGroups)
+}
+
+// ExtractColGroups implements LogicalPlan ExtractColGroups interface.
+func (*baseLogicalPlan) ExtractColGroups(_ [][]*expression.Column) [][]*expression.Column {
+	return nil
+}
+
+// DeriveStats implement LogicalPlan DeriveStats interface.
+func (p *baseLogicalPlan) DeriveStats(childStats []*property.StatsInfo, selfSchema *expression.Schema, _ []*expression.Schema, _ [][]*expression.Column) (*property.StatsInfo, error) {
+	if len(childStats) == 1 {
+		p.SetStats(childStats[0])
+		return p.StatsInfo(), nil
+	}
+	if len(childStats) > 1 {
+		err := plannererrors.ErrInternal.GenWithStack("LogicalPlans with more than one child should implement their own DeriveStats().")
+		return nil, err
+	}
+	if p.StatsInfo() != nil {
+		return p.StatsInfo(), nil
+	}
+	profile := &property.StatsInfo{
+		RowCount: float64(1),
+		ColNDVs:  make(map[int64]float64, selfSchema.Len()),
+	}
+	for _, col := range selfSchema.Columns {
+		profile.ColNDVs[col.UniqueID] = 1
+	}
+	p.SetStats(profile)
+	return profile, nil
 }
 
 func (ds *DataSource) getGroupNDVs(colGroups [][]*expression.Column) []property.GroupNDV {
 	if colGroups == nil {
 		return nil
 	}
-	tbl := ds.TableStats.HistColl
+	tbl := ds.tableStats.HistColl
 	ndvs := make([]property.GroupNDV, 0, len(colGroups))
 	for idxID, idx := range tbl.Indices {
 		colsLen := len(tbl.Idx2ColUniqueIDs[idxID])
@@ -172,8 +214,13 @@ func (ds *DataSource) getGroupNDVs(colGroups [][]*expression.Column) []property.
 	return ndvs
 }
 
+func init() {
+	// To handle cycle import, we have to define this function here.
+	cardinality.GetTblInfoForUsedStatsByPhysicalID = getTblInfoForUsedStatsByPhysicalID
+}
+
 // getTblInfoForUsedStatsByPhysicalID get table name, partition name and HintedTable that will be used to record used stats.
-func getTblInfoForUsedStatsByPhysicalID(sctx base.PlanContext, id int64) (fullName string, tblInfo *model.TableInfo) {
+func getTblInfoForUsedStatsByPhysicalID(sctx PlanContext, id int64) (fullName string, tblInfo *model.TableInfo) {
 	fullName = "tableID " + strconv.FormatInt(id, 10)
 
 	is := domain.GetDomain(sctx).InfoSchema()
@@ -195,50 +242,50 @@ func getTblInfoForUsedStatsByPhysicalID(sctx base.PlanContext, id int64) (fullNa
 }
 
 func (ds *DataSource) initStats(colGroups [][]*expression.Column) {
-	if ds.TableStats != nil {
+	if ds.tableStats != nil {
 		// Reload GroupNDVs since colGroups may have changed.
-		ds.TableStats.GroupNDVs = ds.getGroupNDVs(colGroups)
+		ds.tableStats.GroupNDVs = ds.getGroupNDVs(colGroups)
 		return
 	}
-	if ds.StatisticTable == nil {
-		ds.StatisticTable = getStatsTable(ds.SCtx(), ds.TableInfo, ds.PhysicalTableID)
+	if ds.statisticTable == nil {
+		ds.statisticTable = getStatsTable(ds.SCtx(), ds.tableInfo, ds.physicalTableID)
 	}
 	tableStats := &property.StatsInfo{
-		RowCount:     float64(ds.StatisticTable.RealtimeCount),
-		ColNDVs:      make(map[int64]float64, ds.Schema().Len()),
-		HistColl:     ds.StatisticTable.GenerateHistCollFromColumnInfo(ds.TableInfo, ds.TblCols),
-		StatsVersion: ds.StatisticTable.Version,
+		RowCount:     float64(ds.statisticTable.RealtimeCount),
+		ColNDVs:      make(map[int64]float64, ds.schema.Len()),
+		HistColl:     ds.statisticTable.GenerateHistCollFromColumnInfo(ds.tableInfo, ds.TblCols),
+		StatsVersion: ds.statisticTable.Version,
 	}
-	if ds.StatisticTable.Pseudo {
+	if ds.statisticTable.Pseudo {
 		tableStats.StatsVersion = statistics.PseudoVersion
 	}
 
 	statsRecord := ds.SCtx().GetSessionVars().StmtCtx.GetUsedStatsInfo(true)
-	name, tblInfo := getTblInfoForUsedStatsByPhysicalID(ds.SCtx(), ds.PhysicalTableID)
-	statsRecord.RecordUsedInfo(ds.PhysicalTableID, &stmtctx.UsedStatsInfoForTable{
+	name, tblInfo := getTblInfoForUsedStatsByPhysicalID(ds.SCtx(), ds.physicalTableID)
+	statsRecord.RecordUsedInfo(ds.physicalTableID, &stmtctx.UsedStatsInfoForTable{
 		Name:            name,
 		TblInfo:         tblInfo,
 		Version:         tableStats.StatsVersion,
 		RealtimeCount:   tableStats.HistColl.RealtimeCount,
 		ModifyCount:     tableStats.HistColl.ModifyCount,
-		ColAndIdxStatus: ds.StatisticTable.ColAndIdxExistenceMap,
+		ColAndIdxStatus: ds.statisticTable.ColAndIdxExistenceMap,
 	})
 
-	for _, col := range ds.Schema().Columns {
-		tableStats.ColNDVs[col.UniqueID] = cardinality.EstimateColumnNDV(ds.StatisticTable, col.ID)
+	for _, col := range ds.schema.Columns {
+		tableStats.ColNDVs[col.UniqueID] = cardinality.EstimateColumnNDV(ds.statisticTable, col.ID)
 	}
-	ds.TableStats = tableStats
-	ds.TableStats.GroupNDVs = ds.getGroupNDVs(colGroups)
-	ds.TblColHists = ds.StatisticTable.ID2UniqueID(ds.TblCols)
-	for _, col := range ds.TableInfo.Columns {
+	ds.tableStats = tableStats
+	ds.tableStats.GroupNDVs = ds.getGroupNDVs(colGroups)
+	ds.TblColHists = ds.statisticTable.ID2UniqueID(ds.TblCols)
+	for _, col := range ds.tableInfo.Columns {
 		if col.State != model.StatePublic {
 			continue
 		}
 		// If we enable lite stats init or we just found out the meta info of the column is missed, we need to register columns for async load.
-		_, isLoadNeeded, _ := ds.StatisticTable.ColumnIsLoadNeeded(col.ID, false)
+		_, isLoadNeeded, _ := ds.statisticTable.ColumnIsLoadNeeded(col.ID, false)
 		if isLoadNeeded {
-			asyncload.AsyncLoadHistogramNeededItems.Insert(model.TableItemID{
-				TableID:          ds.TableInfo.ID,
+			statistics.HistogramNeededItems.Insert(model.TableItemID{
+				TableID:          ds.tableInfo.ID,
 				ID:               col.ID,
 				IsIndex:          false,
 				IsSyncLoadFailed: ds.SCtx().GetSessionVars().StmtCtx.StatsLoad.Timeout > 0,
@@ -252,17 +299,17 @@ func (ds *DataSource) deriveStatsByFilter(conds expression.CNFExprs, filledPaths
 		debugtrace.EnterContextCommon(ds.SCtx())
 		defer debugtrace.LeaveContextCommon(ds.SCtx())
 	}
-	selectivity, _, err := cardinality.Selectivity(ds.SCtx(), ds.TableStats.HistColl, conds, filledPaths)
+	selectivity, _, err := cardinality.Selectivity(ds.SCtx(), ds.tableStats.HistColl, conds, filledPaths)
 	if err != nil {
 		logutil.BgLogger().Debug("something wrong happened, use the default selectivity", zap.Error(err))
-		selectivity = cost.SelectionFactor
+		selectivity = SelectionFactor
 	}
 	// TODO: remove NewHistCollBySelectivity later on.
 	// if ds.SCtx().GetSessionVars().OptimizerSelectivityLevel >= 1 {
 	// Only '0' is suggested, see https://docs.pingcap.com/zh/tidb/stable/system-variables#tidb_optimizer_selectivity_level.
 	// stats.HistColl = stats.HistColl.NewHistCollBySelectivity(ds.SCtx(), nodes)
 	// }
-	return ds.TableStats.Scale(selectivity)
+	return ds.tableStats.Scale(selectivity)
 }
 
 // We bind logic of derivePathStats and tryHeuristics together. When some path matches the heuristic rule, we don't need
@@ -272,18 +319,18 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 		debugtrace.EnterContextCommon(ds.SCtx())
 		defer debugtrace.LeaveContextCommon(ds.SCtx())
 	}
-	uniqueIdxsWithDoubleScan := make([]*util.AccessPath, 0, len(ds.PossibleAccessPaths))
-	singleScanIdxs := make([]*util.AccessPath, 0, len(ds.PossibleAccessPaths))
+	uniqueIdxsWithDoubleScan := make([]*util.AccessPath, 0, len(ds.possibleAccessPaths))
+	singleScanIdxs := make([]*util.AccessPath, 0, len(ds.possibleAccessPaths))
 	var (
 		selected, uniqueBest, refinedBest *util.AccessPath
 		isRefinedPath                     bool
 	)
 	// step1: if user prefer tiFlash store type, tiFlash path should always be built anyway ahead.
 	var tiflashPath *util.AccessPath
-	if ds.PreferStoreType&h.PreferTiFlash != 0 {
-		for _, path := range ds.PossibleAccessPaths {
+	if ds.preferStoreType&h.PreferTiFlash != 0 {
+		for _, path := range ds.possibleAccessPaths {
 			if path.StoreType == kv.TiFlash {
-				err := ds.deriveTablePathStats(path, ds.PushedDownConds, false)
+				err := ds.deriveTablePathStats(path, ds.pushedDownConds, false)
 				if err != nil {
 					return err
 				}
@@ -294,15 +341,15 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 		}
 	}
 	// step2: kv path should follow the heuristic rules.
-	for _, path := range ds.PossibleAccessPaths {
+	for _, path := range ds.possibleAccessPaths {
 		if path.IsTablePath() {
-			err := ds.deriveTablePathStats(path, ds.PushedDownConds, false)
+			err := ds.deriveTablePathStats(path, ds.pushedDownConds, false)
 			if err != nil {
 				return err
 			}
 			path.IsSingleScan = true
 		} else {
-			ds.deriveIndexPathStats(path, ds.PushedDownConds, false)
+			ds.deriveIndexPathStats(path, ds.pushedDownConds, false)
 			path.IsSingleScan = ds.isSingleScan(path.FullIdxCols, path.FullIdxColLens)
 		}
 		// step: 3
@@ -376,18 +423,18 @@ func (ds *DataSource) derivePathStatsAndTryHeuristics() error {
 	// heuristic rule pruning other path should consider hint prefer.
 	// If no hints and some path matches a heuristic rule, just remove other possible paths.
 	if selected != nil {
-		ds.PossibleAccessPaths[0] = selected
-		ds.PossibleAccessPaths = ds.PossibleAccessPaths[:1]
+		ds.possibleAccessPaths[0] = selected
+		ds.possibleAccessPaths = ds.possibleAccessPaths[:1]
 		// if user wanna tiFlash read, while current heuristic choose a TiKV path. so we shouldn't prune tiFlash path.
-		keep := ds.PreferStoreType&h.PreferTiFlash != 0 && selected.StoreType != kv.TiFlash
+		keep := ds.preferStoreType&h.PreferTiFlash != 0 && selected.StoreType != kv.TiFlash
 		if keep {
 			// also keep tiflash path as well.
-			ds.PossibleAccessPaths = append(ds.PossibleAccessPaths, tiflashPath)
+			ds.possibleAccessPaths = append(ds.possibleAccessPaths, tiflashPath)
 			return nil
 		}
 		var tableName string
 		if ds.TableAsName.O == "" {
-			tableName = ds.TableInfo.Name.O
+			tableName = ds.tableInfo.Name.O
 		} else {
 			tableName = ds.TableAsName.O
 		}
@@ -428,8 +475,8 @@ func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema,
 	ds.initStats(colGroups)
 	if ds.StatsInfo() != nil {
 		// Just reload the GroupNDVs.
-		selectivity := ds.StatsInfo().RowCount / ds.TableStats.RowCount
-		ds.SetStats(ds.TableStats.Scale(selectivity))
+		selectivity := ds.StatsInfo().RowCount / ds.tableStats.RowCount
+		ds.SetStats(ds.tableStats.Scale(selectivity))
 		return ds.StatsInfo(), nil
 	}
 	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
@@ -440,22 +487,22 @@ func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema,
 	// 1: PushDownNot here can convert query 'not (a != 1)' to 'a = 1'.
 	// 2: EliminateNoPrecisionCast here can convert query 'cast(c<int> as bigint) = 1' to 'c = 1' to leverage access range.
 	exprCtx := ds.SCtx().GetExprCtx()
-	for i, expr := range ds.PushedDownConds {
-		ds.PushedDownConds[i] = expression.PushDownNot(exprCtx, expr)
-		ds.PushedDownConds[i] = expression.EliminateNoPrecisionLossCast(exprCtx, ds.PushedDownConds[i])
+	for i, expr := range ds.pushedDownConds {
+		ds.pushedDownConds[i] = expression.PushDownNot(exprCtx, expr)
+		ds.pushedDownConds[i] = expression.EliminateNoPrecisionLossCast(exprCtx, ds.pushedDownConds[i])
 	}
-	for _, path := range ds.PossibleAccessPaths {
+	for _, path := range ds.possibleAccessPaths {
 		if path.IsTablePath() {
 			continue
 		}
-		err := ds.fillIndexPath(path, ds.PushedDownConds)
+		err := ds.fillIndexPath(path, ds.pushedDownConds)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// TODO: Can we move ds.deriveStatsByFilter after pruning by heuristics? In this way some computation can be avoided
-	// when ds.PossibleAccessPaths are pruned.
-	ds.SetStats(ds.deriveStatsByFilter(ds.PushedDownConds, ds.PossibleAccessPaths))
+	// when ds.possibleAccessPaths are pruned.
+	ds.SetStats(ds.deriveStatsByFilter(ds.pushedDownConds, ds.possibleAccessPaths))
 	err := ds.derivePathStatsAndTryHeuristics()
 	if err != nil {
 		return nil, err
@@ -466,9 +513,9 @@ func (ds *DataSource) DeriveStats(_ []*property.StatsInfo, _ *expression.Schema,
 	}
 
 	if ds.SCtx().GetSessionVars().StmtCtx.EnableOptimizerDebugTrace {
-		debugTraceAccessPaths(ds.SCtx(), ds.PossibleAccessPaths)
+		debugTraceAccessPaths(ds.SCtx(), ds.possibleAccessPaths)
 	}
-	ds.AccessPathMinSelectivity = getMinSelectivityFromPaths(ds.PossibleAccessPaths, float64(ds.TblColHists.RealtimeCount))
+	ds.accessPathMinSelectivity = getMinSelectivityFromPaths(ds.possibleAccessPaths, float64(ds.TblColHists.RealtimeCount))
 
 	return ds.StatsInfo(), nil
 }
@@ -505,11 +552,11 @@ func (ts *LogicalTableScan) DeriveStats(_ []*property.StatsInfo, _ *expression.S
 	// TODO: support clustered index.
 	if ts.HandleCols != nil {
 		// TODO: restrict mem usage of table ranges.
-		ts.Ranges, _, _, err = ranger.BuildTableRange(ts.AccessConds, ts.SCtx().GetRangerCtx(), ts.HandleCols.GetCol(0).RetType, 0)
+		ts.Ranges, _, _, err = ranger.BuildTableRange(ts.AccessConds, ts.SCtx(), ts.HandleCols.GetCol(0).RetType, 0)
 	} else {
 		isUnsigned := false
-		if ts.Source.TableInfo.PKIsHandle {
-			if pkColInfo := ts.Source.TableInfo.GetPkColInfo(); pkColInfo != nil {
+		if ts.Source.tableInfo.PKIsHandle {
+			if pkColInfo := ts.Source.tableInfo.GetPkColInfo(); pkColInfo != nil {
 				isUnsigned = mysql.HasUnsignedFlag(pkColInfo.GetFlag())
 			}
 		}
@@ -549,7 +596,7 @@ func (p *LogicalSelection) DeriveStats(childStats []*property.StatsInfo, _ *expr
 	if p.StatsInfo() != nil {
 		return p.StatsInfo(), nil
 	}
-	p.SetStats(childStats[0].Scale(cost.SelectionFactor))
+	p.SetStats(childStats[0].Scale(SelectionFactor))
 	p.StatsInfo().GroupNDVs = nil
 	return p.StatsInfo(), nil
 }
@@ -722,7 +769,7 @@ func (la *LogicalAggregation) DeriveStats(childStats []*property.StatsInfo, self
 	for _, col := range selfSchema.Columns {
 		la.StatsInfo().ColNDVs[col.UniqueID] = ndv
 	}
-	la.InputCount = childProfile.RowCount
+	la.inputCount = childProfile.RowCount
 	la.StatsInfo().GroupNDVs = la.getGroupNDVs(colGroups, childProfile, gbyCols)
 	return la.StatsInfo(), nil
 }
@@ -773,7 +820,7 @@ func (p *LogicalJoin) DeriveStats(childStats []*property.StatsInfo, selfSchema *
 	}
 	leftProfile, rightProfile := childStats[0], childStats[1]
 	leftJoinKeys, rightJoinKeys, _, _ := p.GetJoinKeys()
-	p.EqualCondOutCnt = cardinality.EstimateFullJoinRowCount(p.SCtx(),
+	p.equalCondOutCnt = cardinality.EstimateFullJoinRowCount(p.SCtx(),
 		0 == len(p.EqualConditions),
 		leftProfile, rightProfile,
 		leftJoinKeys, rightJoinKeys,
@@ -781,11 +828,11 @@ func (p *LogicalJoin) DeriveStats(childStats []*property.StatsInfo, selfSchema *
 		nil, nil)
 	if p.JoinType == SemiJoin || p.JoinType == AntiSemiJoin {
 		p.SetStats(&property.StatsInfo{
-			RowCount: leftProfile.RowCount * cost.SelectionFactor,
+			RowCount: leftProfile.RowCount * SelectionFactor,
 			ColNDVs:  make(map[int64]float64, len(leftProfile.ColNDVs)),
 		})
 		for id, c := range leftProfile.ColNDVs {
-			p.StatsInfo().ColNDVs[id] = c * cost.SelectionFactor
+			p.StatsInfo().ColNDVs[id] = c * SelectionFactor
 		}
 		return p.StatsInfo(), nil
 	}
@@ -801,7 +848,7 @@ func (p *LogicalJoin) DeriveStats(childStats []*property.StatsInfo, selfSchema *
 		p.StatsInfo().GroupNDVs = p.getGroupNDVs(colGroups, childStats)
 		return p.StatsInfo(), nil
 	}
-	count := p.EqualCondOutCnt
+	count := p.equalCondOutCnt
 	if p.JoinType == LeftOuterJoin {
 		count = math.Max(count, leftProfile.RowCount)
 	} else if p.JoinType == RightOuterJoin {
@@ -1017,7 +1064,7 @@ func (p *LogicalCTE) DeriveStats(_ []*property.StatsInfo, selfSchema *expression
 			p.StatsInfo().ColNDVs[col.UniqueID] += recurStat.ColNDVs[p.cte.recursivePartLogicalPlan.Schema().Columns[i].UniqueID]
 		}
 		if p.cte.IsDistinct {
-			p.StatsInfo().RowCount, _ = cardinality.EstimateColsNDVWithMatchedLen(p.Schema().Columns, p.Schema(), p.StatsInfo())
+			p.StatsInfo().RowCount, _ = cardinality.EstimateColsNDVWithMatchedLen(p.schema.Columns, p.schema, p.StatsInfo())
 		} else {
 			p.StatsInfo().RowCount += recurStat.RowCount
 		}

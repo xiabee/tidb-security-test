@@ -16,7 +16,6 @@ package resultset
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -55,10 +54,6 @@ type tidbResultSet struct {
 	preparedStmt *core.PlanCacheStmt
 	columns      []*column.Info
 	closed       int32
-	// finishLock is a mutex used to synchronize access to the `Next`,`Finish` and `Close` functions of the adapter.
-	// It ensures that only one goroutine can access the `Next`,`Finish` and `Close` functions at a time, preventing race conditions.
-	// When we terminate the current SQL externally (e.g., kill query), an additional goroutine would be used to call the `Finish` function.
-	finishLock sync.Mutex
 }
 
 func (trs *tidbResultSet) NewChunk(alloc chunk.Allocator) *chunk.Chunk {
@@ -66,24 +61,17 @@ func (trs *tidbResultSet) NewChunk(alloc chunk.Allocator) *chunk.Chunk {
 }
 
 func (trs *tidbResultSet) Next(ctx context.Context, req *chunk.Chunk) error {
-	trs.finishLock.Lock()
-	defer trs.finishLock.Unlock()
 	return trs.recordSet.Next(ctx, req)
 }
 
 func (trs *tidbResultSet) Finish() error {
-	if trs.finishLock.TryLock() {
-		defer trs.finishLock.Unlock()
-		if x, ok := trs.recordSet.(interface{ Finish() error }); ok {
-			return x.Finish()
-		}
+	if x, ok := trs.recordSet.(interface{ Finish() error }); ok {
+		return x.Finish()
 	}
 	return nil
 }
 
 func (trs *tidbResultSet) Close() {
-	trs.finishLock.Lock()
-	defer trs.finishLock.Unlock()
 	if !atomic.CompareAndSwapInt32(&trs.closed, 0, 1) {
 		return
 	}

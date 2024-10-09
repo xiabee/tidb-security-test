@@ -53,14 +53,15 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/tidb"
 	field_types "github.com/pingcap/tidb/pkg/parser/types"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/plugin"
 	"github.com/pingcap/tidb/pkg/privilege"
 	"github.com/pingcap/tidb/pkg/privilege/privileges"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/pkg/sessionctx/sessionstates"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
@@ -69,7 +70,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/etcd"
@@ -101,7 +101,7 @@ type ShowExec struct {
 	Flag              int                  // Some flag parsed from sql, such as FULL.
 	Roles             []*auth.RoleIdentity // Used for show grants.
 	User              *auth.UserIdentity   // Used by show grants, show create user.
-	Extractor         base.ShowPredicateExtractor
+	Extractor         plannercore.ShowPredicateExtractor
 
 	is infoschema.InfoSchema
 
@@ -1878,7 +1878,7 @@ func (e *ShowExec) fetchShowWarnings(errOnly bool) error {
 		return nil
 	}
 	for _, w := range stmtCtx.GetWarnings() {
-		if errOnly && w.Level != contextutil.WarnLevelError {
+		if errOnly && w.Level != stmtctx.WarnLevelError {
 			continue
 		}
 		warn := errors.Cause(w.Err)
@@ -1887,7 +1887,11 @@ func (e *ShowExec) fetchShowWarnings(errOnly bool) error {
 			sqlErr := terror.ToSQLError(x)
 			e.appendRow([]any{w.Level, int64(sqlErr.Code), sqlErr.Message})
 		default:
-			e.appendRow([]any{w.Level, int64(mysql.ErrUnknown), warn.Error()})
+			var err string
+			if warn != nil {
+				err = warn.Error()
+			}
+			e.appendRow([]any{w.Level, int64(mysql.ErrUnknown), err})
 		}
 	}
 	return nil
@@ -2355,7 +2359,7 @@ func tryFillViewColumnType(ctx context.Context, sctx sessionctx.Context, is info
 		for _, col := range tbl.Columns {
 			idx := expression.FindFieldNameIdxByColName(viewOutputNames, col.Name.L)
 			if idx >= 0 {
-				col.FieldType = *viewSchema.Columns[idx].GetType(sctx.GetExprCtx().GetEvalCtx())
+				col.FieldType = *viewSchema.Columns[idx].GetType()
 			}
 			if col.GetType() == mysql.TypeVarString {
 				col.SetType(mysql.TypeVarchar)
@@ -2372,5 +2376,17 @@ func runWithSystemSession(ctx context.Context, sctx sessionctx.Context, fn func(
 		return err
 	}
 	defer b.ReleaseSysSession(ctx, sysCtx)
+
+	if err = loadSnapshotInfoSchemaIfNeeded(sysCtx, sctx.GetSessionVars().SnapshotTS); err != nil {
+		return err
+	}
+	// `fn` may use KV transaction, so initialize the txn here
+	if err = sessiontxn.NewTxn(ctx, sysCtx); err != nil {
+		return err
+	}
+	defer sysCtx.RollbackTxn(ctx)
+	if err = ResetContextOfStmt(sysCtx, &ast.SelectStmt{}); err != nil {
+		return err
+	}
 	return fn(sysCtx)
 }

@@ -48,10 +48,10 @@ type stmtSummaryByDigestKey struct {
 	prevDigest string
 	// The digest of the plan of this SQL.
 	planDigest string
-	// `resourceGroupName` is the resource group's name of this statement is bind to.
-	resourceGroupName string
 	// `hash` is the hash value of this object.
 	hash []byte
+	// `resourceGroupName` is the resource group's name of this statement is bind to.
+	resourceGroupName string
 }
 
 // Hash implements SimpleLRUCache.Key.
@@ -59,7 +59,7 @@ type stmtSummaryByDigestKey struct {
 // `prevSQL` is included in the key To distinguish different transactions.
 func (key *stmtSummaryByDigestKey) Hash() []byte {
 	if len(key.hash) == 0 {
-		key.hash = make([]byte, 0, len(key.schemaName)+len(key.digest)+len(key.prevDigest)+len(key.planDigest)+len(key.resourceGroupName))
+		key.hash = make([]byte, 0, len(key.schemaName)+len(key.digest)+len(key.prevDigest)+len(key.planDigest))
 		key.hash = append(key.hash, hack.Slice(key.digest)...)
 		key.hash = append(key.hash, hack.Slice(key.schemaName)...)
 		key.hash = append(key.hash, hack.Slice(key.prevDigest)...)
@@ -217,9 +217,6 @@ type stmtSummaryByDigestElement struct {
 	// request-units
 	resourceGroupName string
 	StmtRUSummary
-
-	planCacheUnqualifiedCount int64
-	lastPlanCacheUnqualified  string // the reason why this query is unqualified for the plan cache
 }
 
 // StmtExecInfo records execution information of each statement.
@@ -260,8 +257,6 @@ type StmtExecInfo struct {
 	KeyspaceID        uint32
 	ResourceGroupName string
 	RUDetail          *util.RUDetails
-
-	PlanCacheUnqualified string
 }
 
 // newStmtSummaryByDigestMap creates an empty stmtSummaryByDigestMap.
@@ -865,10 +860,6 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 		ssElement.planCacheHits++
 	} else {
 		ssElement.planInCache = false
-	}
-	if sei.PlanCacheUnqualified != "" {
-		ssElement.planCacheUnqualifiedCount++
-		ssElement.lastPlanCacheUnqualified = sei.PlanCacheUnqualified
 	}
 
 	// SPM

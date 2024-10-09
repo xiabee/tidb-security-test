@@ -348,7 +348,6 @@ const (
 	JSONMergePreserve = "json_merge_preserve"
 	JSONPretty        = "json_pretty"
 	JSONQuote         = "json_quote"
-	JSONSchemaValid   = "json_schema_valid"
 	JSONSearch        = "json_search"
 	JSONStorageFree   = "json_storage_free"
 	JSONStorageSize   = "json_storage_size"

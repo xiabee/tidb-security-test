@@ -347,7 +347,6 @@ var funcName2Alias = map[string]string{
 	"json_merge_preserve":        ast.JSONMergePreserve,
 	"json_pretty":                ast.JSONPretty,
 	"json_quote":                 ast.JSONQuote,
-	"json_schema_valid":          ast.JSONSchemaValid,
 	"json_search":                ast.JSONSearch,
 	"json_storage_size":          ast.JSONStorageSize,
 	"json_depth":                 ast.JSONDepth,

@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/kvproto/pkg/keyspacepb"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
@@ -656,7 +655,7 @@ func TestTempIndexValueCodec(t *testing.T) {
 	remain, err = newTempIdxVal.DecodeOne(val)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(remain))
-	handle, err := DecodeHandleInIndexValue(newTempIdxVal.Value)
+	handle, err := DecodeHandleInUniqueIndexValue(newTempIdxVal.Value, false)
 	require.NoError(t, err)
 	require.Equal(t, handle.IntValue(), int64(100))
 	require.EqualValues(t, tempIdxVal, newTempIdxVal)
@@ -730,7 +729,7 @@ func TestTempIndexValueCodec(t *testing.T) {
 func TestV2TableCodec(t *testing.T) {
 	const tableID int64 = 31415926
 	key := EncodeTablePrefix(tableID)
-	c, err := tikv.NewCodecV2(tikv.ModeTxn, &keyspacepb.KeyspaceMeta{Id: 271828})
+	c, err := tikv.NewCodecV2(tikv.ModeTxn, 271828)
 	require.NoError(t, err)
 	key = c.EncodeKey(key)
 	tbid := DecodeTableID(key)

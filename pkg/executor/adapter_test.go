@@ -19,10 +19,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/executor"
 	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/store/copr"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
@@ -46,15 +46,7 @@ func TestContextCancelWhenReadFromCopIterator(t *testing.T) {
 	tk.MustExec("create table t(a int)")
 	tk.MustExec("insert into t values(1)")
 
-	syncCh := make(chan struct{})
-	require.NoError(t, failpoint.EnableCall("github.com/pingcap/tidb/pkg/store/copr/CtxCancelBeforeReceive",
-		func(ctx context.Context) {
-			if ctx.Value("TestContextCancel") == "test" {
-				syncCh <- struct{}{}
-				<-syncCh
-			}
-		},
-	))
+	testkit.EnableFailPoint(t, "github.com/pingcap/tidb/pkg/store/copr/CtxCancelBeforeReceive", "return(true)")
 	ctx := context.WithValue(context.Background(), "TestContextCancel", "test")
 	ctx, cancelFunc := context.WithCancel(ctx)
 	defer cancelFunc()
@@ -68,8 +60,8 @@ func TestContextCancelWhenReadFromCopIterator(t *testing.T) {
 		_, err2 := session.ResultSetToStringSlice(ctx, tk.Session(), rs)
 		require.ErrorIs(t, err2, context.Canceled)
 	}()
-	<-syncCh
+	<-copr.GlobalSyncChForTest
 	cancelFunc()
-	syncCh <- struct{}{}
+	copr.GlobalSyncChForTest <- struct{}{}
 	wg.Wait()
 }

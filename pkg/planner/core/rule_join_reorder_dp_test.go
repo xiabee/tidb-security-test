@@ -23,37 +23,34 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 
 type mockLogicalJoin struct {
-	logicalop.LogicalSchemaProducer
+	logicalSchemaProducer
 	involvedNodeSet int
 	statsMap        map[int]*property.StatsInfo
 	JoinType        JoinType
 }
 
-func (mj mockLogicalJoin) init(ctx base.PlanContext) *mockLogicalJoin {
-	mj.BaseLogicalPlan = logicalop.NewBaseLogicalPlan(ctx, "MockLogicalJoin", &mj, 0)
+func (mj mockLogicalJoin) init(ctx PlanContext) *mockLogicalJoin {
+	mj.baseLogicalPlan = newBaseLogicalPlan(ctx, "MockLogicalJoin", &mj, 0)
 	return &mj
 }
 
-// RecursiveDeriveStats implements LogicalPlan interface.
-func (mj *mockLogicalJoin) RecursiveDeriveStats(_ [][]*expression.Column) (*property.StatsInfo, error) {
+func (mj *mockLogicalJoin) recursiveDeriveStats(_ [][]*expression.Column) (*property.StatsInfo, error) {
 	if mj.StatsInfo() == nil {
 		mj.SetStats(mj.statsMap[mj.involvedNodeSet])
 	}
 	return mj.statsMap[mj.involvedNodeSet], nil
 }
 
-func newMockJoin(ctx base.PlanContext, statsMap map[int]*property.StatsInfo) func(lChild, rChild base.LogicalPlan, _ []*expression.ScalarFunction, _, _, _ []expression.Expression, joinType JoinType) base.LogicalPlan {
-	return func(lChild, rChild base.LogicalPlan, _ []*expression.ScalarFunction, _, _, _ []expression.Expression, joinType JoinType) base.LogicalPlan {
+func newMockJoin(ctx PlanContext, statsMap map[int]*property.StatsInfo) func(lChild, rChild LogicalPlan, _ []*expression.ScalarFunction, _, _, _ []expression.Expression, joinType JoinType) LogicalPlan {
+	return func(lChild, rChild LogicalPlan, _ []*expression.ScalarFunction, _, _, _ []expression.Expression, joinType JoinType) LogicalPlan {
 		retJoin := mockLogicalJoin{}.init(ctx)
-		retJoin.SetSchema(expression.MergeSchema(lChild.Schema(), rChild.Schema()))
+		retJoin.schema = expression.MergeSchema(lChild.Schema(), rChild.Schema())
 		retJoin.statsMap = statsMap
 		if mj, ok := lChild.(*mockLogicalJoin); ok {
 			retJoin.involvedNodeSet = mj.involvedNodeSet
@@ -136,12 +133,12 @@ func makeStatsMapForTPCHQ5() map[int]*property.StatsInfo {
 	return statsMap
 }
 
-func newDataSource(ctx base.PlanContext, name string, count int) base.LogicalPlan {
+func newDataSource(ctx PlanContext, name string, count int) LogicalPlan {
 	ds := DataSource{}.Init(ctx, 0)
 	tan := model.NewCIStr(name)
 	ds.TableAsName = &tan
-	ds.SetSchema(expression.NewSchema())
-	ds.Schema().Append(&expression.Column{
+	ds.schema = expression.NewSchema()
+	ds.schema.Append(&expression.Column{
 		UniqueID: ctx.GetSessionVars().PlanColumnID.Add(1),
 		RetType:  types.NewFieldType(mysql.TypeLonglong),
 	})
@@ -151,10 +148,10 @@ func newDataSource(ctx base.PlanContext, name string, count int) base.LogicalPla
 	return ds
 }
 
-func planToString(plan base.LogicalPlan) string {
+func planToString(plan LogicalPlan) string {
 	switch x := plan.(type) {
 	case *mockLogicalJoin:
-		return fmt.Sprintf("MockJoin{%v, %v}", planToString(x.Children()[0]), planToString(x.Children()[1]))
+		return fmt.Sprintf("MockJoin{%v, %v}", planToString(x.children[0]), planToString(x.children[1]))
 	case *DataSource:
 		return x.TableAsName.L
 	}
@@ -170,7 +167,7 @@ func TestDPReorderTPCHQ5(t *testing.T) {
 		do.StatsHandle().Close()
 	}()
 	ctx.GetSessionVars().PlanID.Store(-1)
-	joinGroups := make([]base.LogicalPlan, 0, 6)
+	joinGroups := make([]LogicalPlan, 0, 6)
 	joinGroups = append(joinGroups, newDataSource(ctx, "lineitem", 59986052))
 	joinGroups = append(joinGroups, newDataSource(ctx, "orders", 15000000))
 	joinGroups = append(joinGroups, newDataSource(ctx, "customer", 1500000))
@@ -219,7 +216,7 @@ func TestDPReorderAllCartesian(t *testing.T) {
 	}()
 	ctx.GetSessionVars().PlanID.Store(-1)
 
-	joinGroup := make([]base.LogicalPlan, 0, 4)
+	joinGroup := make([]LogicalPlan, 0, 4)
 	joinGroup = append(joinGroup, newDataSource(ctx, "a", 100))
 	joinGroup = append(joinGroup, newDataSource(ctx, "b", 100))
 	joinGroup = append(joinGroup, newDataSource(ctx, "c", 100))

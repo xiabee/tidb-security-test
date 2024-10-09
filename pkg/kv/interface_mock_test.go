@@ -172,8 +172,6 @@ func (t *mockTxn) SetMemoryFootprintChangeHook(func(uint64)) {
 
 }
 
-func (t *mockTxn) MemHookSet() bool { return false }
-
 func (t *mockTxn) Mem() uint64 {
 	return 0
 }

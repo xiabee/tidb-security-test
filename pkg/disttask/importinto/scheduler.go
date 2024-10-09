@@ -614,7 +614,10 @@ func getLoadedRowCountOnGlobalSort(handle storage.TaskHandle, task *proto.Task) 
 }
 
 func startJob(ctx context.Context, logger *zap.Logger, taskHandle storage.TaskHandle, taskMeta *TaskMeta, jobStep string) error {
-	failpoint.InjectCall("syncBeforeJobStarted", taskMeta.JobID)
+	failpoint.Inject("syncBeforeJobStarted", func() {
+		TestSyncChan <- struct{}{}
+		<-TestSyncChan
+	})
 	// retry for 3+6+12+24+(30-4)*30 ~= 825s ~= 14 minutes
 	// we consider all errors as retryable errors, except context done.
 	// the errors include errors happened when communicate with PD and TiKV.
@@ -628,7 +631,9 @@ func startJob(ctx context.Context, logger *zap.Logger, taskHandle storage.TaskHa
 			})
 		},
 	)
-	failpoint.InjectCall("syncAfterJobStarted")
+	failpoint.Inject("syncAfterJobStarted", func() {
+		TestSyncChan <- struct{}{}
+	})
 	return err
 }
 

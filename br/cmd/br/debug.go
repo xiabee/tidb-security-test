@@ -21,9 +21,8 @@ import (
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/mock/mockid"
-	restoreutils "github.com/pingcap/tidb/br/pkg/restore/utils"
+	"github.com/pingcap/tidb/br/pkg/restore"
 	"github.com/pingcap/tidb/br/pkg/rtree"
-	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/task"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version/build"
@@ -208,7 +207,7 @@ func newBackupMetaValidateCommand() *cobra.Command {
 			for offset := uint64(0); offset < tableIDOffset; offset++ {
 				_, _ = tableIDAllocator.Alloc() // Ignore error
 			}
-			rewriteRules := &restoreutils.RewriteRules{
+			rewriteRules := &restore.RewriteRules{
 				Data: make([]*import_sstpb.RewriteRule, 0),
 			}
 			tableIDMap := make(map[int64]int64)
@@ -246,13 +245,13 @@ func newBackupMetaValidateCommand() *cobra.Command {
 					}
 				}
 
-				rules := restoreutils.GetRewriteRules(newTable, table.Info, 0, true)
+				rules := restore.GetRewriteRules(newTable, table.Info, 0, true)
 				rewriteRules.Data = append(rewriteRules.Data, rules.Data...)
 				tableIDMap[table.Info.ID] = int64(tableID)
 			}
 			// Validate rewrite rules
 			for _, file := range files {
-				err = restoreutils.ValidateFileRewriteRule(file, rewriteRules)
+				err = restore.ValidateFileRewriteRule(file, rewriteRules)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -448,8 +447,8 @@ func searchStreamBackupCommand() *cobra.Command {
 			if err != nil {
 				return errors.Trace(err)
 			}
-			comparator := stream.NewStartWithComparator()
-			bs := stream.NewStreamBackupSearch(s, comparator, keyBytes)
+			comparator := restore.NewStartWithComparator()
+			bs := restore.NewStreamBackupSearch(s, comparator, keyBytes)
 			bs.SetStartTS(startTs)
 			bs.SetEndTs(endTs)
 

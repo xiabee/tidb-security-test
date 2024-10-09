@@ -429,14 +429,14 @@ StreamAgg	4.80	root		group by:upper(explain_generate_column_substitute.t.b), fun
   └─IndexFullScan	6.00	cop[tikv]	table:t, index:expression_index_2(upper(`b`))	keep order:true
 desc format = 'brief' select count(upper(b)) from t use index() group by upper(b);
 id	estRows	task	access object	operator info
-HashAgg	6.00	root		group by:Column#10, funcs:count(Column#10)->Column#7
-└─Projection	6.00	root		upper(explain_generate_column_substitute.t.b)->Column#10
+HashAgg	6.00	root		group by:Column#11, funcs:count(Column#10)->Column#7
+└─Projection	6.00	root		upper(explain_generate_column_substitute.t.b)->Column#10, upper(explain_generate_column_substitute.t.b)->Column#11
   └─TableReader	6.00	root		data:TableFullScan
     └─TableFullScan	6.00	cop[tikv]	table:t	keep order:false
 desc format = 'brief' select max(upper(b)) from t use index() group by upper(b);
 id	estRows	task	access object	operator info
-HashAgg	6.00	root		group by:Column#10, funcs:max(Column#10)->Column#7
-└─Projection	6.00	root		upper(explain_generate_column_substitute.t.b)->Column#10
+HashAgg	6.00	root		group by:Column#11, funcs:max(Column#10)->Column#7
+└─Projection	6.00	root		upper(explain_generate_column_substitute.t.b)->Column#10, upper(explain_generate_column_substitute.t.b)->Column#11
   └─TableReader	6.00	root		data:TableFullScan
     └─TableFullScan	6.00	cop[tikv]	table:t	keep order:false
 drop table if exists t;
@@ -505,7 +505,7 @@ a
 b
 select @@tidb_allow_function_for_expression_index;
 @@tidb_allow_function_for_expression_index
-json_array, json_array_append, json_array_insert, json_contains, json_contains_path, json_depth, json_extract, json_insert, json_keys, json_length, json_merge_patch, json_merge_preserve, json_object, json_pretty, json_quote, json_remove, json_replace, json_schema_valid, json_search, json_set, json_storage_size, json_type, json_unquote, json_valid, lower, md5, reverse, tidb_shard, upper, vitess_hash
+json_array, json_array_append, json_array_insert, json_contains, json_contains_path, json_depth, json_extract, json_insert, json_keys, json_length, json_merge_patch, json_merge_preserve, json_object, json_pretty, json_quote, json_remove, json_replace, json_search, json_set, json_storage_size, json_type, json_unquote, json_valid, lower, md5, reverse, tidb_shard, upper, vitess_hash
 CREATE TABLE `PK_S_MULTI_30_tmp` (
 `COL1` double NOT NULL,
 `COL2` double NOT NULL,

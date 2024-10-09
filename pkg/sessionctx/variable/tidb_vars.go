@@ -975,12 +975,10 @@ const (
 	// TiDBPersistAnalyzeOptions persists analyze options for later analyze and auto-analyze
 	TiDBPersistAnalyzeOptions = "tidb_persist_analyze_options"
 	// TiDBEnableColumnTracking enables collecting predicate columns.
-	// DEPRECATED: This variable is deprecated, please do not use this variable.
 	TiDBEnableColumnTracking = "tidb_enable_column_tracking"
 	// TiDBDisableColumnTrackingTime records the last time TiDBEnableColumnTracking is set off.
 	// It is used to invalidate the collected predicate columns after turning off TiDBEnableColumnTracking, which avoids physical deletion.
 	// It doesn't have cache in memory, and we directly get/set the variable value from/to mysql.tidb.
-	// DEPRECATED: This variable is deprecated, please do not use this variable.
 	TiDBDisableColumnTrackingTime = "tidb_disable_column_tracking_time"
 	// TiDBStatsLoadPseudoTimeout indicates whether to fallback to pseudo stats after load timeout.
 	TiDBStatsLoadPseudoTimeout = "tidb_stats_load_pseudo_timeout"
@@ -1073,9 +1071,6 @@ const (
 	TiDBEnableHistoricalStatsForCapture = "tidb_enable_historical_stats_for_capture"
 	// TiDBEnableResourceControl indicates whether resource control feature is enabled
 	TiDBEnableResourceControl = "tidb_enable_resource_control"
-	// TiDBResourceControlStrictMode indicates whether resource control strict mode is enabled.
-	// When strict mode is enabled, user need certain privilege to change session or statement resource group.
-	TiDBResourceControlStrictMode = "tidb_resource_control_strict_mode"
 	// TiDBStmtSummaryEnablePersistent indicates whether to enable file persistence for stmtsummary.
 	TiDBStmtSummaryEnablePersistent = "tidb_stmt_summary_enable_persistent"
 	// TiDBStmtSummaryFilename indicates the file name written by stmtsummary.
@@ -1245,7 +1240,6 @@ const (
 	DefTiDBEnableOuterJoinReorder                  = true
 	DefTiDBEnableNAAJ                              = true
 	DefTiDBAllowBatchCop                           = 1
-	DefBlockEncryptionMode                         = "aes-128-ecb"
 	DefTiDBAllowMPPExecution                       = true
 	DefTiDBAllowTiFlashCop                         = false
 	DefTiDBHashExchangeWithNewCollation            = true
@@ -1344,10 +1338,11 @@ const (
 	DefEnableLegacyInstanceScope                   = true
 	DefTiDBTableCacheLease                         = 3 // 3s
 	DefTiDBPersistAnalyzeOptions                   = true
+	DefTiDBEnableColumnTracking                    = false
 	DefTiDBStatsLoadSyncWait                       = 100
 	DefTiDBStatsLoadPseudoTimeout                  = true
 	DefSysdateIsNow                                = false
-	DefTiDBEnableParallelHashaggSpill              = true
+	DefTiDBEnableParallelHashaggSpill              = false
 	DefTiDBEnableMutationChecker                   = false
 	DefTiDBTxnAssertionLevel                       = AssertionOffStr
 	DefTiDBIgnorePreparedCacheCloseStmt            = false
@@ -1452,7 +1447,6 @@ const (
 	DefTiDBTTLDeleteWorkerCount                       = 4
 	DefaultExchangeCompressionMode                    = kv.ExchangeCompressionModeUnspecified
 	DefTiDBEnableResourceControl                      = true
-	DefTiDBResourceControlStrictMode                  = true
 	DefTiDBPessimisticTransactionFairLocking          = false
 	DefTiDBEnablePlanCacheForParamLimit               = true
 	DefTiFlashComputeDispatchPolicy                   = tiflashcompute.DispatchPolicyConsistentHashStr
@@ -1493,7 +1487,6 @@ const (
 	DefDivPrecisionIncrement                          = 4
 	DefTiDBDMLType                                    = "STANDARD"
 	DefGroupConcatMaxLen                              = uint64(1024)
-	DefDefaultWeekFormat                              = "0"
 )
 
 // Process global variables.
@@ -1528,6 +1521,7 @@ var (
 	VarTiDBSuperReadOnly                 = atomic.NewBool(DefTiDBSuperReadOnly)
 	PersistAnalyzeOptions                = atomic.NewBool(DefTiDBPersistAnalyzeOptions)
 	TableCacheLease                      = atomic.NewInt64(DefTiDBTableCacheLease)
+	EnableColumnTracking                 = atomic.NewBool(DefTiDBEnableColumnTracking)
 	StatsLoadSyncWait                    = atomic.NewInt64(DefTiDBStatsLoadSyncWait)
 	StatsLoadPseudoTimeout               = atomic.NewBool(DefTiDBStatsLoadPseudoTimeout)
 	MemQuotaBindingCache                 = atomic.NewInt64(DefTiDBMemQuotaBindingCache)
@@ -1589,16 +1583,15 @@ var (
 	TTLRunningTasks                 = atomic.NewInt32(DefTiDBTTLRunningTasks)
 	// always set the default value to false because the resource control in kv-client is not inited
 	// It will be initialized to the right value after the first call of `rebuildSysVarCache`
-	EnableResourceControl           = atomic.NewBool(false)
-	EnableResourceControlStrictMode = atomic.NewBool(true)
-	EnableCheckConstraint           = atomic.NewBool(DefTiDBEnableCheckConstraint)
-	SkipMissingPartitionStats       = atomic.NewBool(DefTiDBSkipMissingPartitionStats)
-	TiFlashEnablePipelineMode       = atomic.NewBool(DefTiDBEnableTiFlashPipelineMode)
-	ServiceScope                    = atomic.NewString("")
-	SchemaVersionCacheLimit         = atomic.NewInt64(DefTiDBSchemaVersionCacheLimit)
-	CloudStorageURI                 = atomic.NewString("")
-	IgnoreInlistPlanDigest          = atomic.NewBool(DefTiDBIgnoreInlistPlanDigest)
-	TxnEntrySizeLimit               = atomic.NewUint64(DefTiDBTxnEntrySizeLimit)
+	EnableResourceControl     = atomic.NewBool(false)
+	EnableCheckConstraint     = atomic.NewBool(DefTiDBEnableCheckConstraint)
+	SkipMissingPartitionStats = atomic.NewBool(DefTiDBSkipMissingPartitionStats)
+	TiFlashEnablePipelineMode = atomic.NewBool(DefTiDBEnableTiFlashPipelineMode)
+	ServiceScope              = atomic.NewString("")
+	SchemaVersionCacheLimit   = atomic.NewInt64(DefTiDBSchemaVersionCacheLimit)
+	CloudStorageURI           = atomic.NewString("")
+	IgnoreInlistPlanDigest    = atomic.NewBool(DefTiDBIgnoreInlistPlanDigest)
+	TxnEntrySizeLimit         = atomic.NewUint64(DefTiDBTxnEntrySizeLimit)
 
 	SchemaCacheSize = atomic.NewInt64(DefTiDBSchemaCacheSize)
 )

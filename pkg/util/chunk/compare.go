@@ -53,8 +53,6 @@ func GetCompareFunc(tp *types.FieldType) CompareFunc {
 		return cmpBit
 	case mysql.TypeJSON:
 		return cmpJSON
-	case mysql.TypeNull:
-		return cmpNullConst
 	}
 	return nil
 }
@@ -169,10 +167,6 @@ func cmpJSON(l Row, lCol int, r Row, rCol int) int {
 	}
 	lJ, rJ := l.GetJSON(lCol), r.GetJSON(rCol)
 	return types.CompareBinaryJSON(lJ, rJ)
-}
-
-func cmpNullConst(_ Row, _ int, _ Row, _ int) int {
-	return 0
 }
 
 // Compare compares the value with ad.

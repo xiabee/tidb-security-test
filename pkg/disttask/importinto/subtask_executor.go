@@ -33,6 +33,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// TestSyncChan is used to test.
+var TestSyncChan = make(chan struct{})
+
 // MiniTaskExecutor is the interface for a minimal task executor.
 // exported for testing.
 type MiniTaskExecutor interface {
@@ -61,7 +64,10 @@ func (e *importMinimalTaskExecutor) Run(ctx context.Context, dataWriter, indexWr
 	failpoint.Inject("errorWhenSortChunk", func() {
 		failpoint.Return(errors.New("occur an error when sort chunk"))
 	})
-	failpoint.InjectCall("syncBeforeSortChunk")
+	failpoint.Inject("syncBeforeSortChunk", func() {
+		TestSyncChan <- struct{}{}
+		<-TestSyncChan
+	})
 	chunkCheckpoint := toChunkCheckpoint(e.mTtask.Chunk)
 	sharedVars := e.mTtask.SharedVars
 	checksum := verify.NewKVGroupChecksumWithKeyspace(sharedVars.TableImporter.GetKeySpace())
@@ -101,7 +107,10 @@ func (e *importMinimalTaskExecutor) Run(ctx context.Context, dataWriter, indexWr
 
 // postProcess does the post-processing for the task.
 func postProcess(ctx context.Context, store kv.Storage, taskMeta *TaskMeta, subtaskMeta *PostProcessStepMeta, logger *zap.Logger) (err error) {
-	failpoint.InjectCall("syncBeforePostProcess", taskMeta.JobID)
+	failpoint.Inject("syncBeforePostProcess", func() {
+		TestSyncChan <- struct{}{}
+		<-TestSyncChan
+	})
 
 	callLog := log.BeginTask(logger, "post process")
 	defer func() {

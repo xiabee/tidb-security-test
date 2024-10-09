@@ -21,11 +21,6 @@ import (
 	"go.uber.org/goleak"
 )
 
-var (
-	CheckStoresAlive  = checkStoresAlive
-	HandleTiKVAddress = handleTiKVAddress
-)
-
 func TestMain(m *testing.M) {
 	opts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),

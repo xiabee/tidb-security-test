@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/types"
@@ -72,9 +73,9 @@ func (e *baseGroupConcat4String) AppendFinalResult2Chunk(_ AggFuncUpdateContext,
 func (e *baseGroupConcat4String) handleTruncateError(tc types.Context) (err error) {
 	if atomic.CompareAndSwapInt32(e.truncated, 0, 1) {
 		if !tc.Flags().TruncateAsWarning() {
-			return expression.ErrCutValueGroupConcat.GenWithStackByArgs(e.args[0].String())
+			return expression.ErrCutValueGroupConcat.GenWithStackByArgs(e.args[0].StringWithCtx(errors.RedactLogDisable))
 		}
-		tc.AppendWarning(expression.ErrCutValueGroupConcat.FastGenByArgs(e.args[0].String()))
+		tc.AppendWarning(expression.ErrCutValueGroupConcat.FastGenByArgs(e.args[0].StringWithCtx(errors.RedactLogDisable)))
 	}
 	return nil
 }
@@ -242,7 +243,7 @@ func (e *groupConcatDistinct) UpdatePartialResult(sctx AggFuncUpdateContext, row
 
 	collators := make([]collate.Collator, 0, len(e.args))
 	for _, arg := range e.args {
-		collators = append(collators, collate.GetCollator(arg.GetType(sctx).GetCollate()))
+		collators = append(collators, collate.GetCollator(arg.GetType().GetCollate()))
 	}
 
 	for _, row := range rowsInGroup {
@@ -303,8 +304,7 @@ type topNRows struct {
 	rows []sortRow
 	desc []bool
 	sctx AggFuncUpdateContext
-	// TODO: this err is never assigned now. Please choose to make use of it or just remove it.
-	err error
+	err  error
 
 	currSize  uint64
 	limitSize uint64
@@ -326,16 +326,7 @@ func (h topNRows) Less(i, j int) bool {
 	for k := 0; k < n; k++ {
 		ret, err := h.rows[i].byItems[k].Compare(h.sctx.TypeCtx(), h.rows[j].byItems[k], h.collators[k])
 		if err != nil {
-			// TODO: check whether it's appropriate to just ignore the error here.
-			//
-			// Previously, the error is assigned to `h.err` and hope it can be accessed from outside. However,
-			// the `h` is copied when calling this method, and the assignment to `h.err` is meaningless.
-			//
-			// The linter `unusedwrite` found this issue. Therefore, the unused write to `h.err` is removed and
-			// it doesn't change the behavior. But we need to confirm whether it's correct to just ignore the error
-			// here.
-			//
-			// Ref https://github.com/pingcap/tidb/issues/52449
+			h.err = err
 			return false
 		}
 		if h.desc[k] {
@@ -429,8 +420,6 @@ type partialResult4GroupConcatOrder struct {
 
 type groupConcatOrder struct {
 	baseGroupConcat4String
-	ctors []collate.Collator
-	desc  []bool
 }
 
 func (e *groupConcatOrder) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr PartialResult, chk *chunk.Chunk) error {
@@ -444,14 +433,20 @@ func (e *groupConcatOrder) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr Pa
 }
 
 func (e *groupConcatOrder) AllocPartialResult() (pr PartialResult, memDelta int64) {
+	desc := make([]bool, len(e.byItems))
+	ctors := make([]collate.Collator, 0, len(e.byItems))
+	for i, byItem := range e.byItems {
+		desc[i] = byItem.Desc
+		ctors = append(ctors, collate.GetCollator(byItem.Expr.GetType().GetCollate()))
+	}
 	p := &partialResult4GroupConcatOrder{
 		topN: &topNRows{
-			desc:           e.desc,
+			desc:           desc,
 			currSize:       0,
 			limitSize:      e.maxLen,
 			sepSize:        uint64(len(e.sep)),
 			isSepTruncated: false,
-			collators:      e.ctors,
+			collators:      ctors,
 		},
 	}
 	return PartialResult(p), DefPartialResult4GroupConcatOrderSize + DefTopNRowsSize
@@ -530,8 +525,6 @@ type partialResult4GroupConcatOrderDistinct struct {
 
 type groupConcatDistinctOrder struct {
 	baseGroupConcat4String
-	ctors []collate.Collator
-	desc  []bool
 }
 
 func (e *groupConcatDistinctOrder) AppendFinalResult2Chunk(_ AggFuncUpdateContext, pr PartialResult, chk *chunk.Chunk) error {
@@ -545,15 +538,21 @@ func (e *groupConcatDistinctOrder) AppendFinalResult2Chunk(_ AggFuncUpdateContex
 }
 
 func (e *groupConcatDistinctOrder) AllocPartialResult() (pr PartialResult, memDelta int64) {
+	desc := make([]bool, len(e.byItems))
+	ctors := make([]collate.Collator, 0, len(e.byItems))
+	for i, byItem := range e.byItems {
+		desc[i] = byItem.Desc
+		ctors = append(ctors, collate.GetCollator(byItem.Expr.GetType().GetCollate()))
+	}
 	valSet, setSize := set.NewStringSetWithMemoryUsage()
 	p := &partialResult4GroupConcatOrderDistinct{
 		topN: &topNRows{
-			desc:           e.desc,
+			desc:           desc,
 			currSize:       0,
 			limitSize:      e.maxLen,
 			sepSize:        uint64(len(e.sep)),
 			isSepTruncated: false,
-			collators:      e.ctors,
+			collators:      ctors,
 		},
 		valSet: valSet,
 	}
@@ -575,7 +574,7 @@ func (e *groupConcatDistinctOrder) UpdatePartialResult(sctx AggFuncUpdateContext
 
 	collators := make([]collate.Collator, 0, len(e.args))
 	for _, arg := range e.args {
-		collators = append(collators, collate.GetCollator(arg.GetType(sctx).GetCollate()))
+		collators = append(collators, collate.GetCollator(arg.GetType().GetCollate()))
 	}
 
 	for _, row := range rowsInGroup {

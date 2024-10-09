@@ -143,6 +143,9 @@ func NewTargetInfoGetterImpl(
 	case config.BackendTiDB:
 		backendTargetInfoGetter = tidb.NewTargetInfoGetter(targetDB)
 	case config.BackendLocal:
+		if pdHTTPCli == nil {
+			return nil, common.ErrUnknown.GenWithStack("pd HTTP client is required when using local backend")
+		}
 		backendTargetInfoGetter = local.NewTargetInfoGetter(tls, targetDB, pdHTTPCli)
 	default:
 		return nil, common.ErrUnknownBackend.GenWithStackByArgs(cfg.TikvImporter.Backend)
@@ -461,9 +464,7 @@ func (p *PreImportInfoGetterImpl) ReadFirstNRowsByTableName(ctx context.Context,
 // ReadFirstNRowsByFileMeta reads the first N rows of an data file.
 // It implements the PreImportInfoGetter interface.
 func (p *PreImportInfoGetterImpl) ReadFirstNRowsByFileMeta(ctx context.Context, dataFileMeta mydump.SourceFileMeta, n int) ([]string, [][]types.Datum, error) {
-	reader, err := mydump.OpenReader(ctx, &dataFileMeta, p.srcStorage, storage.DecompressConfig{
-		ZStdDecodeConcurrency: 1,
-	})
+	reader, err := mydump.OpenReader(ctx, &dataFileMeta, p.srcStorage, storage.DecompressConfig{})
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -612,9 +613,7 @@ func (p *PreImportInfoGetterImpl) sampleDataFromTable(
 		return resultIndexRatio, isRowOrdered, nil
 	}
 	sampleFile := tableMeta.DataFiles[0].FileMeta
-	reader, err := mydump.OpenReader(ctx, &sampleFile, p.srcStorage, storage.DecompressConfig{
-		ZStdDecodeConcurrency: 1,
-	})
+	reader, err := mydump.OpenReader(ctx, &sampleFile, p.srcStorage, storage.DecompressConfig{})
 	if err != nil {
 		return 0.0, false, errors.Trace(err)
 	}

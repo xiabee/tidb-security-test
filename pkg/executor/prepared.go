@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/types"
@@ -162,7 +161,7 @@ type ExecuteExec struct {
 	usingVars     []expression.Expression
 	stmtExec      exec.Executor
 	stmt          ast.StmtNode
-	plan          base.Plan
+	plan          plannercore.Plan
 	lowerPriority bool
 	outputNames   []*types.FieldName
 }

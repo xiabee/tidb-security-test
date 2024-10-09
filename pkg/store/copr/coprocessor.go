@@ -340,7 +340,6 @@ type buildCopTaskOpt struct {
 func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*copTask, error) {
 	req, cache, eventCb, hints := opt.req, opt.cache, opt.eventCb, opt.rowHints
 	start := time.Now()
-	defer tracing.StartRegion(bo.GetCtx(), "copr.buildCopTasks").End()
 	cmdType := tikvrpc.CmdCop
 	if req.StoreType == kv.TiDB {
 		return buildTiDBMemCopTasks(ranges, req)
@@ -358,7 +357,7 @@ func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*c
 		}
 	})
 
-	// TODO(youjiali1995): is there any request type that needn't be split by buckets?
+	// TODO(youjiali1995): is there any request type that needn't be splitted by buckets?
 	locs, err := cache.SplitKeyRangesByBuckets(bo, ranges)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -460,6 +459,9 @@ func buildCopTasks(bo *Backoffer, ranges *KeyRanges, opt *buildCopTaskOpt) ([]*c
 			zap.Duration("elapsed", elapsed),
 			zap.Int("range len", rangesLen),
 			zap.Int("task len", len(tasks)))
+	}
+	if elapsed > time.Millisecond {
+		defer tracing.StartRegion(bo.GetCtx(), "copr.buildCopTasks").End()
 	}
 	if opt.elapsed != nil {
 		*opt.elapsed = *opt.elapsed + elapsed
@@ -935,8 +937,16 @@ func (sender *copIteratorTaskSender) run(connID uint64) {
 	}
 }
 
+// GlobalSyncChForTest is a global channel for test.
+var GlobalSyncChForTest = make(chan struct{})
+
 func (it *copIterator) recvFromRespCh(ctx context.Context, respCh <-chan *copResponse) (resp *copResponse, ok bool, exit bool) {
-	failpoint.InjectCall("CtxCancelBeforeReceive", ctx)
+	failpoint.Inject("CtxCancelBeforeReceive", func(_ failpoint.Value) {
+		if ctx.Value("TestContextCancel") == "test" {
+			GlobalSyncChForTest <- struct{}{}
+			<-GlobalSyncChForTest
+		}
+	})
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -1538,7 +1548,7 @@ func (worker *copIteratorWorker) handleBatchCopResponse(bo *Backoffer, rpcCtx *t
 	}()
 	appendRemainTasks := func(tasks ...*copTask) {
 		if remainTasks == nil {
-			// allocate size of remain length
+			// allocate size fo remain length
 			remainTasks = make([]*copTask, 0, len(tasks))
 		}
 		remainTasks = append(remainTasks, tasks...)

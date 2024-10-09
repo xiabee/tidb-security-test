@@ -63,7 +63,6 @@ func (c *codecPDClient) ScanRegions(
 		endKey = codec.EncodeBytes(nil, endKey)
 	}
 
-	//nolint:staticcheck
 	regions, err := c.Client.ScanRegions(ctx, startKey, endKey, limit, opts...)
 	if err != nil {
 		return nil, errors.Trace(err)

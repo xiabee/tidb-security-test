@@ -228,7 +228,7 @@ func (e *AnalyzeColumnsExecV2) buildSamplingStats(
 	l := len(e.analyzePB.ColReq.ColumnsInfo) + len(e.analyzePB.ColReq.ColumnGroups)
 	rootRowCollector := statistics.NewRowSampleCollector(int(e.analyzePB.ColReq.SampleSize), e.analyzePB.ColReq.GetSampleRate(), l)
 	for i := 0; i < l; i++ {
-		rootRowCollector.Base().FMSketches = append(rootRowCollector.Base().FMSketches, statistics.NewFMSketch(statistics.MaxSketchSize))
+		rootRowCollector.Base().FMSketches = append(rootRowCollector.Base().FMSketches, statistics.NewFMSketch(maxSketchSize))
 	}
 
 	sc := e.ctx.GetSessionVars().StmtCtx
@@ -528,7 +528,7 @@ func (e *AnalyzeColumnsExecV2) buildSubIndexJobForSpecialIndex(indexInfos []*mod
 	_, offset := timeutil.Zone(e.ctx.GetSessionVars().Location())
 	tasks := make([]*analyzeTask, 0, len(indexInfos))
 	sc := e.ctx.GetSessionVars().StmtCtx
-	concurrency := adaptiveAnlayzeDistSQLConcurrency(context.Background(), e.ctx)
+	concurrency := e.ctx.GetSessionVars().AnalyzeDistSQLScanConcurrency()
 	for _, indexInfo := range indexInfos {
 		base := baseAnalyzeExec{
 			ctx:         e.ctx,
@@ -562,7 +562,7 @@ func (e *AnalyzeColumnsExecV2) buildSubIndexJobForSpecialIndex(indexInfos []*mod
 			NumColumns: int32(len(indexInfo.Columns)),
 			TopNSize:   &topnSize,
 			Version:    statsVersion,
-			SketchSize: statistics.MaxSketchSize,
+			SketchSize: maxSketchSize,
 		}
 		if idxExec.isCommonHandle && indexInfo.Primary {
 			idxExec.analyzePB.Tp = tipb.AnalyzeType_TypeCommonHandle
@@ -621,7 +621,7 @@ func (e *AnalyzeColumnsExecV2) subMergeWorker(resultCh chan<- *samplingMergeResu
 	})
 	retCollector := statistics.NewRowSampleCollector(int(e.analyzePB.ColReq.SampleSize), e.analyzePB.ColReq.GetSampleRate(), l)
 	for i := 0; i < l; i++ {
-		retCollector.Base().FMSketches = append(retCollector.Base().FMSketches, statistics.NewFMSketch(statistics.MaxSketchSize))
+		retCollector.Base().FMSketches = append(retCollector.Base().FMSketches, statistics.NewFMSketch(maxSketchSize))
 	}
 	for {
 		data, ok := <-taskCh

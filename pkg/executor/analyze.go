@@ -39,7 +39,6 @@ import (
 	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/statistics/handle"
-	statstypes "github.com/pingcap/tidb/pkg/statistics/handle/types"
 	handleutil "github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
@@ -75,6 +74,10 @@ var (
 	// MaxRegionSampleSize is the max sample size for one region when analyze v1 collects samples from table.
 	// It's public for test.
 	MaxRegionSampleSize = int64(1000)
+)
+
+const (
+	maxSketchSize = 10000
 )
 
 type taskType int
@@ -118,7 +121,7 @@ func (e *AnalyzeExec) Next(ctx context.Context, _ *chunk.Chunk) error {
 	pruneMode := variable.PartitionPruneMode(sessionVars.PartitionPruneMode.Load())
 	// needGlobalStats used to indicate whether we should merge the partition-level stats to global-level stats.
 	needGlobalStats := pruneMode == variable.Dynamic
-	globalStatsMap := make(map[globalStatsKey]statstypes.GlobalStatsInfo)
+	globalStatsMap := make(map[globalStatsKey]globalStatsInfo)
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		return e.handleResultsError(ctx, concurrency, needGlobalStats, globalStatsMap, resultsCh, len(tasks))
@@ -161,7 +164,7 @@ TASKLOOP:
 	})
 	// If we enabled dynamic prune mode, then we need to generate global stats here for partition tables.
 	if needGlobalStats {
-		err = e.handleGlobalStats(globalStatsMap)
+		err = e.handleGlobalStats(ctx, globalStatsMap)
 		if err != nil {
 			return err
 		}
@@ -770,11 +773,11 @@ func handleGlobalStats(needGlobalStats bool, globalStatsMap globalStatsMap, resu
 					}
 					histIDs = append(histIDs, hg.ID)
 				}
-				globalStatsMap[globalStatsID] = statstypes.GlobalStatsInfo{IsIndex: result.IsIndex, HistIDs: histIDs, StatsVersion: results.StatsVer}
+				globalStatsMap[globalStatsID] = globalStatsInfo{isIndex: result.IsIndex, histIDs: histIDs, statsVersion: results.StatsVer}
 			} else {
 				for _, hg := range result.Hist {
 					globalStatsID := globalStatsKey{tableID: results.TableID.TableID, indexID: hg.ID}
-					globalStatsMap[globalStatsID] = statstypes.GlobalStatsInfo{IsIndex: result.IsIndex, HistIDs: []int64{hg.ID}, StatsVersion: results.StatsVer}
+					globalStatsMap[globalStatsID] = globalStatsInfo{isIndex: result.IsIndex, histIDs: []int64{hg.ID}, statsVersion: results.StatsVer}
 				}
 			}
 		}

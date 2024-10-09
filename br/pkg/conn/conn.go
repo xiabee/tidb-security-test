@@ -91,23 +91,17 @@ func GetAllTiKVStoresWithRetry(ctx context.Context,
 				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-error injected.")
 				if val.(bool) {
 					err = status.Error(codes.Unknown, "Retryable error")
-					failpoint.Return(err)
+				} else {
+					err = context.Canceled
 				}
 			})
 
-			failpoint.Inject("hint-GetAllTiKVStores-grpc-cancel", func(val failpoint.Value) {
-				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-grpc-cancel injected.")
+			failpoint.Inject("hint-GetAllTiKVStores-cancel", func(val failpoint.Value) {
+				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-cancel injected.")
 				if val.(bool) {
 					err = status.Error(codes.Canceled, "Cancel Retry")
-					failpoint.Return(err)
-				}
-			})
-
-			failpoint.Inject("hint-GetAllTiKVStores-ctx-cancel", func(val failpoint.Value) {
-				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-ctx-cancel injected.")
-				if val.(bool) {
+				} else {
 					err = context.Canceled
-					failpoint.Return(err)
 				}
 			})
 
@@ -406,11 +400,11 @@ func (mgr *Mgr) GetConfigFromTiKV(ctx context.Context, cli *http.Client, fn func
 			if e != nil {
 				return e
 			}
-			defer resp.Body.Close()
 			err = fn(resp)
 			if err != nil {
 				return err
 			}
+			_ = resp.Body.Close()
 			return nil
 		}, utils.NewPDReqBackoffer())
 		if err != nil {

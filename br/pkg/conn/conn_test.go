@@ -1,6 +1,6 @@
 // Copyright 2020 PingCAP, Inc. Licensed under Apache-2.0.
 
-package conn_test
+package conn
 
 import (
 	"context"
@@ -15,10 +15,9 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	kvconfig "github.com/pingcap/tidb/br/pkg/config"
-	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	"github.com/pingcap/tidb/br/pkg/pdutil"
-	"github.com/pingcap/tidb/br/pkg/utiltest"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/multierr"
 	"google.golang.org/grpc/codes"
@@ -26,14 +25,10 @@ import (
 )
 
 func TestGetAllTiKVStoresWithRetryCancel(t *testing.T) {
-	err := failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-grpc-cancel", "1*return(true)")
-	require.NoError(t, err)
-	err = failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-ctx-cancel", "1*return(true)")
+	err := failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-cancel", "1*return(true)->1*return(false)")
 	require.NoError(t, err)
 	defer func() {
-		err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-grpc-cancel")
-		require.NoError(t, err)
-		err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-ctx-cancel")
+		err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-cancel")
 		require.NoError(t, err)
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -62,24 +57,22 @@ func TestGetAllTiKVStoresWithRetryCancel(t *testing.T) {
 		},
 	}
 
-	fpdc := utiltest.NewFakePDClient(stores, false, nil)
+	fpdc := utils.FakePDClient{
+		Stores: stores,
+	}
 
-	_, err = conn.GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
+	_, err = GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
 	require.Error(t, err)
 	errs := multierr.Errors(err)
-	require.Equal(t, 1, len(errs))
+	require.Equal(t, 2, len(errs))
 	require.Equal(t, codes.Canceled, status.Code(errors.Cause(errs[0])))
 }
 
 func TestGetAllTiKVStoresWithUnknown(t *testing.T) {
-	err := failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-error", "1*return(true)")
-	require.NoError(t, err)
-	err = failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-ctx-cancel", "1*return(true)")
+	err := failpoint.Enable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-error", "1*return(true)->1*return(false)")
 	require.NoError(t, err)
 	defer func() {
 		err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-error")
-		require.NoError(t, err)
-		err = failpoint.Disable("github.com/pingcap/tidb/br/pkg/conn/hint-GetAllTiKVStores-ctx-cancel")
 		require.NoError(t, err)
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,12 +101,14 @@ func TestGetAllTiKVStoresWithUnknown(t *testing.T) {
 		},
 	}
 
-	fpdc := utiltest.NewFakePDClient(stores, false, nil)
+	fpdc := utils.FakePDClient{
+		Stores: stores,
+	}
 
-	_, err = conn.GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
+	_, err = GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
 	require.Error(t, err)
 	errs := multierr.Errors(err)
-	require.Equal(t, 1, len(errs))
+	require.Equal(t, 2, len(errs))
 	require.Equal(t, codes.Unknown, status.Code(errors.Cause(errs[0])))
 }
 
@@ -164,14 +159,16 @@ func TestCheckStoresAlive(t *testing.T) {
 		},
 	}
 
-	fpdc := utiltest.NewFakePDClient(stores, false, nil)
+	fpdc := utils.FakePDClient{
+		Stores: stores,
+	}
 
-	kvStores, err := conn.GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
+	kvStores, err := GetAllTiKVStoresWithRetry(ctx, fpdc, util.SkipTiFlash)
 	require.NoError(t, err)
 	require.Len(t, kvStores, 2)
 	require.Equal(t, stores[2:], kvStores)
 
-	err = conn.CheckStoresAlive(ctx, fpdc, util.SkipTiFlash)
+	err = checkStoresAlive(ctx, fpdc, util.SkipTiFlash)
 	require.NoError(t, err)
 }
 
@@ -251,7 +248,7 @@ func TestGetAllTiKVStores(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		pdClient := utiltest.NewFakePDClient(testCase.stores, false, nil)
+		pdClient := utils.FakePDClient{Stores: testCase.stores}
 		stores, err := util.GetAllTiKVStores(context.Background(), pdClient, testCase.storeBehavior)
 		if len(testCase.expectedError) != 0 {
 			require.Error(t, err)
@@ -270,7 +267,7 @@ func TestGetConnOnCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	mgr := &conn.Mgr{PdController: &pdutil.PdController{}}
+	mgr := &Mgr{PdController: &pdutil.PdController{}}
 
 	_, err := mgr.GetBackupClient(ctx, 42)
 	require.Error(t, err)
@@ -304,9 +301,9 @@ func TestGetMergeRegionSizeAndCount(t *testing.T) {
 			},
 			content: []string{""},
 			// no tikv detected in this case
-			importNumGoroutines: conn.DefaultImportNumGoroutines,
-			regionSplitSize:     conn.DefaultMergeRegionSizeBytes,
-			regionSplitKeys:     conn.DefaultMergeRegionKeyCount,
+			importNumGoroutines: DefaultImportNumGoroutines,
+			regionSplitSize:     DefaultMergeRegionSizeBytes,
+			regionSplitKeys:     DefaultMergeRegionKeyCount,
 		},
 		{
 			stores: []*metapb.Store{
@@ -337,9 +334,9 @@ func TestGetMergeRegionSizeAndCount(t *testing.T) {
 				"",
 			},
 			// no tikv detected in this case
-			importNumGoroutines: conn.DefaultImportNumGoroutines,
-			regionSplitSize:     conn.DefaultMergeRegionSizeBytes,
-			regionSplitKeys:     conn.DefaultMergeRegionKeyCount,
+			importNumGoroutines: DefaultImportNumGoroutines,
+			regionSplitSize:     DefaultMergeRegionSizeBytes,
+			regionSplitKeys:     DefaultMergeRegionKeyCount,
 		},
 		{
 			stores: []*metapb.Store{
@@ -421,7 +418,7 @@ func TestGetMergeRegionSizeAndCount(t *testing.T) {
 	pctx := context.Background()
 	for _, ca := range cases {
 		ctx, cancel := context.WithCancel(pctx)
-		pdCli := utiltest.NewFakePDClient(ca.stores, false, nil)
+		pdCli := utils.FakePDClient{Stores: ca.stores}
 		require.Equal(t, len(ca.content), len(ca.stores))
 		count := 0
 		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -443,12 +440,12 @@ func TestGetMergeRegionSizeAndCount(t *testing.T) {
 		}
 
 		httpCli := mockServer.Client()
-		mgr := &conn.Mgr{PdController: &pdutil.PdController{}}
+		mgr := &Mgr{PdController: &pdutil.PdController{}}
 		mgr.PdController.SetPDClient(pdCli)
 		kvConfigs := &kvconfig.KVConfig{
-			ImportGoroutines:    kvconfig.ConfigTerm[uint]{Value: conn.DefaultImportNumGoroutines, Modified: false},
-			MergeRegionSize:     kvconfig.ConfigTerm[uint64]{Value: conn.DefaultMergeRegionSizeBytes, Modified: false},
-			MergeRegionKeyCount: kvconfig.ConfigTerm[uint64]{Value: conn.DefaultMergeRegionKeyCount, Modified: false},
+			ImportGoroutines:    kvconfig.ConfigTerm[uint]{Value: DefaultImportNumGoroutines, Modified: false},
+			MergeRegionSize:     kvconfig.ConfigTerm[uint64]{Value: DefaultMergeRegionSizeBytes, Modified: false},
+			MergeRegionKeyCount: kvconfig.ConfigTerm[uint64]{Value: DefaultMergeRegionKeyCount, Modified: false},
 		}
 		mgr.ProcessTiKVConfigs(ctx, kvConfigs, httpCli)
 		require.EqualValues(t, ca.regionSplitSize, kvConfigs.MergeRegionSize.Value)
@@ -586,7 +583,7 @@ func TestIsLogBackupEnabled(t *testing.T) {
 	pctx := context.Background()
 	for _, ca := range cases {
 		ctx, cancel := context.WithCancel(pctx)
-		pdCli := utiltest.NewFakePDClient(ca.stores, false, nil)
+		pdCli := utils.FakePDClient{Stores: ca.stores}
 		require.Equal(t, len(ca.content), len(ca.stores))
 		count := 0
 		mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -608,7 +605,7 @@ func TestIsLogBackupEnabled(t *testing.T) {
 		}
 
 		httpCli := mockServer.Client()
-		mgr := &conn.Mgr{PdController: &pdutil.PdController{}}
+		mgr := &Mgr{PdController: &pdutil.PdController{}}
 		mgr.PdController.SetPDClient(pdCli)
 		enable, err := mgr.IsLogBackupEnabled(ctx, httpCli)
 		if ca.err {
@@ -650,7 +647,7 @@ func TestHandleTiKVAddress(t *testing.T) {
 		},
 	}
 	for _, ca := range cases {
-		addr, err := conn.HandleTiKVAddress(ca.store, ca.httpPrefix)
+		addr, err := handleTiKVAddress(ca.store, ca.httpPrefix)
 		require.Nil(t, err)
 		require.Equal(t, ca.result, addr.String())
 	}

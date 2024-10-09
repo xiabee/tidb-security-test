@@ -1589,7 +1589,6 @@ const (
 	PasswordLockTimeUnbounded
 	UserCommentType
 	UserAttributeType
-	PasswordRequireCurrentDefault
 
 	UserResourceGroupName
 )
@@ -3279,9 +3278,6 @@ const (
 	BRIEOptionCheckpoint
 	BRIEOptionStartTS
 	BRIEOptionUntilTS
-	BRIEOptionChecksumConcurrency
-	BRIEOptionEncryptionMethod
-	BRIEOptionEncryptionKeyFile
 	// backup options
 	BRIEOptionBackupTimeAgo
 	BRIEOptionBackupTS
@@ -3289,16 +3285,10 @@ const (
 	BRIEOptionLastBackupTS
 	BRIEOptionLastBackupTSO
 	BRIEOptionGCTTL
-	BRIEOptionCompressionLevel
-	BRIEOptionCompression
-	BRIEOptionIgnoreStats
-	BRIEOptionLoadStats
 	// restore options
 	BRIEOptionOnline
 	BRIEOptionFullBackupStorage
 	BRIEOptionRestoredTS
-	BRIEOptionWaitTiflashReady
-	BRIEOptionWithSysTable
 	// import options
 	BRIEOptionAnalyze
 	BRIEOptionBackend
@@ -3418,24 +3408,6 @@ func (kind BRIEOptionType) String() string {
 		return "UNTIL_TS"
 	case BRIEOptionGCTTL:
 		return "GC_TTL"
-	case BRIEOptionWaitTiflashReady:
-		return "WAIT_TIFLASH_READY"
-	case BRIEOptionWithSysTable:
-		return "WITH_SYS_TABLE"
-	case BRIEOptionIgnoreStats:
-		return "IGNORE_STATS"
-	case BRIEOptionLoadStats:
-		return "LOAD_STATS"
-	case BRIEOptionChecksumConcurrency:
-		return "CHECKSUM_CONCURRENCY"
-	case BRIEOptionCompressionLevel:
-		return "COMPRESSION_LEVEL"
-	case BRIEOptionCompression:
-		return "COMPRESSION_TYPE"
-	case BRIEOptionEncryptionMethod:
-		return "ENCRYPTION_METHOD"
-	case BRIEOptionEncryptionKeyFile:
-		return "ENCRYPTION_KEY_FILE"
 	default:
 		return ""
 	}
@@ -3464,7 +3436,7 @@ func (opt *BRIEOption) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord(opt.Tp.String())
 	ctx.WritePlain(" = ")
 	switch opt.Tp {
-	case BRIEOptionBackupTS, BRIEOptionLastBackupTS, BRIEOptionBackend, BRIEOptionOnDuplicate, BRIEOptionTiKVImporter, BRIEOptionCSVDelimiter, BRIEOptionCSVNull, BRIEOptionCSVSeparator, BRIEOptionFullBackupStorage, BRIEOptionRestoredTS, BRIEOptionStartTS, BRIEOptionUntilTS, BRIEOptionGCTTL, BRIEOptionCompression, BRIEOptionEncryptionMethod, BRIEOptionEncryptionKeyFile:
+	case BRIEOptionBackupTS, BRIEOptionLastBackupTS, BRIEOptionBackend, BRIEOptionOnDuplicate, BRIEOptionTiKVImporter, BRIEOptionCSVDelimiter, BRIEOptionCSVNull, BRIEOptionCSVSeparator, BRIEOptionFullBackupStorage, BRIEOptionRestoredTS, BRIEOptionStartTS, BRIEOptionUntilTS, BRIEOptionGCTTL:
 		ctx.WriteString(opt.StrValue)
 	case BRIEOptionBackupTimeAgo:
 		ctx.WritePlainf("%d ", opt.UintValue/1000)

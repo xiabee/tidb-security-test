@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
@@ -202,7 +202,7 @@ func (rf *RuntimeFilter) Clone() *RuntimeFilter {
 }
 
 // RuntimeFilterListToPB convert runtime filter list to PB list
-func RuntimeFilterListToPB(ctx *base.BuildPBContext, runtimeFilterList []*RuntimeFilter, client kv.Client) ([]*tipb.RuntimeFilter, error) {
+func RuntimeFilterListToPB(ctx PlanContext, runtimeFilterList []*RuntimeFilter, client kv.Client) ([]*tipb.RuntimeFilter, error) {
 	result := make([]*tipb.RuntimeFilter, 0, len(runtimeFilterList))
 	for _, runtimeFilter := range runtimeFilterList {
 		rfPB, err := runtimeFilter.ToPB(ctx, client)
@@ -215,13 +215,13 @@ func RuntimeFilterListToPB(ctx *base.BuildPBContext, runtimeFilterList []*Runtim
 }
 
 // ToPB convert runtime filter to PB
-func (rf *RuntimeFilter) ToPB(ctx *base.BuildPBContext, client kv.Client) (*tipb.RuntimeFilter, error) {
+func (rf *RuntimeFilter) ToPB(ctx PlanContext, client kv.Client) (*tipb.RuntimeFilter, error) {
 	pc := expression.NewPBConverter(client, ctx.GetExprCtx().GetEvalCtx())
 	srcExprListPB := make([]*tipb.Expr, 0, len(rf.srcExprList))
 	for _, srcExpr := range rf.srcExprList {
 		srcExprPB := pc.ExprToPB(srcExpr)
 		if srcExprPB == nil {
-			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform src expr %s to pb in runtime filter", srcExpr.String())
+			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform src expr %s to pb in runtime filter", srcExpr.StringWithCtx(errors.RedactLogDisable))
 		}
 		srcExprListPB = append(srcExprListPB, srcExprPB)
 	}
@@ -229,7 +229,7 @@ func (rf *RuntimeFilter) ToPB(ctx *base.BuildPBContext, client kv.Client) (*tipb
 	for _, targetExpr := range rf.targetExprList {
 		targetExprPB := pc.ExprToPB(targetExpr)
 		if targetExprPB == nil {
-			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform target expr %s to pb in runtime filter", targetExpr.String())
+			return nil, plannererrors.ErrInternal.GenWithStack("failed to transform target expr %s to pb in runtime filter", targetExpr.StringWithCtx(errors.RedactLogDisable))
 		}
 		targetExprListPB = append(targetExprListPB, targetExprPB)
 	}

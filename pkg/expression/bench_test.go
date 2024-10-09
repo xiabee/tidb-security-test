@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	perrors "github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/charset"
@@ -149,7 +150,7 @@ func (h *benchHelper) init() {
 
 	h.outputTypes = make([]*types.FieldType, 0, len(h.exprs))
 	for i := 0; i < len(h.exprs); i++ {
-		h.outputTypes = append(h.outputTypes, h.exprs[i].GetType(h.ctx))
+		h.outputTypes = append(h.outputTypes, h.exprs[i].GetType())
 	}
 
 	h.outputChunk = chunk.NewChunkWithCapacity(h.outputTypes, numRows)
@@ -1293,7 +1294,7 @@ func genVecExprBenchCase(ctx BuildContext, funcName string, testCase vecExprBenc
 		panic(err)
 	}
 
-	output = chunk.New([]*types.FieldType{eType2FieldType(expr.GetType(ctx.GetEvalCtx()).EvalType())}, testCase.chunkSize, testCase.chunkSize)
+	output = chunk.New([]*types.FieldType{eType2FieldType(expr.GetType().EvalType())}, testCase.chunkSize, testCase.chunkSize)
 	return expr, fts, input, output
 }
 
@@ -1313,7 +1314,7 @@ func testVectorizedEvalOneVec(t *testing.T, vecExprCases vecExprBenchCases) {
 			require.NoErrorf(t, evalOneColumn(ctx, expr, it, output2, 0), "func: %v, case: %+v", funcName, testCase)
 
 			c1, c2 := output.Column(0), output2.Column(0)
-			switch expr.GetType(ctx).EvalType() {
+			switch expr.GetType().EvalType() {
 			case types.ETInt:
 				for i := 0; i < input.NumRows(); i++ {
 					require.Equal(t, c1.IsNull(i), c2.IsNull(i), commentf(i))
@@ -1375,7 +1376,7 @@ func benchmarkVectorizedEvalOneVec(b *testing.B, vecExprCases vecExprBenchCases)
 	for funcName, testCases := range vecExprCases {
 		for _, testCase := range testCases {
 			expr, _, input, output := genVecExprBenchCase(ctx, funcName, testCase)
-			exprName := expr.String()
+			exprName := expr.StringWithCtx(perrors.RedactLogDisable)
 			if sf, ok := expr.(*ScalarFunction); ok {
 				exprName = fmt.Sprintf("%v", reflect.TypeOf(sf.Function))
 				tmp := strings.Split(exprName, ".")
@@ -1436,11 +1437,11 @@ func genVecBuiltinFuncBenchCase(ctx BuildContext, funcName string, testCase vecE
 		tp := eType2FieldType(testCase.retEvalType)
 		switch testCase.retEvalType {
 		case types.ETInt:
-			fc = &castAsIntFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsIntFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDecimal:
-			fc = &castAsDecimalFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsDecimalFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETReal:
-			fc = &castAsRealFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsRealFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDatetime, types.ETTimestamp:
 			fc = &castAsTimeFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDuration:

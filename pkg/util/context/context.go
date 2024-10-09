@@ -16,7 +16,6 @@ package context
 
 import (
 	"fmt"
-	"sync/atomic"
 )
 
 // ValueStoreContext is a context that can store values.
@@ -29,11 +28,4 @@ type ValueStoreContext interface {
 
 	// ClearValue clears the value associated with this context for key.
 	ClearValue(key fmt.Stringer)
-}
-
-var contextIDGenerator atomic.Uint64
-
-// GenContextID generates a unique context ID.
-func GenContextID() uint64 {
-	return contextIDGenerator.Add(1)
 }

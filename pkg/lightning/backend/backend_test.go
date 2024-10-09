@@ -160,9 +160,7 @@ func TestWriteEngine(t *testing.T) {
 
 	engine, err := s.engineMgr.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
 	require.NoError(t, err)
-	writerCfg := &backend.LocalWriterConfig{}
-	writerCfg.TiDB.TableName = "`db`.`table`"
-	writer, err := engine.LocalWriter(ctx, writerCfg)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`db`.`table`"})
 	require.NoError(t, err)
 	err = writer.AppendRows(ctx, []string{"c1", "c2"}, rows1)
 	require.NoError(t, err)
@@ -187,9 +185,7 @@ func TestWriteToEngineWithNothing(t *testing.T) {
 
 	engine, err := s.engineMgr.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
 	require.NoError(t, err)
-	writerCfg := &backend.LocalWriterConfig{}
-	writerCfg.TiDB.TableName = "`db`.`table`"
-	writer, err := engine.LocalWriter(ctx, writerCfg)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`db`.`table`"})
 	require.NoError(t, err)
 	err = writer.AppendRows(ctx, nil, emptyRows)
 	require.NoError(t, err)
@@ -228,9 +224,7 @@ func TestWriteEngineFailed(t *testing.T) {
 
 	engine, err := s.engineMgr.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
 	require.NoError(t, err)
-	writerCfg := &backend.LocalWriterConfig{}
-	writerCfg.TiDB.TableName = "`db`.`table`"
-	writer, err := engine.LocalWriter(ctx, writerCfg)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`db`.`table`"})
 	require.NoError(t, err)
 	err = writer.AppendRows(ctx, nil, rows)
 	require.Error(t, err)
@@ -257,9 +251,7 @@ func TestWriteBatchSendFailedWithRetry(t *testing.T) {
 
 	engine, err := s.engineMgr.OpenEngine(ctx, &backend.EngineConfig{}, "`db`.`table`", 1)
 	require.NoError(t, err)
-	writerCfg := &backend.LocalWriterConfig{}
-	writerCfg.TiDB.TableName = "`db`.`table`"
-	writer, err := engine.LocalWriter(ctx, writerCfg)
+	writer, err := engine.LocalWriter(ctx, &backend.LocalWriterConfig{TableName: "`db`.`table`"})
 	require.NoError(t, err)
 	err = writer.AppendRows(ctx, nil, rows)
 	require.Error(t, err)

@@ -99,9 +99,7 @@ func main() {
 	finished := true
 	if common.IsContextCanceledError(err) {
 		err = nil
-		if app.TaskCanceled() {
-			finished = false
-		}
+		finished = false
 	}
 	if err != nil {
 		logger.Error("tidb lightning encountered error stack info", zap.Error(err))
@@ -123,7 +121,7 @@ func main() {
 		}
 	}
 
-	if err != nil || (globalCfg.App.ServerMode && !finished) {
+	if err != nil {
 		exit(1)
 	}
 }

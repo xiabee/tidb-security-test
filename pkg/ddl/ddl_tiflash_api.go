@@ -451,9 +451,10 @@ func (d *ddl) refreshTiFlashTicker(ctx sessionctx.Context, pollTiFlashContext *T
 	var tableList = make([]TiFlashReplicaStatus, 0)
 
 	// Collect TiFlash Replica info, for every table.
-	ch := schema.ListTablesWithSpecialAttribute(infoschema.TiFlashAttribute)
-	for _, v := range ch {
-		for _, tblInfo := range v.TableInfos {
+	for _, db := range schema.AllSchemaNames() {
+		tbls := schema.SchemaTables(db)
+		for _, tbl := range tbls {
+			tblInfo := tbl.Meta()
 			LoadTiFlashReplicaInfo(tblInfo, &tableList)
 		}
 	}

@@ -24,7 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
@@ -108,7 +107,7 @@ func TestGroupFingerPrint(t *testing.T) {
 	}()
 	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
 	require.NoError(t, err)
-	logic1, ok := plan.(base.LogicalPlan)
+	logic1, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	// Plan tree should be: DataSource -> Selection -> Projection
@@ -178,13 +177,13 @@ func TestGroupGetFirstElem(t *testing.T) {
 }
 
 type fakeImpl struct {
-	plan base.PhysicalPlan
+	plan plannercore.PhysicalPlan
 }
 
 func (impl *fakeImpl) CalcCost(float64, ...Implementation) float64     { return 0 }
 func (impl *fakeImpl) SetCost(float64)                                 {}
 func (impl *fakeImpl) GetCost() float64                                { return 0 }
-func (impl *fakeImpl) GetPlan() base.PhysicalPlan                      { return impl.plan }
+func (impl *fakeImpl) GetPlan() plannercore.PhysicalPlan               { return impl.plan }
 func (impl *fakeImpl) AttachChildren(...Implementation) Implementation { return nil }
 func (impl *fakeImpl) GetCostLimit(float64, ...Implementation) float64 { return 0 }
 
@@ -241,7 +240,7 @@ func TestBuildKeyInfo(t *testing.T) {
 	require.NoError(t, err)
 	p1, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt1, is)
 	require.NoError(t, err)
-	logic1, ok := p1.(base.LogicalPlan)
+	logic1, ok := p1.(plannercore.LogicalPlan)
 	require.True(t, ok)
 	group1 := Convert2Group(logic1)
 	group1.BuildKeyInfo()
@@ -253,7 +252,7 @@ func TestBuildKeyInfo(t *testing.T) {
 	require.NoError(t, err)
 	p2, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt2, is)
 	require.NoError(t, err)
-	logic2, ok := p2.(base.LogicalPlan)
+	logic2, ok := p2.(plannercore.LogicalPlan)
 	require.True(t, ok)
 	group2 := Convert2Group(logic2)
 	group2.BuildKeyInfo()

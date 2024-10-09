@@ -162,7 +162,7 @@ func selectRegion(storeID uint64, candidateRegionInfos []RegionInfo, selected []
 		selected[idx] = true
 		regionInfos = append(regionInfos, candidateRegionInfos[idx])
 	}
-	// Remove regions that has been selected.
+	// Remove regions that has beed selected.
 	storeID2RegionIndex[storeID] = regionIndexes[i:]
 	return regionInfos
 }
@@ -207,7 +207,7 @@ func checkBatchCopTaskBalance(storeTasks map[uint64]*batchCopTask, balanceContin
 // In fact, not absolutely continuous is required, regions' range are closed to store in a TiFlash segment is enough for internal read optimization.
 //
 // First, sort candidateRegionInfos by their key ranges.
-// Second, build a storeID2RegionIndex data structure to fastly locate regions of a store (avoid scanning candidateRegionInfos repeatedly).
+// Second, build a storeID2RegionIndex data structure to fastly locate regions of a store (avoid scanning candidateRegionInfos repeatly).
 // Third, each store will take balanceContinuousRegionCount from the sorted candidateRegionInfos. These regions are stored very close to each other in TiFlash.
 // Fourth, if the region count is not balance between TiFlash, it may fallback to the original balance logic.
 func balanceBatchCopTaskWithContinuity(storeTaskMap map[uint64]*batchCopTask, candidateRegionInfos []RegionInfo, balanceContinuousRegionCount int64) ([]*batchCopTask, int) {
@@ -635,7 +635,7 @@ func buildBatchCopTasksConsistentHash(
 
 	for i, ranges := range rangesForEachPhysicalTable {
 		rangesLen += ranges.Len()
-		locations, err := cache.SplitKeyRangesByLocations(bo, ranges, UnspecifiedLimit, false, false)
+		locations, err := cache.SplitKeyRangesByLocationsWithoutBuckets(bo, ranges, UnspecifiedLimit)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -932,7 +932,7 @@ func buildBatchCopTasksCore(bo *backoff.Backoffer, store *kvStore, rangesForEach
 		rangesLen = 0
 		for i, ranges := range rangesForEachPhysicalTable {
 			rangesLen += ranges.Len()
-			locations, err := cache.SplitKeyRangesByLocations(bo, ranges, UnspecifiedLimit, false, false)
+			locations, err := cache.SplitKeyRangesByLocationsWithoutBuckets(bo, ranges, UnspecifiedLimit)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}
@@ -1483,7 +1483,7 @@ func buildBatchCopTasksConsistentHashForPD(bo *backoff.Backoffer,
 		splitKeyStart := time.Now()
 		for i, ranges := range rangesForEachPhysicalTable {
 			rangesLen += ranges.Len()
-			locations, err := cache.SplitKeyRangesByLocations(bo, ranges, UnspecifiedLimit, false, false)
+			locations, err := cache.SplitKeyRangesByLocationsWithoutBuckets(bo, ranges, UnspecifiedLimit)
 			if err != nil {
 				return nil, errors.Trace(err)
 			}

@@ -763,7 +763,6 @@ func (s *clusterTablesSuite) setUpRPCService(t *testing.T, addr string, sm util.
 	}()
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.Status.StatusPort = uint(port)
-		conf.AdvertiseAddress = "127.0.0.1"
 	})
 	return srv, addr
 }
@@ -1777,14 +1776,14 @@ func TestMDLViewIDConflict(t *testing.T) {
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
-		ddlTK1.MustExec("ALTER TABLE t ADD index(a);")
+		ddlTK1.MustExec("ALTER TABLE t ADD COLUMN b INT;")
 		wg.Done()
 	}()
 	ddlTK2 := s.newTestKitWithRoot(t)
 	ddlTK2.MustExec("use test")
 	wg.Add(1)
 	go func() {
-		ddlTK2.MustExec(fmt.Sprintf("ALTER TABLE %s ADD index(a);", bigTableName))
+		ddlTK2.MustExec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN b INT;", bigTableName))
 		wg.Done()
 	}()
 

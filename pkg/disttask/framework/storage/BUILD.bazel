@@ -51,7 +51,6 @@ go_test(
         "//pkg/sessionctx",
         "//pkg/sessionctx/variable",
         "//pkg/testkit",
-        "//pkg/testkit/testfailpoint",
         "//pkg/testkit/testsetup",
         "//pkg/util/sqlexec",
         "@com_github_pingcap_errors//:errors",

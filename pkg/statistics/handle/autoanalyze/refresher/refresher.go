@@ -15,6 +15,7 @@
 package refresher
 
 import (
+	"strings"
 	"time"
 
 	"github.com/pingcap/tidb/pkg/infoschema"
@@ -168,7 +169,7 @@ func (r *Refresher) RebuildTableAnalysisJobQueue() error {
 				return err
 			}
 
-			dbs := is.AllSchemaNames()
+			dbs := infoschema.AllSchemaNames(is)
 			for _, db := range dbs {
 				// Sometimes the tables are too many. Auto-analyze will take too much time on it.
 				// so we need to check the available time.
@@ -176,11 +177,11 @@ func (r *Refresher) RebuildTableAnalysisJobQueue() error {
 					return nil
 				}
 				// Ignore the memory and system database.
-				if util.IsMemOrSysDB(db.L) {
+				if util.IsMemOrSysDB(strings.ToLower(db)) {
 					continue
 				}
 
-				tbls := is.SchemaTables(db)
+				tbls := is.SchemaTables(model.NewCIStr(db))
 				// We need to check every partition of every table to see if it needs to be analyzed.
 				for _, tbl := range tbls {
 					// If table locked, skip analyze all partitions of the table.
@@ -216,7 +217,7 @@ func (r *Refresher) RebuildTableAnalysisJobQueue() error {
 					if pi == nil {
 						job := CreateTableAnalysisJob(
 							sctx,
-							db.O,
+							db,
 							tblInfo,
 							r.statsHandle.GetTableStatsForAutoAnalyze(tblInfo),
 							autoAnalyzeRatio,
@@ -240,7 +241,7 @@ func (r *Refresher) RebuildTableAnalysisJobQueue() error {
 						for pIDAndName, stats := range partitionStats {
 							job := CreateStaticPartitionAnalysisJob(
 								sctx,
-								db.O,
+								db,
 								tblInfo,
 								pIDAndName.ID,
 								pIDAndName.Name,
@@ -253,7 +254,7 @@ func (r *Refresher) RebuildTableAnalysisJobQueue() error {
 					} else {
 						job := createTableAnalysisJobForPartitions(
 							sctx,
-							db.O,
+							db,
 							tblInfo,
 							r.statsHandle.GetPartitionStatsForAutoAnalyze(tblInfo, tblInfo.ID),
 							partitionStats,

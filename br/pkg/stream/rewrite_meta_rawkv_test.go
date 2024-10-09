@@ -468,14 +468,18 @@ func TestRewriteTableInfoForExchangePartition(t *testing.T) {
 		Name:      model.NewCIStr(tableName1),
 		Partition: &pi,
 	}
-	db1 := model.DBInfo{}
+	db1 := model.DBInfo{
+		ID: dbID1,
+	}
 
 	// construct table t2 without partition.
 	t2 := model.TableInfo{
 		ID:   tableID2,
 		Name: model.NewCIStr(tableName2),
 	}
-	db2 := model.DBInfo{}
+	db2 := model.DBInfo{
+		ID: dbID2,
+	}
 
 	// construct the SchemaReplace
 	dbMap := make(map[UpstreamID]*DBReplace)

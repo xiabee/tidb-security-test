@@ -386,8 +386,7 @@ func NewMultiSchemaInfo() *MultiSchemaInfo {
 	}
 }
 
-// SubJob is a representation of one DDL schema change. A Job may contain zero
-// (when multi-schema change is not applicable) or more SubJobs.
+// SubJob is a representation of one DDL schema change. A Job may contain zero(when multi-schema change is not applicable) or more SubJobs.
 type SubJob struct {
 	Type        ActionType      `json:"type"`
 	Args        []interface{}   `json:"-"`
@@ -489,13 +488,9 @@ type JobMeta struct {
 
 // Job is for a DDL operation.
 type Job struct {
-	ID   int64      `json:"id"`
-	Type ActionType `json:"type"`
-	// SchemaID means different for different job types:
-	// - ExchangeTablePartition: db id of non-partitioned table
-	SchemaID int64 `json:"schema_id"`
-	// TableID means different for different job types:
-	// - ExchangeTablePartition: non-partitioned table id
+	ID         int64         `json:"id"`
+	Type       ActionType    `json:"type"`
+	SchemaID   int64         `json:"schema_id"`
 	TableID    int64         `json:"table_id"`
 	SchemaName string        `json:"schema_name"`
 	TableName  string        `json:"table_name"`
@@ -509,15 +504,8 @@ type Job struct {
 	Mu       sync.Mutex `json:"-"`
 	// CtxVars are variables attached to the job. It is for internal usage.
 	// E.g. passing arguments between functions by one single *Job pointer.
-	// for ExchangeTablePartition, RenameTables, RenameTable, it's [slice-of-db-id, slice-of-table-id]
 	CtxVars []interface{} `json:"-"`
-	// Note: it might change when state changes, such as when rollback on AddColumn.
-	// - CreateTable, it's [model.TableInfo, foreignKeyCheck]
-	// - AddIndex or AddPrimaryKey: [unique, ....
-	// - TruncateTable: [new-table-id, foreignKeyCheck, ...
-	// - RenameTable: [old-db-id, new-table-name, old-db-name]
-	// - ExchangeTablePartition: [partition-id, pt-db-id, pt-id, partition-name, with-validation]
-	Args []interface{} `json:"-"`
+	Args    []interface{} `json:"-"`
 	// RawArgs : We must use json raw message to delay parsing special args.
 	RawArgs     json.RawMessage `json:"raw_args"`
 	SchemaState SchemaState     `json:"schema_state"`
@@ -529,7 +517,7 @@ type Job struct {
 	// StartTS uses timestamp allocated by TSO.
 	// Now it's the TS when we put the job to TiKV queue.
 	StartTS uint64 `json:"start_ts"`
-	// DependencyID is the largest job ID before current job and current job depends on.
+	// DependencyID is the job's ID that the current job depends on.
 	DependencyID int64 `json:"dependency_id"`
 	// Query string of the ddl job.
 	Query      string       `json:"query"`
@@ -547,10 +535,7 @@ type Job struct {
 	// Priority is only used to set the operation priority of adding indices.
 	Priority int `json:"priority"`
 
-	// SeqNum is the total order in all DDLs, it's used to identify the order of
-	// moving the job into DDL history, not the order of the job execution.
-	// fast create table doesn't honor this field, there might duplicate seq_num in this case.
-	// TODO: deprecated it, as it forces 'moving jobs into DDL history' part to be serial.
+	// SeqNum is the total order in all DDLs, it's used to identify the order of DDL.
 	SeqNum uint64 `json:"seq_num"`
 
 	// Charset is the charset when the DDL Job is created.
@@ -576,48 +561,23 @@ type Job struct {
 	// CDCWriteSource indicates the source of CDC write.
 	CDCWriteSource uint64 `json:"cdc_write_source"`
 
-	// LocalMode = true means the job is running on the local TiDB that the client
-	// connects to, else it's run on the DDL owner.
-	// Only happens when tidb_enable_fast_create_table = on
+	// LocalMode indicates whether the job is running in local TiDB.
+	// Only happens when tidb_enable_fast_ddl = on
 	LocalMode bool `json:"local_mode"`
 
 	// SQLMode for executing DDL query.
 	SQLMode mysql.SQLMode `json:"sql_mode"`
 }
 
-// InvolvingSchemaInfo returns the schema info involved in the job. The value
-// should be stored in lower case. Only one type of the three member types
-// (Database&Table, Policy, ResourceGroup) should only be set in a
-// InvolvingSchemaInfo.
+// InvolvingSchemaInfo returns the schema info involved in the job.
+// The value should be stored in lower case.
 type InvolvingSchemaInfo struct {
-	Database      string                  `json:"database,omitempty"`
-	Table         string                  `json:"table,omitempty"`
-	Policy        string                  `json:"policy,omitempty"`
-	ResourceGroup string                  `json:"resource_group,omitempty"`
-	Mode          InvolvingSchemaInfoMode `json:"mode,omitempty"`
+	Database string `json:"database"`
+	Table    string `json:"table"`
 }
 
-// InvolvingSchemaInfoMode is used by InvolvingSchemaInfo.Mode.
-type InvolvingSchemaInfoMode int
-
-// ExclusiveInvolving and SharedInvolving are considered like the exclusive lock
-// and shared lock when calculate DDL job dependencies. And we also implement the
-// fair lock semantic which means if we have job A/B/C arrive in order, and job B
-// (exclusive request object 0) is waiting for the running job A (shared request
-// object 0), and job C (shared request object 0) arrives, job C should also be
-// blocked until job B is finished although job A & C has no dependency.
 const (
-	// ExclusiveInvolving is the default value to keep compatibility with old
-	// versions.
-	ExclusiveInvolving InvolvingSchemaInfoMode = iota
-	SharedInvolving
-)
-
-const (
-	// InvolvingAll means all schemas/tables are affected. It's used in
-	// InvolvingSchemaInfo.Database/Tables fields. When both the Database and Tables
-	// are InvolvingAll it also means all placement policies and resource groups are
-	// affected. Currently the only case is FLASHBACK CLUSTER.
+	// InvolvingAll means all schemas/tables are affected.
 	InvolvingAll = "*"
 	// InvolvingNone means no schema/table is affected.
 	InvolvingNone = ""
@@ -757,8 +717,7 @@ func (job *Job) Decode(b []byte) error {
 	return errors.Trace(err)
 }
 
-// DecodeArgs decodes serialized job arguments from job.RawArgs into the given
-// variables, and also save the result in job.Args.
+// DecodeArgs decodes job args.
 func (job *Job) DecodeArgs(args ...interface{}) error {
 	var rawArgs []json.RawMessage
 	if err := json.Unmarshal(job.RawArgs, &rawArgs); err != nil {
@@ -775,9 +734,6 @@ func (job *Job) DecodeArgs(args ...interface{}) error {
 			return errors.Trace(err)
 		}
 	}
-	// TODO(lance6716): don't assign to job.Args here, because the types of argument
-	// `args` are always pointer type. But sometimes in the `job` literals we don't
-	// use pointer
 	job.Args = args[:sz]
 	return nil
 }
@@ -982,14 +938,6 @@ func (job *Job) NotStarted() bool {
 	return job.State == JobStateNone || job.State == JobStateQueueing
 }
 
-// InFinalState returns whether the job is in a final state of job FSM.
-// TODO JobStateRollbackDone is not a final state, maybe we should add a JobStateRollbackSynced
-// state to diff between the entrance of JobStateRollbackDone and move the job to
-// history where the job is in final state.
-func (job *Job) InFinalState() bool {
-	return job.State == JobStateSynced || job.State == JobStateCancelled || job.State == JobStatePaused
-}
-
 // MayNeedReorg indicates that this job may need to reorganize the data.
 func (job *Job) MayNeedReorg() bool {
 	switch job.Type {
@@ -1056,13 +1004,8 @@ func (job *Job) GetInvolvingSchemaInfo() []InvolvingSchemaInfo {
 	if len(job.InvolvingSchemaInfo) > 0 {
 		return job.InvolvingSchemaInfo
 	}
-	table := job.TableName
-	// for schema related DDL, such as 'drop schema xxx'
-	if len(job.SchemaName) > 0 && table == "" {
-		table = InvolvingAll
-	}
 	return []InvolvingSchemaInfo{
-		{Database: job.SchemaName, Table: table},
+		{Database: job.SchemaName, Table: job.TableName},
 	}
 }
 
@@ -1073,19 +1016,15 @@ type JobState int32
 const (
 	JobStateNone    JobState = 0
 	JobStateRunning JobState = 1
-	// JobStateRollingback is the state to do the rolling back job.
 	// When DDL encountered an unrecoverable error at reorganization state,
 	// some keys has been added already, we need to remove them.
+	// JobStateRollingback is the state to do the rolling back job.
 	JobStateRollingback  JobState = 2
 	JobStateRollbackDone JobState = 3
 	JobStateDone         JobState = 4
-	// JobStateCancelled is the state to do the job is cancelled, this state only
-	// persisted to history table and queue too.
-	JobStateCancelled JobState = 5
-	// JobStateSynced means the job is done and has been synchronized to all servers.
-	// job of this state will not be written to the tidb_ddl_job table, when job
-	// is in `done` state and version synchronized, the job will be deleted from
-	// tidb_ddl_job table, and we insert a `synced` job to the history table and queue directly.
+	JobStateCancelled    JobState = 5
+	// JobStateSynced is used to mark the information about the completion of this job
+	// has been synchronized to all servers.
 	JobStateSynced JobState = 6
 	// JobStateCancelling is used to mark the DDL job is cancelled by the client, but the DDL work hasn't handle it.
 	JobStateCancelling JobState = 7

@@ -33,7 +33,6 @@ import (
 	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/tikv/client-go/v2/config"
 	pd "github.com/tikv/pd/client"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -158,15 +157,6 @@ func (tls *TLSConfig) ToPDSecurityOption() pd.SecurityOption {
 	securityOption.CertPath = tls.Cert
 	securityOption.KeyPath = tls.Key
 	return securityOption
-}
-
-// Convert the TLS config to the PD security option.
-func (tls *TLSConfig) ToKVSecurity() config.Security {
-	return config.Security{
-		ClusterSSLCA:   tls.CA,
-		ClusterSSLCert: tls.Cert,
-		ClusterSSLKey:  tls.Key,
-	}
 }
 
 // ParseFromFlags parses the TLS config from the flag set.
@@ -415,12 +405,12 @@ func parseCipherType(t string) (encryptionpb.EncryptionMethod, error) {
 func checkCipherKey(cipherKey, cipherKeyFile string) error {
 	if (len(cipherKey) == 0) == (len(cipherKeyFile) == 0) {
 		return errors.Annotate(berrors.ErrInvalidArgument,
-			"exactly one of cipher key or keyfile path should be provided")
+			"exactly one of --crypter.key or --crypter.key-file should be provided")
 	}
 	return nil
 }
 
-func GetCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
+func getCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
 	if err := checkCipherKey(cipherKey, cipherKeyFile); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -480,7 +470,7 @@ func (cfg *Config) parseCipherInfo(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
-	cfg.CipherInfo.CipherKey, err = GetCipherKeyContent(key, keyFilePath)
+	cfg.CipherInfo.CipherKey, err = getCipherKeyContent(key, keyFilePath)
 	if err != nil {
 		return errors.Trace(err)
 	}

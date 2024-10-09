@@ -15,11 +15,11 @@
 package core
 
 import (
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -30,7 +30,7 @@ import (
 type RuntimeFilterGenerator struct {
 	rfIDGenerator                 *util.IDGenerator
 	columnUniqueIDToRF            map[int64][]*RuntimeFilter
-	parentPhysicalPlan            base.PhysicalPlan
+	parentPhysicalPlan            PhysicalPlan
 	childIdxForParentPhysicalPlan int
 }
 
@@ -56,7 +56,7 @@ PhysicalPlanTree:
  TableScan   ExchangeNode
 (assign RF1)
 */
-func (generator *RuntimeFilterGenerator) GenerateRuntimeFilter(plan base.PhysicalPlan) {
+func (generator *RuntimeFilterGenerator) GenerateRuntimeFilter(plan PhysicalPlan) {
 	switch physicalPlan := plan.(type) {
 	case *PhysicalHashJoin:
 		generator.generateRuntimeFilterInterval(physicalPlan)
@@ -184,7 +184,7 @@ func (*RuntimeFilterGenerator) matchEQPredicate(eqPredicate *expression.ScalarFu
 	// exclude null safe equal predicate
 	if eqPredicate.FuncName.L == ast.NullEQ {
 		logutil.BgLogger().Debug("The runtime filter doesn't support null safe eq predicate",
-			zap.String("EQPredicate", eqPredicate.String()))
+			zap.String("EQPredicate", eqPredicate.StringWithCtx(errors.RedactLogDisable)))
 		return false
 	}
 	var targetColumn, srcColumn *expression.Column
@@ -201,21 +201,21 @@ func (*RuntimeFilterGenerator) matchEQPredicate(eqPredicate *expression.ScalarFu
 	// todo: cast expr in target column
 	if targetColumn.IsHidden || targetColumn.OrigName == "" {
 		logutil.BgLogger().Debug("Target column does not match RF pattern",
-			zap.String("EQPredicate", eqPredicate.String()),
+			zap.String("EQPredicate", eqPredicate.StringWithCtx(errors.RedactLogDisable)),
 			zap.String("TargetColumn", targetColumn.String()),
 			zap.Bool("IsHidden", targetColumn.IsHidden),
 			zap.String("OrigName", targetColumn.OrigName))
 		return false
 	}
 	// match data type
-	srcColumnType := srcColumn.GetStaticType().GetType()
+	srcColumnType := srcColumn.GetType().GetType()
 	if srcColumnType == mysql.TypeJSON || srcColumnType == mysql.TypeBlob ||
 		srcColumnType == mysql.TypeLongBlob || srcColumnType == mysql.TypeMediumBlob ||
-		srcColumnType == mysql.TypeTinyBlob || srcColumn.GetStaticType().Hybrid() || srcColumn.GetStaticType().IsArray() {
+		srcColumnType == mysql.TypeTinyBlob || srcColumn.GetType().Hybrid() || srcColumn.GetType().IsArray() {
 		logutil.BgLogger().Debug("Src column type does not match RF pattern",
-			zap.String("EQPredicate", eqPredicate.String()),
+			zap.String("EQPredicate", eqPredicate.StringWithCtx(errors.RedactLogDisable)),
 			zap.String("SrcColumn", srcColumn.String()),
-			zap.String("SrcColumnType", srcColumn.GetStaticType().String()))
+			zap.String("SrcColumnType", srcColumn.GetType().String()))
 		return false
 	}
 	return true
@@ -228,7 +228,7 @@ func (generator *RuntimeFilterGenerator) calculateRFMode(buildNode *PhysicalHash
 	return variable.RFGlobal
 }
 
-func (generator *RuntimeFilterGenerator) belongsToSameFragment(currentNode base.PhysicalPlan, targetNode *PhysicalTableScan) bool {
+func (generator *RuntimeFilterGenerator) belongsToSameFragment(currentNode PhysicalPlan, targetNode *PhysicalTableScan) bool {
 	switch currentNode.(type) {
 	case *PhysicalExchangeReceiver:
 		// terminal traversal

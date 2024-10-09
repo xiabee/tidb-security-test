@@ -262,14 +262,8 @@ type targetInfoGetter struct {
 	pdHTTPCli pdhttp.Client
 }
 
-// NewTargetInfoGetter creates an TargetInfoGetter with local backend
-// implementation. `pdHTTPCli` should not be nil when need to check component
-// versions in CheckRequirements.
-func NewTargetInfoGetter(
-	tls *common.TLS,
-	db *sql.DB,
-	pdHTTPCli pdhttp.Client,
-) backend.TargetInfoGetter {
+// NewTargetInfoGetter creates an TargetInfoGetter with local backend implementation.
+func NewTargetInfoGetter(tls *common.TLS, db *sql.DB, pdHTTPCli pdhttp.Client) backend.TargetInfoGetter {
 	return &targetInfoGetter{
 		tls:       tls,
 		targetDB:  db,
@@ -298,9 +292,6 @@ func (g *targetInfoGetter) CheckRequirements(ctx context.Context, checkCtx *back
 	}
 	if err := checkTiDBVersion(ctx, versionStr, localMinTiDBVersion, localMaxTiDBVersion); err != nil {
 		return err
-	}
-	if g.pdHTTPCli == nil {
-		return common.ErrUnknown.GenWithStack("pd HTTP client is required for component version check in local backend")
 	}
 	if err := tikv.CheckPDVersion(ctx, g.pdHTTPCli, localMinPDVersion, localMaxPDVersion); err != nil {
 		return err
@@ -408,12 +399,7 @@ type BackendConfig struct {
 	CheckpointEnabled      bool
 	// memory table size of pebble. since pebble can have multiple mem tables, the max memory used is
 	// MemTableSize * MemTableStopWritesThreshold, see pebble.Options for more details.
-	MemTableSize int
-	// LocalWriterMemCacheSize is the memory threshold for one local writer of
-	// engines. If the KV payload size exceeds LocalWriterMemCacheSize, local writer
-	// will flush them into the engine.
-	//
-	// It has lower priority than LocalWriterConfig.Local.MemCacheSize.
+	MemTableSize            int
 	LocalWriterMemCacheSize int64
 	// whether check TiKV capacity before write & ingest.
 	ShouldCheckTiKV    bool
@@ -604,7 +590,7 @@ func NewBackend(
 		pdCli.GetServiceDiscovery(),
 		pdhttp.WithTLSConfig(tls.TLSConfig()),
 	).WithBackoffer(retry.InitialBackoffer(time.Second, time.Second, pdutil.PDRequestRetryTime*time.Second))
-	splitCli := split.NewClient(pdCli, pdHTTPCli, tls.TLSConfig(), config.RegionSplitBatchSize, config.RegionSplitConcurrency)
+	splitCli := split.NewClient(pdCli, pdHTTPCli, tls.TLSConfig(), false, config.RegionSplitBatchSize, config.RegionSplitConcurrency)
 	importClientFactory = newImportClientFactoryImpl(splitCli, tls, config.MaxConnPerStore, config.ConnCompressType)
 
 	multiIngestSupported, err = checkMultiIngestSupport(ctx, pdCli, importClientFactory)
@@ -1632,25 +1618,18 @@ func (local *Backend) SwitchModeByKeyRanges(ctx context.Context, ranges []common
 }
 
 func openLocalWriter(cfg *backend.LocalWriterConfig, engine *Engine, tikvCodec tikvclient.Codec, cacheSize int64, kvBuffer *membuf.Buffer) (*Writer, error) {
-	// pre-allocate a long enough buffer to avoid a lot of runtime.growslice
-	// this can help save about 3% of CPU.
-	var preAllocWriteBatch []common.KvPair
-	if !cfg.Local.IsKVSorted {
-		preAllocWriteBatch = make([]common.KvPair, units.MiB)
-		// we want to keep the cacheSize as the whole limit of this local writer, but the
-		// main memory usage comes from two member: kvBuffer and writeBatch, so we split
-		// ~10% to writeBatch for !IsKVSorted, which means we estimate the average length
-		// of KV pairs are 9 times than the size of common.KvPair (9*72B = 648B).
-		cacheSize = cacheSize * 9 / 10
-	}
 	w := &Writer{
 		engine:             engine,
 		memtableSizeLimit:  cacheSize,
 		kvBuffer:           kvBuffer,
-		isKVSorted:         cfg.Local.IsKVSorted,
+		isKVSorted:         cfg.IsKVSorted,
 		isWriteBatchSorted: true,
 		tikvCodec:          tikvCodec,
-		writeBatch:         preAllocWriteBatch,
+	}
+	// pre-allocate a long enough buffer to avoid a lot of runtime.growslice
+	// this can help save about 3% of CPU.
+	if !w.isKVSorted {
+		w.writeBatch = make([]common.KvPair, units.MiB)
 	}
 	engine.localWriters.Store(w, nil)
 	return w, nil

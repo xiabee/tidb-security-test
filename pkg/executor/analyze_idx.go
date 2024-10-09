@@ -191,7 +191,7 @@ func (e *AnalyzeIndexExec) buildStatsFromResult(result distsql.SelectResult, nee
 		cms = statistics.NewCMSketch(int32(e.opts[ast.AnalyzeOptCMSketchDepth]), int32(e.opts[ast.AnalyzeOptCMSketchWidth]))
 		topn = statistics.NewTopN(int(e.opts[ast.AnalyzeOptNumTopN]))
 	}
-	fms := statistics.NewFMSketch(statistics.MaxSketchSize)
+	fms := statistics.NewFMSketch(maxSketchSize)
 	statsVer := statistics.Version1
 	if e.analyzePB.IdxReq.Version != nil {
 		statsVer = int(*e.analyzePB.IdxReq.Version)

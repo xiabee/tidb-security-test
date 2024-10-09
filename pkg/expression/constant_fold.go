@@ -41,9 +41,9 @@ func FoldConstant(ctx BuildContext, expr Expression) Expression {
 	// keep the original coercibility, charset, collation and repertoire values after folding
 	e.SetCoercibility(expr.Coercibility())
 
-	charset, collate := expr.GetType(ctx.GetEvalCtx()).GetCharset(), expr.GetType(ctx.GetEvalCtx()).GetCollate()
-	e.GetType(ctx.GetEvalCtx()).SetCharset(charset)
-	e.GetType(ctx.GetEvalCtx()).SetCollate(collate)
+	charset, collate := expr.GetType().GetCharset(), expr.GetType().GetCollate()
+	e.GetType().SetCharset(charset)
+	e.GetType().SetCollate(collate)
 	e.SetRepertoire(expr.Repertoire())
 	return e
 }
@@ -65,7 +65,7 @@ func isNullHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool) {
 		}
 		return &Constant{Value: value, RetType: expr.RetType}, false
 	}
-	if mysql.HasNotNullFlag(arg0.GetType(ctx.GetEvalCtx()).GetFlag()) {
+	if mysql.HasNotNullFlag(arg0.GetType().GetFlag()) {
 		return NewZero(), false
 	}
 	return expr, false
@@ -105,8 +105,8 @@ func ifNullFoldHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool
 			// See https://github.com/pingcap/tidb/issues/51765. If the first argument can
 			// be folded into NULL, the collation of IFNULL should be the same as the second
 			// arguments.
-			expr.GetType(ctx.GetEvalCtx()).SetCharset(args[1].GetType(ctx.GetEvalCtx()).GetCharset())
-			expr.GetType(ctx.GetEvalCtx()).SetCollate(args[1].GetType(ctx.GetEvalCtx()).GetCollate())
+			expr.GetType().SetCharset(args[1].GetType().GetCharset())
+			expr.GetType().SetCollate(args[1].GetType().GetCollate())
 
 			return foldedExpr, isConstant
 		}
@@ -137,7 +137,7 @@ func caseWhenHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool) 
 			foldedExpr, isDeferred := foldConstant(ctx, args[i+1])
 			isDeferredConst = isDeferredConst || isDeferred
 			if _, isConst := foldedExpr.(*Constant); isConst {
-				foldedExpr.GetType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
+				foldedExpr.GetType().SetDecimal(expr.GetType().GetDecimal())
 				return foldedExpr, isDeferredConst
 			}
 			return foldedExpr, isDeferredConst
@@ -150,7 +150,7 @@ func caseWhenHandler(ctx BuildContext, expr *ScalarFunction) (Expression, bool) 
 		foldedExpr, isDeferred := foldConstant(ctx, args[l-1])
 		isDeferredConst = isDeferredConst || isDeferred
 		if _, isConst := foldedExpr.(*Constant); isConst {
-			foldedExpr.GetType(ctx.GetEvalCtx()).SetDecimal(expr.GetType(ctx.GetEvalCtx()).GetDecimal())
+			foldedExpr.GetType().SetDecimal(expr.GetType().GetDecimal())
 			return foldedExpr, isDeferredConst
 		}
 		return foldedExpr, isDeferredConst
@@ -173,6 +173,7 @@ func foldConstant(ctx BuildContext, expr Expression) (Expression, bool) {
 		}
 
 		args := x.GetArgs()
+		sc := ctx.GetSessionVars().StmtCtx
 		argIsConst := make([]bool, len(args))
 		hasNullArg := false
 		allConstArg := true
@@ -193,7 +194,7 @@ func foldConstant(ctx BuildContext, expr Expression) (Expression, bool) {
 			//
 			// NullEQ and ConcatWS are excluded, because they could have different value when the non-constant value is
 			// 1 or NULL. For example, concat_ws(NULL, NULL) gives NULL, but concat_ws(1, NULL) gives ''
-			if !hasNullArg || !ctx.IsInNullRejectCheck() || x.FuncName.L == ast.NullEQ || x.FuncName.L == ast.ConcatWS {
+			if !hasNullArg || !sc.InNullRejectCheck || x.FuncName.L == ast.NullEQ || x.FuncName.L == ast.ConcatWS {
 				return expr, isDeferredConst
 			}
 			constArgs := make([]Expression, len(args))
@@ -204,7 +205,7 @@ func foldConstant(ctx BuildContext, expr Expression) (Expression, bool) {
 					constArgs[i] = NewOne()
 				}
 			}
-			dummyScalarFunc, err := NewFunctionBase(ctx, x.FuncName.L, x.GetType(ctx.GetEvalCtx()), constArgs...)
+			dummyScalarFunc, err := NewFunctionBase(ctx, x.FuncName.L, x.GetType(), constArgs...)
 			if err != nil {
 				return expr, isDeferredConst
 			}
@@ -251,7 +252,7 @@ func foldConstant(ctx BuildContext, expr Expression) (Expression, bool) {
 	case *Constant:
 		if x.ParamMarker != nil {
 			return &Constant{
-				Value:        x.ParamMarker.GetUserVar(ctx.GetEvalCtx()),
+				Value:        x.ParamMarker.GetUserVar(),
 				RetType:      x.RetType,
 				DeferredExpr: x.DeferredExpr,
 				ParamMarker:  x.ParamMarker,

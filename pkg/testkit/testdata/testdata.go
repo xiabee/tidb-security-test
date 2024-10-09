@@ -31,7 +31,7 @@ import (
 	"strings"
 	"testing"
 
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,7 +129,7 @@ func ConvertRowsToStrings(rows [][]any) (rs []string) {
 }
 
 // ConvertSQLWarnToStrings converts []SQLWarn to []string.
-func ConvertSQLWarnToStrings(warns []contextutil.SQLWarn) (rs []string) {
+func ConvertSQLWarnToStrings(warns []stmtctx.SQLWarn) (rs []string) {
 	for _, warn := range warns {
 		rs = append(rs, fmt.Sprint(warn.Err.Error()))
 	}

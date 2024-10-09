@@ -130,9 +130,7 @@ func TestIssue23309(t *testing.T) {
 	v, err := sf.GetArgs()[1].Eval(mock.NewContext(), chunk.Row{})
 	require.NoError(t, err)
 	require.True(t, v.IsNull())
-
-	ctx := createContext(t)
-	require.False(t, mysql.HasNotNullFlag(sf.GetArgs()[1].GetType(ctx).GetFlag()))
+	require.False(t, mysql.HasNotNullFlag(sf.GetArgs()[1].GetType().GetFlag()))
 }
 
 func TestScalarFuncs2Exprs(t *testing.T) {

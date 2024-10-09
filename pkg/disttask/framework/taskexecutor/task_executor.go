@@ -57,6 +57,8 @@ var (
 	// so cannot be run again.
 	ErrNonIdempotentSubtask = errors.New("subtask in running state and is not idempotent")
 
+	// TestSyncChan is used to sync the test.
+	TestSyncChan = make(chan struct{})
 	// MockTiDBDown is used to mock TiDB node down, return true if it's chosen.
 	MockTiDBDown func(execID string, task *proto.TaskBase) bool
 )
@@ -474,7 +476,10 @@ func (e *BaseTaskExecutor) onSubtaskFinished(ctx context.Context, executor execu
 		return
 	}
 
-	failpoint.InjectCall("syncAfterSubtaskFinish")
+	failpoint.Inject("syncAfterSubtaskFinish", func() {
+		TestSyncChan <- struct{}{}
+		<-TestSyncChan
+	})
 }
 
 // GetTaskBase implements TaskExecutor.GetTaskBase.

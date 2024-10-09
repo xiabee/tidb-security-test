@@ -541,7 +541,7 @@ func (b *Builder) applyDropSchema(diff *model.SchemaDiff) []int64 {
 	if !ok {
 		return nil
 	}
-	b.infoSchema.delSchema(di)
+	delete(b.infoSchema.schemaMap, di.Name.L)
 
 	// Copy the sortedTables that contain the table we are going to drop.
 	tableIDs := make([]int64, 0, len(di.Tables))
@@ -573,10 +573,10 @@ func (b *Builder) applyRecoverSchema(m *meta.Meta, diff *model.SchemaDiff) ([]in
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	b.infoSchema.addSchema(&schemaTables{
+	b.infoSchema.schemaMap[di.Name.L] = &schemaTables{
 		dbInfo: di,
 		tables: make(map[string]table.Table, len(diff.AffectedOpts)),
-	})
+	}
 	return applyCreateTables(b, m, diff)
 }
 
@@ -794,9 +794,8 @@ func (b *Builder) Build(schemaTS uint64) InfoSchema {
 func (b *Builder) InitWithOldInfoSchema(oldSchema InfoSchema) (*Builder, error) {
 	// Do not mix infoschema v1 and infoschema v2 building, this can simplify the logic.
 	// If we want to build infoschema v2, but the old infoschema is v1, just return error to trigger a full load.
-	isV2, _ := IsV2(oldSchema)
-	if b.enableV2 != isV2 {
-		return nil, errors.Errorf("builder's (v2=%v) infoschema mismatch, return error to trigger full reload", b.enableV2)
+	if b.enableV2 != IsV2(oldSchema) {
+		return nil, errors.New("builder's infoschema mismatch, return error to trigger full reload")
 	}
 
 	if schemaV2, ok := oldSchema.(*infoschemaV2); ok {
@@ -817,8 +816,8 @@ func (b *Builder) InitWithOldInfoSchema(oldSchema InfoSchema) (*Builder, error) 
 }
 
 func (b *Builder) copySchemasMap(oldIS *infoSchema) {
-	for _, v := range oldIS.schemaMap {
-		b.infoSchema.addSchema(v)
+	for k, v := range oldIS.schemaMap {
+		b.infoSchema.schemaMap[k] = v
 	}
 }
 
@@ -837,7 +836,7 @@ func (b *Builder) getSchemaAndCopyIfNecessary(dbName string) *model.DBInfo {
 		for k, v := range oldSchemaTables.tables {
 			newSchemaTables.tables[k] = v
 		}
-		b.infoSchema.addSchema(newSchemaTables)
+		b.infoSchema.schemaMap[dbName] = newSchemaTables
 		return newSchemaTables.dbInfo
 	}
 	return b.infoSchema.schemaMap[dbName].dbInfo
@@ -944,7 +943,7 @@ func (b *Builder) addDB(schemaVersion int64, di *model.DBInfo, schTbls *schemaTa
 			b.infoData.addDB(schemaVersion, di)
 		}
 	} else {
-		b.infoSchema.addSchema(schTbls)
+		b.infoSchema.schemaMap[di.Name.L] = schTbls
 	}
 }
 
@@ -977,19 +976,14 @@ func RegisterVirtualTable(dbInfo *model.DBInfo, tableFromMeta tableFromMetaFunc)
 
 // NewBuilder creates a new Builder with a Handle.
 func NewBuilder(r autoid.Requirement, factory func() (pools.Resource, error), infoData *Data) *Builder {
-	builder := &Builder{
+	return &Builder{
+		enableV2:     variable.SchemaCacheSize.Load() > 0,
 		Requirement:  r,
 		infoschemaV2: NewInfoSchemaV2(r, infoData),
 		dirtyDB:      make(map[string]bool),
 		factory:      factory,
 		infoData:     infoData,
 	}
-	schemaCacheSize := variable.SchemaCacheSize.Load()
-	if schemaCacheSize > 0 {
-		infoData.tableCache.SetCapacity(uint64(schemaCacheSize))
-		builder.enableV2 = true
-	}
-	return builder
 }
 
 func tableBucketIdx(tableID int64) int {

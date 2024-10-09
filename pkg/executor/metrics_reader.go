@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
@@ -189,7 +188,7 @@ type MetricsSummaryRetriever struct {
 	dummyCloser
 	table     *model.TableInfo
 	extractor *plannercore.MetricSummaryTableExtractor
-	timeRange plannerutil.QueryTimeRange
+	timeRange plannercore.QueryTimeRange
 	retrieved bool
 }
 
@@ -266,7 +265,7 @@ type MetricsSummaryByLabelRetriever struct {
 	dummyCloser
 	table     *model.TableInfo
 	extractor *plannercore.MetricSummaryTableExtractor
-	timeRange plannerutil.QueryTimeRange
+	timeRange plannercore.QueryTimeRange
 	retrieved bool
 }
 

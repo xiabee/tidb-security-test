@@ -16,7 +16,6 @@ package implementation
 
 import (
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/cost"
 	"github.com/pingcap/tidb/pkg/planner/memo"
 )
 
@@ -231,7 +230,7 @@ func (impl *ApplyImpl) GetCostLimit(costLimit float64, children ...memo.Implemen
 	leftCount, leftCost := children[0].GetPlan().StatsInfo().RowCount, children[0].GetCost()
 	apply := impl.plan.(*plannercore.PhysicalApply)
 	if len(apply.LeftConditions) > 0 {
-		leftCount *= cost.SelectionFactor
+		leftCount *= plannercore.SelectionFactor
 	}
 	return (costLimit - leftCost) / leftCount
 }

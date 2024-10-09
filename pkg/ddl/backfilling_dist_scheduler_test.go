@@ -60,8 +60,7 @@ func TestBackfillingSchedulerLocalMode(t *testing.T) {
 	task.Step = sch.GetNextStep(&task.TaskBase)
 	require.Equal(t, proto.BackfillStepReadIndex, task.Step)
 	execIDs := []string{":4000"}
-	ctx := util.WithInternalSourceType(context.Background(), "backfill")
-	metas, err := sch.OnNextSubtasksBatch(ctx, nil, task, execIDs, task.Step)
+	metas, err := sch.OnNextSubtasksBatch(context.Background(), nil, task, execIDs, task.Step)
 	require.NoError(t, err)
 	require.Equal(t, len(tblInfo.Partition.Definitions), len(metas))
 	for i, par := range tblInfo.Partition.Definitions {
@@ -74,7 +73,7 @@ func TestBackfillingSchedulerLocalMode(t *testing.T) {
 	task.State = proto.TaskStateRunning
 	task.Step = sch.GetNextStep(&task.TaskBase)
 	require.Equal(t, proto.StepDone, task.Step)
-	metas, err = sch.OnNextSubtasksBatch(ctx, nil, task, execIDs, task.Step)
+	metas, err = sch.OnNextSubtasksBatch(context.Background(), nil, task, execIDs, task.Step)
 	require.NoError(t, err)
 	require.Len(t, metas, 0)
 
@@ -86,7 +85,7 @@ func TestBackfillingSchedulerLocalMode(t *testing.T) {
 	// 2.1 empty table
 	tk.MustExec("create table t1(id int primary key, v int)")
 	task = createAddIndexTask(t, dom, "test", "t1", proto.Backfill, false)
-	metas, err = sch.OnNextSubtasksBatch(ctx, nil, task, execIDs, task.Step)
+	metas, err = sch.OnNextSubtasksBatch(context.Background(), nil, task, execIDs, task.Step)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(metas))
 	// 2.2 non empty table.
@@ -98,7 +97,7 @@ func TestBackfillingSchedulerLocalMode(t *testing.T) {
 	task = createAddIndexTask(t, dom, "test", "t2", proto.Backfill, false)
 	// 2.2.1 stepInit
 	task.Step = sch.GetNextStep(&task.TaskBase)
-	metas, err = sch.OnNextSubtasksBatch(ctx, nil, task, execIDs, task.Step)
+	metas, err = sch.OnNextSubtasksBatch(context.Background(), nil, task, execIDs, task.Step)
 	require.NoError(t, err)
 	require.Equal(t, 1, len(metas))
 	require.Equal(t, proto.BackfillStepReadIndex, task.Step)
@@ -106,7 +105,7 @@ func TestBackfillingSchedulerLocalMode(t *testing.T) {
 	task.State = proto.TaskStateRunning
 	task.Step = sch.GetNextStep(&task.TaskBase)
 	require.Equal(t, proto.StepDone, task.Step)
-	metas, err = sch.OnNextSubtasksBatch(ctx, nil, task, execIDs, task.Step)
+	metas, err = sch.OnNextSubtasksBatch(context.Background(), nil, task, execIDs, task.Step)
 	require.NoError(t, err)
 	require.Equal(t, 0, len(metas))
 }

@@ -45,6 +45,7 @@ import (
 	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	tidblogutil "github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/resourcegrouptag"
 	"github.com/pingcap/tidb/pkg/util/topsql"
 	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
@@ -97,15 +98,14 @@ type worker struct {
 	tp              workerType
 	addingDDLJobKey string
 	ddlJobCh        chan struct{}
-	// for local mode worker, it's ctx of 'ddl', else it's the ctx of 'job scheduler'.
-	ctx context.Context
-	wg  sync.WaitGroup
+	ctx             context.Context
+	wg              sync.WaitGroup
 
 	sessPool        *sess.Pool    // sessPool is used to new sessions to execute SQL in ddl package.
 	sess            *sess.Session // sess is used and only used in running DDL job.
 	delRangeManager delRangeManager
 	logCtx          context.Context
-	seqNumLocked    bool
+	lockSeqNum      bool
 
 	*ddlCtx
 }
@@ -188,7 +188,7 @@ func (w *worker) Close() {
 	tidblogutil.Logger(w.logCtx).Info("DDL worker closed", zap.Duration("take time", time.Since(startTime)))
 }
 
-func (dc *ddlCtx) notifyNewJobByEtcd(etcdPath string, jobID int64, jobType string) {
+func (dc *ddlCtx) asyncNotifyByEtcd(etcdPath string, jobID int64, jobType string) {
 	if dc.etcdCli == nil {
 		return
 	}
@@ -219,7 +219,6 @@ func (d *ddl) limitDDLJobs(ch chan *limitJobTask, handler func(tasks []*limitJob
 	tasks := make([]*limitJobTask, 0, batchAddingJobs)
 	for {
 		select {
-		// the channel is never closed
 		case task := <-ch:
 			tasks = tasks[:0]
 			jobLen := len(ch)
@@ -407,11 +406,11 @@ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) error {
 		return errors.Trace(err)
 	}
 	defer d.sessPool.Put(se)
-	jobs, err := getJobsBySQL(sess.NewSession(se), JobTable, fmt.Sprintf("type = %d", model.ActionFlashbackCluster))
+	job, err := getJobsBySQL(sess.NewSession(se), JobTable, fmt.Sprintf("type = %d", model.ActionFlashbackCluster))
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if len(jobs) != 0 {
+	if len(job) != 0 {
 		return errors.Errorf("Can't add ddl job, have flashback cluster job")
 	}
 
@@ -420,7 +419,7 @@ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) error {
 		bdrRole = string(ast.BDRRoleNone)
 	)
 
-	if newTasks, err := combineBatchCreateTableJobs(tasks); err == nil {
+	if newTasks, err := d.combineBatchCreateTableJobs(tasks); err == nil {
 		tasks = newTasks
 	}
 
@@ -494,9 +493,6 @@ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) error {
 
 		jobTasks = append(jobTasks, job)
 		injectModifyJobArgFailPoint(job)
-		if !job.LocalMode {
-			d.initJobDoneCh(job.ID)
-		}
 	}
 
 	se.GetSessionVars().SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
@@ -512,7 +508,7 @@ func (d *ddl) addBatchDDLJobs(tasks []*limitJobTask) error {
 
 // combineBatchCreateTableJobs combine batch jobs to another batch jobs.
 // currently it only support combine CreateTable to CreateTables.
-func combineBatchCreateTableJobs(tasks []*limitJobTask) ([]*limitJobTask, error) {
+func (d *ddl) combineBatchCreateTableJobs(tasks []*limitJobTask) ([]*limitJobTask, error) {
 	if len(tasks) <= 1 || !tasks[0].job.LocalMode {
 		return tasks, nil
 	}
@@ -530,7 +526,7 @@ func combineBatchCreateTableJobs(tasks []*limitJobTask) ([]*limitJobTask, error)
 		jobs = append(jobs, task.job)
 	}
 
-	job, err := BatchCreateTableWithJobs(jobs)
+	job, err := d.BatchCreateTableWithJobs(jobs)
 	if err != nil {
 		return tasks, err
 	}
@@ -564,7 +560,7 @@ func (w *worker) handleUpdateJobError(t *meta.Meta, job *model.Job, err error) e
 	if kv.ErrEntryTooLarge.Equal(err) {
 		w.jobLogger(job).Warn("update DDL job failed", zap.String("job", job.String()), zap.Error(err))
 		w.sess.Rollback()
-		err1 := w.sess.Begin(w.ctx)
+		err1 := w.sess.Begin()
 		if err1 != nil {
 			return errors.Trace(err1)
 		}
@@ -603,7 +599,7 @@ func (w *worker) registerMDLInfo(job *model.Job, ver int64) error {
 	if ver == 0 {
 		return nil
 	}
-	rows, err := w.sess.Execute(w.ctx, fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", job.ID), "register-mdl-info")
+	rows, err := w.sess.Execute(context.Background(), fmt.Sprintf("select table_ids from mysql.tidb_ddl_job where job_id = %d", job.ID), "register-mdl-info")
 	if err != nil {
 		return err
 	}
@@ -620,12 +616,12 @@ func (w *worker) registerMDLInfo(job *model.Job, ver int64) error {
 	} else {
 		sql = fmt.Sprintf("replace into mysql.tidb_mdl_info (job_id, version, table_ids, owner_id) values (%d, %d, '%s', '%s')", job.ID, ver, ids, ownerID)
 	}
-	_, err = w.sess.Execute(w.ctx, sql, "register-mdl-info")
+	_, err = w.sess.Execute(context.Background(), sql, "register-mdl-info")
 	return err
 }
 
 // cleanMDLInfo cleans metadata lock info.
-func (s *jobScheduler) cleanMDLInfo(job *model.Job, ownerID string) {
+func cleanMDLInfo(pool *sess.Pool, job *model.Job, ec *clientv3.Client, ownerID string, cleanETCD bool) {
 	if !variable.EnableMDL.Load() {
 		return
 	}
@@ -637,23 +633,39 @@ func (s *jobScheduler) cleanMDLInfo(job *model.Job, ownerID string) {
 	} else {
 		sql = fmt.Sprintf("delete from mysql.tidb_mdl_info where job_id = %d and owner_id = '%s'", job.ID, ownerID)
 	}
-	sctx, _ := s.sessPool.Get()
-	defer s.sessPool.Put(sctx)
+	sctx, _ := pool.Get()
+	defer pool.Put(sctx)
 	se := sess.NewSession(sctx)
 	se.GetSessionVars().SetDiskFullOpt(kvrpcpb.DiskFullOpt_AllowedOnAlmostFull)
-	_, err := se.Execute(s.schCtx, sql, "delete-mdl-info")
+	_, err := se.Execute(context.Background(), sql, "delete-mdl-info")
 	if err != nil {
 		logutil.DDLLogger().Warn("unexpected error when clean mdl info", zap.Int64("job ID", job.ID), zap.Error(err))
 		return
 	}
-	// TODO we need clean it when version of JobStateRollbackDone is synced also.
-	if job.State == model.JobStateSynced && s.etcdCli != nil {
+	if cleanETCD && ec != nil {
 		path := fmt.Sprintf("%s/%d/", util.DDLAllSchemaVersionsByJob, job.ID)
-		_, err = s.etcdCli.Delete(s.schCtx, path, clientv3.WithPrefix())
+		_, err = ec.Delete(context.Background(), path, clientv3.WithPrefix())
 		if err != nil {
 			logutil.DDLLogger().Warn("delete versions failed", zap.Int64("job ID", job.ID), zap.Error(err))
 		}
 	}
+}
+
+// checkMDLInfo checks if metadata lock info exists. It means the schema is locked by some TiDBs if exists.
+func checkMDLInfo(jobID int64, pool *sess.Pool) (bool, int64, error) {
+	sql := fmt.Sprintf("select version from mysql.tidb_mdl_info where job_id = %d", jobID)
+	sctx, _ := pool.Get()
+	defer pool.Put(sctx)
+	se := sess.NewSession(sctx)
+	rows, err := se.Execute(context.Background(), sql, "check-mdl-info")
+	if err != nil {
+		return false, 0, err
+	}
+	if len(rows) == 0 {
+		return false, 0, nil
+	}
+	ver := rows[0].GetInt64(0)
+	return true, ver, nil
 }
 
 func needUpdateRawArgs(job *model.Job, meetErr bool) bool {
@@ -753,14 +765,14 @@ func (w *worker) finishDDLJob(t *meta.Meta, job *model.Job) (err error) {
 	}
 	w.writeDDLSeqNum(job)
 	w.removeJobCtx(job)
-	err = AddHistoryDDLJob(w.ctx, w.sess, t, job, updateRawArgs)
+	err = AddHistoryDDLJob(w.sess, t, job, updateRawArgs)
 	return errors.Trace(err)
 }
 
 func (w *worker) writeDDLSeqNum(job *model.Job) {
 	w.ddlSeqNumMu.Lock()
 	w.ddlSeqNumMu.seqNum++
-	w.seqNumLocked = true
+	w.lockSeqNum = true
 	job.SeqNum = w.ddlSeqNumMu.seqNum
 }
 
@@ -815,12 +827,12 @@ func (w *JobContext) setDDLLabelForTopSQL(jobQuery string) {
 }
 
 func (w *worker) unlockSeqNum(err error) {
-	if w.seqNumLocked {
+	if w.lockSeqNum {
 		if err != nil {
 			// if meet error, we should reset seqNum.
 			w.ddlSeqNumMu.seqNum--
 		}
-		w.seqNumLocked = false
+		w.lockSeqNum = false
 		w.ddlSeqNumMu.Unlock()
 	}
 }
@@ -858,17 +870,17 @@ func (w *worker) HandleJobDone(d *ddlCtx, job *model.Job, t *meta.Meta) error {
 		return err
 	}
 
-	err = w.sess.Commit(w.ctx)
+	err = w.sess.Commit()
 	if err != nil {
 		return err
 	}
 	CleanupDDLReorgHandles(job, w.sess)
-	d.notifyJobDone(job.ID)
+	asyncNotify(d.ddlJobDoneCh)
 	return nil
 }
 
 func (w *worker) prepareTxn(job *model.Job) (kv.Transaction, error) {
-	err := w.sess.Begin(w.ctx)
+	err := w.sess.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -993,7 +1005,7 @@ func (w *worker) HandleDDLJobTable(d *ddlCtx, job *model.Job) (int64, error) {
 	writeBinlog(d.binlogCli, txn, job)
 	// reset the SQL digest to make topsql work right.
 	w.sess.GetSessionVars().StmtCtx.ResetSQLDigest(job.Query)
-	err = w.sess.Commit(w.ctx)
+	err = w.sess.Commit()
 	d.unlockSchemaVersion(job.ID)
 	if err != nil {
 		return 0, err
@@ -1324,7 +1336,7 @@ func (w *worker) runDDLJob(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, 
 	case model.ActionAlterTablePlacement:
 		ver, err = onAlterTablePlacement(d, t, job)
 	case model.ActionCreateResourceGroup:
-		ver, err = onCreateResourceGroup(w.ctx, d, t, job)
+		ver, err = onCreateResourceGroup(d, t, job)
 	case model.ActionAlterResourceGroup:
 		ver, err = onAlterResourceGroup(d, t, job)
 	case model.ActionDropResourceGroup:
@@ -1387,7 +1399,7 @@ func toTError(err error) *terror.Error {
 
 // waitSchemaChanged waits for the completion of updating all servers' schema or MDL synced. In order to make sure that happens,
 // we wait at most 2 * lease time(sessionTTL, 90 seconds).
-func waitSchemaChanged(ctx context.Context, d *ddlCtx, waitTime time.Duration, latestSchemaVersion int64, job *model.Job) error {
+func waitSchemaChanged(d *ddlCtx, waitTime time.Duration, latestSchemaVersion int64, job *model.Job) error {
 	if !job.IsRunning() && !job.IsRollingback() && !job.IsDone() && !job.IsRollbackDone() {
 		return nil
 	}
@@ -1402,13 +1414,13 @@ func waitSchemaChanged(ctx context.Context, d *ddlCtx, waitTime time.Duration, l
 	}()
 
 	if latestSchemaVersion == 0 {
-		logutil.DDLLogger().Info("schema version doesn't change", zap.Int64("jobID", job.ID))
+		tidblogutil.Logger(d.ctx).Info("schema version doesn't change", zap.String("category", "ddl"), zap.Int64("jobID", job.ID))
 		return nil
 	}
 
-	err = d.schemaSyncer.OwnerUpdateGlobalVersion(ctx, latestSchemaVersion)
+	err = d.schemaSyncer.OwnerUpdateGlobalVersion(d.ctx, latestSchemaVersion)
 	if err != nil {
-		logutil.DDLLogger().Info("update latest schema version failed", zap.Int64("ver", latestSchemaVersion), zap.Error(err))
+		tidblogutil.Logger(d.ctx).Info("update latest schema version failed", zap.String("category", "ddl"), zap.Int64("ver", latestSchemaVersion), zap.Error(err))
 		if variable.EnableMDL.Load() {
 			return err
 		}
@@ -1419,13 +1431,69 @@ func waitSchemaChanged(ctx context.Context, d *ddlCtx, waitTime time.Duration, l
 		}
 	}
 
-	return checkAllVersions(ctx, d, job, latestSchemaVersion, timeStart)
+	return checkAllVersions(d, job, latestSchemaVersion, timeStart)
+}
+
+func checkAllVersions(d *ddlCtx, job *model.Job, latestSchemaVersion int64, timeStart time.Time) error {
+	failpoint.Inject("checkDownBeforeUpdateGlobalVersion", func(val failpoint.Value) {
+		if val.(bool) {
+			if mockDDLErrOnce > 0 && mockDDLErrOnce != latestSchemaVersion {
+				panic("check down before update global version failed")
+			}
+			mockDDLErrOnce = -1
+		}
+	})
+
+	// OwnerCheckAllVersions returns only when all TiDB schemas are synced(exclude the isolated TiDB).
+	err := d.schemaSyncer.OwnerCheckAllVersions(d.ctx, job.ID, latestSchemaVersion)
+	if err != nil {
+		tidblogutil.Logger(d.ctx).Info("wait latest schema version encounter error", zap.String("category", "ddl"), zap.Int64("ver", latestSchemaVersion),
+			zap.Int64("jobID", job.ID), zap.Duration("take time", time.Since(timeStart)), zap.Error(err))
+		return err
+	}
+	tidblogutil.Logger(d.ctx).Info("wait latest schema version changed(get the metadata lock if tidb_enable_metadata_lock is true)", zap.String("category", "ddl"),
+		zap.Int64("ver", latestSchemaVersion),
+		zap.Duration("take time", time.Since(timeStart)),
+		zap.String("job", job.String()))
+	return nil
 }
 
 // waitSchemaSyncedForMDL likes waitSchemaSynced, but it waits for getting the metadata lock of the latest version of this DDL.
-func waitSchemaSyncedForMDL(ctx context.Context, d *ddlCtx, job *model.Job, latestSchemaVersion int64) error {
+func waitSchemaSyncedForMDL(d *ddlCtx, job *model.Job, latestSchemaVersion int64) error {
 	timeStart := time.Now()
-	return checkAllVersions(ctx, d, job, latestSchemaVersion, timeStart)
+	return checkAllVersions(d, job, latestSchemaVersion, timeStart)
+}
+
+// waitSchemaSynced handles the following situation:
+// If the job enters a new state, and the worker crashs when it's in the process of waiting for 2 * lease time,
+// Then the worker restarts quickly, we may run the job immediately again,
+// but in this case we don't wait enough 2 * lease time to let other servers update the schema.
+// So here we get the latest schema version to make sure all servers' schema version update to the latest schema version
+// in a cluster, or to wait for 2 * lease time.
+func waitSchemaSynced(d *ddlCtx, job *model.Job, waitTime time.Duration) error {
+	if !job.IsRunning() && !job.IsRollingback() && !job.IsDone() && !job.IsRollbackDone() {
+		return nil
+	}
+
+	ver, _ := d.store.CurrentVersion(kv.GlobalTxnScope)
+	snapshot := d.store.GetSnapshot(ver)
+	m := meta.NewSnapshotMeta(snapshot)
+	latestSchemaVersion, err := m.GetSchemaVersionWithNonEmptyDiff()
+	if err != nil {
+		tidblogutil.Logger(d.ctx).Warn("get global version failed", zap.String("category", "ddl"), zap.Int64("jobID", job.ID), zap.Error(err))
+		return err
+	}
+
+	failpoint.Inject("checkDownBeforeUpdateGlobalVersion", func(val failpoint.Value) {
+		if val.(bool) {
+			if mockDDLErrOnce > 0 && mockDDLErrOnce != latestSchemaVersion {
+				panic("check down before update global version failed")
+			}
+			mockDDLErrOnce = -1
+		}
+	})
+
+	return waitSchemaChanged(d, waitTime, latestSchemaVersion, job)
 }
 
 func buildPlacementAffects(oldIDs []int64, newIDs []int64) []*model.AffectedOption {
@@ -1441,4 +1509,255 @@ func buildPlacementAffects(oldIDs []int64, newIDs []int64) []*model.AffectedOpti
 		}
 	}
 	return affects
+}
+
+// updateSchemaVersion increments the schema version by 1 and sets SchemaDiff.
+func updateSchemaVersion(d *ddlCtx, t *meta.Meta, job *model.Job, multiInfos ...schemaIDAndTableInfo) (int64, error) {
+	schemaVersion, err := d.setSchemaVersion(job, d.store)
+	if err != nil {
+		return 0, errors.Trace(err)
+	}
+	diff := &model.SchemaDiff{
+		Version:  schemaVersion,
+		Type:     job.Type,
+		SchemaID: job.SchemaID,
+	}
+	switch job.Type {
+	case model.ActionCreateTables:
+		var tableInfos []*model.TableInfo
+		err = job.DecodeArgs(&tableInfos)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		diff.AffectedOpts = make([]*model.AffectedOption, len(tableInfos))
+		for i := range tableInfos {
+			diff.AffectedOpts[i] = &model.AffectedOption{
+				SchemaID:    job.SchemaID,
+				OldSchemaID: job.SchemaID,
+				TableID:     tableInfos[i].ID,
+				OldTableID:  tableInfos[i].ID,
+			}
+		}
+	case model.ActionTruncateTable:
+		// Truncate table has two table ID, should be handled differently.
+		err = job.DecodeArgs(&diff.TableID)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		diff.OldTableID = job.TableID
+
+		// affects are used to update placement rule cache
+		if len(job.CtxVars) > 0 {
+			oldIDs := job.CtxVars[0].([]int64)
+			newIDs := job.CtxVars[1].([]int64)
+			diff.AffectedOpts = buildPlacementAffects(oldIDs, newIDs)
+		}
+	case model.ActionCreateView:
+		tbInfo := &model.TableInfo{}
+		var orReplace bool
+		var oldTbInfoID int64
+		if err := job.DecodeArgs(tbInfo, &orReplace, &oldTbInfoID); err != nil {
+			return 0, errors.Trace(err)
+		}
+		// When the statement is "create or replace view " and we need to drop the old view,
+		// it has two table IDs and should be handled differently.
+		if oldTbInfoID > 0 && orReplace {
+			diff.OldTableID = oldTbInfoID
+		}
+		diff.TableID = tbInfo.ID
+	case model.ActionRenameTable:
+		err = job.DecodeArgs(&diff.OldSchemaID)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		diff.TableID = job.TableID
+	case model.ActionRenameTables:
+		var (
+			oldSchemaIDs, newSchemaIDs, tableIDs []int64
+			tableNames, oldSchemaNames           []*model.CIStr
+		)
+		err = job.DecodeArgs(&oldSchemaIDs, &newSchemaIDs, &tableNames, &tableIDs, &oldSchemaNames)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		affects := make([]*model.AffectedOption, len(newSchemaIDs)-1)
+		for i, newSchemaID := range newSchemaIDs {
+			// Do not add the first table to AffectedOpts. Related issue tidb#47064.
+			if i == 0 {
+				continue
+			}
+			affects[i-1] = &model.AffectedOption{
+				SchemaID:    newSchemaID,
+				TableID:     tableIDs[i],
+				OldTableID:  tableIDs[i],
+				OldSchemaID: oldSchemaIDs[i],
+			}
+		}
+		diff.TableID = tableIDs[0]
+		diff.SchemaID = newSchemaIDs[0]
+		diff.OldSchemaID = oldSchemaIDs[0]
+		diff.AffectedOpts = affects
+	case model.ActionExchangeTablePartition:
+		// From start of function: diff.SchemaID = job.SchemaID
+		// Old is original non partitioned table
+		diff.OldTableID = job.TableID
+		diff.OldSchemaID = job.SchemaID
+		// Update the partitioned table (it is only done in the last state)
+		var (
+			ptSchemaID     int64
+			ptTableID      int64
+			ptDefID        int64
+			partName       string // Not used
+			withValidation bool   // Not used
+		)
+		// See ddl.ExchangeTablePartition
+		err = job.DecodeArgs(&ptDefID, &ptSchemaID, &ptTableID, &partName, &withValidation)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		// This is needed for not crashing TiFlash!
+		// TODO: Update TiFlash, to handle StateWriteOnly
+		diff.AffectedOpts = []*model.AffectedOption{{
+			TableID: ptTableID,
+		}}
+		if job.SchemaState != model.StatePublic {
+			// No change, just to refresh the non-partitioned table
+			// with its new ExchangePartitionInfo.
+			diff.TableID = job.TableID
+			// Keep this as Schema ID of non-partitioned table
+			// to avoid trigger early rename in TiFlash
+			diff.AffectedOpts[0].SchemaID = job.SchemaID
+			// Need reload partition table, use diff.AffectedOpts[0].OldSchemaID to mark it.
+			if len(multiInfos) > 0 {
+				diff.AffectedOpts[0].OldSchemaID = ptSchemaID
+			}
+		} else {
+			// Swap
+			diff.TableID = ptDefID
+			// Also add correct SchemaID in case different schemas
+			diff.AffectedOpts[0].SchemaID = ptSchemaID
+		}
+	case model.ActionTruncateTablePartition:
+		diff.TableID = job.TableID
+		if len(job.CtxVars) > 0 {
+			oldIDs := job.CtxVars[0].([]int64)
+			newIDs := job.CtxVars[1].([]int64)
+			diff.AffectedOpts = buildPlacementAffects(oldIDs, newIDs)
+		}
+	case model.ActionDropTablePartition, model.ActionRecoverTable, model.ActionDropTable:
+		// affects are used to update placement rule cache
+		diff.TableID = job.TableID
+		if len(job.CtxVars) > 0 {
+			if oldIDs, ok := job.CtxVars[0].([]int64); ok {
+				diff.AffectedOpts = buildPlacementAffects(oldIDs, oldIDs)
+			}
+		}
+	case model.ActionReorganizePartition:
+		diff.TableID = job.TableID
+		// TODO: should this be for every state of Reorganize?
+		if len(job.CtxVars) > 0 {
+			if droppedIDs, ok := job.CtxVars[0].([]int64); ok {
+				if addedIDs, ok := job.CtxVars[1].([]int64); ok {
+					// to use AffectedOpts we need both new and old to have the same length
+					maxParts := mathutil.Max[int](len(droppedIDs), len(addedIDs))
+					// Also initialize them to 0!
+					oldIDs := make([]int64, maxParts)
+					copy(oldIDs, droppedIDs)
+					newIDs := make([]int64, maxParts)
+					copy(newIDs, addedIDs)
+					diff.AffectedOpts = buildPlacementAffects(oldIDs, newIDs)
+				}
+			}
+		}
+	case model.ActionRemovePartitioning, model.ActionAlterTablePartitioning:
+		diff.TableID = job.TableID
+		diff.OldTableID = job.TableID
+		if job.SchemaState == model.StateDeleteReorganization {
+			partInfo := &model.PartitionInfo{}
+			var partNames []string
+			err = job.DecodeArgs(&partNames, &partInfo)
+			if err != nil {
+				return 0, errors.Trace(err)
+			}
+			// Final part, new table id is assigned
+			diff.TableID = partInfo.NewTableID
+			if len(job.CtxVars) > 0 {
+				if droppedIDs, ok := job.CtxVars[0].([]int64); ok {
+					if addedIDs, ok := job.CtxVars[1].([]int64); ok {
+						// to use AffectedOpts we need both new and old to have the same length
+						maxParts := mathutil.Max[int](len(droppedIDs), len(addedIDs))
+						// Also initialize them to 0!
+						oldIDs := make([]int64, maxParts)
+						copy(oldIDs, droppedIDs)
+						newIDs := make([]int64, maxParts)
+						copy(newIDs, addedIDs)
+						diff.AffectedOpts = buildPlacementAffects(oldIDs, newIDs)
+					}
+				}
+			}
+		}
+	case model.ActionCreateTable:
+		diff.TableID = job.TableID
+		if len(job.Args) > 0 {
+			tbInfo, _ := job.Args[0].(*model.TableInfo)
+			// When create table with foreign key, there are two schema status change:
+			// 1. none -> write-only
+			// 2. write-only -> public
+			// In the second status change write-only -> public, infoschema loader should apply drop old table first, then
+			// apply create new table. So need to set diff.OldTableID here to make sure it.
+			if tbInfo != nil && tbInfo.State == model.StatePublic && len(tbInfo.ForeignKeys) > 0 {
+				diff.OldTableID = job.TableID
+			}
+		}
+	case model.ActionRecoverSchema:
+		var (
+			recoverSchemaInfo      *RecoverSchemaInfo
+			recoverSchemaCheckFlag int64
+		)
+		err = job.DecodeArgs(&recoverSchemaInfo, &recoverSchemaCheckFlag)
+		if err != nil {
+			return 0, errors.Trace(err)
+		}
+		// Reserved recoverSchemaCheckFlag value for gc work judgment.
+		job.Args[checkFlagIndexInJobArgs] = recoverSchemaCheckFlag
+		recoverTabsInfo := recoverSchemaInfo.RecoverTabsInfo
+		diff.AffectedOpts = make([]*model.AffectedOption, len(recoverTabsInfo))
+		for i := range recoverTabsInfo {
+			diff.AffectedOpts[i] = &model.AffectedOption{
+				SchemaID:    job.SchemaID,
+				OldSchemaID: job.SchemaID,
+				TableID:     recoverTabsInfo[i].TableInfo.ID,
+				OldTableID:  recoverTabsInfo[i].TableInfo.ID,
+			}
+		}
+	case model.ActionFlashbackCluster:
+		diff.TableID = -1
+		if job.SchemaState == model.StatePublic {
+			diff.RegenerateSchemaMap = true
+		}
+	default:
+		diff.TableID = job.TableID
+	}
+	if len(multiInfos) > 0 {
+		existsMap := make(map[int64]struct{})
+		existsMap[diff.TableID] = struct{}{}
+		for _, affect := range diff.AffectedOpts {
+			existsMap[affect.TableID] = struct{}{}
+		}
+		for _, info := range multiInfos {
+			_, exist := existsMap[info.tblInfo.ID]
+			if exist {
+				continue
+			}
+			existsMap[info.tblInfo.ID] = struct{}{}
+			diff.AffectedOpts = append(diff.AffectedOpts, &model.AffectedOption{
+				SchemaID:    info.schemaID,
+				OldSchemaID: info.schemaID,
+				TableID:     info.tblInfo.ID,
+				OldTableID:  info.tblInfo.ID,
+			})
+		}
+	}
+	err = t.SetSchemaDiff(diff)
+	return schemaVersion, errors.Trace(err)
 }

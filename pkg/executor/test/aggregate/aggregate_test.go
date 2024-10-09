@@ -38,9 +38,11 @@ import (
 func TestHashAggRuntimeStat(t *testing.T) {
 	partialInfo := &aggregate.AggWorkerInfo{
 		Concurrency: 5,
+		WallTime:    int64(time.Second * 20),
 	}
 	finalInfo := &aggregate.AggWorkerInfo{
 		Concurrency: 8,
+		WallTime:    int64(time.Second * 10),
 	}
 	stats := &aggregate.HashAggRuntimeStats{
 		PartialConcurrency: 5,
@@ -280,11 +282,6 @@ func TestRandomPanicConsume(t *testing.T) {
 	require.NoError(t, failpoint.Enable(fpName2, "3%panic(\"ERROR 1105 (HY000): Out Of Memory Quota![conn=1]\")"))
 	defer func() {
 		require.NoError(t, failpoint.Disable(fpName2))
-	}()
-	fpName3 := "github.com/pingcap/tidb/pkg/executor/join/ConsumeRandomPanic"
-	require.NoError(t, failpoint.Enable(fpName3, "3%panic(\"ERROR 1105 (HY000): Out Of Memory Quota![conn=1]\")"))
-	defer func() {
-		require.NoError(t, failpoint.Disable(fpName3))
 	}()
 
 	sqls := []string{

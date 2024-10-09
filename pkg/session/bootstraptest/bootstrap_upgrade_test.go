@@ -36,7 +36,6 @@ import (
 	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	tidb_util "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
@@ -475,7 +474,7 @@ func checkDDLJobExecSucc(t *testing.T, se sessiontypes.Session, jobID int64) {
 // TestUpgradeVersionForSystemPausedJob tests mock the first upgrade failed, and it has a mock system DDL in queue.
 // Then we do re-upgrade(This operation will pause all DDL jobs by the system).
 func TestUpgradeVersionForSystemPausedJob(t *testing.T) {
-	// Mock a general and a reorg job in bootstrap.
+	// Mock a general and a reorg job in boostrap.
 	mock := true
 	session.WithMockUpgrade = &mock
 	session.MockUpgradeToVerLatestKind = session.MockSimpleUpgradeToVerLatest
@@ -510,16 +509,11 @@ func TestUpgradeVersionForSystemPausedJob(t *testing.T) {
 		if job.State == model.JobStatePaused && jobID == 0 {
 			// Mock pause the ddl job by system.
 			job.AdminOperator = model.AdminCommandBySystem
+			ch <- struct{}{}
 			jobID = job.ID
 		}
 	}
 	dom.DDL().SetHook(hook)
-	var once sync.Once
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/afterDelivery2Worker", func(job *model.Job) {
-		if job != nil && job.ID == jobID {
-			once.Do(func() { ch <- struct{}{} })
-		}
-	})
 	go func() {
 		_, err = execute(context.Background(), seV, "alter table mysql.upgrade_tbl add column b int")
 	}()
@@ -566,11 +560,12 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 	session.MustExec(t, seV, "create table test.upgrade_tbl(a int, b int)")
 	session.MustExec(t, seV, "create table test.upgrade_tbl1(a int, b int)")
 	ch := make(chan struct{})
+	hook := &callback.TestDDLCallback{}
 	var jobID int64
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	times := 0
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/beforeRefreshJob", func(job *model.Job) {
+	hook.OnGetJobAfterExported = func(tp string, job *model.Job) {
 		if job.SchemaState == model.StateWriteOnly && times == 0 {
 			ch <- struct{}{}
 			jobID = job.ID
@@ -579,8 +574,9 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 		if job.ID == jobID && job.State == model.JobStateDone && job.SchemaState == model.StatePublic {
 			wg.Done()
 		}
-	})
+	}
 
+	dom.DDL().SetHook(hook)
 	go func() {
 		// This "add index" job will be paused when upgrading.
 		_, _ = execute(context.Background(), seV, "alter table test.upgrade_tbl add index idx(a)")
@@ -593,6 +589,7 @@ func TestUpgradeVersionForResumeJob(t *testing.T) {
 	domLatestV, err := session.BootstrapSession(store)
 	require.NoError(t, err)
 	defer domLatestV.Close()
+	domLatestV.DDL().SetHook(hook)
 	finishUpgrade(store)
 	seLatestV := session.CreateSessionAndSetID(t, store)
 	// Add a new DDL (an "add index" job uses a different table than the previous DDL job) to the DDL table.

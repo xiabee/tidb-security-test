@@ -1916,7 +1916,7 @@ func testKillAutoAnalyze(t *testing.T, ver int) {
 	if ver == 1 {
 		jobInfo += "columns"
 	} else {
-		jobInfo += "table all columns with 256 buckets, 100 topn, 1 samplerate"
+		jobInfo += "table all columns with 256 buckets, 500 topn, 1 samplerate"
 	}
 	// kill auto analyze when it is pending/running/finished
 	for _, status := range []string{
@@ -2041,7 +2041,7 @@ func TestAnalyzeJob(t *testing.T) {
 			DBName:        "test",
 			TableName:     "t",
 			PartitionName: "",
-			JobInfo:       "table all columns with 256 buckets, 100 topn, 1 samplerate",
+			JobInfo:       "table all columns with 256 buckets, 500 topn, 1 samplerate",
 		}
 		executor.AddNewAnalyzeJob(se, job)
 		require.NotNil(t, job.ID)
@@ -2133,7 +2133,7 @@ func TestInsertAnalyzeJobWithLongInstance(t *testing.T) {
 		DBName:        "test",
 		TableName:     "t",
 		PartitionName: "",
-		JobInfo:       "table all columns with 256 buckets, 100 topn, 1 samplerate",
+		JobInfo:       "table all columns with 256 buckets, 500 topn, 1 samplerate",
 	}
 	h := dom.StatsHandle()
 	instance := "xxxtidb-tidb-0.xxxtidb-tidb-peer.xxxx-xx-1234-xxx-123456-1-321.xyz:4000"
@@ -2166,7 +2166,6 @@ func TestShowAanalyzeStatusJobInfo(t *testing.T) {
 		tk.MustExec("delete from mysql.analyze_jobs")
 	}
 	checkJobInfo("analyze table columns b, c, d with 2 buckets, 2 topn, 1 samplerate")
-	tk.MustExec("set global tidb_persist_analyze_options = 1")
 	tk.MustExec("set global tidb_enable_column_tracking = 1")
 	tk.MustExec("select * from t where c > 1")
 	h := dom.StatsHandle()
@@ -2174,7 +2173,8 @@ func TestShowAanalyzeStatusJobInfo(t *testing.T) {
 	tk.MustExec("analyze table t predicate columns with 2 topn, 2 buckets")
 	checkJobInfo("analyze table columns b, c, d with 2 buckets, 2 topn, 1 samplerate")
 	tk.MustExec("analyze table t")
-	checkJobInfo("analyze table columns b, c, d with 2 buckets, 2 topn, 1 samplerate")
+	checkJobInfo("analyze table all columns with 256 buckets, 500 topn, 1 samplerate")
+	tk.MustExec("set global tidb_persist_analyze_options = 1")
 	tk.MustExec("analyze table t columns a with 1 topn, 3 buckets")
 	checkJobInfo("analyze table columns a, b, d with 3 buckets, 1 topn, 1 samplerate")
 	tk.MustExec("analyze table t")
@@ -2785,7 +2785,7 @@ func TestAnalyzeColumnsSkipMVIndexJsonCol(t *testing.T) {
 	tk.MustQuery("select job_info from mysql.analyze_jobs where table_schema = 'test' and table_name = 't'").Sort().Check(
 		testkit.Rows(
 			"analyze index idx_c",
-			"analyze table columns a, b with 256 buckets, 100 topn, 1 samplerate",
+			"analyze table columns a, b with 256 buckets, 500 topn, 1 samplerate",
 		))
 
 	is := dom.InfoSchema()
@@ -3126,4 +3126,13 @@ func TestAnalyzePartitionVerify(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestIssue55438(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("CREATE TABLE t0(c0 NUMERIC , c1 BIGINT UNSIGNED  AS ((CASE 0 WHEN false THEN 1358571571 ELSE TRIM(c0) END )));")
+	tk.MustExec("CREATE INDEX i0 ON t0(c1);")
+	tk.MustExec("analyze table t0")
 }

@@ -17,7 +17,6 @@ go_library(
         "//pkg/parser/ast",
         "//pkg/parser/mysql",
         "//pkg/planner/core",
-        "//pkg/planner/core/base",
         "//pkg/planner/property",
         "//pkg/sessionctx",
         "//pkg/sessionctx/variable",
@@ -25,7 +24,6 @@ go_library(
         "//pkg/util/chunk",
         "//pkg/util/memory",
         "//pkg/util/mock",
-        "//pkg/util/serialization",
         "//pkg/util/stringutil",
     ],
 )

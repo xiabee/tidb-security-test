@@ -41,6 +41,7 @@ import (
 	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/util/backoff"
+	tidblogutil "github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
@@ -76,7 +77,7 @@ func (sch *BackfillingSchedulerExt) OnNextSubtasksBatch(
 	task *proto.Task,
 	execIDs []string,
 	nextStep proto.Step,
-) (subtaskMeta [][]byte, err error) {
+) (taskMeta [][]byte, err error) {
 	logger := logutil.DDLLogger().With(
 		zap.Stringer("type", task.Type),
 		zap.Int64("task-id", task.ID),
@@ -88,7 +89,7 @@ func (sch *BackfillingSchedulerExt) OnNextSubtasksBatch(
 		return nil, err
 	}
 	job := &backfillMeta.Job
-	tblInfo, err := getTblInfo(ctx, sch.d, job)
+	tblInfo, err := getTblInfo(sch.d, job)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +101,7 @@ func (sch *BackfillingSchedulerExt) OnNextSubtasksBatch(
 		if tblInfo.Partition != nil {
 			return generatePartitionPlan(tblInfo)
 		}
-		return generateNonPartitionPlan(ctx, sch.d, tblInfo, job, sch.GlobalSort, len(execIDs))
+		return generateNonPartitionPlan(sch.d, tblInfo, job, sch.GlobalSort, len(execIDs))
 	case proto.BackfillStepMergeSort:
 		return generateMergePlan(taskHandle, task, logger)
 	case proto.BackfillStepWriteAndIngest:
@@ -200,8 +201,8 @@ func (sch *LitBackfillScheduler) Close() {
 	sch.BaseScheduler.Close()
 }
 
-func getTblInfo(ctx context.Context, d *ddl, job *model.Job) (tblInfo *model.TableInfo, err error) {
-	err = kv.RunInNewTxn(ctx, d.store, true, func(_ context.Context, txn kv.Transaction) error {
+func getTblInfo(d *ddl, job *model.Job) (tblInfo *model.TableInfo, err error) {
+	err = kv.RunInNewTxn(d.ctx, d.store, true, func(_ context.Context, txn kv.Transaction) error {
 		tblInfo, err = meta.NewMeta(txn).GetTable(job.SchemaID, job.TableID)
 		return err
 	})
@@ -241,13 +242,11 @@ const (
 )
 
 func generateNonPartitionPlan(
-	ctx context.Context,
 	d *ddl,
 	tblInfo *model.TableInfo,
 	job *model.Job,
 	useCloud bool,
-	instanceCnt int,
-) (metas [][]byte, err error) {
+	instanceCnt int) (metas [][]byte, err error) {
 	tbl, err := getTable((*asAutoIDRequirement)(d.ddlCtx), job.SchemaID, tblInfo)
 	if err != nil {
 		return nil, err
@@ -268,7 +267,7 @@ func generateNonPartitionPlan(
 
 	subTaskMetas := make([][]byte, 0, 4)
 	backoffer := backoff.NewExponential(scanRegionBackoffBase, 2, scanRegionBackoffMax)
-	err = handle.RunWithRetry(ctx, 8, backoffer, logutil.DDLLogger(), func(_ context.Context) (bool, error) {
+	err = handle.RunWithRetry(d.ctx, 8, backoffer, tidblogutil.Logger(d.ctx), func(_ context.Context) (bool, error) {
 		regionCache := d.store.(helper.Storage).GetRegionCache()
 		recordRegionMetas, err := regionCache.LoadRegionsInKeyRange(tikv.NewBackofferWithVars(context.Background(), 20000, nil), startKey, endKey)
 		if err != nil {
@@ -349,17 +348,13 @@ func generateGlobalSortIngestPlan(
 	cloudStorageURI string,
 	logger *zap.Logger,
 ) ([][]byte, error) {
-	var (
-		kvMetaGroups []*external.SortedKVMeta
-		eleIDs       []int64
-	)
+	var kvMetaGroups []*external.SortedKVMeta
 	for _, step := range []proto.Step{proto.BackfillStepMergeSort, proto.BackfillStepReadIndex} {
 		hasSubtasks := false
 		err := forEachBackfillSubtaskMeta(taskHandle, task.ID, step, func(subtask *BackfillSubTaskMeta) {
 			hasSubtasks = true
 			if kvMetaGroups == nil {
 				kvMetaGroups = make([]*external.SortedKVMeta, len(subtask.MetaGroups))
-				eleIDs = subtask.EleIDs
 			}
 			for i, cur := range subtask.MetaGroups {
 				if kvMetaGroups[i] == nil {
@@ -390,12 +385,7 @@ func generateGlobalSortIngestPlan(
 				zap.Int64("taskID", task.ID))
 			return nil, errors.Errorf("subtask kv group %d is empty", i)
 		}
-		eleID := int64(0)
-		// in case the subtask metadata is written by an old version of TiDB.
-		if i < len(eleIDs) {
-			eleID = eleIDs[i]
-		}
-		newMeta, err := splitSubtaskMetaForOneKVMetaGroup(ctx, store, g, eleID, cloudStorageURI, iCnt, logger)
+		newMeta, err := splitSubtaskMetaForOneKVMetaGroup(ctx, store, g, cloudStorageURI, iCnt, logger)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -408,7 +398,6 @@ func splitSubtaskMetaForOneKVMetaGroup(
 	ctx context.Context,
 	store kv.StorageWithPD,
 	kvMeta *external.SortedKVMeta,
-	eleID int64,
 	cloudStorageURI string,
 	instanceCnt int64,
 	logger *zap.Logger,
@@ -470,9 +459,6 @@ func splitSubtaskMetaForOneKVMetaGroup(
 			RangeSplitKeys: rangeSplitKeys,
 			TS:             ts,
 		}
-		if eleID > 0 {
-			m.EleIDs = []int64{eleID}
-		}
 		metaBytes, err := json.Marshal(m)
 		if err != nil {
 			return nil, err
@@ -493,17 +479,13 @@ func generateMergePlan(
 ) ([][]byte, error) {
 	// check data files overlaps,
 	// if data files overlaps too much, we need a merge step.
-	var (
-		multiStatsGroup [][]external.MultipleFilesStat
-		kvMetaGroups    []*external.SortedKVMeta
-		eleIDs          []int64
-	)
+	var multiStatsGroup [][]external.MultipleFilesStat
+	var kvMetaGroups []*external.SortedKVMeta
 	err := forEachBackfillSubtaskMeta(taskHandle, task.ID, proto.BackfillStepReadIndex,
 		func(subtask *BackfillSubTaskMeta) {
 			if kvMetaGroups == nil {
 				kvMetaGroups = make([]*external.SortedKVMeta, len(subtask.MetaGroups))
 				multiStatsGroup = make([][]external.MultipleFilesStat, len(subtask.MetaGroups))
-				eleIDs = subtask.EleIDs
 			}
 			for i, g := range subtask.MetaGroups {
 				if kvMetaGroups[i] == nil {
@@ -543,10 +525,6 @@ func generateMergePlan(
 				dataFiles = append(dataFiles, filePair[0])
 			}
 		}
-		var eleID []int64
-		if i < len(eleIDs) {
-			eleID = []int64{eleIDs[i]}
-		}
 		start := 0
 		step := external.MergeSortFileCountStep
 		for start < len(dataFiles) {
@@ -556,7 +534,6 @@ func generateMergePlan(
 			}
 			m := &BackfillSubTaskMeta{
 				DataFiles: dataFiles[start:end],
-				EleIDs:    eleID,
 			}
 			metaBytes, err := json.Marshal(m)
 			if err != nil {

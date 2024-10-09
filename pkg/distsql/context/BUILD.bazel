@@ -10,7 +10,6 @@ go_library(
         "//pkg/errctx",
         "//pkg/kv",
         "//pkg/parser/mysql",
-        "//pkg/util/context",
         "//pkg/util/execdetails",
         "//pkg/util/memory",
         "//pkg/util/nocopy",

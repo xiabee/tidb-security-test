@@ -136,17 +136,3 @@ func TestDumpGCFileParseTime(t *testing.T) {
 	_, err = parseTime(pName)
 	require.NoError(t, err)
 }
-
-func TestSendTask(t *testing.T) {
-	h := &planReplayerHandle{
-		planReplayerTaskDumpHandle: &planReplayerTaskDumpHandle{
-			taskCH: make(chan *PlanReplayerDumpTask, 1),
-		},
-		planReplayerTaskCollectorHandle: &planReplayerTaskCollectorHandle{},
-	}
-	task1 := &PlanReplayerDumpTask{}
-	task2 := &PlanReplayerDumpTask{}
-	h.SendTask(task1)
-	success := h.SendTask(task2)
-	require.False(t, success)
-}

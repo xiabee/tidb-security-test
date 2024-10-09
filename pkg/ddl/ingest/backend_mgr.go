@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -27,25 +28,27 @@ import (
 	ddllogutil "github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/lightning/backend/local"
 	"github.com/pingcap/tidb/pkg/lightning/config"
+	"github.com/pingcap/tidb/pkg/util/generic"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	kvutil "github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
+	"golang.org/x/exp/maps"
 )
 
 // BackendCtxMgr is used to manage the BackendCtx.
 type BackendCtxMgr interface {
 	// CheckMoreTasksAvailable checks if it can run more ingest backfill tasks.
-	CheckMoreTasksAvailable() (bool, error)
+	CheckMoreTasksAvailable(ctx context.Context) (bool, error)
 	// Register uses jobID to identify the BackendCtx. If there's already a
 	// BackendCtx with the same jobID, it will be returned. Otherwise, a new
 	// BackendCtx will be created and returned.
 	Register(
 		ctx context.Context,
 		jobID int64,
-		hasUnique bool,
+		unique bool,
 		etcdClient *clientv3.Client,
 		pdSvcDiscovery pd.ServiceDiscovery,
 		resourceGroupName string,
@@ -54,6 +57,10 @@ type BackendCtxMgr interface {
 	// Load returns the registered BackendCtx with the given jobID.
 	Load(jobID int64) (BackendCtx, bool)
 }
+
+// FilterProcessingJobIDsFunc is a function type to return processing ones from
+// input job IDs.
+type FilterProcessingJobIDsFunc func([]int64) ([]int64, error)
 
 // litBackendCtxMgr manages multiple litBackendCtx for each DDL job. Each
 // litBackendCtx can use some local disk space and memory resource which are
@@ -72,12 +79,15 @@ type litBackendCtxMgr struct {
 	path     string
 	memRoot  MemRoot
 	diskRoot DiskRoot
+
+	filterProcessingJobIDs FilterProcessingJobIDsFunc
 }
 
 // NewLitBackendCtxMgr creates a new litBackendCtxMgr.
-func NewLitBackendCtxMgr(path string, memQuota uint64) BackendCtxMgr {
+func NewLitBackendCtxMgr(path string, memQuota uint64, getProcessingJobIDs FilterProcessingJobIDsFunc) BackendCtxMgr {
 	mgr := &litBackendCtxMgr{
-		path: path,
+		path:                   path,
+		filterProcessingJobIDs: getProcessingJobIDs,
 	}
 	mgr.backends.m = make(map[int64]*litBackendCtx, 4)
 	mgr.memRoot = NewMemRootImpl(int64(memQuota), mgr)
@@ -93,7 +103,8 @@ func NewLitBackendCtxMgr(path string, memQuota uint64) BackendCtxMgr {
 }
 
 // CheckMoreTasksAvailable implements BackendCtxMgr.CheckMoreTaskAvailable interface.
-func (m *litBackendCtxMgr) CheckMoreTasksAvailable() (bool, error) {
+func (m *litBackendCtxMgr) CheckMoreTasksAvailable(ctx context.Context) (bool, error) {
+	m.cleanupSortPath(ctx)
 	if err := m.diskRoot.PreCheckUsage(); err != nil {
 		ddllogutil.DDLIngestLogger().Info("ingest backfill is not available", zap.Error(err))
 		return false, err
@@ -108,7 +119,7 @@ var ResignOwnerForTest = atomic.NewBool(false)
 func (m *litBackendCtxMgr) Register(
 	ctx context.Context,
 	jobID int64,
-	hasUnique bool,
+	unique bool,
 	etcdClient *clientv3.Client,
 	pdSvcDiscovery pd.ServiceDiscovery,
 	resourceGroupName string,
@@ -119,17 +130,11 @@ func (m *litBackendCtxMgr) Register(
 	}
 
 	m.memRoot.RefreshConsumption()
-	ok := m.memRoot.CheckConsume(structSizeBackendCtx)
+	ok := m.memRoot.CheckConsume(StructSizeBackendCtx)
 	if !ok {
 		return nil, genBackendAllocMemFailedErr(ctx, m.memRoot, jobID)
 	}
-	sortPath := m.encodeJobSortPath(jobID)
-	err := os.MkdirAll(sortPath, 0700)
-	if err != nil {
-		logutil.Logger(ctx).Error(LitErrCreateDirFail, zap.Error(err))
-		return nil, err
-	}
-	cfg, err := genConfig(ctx, sortPath, m.memRoot, hasUnique, resourceGroupName)
+	cfg, err := genConfig(ctx, m.encodeJobSortPath(jobID), m.memRoot, unique, resourceGroupName)
 	if err != nil {
 		logutil.Logger(ctx).Warn(LitWarnConfigError, zap.Int64("job ID", jobID), zap.Error(err))
 		return nil, err
@@ -150,18 +155,83 @@ func (m *litBackendCtxMgr) Register(
 
 	bcCtx := newBackendContext(ctx, jobID, bd, cfg.lightning, defaultImportantVariables, m.memRoot, m.diskRoot, etcdClient)
 	m.backends.m[jobID] = bcCtx
-	m.memRoot.Consume(structSizeBackendCtx)
+	m.memRoot.Consume(StructSizeBackendCtx)
 	m.backends.mu.Unlock()
 
 	logutil.Logger(ctx).Info(LitInfoCreateBackend, zap.Int64("job ID", jobID),
 		zap.Int64("current memory usage", m.memRoot.CurrentUsage()),
 		zap.Int64("max memory quota", m.memRoot.MaxMemoryQuota()),
-		zap.Bool("has unique index", hasUnique))
+		zap.Bool("is unique index", unique))
 	return bcCtx, nil
 }
 
 func (m *litBackendCtxMgr) encodeJobSortPath(jobID int64) string {
 	return filepath.Join(m.path, encodeBackendTag(jobID))
+}
+
+// cleanupSortPath is used to clean up the temp data of the previous jobs.
+// Because we don't remove all the files after the support of checkpoint, there
+// maybe some stale files in the sort path if TiDB is killed during the backfill
+// process.
+func (m *litBackendCtxMgr) cleanupSortPath(ctx context.Context) {
+	err := os.MkdirAll(m.path, 0700)
+	if err != nil {
+		logutil.Logger(ctx).Error(LitErrCreateDirFail, zap.Error(err))
+		return
+	}
+	entries, err := os.ReadDir(m.path)
+	if err != nil {
+		logutil.Logger(ctx).Error(LitErrReadSortPath, zap.Error(err))
+		return
+	}
+	toCheckJobIDs := make(map[int64]struct{}, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		jobID, err := decodeBackendTag(entry.Name())
+		if err != nil {
+			logutil.Logger(ctx).Error(LitErrCleanSortPath, zap.Error(err))
+			continue
+		}
+		if _, ok := m.Load(jobID); ok {
+			continue
+		}
+		toCheckJobIDs[jobID] = struct{}{}
+	}
+
+	if len(toCheckJobIDs) == 0 {
+		return
+	}
+
+	idSlice := maps.Keys(toCheckJobIDs)
+	slices.Sort(idSlice)
+	processing, err := m.filterProcessingJobIDs(idSlice)
+	if err != nil {
+		logutil.Logger(ctx).Error(LitErrCleanSortPath, zap.Error(err))
+		return
+	}
+
+	for _, id := range processing {
+		delete(toCheckJobIDs, id)
+	}
+
+	if len(toCheckJobIDs) == 0 {
+		return
+	}
+
+	for id := range toCheckJobIDs {
+		logutil.Logger(ctx).Info("remove stale temp index data",
+			zap.Int64("jobID", id))
+		err = os.RemoveAll(m.encodeJobSortPath(id))
+		if err != nil {
+			logutil.Logger(ctx).Error(LitErrCleanSortPath, zap.Error(err))
+		}
+	}
+
+	failpoint.Inject("ownerResignAfterDispatchLoopCheck", func() {
+		close(local.WaitRMFolderChForTest)
+	})
 }
 
 func createLocalBackend(
@@ -198,14 +268,15 @@ func newBackendContext(
 	etcdClient *clientv3.Client,
 ) *litBackendCtx {
 	bCtx := &litBackendCtx{
-		engines:        make(map[int64]*engineInfo, 10),
-		memRoot:        memRoot,
-		diskRoot:       diskRoot,
+		SyncMap:        generic.NewSyncMap[int64, *engineInfo](10),
+		MemRoot:        memRoot,
+		DiskRoot:       diskRoot,
 		jobID:          jobID,
 		backend:        be,
 		ctx:            ctx,
 		cfg:            cfg,
 		sysVars:        vars,
+		diskRoot:       diskRoot,
 		updateInterval: checkpointUpdateInterval,
 		etcdClient:     etcdClient,
 	}
@@ -228,12 +299,12 @@ func (m *litBackendCtxMgr) Unregister(jobID int64) {
 	if !exist {
 		return
 	}
-	bc.UnregisterEngines()
+	bc.unregisterAll(jobID)
 	bc.backend.Close()
 	if bc.checkpointMgr != nil {
 		bc.checkpointMgr.Close()
 	}
-	m.memRoot.Release(structSizeBackendCtx)
+	m.memRoot.Release(StructSizeBackendCtx)
 	m.memRoot.ReleaseWithTag(encodeBackendTag(jobID))
 	logutil.Logger(bc.ctx).Info(LitInfoCloseBackend, zap.Int64("job ID", jobID),
 		zap.Int64("current memory usage", m.memRoot.CurrentUsage()),

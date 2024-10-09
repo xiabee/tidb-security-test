@@ -32,9 +32,9 @@ import (
 	"github.com/pingcap/tidb/pkg/lightning/backend/external"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	tidblogutil "github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -105,15 +105,21 @@ func (r *readIndexExecutor) RunSubtask(ctx context.Context, subtask *proto.Subta
 		return err
 	}
 
-	opCtx := NewDistTaskOperatorCtx(ctx, subtask.TaskID, subtask.ID)
+	sessCtx, err := newSessCtx(
+		r.d.store, r.job.ReorgMeta.SQLMode, r.job.ReorgMeta.Location, r.job.ReorgMeta.ResourceGroupName)
+	if err != nil {
+		return err
+	}
+
+	opCtx := NewOperatorCtx(ctx, subtask.TaskID, subtask.ID)
 	defer opCtx.Cancel()
 	r.curRowCount.Store(0)
 
 	var pipe *operator.AsyncPipeline
 	if len(r.cloudStorageURI) > 0 {
-		pipe, err = r.buildExternalStorePipeline(opCtx, subtask.ID, sm, subtask.Concurrency)
+		pipe, err = r.buildExternalStorePipeline(opCtx, subtask.ID, sessCtx, sm, subtask.Concurrency)
 	} else {
-		pipe, err = r.buildLocalStorePipeline(opCtx, sm, subtask.Concurrency)
+		pipe, err = r.buildLocalStorePipeline(opCtx, sessCtx, sm, subtask.Concurrency)
 	}
 	if err != nil {
 		return err
@@ -127,7 +133,12 @@ func (r *readIndexExecutor) RunSubtask(ctx context.Context, subtask *proto.Subta
 	if opCtx.OperatorErr() != nil {
 		return opCtx.OperatorErr()
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	r.bc.ResetWorkers(r.job.ID)
+	return nil
 }
 
 func (r *readIndexExecutor) RealtimeSummary() *execute.SubtaskSummary {
@@ -143,8 +154,16 @@ func (r *readIndexExecutor) Cleanup(ctx context.Context) error {
 	return nil
 }
 
+// MockDMLExecutionAddIndexSubTaskFinish is used to mock DML execution during distributed add index.
+var MockDMLExecutionAddIndexSubTaskFinish func()
+
 func (r *readIndexExecutor) OnFinished(ctx context.Context, subtask *proto.Subtask) error {
-	failpoint.InjectCall("mockDMLExecutionAddIndexSubTaskFinish")
+	failpoint.Inject("mockDMLExecutionAddIndexSubTaskFinish", func(val failpoint.Value) {
+		//nolint:forcetypeassert
+		if val.(bool) {
+			MockDMLExecutionAddIndexSubTaskFinish()
+		}
+	})
 	if len(r.cloudStorageURI) == 0 {
 		return nil
 	}
@@ -155,22 +174,17 @@ func (r *readIndexExecutor) OnFinished(ctx context.Context, subtask *proto.Subta
 	}
 	sum, _ := r.subtaskSummary.LoadAndDelete(subtask.ID)
 	s := sum.(*readIndexSummary)
-	sm.MetaGroups = s.metaGroups
-	sm.EleIDs = make([]int64, 0, len(r.indexes))
-	for _, index := range r.indexes {
-		sm.EleIDs = append(sm.EleIDs, index.ID)
-	}
-
 	all := external.SortedKVMeta{}
 	for _, g := range s.metaGroups {
 		all.Merge(g)
 	}
+	sm.MetaGroups = s.metaGroups
+
 	tidblogutil.Logger(ctx).Info("get key boundary on subtask finished",
 		zap.String("start", hex.EncodeToString(all.StartKey)),
 		zap.String("end", hex.EncodeToString(all.EndKey)),
 		zap.Int("fileCount", len(all.MultipleFilesStats)),
 		zap.Uint64("totalKVSize", all.TotalKVSize))
-
 	meta, err := json.Marshal(sm)
 	if err != nil {
 		return err
@@ -203,6 +217,7 @@ func (r *readIndexExecutor) getTableStartEndKey(sm *BackfillSubTaskMeta) (
 
 func (r *readIndexExecutor) buildLocalStorePipeline(
 	opCtx *OperatorCtx,
+	sessCtx sessionctx.Context,
 	sm *BackfillSubTaskMeta,
 	concurrency int,
 ) (*operator.AsyncPipeline, error) {
@@ -211,43 +226,42 @@ func (r *readIndexExecutor) buildLocalStorePipeline(
 		return nil, err
 	}
 	d := r.d
-	indexIDs := make([]int64, 0, len(r.indexes))
-	uniques := make([]bool, 0, len(r.indexes))
+	engines := make([]ingest.Engine, 0, len(r.indexes))
 	for _, index := range r.indexes {
-		indexIDs = append(indexIDs, index.ID)
-		uniques = append(uniques, index.Unique)
+		ei, err := r.bc.Register(r.job.ID, index.ID, r.job.SchemaName, r.job.TableName)
+		if err != nil {
+			tidblogutil.Logger(opCtx).Warn("cannot register new engine", zap.Error(err),
+				zap.Int64("job ID", r.job.ID), zap.Int64("index ID", index.ID))
+			return nil, err
+		}
+		engines = append(engines, ei)
 	}
-	engines, err := r.bc.Register(indexIDs, uniques, r.ptbl.Meta())
-	if err != nil {
-		tidblogutil.Logger(opCtx).Error("cannot register new engine",
-			zap.Error(err),
-			zap.Int64("job ID", r.job.ID),
-			zap.Int64s("index IDs", indexIDs))
-		return nil, err
-	}
-	rowCntListener := newDistTaskRowCntListener(r.curRowCount, r.job.SchemaName, tbl.Meta().Name.O)
+	counter := metrics.BackfillTotalCounter.WithLabelValues(
+		metrics.GenerateReorgLabel("add_idx_rate", r.job.SchemaName, tbl.Meta().Name.O))
 	return NewAddIndexIngestPipeline(
 		opCtx,
 		d.store,
 		d.sessPool,
 		r.bc,
 		engines,
+		sessCtx,
 		r.job.ID,
 		tbl,
 		r.indexes,
 		start,
 		end,
+		r.curRowCount,
+		counter,
 		r.job.ReorgMeta,
 		r.avgRowSize,
 		concurrency,
-		nil,
-		rowCntListener,
 	)
 }
 
 func (r *readIndexExecutor) buildExternalStorePipeline(
 	opCtx *OperatorCtx,
 	subtaskID int64,
+	sessCtx sessionctx.Context,
 	sm *BackfillSubTaskMeta,
 	concurrency int,
 ) (*operator.AsyncPipeline, error) {
@@ -269,43 +283,26 @@ func (r *readIndexExecutor) buildExternalStorePipeline(
 		kvMeta.MergeSummary(summary)
 		s.mu.Unlock()
 	}
-	rowCntListener := newDistTaskRowCntListener(r.curRowCount, r.job.SchemaName, tbl.Meta().Name.O)
+	counter := metrics.BackfillTotalCounter.WithLabelValues(
+		metrics.GenerateReorgLabel("add_idx_rate", r.job.SchemaName, tbl.Meta().Name.O))
 	return NewWriteIndexToExternalStoragePipeline(
 		opCtx,
 		d.store,
 		r.cloudStorageURI,
 		r.d.sessPool,
+		sessCtx,
 		r.job.ID,
 		subtaskID,
 		tbl,
 		r.indexes,
 		start,
 		end,
+		r.curRowCount,
+		counter,
 		onClose,
 		r.job.ReorgMeta,
 		r.avgRowSize,
 		concurrency,
 		r.GetResource(),
-		rowCntListener,
 	)
-}
-
-type distTaskRowCntListener struct {
-	EmptyRowCntListener
-	totalRowCount *atomic.Int64
-	counter       prometheus.Counter
-}
-
-func newDistTaskRowCntListener(totalRowCnt *atomic.Int64, dbName, tblName string) *distTaskRowCntListener {
-	counter := metrics.BackfillTotalCounter.WithLabelValues(
-		metrics.GenerateReorgLabel("add_idx_rate", dbName, tblName))
-	return &distTaskRowCntListener{
-		totalRowCount: totalRowCnt,
-		counter:       counter,
-	}
-}
-
-func (d *distTaskRowCntListener) Written(rowCnt int) {
-	d.totalRowCount.Add(int64(rowCnt))
-	d.counter.Add(float64(rowCnt))
 }

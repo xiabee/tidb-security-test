@@ -8,10 +8,7 @@ go_library(
     ],
     importpath = "github.com/pingcap/tidb/pkg/planner/pattern",
     visibility = ["//visibility:public"],
-    deps = [
-        "//pkg/planner/core",
-        "//pkg/planner/core/base",
-    ],
+    deps = ["//pkg/planner/core"],
 )
 
 go_test(

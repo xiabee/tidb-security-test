@@ -34,21 +34,19 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	exprctx "github.com/pingcap/tidb/pkg/expression/context"
 	"github.com/pingcap/tidb/pkg/infoschema"
-	isctx "github.com/pingcap/tidb/pkg/infoschema/context"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	planctx "github.com/pingcap/tidb/pkg/planner/context"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/ranger"
-	rangerctx "github.com/pingcap/tidb/pkg/util/ranger/context"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"github.com/pingcap/tidb/pkg/util/stringutil"
 	"github.com/pingcap/tidb/pkg/util/tracing"
@@ -79,19 +77,19 @@ type kvRangeBuilder interface {
 
 // tableReaderExecutorContext is the execution context for the `TableReaderExecutor`
 type tableReaderExecutorContext struct {
-	dctx       *distsqlctx.DistSQLContext
-	rctx       *rangerctx.RangerContext
-	buildPBCtx *planctx.BuildPBContext
-	ectx       exprctx.BuildContext
+	dctx *distsqlctx.DistSQLContext
+	pctx planctx.PlanContext
+	ectx exprctx.BuildContext
 
-	stmtMemTracker *memory.Tracker
-
-	infoSchema  isctx.MetaOnlyInfoSchema
 	getDDLOwner func(context.Context) (*infosync.ServerInfo, error)
 }
 
-func (treCtx *tableReaderExecutorContext) GetInfoSchema() isctx.MetaOnlyInfoSchema {
-	return treCtx.infoSchema
+func (treCtx *tableReaderExecutorContext) GetSessionVars() *variable.SessionVars {
+	return treCtx.pctx.GetSessionVars()
+}
+
+func (treCtx *tableReaderExecutorContext) GetInfoSchema() infoschema.InfoSchema {
+	return treCtx.pctx.GetInfoSchema().(infoschema.InfoSchema)
 }
 
 func (treCtx *tableReaderExecutorContext) GetDDLOwner(ctx context.Context) (*infosync.ServerInfo, error) {
@@ -119,15 +117,11 @@ func newTableReaderExecutorContext(sctx sessionctx.Context) tableReaderExecutorC
 		}
 	}
 
-	pctx := sctx.GetPlanCtx()
 	return tableReaderExecutorContext{
-		dctx:           sctx.GetDistSQLCtx(),
-		rctx:           pctx.GetRangerCtx(),
-		buildPBCtx:     pctx.GetBuildPBCtx(),
-		ectx:           sctx.GetExprCtx(),
-		stmtMemTracker: sctx.GetSessionVars().StmtCtx.MemTracker,
-		infoSchema:     pctx.GetInfoSchema(),
-		getDDLOwner:    getDDLOwner,
+		dctx:        sctx.GetDistSQLCtx(),
+		pctx:        sctx.GetPlanCtx(),
+		ectx:        sctx.GetExprCtx(),
+		getDDLOwner: getDDLOwner,
 	}
 }
 
@@ -163,8 +157,8 @@ type TableReaderExecutor struct {
 	// resultHandler handles the order of the result. Since (MAXInt64, MAXUint64] stores before [0, MaxInt64] physically
 	// for unsigned int.
 	resultHandler *tableResultHandler
-	plans         []base.PhysicalPlan
-	tablePlan     base.PhysicalPlan
+	plans         []plannercore.PhysicalPlan
+	tablePlan     plannercore.PhysicalPlan
 
 	memTracker       *memory.Tracker
 	selectResultHook // for testing
@@ -230,25 +224,25 @@ func (e *TableReaderExecutor) Open(ctx context.Context) error {
 	} else {
 		e.memTracker = memory.NewTracker(e.ID(), -1)
 	}
-	e.memTracker.AttachTo(e.stmtMemTracker)
+	e.memTracker.AttachTo(e.GetSessionVars().StmtCtx.MemTracker)
 
 	var err error
 	if e.corColInFilter {
 		// If there's correlated column in filter, need to rewrite dagPB
 		if e.storeType == kv.TiFlash {
-			execs, err := builder.ConstructTreeBasedDistExec(e.buildPBCtx, e.tablePlan)
+			execs, err := builder.ConstructTreeBasedDistExec(e.pctx, e.tablePlan)
 			if err != nil {
 				return err
 			}
 			e.dagPB.RootExecutor = execs[0]
 		} else {
-			e.dagPB.Executors, err = builder.ConstructListBasedDistExec(e.buildPBCtx, e.plans)
+			e.dagPB.Executors, err = builder.ConstructListBasedDistExec(e.pctx, e.plans)
 			if err != nil {
 				return err
 			}
 		}
 	}
-	if e.dctx.RuntimeStatsColl != nil {
+	if e.GetSessionVars().StmtCtx.RuntimeStatsColl != nil {
 		collExec := true
 		e.dagPB.CollectExecutionSummaries = &collExec
 	}
@@ -401,7 +395,7 @@ func (e *TableReaderExecutor) buildResp(ctx context.Context, ranges []*ranger.Ra
 		if len(results) == 1 {
 			return results[0], nil
 		}
-		return distsql.NewSortedSelectResults(e.ectx.GetEvalCtx(), results, e.Schema(), e.byItems, e.memTracker), nil
+		return distsql.NewSortedSelectResults(results, e.Schema(), e.byItems, e.memTracker), nil
 	}
 
 	kvReq, err := e.buildKVReq(ctx, ranges)

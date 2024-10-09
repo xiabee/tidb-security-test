@@ -120,18 +120,23 @@ func (sf *ScalarFunction) Vectorized() bool {
 
 // String implements fmt.Stringer interface.
 func (sf *ScalarFunction) String() string {
+	return sf.StringWithCtx(errors.RedactLogDisable)
+}
+
+// StringWithCtx implements Expression interface.
+func (sf *ScalarFunction) StringWithCtx(redact string) string {
 	var buffer bytes.Buffer
 	fmt.Fprintf(&buffer, "%s(", sf.FuncName.L)
 	switch sf.FuncName.L {
 	case ast.Cast:
 		for _, arg := range sf.GetArgs() {
-			buffer.WriteString(arg.String())
+			buffer.WriteString(arg.StringWithCtx(redact))
 			buffer.WriteString(", ")
 			buffer.WriteString(sf.RetType.String())
 		}
 	default:
 		for i, arg := range sf.GetArgs() {
-			buffer.WriteString(arg.String())
+			buffer.WriteString(arg.StringWithCtx(redact))
 			if i+1 != len(sf.GetArgs()) {
 				buffer.WriteString(", ")
 			}
@@ -148,7 +153,7 @@ func (sf *ScalarFunction) MarshalJSON() ([]byte, error) {
 
 // typeInferForNull infers the NULL constants field type and set the field type
 // of NULL constant same as other non-null operands.
-func typeInferForNull(ctx EvalContext, args []Expression) {
+func typeInferForNull(args []Expression) {
 	if len(args) < 2 {
 		return
 	}
@@ -162,7 +167,7 @@ func typeInferForNull(ctx EvalContext, args []Expression) {
 	for i := len(args) - 1; i >= 0; i-- {
 		isNullArg := isNull(args[i])
 		if !isNullArg && retFieldTp == nil {
-			retFieldTp = args[i].GetType(ctx)
+			retFieldTp = args[i].GetType()
 		}
 		hasNullArg = hasNullArg || isNullArg
 		// Break if there are both NULL and non-NULL expression
@@ -175,8 +180,8 @@ func typeInferForNull(ctx EvalContext, args []Expression) {
 	}
 	for _, arg := range args {
 		if isNull(arg) {
-			*arg.GetType(ctx) = *retFieldTp
-			arg.GetType(ctx).DelFlag(mysql.NotNullFlag) // Remove NotNullFlag of NullConst
+			*arg.GetType() = *retFieldTp
+			arg.GetType().DelFlag(mysql.NotNullFlag) // Remove NotNullFlag of NullConst
 		}
 	}
 }
@@ -245,7 +250,7 @@ func newFunctionImpl(ctx BuildContext, fold int, funcName string, retType *types
 		// For example, expression ('abc', 1) = (null, 0). Null's type should be STRING, not INT.
 		// The type infer happens when converting the expression to ('abc' = null) and (1 = 0).
 	default:
-		typeInferForNull(ctx.GetEvalCtx(), funcArgs)
+		typeInferForNull(funcArgs)
 	}
 
 	f, err := fc.getFunction(ctx, funcArgs)
@@ -346,12 +351,7 @@ func (sf *ScalarFunction) Clone() Expression {
 }
 
 // GetType implements Expression interface.
-func (sf *ScalarFunction) GetType(_ EvalContext) *types.FieldType {
-	return sf.GetStaticType()
-}
-
-// GetStaticType returns the static type of the scalar function.
-func (sf *ScalarFunction) GetStaticType() *types.FieldType {
+func (sf *ScalarFunction) GetType() *types.FieldType {
 	return sf.RetType
 }
 
@@ -428,7 +428,7 @@ func (sf *ScalarFunction) Eval(ctx EvalContext, row chunk.Row) (d types.Datum, e
 		isNull bool
 	)
 	intest.AssertNotNil(ctx)
-	switch tp, evalType := sf.GetType(ctx), sf.GetType(ctx).EvalType(); evalType {
+	switch tp, evalType := sf.GetType(), sf.GetType().EvalType(); evalType {
 	case types.ETInt:
 		var intRes int64
 		intRes, isNull, err = sf.EvalInt(ctx, row)

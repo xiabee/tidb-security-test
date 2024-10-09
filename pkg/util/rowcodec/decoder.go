@@ -211,7 +211,11 @@ func (decoder *ChunkDecoder) DecodeToChunk(rowData []byte, handle kv.Handle, chk
 			continue
 		}
 		if col.ID == model.ExtraRowChecksumID {
-			chk.AppendNull(colIdx)
+			if v := decoder.row.getChecksumInfo(); len(v) > 0 {
+				chk.AppendString(colIdx, v)
+			} else {
+				chk.AppendNull(colIdx)
+			}
 			continue
 		}
 

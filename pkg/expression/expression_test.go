@@ -17,6 +17,7 @@ package expression
 import (
 	"testing"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -47,7 +48,9 @@ func TestEvaluateExprWithNull(t *testing.T) {
 	require.NoError(t, err)
 
 	res := EvaluateExprWithNull(ctx, schema, outerIfNull)
-	require.Equal(t, "ifnull(Column#1, 1)", res.String())
+	require.Equal(t, "ifnull(Column#1, 1)", res.StringWithCtx(errors.RedactLogDisable))
+	require.Equal(t, "ifnull(Column#1, ?)", res.StringWithCtx(errors.RedactLogEnable))
+	require.Equal(t, "ifnull(Column#1, ‹1›)", res.StringWithCtx(errors.RedactLogMarker))
 	schema.Columns = append(schema.Columns, col1)
 	// ifnull(null, ifnull(null, 1))
 	res = EvaluateExprWithNull(ctx, schema, outerIfNull)
@@ -60,7 +63,7 @@ func TestEvaluateExprWithNullAndParameters(t *testing.T) {
 	schema := tableInfoToSchemaForTest(tblInfo)
 	col0 := schema.Columns[0]
 
-	ctx.GetSessionVars().StmtCtx.EnablePlanCache()
+	ctx.GetSessionVars().StmtCtx.UseCache = true
 
 	// cases for parameters
 	ltWithoutParam, err := newFunctionForTest(ctx, ast.LT, col0, NewOne())
@@ -75,7 +78,7 @@ func TestEvaluateExprWithNullAndParameters(t *testing.T) {
 	res = EvaluateExprWithNull(ctx, schema, ltWithParam)
 	_, isConst := res.(*Constant)
 	require.True(t, isConst) // this expression is evaluated and skip-plan cache flag is set.
-	require.True(t, !ctx.GetSessionVars().StmtCtx.UseCache())
+	require.True(t, !ctx.GetSessionVars().StmtCtx.UseCache)
 }
 
 func TestEvaluateExprWithNullNoChangeRetType(t *testing.T) {
@@ -148,7 +151,7 @@ func TestConstLevel(t *testing.T) {
 		{newFunctionWithMockCtx(ast.Plus, NewOne(), newColumn(1)), ConstNone},
 		{newFunctionWithMockCtx(ast.Plus, NewOne(), ctxConst), ConstOnlyInContext},
 	} {
-		require.Equal(t, c.level, c.exp.ConstLevel(), c.exp.String())
+		require.Equal(t, c.level, c.exp.ConstLevel(), c.exp.StringWithCtx(errors.RedactLogDisable))
 	}
 }
 
@@ -268,9 +271,9 @@ func TestEvalExpr(t *testing.T) {
 		colBuf2 := chunk.NewColumn(ft, 1024)
 		var err error
 		require.True(t, colExpr.Vectorized())
-		err = EvalExpr(ctx, false, colExpr, colExpr.GetType(ctx).EvalType(), input, colBuf)
+		err = EvalExpr(ctx, false, colExpr, colExpr.GetType().EvalType(), input, colBuf)
 		require.NoError(t, err)
-		err = EvalExpr(ctx, true, colExpr, colExpr.GetType(ctx).EvalType(), input, colBuf2)
+		err = EvalExpr(ctx, true, colExpr, colExpr.GetType().EvalType(), input, colBuf2)
 		require.NoError(t, err)
 		for j := 0; j < 1024; j++ {
 			isNull := colBuf.IsNull(j)

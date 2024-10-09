@@ -30,8 +30,6 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/planner"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/session"
 	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -50,7 +48,7 @@ func getLogicalMemTable(t *testing.T, dom *domain.Domain, se sessiontypes.Sessio
 	plan, err := builder.Build(ctx, stmt)
 	require.NoError(t, err)
 
-	logicalPlan, err := plannercore.LogicalOptimize(ctx, builder.GetOptFlag(), plan.(base.LogicalPlan))
+	logicalPlan, err := plannercore.LogicalOptimize(ctx, builder.GetOptFlag(), plan.(plannercore.LogicalPlan))
 	require.NoError(t, err)
 
 	// Obtain the leaf plan
@@ -545,7 +543,7 @@ func TestMetricTableExtractor(t *testing.T) {
 	require.NoError(t, err)
 
 	parseTime := func(t *testing.T, s string) time.Time {
-		tt, err := time.ParseInLocation(util.MetricTableTimeFormat, s, time.Local)
+		tt, err := time.ParseInLocation(plannercore.MetricTableTimeFormat, s, time.Local)
 		require.NoError(t, err)
 		return tt
 	}
@@ -636,7 +634,6 @@ func TestMetricTableExtractor(t *testing.T) {
 			quantiles: []float64{0},
 		},
 	}
-	se.GetSessionVars().TimeZone = time.Local
 	se.GetSessionVars().StmtCtx.SetTimeZone(time.Local)
 	for _, ca := range cases {
 		logicalMemTable := getLogicalMemTable(t, dom, se, parser, ca.sql)
@@ -1051,7 +1048,6 @@ func TestTiDBHotRegionsHistoryTableExtractor(t *testing.T) {
 
 	se, err := session.CreateSession4Test(store)
 	require.NoError(t, err)
-	se.GetSessionVars().TimeZone = time.Local
 	se.GetSessionVars().StmtCtx.SetTimeZone(time.Local)
 
 	var cases = []struct {
@@ -1722,13 +1718,13 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 		prepared string
 		userVars []any
 		params   []any
-		checker  func(extractor base.MemTablePredicateExtractor)
+		checker  func(extractor plannercore.MemTablePredicateExtractor)
 	}{
 		{
 			prepared: "select * from information_schema.TIKV_REGION_STATUS where table_id = ?",
 			userVars: []any{1},
 			params:   []any{1},
-			checker: func(extractor base.MemTablePredicateExtractor) {
+			checker: func(extractor plannercore.MemTablePredicateExtractor) {
 				rse := extractor.(*plannercore.TiKVRegionStatusExtractor)
 				tableids := rse.GetTablesID()
 				slices.Sort(tableids)
@@ -1739,7 +1735,7 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 			prepared: "select * from information_schema.TIKV_REGION_STATUS where table_id = ? or table_id = ?",
 			userVars: []any{1, 2},
 			params:   []any{1, 2},
-			checker: func(extractor base.MemTablePredicateExtractor) {
+			checker: func(extractor plannercore.MemTablePredicateExtractor) {
 				rse := extractor.(*plannercore.TiKVRegionStatusExtractor)
 				tableids := rse.GetTablesID()
 				slices.Sort(tableids)
@@ -1750,7 +1746,7 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 			prepared: "select * from information_schema.TIKV_REGION_STATUS where table_id in (?,?)",
 			userVars: []any{1, 2},
 			params:   []any{1, 2},
-			checker: func(extractor base.MemTablePredicateExtractor) {
+			checker: func(extractor plannercore.MemTablePredicateExtractor) {
 				rse := extractor.(*plannercore.TiKVRegionStatusExtractor)
 				tableids := rse.GetTablesID()
 				slices.Sort(tableids)
@@ -1761,7 +1757,7 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 			prepared: "select * from information_schema.COLUMNS where table_name like ?",
 			userVars: []any{`"a%"`},
 			params:   []any{"a%"},
-			checker: func(extractor base.MemTablePredicateExtractor) {
+			checker: func(extractor plannercore.MemTablePredicateExtractor) {
 				rse := extractor.(*plannercore.ColumnsTableExtractor)
 				require.EqualValues(t, []string{"a%"}, rse.TableNamePatterns)
 			},
@@ -1774,7 +1770,7 @@ func TestExtractorInPreparedStmt(t *testing.T) {
 				require.NoError(t, err)
 				return tt
 			}()},
-			checker: func(extractor base.MemTablePredicateExtractor) {
+			checker: func(extractor plannercore.MemTablePredicateExtractor) {
 				rse := extractor.(*plannercore.HotRegionsHistoryTableExtractor)
 				require.Equal(t, timestamp(t, "2019-10-10 10:10:10"), rse.StartTime)
 			},

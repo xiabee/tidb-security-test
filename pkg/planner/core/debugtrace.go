@@ -18,13 +18,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/context"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/planner/util/debugtrace"
 	"github.com/pingcap/tidb/pkg/statistics"
@@ -73,7 +73,7 @@ func (info *binaryParamInfo) MarshalJSON() ([]byte, error) {
 }
 
 // DebugTraceReceivedCommand records the received command from the client to the debug trace.
-func DebugTraceReceivedCommand(s base.PlanContext, cmd byte, stmtNode ast.StmtNode) {
+func DebugTraceReceivedCommand(s PlanContext, cmd byte, stmtNode ast.StmtNode) {
 	sessionVars := s.GetSessionVars()
 	trace := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := new(receivedCmdInfo)
@@ -106,8 +106,8 @@ func DebugTraceReceivedCommand(s base.PlanContext, cmd byte, stmtNode ast.StmtNo
 	if len(binaryParams) > 0 {
 		execInfo.BinaryParamsInfo = make([]binaryParamInfo, len(binaryParams))
 		for i, param := range binaryParams {
-			execInfo.BinaryParamsInfo[i].Type = param.GetType(s.GetExprCtx().GetEvalCtx()).String()
-			execInfo.BinaryParamsInfo[i].Value = param.String()
+			execInfo.BinaryParamsInfo[i].Type = param.GetType().String()
+			execInfo.BinaryParamsInfo[i].Value = param.StringWithCtx(errors.RedactLogDisable)
 		}
 	}
 }
@@ -173,7 +173,7 @@ type getStatsTblInfo struct {
 }
 
 func debugTraceGetStatsTbl(
-	s base.PlanContext,
+	s PlanContext,
 	tblInfo *model.TableInfo,
 	pid int64,
 	handleIsNil,
@@ -250,7 +250,7 @@ func convertAccessPathForDebugTrace(path *util.AccessPath, out *accessPathForDeb
 	}
 }
 
-func debugTraceAccessPaths(s base.PlanContext, paths []*util.AccessPath) {
+func debugTraceAccessPaths(s PlanContext, paths []*util.AccessPath) {
 	root := debugtrace.GetOrInitDebugTraceRoot(s)
 	traceInfo := make([]accessPathForDebugTrace, len(paths))
 	for i, partialPath := range paths {

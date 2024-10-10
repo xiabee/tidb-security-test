@@ -359,8 +359,9 @@ func (s *StmtSummary) GetMoreThanCntBindableStmt(cnt int64) []*stmtsummary.Binda
 						PlanHint:  record.PlanHint,
 						Charset:   record.Charset,
 						Collation: record.Collation,
-						Users:     maps.Clone(record.AuthUsers),
+						Users:     make(map[string]struct{}),
 					}
+					maps.Copy(stmt.Users, record.AuthUsers)
 
 					// If it is SQL command prepare / execute, the ssElement.sampleSQL
 					// is `execute ...`, we should get the original select query.
@@ -466,7 +467,7 @@ type stmtKey struct {
 // `prevSQL` is included in the key To distinguish different transactions.
 func (k *stmtKey) Hash() []byte {
 	if len(k.hash) == 0 {
-		k.hash = make([]byte, 0, len(k.schemaName)+len(k.digest)+len(k.prevDigest)+len(k.planDigest)+len(k.resourceGroupName))
+		k.hash = make([]byte, 0, len(k.schemaName)+len(k.digest)+len(k.prevDigest)+len(k.planDigest))
 		k.hash = append(k.hash, hack.Slice(k.digest)...)
 		k.hash = append(k.hash, hack.Slice(k.schemaName)...)
 		k.hash = append(k.hash, hack.Slice(k.prevDigest)...)

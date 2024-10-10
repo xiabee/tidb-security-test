@@ -19,16 +19,13 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/extension"
-	"github.com/pingcap/tidb/pkg/param"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
 )
 
 func (cc *clientConn) onExtensionConnEvent(tp extension.ConnEventTp, err error) {
@@ -60,7 +57,7 @@ func (cc *clientConn) onExtensionConnEvent(tp extension.ConnEventTp, err error) 
 	cc.extensions.OnConnectionEvent(tp, info)
 }
 
-func (cc *clientConn) onExtensionStmtEnd(node any, stmtCtxValid bool, err error, args ...param.BinaryParam) {
+func (cc *clientConn) onExtensionStmtEnd(node interface{}, stmtCtxValid bool, err error, args ...expression.Expression) {
 	if !cc.extensions.HasStmtEventListeners() {
 		return
 	}
@@ -88,15 +85,9 @@ func (cc *clientConn) onExtensionStmtEnd(node any, stmtCtxValid bool, err error,
 	case PreparedStatement:
 		info.executeStmtID = uint32(stmt.ID())
 		prepared, _ := sessVars.GetPreparedStmtByID(info.executeStmtID)
-
-		// TODO: the `BinaryParam` is parsed two times: one in the `Execute` method and one here. It would be better to
-		// eliminate one of them by storing the parsed result.
-		typectx := ctx.GetSessionVars().StmtCtx.TypeCtx()
-		typectx = types.NewContext(typectx.Flags(), typectx.Location(), contextutil.IgnoreWarn)
-		params, _ := expression.ExecBinaryParam(typectx, args)
 		info.executeStmt = &ast.ExecuteStmt{
 			PrepStmt:   prepared,
-			BinaryArgs: params,
+			BinaryArgs: args,
 		}
 		info.stmtNode = info.executeStmt
 	case ast.StmtNode:
@@ -124,7 +115,7 @@ func (cc *clientConn) onExtensionSQLParseFailed(sql string, err error) {
 	})
 }
 
-func (cc *clientConn) onExtensionBinaryExecuteEnd(prep PreparedStatement, args []param.BinaryParam, stmtCtxValid bool, err error) {
+func (cc *clientConn) onExtensionBinaryExecuteEnd(prep PreparedStatement, args []expression.Expression, stmtCtxValid bool, err error) {
 	cc.onExtensionStmtEnd(prep, stmtCtxValid, err, args...)
 }
 
@@ -220,8 +211,7 @@ func (e *stmtEventInfo) RelatedTables() []stmtctx.TableEntry {
 	if e.sc != nil && e.err == nil {
 		return e.sc.Tables
 	}
-	nodeW := resolve.NewNodeW(e.stmtNode)
-	tableNames := core.ExtractTableList(nodeW, false)
+	tableNames := core.ExtractTableList(e.stmtNode, false)
 	tableEntries := make([]stmtctx.TableEntry, 0, len(tableNames))
 	for i, tableName := range tableNames {
 		if tableName != nil {

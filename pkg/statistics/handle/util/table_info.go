@@ -15,12 +15,10 @@
 package util
 
 import (
-	"context"
 	"sync"
 
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/table"
-	"github.com/pingcap/tidb/pkg/util/intest"
 )
 
 // TableInfoGetter is used to get table meta info.
@@ -54,18 +52,20 @@ func (c *tableInfoGetterImpl) TableInfoByID(is infoschema.InfoSchema, physicalID
 		c.pid2tid = buildPartitionID2TableID(is)
 	}
 	if id, ok := c.pid2tid[physicalID]; ok {
-		return is.TableByID(context.Background(), id)
+		return is.TableByID(id)
 	}
-	return is.TableByID(context.Background(), physicalID)
+	return is.TableByID(physicalID)
 }
 
 func buildPartitionID2TableID(is infoschema.InfoSchema) map[int64]int64 {
 	mapper := make(map[int64]int64)
-	rs := is.ListTablesWithSpecialAttribute(infoschema.PartitionAttribute)
-	for _, db := range rs {
-		for _, tbl := range db.TableInfos {
+	for _, db := range is.AllSchemas() {
+		tbls := db.Tables
+		for _, tbl := range tbls {
 			pi := tbl.GetPartitionInfo()
-			intest.AssertNotNil(pi)
+			if pi == nil {
+				continue
+			}
 			for _, def := range pi.Definitions {
 				mapper[def.ID] = tbl.ID
 			}

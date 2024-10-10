@@ -15,7 +15,6 @@
 package executor_test
 
 import (
-	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -53,7 +52,7 @@ func TestIntegrationCopCache(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("create table t (a int primary key)")
 
-	tblInfo, err := dom.InfoSchema().TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tblInfo, err := dom.InfoSchema().TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tid := tblInfo.Meta().ID
 	tk.MustExec(`insert into t values(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12)`)

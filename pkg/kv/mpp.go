@@ -95,15 +95,13 @@ type MPPQueryID struct {
 
 // MPPTask means the minimum execution unit of a mpp computation job.
 type MPPTask struct {
-	Meta         MPPTaskMeta // on which store this task will execute
-	ID           int64       // mppTaskID
-	StartTs      uint64
-	GatherID     uint64
-	MppQueryID   MPPQueryID
-	TableID      int64      // physical table id
-	MppVersion   MppVersion // mpp version
-	SessionID    uint64
-	SessionAlias string
+	Meta       MPPTaskMeta // on which store this task will execute
+	ID         int64       // mppTaskID
+	StartTs    uint64
+	GatherID   uint64
+	MppQueryID MPPQueryID
+	TableID    int64      // physical table id
+	MppVersion MppVersion // mpp version
 
 	PartitionTableIDs  []int64
 	TiFlashStaticPrune bool
@@ -112,15 +110,13 @@ type MPPTask struct {
 // ToPB generates the pb structure.
 func (t *MPPTask) ToPB() *mpp.TaskMeta {
 	meta := &mpp.TaskMeta{
-		StartTs:         t.StartTs,
-		GatherId:        t.GatherID,
-		QueryTs:         t.MppQueryID.QueryTs,
-		LocalQueryId:    t.MppQueryID.LocalQueryID,
-		ServerId:        t.MppQueryID.ServerID,
-		TaskId:          t.ID,
-		MppVersion:      t.MppVersion.ToInt64(),
-		ConnectionId:    t.SessionID,
-		ConnectionAlias: t.SessionAlias,
+		StartTs:      t.StartTs,
+		GatherId:     t.GatherID,
+		QueryTs:      t.MppQueryID.QueryTs,
+		LocalQueryId: t.MppQueryID.LocalQueryID,
+		ServerId:     t.MppQueryID.ServerID,
+		TaskId:       t.ID,
+		MppVersion:   t.MppVersion.ToInt64(),
 	}
 	if t.ID != -1 {
 		meta.Address = t.Meta.GetAddress()
@@ -159,8 +155,6 @@ type MPPDispatchRequest struct {
 	ReportExecutionSummary bool
 	State                  MppTaskStates
 	ResourceGroupName      string
-	ConnectionID           uint64
-	ConnectionAlias        string
 }
 
 // CancelMPPTasksParam represents parameter for MPPClient's CancelMPPTasks
@@ -224,8 +218,6 @@ type MppCoordinator interface {
 	Close() error
 	// IsClosed returns whether mpp coordinator is closed or not
 	IsClosed() bool
-	// GetComputationCnt returns the number of node cnt that involved in the MPP computation.
-	GetNodeCnt() int
 }
 
 // MPPBuildTasksRequest request the stores allocation for a mpp plan fragment.
@@ -235,29 +227,6 @@ type MPPBuildTasksRequest struct {
 	StartTS   uint64
 
 	PartitionIDAndRanges []PartitionIDAndRanges
-}
-
-// ToString returns a string representation of MPPBuildTasksRequest. Used for CacheKey.
-func (req *MPPBuildTasksRequest) ToString() string {
-	sb := strings.Builder{}
-	if req.KeyRanges != nil { // Non-partiton
-		for i, keyRange := range req.KeyRanges {
-			sb.WriteString("range_id" + strconv.Itoa(i))
-			sb.WriteString(keyRange.StartKey.String())
-			sb.WriteString(keyRange.EndKey.String())
-		}
-		return sb.String()
-	}
-	// Partition
-	for _, partitionIDAndRange := range req.PartitionIDAndRanges {
-		sb.WriteString("partition_id" + strconv.Itoa(int(partitionIDAndRange.ID)))
-		for i, keyRange := range partitionIDAndRange.KeyRanges {
-			sb.WriteString("range_id" + strconv.Itoa(i))
-			sb.WriteString(keyRange.StartKey.String())
-			sb.WriteString(keyRange.EndKey.String())
-		}
-	}
-	return sb.String()
 }
 
 // ExchangeCompressionMode means the compress method used in exchange operator

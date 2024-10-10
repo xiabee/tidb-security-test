@@ -17,6 +17,7 @@ package expression
 import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/opcode"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 )
 
 // UnCacheableFunctions stores functions which can not be cached to plan cache.
@@ -136,12 +137,12 @@ var IllegalFunctions4GeneratedColumns = map[string]struct{}{
 // IsDeferredFunctions checks whether the function is in DeferredFunctions.
 // DeferredFunctions stores functions which are foldable but should be deferred as well when plan cache is enabled.
 // Note that, these functions must be foldable at first place, i.e, they are not in `unFoldableFunctions`.
-func IsDeferredFunctions(ctx BuildContext, fn string) bool {
+func IsDeferredFunctions(ctx sessionctx.Context, fn string) bool {
 	_, ok := deferredFunctions[fn]
 	if ok {
 		return ok
 	}
-	if fn == ast.Sysdate && ctx.GetSysdateIsNow() {
+	if fn == ast.Sysdate && ctx.GetSessionVars().SysdateIsNow {
 		return true
 	}
 	return ok
@@ -279,7 +280,6 @@ var booleanFunctions = map[string]struct{}{
 	ast.IsIPv4Compat:       {},
 	ast.IsIPv4Mapped:       {},
 	ast.IsIPv6:             {},
-	ast.JSONSchemaValid:    {},
 	ast.JSONValid:          {},
 	ast.RegexpLike:         {},
 }

@@ -308,7 +308,6 @@ type csvOption struct {
 	separator      []byte
 	delimiter      []byte
 	lineTerminator []byte
-	binaryFormat   BinaryFormat
 }
 
 func newOutputFileNamer(meta TableMeta, chunkIdx int, rows, fileSize bool) *outputFileNamer {

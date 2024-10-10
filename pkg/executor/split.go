@@ -25,10 +25,9 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/table/tables"
@@ -38,6 +37,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
 )
@@ -47,7 +47,7 @@ type SplitIndexRegionExec struct {
 	exec.BaseExecutor
 
 	tableInfo      *model.TableInfo
-	partitionNames []pmodel.CIStr
+	partitionNames []model.CIStr
 	indexInfo      *model.IndexInfo
 	lower          []types.Datum
 	upper          []types.Datum
@@ -165,9 +165,8 @@ func (e *SplitIndexRegionExec) getSplitIdxKeysFromValueList() (keys [][]byte, er
 func (e *SplitIndexRegionExec) getSplitIdxPhysicalKeysFromValueList(physicalID int64, keys [][]byte) ([][]byte, error) {
 	keys = e.getSplitIdxPhysicalStartAndOtherIdxKeys(physicalID, keys)
 	index := tables.NewIndex(physicalID, e.tableInfo, e.indexInfo)
-	sc := e.Ctx().GetSessionVars().StmtCtx
 	for _, v := range e.valueLists {
-		idxKey, _, err := index.GenIndexKey(sc.ErrCtx(), sc.TimeZone(), v, kv.IntHandle(math.MinInt64), nil)
+		idxKey, _, err := index.GenIndexKey(e.Ctx().GetSessionVars().StmtCtx, v, kv.IntHandle(math.MinInt64), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -228,14 +227,13 @@ func (e *SplitIndexRegionExec) getSplitIdxPhysicalKeysFromBound(physicalID int64
 	keys = e.getSplitIdxPhysicalStartAndOtherIdxKeys(physicalID, keys)
 	index := tables.NewIndex(physicalID, e.tableInfo, e.indexInfo)
 	// Split index regions by lower, upper value and calculate the step by (upper - lower)/num.
-	sc := e.Ctx().GetSessionVars().StmtCtx
-	lowerIdxKey, _, err := index.GenIndexKey(sc.ErrCtx(), sc.TimeZone(), e.lower, kv.IntHandle(math.MinInt64), nil)
+	lowerIdxKey, _, err := index.GenIndexKey(e.Ctx().GetSessionVars().StmtCtx, e.lower, kv.IntHandle(math.MinInt64), nil)
 	if err != nil {
 		return nil, err
 	}
 	// Use math.MinInt64 as handle_id for the upper index key to avoid affecting calculate split point.
 	// If use math.MaxInt64 here, test of `TestSplitIndex` will report error.
-	upperIdxKey, _, err := index.GenIndexKey(sc.ErrCtx(), sc.TimeZone(), e.upper, kv.IntHandle(math.MinInt64), nil)
+	upperIdxKey, _, err := index.GenIndexKey(e.Ctx().GetSessionVars().StmtCtx, e.upper, kv.IntHandle(math.MinInt64), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +272,7 @@ func getValuesList(lower, upper []byte, num int, valuesList [][]byte) [][]byte {
 
 // longestCommonPrefixLen gets the longest common prefix byte length.
 func longestCommonPrefixLen(s1, s2 []byte) int {
-	l := min(len(s1), len(s2))
+	l := mathutil.Min(len(s1), len(s2))
 	i := 0
 	for ; i < l; i++ {
 		if s1[i] != s2[i] {
@@ -327,11 +325,11 @@ type SplitTableRegionExec struct {
 	exec.BaseExecutor
 
 	tableInfo      *model.TableInfo
-	partitionNames []pmodel.CIStr
+	partitionNames []model.CIStr
 	lower          []types.Datum
 	upper          []types.Datum
 	num            int
-	handleCols     util.HandleCols
+	handleCols     core.HandleCols
 	valueLists     [][]types.Datum
 	splitKeys      [][]byte
 
@@ -826,12 +824,8 @@ func getRegionInfo(store helper.Storage, regions []regionMeta) ([]regionMeta, er
 		Store:       store,
 		RegionCache: store.GetRegionCache(),
 	}
-	pdCli, err := tikvHelper.TryGetPDHTTPClient()
-	if err != nil {
-		return regions, err
-	}
 	for i := range regions {
-		regionInfo, err := pdCli.GetRegionByID(context.TODO(), regions[i].region.Id)
+		regionInfo, err := tikvHelper.GetRegionInfoByID(regions[i].region.Id)
 		if err != nil {
 			return nil, err
 		}

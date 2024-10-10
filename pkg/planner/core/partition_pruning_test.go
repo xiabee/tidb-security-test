@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit/ddlhelper"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -45,11 +46,11 @@ func TestCanBePrune(t *testing.T) {
 	pruner := &rangePruner{lessThan, tc.col, tc.fn, monotoneModeNonStrict}
 
 	queryExpr := tc.expr("d < '2000-03-08 00:00:00'")
-	result := partitionRangeForCNFExpr(tc.sctx, []expression.Expression{queryExpr}, pruner, fullRange(len(lessThan.data)))
+	result := partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
 	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{0, 1}}))
 
 	queryExpr = tc.expr("d > '2018-03-08 00:00:00'")
-	result = partitionRangeForCNFExpr(tc.sctx, []expression.Expression{queryExpr}, pruner, fullRange(len(lessThan.data)))
+	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
 	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{}))
 
 	// For the following case:
@@ -68,11 +69,11 @@ func TestCanBePrune(t *testing.T) {
 	pruner = &rangePruner{lessThan, tc.col, tc.fn, monotoneModeStrict}
 
 	queryExpr = tc.expr("report_updated > '2008-05-01 00:00:00'")
-	result = partitionRangeForCNFExpr(tc.sctx, []expression.Expression{queryExpr}, pruner, fullRange(len(lessThan.data)))
+	result = partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
 	require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}))
 
 	queryExpr = tc.expr("report_updated > unix_timestamp('2008-05-01 00:00:00')")
-	partitionRangeForCNFExpr(tc.sctx, []expression.Expression{queryExpr}, pruner, fullRange(len(lessThan.data)))
+	partitionRangeForCNFExpr(tc.sctx, queryExpr, pruner, fullRange(len(lessThan.data)))
 	// TODO: Uncomment the check after fixing issue https://github.com/pingcap/tidb/issues/12028
 	// require.True(t, equalPartitionRangeOR(result, partitionRangeOR{{2, 4}}))
 	// report_updated > unix_timestamp('2008-05-01 00:00:00') is converted to gt(t.t.report_updated, <nil>)
@@ -168,7 +169,7 @@ func TestPruneUseBinarySearchUnSigned(t *testing.T) {
 
 type testCtx struct {
 	require *require.Assertions
-	sctx    *mock.Context
+	sctx    sessionctx.Context
 	schema  *expression.Schema
 	columns []*expression.Column
 	names   types.NameSlice
@@ -183,7 +184,7 @@ func prepareBenchCtx(createTable string, partitionExpr string) *testCtx {
 		return nil
 	}
 	sctx := mock.NewContext()
-	tblInfo, err := ddlhelper.BuildTableInfoFromASTForTest(stmt.(*ast.CreateTableStmt))
+	tblInfo, err := ddlhelper.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 	if err != nil {
 		return nil
 	}
@@ -213,7 +214,7 @@ func prepareTestCtx(t *testing.T, createTable string, partitionExpr string) *tes
 	stmt, err := p.ParseOneStmt(createTable, "", "")
 	require.NoError(t, err)
 	sctx := mock.NewContext()
-	tblInfo, err := ddlhelper.BuildTableInfoFromASTForTest(stmt.(*ast.CreateTableStmt))
+	tblInfo, err := ddlhelper.BuildTableInfoFromAST(stmt.(*ast.CreateTableStmt))
 	require.NoError(t, err)
 	columns, names, err := expression.ColumnInfos2ColumnsAndNames(sctx, model.NewCIStr("t"), tblInfo.Name, tblInfo.Cols(), tblInfo)
 	require.NoError(t, err)
@@ -232,8 +233,8 @@ func prepareTestCtx(t *testing.T, createTable string, partitionExpr string) *tes
 	}
 }
 
-func (tc *testCtx) expr(expr string) expression.Expression {
-	res, err := expression.ParseSimpleExpr(tc.sctx, expr, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+func (tc *testCtx) expr(expr string) []expression.Expression {
+	res, err := expression.ParseSimpleExprsWithNames(tc.sctx, expr, tc.schema, tc.names)
 	tc.require.NoError(err)
 	return res
 }
@@ -262,10 +263,10 @@ func TestPartitionRangeForExpr(t *testing.T) {
 	}
 
 	for _, ca := range cases {
-		expr, err := expression.ParseSimpleExpr(tc.sctx, ca.input, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
 		require.NoError(t, err)
 		result := fullRange(lessThan.length())
-		result = partitionRangeForExpr(tc.sctx, expr, pruner, result)
+		result = partitionRangeForExpr(tc.sctx, expr[0], pruner, result)
 		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
 	}
 }
@@ -353,9 +354,9 @@ func TestPartitionRangePruner2VarChar(t *testing.T) {
 		if strings.EqualFold(str, "MAXVALUE") {
 			e = append(e, nil)
 		} else {
-			expr, err := expression.ParseSimpleExpr(tc.sctx, str, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+			tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
 			require.NoError(t, err)
-			e = append(e, &expr)
+			e = append(e, &tmp[0])
 		}
 		lessThan[i] = e
 	}
@@ -381,10 +382,10 @@ func TestPartitionRangePruner2VarChar(t *testing.T) {
 	}
 
 	for _, ca := range cases {
-		expr, err := expression.ParseSimpleExpr(tc.sctx, ca.input, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
 		require.NoError(t, err)
 		result := fullRange(len(lessThan))
-		result = partitionRangeForExpr(tc.sctx, expr, pruner, result)
+		result = partitionRangeForExpr(tc.sctx, expr[0], pruner, result)
 		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v", ca.input)
 	}
 }
@@ -401,9 +402,9 @@ func TestPartitionRangePruner2CharWithCollation(t *testing.T) {
 		if strings.EqualFold(str, "MAXVALUE") {
 			e = append(e, nil)
 		} else {
-			expr, err := expression.ParseSimpleExpr(tc.sctx, str, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+			tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
 			require.NoError(t, err)
-			e = append(e, &expr)
+			e = append(e, &tmp[0])
 		}
 		lessThan[i] = e
 	}
@@ -431,10 +432,10 @@ func TestPartitionRangePruner2CharWithCollation(t *testing.T) {
 	}
 
 	for _, ca := range cases {
-		expr, err := expression.ParseSimpleExpr(tc.sctx, ca.input, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
 		require.NoError(t, err)
 		result := fullRange(len(lessThan))
-		result = partitionRangeForExpr(tc.sctx, expr, pruner, result)
+		result = partitionRangeForExpr(tc.sctx, expr[0], pruner, result)
 		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v %v != %v", ca.input, ca.result, result)
 	}
 }
@@ -458,9 +459,9 @@ func TestPartitionRangePruner2Date(t *testing.T) {
 		if strings.EqualFold(str, "MAXVALUE") {
 			e = append(e, nil)
 		} else {
-			expr, err := expression.ParseSimpleExpr(tc.sctx, str, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+			tmp, err := expression.ParseSimpleExprsWithNames(tc.sctx, str, tc.schema, tc.names)
 			require.NoError(t, err)
-			e = append(e, &expr)
+			e = append(e, &tmp[0])
 		}
 		lessThan[i] = e
 	}
@@ -487,10 +488,10 @@ func TestPartitionRangePruner2Date(t *testing.T) {
 	}
 
 	for _, ca := range cases {
-		expr, err := expression.ParseSimpleExpr(tc.sctx, ca.input, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+		expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
 		require.NoError(t, err)
 		result := fullRange(len(lessThan))
-		result = partitionRangeForExpr(tc.sctx, expr, pruner, result)
+		result = partitionRangeForExpr(tc.sctx, expr[0], pruner, result)
 		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v, %v != %v", ca.input, ca.result, result)
 	}
 }
@@ -520,9 +521,10 @@ func TestPartitionRangeColumnsForExpr(t *testing.T) {
 			if v == -99 {
 				e = nil // MAXVALUE
 			} else {
-				expr, err := expression.ParseSimpleExpr(tc.sctx, strconv.FormatInt(v, 10), expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+				expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, strconv.FormatInt(v, 10), tc.schema, tc.names)
 				require.NoError(t, err)
-				e = &expr
+				tmp := expr[0]
+				e = &tmp
 			}
 			l = append(l, e)
 		}
@@ -553,23 +555,24 @@ func TestPartitionRangeColumnsForExpr(t *testing.T) {
 		{"a is null", partitionRangeOR{{0, 1}}},
 		{"12 > a", partitionRangeOR{{0, 12}}},
 		{"4 <= a", partitionRangeOR{{1, 14}}},
-		{"(a,b) < (4,4)", partitionRangeOR{{0, 4}}},
+		// The expression is converted to 'if ...', see constructBinaryOpFunction, so not possible to break down to ranges
+		{"(a,b) < (4,4)", partitionRangeOR{{0, 14}}},
 		{"(a,b) = (4,4)", partitionRangeOR{{4, 5}}},
 		{"a < 4 OR (a = 4 AND b < 4)", partitionRangeOR{{0, 4}}},
-		{"(a,b,c) < (4,4,4)", partitionRangeOR{{0, 5}}},
+		// The expression is converted to 'if ...', see constructBinaryOpFunction, so not possible to break down to ranges
+		{"(a,b,c) < (4,4,4)", partitionRangeOR{{0, 14}}},
 		{"a < 4 OR (a = 4 AND b < 4) OR (a = 4 AND b = 4 AND c < 4)", partitionRangeOR{{0, 5}}},
-		{"(a,b,c) >= (4,7,4)", partitionRangeOR{{5, len(partDefs)}}},
-		{"a > 4 or (a= 4 and b > 7) or (a = 4 and b = 7 and c >= 4)", partitionRangeOR{{5, len(partDefs)}}},
+		{"(a,b,c) >= (4,7,4)", partitionRangeOR{{0, len(partDefs)}}},
 		{"(a,b,c) = (4,7,4)", partitionRangeOR{{5, 6}}},
 		{"a < 2 and a > 10", partitionRangeOR{}},
 		{"a < 1 and a > 1", partitionRangeOR{}},
 	}
 
 	for _, ca := range cases {
-		expr, err := expression.ParseSimpleExpr(tc.sctx, ca.input, expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+		exprs, err := expression.ParseSimpleExprsWithNames(tc.sctx, ca.input, tc.schema, tc.names)
 		require.NoError(t, err)
 		result := fullRange(len(lessThan))
-		e := expression.SplitCNFItems(expr)
+		e := expression.SplitCNFItems(exprs[0])
 		result = partitionRangeForCNFExpr(tc.sctx, e, pruner, result)
 		require.Truef(t, equalPartitionRangeOR(ca.result, result), "unexpected: %v %v != %v", ca.input, ca.result, result)
 	}
@@ -592,22 +595,23 @@ func benchmarkRangeColumnsPruner(b *testing.B, parts int) {
 		if v == -99 {
 			e = nil // MAXVALUE
 		} else {
-			expr, err := expression.ParseSimpleExpr(tc.sctx, strconv.FormatInt(v, 10), expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+			expr, err := expression.ParseSimpleExprsWithNames(tc.sctx, strconv.FormatInt(v, 10), tc.schema, tc.names)
 			if err != nil {
 				panic(err.Error())
 			}
-			e = &expr
+			tmp := expr[0]
+			e = &tmp
 		}
 		lessThan = append(lessThan, []*expression.Expression{e})
 	}
 	pruner := &rangeColumnsPruner{lessThan, tc.columns[:1]}
 
-	expr, err := expression.ParseSimpleExpr(tc.sctx, "a > 11000", expression.WithInputSchemaAndNames(tc.schema, tc.names, nil))
+	exprs, err := expression.ParseSimpleExprsWithNames(tc.sctx, "a > 11000", tc.schema, tc.names)
 	if err != nil {
 		panic(err.Error())
 	}
 	result := fullRange(len(lessThan))
-	e := expression.SplitCNFItems(expr)
+	e := expression.SplitCNFItems(exprs[0])
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		result[0] = partitionRange{0, parts}

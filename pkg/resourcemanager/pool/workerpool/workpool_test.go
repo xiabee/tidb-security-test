@@ -30,18 +30,12 @@ import (
 var globalCnt atomic.Int64
 var cntWg sync.WaitGroup
 
-type int64Task int64
-
-func (int64Task) RecoverArgs() (string, string, func(), bool) {
-	return "", "", nil, false
-}
-
-type MyWorker[T int64Task, R struct{}] struct {
+type MyWorker[T int64, R struct{}] struct {
 	id int
 }
 
-func (w *MyWorker[T, R]) HandleTask(task int64Task, _ func(struct{})) {
-	globalCnt.Add(int64(task))
+func (w *MyWorker[T, R]) HandleTask(task int64, _ func(struct{})) {
+	globalCnt.Add(task)
 	cntWg.Done()
 	logutil.BgLogger().Info("Worker handling task")
 }
@@ -50,13 +44,13 @@ func (w *MyWorker[T, R]) Close() {
 	logutil.BgLogger().Info("Close worker", zap.Any("id", w.id))
 }
 
-func createMyWorker() Worker[int64Task, struct{}] {
-	return &MyWorker[int64Task, struct{}]{}
+func createMyWorker() Worker[int64, struct{}] {
+	return &MyWorker[int64, struct{}]{}
 }
 
 func TestWorkerPool(t *testing.T) {
 	// Create a worker pool with 3 workers.
-	pool := NewWorkerPool[int64Task]("test", util.UNKNOWN, 3, createMyWorker)
+	pool := NewWorkerPool[int64]("test", util.UNKNOWN, 3, createMyWorker)
 	pool.Start(context.Background())
 	globalCnt.Store(0)
 
@@ -74,7 +68,7 @@ func TestWorkerPool(t *testing.T) {
 	// Add some tasks to the pool.
 	cntWg.Add(10)
 	for i := 0; i < 10; i++ {
-		pool.AddTask(int64Task(i))
+		pool.AddTask(int64(i))
 	}
 
 	cntWg.Wait()
@@ -87,7 +81,7 @@ func TestWorkerPool(t *testing.T) {
 	// Add some more tasks to the pool.
 	cntWg.Add(10)
 	for i := 0; i < 10; i++ {
-		pool.AddTask(int64Task(i))
+		pool.AddTask(int64(i))
 	}
 
 	cntWg.Wait()
@@ -100,7 +94,7 @@ func TestWorkerPool(t *testing.T) {
 	// Add some more tasks to the pool.
 	cntWg.Add(10)
 	for i := 0; i < 10; i++ {
-		pool.AddTask(int64Task(i))
+		pool.AddTask(int64(i))
 	}
 
 	cntWg.Wait()
@@ -122,29 +116,29 @@ func (d dummyWorker[T, R]) HandleTask(task T, send func(R)) {
 func (d dummyWorker[T, R]) Close() {}
 
 func TestWorkerPoolNoneResult(t *testing.T) {
-	pool := NewWorkerPool[int64Task, None](
+	pool := NewWorkerPool[int64, None](
 		"test", util.UNKNOWN, 3,
-		func() Worker[int64Task, None] {
-			return dummyWorker[int64Task, None]{}
+		func() Worker[int64, None] {
+			return dummyWorker[int64, None]{}
 		})
 	pool.Start(context.Background())
 	ch := pool.GetResultChan()
 	require.Nil(t, ch)
 	pool.ReleaseAndWait()
 
-	pool2 := NewWorkerPool[int64Task, int64](
+	pool2 := NewWorkerPool[int64, int64](
 		"test", util.UNKNOWN, 3,
-		func() Worker[int64Task, int64] {
-			return dummyWorker[int64Task, int64]{}
+		func() Worker[int64, int64] {
+			return dummyWorker[int64, int64]{}
 		})
 	pool2.Start(context.Background())
 	require.NotNil(t, pool2.GetResultChan())
 	pool2.ReleaseAndWait()
 
-	pool3 := NewWorkerPool[int64Task, struct{}](
+	pool3 := NewWorkerPool[int64, struct{}](
 		"test", util.UNKNOWN, 3,
-		func() Worker[int64Task, struct{}] {
-			return dummyWorker[int64Task, struct{}]{}
+		func() Worker[int64, struct{}] {
+			return dummyWorker[int64, struct{}]{}
 		})
 	pool3.Start(context.Background())
 	require.NotNil(t, pool3.GetResultChan())
@@ -152,13 +146,13 @@ func TestWorkerPoolNoneResult(t *testing.T) {
 }
 
 func TestWorkerPoolCustomChan(t *testing.T) {
-	pool := NewWorkerPool[int64Task, int64](
+	pool := NewWorkerPool[int64, int64](
 		"test", util.UNKNOWN, 3,
-		func() Worker[int64Task, int64] {
-			return dummyWorker[int64Task, int64]{}
+		func() Worker[int64, int64] {
+			return dummyWorker[int64, int64]{}
 		})
 
-	taskCh := make(chan int64Task)
+	taskCh := make(chan int64)
 	pool.SetTaskReceiver(taskCh)
 	resultCh := make(chan int64)
 	pool.SetResultSender(resultCh)
@@ -173,7 +167,7 @@ func TestWorkerPoolCustomChan(t *testing.T) {
 
 	pool.Start(context.Background())
 	for i := 0; i < 5; i++ {
-		taskCh <- int64Task(i)
+		taskCh <- int64(i)
 	}
 	close(taskCh)
 	pool.Wait()
@@ -184,10 +178,10 @@ func TestWorkerPoolCustomChan(t *testing.T) {
 
 func TestWorkerPoolCancelContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	pool := NewWorkerPool[int64Task, int64](
+	pool := NewWorkerPool[int64, int64](
 		"test", util.UNKNOWN, 3,
-		func() Worker[int64Task, int64] {
-			return dummyWorker[int64Task, int64]{}
+		func() Worker[int64, int64] {
+			return dummyWorker[int64, int64]{}
 		})
 	pool.Start(ctx)
 	pool.AddTask(1)

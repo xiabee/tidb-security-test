@@ -25,22 +25,13 @@ func newInvalidModeErr(s string) error {
 	return NewErr(ErrWrongValueForVar, "sql_mode", s)
 }
 
-const (
-	mysqlCompatibilityVersion = "8.0.11"
-	// VersionSeparator NOTE: DON'T MODIFY THIS VALUE.
-	// We don't store TiDB server version directly inside PD, but stores a concatenated
-	// one with MySQL compatibility version, with this fixed then we can parse TiDB
-	// version from ServerVersion.
-	VersionSeparator = "-TiDB-"
-)
-
 // Version information.
 var (
 	// TiDBReleaseVersion is initialized by (git describe --tags) in Makefile.
-	TiDBReleaseVersion = "v8.4.0-this-is-a-placeholder"
+	TiDBReleaseVersion = "None"
 
 	// ServerVersion is the version information of this tidb-server in MySQL's format.
-	ServerVersion = fmt.Sprintf("%s%s%s", mysqlCompatibilityVersion, VersionSeparator, TiDBReleaseVersion)
+	ServerVersion = fmt.Sprintf("8.0.11-TiDB-%s", TiDBReleaseVersion)
 )
 
 // Header information.
@@ -200,9 +191,6 @@ const (
 const (
 	// SystemDB is the name of system database.
 	SystemDB = "mysql"
-	// SysDB is the name of `sys` schema, which is a set of objects to help users to interpret data collected
-	// in `information_schema`.
-	SysDB = "sys"
 	// GlobalPrivTable is the table in system db contains global scope privilege info.
 	GlobalPrivTable = "global_priv"
 	// UserTable is the table in system db contains user info.
@@ -345,22 +333,9 @@ var DefaultLengthOfTimeFraction = map[int]int{
 	6: 3,
 }
 
-// DefaultAuthPlugins are the supported default authentication plugins.
-var DefaultAuthPlugins = []string{
-	AuthNativePassword,
-	AuthCachingSha2Password,
-	AuthTiDBSM3Password,
-	AuthLDAPSASL,
-	AuthLDAPSimple,
-	AuthSocket,
-	AuthTiDBSessionToken,
-	AuthTiDBAuthToken,
-	AuthMySQLClearPassword,
-}
-
 // SQLMode is the type for MySQL sql_mode.
 // See https://dev.mysql.com/doc/refman/5.7/en/sql-mode.html
-type SQLMode int64
+type SQLMode int
 
 // HasNoZeroDateMode detects if 'NO_ZERO_DATE' mode is set in SQLMode
 func (m SQLMode) HasNoZeroDateMode() bool {
@@ -666,9 +641,6 @@ const (
 	CursorTypeForUpdate
 	CursorTypeScrollable
 )
-
-// ZlibCompressDefaultLevel is the zlib compression level for the compressed protocol
-const ZlibCompressDefaultLevel = 6
 
 const (
 	// CompressionNone is no compression in use

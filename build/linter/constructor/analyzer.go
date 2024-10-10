@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/fatih/structtag"
-	"github.com/pingcap/tidb/build/linter/util"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ast/inspector"
 )
@@ -156,7 +155,7 @@ func handleValueSpec(pass *analysis.Pass, n *ast.ValueSpec, _ bool, stack []ast.
 	return assertInConstructor(pass, n, stack, ctors)
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	for _, file := range pass.Files {
 		i := inspector.New([]*ast.File{file})
 
@@ -174,8 +173,4 @@ func run(pass *analysis.Pass) (any, error) {
 		})
 	}
 	return nil, nil
-}
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 }

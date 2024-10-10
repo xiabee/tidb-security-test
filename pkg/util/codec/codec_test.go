@@ -24,10 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/errctx"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
-	"github.com/pingcap/tidb/pkg/planner/cascades/base"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/collate"
@@ -73,20 +72,20 @@ func TestCodecKey(t *testing.T) {
 			types.MakeDatums(uint64(1), uint64(1)),
 		},
 	}
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for i, datums := range table {
 		comment := fmt.Sprintf("%d %v", i, datums)
-		b, err := EncodeKey(typeCtx.Location(), nil, datums.Input...)
+		b, err := EncodeKey(sc, nil, datums.Input...)
 		require.NoError(t, err, comment)
 
 		args, err := Decode(b, 1)
 		require.NoError(t, err, comment)
 		require.Equal(t, datums.Expect, args, comment)
 
-		b, err = EncodeValue(typeCtx.Location(), nil, datums.Input...)
+		b, err = EncodeValue(sc, nil, datums.Input...)
 		require.NoError(t, err, comment)
 
-		size, err := estimateValuesSize(typeCtx, datums.Input)
+		size, err := estimateValuesSize(sc, datums.Input)
 		require.NoError(t, err, comment)
 		require.Len(t, b, size, comment)
 
@@ -97,14 +96,14 @@ func TestCodecKey(t *testing.T) {
 
 	var raw types.Datum
 	raw.SetRaw([]byte("raw"))
-	_, err := EncodeKey(typeCtx.Location(), nil, raw)
+	_, err := EncodeKey(sc, nil, raw)
 	require.Error(t, err)
 }
 
-func estimateValuesSize(typeCtx types.Context, vals []types.Datum) (int, error) {
+func estimateValuesSize(sc *stmtctx.StatementContext, vals []types.Datum) (int, error) {
 	size := 0
 	for _, val := range vals {
-		length, err := EstimateValueSize(typeCtx, val)
+		length, err := EstimateValueSize(sc, val)
 		if err != nil {
 			return 0, err
 		}
@@ -215,11 +214,12 @@ func TestCodecKeyCompare(t *testing.T) {
 			-1,
 		},
 	}
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for _, datums := range table {
-		b1, err := EncodeKey(time.Local, nil, datums.Left...)
+		b1, err := EncodeKey(sc, nil, datums.Left...)
 		require.NoError(t, err)
 
-		b2, err := EncodeKey(time.Local, nil, datums.Right...)
+		b2, err := EncodeKey(sc, nil, datums.Right...)
 		require.NoError(t, err)
 
 		comparedRes := bytes.Compare(b1, b2)
@@ -519,13 +519,14 @@ func TestBytes(t *testing.T) {
 }
 
 func parseTime(t *testing.T, s string) types.Time {
-	m, err := types.ParseTime(types.DefaultStmtNoWarningContext, s, mysql.TypeDatetime, types.DefaultFsp)
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.UTC)
+	m, err := types.ParseTime(sc, s, mysql.TypeDatetime, types.DefaultFsp, nil)
 	require.NoError(t, err)
 	return m
 }
 
 func parseDuration(t *testing.T, s string) types.Duration {
-	m, _, err := types.ParseDuration(types.DefaultStmtNoWarningContext, s, types.DefaultFsp)
+	m, _, err := types.ParseDuration(nil, s, types.DefaultFsp)
 	require.NoError(t, err)
 	return m
 }
@@ -536,10 +537,11 @@ func TestTime(t *testing.T) {
 		"2011-01-01 00:00:00",
 		"0001-01-01 00:00:00",
 	}
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for _, timeDatum := range tbl {
 		m := types.NewDatum(parseTime(t, timeDatum))
 
-		b, err := EncodeKey(time.Local, nil, m)
+		b, err := EncodeKey(sc, nil, m)
 		require.NoError(t, err)
 		v, err := Decode(b, 1)
 		require.NoError(t, err)
@@ -566,9 +568,9 @@ func TestTime(t *testing.T) {
 		m1 := types.NewDatum(parseTime(t, timeData.Arg1))
 		m2 := types.NewDatum(parseTime(t, timeData.Arg2))
 
-		b1, err := EncodeKey(time.Local, nil, m1)
+		b1, err := EncodeKey(sc, nil, m1)
 		require.NoError(t, err)
-		b2, err := EncodeKey(time.Local, nil, m2)
+		b2, err := EncodeKey(sc, nil, m2)
 		require.NoError(t, err)
 
 		ret := bytes.Compare(b1, b2)
@@ -582,10 +584,11 @@ func TestDuration(t *testing.T) {
 		"00:00:00",
 		"1 11:11:11",
 	}
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for _, duration := range tbl {
 		m := parseDuration(t, duration)
 
-		b, err := EncodeKey(time.Local, nil, types.NewDatum(m))
+		b, err := EncodeKey(sc, nil, types.NewDatum(m))
 		require.NoError(t, err)
 		v, err := Decode(b, 1)
 		require.NoError(t, err)
@@ -607,9 +610,9 @@ func TestDuration(t *testing.T) {
 		m1 := parseDuration(t, durations.Arg1)
 		m2 := parseDuration(t, durations.Arg2)
 
-		b1, err := EncodeKey(time.Local, nil, types.NewDatum(m1))
+		b1, err := EncodeKey(sc, nil, types.NewDatum(m1))
 		require.NoError(t, err)
-		b2, err := EncodeKey(time.Local, nil, types.NewDatum(m2))
+		b2, err := EncodeKey(sc, nil, types.NewDatum(m2))
 		require.NoError(t, err)
 
 		ret := bytes.Compare(b1, b2)
@@ -634,13 +637,13 @@ func TestDecimal(t *testing.T) {
 		"-12.340",
 		"-0.1234",
 	}
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for _, decimalNum := range tbl {
 		dec := new(types.MyDecimal)
 		err := dec.FromString([]byte(decimalNum))
 		require.NoError(t, err)
 
-		b, err := EncodeKey(typeCtx.Location(), nil, types.NewDatum(dec))
+		b, err := EncodeKey(sc, nil, types.NewDatum(dec))
 		require.NoError(t, err)
 		v, err := Decode(b, 1)
 		require.NoError(t, err)
@@ -651,8 +654,8 @@ func TestDecimal(t *testing.T) {
 	}
 
 	tblCmp := []struct {
-		Arg1 any
-		Arg2 any
+		Arg1 interface{}
+		Arg2 interface{}
 		Ret  int
 	}{
 		// Test for float type decimal.
@@ -717,12 +720,12 @@ func TestDecimal(t *testing.T) {
 	}
 	for _, decimalNums := range tblCmp {
 		d1 := types.NewDatum(decimalNums.Arg1)
-		dec1, err := d1.ToDecimal(typeCtx)
+		dec1, err := d1.ToDecimal(sc)
 		require.NoError(t, err)
 		d1.SetMysqlDecimal(dec1)
 
 		d2 := types.NewDatum(decimalNums.Arg2)
-		dec2, err := d2.ToDecimal(typeCtx)
+		dec2, err := d2.ToDecimal(sc)
 		require.NoError(t, err)
 		d2.SetMysqlDecimal(dec2)
 
@@ -731,17 +734,17 @@ func TestDecimal(t *testing.T) {
 		d2.SetLength(30)
 		d2.SetFrac(6)
 
-		b1, err := EncodeKey(typeCtx.Location(), nil, d1)
+		b1, err := EncodeKey(sc, nil, d1)
 		require.NoError(t, err)
-		b2, err := EncodeKey(typeCtx.Location(), nil, d2)
+		b2, err := EncodeKey(sc, nil, d2)
 		require.NoError(t, err)
 
 		ret := bytes.Compare(b1, b2)
 		require.Equalf(t, decimalNums.Ret, ret, "%v %x %x", decimalNums, b1, b2)
 
-		b1, err = EncodeValue(typeCtx.Location(), b1[:0], d1)
+		b1, err = EncodeValue(sc, b1[:0], d1)
 		require.NoError(t, err)
-		size, err := EstimateValueSize(typeCtx, d1)
+		size, err := EstimateValueSize(sc, d1)
 		require.NoError(t, err)
 		require.Len(t, b1, size)
 	}
@@ -758,7 +761,7 @@ func TestDecimal(t *testing.T) {
 		b, err := EncodeDecimal(nil, d.GetMysqlDecimal(), d.Length(), d.Frac())
 		require.NoError(t, err)
 		decs = append(decs, b)
-		size, err := EstimateValueSize(typeCtx, d)
+		size, err := EstimateValueSize(sc, d)
 		require.NoError(t, err)
 		// size - 1 because the flag occupy 1 bit.
 		require.Len(t, b, size-1)
@@ -775,19 +778,17 @@ func TestDecimal(t *testing.T) {
 	_, err = EncodeDecimal(nil, d, 12, 10)
 	require.Truef(t, terror.ErrorEqual(err, types.ErrOverflow), "err %v", err)
 
-	errCtx := errctx.StrictNoWarningContext.WithErrGroupLevel(errctx.ErrGroupTruncate, errctx.LevelIgnore)
+	sc.IgnoreTruncate.Store(true)
 	decimalDatum := types.NewDatum(d)
 	decimalDatum.SetLength(20)
 	decimalDatum.SetFrac(5)
-	_, err = EncodeValue(typeCtx.Location(), nil, decimalDatum)
-	err = errCtx.HandleError(err)
+	_, err = EncodeValue(sc, nil, decimalDatum)
 	require.NoError(t, err)
 
-	errCtx = errctx.StrictNoWarningContext.WithErrGroupLevel(errctx.ErrGroupTruncate, errctx.LevelWarn)
+	sc.OverflowAsWarning = true
 	decimalDatum.SetLength(12)
 	decimalDatum.SetFrac(10)
-	_, err = EncodeValue(typeCtx.Location(), nil, decimalDatum)
-	err = errCtx.HandleError(err)
+	_, err = EncodeValue(sc, nil, decimalDatum)
 	require.NoError(t, err)
 }
 
@@ -875,8 +876,9 @@ func TestCut(t *testing.T) {
 			types.MakeDatums(types.CreateBinaryJSON(types.Opaque{TypeCode: mysql.TypeString, Buf: []byte("abc")})),
 		},
 	}
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	for i, datums := range table {
-		b, err := EncodeKey(time.Local, nil, datums.Input...)
+		b, err := EncodeKey(sc, nil, datums.Input...)
 		require.NoErrorf(t, err, "%d %v", i, datums)
 
 		var d []byte
@@ -885,7 +887,7 @@ func TestCut(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, d)
 
-			ed, err1 := EncodeKey(time.Local, nil, e)
+			ed, err1 := EncodeKey(sc, nil, e)
 			require.NoError(t, err1)
 			require.Equalf(t, ed, d, "%d:%d %#v", i, j, e)
 		}
@@ -893,7 +895,7 @@ func TestCut(t *testing.T) {
 	}
 
 	for i, datums := range table {
-		b, err := EncodeValue(time.Local, nil, datums.Input...)
+		b, err := EncodeValue(sc, nil, datums.Input...)
 		require.NoErrorf(t, err, "%d %v", i, datums)
 
 		var d []byte
@@ -902,7 +904,7 @@ func TestCut(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, d)
 
-			ed, err1 := EncodeValue(time.Local, nil, e)
+			ed, err1 := EncodeValue(sc, nil, e)
 			require.NoError(t, err1)
 			require.Equalf(t, ed, d, "%d:%d %#v", i, j, e)
 		}
@@ -910,7 +912,7 @@ func TestCut(t *testing.T) {
 	}
 
 	input := 42
-	b, err := EncodeValue(time.Local, nil, types.NewDatum(input))
+	b, err := EncodeValue(sc, nil, types.NewDatum(input))
 	require.NoError(t, err)
 	rem, n, err := CutColumnID(b)
 	require.NoError(t, err)
@@ -931,8 +933,9 @@ func TestCutOneError(t *testing.T) {
 }
 
 func TestSetRawValues(t *testing.T) {
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	datums := types.MakeDatums(1, "abc", 1.1, []byte("def"))
-	rowData, err := EncodeValue(time.Local, nil, datums...)
+	rowData, err := EncodeValue(sc, nil, datums...)
 	require.NoError(t, err)
 
 	values := make([]types.Datum, 4)
@@ -941,17 +944,17 @@ func TestSetRawValues(t *testing.T) {
 
 	for i, rawVal := range values {
 		require.IsType(t, types.KindRaw, rawVal.Kind())
-		encoded, encodedErr := EncodeValue(time.Local, nil, datums[i])
+		encoded, encodedErr := EncodeValue(sc, nil, datums[i])
 		require.NoError(t, encodedErr)
 		require.Equal(t, rawVal.GetBytes(), encoded)
 	}
 }
 
 func TestDecodeOneToChunk(t *testing.T) {
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
-	datums, tps := datumsForTest()
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
+	datums, tps := datumsForTest(sc)
 	rowCount := 3
-	chk := chunkForTest(t, typeCtx.Location(), datums, tps, rowCount)
+	chk := chunkForTest(t, sc, datums, tps, rowCount)
 	for colIdx, tp := range tps {
 		for rowIdx := 0; rowIdx < rowCount; rowIdx++ {
 			got := chk.GetRow(rowIdx).GetDatum(colIdx, tp)
@@ -960,7 +963,7 @@ func TestDecodeOneToChunk(t *testing.T) {
 				require.True(t, expect.IsNull())
 			} else {
 				if got.Kind() != types.KindMysqlDecimal {
-					cmp, err := got.Compare(typeCtx, &expect, collate.GetCollator(tp.GetCollate()))
+					cmp, err := got.Compare(sc, &expect, collate.GetCollator(tp.GetCollate()))
 					require.NoError(t, err)
 					require.Equalf(t, 0, cmp, "expect: %v, got %v", expect, got)
 				} else {
@@ -972,6 +975,7 @@ func TestDecodeOneToChunk(t *testing.T) {
 }
 
 func TestHashGroup(t *testing.T) {
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	tp := types.NewFieldType(mysql.TypeNewDecimal)
 	tps := []*types.FieldType{tp}
 	chk1 := chunk.New(tps, 3, 3)
@@ -984,17 +988,17 @@ func TestHashGroup(t *testing.T) {
 	tp1 := tp
 	tp1.SetFlen(20)
 	tp1.SetDecimal(5)
-	_, err := HashGroupKey(time.Local, 3, chk1.Column(0), buf1, tp1)
+	_, err := HashGroupKey(sc, 3, chk1.Column(0), buf1, tp1)
 	require.Error(t, err)
 
 	tp2 := tp
 	tp2.SetFlen(12)
 	tp2.SetDecimal(10)
-	_, err = HashGroupKey(time.Local, 3, chk1.Column(0), buf1, tp2)
+	_, err = HashGroupKey(sc, 3, chk1.Column(0), buf1, tp2)
 	require.Error(t, err)
 }
 
-func datumsForTest() ([]types.Datum, []*types.FieldType) {
+func datumsForTest(_ *stmtctx.StatementContext) ([]types.Datum, []*types.FieldType) {
 	decType := types.NewFieldType(mysql.TypeNewDecimal)
 	decType.SetDecimal(2)
 	_tp1 := types.NewFieldType(mysql.TypeEnum)
@@ -1006,7 +1010,7 @@ func datumsForTest() ([]types.Datum, []*types.FieldType) {
 	_tp4 := types.NewFieldType(mysql.TypeBit)
 	_tp4.SetFlen(8)
 	table := []struct {
-		value any
+		value interface{}
 		tp    *types.FieldType
 	}{
 		{nil, types.NewFieldType(mysql.TypeNull)},
@@ -1061,10 +1065,10 @@ func datumsForTest() ([]types.Datum, []*types.FieldType) {
 	return datums, tps
 }
 
-func chunkForTest(t *testing.T, tz *time.Location, datums []types.Datum, tps []*types.FieldType, rowCount int) *chunk.Chunk {
-	decoder := NewDecoder(chunk.New(tps, 32, 32), tz)
+func chunkForTest(t *testing.T, sc *stmtctx.StatementContext, datums []types.Datum, tps []*types.FieldType, rowCount int) *chunk.Chunk {
+	decoder := NewDecoder(chunk.New(tps, 32, 32), sc.TimeZone())
 	for rowIdx := 0; rowIdx < rowCount; rowIdx++ {
-		encoded, err := EncodeValue(tz, nil, datums...)
+		encoded, err := EncodeValue(sc, nil, datums...)
 		require.NoError(t, err)
 		decoder.buf = make([]byte, 0, len(encoded))
 		for colIdx, tp := range tps {
@@ -1080,13 +1084,13 @@ func TestDecodeRange(t *testing.T) {
 	require.Error(t, err)
 
 	datums := types.MakeDatums(1, "abc", 1.1, []byte("def"))
-	rowData, err := EncodeValue(time.UTC, nil, datums...)
+	rowData, err := EncodeValue(nil, nil, datums...)
 	require.NoError(t, err)
 
 	datums1, _, err := DecodeRange(rowData, len(datums), nil, nil)
 	require.NoError(t, err)
 	for i, datum := range datums1 {
-		cmp, err := datum.Compare(types.DefaultStmtNoWarningContext, &datums[i], collate.GetBinaryCollator())
+		cmp, err := datum.Compare(nil, &datums[i], collate.GetBinaryCollator())
 		require.NoError(t, err)
 		require.Equal(t, 0, cmp)
 	}
@@ -1098,8 +1102,8 @@ func TestDecodeRange(t *testing.T) {
 	}
 }
 
-func testHashChunkRowEqual(t *testing.T, a, b any, equal bool) {
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
+func testHashChunkRowEqual(t *testing.T, a, b interface{}, equal bool) {
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	buf1 := make([]byte, 1)
 	buf2 := make([]byte, 1)
 
@@ -1118,10 +1122,10 @@ func testHashChunkRowEqual(t *testing.T, a, b any, equal bool) {
 	chk2.AppendDatum(0, &d)
 
 	h := crc32.NewIEEE()
-	err1 := HashChunkRow(typeCtx, h, chk1.GetRow(0), []*types.FieldType{tp1}, []int{0}, buf1)
+	err1 := HashChunkRow(sc, h, chk1.GetRow(0), []*types.FieldType{tp1}, []int{0}, buf1)
 	sum1 := h.Sum32()
 	h.Reset()
-	err2 := HashChunkRow(typeCtx, h, chk2.GetRow(0), []*types.FieldType{tp2}, []int{0}, buf2)
+	err2 := HashChunkRow(sc, h, chk2.GetRow(0), []*types.FieldType{tp2}, []int{0}, buf2)
 	sum2 := h.Sum32()
 	require.NoError(t, err1)
 	require.NoError(t, err2)
@@ -1130,7 +1134,7 @@ func testHashChunkRowEqual(t *testing.T, a, b any, equal bool) {
 	} else {
 		require.NotEqual(t, sum2, sum1)
 	}
-	e, err := EqualChunkRow(typeCtx,
+	e, err := EqualChunkRow(sc,
 		chk1.GetRow(0), []*types.FieldType{tp1}, []int{0},
 		chk2.GetRow(0), []*types.FieldType{tp2}, []int{0})
 	require.NoError(t, err)
@@ -1142,26 +1146,26 @@ func testHashChunkRowEqual(t *testing.T, a, b any, equal bool) {
 }
 
 func TestHashChunkRow(t *testing.T) {
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	buf := make([]byte, 1)
-	datums, tps := datumsForTest()
-	chk := chunkForTest(t, typeCtx.Location(), datums, tps, 1)
+	datums, tps := datumsForTest(sc)
+	chk := chunkForTest(t, sc, datums, tps, 1)
 
 	colIdx := make([]int, len(tps))
 	for i := 0; i < len(tps); i++ {
 		colIdx[i] = i
 	}
 	h := crc32.NewIEEE()
-	err1 := HashChunkRow(typeCtx, h, chk.GetRow(0), tps, colIdx, buf)
+	err1 := HashChunkRow(sc, h, chk.GetRow(0), tps, colIdx, buf)
 	sum1 := h.Sum32()
 	h.Reset()
-	err2 := HashChunkRow(typeCtx, h, chk.GetRow(0), tps, colIdx, buf)
+	err2 := HashChunkRow(sc, h, chk.GetRow(0), tps, colIdx, buf)
 	sum2 := h.Sum32()
 
 	require.NoError(t, err1)
 	require.NoError(t, err2)
 	require.Equal(t, sum2, sum1)
-	e, err := EqualChunkRow(typeCtx,
+	e, err := EqualChunkRow(sc,
 		chk.GetRow(0), tps, colIdx,
 		chk.GetRow(0), tps, colIdx)
 	require.NoError(t, err)
@@ -1230,10 +1234,10 @@ func TestValueSizeOfUnsignedInt(t *testing.T) {
 }
 
 func TestHashChunkColumns(t *testing.T) {
-	typeCtx := types.DefaultStmtNoWarningContext.WithLocation(time.Local)
+	sc := stmtctx.NewStmtCtxWithTimeZone(time.Local)
 	buf := make([]byte, 1)
-	datums, tps := datumsForTest()
-	chk := chunkForTest(t, typeCtx.Location(), datums, tps, 4)
+	datums, tps := datumsForTest(sc)
+	chk := chunkForTest(t, sc, datums, tps, 4)
 
 	colIdx := make([]int, len(tps))
 	for i := 0; i < len(tps); i++ {
@@ -1251,10 +1255,10 @@ func TestHashChunkColumns(t *testing.T) {
 	// Test hash value of the first 12 `Null` columns
 	for i := 0; i < 12; i++ {
 		require.True(t, chk.GetRow(0).IsNull(i))
-		err1 := HashChunkSelected(typeCtx, vecHash, chk, tps[i], i, buf, hasNull, sel, false)
-		err2 := HashChunkRow(typeCtx, rowHash[0], chk.GetRow(0), tps[i:i+1], colIdx[i:i+1], buf)
-		err3 := HashChunkRow(typeCtx, rowHash[1], chk.GetRow(1), tps[i:i+1], colIdx[i:i+1], buf)
-		err4 := HashChunkRow(typeCtx, rowHash[2], chk.GetRow(2), tps[i:i+1], colIdx[i:i+1], buf)
+		err1 := HashChunkSelected(sc, vecHash, chk, tps[i], i, buf, hasNull, sel, false)
+		err2 := HashChunkRow(sc, rowHash[0], chk.GetRow(0), tps[i:i+1], colIdx[i:i+1], buf)
+		err3 := HashChunkRow(sc, rowHash[1], chk.GetRow(1), tps[i:i+1], colIdx[i:i+1], buf)
+		err4 := HashChunkRow(sc, rowHash[2], chk.GetRow(2), tps[i:i+1], colIdx[i:i+1], buf)
 		require.NoError(t, err1)
 		require.NoError(t, err2)
 		require.NoError(t, err3)
@@ -1276,10 +1280,10 @@ func TestHashChunkColumns(t *testing.T) {
 
 		require.False(t, chk.GetRow(0).IsNull(i))
 
-		err1 := HashChunkSelected(typeCtx, vecHash, chk, tps[i], i, buf, hasNull, sel, false)
-		err2 := HashChunkRow(typeCtx, rowHash[0], chk.GetRow(0), tps[i:i+1], colIdx[i:i+1], buf)
-		err3 := HashChunkRow(typeCtx, rowHash[1], chk.GetRow(1), tps[i:i+1], colIdx[i:i+1], buf)
-		err4 := HashChunkRow(typeCtx, rowHash[2], chk.GetRow(2), tps[i:i+1], colIdx[i:i+1], buf)
+		err1 := HashChunkSelected(sc, vecHash, chk, tps[i], i, buf, hasNull, sel, false)
+		err2 := HashChunkRow(sc, rowHash[0], chk.GetRow(0), tps[i:i+1], colIdx[i:i+1], buf)
+		err3 := HashChunkRow(sc, rowHash[1], chk.GetRow(1), tps[i:i+1], colIdx[i:i+1], buf)
+		err4 := HashChunkRow(sc, rowHash[2], chk.GetRow(2), tps[i:i+1], colIdx[i:i+1], buf)
 
 		require.NoError(t, err1)
 		require.NoError(t, err2)
@@ -1293,43 +1297,4 @@ func TestHashChunkColumns(t *testing.T) {
 		require.Equal(t, rowHash[1].Sum64(), vecHash[1].Sum64())
 		require.Equal(t, rowHash[2].Sum64(), vecHash[2].Sum64())
 	}
-}
-
-func TestDatumHashEquals(t *testing.T) {
-	now := time.Now()
-	tests := []struct {
-		d1 types.Datum
-		d2 types.Datum
-	}{
-		{types.NewIntDatum(1), types.NewIntDatum(1)},
-		{types.NewUintDatum(1), types.NewUintDatum(1)},
-		{types.NewFloat64Datum(1.1), types.NewFloat64Datum(1.1)},
-		{types.NewStringDatum("abc"), types.NewStringDatum("abc")},
-		{types.NewBytesDatum([]byte("abc")), types.NewBytesDatum([]byte("abc"))},
-		{types.NewMysqlEnumDatum(types.Enum{Name: "a", Value: 1}), types.NewMysqlEnumDatum(types.Enum{Name: "a", Value: 1})},
-		{types.NewMysqlSetDatum(types.Set{Name: "a", Value: 1}, "a"), types.NewMysqlSetDatum(types.Set{Name: "a", Value: 1}, "a")},
-		{types.NewBinaryLiteralDatum([]byte{0x01}), types.NewBinaryLiteralDatum([]byte{0x01})},
-		{types.NewMysqlBitDatum(types.NewBinaryLiteralFromUint(1, -1)), types.NewMysqlBitDatum(types.NewBinaryLiteralFromUint(1, -1))},
-		{types.NewTimeDatum(types.NewTime(types.FromGoTime(now), mysql.TypeDatetime, 6)), types.NewTimeDatum(types.NewTime(types.FromGoTime(now), mysql.TypeDatetime, 6))},
-		{types.NewDurationDatum(types.Duration{Duration: time.Second}), types.NewDurationDatum(types.Duration{Duration: time.Second})},
-		{types.NewJSONDatum(types.CreateBinaryJSON("a")), types.NewJSONDatum(types.CreateBinaryJSON("a"))},
-		{types.NewTimeDatum(types.NewTime(types.FromGoTime(now), mysql.TypeDatetime, 6)), types.NewTimeDatum(types.NewTime(types.FromGoTime(time.Now()), mysql.TypeDatetime, 6))},
-	}
-	hasher1 := base.NewHashEqualer()
-	hasher2 := base.NewHashEqualer()
-	for _, tt := range tests[:(len(tests) - 1)] {
-		hasher1.Reset()
-		hasher2.Reset()
-		tt.d1.Hash64(hasher1)
-		tt.d2.Hash64(hasher2)
-		require.Equal(t, hasher1.Sum64(), hasher2.Sum64())
-		require.True(t, tt.d1.Equals(tt.d2))
-	}
-	// the last test case is for the case that two datums are not equal
-	hasher1.Reset()
-	hasher2.Reset()
-	tests[len(tests)-1].d1.Hash64(hasher1)
-	tests[len(tests)-1].d2.Hash64(hasher2)
-	require.NotEqual(t, hasher1.Sum64(), hasher2.Sum64())
-	require.False(t, tests[len(tests)-1].d1.Equals(tests[len(tests)-1].d2))
 }

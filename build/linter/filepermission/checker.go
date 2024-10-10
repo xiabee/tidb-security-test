@@ -17,7 +17,6 @@ package filepermission
 import (
 	"os"
 
-	"github.com/pingcap/tidb/build/linter/util"
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -31,7 +30,7 @@ var Analyzer = &analysis.Analyzer{
 	Run:  run,
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	for _, f := range pass.Files {
 		fn := pass.Fset.PositionFor(f.Pos(), false).Filename
 		if fn != "" {
@@ -46,8 +45,4 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	return nil, nil
-}
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 }

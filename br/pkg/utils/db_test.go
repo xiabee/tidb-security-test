@@ -9,10 +9,9 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
@@ -21,19 +20,19 @@ import (
 
 type mockRestrictedSQLExecutor struct {
 	rows      []chunk.Row
-	fields    []*resolve.ResultField
+	fields    []*ast.ResultField
 	errHappen bool
 }
 
-func (m *mockRestrictedSQLExecutor) ParseWithParams(ctx context.Context, sql string, args ...any) (ast.StmtNode, error) {
+func (m *mockRestrictedSQLExecutor) ParseWithParams(ctx context.Context, sql string, args ...interface{}) (ast.StmtNode, error) {
 	return nil, nil
 }
 
-func (m *mockRestrictedSQLExecutor) ExecRestrictedStmt(ctx context.Context, stmt ast.StmtNode, opts ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*resolve.ResultField, error) {
+func (m *mockRestrictedSQLExecutor) ExecRestrictedStmt(ctx context.Context, stmt ast.StmtNode, opts ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*ast.ResultField, error) {
 	return nil, nil, nil
 }
 
-func (m *mockRestrictedSQLExecutor) ExecRestrictedSQL(ctx context.Context, opts []sqlexec.OptionFuncAlias, sql string, args ...any) ([]chunk.Row, []*resolve.ResultField, error) {
+func (m *mockRestrictedSQLExecutor) ExecRestrictedSQL(ctx context.Context, opts []sqlexec.OptionFuncAlias, sql string, args ...interface{}) ([]chunk.Row, []*ast.ResultField, error) {
 	if m.errHappen {
 		return nil, nil, errors.New("injected error")
 	}
@@ -69,7 +68,7 @@ func TestGc(t *testing.T) {
 	// | tikv | 172.16.6.46:3460  | gc.ratio-threshold | 1.1   |
 	// | tikv | 172.16.6.47:3460  | gc.ratio-threshold | 1.1   |
 	// +------+-------------------+--------------------+-------+
-	fields := make([]*resolve.ResultField, 4)
+	fields := make([]*ast.ResultField, 4)
 	tps := []*types.FieldType{
 		types.NewFieldType(mysql.TypeString),
 		types.NewFieldType(mysql.TypeString),
@@ -77,7 +76,7 @@ func TestGc(t *testing.T) {
 		types.NewFieldType(mysql.TypeString),
 	}
 	for i := 0; i < len(tps); i++ {
-		rf := new(resolve.ResultField)
+		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
 		rf.Column.FieldType = *tps[i]
 		fields[i] = rf
@@ -115,7 +114,7 @@ func TestRegionSplitInfo(t *testing.T) {
 	// | tikv | 127.0.0.1:20161   | coprocessor.region-split-keys | 100000 |
 	// +------+-------------------+-------------------------------+--------+
 
-	fields := make([]*resolve.ResultField, 4)
+	fields := make([]*ast.ResultField, 4)
 	tps := []*types.FieldType{
 		types.NewFieldType(mysql.TypeString),
 		types.NewFieldType(mysql.TypeString),
@@ -123,7 +122,7 @@ func TestRegionSplitInfo(t *testing.T) {
 		types.NewFieldType(mysql.TypeString),
 	}
 	for i := 0; i < len(tps); i++ {
-		rf := new(resolve.ResultField)
+		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
 		rf.Column.FieldType = *tps[i]
 		fields[i] = rf

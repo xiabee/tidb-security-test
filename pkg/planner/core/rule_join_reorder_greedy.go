@@ -15,12 +15,10 @@
 package core
 
 import (
-	"cmp"
 	"math"
-	"slices"
+	"sort"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 )
 
 type joinReorderGreedySolver struct {
@@ -43,7 +41,7 @@ type joinReorderGreedySolver struct {
 //
 // For the nodes and join trees which don't have a join equal condition to
 // connect them, we make a bushy join tree to do the cartesian joins finally.
-func (s *joinReorderGreedySolver) solve(joinNodePlans []base.LogicalPlan, tracer *joinReorderTrace) (base.LogicalPlan, error) {
+func (s *joinReorderGreedySolver) solve(joinNodePlans []LogicalPlan, tracer *joinReorderTrace) (LogicalPlan, error) {
 	var err error
 	s.curJoinGroup, err = s.generateJoinOrderNode(joinNodePlans, tracer)
 	if err != nil {
@@ -53,14 +51,14 @@ func (s *joinReorderGreedySolver) solve(joinNodePlans []base.LogicalPlan, tracer
 	if s.leadingJoinGroup != nil {
 		// We have a leading hint to let some tables join first. The result is stored in the s.leadingJoinGroup.
 		// We generate jrNode separately for it.
-		leadingJoinNodes, err = s.generateJoinOrderNode([]base.LogicalPlan{s.leadingJoinGroup}, tracer)
+		leadingJoinNodes, err = s.generateJoinOrderNode([]LogicalPlan{s.leadingJoinGroup}, tracer)
 		if err != nil {
 			return nil, err
 		}
 	}
 	// Sort plans by cost
-	slices.SortStableFunc(s.curJoinGroup, func(i, j *jrNode) int {
-		return cmp.Compare(i.cumCost, j.cumCost)
+	sort.SliceStable(s.curJoinGroup, func(i, j int) bool {
+		return s.curJoinGroup[i].cumCost < s.curJoinGroup[j].cumCost
 	})
 
 	// joinNodeNum indicates the number of join nodes except leading join nodes in the current join group
@@ -71,7 +69,7 @@ func (s *joinReorderGreedySolver) solve(joinNodePlans []base.LogicalPlan, tracer
 		leadingJoinNodes := append(leadingJoinNodes, s.curJoinGroup...)
 		s.curJoinGroup = leadingJoinNodes
 	}
-	var cartesianGroup []base.LogicalPlan
+	var cartesianGroup []LogicalPlan
 	for len(s.curJoinGroup) > 0 {
 		newNode, err := s.constructConnectedJoinTree(tracer)
 		if err != nil {
@@ -84,7 +82,7 @@ func (s *joinReorderGreedySolver) solve(joinNodePlans []base.LogicalPlan, tracer
 			// TODO(hawkingrei): we find the problem in the TestHint.
 			// 	`select * from t1, t2, t3 union all select /*+ leading(t3, t2) */ * from t1, t2, t3 union all select * from t1, t2, t3`
 			//  this sql should not return the warning. but It will not affect the result. so we will fix it as soon as possible.
-			s.ctx.GetSessionVars().StmtCtx.SetHintWarning("leading hint is inapplicable, check if the leading hint table has join conditions with other tables")
+			s.ctx.GetSessionVars().StmtCtx.AppendWarning(ErrInternal.GenWithStack("leading hint is inapplicable, check if the leading hint table has join conditions with other tables"))
 		}
 		cartesianGroup = append(cartesianGroup, newNode.p)
 	}
@@ -99,13 +97,13 @@ func (s *joinReorderGreedySolver) constructConnectedJoinTree(tracer *joinReorder
 		bestCost := math.MaxFloat64
 		bestIdx := -1
 		var finalRemainOthers []expression.Expression
-		var bestJoin base.LogicalPlan
+		var bestJoin LogicalPlan
 		for i, node := range s.curJoinGroup {
 			newJoin, remainOthers := s.checkConnectionAndMakeJoin(curJoinTree.p, node.p)
 			if newJoin == nil {
 				continue
 			}
-			_, err := newJoin.RecursiveDeriveStats(nil)
+			_, err := newJoin.recursiveDeriveStats(nil)
 			if err != nil {
 				return nil, err
 			}
@@ -132,7 +130,7 @@ func (s *joinReorderGreedySolver) constructConnectedJoinTree(tracer *joinReorder
 	return curJoinTree, nil
 }
 
-func (s *joinReorderGreedySolver) checkConnectionAndMakeJoin(leftPlan, rightPlan base.LogicalPlan) (base.LogicalPlan, []expression.Expression) {
+func (s *joinReorderGreedySolver) checkConnectionAndMakeJoin(leftPlan, rightPlan LogicalPlan) (LogicalPlan, []expression.Expression) {
 	leftPlan, rightPlan, usedEdges, joinType := s.checkConnection(leftPlan, rightPlan)
 	if len(usedEdges) == 0 {
 		return nil, nil

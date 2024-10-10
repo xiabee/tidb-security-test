@@ -667,7 +667,7 @@ const (
 	WarnCondItemTruncated                                    = 1647
 	ErrCondItemTooLong                                       = 1648
 	ErrUnknownLocale                                         = 1649
-	ErrSlaveIgnoreServerIDs                                  = 1650
+	ErrSlaveIgnoreServerIds                                  = 1650
 	ErrQueryCacheDisabled                                    = 1651
 	ErrSameNamePartitionField                                = 1652
 	ErrPartitionColumnList                                   = 1653
@@ -904,7 +904,6 @@ const (
 	ErrJSONUsedAsKey                                         = 3152
 	ErrJSONVacuousPath                                       = 3153
 	ErrJSONBadOneOrAllArg                                    = 3154
-	ErrJSONDocumentTooDeep                                   = 3157
 	ErrJSONDocumentNULLKey                                   = 3158
 	ErrBadUser                                               = 3162
 	ErrUserAlreadyExists                                     = 3163

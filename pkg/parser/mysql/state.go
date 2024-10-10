@@ -57,7 +57,6 @@ var MySQLState = map[uint16]string{
 	ErrTooLongKey:                          "42000",
 	ErrKeyColumnDoesNotExits:               "42000",
 	ErrBlobUsedAsKey:                       "42000",
-	ErrJSONDocumentTooDeep:                 "22032",
 	ErrTooBigFieldlength:                   "42000",
 	ErrWrongAutoKey:                        "42000",
 	ErrForcingClose:                        "08S01",

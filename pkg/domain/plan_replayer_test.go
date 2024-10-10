@@ -16,7 +16,6 @@ package domain
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -32,7 +31,6 @@ func TestPlanReplayerDifferentGC(t *testing.T) {
 	time1 := time.Now().Add(-7 * 25 * time.Hour).UnixNano()
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/util/replayer/InjectPlanReplayerFileNameTimeField", fmt.Sprintf("return(%d)", time1)))
 	file1, fileName1, err := replayer.GeneratePlanReplayerFile(true, false, false)
-	defer os.RemoveAll(replayer.GetPlanReplayerDirName())
 	require.NoError(t, err)
 	require.NoError(t, file1.Close())
 	filePath1 := filepath.Join(dirName, fileName1)
@@ -135,18 +133,4 @@ func TestDumpGCFileParseTime(t *testing.T) {
 	require.NoError(t, err)
 	_, err = parseTime(pName)
 	require.NoError(t, err)
-}
-
-func TestSendTask(t *testing.T) {
-	h := &planReplayerHandle{
-		planReplayerTaskDumpHandle: &planReplayerTaskDumpHandle{
-			taskCH: make(chan *PlanReplayerDumpTask, 1),
-		},
-		planReplayerTaskCollectorHandle: &planReplayerTaskCollectorHandle{},
-	}
-	task1 := &PlanReplayerDumpTask{}
-	task2 := &PlanReplayerDumpTask{}
-	h.SendTask(task1)
-	success := h.SendTask(task2)
-	require.False(t, success)
 }

@@ -21,14 +21,14 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/ddl/logutil"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	driver "github.com/pingcap/tidb/pkg/store/driver/txn"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/tablecodec"
+	"github.com/pingcap/tidb/pkg/util/logutil"
 	kvutil "github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
 )
@@ -49,54 +49,44 @@ func (w *mergeIndexWorker) batchCheckTemporaryUniqueKey(
 	}
 
 	for i, key := range w.originIdxKeys {
-		keyStr := string(key)
-		if val, found := batchVals[keyStr]; found {
+		if val, found := batchVals[string(key)]; found {
 			// Found a value in the original index key.
-			matchDeleted, err := checkTempIndexKey(txn, idxRecords[i], val, w.table)
+			err := checkTempIndexKey(txn, idxRecords[i], val, w.table)
 			if err != nil {
 				if kv.ErrKeyExists.Equal(err) {
 					return driver.ExtractKeyExistsErrFromIndex(key, val, w.table.Meta(), w.currentIndex.ID)
 				}
 				return errors.Trace(err)
 			}
-			if matchDeleted {
-				// Delete from batchVals to prevent false-positive duplicate detection.
-				delete(batchVals, keyStr)
-			}
 		} else if idxRecords[i].distinct {
 			// The keys in w.batchCheckKeys also maybe duplicate,
 			// so we need to backfill the not found key into `batchVals` map.
-			batchVals[keyStr] = idxRecords[i].vals
+			batchVals[string(key)] = idxRecords[i].vals
 		}
 	}
 	return nil
 }
 
-// checkTempIndexKey determines whether there is a duplicated index key entry according to value of temp index.
-// For non-delete temp record, if the index values mismatch, it is duplicated.
-// For delete temp record, we decode the handle from the origin index value and temp index value.
-//   - if the handles match, we can delete the index key.
-//   - otherwise, we further check if the row exists in the table.
-func checkTempIndexKey(txn kv.Transaction, tmpRec *temporaryIndexRecord, originIdxVal []byte, tblInfo table.Table) (matchDelete bool, err error) {
+func checkTempIndexKey(txn kv.Transaction, tmpRec *temporaryIndexRecord, originIdxVal []byte, tblInfo table.Table) error {
 	if !tmpRec.delete {
 		if tmpRec.distinct && !bytes.Equal(originIdxVal, tmpRec.vals) {
-			return false, kv.ErrKeyExists
+			return kv.ErrKeyExists
 		}
 		// The key has been found in the original index, skip merging it.
 		tmpRec.skip = true
-		return false, nil
+		return nil
 	}
 	// Delete operation.
 	distinct := tablecodec.IndexKVIsUnique(originIdxVal)
 	if !distinct {
 		// For non-distinct key, it is consist of a null value and the handle.
 		// Same as the non-unique indexes, replay the delete operation on non-distinct keys.
-		return false, nil
+		return nil
 	}
 	// For distinct index key values, prevent deleting an unexpected index KV in original index.
-	hdInVal, err := tablecodec.DecodeHandleInIndexValue(originIdxVal)
+	hdInVal, err := tablecodec.DecodeHandleInUniqueIndexValue(originIdxVal, tblInfo.Meta().IsCommonHandle)
 	if err != nil {
-		return false, errors.Trace(err)
+		return errors.Trace(err)
 	}
 	if !tmpRec.handle.Equal(hdInVal) {
 		// The inequality means multiple modifications happened in the same key.
@@ -107,16 +97,16 @@ func checkTempIndexKey(txn kv.Transaction, tmpRec *temporaryIndexRecord, originI
 			if kv.IsErrNotFound(err) {
 				// The row is deleted, so we can merge the delete operation to the origin index.
 				tmpRec.skip = false
-				return false, nil
+				return nil
 			}
 			// Unexpected errors.
-			return false, errors.Trace(err)
+			return errors.Trace(err)
 		}
 		// Don't delete the index key if the row exists.
 		tmpRec.skip = true
-		return false, nil
+		return nil
 	}
-	return true, nil
+	return nil
 }
 
 // temporaryIndexRecord is the record information of an index.
@@ -127,6 +117,7 @@ type temporaryIndexRecord struct {
 	unique   bool
 	distinct bool
 	handle   kv.Handle
+	rowKey   kv.Key
 }
 
 type mergeIndexWorker struct {
@@ -195,10 +186,9 @@ func (w *mergeIndexWorker) BackfillData(taskRange reorgBackfillTask) (taskCtx ba
 	oprStartTime := time.Now()
 	ctx := kv.WithInternalSourceAndTaskType(context.Background(), w.jobContext.ddlJobSourceType(), kvutil.ExplicitTypeDDL)
 
-	errInTxn = kv.RunInNewTxn(ctx, w.ddlCtx.store, true, func(_ context.Context, txn kv.Transaction) error {
+	errInTxn = kv.RunInNewTxn(ctx, w.sessCtx.GetStore(), true, func(_ context.Context, txn kv.Transaction) error {
 		taskCtx.addedCount = 0
 		taskCtx.scanCount = 0
-		updateTxnEntrySizeLimitIfNeeded(txn)
 		txn.SetOption(kv.Priority, taskRange.priority)
 		if tagger := w.GetCtx().getResourceGroupTaggerForTopSQL(taskRange.getJobID()); tagger != nil {
 			txn.SetOption(kv.ResourceGroupTagger, tagger)
@@ -318,7 +308,7 @@ func (w *mergeIndexWorker) fetchTempIndexVals(
 	oprStartTime := startTime
 	idxPrefix := w.table.IndexPrefix()
 	var lastKey kv.Key
-	err := iterateSnapshotKeys(w.jobContext, w.ddlCtx.store, taskRange.priority, idxPrefix, txn.StartTS(),
+	err := iterateSnapshotKeys(w.jobContext, w.sessCtx.GetStore(), taskRange.priority, idxPrefix, txn.StartTS(),
 		taskRange.startKey, taskRange.endKey, func(_ kv.Handle, indexKey kv.Key, rawValue []byte) (more bool, err error) {
 			oprEndTime := time.Now()
 			logSlowOperations(oprEndTime.Sub(oprStartTime), "iterate temporary index in merge process", 0)
@@ -389,7 +379,7 @@ func (w *mergeIndexWorker) fetchTempIndexVals(
 		nextKey = lastKey
 	}
 
-	logutil.DDLLogger().Debug("merge temp index txn fetches handle info", zap.Uint64("txnStartTS", txn.StartTS()),
+	logutil.BgLogger().Debug("merge temp index txn fetches handle info", zap.String("category", "ddl"), zap.Uint64("txnStartTS", txn.StartTS()),
 		zap.String("taskRange", taskRange.String()), zap.Duration("takeTime", time.Since(startTime)))
 	return w.tmpIdxRecords, nextKey.Next(), taskDone, errors.Trace(err)
 }

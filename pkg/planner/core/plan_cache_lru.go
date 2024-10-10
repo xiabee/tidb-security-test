@@ -19,15 +19,17 @@ import (
 	"github.com/pingcap/errors"
 	core_metrics "github.com/pingcap/tidb/pkg/planner/core/metrics"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/pingcap/tidb/pkg/util/kvcache"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
+	utilpc "github.com/pingcap/tidb/pkg/util/plancache"
 	"github.com/pingcap/tidb/pkg/util/syncutil"
 )
 
 // planCacheEntry wraps Key and Value. It's the value of list.Element.
 type planCacheEntry struct {
-	PlanKey   string
+	PlanKey   kvcache.Key
 	PlanValue kvcache.Value
 }
 
@@ -37,7 +39,7 @@ func (e *planCacheEntry) MemoryUsage() (sum int64) {
 		return
 	}
 
-	return int64(len(e.PlanKey)) + e.PlanValue.(*PlanCacheValue).MemoryUsage()
+	return e.PlanKey.(*planCacheKey).MemoryUsage() + e.PlanValue.(*PlanCacheValue).MemoryUsage()
 }
 
 // LRUPlanCache is a dedicated least recently used cache, Only used for plan cache.
@@ -50,7 +52,7 @@ type LRUPlanCache struct {
 	// lock make cache thread safe
 	lock syncutil.RWMutex
 	// onEvict will be called if any eviction happened, only for test use now
-	onEvict func(string, any)
+	onEvict func(kvcache.Key, kvcache.Value)
 
 	// 0 indicates no quota
 	quota uint64
@@ -78,14 +80,22 @@ func NewLRUPlanCache(capacity uint, guard float64, quota uint64, sctx sessionctx
 	}
 }
 
+// strHashKey control deep or Shallow copy of string
+func strHashKey(key kvcache.Key, deepCopy bool) string {
+	if deepCopy {
+		return string(key.Hash())
+	}
+	return string(hack.String(key.Hash()))
+}
+
 // Get tries to find the corresponding value according to the given key.
-func (l *LRUPlanCache) Get(key string, paramTypes any) (value any, ok bool) {
+func (l *LRUPlanCache) Get(key kvcache.Key, opts *utilpc.PlanCacheMatchOpts) (value kvcache.Value, ok bool) {
 	l.lock.RLock()
 	defer l.lock.RUnlock()
 
-	bucket, bucketExist := l.buckets[key]
+	bucket, bucketExist := l.buckets[strHashKey(key, false)]
 	if bucketExist {
-		if element, exist := l.pickFromBucket(bucket, paramTypes); exist {
+		if element, exist := l.pickFromBucket(bucket, opts); exist {
 			l.lruList.MoveToFront(element)
 			return element.Value.(*planCacheEntry).PlanValue, true
 		}
@@ -94,20 +104,21 @@ func (l *LRUPlanCache) Get(key string, paramTypes any) (value any, ok bool) {
 }
 
 // Put puts the (key, value) pair into the LRU Cache.
-func (l *LRUPlanCache) Put(key string, value, paramTypes any) {
+func (l *LRUPlanCache) Put(key kvcache.Key, value kvcache.Value, opts *utilpc.PlanCacheMatchOpts) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
-	bucket, bucketExist := l.buckets[key]
+	hash := strHashKey(key, true)
+	bucket, bucketExist := l.buckets[hash]
 	if bucketExist {
-		if element, exist := l.pickFromBucket(bucket, paramTypes); exist {
+		if element, exist := l.pickFromBucket(bucket, opts); exist {
 			l.updateInstanceMetric(&planCacheEntry{PlanKey: key, PlanValue: value}, element.Value.(*planCacheEntry))
 			element.Value.(*planCacheEntry).PlanValue = value
 			l.lruList.MoveToFront(element)
 			return
 		}
 	} else {
-		l.buckets[key] = make(map[*list.Element]struct{}, 1)
+		l.buckets[hash] = make(map[*list.Element]struct{}, 1)
 	}
 
 	newCacheEntry := &planCacheEntry{
@@ -115,7 +126,7 @@ func (l *LRUPlanCache) Put(key string, value, paramTypes any) {
 		PlanValue: value,
 	}
 	element := l.lruList.PushFront(newCacheEntry)
-	l.buckets[key][element] = struct{}{}
+	l.buckets[hash][element] = struct{}{}
 	l.size++
 	l.updateInstanceMetric(newCacheEntry, nil)
 	if l.size > l.capacity {
@@ -125,18 +136,19 @@ func (l *LRUPlanCache) Put(key string, value, paramTypes any) {
 }
 
 // Delete deletes the multi-values from the LRU Cache.
-func (l *LRUPlanCache) Delete(key string) {
+func (l *LRUPlanCache) Delete(key kvcache.Key) {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 
-	bucket, bucketExist := l.buckets[key]
+	hash := strHashKey(key, false)
+	bucket, bucketExist := l.buckets[hash]
 	if bucketExist {
 		for element := range bucket {
 			l.updateInstanceMetric(nil, element.Value.(*planCacheEntry))
 			l.lruList.Remove(element)
 			l.size--
 		}
-		delete(l.buckets, key)
+		delete(l.buckets, hash)
 	}
 }
 
@@ -150,9 +162,9 @@ func (l *LRUPlanCache) DeleteAll() {
 
 	// update metrics
 	if l.sctx.GetSessionVars().EnablePreparedPlanCacheMemoryMonitor {
-		core_metrics.GetPlanCacheInstanceMemoryUsage(false).Sub(float64(l.memoryUsageTotal))
+		core_metrics.GetPlanCacheInstanceMemoryUsage().Sub(float64(l.memoryUsageTotal))
 	}
-	core_metrics.GetPlanCacheInstanceNumCounter(false).Sub(float64(l.size))
+	core_metrics.GetPlanCacheInstanceNumCounter().Sub(float64(l.size))
 
 	// reset all fields
 	l.size = 0
@@ -217,7 +229,7 @@ func (l *LRUPlanCache) removeOldest() {
 
 // removeFromBucket remove element from bucket
 func (l *LRUPlanCache) removeFromBucket(element *list.Element) {
-	hash := element.Value.(*planCacheEntry).PlanKey
+	hash := strHashKey(element.Value.(*planCacheEntry).PlanKey, false)
 	bucket := l.buckets[hash]
 	delete(bucket, element)
 	if len(bucket) == 0 {
@@ -239,13 +251,57 @@ func (l *LRUPlanCache) memoryControl() {
 }
 
 // PickPlanFromBucket pick one plan from bucket
-func (*LRUPlanCache) pickFromBucket(bucket map[*list.Element]struct{}, paramTypes any) (*list.Element, bool) {
+func (l *LRUPlanCache) pickFromBucket(bucket map[*list.Element]struct{}, matchOpts *utilpc.PlanCacheMatchOpts) (*list.Element, bool) {
 	for k := range bucket {
-		if checkTypesCompatibility4PC(k.Value.(*planCacheEntry).PlanValue.(*PlanCacheValue).paramTypes, paramTypes) {
-			return k, true
+		plan := k.Value.(*planCacheEntry).PlanValue.(*PlanCacheValue)
+		// check param types' compatibility
+		ok1 := checkTypesCompatibility4PC(plan.matchOpts.ParamTypes, matchOpts.ParamTypes)
+		if !ok1 {
+			continue
 		}
+
+		// check limit offset and key if equal and check switch if enabled
+		ok2 := checkUint64SliceIfEqual(plan.matchOpts.LimitOffsetAndCount, matchOpts.LimitOffsetAndCount)
+		if !ok2 {
+			continue
+		}
+		if len(plan.matchOpts.LimitOffsetAndCount) > 0 && !l.sctx.GetSessionVars().EnablePlanCacheForParamLimit {
+			// offset and key slice matched, but it is a plan with param limit and the switch is disabled
+			continue
+		}
+		// check subquery switch state
+		if plan.matchOpts.HasSubQuery && !l.sctx.GetSessionVars().EnablePlanCacheForSubquery {
+			continue
+		}
+		// table stats has changed
+		// this check can be disabled by turning off system variable tidb_plan_cache_invalidation_on_fresh_stats
+		if l.sctx.GetSessionVars().PlanCacheInvalidationOnFreshStats &&
+			plan.matchOpts.StatsVersionHash != matchOpts.StatsVersionHash {
+			continue
+		}
+
+		// below are some SQL variables that can affect the plan
+		if plan.matchOpts.ForeignKeyChecks != matchOpts.ForeignKeyChecks {
+			continue
+		}
+		return k, true
 	}
 	return nil, false
+}
+
+func checkUint64SliceIfEqual(a, b []uint64) bool {
+	if (a == nil && b != nil) || (a != nil && b == nil) {
+		return false
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // updateInstanceMetric update the memory usage and plan num for show in grafana
@@ -256,14 +312,14 @@ func (l *LRUPlanCache) updateInstanceMetric(in, out *planCacheEntry) {
 	}
 
 	if in != nil && out != nil { // replace plan
-		core_metrics.GetPlanCacheInstanceMemoryUsage(false).Sub(float64(out.MemoryUsage()))
-		core_metrics.GetPlanCacheInstanceMemoryUsage(false).Add(float64(in.MemoryUsage()))
+		core_metrics.GetPlanCacheInstanceMemoryUsage().Sub(float64(out.MemoryUsage()))
+		core_metrics.GetPlanCacheInstanceMemoryUsage().Add(float64(in.MemoryUsage()))
 		l.memoryUsageTotal += in.MemoryUsage() - out.MemoryUsage()
 	} else if in != nil { // put plan
-		core_metrics.GetPlanCacheInstanceMemoryUsage(false).Add(float64(in.MemoryUsage()))
+		core_metrics.GetPlanCacheInstanceMemoryUsage().Add(float64(in.MemoryUsage()))
 		l.memoryUsageTotal += in.MemoryUsage()
 	} else { // delete plan
-		core_metrics.GetPlanCacheInstanceMemoryUsage(false).Sub(float64(out.MemoryUsage()))
+		core_metrics.GetPlanCacheInstanceMemoryUsage().Sub(float64(out.MemoryUsage()))
 		l.memoryUsageTotal -= out.MemoryUsage()
 	}
 }
@@ -273,8 +329,8 @@ func updateInstancePlanNum(in, out *planCacheEntry) {
 	if in != nil && out != nil { // replace plan
 		return
 	} else if in != nil { // put plan
-		core_metrics.GetPlanCacheInstanceNumCounter(false).Add(1)
+		core_metrics.GetPlanCacheInstanceNumCounter().Add(1)
 	} else { // delete plan
-		core_metrics.GetPlanCacheInstanceNumCounter(false).Sub(1)
+		core_metrics.GetPlanCacheInstanceNumCounter().Sub(1)
 	}
 }

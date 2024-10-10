@@ -184,6 +184,8 @@ func (p *Preparer) DriveLoopAndWaitPrepare(ctx context.Context) error {
 func (p *Preparer) Finalize(ctx context.Context) error {
 	eg := new(errgroup.Group)
 	for id, cli := range p.clients {
+		cli := cli
+		id := id
 		eg.Go(func() error {
 			if err := cli.Finalize(ctx); err != nil {
 				return errors.Annotatef(err, "failed to finalize the prepare stream for %d", id)
@@ -392,9 +394,7 @@ func (p *Preparer) workOnPendingRanges(ctx context.Context) error {
 }
 
 func (p *Preparer) sendWaitApply(ctx context.Context, reqs pendingRequests) error {
-	logutil.CL(ctx).Info("about to send wait apply to stores", zap.Int("to-stores", len(reqs)))
 	for store, req := range reqs {
-		logutil.CL(ctx).Info("sending wait apply requests to store", zap.Uint64("store", store), zap.Int("regions", len(req.Regions)))
 		stream, err := p.streamOf(ctx, store)
 		if err != nil {
 			return errors.Annotatef(err, "failed to dial the store %d", store)
@@ -403,6 +403,7 @@ func (p *Preparer) sendWaitApply(ctx context.Context, reqs pendingRequests) erro
 		if err != nil {
 			return errors.Annotatef(err, "failed to send message to the store %d", store)
 		}
+		logutil.CL(ctx).Info("sent wait apply requests to store", zap.Uint64("store", store), zap.Int("regions", len(req.Regions)))
 	}
 	return nil
 }

@@ -41,11 +41,10 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	gasConfig := gosec.NewConfig()
 	enabledRules := rules.Generate(func(id string) bool {
 		if id == "G104" || id == "G103" || id == "G101" || id == "G201" {
@@ -61,6 +60,7 @@ func run(pass *analysis.Pass) (any, error) {
 	createdPkgs = append(createdPkgs, util.MakeFakeLoaderPackageInfo(pass))
 	allPkgs := make(map[*types.Package]*loader.PackageInfo)
 	for _, pkg := range createdPkgs {
+		pkg := pkg
 		allPkgs[pkg.Pkg] = pkg
 	}
 	prog := &loader.Program{
@@ -82,6 +82,7 @@ func run(pass *analysis.Pass) (any, error) {
 		if err != nil {
 			panic(err)
 		}
+		text := fmt.Sprintf("[%s] %s: %s", Name, i.RuleID, i.What) // TODO: use severity and confidence
 		var r *result.Range
 		line, err := strconv.Atoi(i.Line)
 		if err != nil {
@@ -91,8 +92,8 @@ func run(pass *analysis.Pass) (any, error) {
 			}
 			line = r.From
 		}
-		pass.Reportf(token.Pos(tf.Base()+util.FindOffset(string(fileContent), line, 1)),
-			"[%s] %s: %s", Name, i.RuleID, i.What) // TODO: use severity and confidence
+
+		pass.Reportf(token.Pos(tf.Base()+util.FindOffset(string(fileContent), line, 1)), text)
 	}
 
 	return nil, nil

@@ -19,13 +19,12 @@ import (
 	"encoding/json"
 	"errors"
 
-	perrors "github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
-	"github.com/pingcap/tidb/pkg/planner/planctx"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/util/debugtrace"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
@@ -37,8 +36,8 @@ import (
 )
 
 // ceTraceExpr appends an expression and related information into CE trace
-func ceTraceExpr(sctx planctx.PlanContext, tableID int64, tp string, expr expression.Expression, rowCount float64) {
-	exprStr, err := exprToString(sctx.GetExprCtx().GetEvalCtx(), expr)
+func ceTraceExpr(sctx sessionctx.Context, tableID int64, tp string, expr expression.Expression, rowCount float64) {
+	exprStr, err := exprToString(expr)
 	if err != nil {
 		logutil.BgLogger().Debug("Failed to trace CE of an expression", zap.String("category", "OptimizerTrace"),
 			zap.Any("expression", expr))
@@ -65,7 +64,7 @@ func ceTraceExpr(sctx planctx.PlanContext, tableID int64, tp string, expr expres
 // It may be more appropriate to put this in expression package. But currently we only use it for CE trace,
 //
 //	and it may not be general enough to handle all possible expressions. So we put it here for now.
-func exprToString(ctx expression.EvalContext, e expression.Expression) (string, error) {
+func exprToString(e expression.Expression) (string, error) {
 	switch expr := e.(type) {
 	case *expression.ScalarFunction:
 		var buffer bytes.Buffer
@@ -73,7 +72,7 @@ func exprToString(ctx expression.EvalContext, e expression.Expression) (string, 
 		switch expr.FuncName.L {
 		case ast.Cast:
 			for _, arg := range expr.GetArgs() {
-				argStr, err := exprToString(ctx, arg)
+				argStr, err := exprToString(arg)
 				if err != nil {
 					return "", err
 				}
@@ -83,7 +82,7 @@ func exprToString(ctx expression.EvalContext, e expression.Expression) (string, 
 			}
 		default:
 			for i, arg := range expr.GetArgs() {
-				argStr, err := exprToString(ctx, arg)
+				argStr, err := exprToString(arg)
 				if err != nil {
 					return "", err
 				}
@@ -96,11 +95,11 @@ func exprToString(ctx expression.EvalContext, e expression.Expression) (string, 
 		buffer.WriteString(")")
 		return buffer.String(), nil
 	case *expression.Column:
-		return expr.StringWithCtx(ctx, perrors.RedactLogDisable), nil
+		return expr.String(), nil
 	case *expression.CorrelatedColumn:
 		return "", errors.New("tracing for correlated columns not supported now")
 	case *expression.Constant:
-		value, err := expr.Eval(ctx, chunk.Row{})
+		value, err := expr.Eval(chunk.Row{})
 		if err != nil {
 			return "", err
 		}
@@ -126,7 +125,7 @@ type getRowCountInput struct {
 }
 
 func debugTraceGetRowCountInput(
-	s planctx.PlanContext,
+	s sessionctx.Context,
 	id int64,
 	ranges ranger.Ranges,
 ) {
@@ -142,10 +141,10 @@ func debugTraceGetRowCountInput(
 }
 
 // GetTblInfoForUsedStatsByPhysicalID get table name, partition name and TableInfo that will be used to record used stats.
-var GetTblInfoForUsedStatsByPhysicalID func(sctx planctx.PlanContext, id int64) (fullName string, tblInfo *model.TableInfo)
+var GetTblInfoForUsedStatsByPhysicalID func(sctx sessionctx.Context, id int64) (fullName string, tblInfo *model.TableInfo)
 
 // recordUsedItemStatsStatus only records un-FullLoad item load status during user query
-func recordUsedItemStatsStatus(sctx planctx.PlanContext, stats any, tableID, id int64) {
+func recordUsedItemStatsStatus(sctx sessionctx.Context, stats interface{}, tableID, id int64) {
 	// Sometimes we try to use stats on _tidb_rowid (id == -1), which must be empty, we ignore this case here.
 	if id <= 0 {
 		return
@@ -170,20 +169,20 @@ func recordUsedItemStatsStatus(sctx planctx.PlanContext, stats any, tableID, id 
 	}
 
 	// no need to record
-	if !missing && loadStatus != nil && loadStatus.IsFullLoad() {
+	if !missing && loadStatus.IsFullLoad() {
 		return
 	}
 
 	// need to record
 	statsRecord := sctx.GetSessionVars().StmtCtx.GetUsedStatsInfo(true)
-	if statsRecord.GetUsedInfo(tableID) == nil {
+	if statsRecord[tableID] == nil {
 		name, tblInfo := GetTblInfoForUsedStatsByPhysicalID(sctx, tableID)
-		statsRecord.RecordUsedInfo(tableID, &stmtctx.UsedStatsInfoForTable{
+		statsRecord[tableID] = &stmtctx.UsedStatsInfoForTable{
 			Name:    name,
 			TblInfo: tblInfo,
-		})
+		}
 	}
-	recordForTbl := statsRecord.GetUsedInfo(tableID)
+	recordForTbl := statsRecord[tableID]
 
 	var recordForColOrIdx map[int64]string
 	if isIndex {
@@ -199,26 +198,18 @@ func recordUsedItemStatsStatus(sctx planctx.PlanContext, stats any, tableID, id 
 	}
 
 	if missing {
-		// Figure out whether it's really not existing.
-		if recordForTbl.ColAndIdxStatus != nil && recordForTbl.ColAndIdxStatus.(*statistics.ColAndIdxExistenceMap).HasAnalyzed(id, isIndex) {
-			// If this item has been analyzed but there's no its stats, we should mark it as uninitialized.
-			recordForColOrIdx[id] = statistics.StatsLoadedStatus{}.StatusToString()
-		} else {
-			// Otherwise, we mark it as missing.
-			recordForColOrIdx[id] = "missing"
-		}
+		recordForColOrIdx[id] = "missing"
 		return
 	}
 	recordForColOrIdx[id] = loadStatus.StatusToString()
 }
 
 // ceTraceRange appends a list of ranges and related information into CE trace
-func ceTraceRange(sctx planctx.PlanContext, tableID int64, colNames []string, ranges []*ranger.Range, tp string, rowCount uint64) {
+func ceTraceRange(sctx sessionctx.Context, tableID int64, colNames []string, ranges []*ranger.Range, tp string, rowCount uint64) {
 	sc := sctx.GetSessionVars().StmtCtx
-	tc := sc.TypeCtx()
 	allPoint := true
 	for _, ran := range ranges {
-		if !ran.IsPointNullable(tc) {
+		if !ran.IsPointNullable(sctx) {
 			allPoint = false
 			break
 		}
@@ -257,7 +248,7 @@ type startEstimateRangeInfo struct {
 }
 
 func debugTraceStartEstimateRange(
-	s planctx.PlanContext,
+	s sessionctx.Context,
 	r *ranger.Range,
 	lowBytes, highBytes []byte,
 	currentCount float64,
@@ -302,7 +293,7 @@ type endEstimateRangeInfo struct {
 }
 
 func debugTraceEndEstimateRange(
-	s planctx.PlanContext,
+	s sessionctx.Context,
 	count float64,
 	addType debugTraceAddRowCountType,
 ) {

@@ -226,7 +226,7 @@ func TestBuildTasksByBuckets(t *testing.T) {
 		}
 	}
 
-	// several ranges per bucket
+	// serveral ranges per bucket
 	// region:  nil---------------------------n-----------x-----------nil
 	// buckets: nil-----c-------g-------k-----n----t------x-----------nil
 	// ranges:  nil-a b-c d-e f-g h-i j-k-l m-n
@@ -381,34 +381,34 @@ func TestSplitKeyRangesByLocationsWithoutBuckets(t *testing.T) {
 
 	bo := backoff.NewBackofferWithVars(context.Background(), 3000, nil)
 
-	locRanges, err := cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "c")), UnspecifiedLimit, false, false)
+	locRanges, err := cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "c")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 1)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "c")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "c")), 0, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "c")), 0)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 0)
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("h", "y")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("h", "y")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 3)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "h", "n")
 	rangeEqual(t, locRanges[1].Ranges.ToRanges(), "n", "t")
 	rangeEqual(t, locRanges[2].Ranges.ToRanges(), "t", "y")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("h", "n")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("h", "n")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 1)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "h", "n")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("s", "s")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("s", "s")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 1)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "s", "s")
 
 	// min --> max
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "z")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "z")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 4)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "g")
@@ -416,7 +416,7 @@ func TestSplitKeyRangesByLocationsWithoutBuckets(t *testing.T) {
 	rangeEqual(t, locRanges[2].Ranges.ToRanges(), "n", "t")
 	rangeEqual(t, locRanges[3].Ranges.ToRanges(), "t", "z")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "z")), 3, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "z")), 3)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 3)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "g")
@@ -424,7 +424,7 @@ func TestSplitKeyRangesByLocationsWithoutBuckets(t *testing.T) {
 	rangeEqual(t, locRanges[2].Ranges.ToRanges(), "n", "t")
 
 	// many range
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 4)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "b", "c", "d", "e", "f", "f", "g")
@@ -432,7 +432,7 @@ func TestSplitKeyRangesByLocationsWithoutBuckets(t *testing.T) {
 	rangeEqual(t, locRanges[2].Ranges.ToRanges(), "o", "p", "q", "r", "s", "t")
 	rangeEqual(t, locRanges[3].Ranges.ToRanges(), "u", "v", "w", "x", "y", "z")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "b", "b", "h", "h", "m", "n", "t", "v", "w")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "b", "b", "h", "h", "m", "n", "t", "v", "w")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 4)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "b", "b", "g")
@@ -440,7 +440,7 @@ func TestSplitKeyRangesByLocationsWithoutBuckets(t *testing.T) {
 	rangeEqual(t, locRanges[2].Ranges.ToRanges(), "n", "t")
 	rangeEqual(t, locRanges[3].Ranges.ToRanges(), "v", "w")
 
-	locRanges, err = cache.SplitKeyRangesByLocations(bo, NewKeyRanges(BuildKeyRanges("a", "b", "v", "w")), UnspecifiedLimit, false, false)
+	locRanges, err = cache.SplitKeyRangesByLocationsWithoutBuckets(bo, NewKeyRanges(BuildKeyRanges("a", "b", "v", "w")), UnspecifiedLimit)
 	require.NoError(t, err)
 	require.Len(t, locRanges, 2)
 	rangeEqual(t, locRanges[0].Ranges.ToRanges(), "a", "b")

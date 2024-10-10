@@ -22,12 +22,12 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	plannerutil "github.com/pingcap/tidb/pkg/planner/util"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 )
 
 type inspectionSummaryRetriever struct {
@@ -35,7 +35,7 @@ type inspectionSummaryRetriever struct {
 	retrieved bool
 	table     *model.TableInfo
 	extractor *plannercore.InspectionSummaryTableExtractor
-	timeRange plannerutil.QueryTimeRange
+	timeRange plannercore.QueryTimeRange
 }
 
 // inspectionSummaryRules is used to maintain
@@ -457,7 +457,7 @@ func (e *inspectionSummaryRetriever) retrieve(ctx context.Context, sctx sessionc
 				sql = fmt.Sprintf("select avg(value),min(value),max(value) from `%s`.`%s` %s",
 					util.MetricSchemaName.L, name, cond)
 			}
-			exec := sctx.GetRestrictedSQLExecutor()
+			exec := sctx.(sqlexec.RestrictedSQLExecutor)
 			rows, _, err := exec.ExecRestrictedSQL(ctx, nil, sql)
 			if err != nil {
 				return nil, errors.Errorf("execute '%s' failed: %v", sql, err)
@@ -482,7 +482,7 @@ func (e *inspectionSummaryRetriever) retrieve(ctx context.Context, sctx sessionc
 					}
 					labels = append(labels, val)
 				}
-				var quantile any
+				var quantile interface{}
 				if def.Quantile > 0 {
 					quantile = row.GetFloat64(row.Len() - 1) // quantile will be the last column
 				}

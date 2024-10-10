@@ -35,7 +35,7 @@ func getDecimal(value float64) *types.MyDecimal {
 }
 
 func getDuration(value string) types.Duration {
-	dur, _, _ := types.ParseDuration(types.DefaultStmtNoWarningContext, value, 0)
+	dur, _, _ := types.ParseDuration(nil, value, 0)
 	return dur
 }
 
@@ -44,8 +44,8 @@ func getTime(year, month, day int, timeType byte) types.Time {
 	return ret
 }
 
-func getTimeStamp(hour, minute, sec int, timeType byte) types.Time {
-	ret := types.NewTime(types.FromDate(2017, 1, 1, hour, minute, sec, 0), timeType, 0)
+func getTimeStamp(hour, min, sec int, timeType byte) types.Time {
+	ret := types.NewTime(types.FromDate(2017, 1, 1, hour, min, sec, 0), timeType, 0)
 	return ret
 }
 

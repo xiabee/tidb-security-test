@@ -24,8 +24,7 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"go.uber.org/zap"
@@ -54,7 +53,7 @@ func showRestoredCreateDatabase(sctx sessionctx.Context, db *model.DBInfo, brCom
 
 // BRIECreateDatabase creates the database with OnExistIgnore option
 func BRIECreateDatabase(sctx sessionctx.Context, schema *model.DBInfo, brComment string) error {
-	d := domain.GetDomain(sctx).DDLExecutor()
+	d := domain.GetDomain(sctx).DDL()
 	query, err := showRestoredCreateDatabase(sctx, schema, brComment)
 	if err != nil {
 		return errors.Trace(err)
@@ -88,12 +87,12 @@ func showRestoredCreateTable(sctx sessionctx.Context, tbl *model.TableInfo, brCo
 // BRIECreateTable creates the table with OnExistIgnore option
 func BRIECreateTable(
 	sctx sessionctx.Context,
-	dbName pmodel.CIStr,
+	dbName model.CIStr,
 	table *model.TableInfo,
 	brComment string,
-	cs ...ddl.CreateTableOption,
+	cs ...ddl.CreateTableWithInfoConfigurier,
 ) error {
-	d := domain.GetDomain(sctx).DDLExecutor()
+	d := domain.GetDomain(sctx).DDL()
 	query, err := showRestoredCreateTable(sctx, table, brComment)
 	if err != nil {
 		return err
@@ -110,7 +109,7 @@ func BRIECreateTable(
 
 	table = table.Clone()
 
-	return d.CreateTableWithInfo(sctx, dbName, table, nil, append(cs, ddl.WithOnExist(ddl.OnExistIgnore))...)
+	return d.CreateTableWithInfo(sctx, dbName, table, append(cs, ddl.OnExistIgnore)...)
 }
 
 // BRIECreateTables creates the tables with OnExistIgnore option in batch
@@ -118,7 +117,7 @@ func BRIECreateTables(
 	sctx sessionctx.Context,
 	tables map[string][]*model.TableInfo,
 	brComment string,
-	cs ...ddl.CreateTableOption,
+	cs ...ddl.CreateTableWithInfoConfigurier,
 ) error {
 	// Disable foreign key check when batch create tables.
 	originForeignKeyChecks := sctx.GetSessionVars().ForeignKeyChecks
@@ -129,7 +128,7 @@ func BRIECreateTables(
 		sctx.GetSessionVars().ForeignKeyChecks = originForeignKeyChecks
 	}()
 	for db, tablesInDB := range tables {
-		dbName := pmodel.NewCIStr(db)
+		dbName := model.NewCIStr(db)
 		queryBuilder := strings.Builder{}
 		cloneTables := make([]*model.TableInfo, 0, len(tablesInDB))
 		for _, table := range tablesInDB {
@@ -159,11 +158,11 @@ func BRIECreateTables(
 // splitBatchCreateTable provide a way to split batch into small batch when batch size is large than 6 MB.
 // The raft entry has limit size of 6 MB, a batch of CreateTables may hit this limitation
 // TODO: shall query string be set for each split batch create, it looks does not matter if we set once for all.
-func splitBatchCreateTable(sctx sessionctx.Context, schema pmodel.CIStr,
-	infos []*model.TableInfo, cs ...ddl.CreateTableOption) error {
+func splitBatchCreateTable(sctx sessionctx.Context, schema model.CIStr,
+	infos []*model.TableInfo, cs ...ddl.CreateTableWithInfoConfigurier) error {
 	var err error
-	d := domain.GetDomain(sctx).DDLExecutor()
-	err = d.BatchCreateTableWithInfo(sctx, schema, infos, append(cs, ddl.WithOnExist(ddl.OnExistIgnore))...)
+	d := domain.GetDomain(sctx).DDL()
+	err = d.BatchCreateTableWithInfo(sctx, schema, infos, append(cs, ddl.OnExistIgnore)...)
 	if kv.ErrEntryTooLarge.Equal(err) {
 		log.Info("entry too large, split batch create table", zap.Int("num table", len(infos)))
 		if len(infos) == 1 {

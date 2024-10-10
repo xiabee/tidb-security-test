@@ -17,9 +17,9 @@ package skip
 import "testing"
 
 // UnderShort skips the test if the -short flag is set.
-func UnderShort(t *testing.T, args ...any) {
+func UnderShort(t *testing.T, args ...interface{}) {
 	t.Helper()
 	if testing.Short() {
-		t.Skip(append([]any{"disabled under -short"}, args...))
+		t.Skip(append([]interface{}{"disabled under -short"}, args...))
 	}
 }

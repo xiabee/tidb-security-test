@@ -60,9 +60,6 @@ var (
 	ErrInstanceScope                        = dbterror.ClassExecutor.NewStd(mysql.ErrInstanceScope)
 	ErrSettingNoopVariable                  = dbterror.ClassExecutor.NewStd(mysql.ErrSettingNoopVariable)
 	ErrLazyUniquenessCheckFailure           = dbterror.ClassExecutor.NewStd(mysql.ErrLazyUniquenessCheckFailure)
-	ErrMemoryExceedForQuery                 = dbterror.ClassExecutor.NewStd(mysql.ErrMemoryExceedForQuery)
-	ErrMemoryExceedForInstance              = dbterror.ClassExecutor.NewStd(mysql.ErrMemoryExceedForInstance)
-	ErrDeleteNotFoundColumn                 = dbterror.ClassExecutor.NewStd(mysql.ErrDeleteNotFoundColumn)
 
 	ErrBRIEBackupFailed               = dbterror.ClassExecutor.NewStd(mysql.ErrBRIEBackupFailed)
 	ErrBRIERestoreFailed              = dbterror.ClassExecutor.NewStd(mysql.ErrBRIERestoreFailed)
@@ -70,6 +67,7 @@ var (
 	ErrBRIEExportFailed               = dbterror.ClassExecutor.NewStd(mysql.ErrBRIEExportFailed)
 	ErrBRJobNotFound                  = dbterror.ClassExecutor.NewStd(mysql.ErrBRJobNotFound)
 	ErrCTEMaxRecursionDepth           = dbterror.ClassExecutor.NewStd(mysql.ErrCTEMaxRecursionDepth)
+	ErrNotSupportedWithSem            = dbterror.ClassOptimizer.NewStd(mysql.ErrNotSupportedWithSem)
 	ErrPluginIsNotLoaded              = dbterror.ClassExecutor.NewStd(mysql.ErrPluginIsNotLoaded)
 	ErrSetPasswordAuthPlugin          = dbterror.ClassExecutor.NewStd(mysql.ErrSetPasswordAuthPlugin)
 	ErrFuncNotEnabled                 = dbterror.ClassExecutor.NewStdErr(mysql.ErrNotSupportedYet, parser_mysql.Message("%-.32s is not supported. To enable this experimental feature, set '%-.32s' in the configuration file.", nil))

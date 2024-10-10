@@ -108,7 +108,7 @@ func (d *ClientDiscover) GetClient(ctx context.Context) (autoid.AutoIDAllocClien
 		opt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
 	}
 	logutil.BgLogger().Info("connect to leader", zap.String("category", "autoid client"), zap.String("addr", addr))
-	grpcConn, err := grpc.NewClient(addr, opt)
+	grpcConn, err := grpc.Dial(addr, opt)
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
@@ -124,7 +124,7 @@ func (d *ClientDiscover) GetClient(ctx context.Context) (autoid.AutoIDAllocClien
 // The returned range is (min, max]:
 // case increment=1 & offset=1: you can derive the ids like min+1, min+2... max.
 // case increment=x & offset=y: you firstly need to seek to firstID by `SeekToFirstAutoIDXXX`, then derive the IDs like firstID, firstID + increment * 2... in the caller.
-func (sp *singlePointAlloc) Alloc(ctx context.Context, n uint64, increment, offset int64) (minv, maxv int64, _ error) {
+func (sp *singlePointAlloc) Alloc(ctx context.Context, n uint64, increment, offset int64) (min int64, max int64, _ error) {
 	r, ctx := tracing.StartRegionEx(ctx, "autoid.Alloc")
 	defer r.End()
 
@@ -132,7 +132,6 @@ func (sp *singlePointAlloc) Alloc(ctx context.Context, n uint64, increment, offs
 		return 0, 0, errInvalidIncrementAndOffset.GenWithStackByArgs(increment, offset)
 	}
 
-	var bo backoffer
 retry:
 	cli, ver, err := sp.GetClient(ctx)
 	if err != nil {
@@ -153,12 +152,11 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			sp.resetConn(ver, err)
-			bo.Backoff()
+			time.Sleep(backoffDuration)
 			goto retry
 		}
 		return 0, 0, errors.Trace(err)
 	}
-	bo.Reset()
 	if len(resp.Errmsg) != 0 {
 		return 0, 0, errors.Trace(errors.New(string(resp.Errmsg)))
 	}
@@ -169,27 +167,7 @@ retry:
 	return resp.Min, resp.Max, err
 }
 
-const backoffMin = 200 * time.Millisecond
-const backoffMax = 5 * time.Second
-
-type backoffer struct {
-	time.Duration
-}
-
-func (b *backoffer) Reset() {
-	b.Duration = backoffMin
-}
-
-func (b *backoffer) Backoff() {
-	if b.Duration == 0 {
-		b.Duration = backoffMin
-	}
-	b.Duration *= 2
-	if b.Duration > backoffMax {
-		b.Duration = backoffMax
-	}
-	time.Sleep(b.Duration)
-}
+const backoffDuration = 200 * time.Millisecond
 
 func (d *ClientDiscover) resetConn(version uint64, reason error) {
 	// Avoid repeated Reset operation
@@ -206,8 +184,6 @@ func (d *ClientDiscover) ResetConn(reason error) {
 		logutil.BgLogger().Info("reset grpc connection", zap.String("category", "autoid client"),
 			zap.String("reason", reason.Error()))
 	}
-
-	metrics.ResetAutoIDConnCounter.Add(1)
 	var grpcConn *grpc.ClientConn
 	d.mu.Lock()
 	grpcConn = d.mu.ClientConn
@@ -225,10 +201,6 @@ func (d *ClientDiscover) ResetConn(reason error) {
 			}
 		}()
 	}
-}
-
-func (*singlePointAlloc) Transfer(_, _ int64) error {
-	return nil
 }
 
 // AllocSeqCache allocs sequence batch value cached in table level（rather than in alloc), the returned range covering
@@ -252,7 +224,6 @@ func (sp *singlePointAlloc) Rebase(ctx context.Context, newBase int64, _ bool) e
 }
 
 func (sp *singlePointAlloc) rebase(ctx context.Context, newBase int64, force bool) error {
-	var bo backoffer
 retry:
 	cli, ver, err := sp.GetClient(ctx)
 	if err != nil {
@@ -269,12 +240,11 @@ retry:
 	if err != nil {
 		if strings.Contains(err.Error(), "rpc error") {
 			sp.resetConn(ver, err)
-			bo.Backoff()
+			time.Sleep(backoffDuration)
 			goto retry
 		}
 		return errors.Trace(err)
 	}
-	bo.Reset()
 	if len(resp.Errmsg) != 0 {
 		return errors.Trace(errors.New(string(resp.Errmsg)))
 	}
@@ -308,8 +278,8 @@ func (sp *singlePointAlloc) End() int64 {
 // NextGlobalAutoID returns the next global autoID.
 // Used by 'show create table', 'alter table auto_increment = xxx'
 func (sp *singlePointAlloc) NextGlobalAutoID() (int64, error) {
-	_, maxv, err := sp.Alloc(context.Background(), 0, 1, 1)
-	return maxv + 1, err
+	_, max, err := sp.Alloc(context.Background(), 0, 1, 1)
+	return max + 1, err
 }
 
 func (*singlePointAlloc) GetType() AllocatorType {

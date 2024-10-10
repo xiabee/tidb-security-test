@@ -30,7 +30,6 @@ import (
 	"github.com/pingcap/tidb/dumpling/cli"
 	tcontext "github.com/pingcap/tidb/dumpling/context"
 	"github.com/pingcap/tidb/dumpling/log"
-	infoschema "github.com/pingcap/tidb/pkg/infoschema/context"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
@@ -226,7 +225,7 @@ func (d *Dumper) Dump() (dumpErr error) {
 	atomic.StoreInt64(&d.totalTables, int64(calculateTableCount(conf.Tables)))
 
 	rebuildMetaConn := func(conn *sql.Conn, updateMeta bool) (*sql.Conn, error) {
-		_ = conn.Raw(func(any) error {
+		_ = conn.Raw(func(dc interface{}) error {
 			// return an `ErrBadConn` to ensure close the connection, but do not put it back to the pool.
 			// if we choose to use `Close`, it will always put the connection back to the pool.
 			return driver.ErrBadConn
@@ -773,24 +772,24 @@ func (d *Dumper) concurrentDumpTable(tctx *tcontext.Context, conn *BaseConn, met
 		return d.dumpWholeTableDirectly(tctx, meta, taskChan, "", orderByClause, 0, 1)
 	}
 
-	minv, maxv, err := d.selectMinAndMaxIntValue(tctx, conn, db, tbl, field)
+	min, max, err := d.selectMinAndMaxIntValue(tctx, conn, db, tbl, field)
 	if err != nil {
 		tctx.L().Info("fallback to sequential dump due to cannot get bounding values. This won't influence the whole dump process",
 			log.ShortError(err))
 		return d.dumpWholeTableDirectly(tctx, meta, taskChan, "", orderByClause, 0, 1)
 	}
 	tctx.L().Debug("get int bounding values",
-		zap.String("lower", minv.String()),
-		zap.String("upper", maxv.String()))
+		zap.String("lower", min.String()),
+		zap.String("upper", max.String()))
 
 	// every chunk would have eventual adjustments
 	estimatedChunks := count / conf.Rows
-	estimatedStep := new(big.Int).Sub(maxv, minv).Uint64()/estimatedChunks + 1
+	estimatedStep := new(big.Int).Sub(max, min).Uint64()/estimatedChunks + 1
 	bigEstimatedStep := new(big.Int).SetUint64(estimatedStep)
-	cutoff := new(big.Int).Set(minv)
+	cutoff := new(big.Int).Set(min)
 	totalChunks := estimatedChunks
 	if estimatedStep == 1 {
-		totalChunks = new(big.Int).Sub(maxv, minv).Uint64() + 1
+		totalChunks = new(big.Int).Sub(max, min).Uint64() + 1
 	}
 
 	selectField, selectLen := meta.SelectedField(), meta.SelectedLen()
@@ -800,7 +799,7 @@ func (d *Dumper) concurrentDumpTable(tctx *tcontext.Context, conn *BaseConn, met
 	if conf.Where == "" {
 		nullValueCondition = fmt.Sprintf("`%s` IS NULL OR ", escapeString(field))
 	}
-	for maxv.Cmp(cutoff) >= 0 {
+	for max.Cmp(cutoff) >= 0 {
 		nextCutOff := new(big.Int).Add(cutoff, bigEstimatedStep)
 		where := fmt.Sprintf("%s(`%s` >= %d AND `%s` < %d)", nullValueCondition, escapeString(field), cutoff, escapeString(field), nextCutOff)
 		query := buildSelectQuery(db, tbl, selectField, "", buildWhereCondition(conf, where), orderByClause)
@@ -847,23 +846,23 @@ func (d *Dumper) selectMinAndMaxIntValue(tctx *tcontext.Context, conn *BaseConn,
 		return err
 	}, func() {}, query)
 	if err != nil {
-		return zero, zero, errors.Annotatef(err, "can't get min/maxv values to split chunks, query: %s", query)
+		return zero, zero, errors.Annotatef(err, "can't get min/max values to split chunks, query: %s", query)
 	}
 	if !smax.Valid || !smin.Valid {
 		// found no data
 		return zero, zero, errors.Errorf("no invalid min/max value found in query %s", query)
 	}
 
-	maxv := new(big.Int)
-	minv := new(big.Int)
+	max := new(big.Int)
+	min := new(big.Int)
 	var ok bool
-	if maxv, ok = maxv.SetString(smax.String, 10); !ok {
+	if max, ok = max.SetString(smax.String, 10); !ok {
 		return zero, zero, errors.Errorf("fail to convert max value %s in query %s", smax.String, query)
 	}
-	if minv, ok = minv.SetString(smin.String, 10); !ok {
+	if min, ok = min.SetString(smin.String, 10); !ok {
 		return zero, zero, errors.Errorf("fail to convert min value %s in query %s", smin.String, query)
 	}
-	return minv, maxv, nil
+	return min, max, nil
 }
 
 func (d *Dumper) concurrentDumpTiDBTables(tctx *tcontext.Context, conn *BaseConn, meta TableMeta, taskChan chan<- Task) error {
@@ -981,7 +980,7 @@ func selectTiDBTableSample(tctx *tcontext.Context, conn *BaseConn, meta TableMet
 		if iter == nil {
 			iter = &rowIter{
 				rows: rows,
-				args: make([]any, pkValNum),
+				args: make([]interface{}, pkValNum),
 			}
 		}
 		err = iter.Decode(rowRec)
@@ -1547,8 +1546,8 @@ func updateServiceSafePoint(tctx *tcontext.Context, pdClient pd.Client, ttl int6
 }
 
 // setDefaultSessionParams is a step to set default params for session params.
-func setDefaultSessionParams(si version.ServerInfo, sessionParams map[string]any) {
-	defaultSessionParams := map[string]any{}
+func setDefaultSessionParams(si version.ServerInfo, sessionParams map[string]interface{}) {
+	defaultSessionParams := map[string]interface{}{}
 	if si.ServerType == version.ServerTypeTiDB && si.HasTiKV && si.ServerVersion.Compare(*enablePagingVersion) >= 0 {
 		defaultSessionParams["tidb_enable_paging"] = "ON"
 	}
@@ -1636,7 +1635,7 @@ func (d *Dumper) renewSelectTableRegionFuncForLowerTiDB(tctx *tcontext.Context) 
 		return errors.Trace(err)
 	}
 	tikvHelper := &helper.Helper{}
-	tableInfos := tikvHelper.GetRegionsTableInfo(regionsInfo, infoschema.DBInfoAsInfoSchema(dbInfos), nil)
+	tableInfos := tikvHelper.GetRegionsTableInfo(regionsInfo, dbInfos)
 
 	tableInfoMap := make(map[string]map[string][]int64, len(conf.Tables))
 	for _, region := range regionsInfo.Regions {

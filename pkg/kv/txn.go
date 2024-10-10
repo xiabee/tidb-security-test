@@ -115,7 +115,7 @@ func RunInNewTxn(ctx context.Context, store Storage, retryable bool, f func(ctx 
 		globalInnerTxnTsBox.deleteInnerTxnTS(originalTxnTS)
 	}()
 
-	for i := uint(0); i < MaxRetryCnt; i++ {
+	for i := uint(0); i < maxRetryCnt; i++ {
 		txn, err = store.Begin()
 		if err != nil {
 			logutil.BgLogger().Error("RunInNewTxn", zap.Error(err))
@@ -177,8 +177,8 @@ func RunInNewTxn(ctx context.Context, store Storage, retryable bool, f func(ctx 
 }
 
 var (
-	// MaxRetryCnt represents maximum retry times.
-	MaxRetryCnt uint = 100
+	// maxRetryCnt represents maximum retry times in RunInNewTxn.
+	maxRetryCnt uint = 100
 	// retryBackOffBase is the initial duration, in microsecond, a failed transaction stays dormancy before it retries
 	retryBackOffBase = 1
 	// retryBackOffCap is the max amount of duration, in microsecond, a failed transaction stays dormancy before it retries
@@ -215,9 +215,10 @@ func setRequestSourceForInnerTxn(ctx context.Context, txn Transaction) {
 	if intest.InTest {
 		panic("unexpected no source type context, if you see this error, " +
 			"the `RequestSourceTypeKey` is missing in your context")
+	} else {
+		logutil.Logger(ctx).Warn("unexpected no source type context, if you see this warning, " +
+			"the `RequestSourceTypeKey` is missing in the context")
 	}
-	logutil.Logger(ctx).Warn("unexpected no source type context, if you see this warning, " +
-		"the `RequestSourceTypeKey` is missing in the context")
 }
 
 // SetTxnResourceGroup update the resource group name of target txn.

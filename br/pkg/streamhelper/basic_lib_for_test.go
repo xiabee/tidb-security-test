@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
 	backup "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/errorpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
@@ -101,11 +100,10 @@ type fakeCluster struct {
 	regions   []*region
 	testCtx   *testing.T
 
-	onGetClient               func(uint64) error
-	onClearCache              func(uint64) error
-	serviceGCSafePoint        uint64
-	serviceGCSafePointDeleted bool
-	currentTS                 uint64
+	onGetClient        func(uint64) error
+	onClearCache       func(uint64) error
+	serviceGCSafePoint uint64
+	currentTS          uint64
 }
 
 func (r *region) splitAt(newID uint64, k string) *region {
@@ -168,11 +166,11 @@ func (t trivialFlushStream) Context() context.Context {
 	return t.cx
 }
 
-func (t trivialFlushStream) SendMsg(m any) error {
+func (t trivialFlushStream) SendMsg(m interface{}) error {
 	return nil
 }
 
-func (t trivialFlushStream) RecvMsg(m any) error {
+func (t trivialFlushStream) RecvMsg(m interface{}) error {
 	return nil
 }
 
@@ -266,18 +264,15 @@ func (f *fakeStore) GetLastFlushTSOfRegion(ctx context.Context, in *logbackup.Ge
 func (f *fakeCluster) BlockGCUntil(ctx context.Context, at uint64) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if at == 0 {
+		f.serviceGCSafePoint = at
+		return at, nil
+	}
 	if f.serviceGCSafePoint > at {
-		return f.serviceGCSafePoint, errors.Errorf("minimal safe point %d is greater than the target %d", f.serviceGCSafePoint, at)
+		return f.serviceGCSafePoint, nil
 	}
 	f.serviceGCSafePoint = at
 	return at, nil
-}
-
-func (f *fakeCluster) UnblockGC(ctx context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.serviceGCSafePointDeleted = true
-	return nil
 }
 
 func (f *fakeCluster) FetchCurrentTS(ctx context.Context) (uint64, error) {
@@ -526,10 +521,9 @@ func (f *fakeCluster) advanceClusterTimeBy(duration time.Duration) uint64 {
 
 func createFakeCluster(t *testing.T, n int, simEnabled bool) *fakeCluster {
 	c := &fakeCluster{
-		stores:             map[uint64]*fakeStore{},
-		regions:            []*region{},
-		testCtx:            t,
-		serviceGCSafePoint: 0,
+		stores:  map[uint64]*fakeStore{},
+		regions: []*region{},
+		testCtx: t,
 	}
 	stores := make([]*fakeStore, 0, n)
 	for i := 0; i < n; i++ {
@@ -667,8 +661,7 @@ func newTestEnv(c *fakeCluster, t *testing.T) *testEnv {
 		Type: streamhelper.EventAdd,
 		Name: "whole",
 		Info: &backup.StreamBackupTaskInfo{
-			Name:    "whole",
-			StartTs: 5,
+			Name: "whole",
 		},
 		Ranges: rngs,
 	}
@@ -832,7 +825,7 @@ type mockPDClient struct {
 	fakeRegions []*region
 }
 
-func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (p *mockPDClient) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	sort.Slice(p.fakeRegions, func(i, j int) bool {
 		return bytes.Compare(p.fakeRegions[i].rng.StartKey, p.fakeRegions[j].rng.StartKey) < 0
 	})
@@ -854,10 +847,6 @@ func (p *mockPDClient) GetStore(_ context.Context, storeID uint64) (*metapb.Stor
 		Id:      storeID,
 		Address: fmt.Sprintf("127.0.0.%d", storeID),
 	}, nil
-}
-
-func (p *mockPDClient) GetClusterID(ctx context.Context) uint64 {
-	return 1
 }
 
 func newMockRegion(regionID uint64, startKey []byte, endKey []byte) *pd.Region {

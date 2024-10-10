@@ -1,11 +1,9 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "util",
     srcs = [
-        "auto_analyze_proc_id_generator.go",
-        "lease_getter.go",
-        "pool.go",
+        "interfaces.go",
         "table_info.go",
         "util.go",
     ],
@@ -14,36 +12,22 @@ go_library(
     deps = [
         "//pkg/infoschema",
         "//pkg/kv",
-        "//pkg/meta/model",
+        "//pkg/parser/ast",
+        "//pkg/parser/model",
         "//pkg/parser/terror",
-        "//pkg/planner/core/resolve",
         "//pkg/sessionctx",
-        "//pkg/sessionctx/sysproctrack",
         "//pkg/sessionctx/variable",
+        "//pkg/statistics",
         "//pkg/table",
         "//pkg/types",
-        "//pkg/util",
         "//pkg/util/chunk",
         "//pkg/util/intest",
         "//pkg/util/sqlexec",
         "//pkg/util/sqlexec/mock",
+        "@com_github_ngaut_pools//:pools",
         "@com_github_pingcap_errors//:errors",
         "@com_github_pingcap_tipb//go-tipb",
         "@com_github_tiancaiamao_gp//:gp",
         "@com_github_tikv_client_go_v2//oracle",
-        "@org_golang_x_exp//maps",
-        "@org_uber_go_atomic//:atomic",
-    ],
-)
-
-go_test(
-    name = "util_test",
-    timeout = "short",
-    srcs = ["util_test.go"],
-    flaky = True,
-    deps = [
-        ":util",
-        "//pkg/testkit",
-        "@com_github_stretchr_testify//require",
     ],
 )

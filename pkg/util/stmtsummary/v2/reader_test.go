@@ -17,14 +17,12 @@ package stmtsummary
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/auth"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/set"
@@ -61,7 +59,7 @@ func TestStmtFile(t *testing.T) {
 		require.NoError(t, f.file.Close())
 	}()
 	require.Equal(t, int64(1), f.begin)
-	require.Equal(t, time.Date(2022, 12, 27, 16, 21, 20, 245000000, time.Local).Unix(), f.end)
+	require.Equal(t, int64(1672129280), f.end) // 2022-12-27T16-21-20.245 == 1672129280
 
 	// Check if seek 0.
 	firstLine, err := util.ReadLine(bufio.NewReader(f.file), maxLineSize)
@@ -91,11 +89,10 @@ func TestStmtFileInvalidLine(t *testing.T) {
 		require.NoError(t, f.file.Close())
 	}()
 	require.Equal(t, int64(1), f.begin)
-	require.Equal(t, time.Date(2022, 12, 27, 16, 21, 20, 245000000, time.Local).Unix(), f.end)
+	require.Equal(t, int64(1672129280), f.end) // 2022-12-27T16-21-20.245 == 1672129280
 }
 
 func TestStmtFiles(t *testing.T) {
-	t1 := time.Date(2022, 12, 27, 16, 21, 20, 245000000, time.Local)
 	filename1 := "tidb-statements-2022-12-27T16-21-20.245.log"
 	filename2 := "tidb-statements.log"
 
@@ -104,9 +101,9 @@ func TestStmtFiles(t *testing.T) {
 	defer func() {
 		require.NoError(t, os.Remove(filename1))
 	}()
-	_, err = file.WriteString(fmt.Sprintf("{\"begin\":%d,\"end\":%d}\n", t1.Unix()-760, t1.Unix()-750))
+	_, err = file.WriteString("{\"begin\":1672128520,\"end\":1672128530}\n")
 	require.NoError(t, err)
-	_, err = file.WriteString(fmt.Sprintf("{\"begin\":%d,\"end\":%d}\n", t1.Unix()-10, t1.Unix()))
+	_, err = file.WriteString("{\"begin\":1672129270,\"end\":1672129280}\n")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 
@@ -115,9 +112,9 @@ func TestStmtFiles(t *testing.T) {
 	defer func() {
 		require.NoError(t, os.Remove(filename2))
 	}()
-	_, err = file.WriteString(fmt.Sprintf("{\"begin\":%d,\"end\":%d}\n", t1.Unix()-10, t1.Unix()))
+	_, err = file.WriteString("{\"begin\":1672129270,\"end\":1672129280}\n")
 	require.NoError(t, err)
-	_, err = file.WriteString(fmt.Sprintf("{\"begin\":%d,\"end\":%d}\n", t1.Unix()+100, t1.Unix()+110))
+	_, err = file.WriteString("{\"begin\":1672129380,\"end\":1672129390}\n")
 	require.NoError(t, err)
 	require.NoError(t, file.Close())
 
@@ -132,7 +129,7 @@ func TestStmtFiles(t *testing.T) {
 
 	func() {
 		files, err := newStmtFiles(context.Background(), []*StmtTimeRange{
-			{Begin: t1.Unix() - 10, End: t1.Unix() - 9},
+			{Begin: 1672129270, End: 1672129271},
 		})
 		require.NoError(t, err)
 		defer files.close()
@@ -143,7 +140,7 @@ func TestStmtFiles(t *testing.T) {
 
 	func() {
 		files, err := newStmtFiles(context.Background(), []*StmtTimeRange{
-			{Begin: 0, End: t1.Unix() - 10},
+			{Begin: 0, End: 1672129270},
 		})
 		require.NoError(t, err)
 		defer files.close()
@@ -154,7 +151,7 @@ func TestStmtFiles(t *testing.T) {
 
 	func() {
 		files, err := newStmtFiles(context.Background(), []*StmtTimeRange{
-			{Begin: 0, End: t1.Unix() - 11},
+			{Begin: 0, End: 1672129269},
 		})
 		require.NoError(t, err)
 		defer files.close()
@@ -173,7 +170,7 @@ func TestStmtFiles(t *testing.T) {
 
 	func() {
 		files, err := newStmtFiles(context.Background(), []*StmtTimeRange{
-			{Begin: t1.Unix() + 1, End: 0},
+			{Begin: 1672129281, End: 0},
 		})
 		require.NoError(t, err)
 		defer files.close()
@@ -228,8 +225,8 @@ func TestMemReader(t *testing.T) {
 	timeLocation, err := time.LoadLocation("Asia/Shanghai")
 	require.NoError(t, err)
 	columns := []*model.ColumnInfo{
-		{Name: pmodel.NewCIStr(DigestStr)},
-		{Name: pmodel.NewCIStr(ExecCountStr)},
+		{Name: model.NewCIStr(DigestStr)},
+		{Name: model.NewCIStr(ExecCountStr)},
 	}
 
 	ss := NewStmtSummary4Test(3)
@@ -282,8 +279,8 @@ func TestHistoryReader(t *testing.T) {
 	timeLocation, err := time.LoadLocation("Asia/Shanghai")
 	require.NoError(t, err)
 	columns := []*model.ColumnInfo{
-		{Name: pmodel.NewCIStr(DigestStr)},
-		{Name: pmodel.NewCIStr(ExecCountStr)},
+		{Name: model.NewCIStr(DigestStr)},
+		{Name: model.NewCIStr(ExecCountStr)},
 	}
 
 	func() {
@@ -430,8 +427,8 @@ func TestHistoryReaderInvalidLine(t *testing.T) {
 	timeLocation, err := time.LoadLocation("Asia/Shanghai")
 	require.NoError(t, err)
 	columns := []*model.ColumnInfo{
-		{Name: pmodel.NewCIStr(DigestStr)},
-		{Name: pmodel.NewCIStr(ExecCountStr)},
+		{Name: model.NewCIStr(DigestStr)},
+		{Name: model.NewCIStr(ExecCountStr)},
 	}
 
 	reader, err := NewHistoryReader(context.Background(), columns, "", timeLocation, nil, false, nil, nil, 2)

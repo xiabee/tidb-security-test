@@ -14,31 +14,36 @@
 package core
 
 import (
-	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/hack"
+	"github.com/pingcap/tidb/pkg/util/kvcache"
+	utilpc "github.com/pingcap/tidb/pkg/util/plancache"
 	"github.com/stretchr/testify/require"
 )
 
-func randomPlanCacheKey() string {
+func randomPlanCacheKey() *planCacheKey {
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return fmt.Sprintf("%v", random.Int())
+	return &planCacheKey{
+		database:      strconv.FormatInt(int64(random.Int()), 10),
+		schemaVersion: time.Now().UnixNano(),
+	}
 }
 
 func randomPlanCacheValue(types []*types.FieldType) *PlanCacheValue {
-	plans := []base.Plan{&Insert{}, &Update{}, &Delete{}, &PhysicalTableScan{}, &PhysicalTableDual{}, &PhysicalTableReader{},
+	plans := []Plan{&Insert{}, &Update{}, &Delete{}, &PhysicalTableScan{}, &PhysicalTableDual{}, &PhysicalTableReader{},
 		&PhysicalTableScan{}, &PhysicalIndexJoin{}, &PhysicalIndexHashJoin{}, &PhysicalIndexMergeJoin{}, &PhysicalIndexMergeReader{},
 		&PhysicalIndexLookUpReader{}, &PhysicalApply{}, &PhysicalApply{}, &PhysicalLimit{}}
 	random := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return &PlanCacheValue{
-		Plan:       plans[random.Int()%len(plans)],
-		paramTypes: types,
+		Plan:      plans[random.Int()%len(plans)],
+		matchOpts: &utilpc.PlanCacheMatchOpts{ParamTypes: types},
 	}
 }
 
@@ -52,14 +57,14 @@ func TestLRUPCPut(t *testing.T) {
 	lruA := NewLRUPlanCache(0, 0, 0, mockCtx, false)
 	require.Equal(t, lruA.capacity, uint(100))
 
-	dropCnt := 0
+	maxMemDroppedKv := make(map[kvcache.Key]kvcache.Value)
 	lru := NewLRUPlanCache(3, 0, 0, mockCtx, false)
-	lru.onEvict = func(key string, value any) {
-		dropCnt++
+	lru.onEvict = func(key kvcache.Key, value kvcache.Value) {
+		maxMemDroppedKv[key] = value
 	}
 	require.Equal(t, uint(3), lru.capacity)
 
-	keys := make([]string, 5)
+	keys := make([]*planCacheKey, 5)
 	vals := make([]*PlanCacheValue, 5)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
@@ -67,13 +72,19 @@ func TestLRUPCPut(t *testing.T) {
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeLong)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeInt24)},
 	}
+	limitParams := [][]uint64{
+		{1}, {2}, {3}, {4}, {5},
+	}
 
 	// one key corresponding to multi values
 	for i := 0; i < 5; i++ {
-		keys[i] = "key-1"
-		opts := pTypes[i]
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(1), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		vals[i] = &PlanCacheValue{
-			paramTypes: opts,
+			matchOpts: opts,
 		}
 		lru.Put(keys[i], vals[i], opts)
 	}
@@ -81,13 +92,14 @@ func TestLRUPCPut(t *testing.T) {
 	require.Equal(t, uint(3), lru.size)
 
 	// test for non-existent elements
-	require.Equal(t, dropCnt, 2)
+	require.Len(t, maxMemDroppedKv, 2)
 	for i := 0; i < 2; i++ {
-		bucket, exist := lru.buckets[keys[i]]
+		bucket, exist := lru.buckets[string(hack.String(keys[i].Hash()))]
 		require.True(t, exist)
 		for element := range bucket {
 			require.NotEqual(t, vals[i], element.Value.(*planCacheEntry).PlanValue)
 		}
+		require.Equal(t, vals[i], maxMemDroppedKv[keys[i]])
 	}
 
 	// test for existent elements
@@ -103,9 +115,12 @@ func TestLRUPCPut(t *testing.T) {
 		require.NotNil(t, key)
 		require.Equal(t, keys[i], key)
 
-		bucket, exist := lru.buckets[keys[i]]
+		bucket, exist := lru.buckets[string(hack.String(keys[i].Hash()))]
 		require.True(t, exist)
-		matchOpts := pTypes[i]
+		matchOpts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		element, exist := lru.pickFromBucket(bucket, matchOpts)
 		require.NotNil(t, element)
 		require.True(t, exist)
@@ -131,7 +146,7 @@ func TestLRUPCGet(t *testing.T) {
 	}()
 	lru := NewLRUPlanCache(3, 0, 0, mockCtx, false)
 
-	keys := make([]string, 5)
+	keys := make([]*planCacheKey, 5)
 	vals := make([]*PlanCacheValue, 5)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
@@ -139,26 +154,38 @@ func TestLRUPCGet(t *testing.T) {
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeLong)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeInt24)},
 	}
+	limitParams := [][]uint64{
+		{1}, {2}, {3}, {4}, {5},
+	}
 	// 5 bucket
 	for i := 0; i < 5; i++ {
-		keys[i] = fmt.Sprintf("key-%v", i%4)
-		opts := pTypes[i]
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(i%4), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		vals[i] = &PlanCacheValue{
-			paramTypes: opts,
+			matchOpts: opts,
 		}
 		lru.Put(keys[i], vals[i], opts)
 	}
 
 	// test for non-existent elements
 	for i := 0; i < 2; i++ {
-		opts := pTypes[i]
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		value, exists := lru.Get(keys[i], opts)
 		require.False(t, exists)
 		require.Nil(t, value)
 	}
 
 	for i := 2; i < 5; i++ {
-		opts := pTypes[i]
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		value, exists := lru.Get(keys[i], opts)
 		require.True(t, exists)
 		require.NotNil(t, value)
@@ -187,17 +214,23 @@ func TestLRUPCDelete(t *testing.T) {
 	}()
 	lru := NewLRUPlanCache(3, 0, 0, mockCtx, false)
 
-	keys := make([]string, 3)
+	keys := make([]*planCacheKey, 3)
 	vals := make([]*PlanCacheValue, 3)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDate)},
 	}
+	limitParams := [][]uint64{
+		{1}, {2}, {3},
+	}
 	for i := 0; i < 3; i++ {
-		keys[i] = fmt.Sprintf("key-%v", i)
-		opts := pTypes[i]
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(i), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: limitParams[i],
+		}
 		vals[i] = &PlanCacheValue{
-			paramTypes: opts,
+			matchOpts: opts,
 		}
 		lru.Put(keys[i], vals[i], opts)
 	}
@@ -205,15 +238,24 @@ func TestLRUPCDelete(t *testing.T) {
 
 	lru.Delete(keys[1])
 
-	value, exists := lru.Get(keys[1], pTypes[1])
+	value, exists := lru.Get(keys[1], &utilpc.PlanCacheMatchOpts{
+		ParamTypes:          pTypes[1],
+		LimitOffsetAndCount: limitParams[1],
+	})
 	require.False(t, exists)
 	require.Nil(t, value)
 	require.Equal(t, 2, int(lru.size))
 
-	_, exists = lru.Get(keys[0], pTypes[0])
+	_, exists = lru.Get(keys[0], &utilpc.PlanCacheMatchOpts{
+		ParamTypes:          pTypes[0],
+		LimitOffsetAndCount: limitParams[0],
+	})
 	require.True(t, exists)
 
-	_, exists = lru.Get(keys[2], pTypes[2])
+	_, exists = lru.Get(keys[2], &utilpc.PlanCacheMatchOpts{
+		ParamTypes:          pTypes[2],
+		LimitOffsetAndCount: limitParams[2],
+	})
 	require.True(t, exists)
 }
 
@@ -223,17 +265,20 @@ func TestLRUPCDeleteAll(t *testing.T) {
 	defer func() {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
-	keys := make([]string, 3)
+	keys := make([]*planCacheKey, 3)
 	vals := make([]*PlanCacheValue, 3)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDate)},
 	}
 	for i := 0; i < 3; i++ {
-		keys[i] = fmt.Sprintf("key-%v", i)
-		opts := pTypes[i]
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(i), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: []uint64{},
+		}
 		vals[i] = &PlanCacheValue{
-			paramTypes: opts,
+			matchOpts: opts,
 		}
 		lru.Put(keys[i], vals[i], opts)
 	}
@@ -242,7 +287,10 @@ func TestLRUPCDeleteAll(t *testing.T) {
 	lru.DeleteAll()
 
 	for i := 0; i < 3; i++ {
-		opts := pTypes[i]
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: []uint64{},
+		}
 		value, exists := lru.Get(keys[i], opts)
 		require.False(t, exists)
 		require.Nil(t, value)
@@ -251,18 +299,18 @@ func TestLRUPCDeleteAll(t *testing.T) {
 }
 
 func TestLRUPCSetCapacity(t *testing.T) {
+	maxMemDroppedKv := make(map[kvcache.Key]kvcache.Value)
 	ctx := MockContext()
 	lru := NewLRUPlanCache(5, 0, 0, ctx, false)
 	defer func() {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
-	dropCnt := 0
-	lru.onEvict = func(key string, value any) {
-		dropCnt++
+	lru.onEvict = func(key kvcache.Key, value kvcache.Value) {
+		maxMemDroppedKv[key] = value
 	}
 	require.Equal(t, uint(5), lru.capacity)
 
-	keys := make([]string, 5)
+	keys := make([]*planCacheKey, 5)
 	vals := make([]*PlanCacheValue, 5)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
@@ -273,10 +321,13 @@ func TestLRUPCSetCapacity(t *testing.T) {
 
 	// one key corresponding to multi values
 	for i := 0; i < 5; i++ {
-		keys[i] = "key-1"
-		opts := pTypes[i]
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(1), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: []uint64{},
+		}
 		vals[i] = &PlanCacheValue{
-			paramTypes: opts,
+			matchOpts: opts,
 		}
 		lru.Put(keys[i], vals[i], opts)
 	}
@@ -287,13 +338,14 @@ func TestLRUPCSetCapacity(t *testing.T) {
 	require.NoError(t, err)
 
 	// test for non-existent elements
-	require.Equal(t, dropCnt, 2)
+	require.Len(t, maxMemDroppedKv, 2)
 	for i := 0; i < 2; i++ {
-		bucket, exist := lru.buckets[keys[i]]
+		bucket, exist := lru.buckets[string(hack.String(keys[i].Hash()))]
 		require.True(t, exist)
 		for element := range bucket {
 			require.NotEqual(t, vals[i], element.Value.(*planCacheEntry).PlanValue)
 		}
+		require.Equal(t, vals[i], maxMemDroppedKv[keys[i]])
 	}
 
 	// test for existent elements
@@ -326,9 +378,12 @@ func TestIssue37914(t *testing.T) {
 		domain.GetDomain(ctx).StatsHandle().Close()
 	}()
 	pTypes := []*types.FieldType{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)}
-	key := "key-1"
-	opts := pTypes
-	val := &PlanCacheValue{paramTypes: opts}
+	key := &planCacheKey{database: strconv.FormatInt(int64(1), 10)}
+	opts := &utilpc.PlanCacheMatchOpts{
+		ParamTypes:          pTypes,
+		LimitOffsetAndCount: []uint64{},
+	}
+	val := &PlanCacheValue{matchOpts: opts}
 
 	require.NotPanics(t, func() {
 		lru.Put(key, val, opts)
@@ -343,7 +398,7 @@ func TestIssue38244(t *testing.T) {
 	}()
 	require.Equal(t, uint(3), lru.capacity)
 
-	keys := make([]string, 5)
+	keys := make([]*planCacheKey, 5)
 	vals := make([]*PlanCacheValue, 5)
 	pTypes := [][]*types.FieldType{{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeDouble)},
 		{types.NewFieldType(mysql.TypeFloat), types.NewFieldType(mysql.TypeEnum)},
@@ -354,9 +409,12 @@ func TestIssue38244(t *testing.T) {
 
 	// one key corresponding to multi values
 	for i := 0; i < 5; i++ {
-		keys[i] = fmt.Sprintf("key-%v", i)
-		opts := pTypes[i]
-		vals[i] = &PlanCacheValue{paramTypes: opts}
+		keys[i] = &planCacheKey{database: strconv.FormatInt(int64(i), 10)}
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes[i],
+			LimitOffsetAndCount: []uint64{},
+		}
+		vals[i] = &PlanCacheValue{matchOpts: opts}
 		lru.Put(keys[i], vals[i], opts)
 	}
 	require.Equal(t, lru.size, lru.capacity)
@@ -372,8 +430,8 @@ func TestLRUPlanCacheMemoryUsage(t *testing.T) {
 	}()
 	ctx.GetSessionVars().EnablePreparedPlanCacheMemoryMonitor = true
 	lru := NewLRUPlanCache(3, 0, 0, ctx, false)
-	evict := make(map[string]any)
-	lru.onEvict = func(key string, value any) {
+	evict := make(map[kvcache.Key]kvcache.Value)
+	lru.onEvict = func(key kvcache.Key, value kvcache.Value) {
 		evict[key] = value
 	}
 	var res int64 = 0
@@ -381,25 +439,31 @@ func TestLRUPlanCacheMemoryUsage(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		k := randomPlanCacheKey()
 		v := randomPlanCacheValue(pTypes)
-		opts := pTypes
+		opts := &utilpc.PlanCacheMatchOpts{
+			ParamTypes:          pTypes,
+			LimitOffsetAndCount: []uint64{},
+		}
 		lru.Put(k, v, opts)
-		res += int64(len(k)) + v.MemoryUsage()
+		res += k.MemoryUsage() + v.MemoryUsage()
 		require.Equal(t, lru.MemoryUsage(), res)
 	}
 	// evict
 	p := &PhysicalTableScan{}
-	k := "key-3"
+	k := &planCacheKey{database: "3"}
 	v := &PlanCacheValue{Plan: p}
-	opts := pTypes
+	opts := &utilpc.PlanCacheMatchOpts{
+		ParamTypes:          pTypes,
+		LimitOffsetAndCount: []uint64{},
+	}
 	lru.Put(k, v, opts)
-	res += int64(len(k)) + v.MemoryUsage()
+	res += k.MemoryUsage() + v.MemoryUsage()
 	for kk, vv := range evict {
-		res -= int64(len(kk)) + vv.(*PlanCacheValue).MemoryUsage()
+		res -= kk.(*planCacheKey).MemoryUsage() + vv.(*PlanCacheValue).MemoryUsage()
 	}
 	require.Equal(t, lru.MemoryUsage(), res)
 	// delete
 	lru.Delete(k)
-	res -= int64(len(k)) + v.MemoryUsage()
+	res -= k.MemoryUsage() + v.MemoryUsage()
 	require.Equal(t, lru.MemoryUsage(), res)
 	// delete all
 	lru.DeleteAll()

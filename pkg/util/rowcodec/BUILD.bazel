@@ -12,14 +12,15 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/kv",
-        "//pkg/meta/model",
+        "//pkg/parser/model",
         "//pkg/parser/mysql",
+        "//pkg/parser/terror",
         "//pkg/parser/types",
+        "//pkg/sessionctx/stmtctx",
         "//pkg/types",
         "//pkg/util/chunk",
         "//pkg/util/codec",
         "@com_github_pingcap_errors//:errors",
-        "@org_uber_go_multierr//:multierr",
     ],
 )
 
@@ -35,7 +36,7 @@ go_test(
     flaky = True,
     deps = [
         "//pkg/kv",
-        "//pkg/meta/model",
+        "//pkg/parser/model",
         "//pkg/parser/mysql",
         "//pkg/sessionctx/stmtctx",
         "//pkg/tablecodec",

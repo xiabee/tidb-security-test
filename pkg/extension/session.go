@@ -114,12 +114,6 @@ func newSessionExtensions(es *Extensions) *SessionExtensions {
 				}
 			}
 		}
-		if m.authPlugins != nil {
-			connExtensions.authPlugins = make(map[string]*AuthPlugin)
-			for _, p := range m.authPlugins {
-				connExtensions.authPlugins[p.Name] = p
-			}
-		}
 	}
 	return connExtensions
 }
@@ -128,8 +122,6 @@ func newSessionExtensions(es *Extensions) *SessionExtensions {
 type SessionExtensions struct {
 	connectionEventFuncs []func(ConnEventTp, *ConnEventInfo)
 	stmtEventFuncs       []func(StmtEventTp, StmtEventInfo)
-
-	authPlugins map[string]*AuthPlugin
 }
 
 // OnConnectionEvent will be called when a connection event happens
@@ -157,13 +149,4 @@ func (es *SessionExtensions) OnStmtEvent(tp StmtEventTp, event StmtEventInfo) {
 	for _, fn := range es.stmtEventFuncs {
 		fn(tp, event)
 	}
-}
-
-// GetAuthPlugin returns the required registered extension auth plugin and whether it exists.
-func (es *SessionExtensions) GetAuthPlugin(name string) (*AuthPlugin, bool) {
-	if es == nil {
-		return nil, false
-	}
-	p, ok := es.authPlugins[name]
-	return p, ok
 }

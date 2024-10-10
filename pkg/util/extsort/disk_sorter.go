@@ -31,7 +31,6 @@ import (
 	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
 	"github.com/cockroachdb/pebble/vfs"
 	"github.com/pingcap/errors"
@@ -162,12 +161,11 @@ func newSSTWriter(
 ) (*sstWriter, error) {
 	destPath := makeFilename(fs, dirname, fileNum)
 	tmpPath := destPath + tmpFileSuffix
-	f, err := vfs.Default.Create(tmpPath)
+	f, err := fs.Create(tmpPath)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	writable := objstorageprovider.NewFileWritable(f)
-	w := sstable.NewWriter(writable, sstable.WriterOptions{
+	w := sstable.NewWriter(f, sstable.WriterOptions{
 		TablePropertyCollectors: []func() sstable.TablePropertyCollector{
 			func() sstable.TablePropertyCollector {
 				return newKVStatsCollector(kvStatsBucketSize)
@@ -274,11 +272,7 @@ func (p *sstReaderPool) get(fileNum int) (*sstable.Reader, error) {
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	readable, err := sstable.NewSimpleReadable(f)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	reader, err = sstable.NewReader(readable, sstable.ReaderOptions{
+	reader, err = sstable.NewReader(f, sstable.ReaderOptions{
 		Cache: p.cache,
 	})
 	if err != nil {
@@ -343,30 +337,22 @@ type sstIter struct {
 }
 
 func (si *sstIter) Seek(key []byte) bool {
-	k, v := si.iter.SeekGE(key, 0)
-	si.key = k
-	si.value, _, _ = v.Value(nil)
+	si.key, si.value = si.iter.SeekGE(key, false)
 	return si.key != nil
 }
 
 func (si *sstIter) First() bool {
-	k, v := si.iter.SeekGE(nil, 0)
-	si.key = k
-	si.value, _, _ = v.Value(nil)
+	si.key, si.value = si.iter.SeekGE(nil, false)
 	return si.key != nil
 }
 
 func (si *sstIter) Next() bool {
-	k, v := si.iter.Next()
-	si.key = k
-	si.value, _, _ = v.Value(nil)
+	si.key, si.value = si.iter.Next()
 	return si.key != nil
 }
 
 func (si *sstIter) Last() bool {
-	k, v := si.iter.Last()
-	si.key = k
-	si.value, _, _ = v.Value(nil)
+	si.key, si.value = si.iter.Last()
 	return si.key != nil
 }
 
@@ -427,11 +413,11 @@ func (h mergingIterHeap) Less(i, j int) bool {
 	return bytes.Compare(h[i].UnsafeKey(), h[j].UnsafeKey()) < 0
 }
 
-func (h *mergingIterHeap) Push(x any) {
+func (h *mergingIterHeap) Push(x interface{}) {
 	*h = append(*h, x.(mergingIterItem))
 }
 
-func (h *mergingIterHeap) Pop() any {
+func (h *mergingIterHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	x := old[n-1]
@@ -991,6 +977,7 @@ func (d *DiskSorter) compactFiles(ctx context.Context, files []*fileMetadata) er
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(d.opts.Concurrency)
 	for _, c := range compactions {
+		c := c
 		g.Go(func() error {
 			if gCtx.Err() != nil {
 				return errors.Trace(gCtx.Err())
@@ -1391,15 +1378,7 @@ func (w *diskSorterWriter) flush() error {
 	slices.SortFunc(w.kvs, func(a, b keyValue) int {
 		return bytes.Compare(a.key, b.key)
 	})
-
-	// To dedup keys before write them into the SST file.
-	// NOTE: keys should be sorted and deduped when construct one SST file.
-	var lastKey []byte
 	for _, kv := range w.kvs {
-		if bytes.Equal(lastKey, kv.key) {
-			continue
-		}
-		lastKey = kv.key
 		if err := sw.Set(kv.key, kv.value); err != nil {
 			_ = sw.Close()
 			return err

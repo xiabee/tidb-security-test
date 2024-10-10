@@ -24,22 +24,17 @@ import (
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser/ast"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/sessiontxn"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 )
 
-func onCreatePlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
-	args, err := model.GetPlacementPolicyArgs(job)
-	if err != nil {
+func onCreatePlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	policyInfo := &model.PolicyInfo{}
+	var orReplace bool
+	if err := job.DecodeArgs(policyInfo, &orReplace); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
-	policyInfo, orReplace := args.Policy, args.ReplaceOnExist
 	policyInfo.State = model.StateNone
 
 	if err := checkPolicyValidation(policyInfo.PlacementSettings); err != nil {
@@ -47,8 +42,7 @@ func onCreatePlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ e
 		return ver, errors.Trace(err)
 	}
 
-	metaMut := jobCtx.metaMut
-	existPolicy, err := getPlacementPolicyByName(jobCtx.infoCache, metaMut, policyInfo.Name)
+	existPolicy, err := getPlacementPolicyByName(d, t, policyInfo.Name)
 	if err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
@@ -62,13 +56,13 @@ func onCreatePlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ e
 
 		replacePolicy := existPolicy.Clone()
 		replacePolicy.PlacementSettings = policyInfo.PlacementSettings
-		if err = updateExistPlacementPolicy(metaMut, replacePolicy); err != nil {
+		if err = updateExistPlacementPolicy(t, replacePolicy); err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)
 		}
 
 		job.SchemaID = replacePolicy.ID
-		ver, err = updateSchemaVersion(jobCtx, job)
+		ver, err = updateSchemaVersion(d, t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -81,13 +75,13 @@ func onCreatePlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ e
 	case model.StateNone:
 		// none -> public
 		policyInfo.State = model.StatePublic
-		err = metaMut.CreatePolicy(policyInfo)
+		err = t.CreatePolicy(policyInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
 		job.SchemaID = policyInfo.ID
 
-		ver, err = updateSchemaVersion(jobCtx, job)
+		ver, err = updateSchemaVersion(d, t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -105,7 +99,7 @@ func checkPolicyValidation(info *model.PlacementSettings) error {
 	return err
 }
 
-func getPolicyInfo(t *meta.Mutator, policyID int64) (*model.PolicyInfo, error) {
+func getPolicyInfo(t *meta.Meta, policyID int64) (*model.PolicyInfo, error) {
 	policy, err := t.GetPolicy(policyID)
 	if err != nil {
 		if meta.ErrPolicyNotExists.Equal(err) {
@@ -118,13 +112,13 @@ func getPolicyInfo(t *meta.Mutator, policyID int64) (*model.PolicyInfo, error) {
 	return policy, nil
 }
 
-func getPlacementPolicyByName(infoCache *infoschema.InfoCache, t *meta.Mutator, policyName pmodel.CIStr) (*model.PolicyInfo, error) {
+func getPlacementPolicyByName(d *ddlCtx, t *meta.Meta, policyName model.CIStr) (*model.PolicyInfo, error) {
 	currVer, err := t.GetSchemaVersion()
 	if err != nil {
 		return nil, err
 	}
 
-	is := infoCache.GetLatest()
+	is := d.infoCache.GetLatest()
 	if is != nil && is.SchemaMetaVersion() == currVer {
 		// Use cached policy.
 		policy, ok := is.PolicyByName(policyName)
@@ -146,7 +140,7 @@ func getPlacementPolicyByName(infoCache *infoschema.InfoCache, t *meta.Mutator, 
 	return nil, nil
 }
 
-func checkPlacementPolicyExistAndCancelNonExistJob(t *meta.Mutator, job *model.Job, policyID int64) (*model.PolicyInfo, error) {
+func checkPlacementPolicyExistAndCancelNonExistJob(t *meta.Meta, job *model.Job, policyID int64) (*model.PolicyInfo, error) {
 	policy, err := getPolicyInfo(t, policyID)
 	if err == nil {
 		return policy, nil
@@ -157,7 +151,7 @@ func checkPlacementPolicyExistAndCancelNonExistJob(t *meta.Mutator, job *model.J
 	return nil, err
 }
 
-func checkPlacementPolicyRefValidAndCanNonValidJob(t *meta.Mutator, job *model.Job, ref *model.PolicyRefInfo) (*model.PolicyInfo, error) {
+func checkPlacementPolicyRefValidAndCanNonValidJob(t *meta.Meta, job *model.Job, ref *model.PolicyRefInfo) (*model.PolicyInfo, error) {
 	if ref == nil {
 		return nil, nil
 	}
@@ -165,7 +159,7 @@ func checkPlacementPolicyRefValidAndCanNonValidJob(t *meta.Mutator, job *model.J
 	return checkPlacementPolicyExistAndCancelNonExistJob(t, job, ref.ID)
 }
 
-func checkAllTablePlacementPoliciesExistAndCancelNonExistJob(t *meta.Mutator, job *model.Job, tblInfo *model.TableInfo) error {
+func checkAllTablePlacementPoliciesExistAndCancelNonExistJob(t *meta.Meta, job *model.Job, tblInfo *model.TableInfo) error {
 	if _, err := checkPlacementPolicyRefValidAndCanNonValidJob(t, job, tblInfo.PlacementPolicyRef); err != nil {
 		return errors.Trace(err)
 	}
@@ -183,18 +177,13 @@ func checkAllTablePlacementPoliciesExistAndCancelNonExistJob(t *meta.Mutator, jo
 	return nil
 }
 
-func onDropPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
-	args, err := model.GetPlacementPolicyArgs(job)
-	if err != nil {
-		return ver, errors.Trace(err)
-	}
-	metaMut := jobCtx.metaMut
-	policyInfo, err := checkPlacementPolicyExistAndCancelNonExistJob(metaMut, job, args.PolicyID)
+func onDropPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	policyInfo, err := checkPlacementPolicyExistAndCancelNonExistJob(t, job, job.SchemaID)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
-	err = checkPlacementPolicyNotInUse(jobCtx.infoCache, metaMut, policyInfo)
+	err = checkPlacementPolicyNotInUse(d, t, policyInfo)
 	if err != nil {
 		if dbterror.ErrPlacementPolicyInUse.Equal(err) {
 			job.State = model.JobStateCancelled
@@ -206,11 +195,11 @@ func onDropPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ err
 	case model.StatePublic:
 		// public -> write only
 		policyInfo.State = model.StateWriteOnly
-		err = metaMut.UpdatePolicy(policyInfo)
+		err = t.UpdatePolicy(policyInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(jobCtx, job)
+		ver, err = updateSchemaVersion(d, t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -219,11 +208,11 @@ func onDropPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ err
 	case model.StateWriteOnly:
 		// write only -> delete only
 		policyInfo.State = model.StateDeleteOnly
-		err = metaMut.UpdatePolicy(policyInfo)
+		err = t.UpdatePolicy(policyInfo)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(jobCtx, job)
+		ver, err = updateSchemaVersion(d, t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -231,10 +220,10 @@ func onDropPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ err
 		job.SchemaState = model.StateDeleteOnly
 	case model.StateDeleteOnly:
 		policyInfo.State = model.StateNone
-		if err = metaMut.DropPolicy(policyInfo.ID); err != nil {
+		if err = t.DropPolicy(policyInfo.ID); err != nil {
 			return ver, errors.Trace(err)
 		}
-		ver, err = updateSchemaVersion(jobCtx, job)
+		ver, err = updateSchemaVersion(d, t, job)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -246,33 +235,32 @@ func onDropPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ err
 	return ver, errors.Trace(err)
 }
 
-func onAlterPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
-	args, err := model.GetPlacementPolicyArgs(job)
-	if err != nil {
+func onAlterPlacementPolicy(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
+	alterPolicy := &model.PolicyInfo{}
+	if err := job.DecodeArgs(alterPolicy); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	metaMut := jobCtx.metaMut
-	oldPolicy, err := checkPlacementPolicyExistAndCancelNonExistJob(metaMut, job, args.PolicyID)
+	oldPolicy, err := checkPlacementPolicyExistAndCancelNonExistJob(t, job, job.SchemaID)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
 	newPolicyInfo := *oldPolicy
-	newPolicyInfo.PlacementSettings = args.Policy.PlacementSettings
+	newPolicyInfo.PlacementSettings = alterPolicy.PlacementSettings
 
 	err = checkPolicyValidation(newPolicyInfo.PlacementSettings)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
-	if err = updateExistPlacementPolicy(metaMut, &newPolicyInfo); err != nil {
+	if err = updateExistPlacementPolicy(t, &newPolicyInfo); err != nil {
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	ver, err = updateSchemaVersion(jobCtx, job)
+	ver, err = updateSchemaVersion(d, t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -282,7 +270,7 @@ func onAlterPlacementPolicy(jobCtx *jobContext, job *model.Job) (ver int64, _ er
 	return ver, nil
 }
 
-func updateExistPlacementPolicy(t *meta.Mutator, policy *model.PolicyInfo) error {
+func updateExistPlacementPolicy(t *meta.Meta, policy *model.PolicyInfo) error {
 	err := t.UpdatePolicy(policy)
 	if err != nil {
 		return errors.Trace(err)
@@ -352,12 +340,12 @@ func updateExistPlacementPolicy(t *meta.Mutator, policy *model.PolicyInfo) error
 	return nil
 }
 
-func checkPlacementPolicyNotInUse(infoCache *infoschema.InfoCache, t *meta.Mutator, policy *model.PolicyInfo) error {
+func checkPlacementPolicyNotInUse(d *ddlCtx, t *meta.Meta, policy *model.PolicyInfo) error {
 	currVer, err := t.GetSchemaVersion()
 	if err != nil {
 		return err
 	}
-	is := infoCache.GetLatest()
+	is := d.infoCache.GetLatest()
 	if is != nil && is.SchemaMetaVersion() == currVer {
 		err = CheckPlacementPolicyNotInUseFromInfoSchema(is, policy)
 	} else {
@@ -375,17 +363,14 @@ func CheckPlacementPolicyNotInUseFromInfoSchema(is infoschema.InfoSchema, policy
 		if ref := dbInfo.PlacementPolicyRef; ref != nil && ref.ID == policy.ID {
 			return dbterror.ErrPlacementPolicyInUse.GenWithStackByArgs(policy.Name)
 		}
-	}
 
-	schemaTables := is.ListTablesWithSpecialAttribute(infoschema.AllPlacementPolicyAttribute)
-	for _, schemaTable := range schemaTables {
-		for _, tblInfo := range schemaTable.TableInfos {
+		for _, tbl := range is.SchemaTables(dbInfo.Name) {
+			tblInfo := tbl.Meta()
 			if err := checkPlacementPolicyNotUsedByTable(tblInfo, policy); err != nil {
 				return err
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -409,7 +394,7 @@ func checkPlacementPolicyNotInUseFromRange(policy *model.PolicyInfo) error {
 	return checkFn(placement.TiDBBundleRangePrefixForMeta)
 }
 
-func getPlacementPolicyDependedObjectsIDs(t *meta.Mutator, policy *model.PolicyInfo) (dbIDs, partIDs []int64, tblInfos []*model.TableInfo, err error) {
+func getPlacementPolicyDependedObjectsIDs(t *meta.Meta, policy *model.PolicyInfo) (dbIDs, partIDs []int64, tblInfos []*model.TableInfo, err error) {
 	schemas, err := t.ListDatabases()
 	if err != nil {
 		return nil, nil, nil, err
@@ -422,10 +407,7 @@ func getPlacementPolicyDependedObjectsIDs(t *meta.Mutator, policy *model.PolicyI
 		if dbInfo.PlacementPolicyRef != nil && dbInfo.PlacementPolicyRef.ID == policy.ID {
 			dbIDs = append(dbIDs, dbInfo.ID)
 		}
-		tables, err := meta.GetTableInfoWithAttributes(
-			t, dbInfo.ID,
-			`"partition":null"`,
-			`"policy_ref_info":null`)
+		tables, err := t.ListTables(dbInfo.ID)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -446,7 +428,7 @@ func getPlacementPolicyDependedObjectsIDs(t *meta.Mutator, policy *model.PolicyI
 }
 
 // CheckPlacementPolicyNotInUseFromMeta export for test.
-func CheckPlacementPolicyNotInUseFromMeta(t *meta.Mutator, policy *model.PolicyInfo) error {
+func CheckPlacementPolicyNotInUseFromMeta(t *meta.Meta, policy *model.PolicyInfo) error {
 	schemas, err := t.ListDatabases()
 	if err != nil {
 		return err
@@ -503,175 +485,4 @@ func GetRangePlacementPolicyName(ctx context.Context, rangeBundleID string) (str
 		return rule.ID[:pos], nil
 	}
 	return "", nil
-}
-
-func buildPolicyInfo(name pmodel.CIStr, options []*ast.PlacementOption) (*model.PolicyInfo, error) {
-	policyInfo := &model.PolicyInfo{PlacementSettings: &model.PlacementSettings{}}
-	policyInfo.Name = name
-	for _, opt := range options {
-		err := SetDirectPlacementOpt(policyInfo.PlacementSettings, opt.Tp, opt.StrValue, opt.UintValue)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return policyInfo, nil
-}
-
-func removeTablePlacement(tbInfo *model.TableInfo) bool {
-	hasPlacementSettings := false
-	if tbInfo.PlacementPolicyRef != nil {
-		tbInfo.PlacementPolicyRef = nil
-		hasPlacementSettings = true
-	}
-
-	if removePartitionPlacement(tbInfo.Partition) {
-		hasPlacementSettings = true
-	}
-
-	return hasPlacementSettings
-}
-
-func removePartitionPlacement(partInfo *model.PartitionInfo) bool {
-	if partInfo == nil {
-		return false
-	}
-
-	hasPlacementSettings := false
-	for i := range partInfo.Definitions {
-		def := &partInfo.Definitions[i]
-		if def.PlacementPolicyRef != nil {
-			def.PlacementPolicyRef = nil
-			hasPlacementSettings = true
-		}
-	}
-	return hasPlacementSettings
-}
-
-func handleDatabasePlacement(ctx sessionctx.Context, dbInfo *model.DBInfo) error {
-	if dbInfo.PlacementPolicyRef == nil {
-		return nil
-	}
-
-	sessVars := ctx.GetSessionVars()
-	if sessVars.PlacementMode == variable.PlacementModeIgnore {
-		dbInfo.PlacementPolicyRef = nil
-		sessVars.StmtCtx.AppendNote(
-			errors.NewNoStackErrorf("Placement is ignored when TIDB_PLACEMENT_MODE is '%s'", variable.PlacementModeIgnore),
-		)
-		return nil
-	}
-
-	var err error
-	dbInfo.PlacementPolicyRef, err = checkAndNormalizePlacementPolicy(ctx, dbInfo.PlacementPolicyRef)
-	return err
-}
-
-func handleTablePlacement(ctx sessionctx.Context, tbInfo *model.TableInfo) error {
-	sessVars := ctx.GetSessionVars()
-	if sessVars.PlacementMode == variable.PlacementModeIgnore && removeTablePlacement(tbInfo) {
-		sessVars.StmtCtx.AppendNote(
-			errors.NewNoStackErrorf("Placement is ignored when TIDB_PLACEMENT_MODE is '%s'", variable.PlacementModeIgnore),
-		)
-		return nil
-	}
-
-	var err error
-	tbInfo.PlacementPolicyRef, err = checkAndNormalizePlacementPolicy(ctx, tbInfo.PlacementPolicyRef)
-	if err != nil {
-		return err
-	}
-
-	if tbInfo.Partition != nil {
-		for i := range tbInfo.Partition.Definitions {
-			partition := &tbInfo.Partition.Definitions[i]
-			partition.PlacementPolicyRef, err = checkAndNormalizePlacementPolicy(ctx, partition.PlacementPolicyRef)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func handlePartitionPlacement(ctx sessionctx.Context, partInfo *model.PartitionInfo) error {
-	sessVars := ctx.GetSessionVars()
-	if sessVars.PlacementMode == variable.PlacementModeIgnore && removePartitionPlacement(partInfo) {
-		sessVars.StmtCtx.AppendNote(
-			errors.NewNoStackErrorf("Placement is ignored when TIDB_PLACEMENT_MODE is '%s'", variable.PlacementModeIgnore),
-		)
-		return nil
-	}
-
-	var err error
-	for i := range partInfo.Definitions {
-		partition := &partInfo.Definitions[i]
-		partition.PlacementPolicyRef, err = checkAndNormalizePlacementPolicy(ctx, partition.PlacementPolicyRef)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func checkAndNormalizePlacementPolicy(ctx sessionctx.Context, placementPolicyRef *model.PolicyRefInfo) (*model.PolicyRefInfo, error) {
-	if placementPolicyRef == nil {
-		return nil, nil
-	}
-
-	if placementPolicyRef.Name.L == defaultPlacementPolicyName {
-		// When policy name is 'default', it means to remove the placement settings
-		return nil, nil
-	}
-
-	policy, ok := sessiontxn.GetTxnManager(ctx).GetTxnInfoSchema().PolicyByName(placementPolicyRef.Name)
-	if !ok {
-		return nil, errors.Trace(infoschema.ErrPlacementPolicyNotExists.GenWithStackByArgs(placementPolicyRef.Name))
-	}
-
-	placementPolicyRef.ID = policy.ID
-	return placementPolicyRef, nil
-}
-
-func checkIgnorePlacementDDL(ctx sessionctx.Context) bool {
-	sessVars := ctx.GetSessionVars()
-	if sessVars.PlacementMode == variable.PlacementModeIgnore {
-		sessVars.StmtCtx.AppendNote(
-			errors.NewNoStackErrorf("Placement is ignored when TIDB_PLACEMENT_MODE is '%s'", variable.PlacementModeIgnore),
-		)
-		return true
-	}
-	return false
-}
-
-// SetDirectPlacementOpt tries to make the PlacementSettings assignments generic for Schema/Table/Partition
-func SetDirectPlacementOpt(placementSettings *model.PlacementSettings, placementOptionType ast.PlacementOptionType, stringVal string, uintVal uint64) error {
-	switch placementOptionType {
-	case ast.PlacementOptionPrimaryRegion:
-		placementSettings.PrimaryRegion = stringVal
-	case ast.PlacementOptionRegions:
-		placementSettings.Regions = stringVal
-	case ast.PlacementOptionFollowerCount:
-		placementSettings.Followers = uintVal
-	case ast.PlacementOptionVoterCount:
-		placementSettings.Voters = uintVal
-	case ast.PlacementOptionLearnerCount:
-		placementSettings.Learners = uintVal
-	case ast.PlacementOptionSchedule:
-		placementSettings.Schedule = stringVal
-	case ast.PlacementOptionConstraints:
-		placementSettings.Constraints = stringVal
-	case ast.PlacementOptionLeaderConstraints:
-		placementSettings.LeaderConstraints = stringVal
-	case ast.PlacementOptionLearnerConstraints:
-		placementSettings.LearnerConstraints = stringVal
-	case ast.PlacementOptionFollowerConstraints:
-		placementSettings.FollowerConstraints = stringVal
-	case ast.PlacementOptionVoterConstraints:
-		placementSettings.VoterConstraints = stringVal
-	case ast.PlacementOptionSurvivalPreferences:
-		placementSettings.SurvivalPreferences = stringVal
-	default:
-		return errors.Trace(errors.New("unknown placement policy option"))
-	}
-	return nil
 }

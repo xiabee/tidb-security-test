@@ -15,7 +15,6 @@
 package executor_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -42,11 +41,11 @@ func TestRecordHistoryStatsAfterAnalyze(t *testing.T) {
 	tk.MustExec("set global tidb_enable_historical_stats = 0")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b varchar(10), index idx(a, b))")
+	tk.MustExec("create table t(a int, b varchar(10))")
 
 	h := dom.StatsHandle()
 	is := dom.InfoSchema()
-	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 
 	// 1. switch off the tidb_enable_historical_stats, and there is no records in table `mysql.stats_history`
@@ -75,7 +74,6 @@ func TestRecordHistoryStatsAfterAnalyze(t *testing.T) {
 	// 3. dump current stats json
 	dumpJSONTable, err := h.DumpStatsToJSON("test", tableInfo.Meta(), nil, true)
 	require.NoError(t, err)
-	dumpJSONTable.Sort()
 	jsOrigin, _ := json.Marshal(dumpJSONTable)
 
 	// 4. get the historical stats json
@@ -90,7 +88,6 @@ func TestRecordHistoryStatsAfterAnalyze(t *testing.T) {
 	}
 	jsonTbl, err := storage.BlocksToJSONTable(data)
 	require.NoError(t, err)
-	jsonTbl.Sort()
 	jsCur, err := json.Marshal(jsonTbl)
 	require.NoError(t, err)
 	// 5. historical stats must be equal to the current stats
@@ -105,12 +102,12 @@ func TestRecordHistoryStatsMetaAfterAnalyze(t *testing.T) {
 	tk.MustExec("set global tidb_enable_historical_stats = 0")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b int, index idx(a, b))")
+	tk.MustExec("create table t(a int, b int)")
 	tk.MustExec("analyze table test.t")
 
 	h := dom.StatsHandle()
 	is := dom.InfoSchema()
-	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 
 	// 1. switch off the tidb_enable_historical_stats, and there is no record in table `mysql.stats_meta_history`
@@ -164,10 +161,10 @@ func TestGCHistoryStatsAfterDropTable(t *testing.T) {
 	tk.MustExec("set global tidb_enable_historical_stats = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b varchar(10), index idx(a, b))")
+	tk.MustExec("create table t(a int, b varchar(10))")
 	tk.MustExec("analyze table test.t")
 	is := dom.InfoSchema()
-	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	// dump historical stats
 	h := dom.StatsHandle()
@@ -204,7 +201,7 @@ func TestAssertHistoricalStatsAfterAlterTable(t *testing.T) {
 	tk.MustExec("create table t(a int, b varchar(10),c int, KEY `idx` (`c`))")
 	tk.MustExec("analyze table test.t")
 	is := dom.InfoSchema()
-	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	// dump historical stats
 	h := dom.StatsHandle()
@@ -250,10 +247,10 @@ func TestGCOutdatedHistoryStats(t *testing.T) {
 	tk.MustExec("set global tidb_enable_historical_stats = 1")
 	tk.MustExec("use test")
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("create table t(a int, b varchar(10), index idx(a, b))")
+	tk.MustExec("create table t(a int, b varchar(10))")
 	tk.MustExec("analyze table test.t")
 	is := dom.InfoSchema()
-	tableInfo, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tableInfo, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	// dump historical stats
 	h := dom.StatsHandle()
@@ -328,7 +325,7 @@ PARTITION p0 VALUES LESS THAN (6)
 
 	tk.MustExec("analyze table t")
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	require.NotNil(t, tbl)
 
@@ -387,7 +384,7 @@ PARTITION p0 VALUES LESS THAN (6)
 	// dump historical stats
 	tk.MustExec("analyze table t")
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	require.NotNil(t, tbl)
 

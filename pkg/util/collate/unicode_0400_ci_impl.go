@@ -29,10 +29,6 @@ const (
 type unicode0400Impl struct {
 }
 
-func (unicode0400Impl) Clone() unicode0400Impl {
-	return unicode0400Impl{}
-}
-
 func (unicode0400Impl) Preprocess(s string) string {
 	return truncateTailingSpace(s)
 }
@@ -63,7 +59,7 @@ func (p *unicodePattern) Compile(patternStr string, escape byte) {
 
 // DoMatch implements WildcardPattern interface.
 func (p *unicodePattern) DoMatch(str string) bool {
-	return stringutil.DoMatchCustomized(str, p.patChars, p.patTypes, func(a, b rune) bool {
+	return stringutil.DoMatchInner(str, p.patChars, p.patTypes, func(a, b rune) bool {
 		if a > 0xFFFF || b > 0xFFFF {
 			return a == b
 		}

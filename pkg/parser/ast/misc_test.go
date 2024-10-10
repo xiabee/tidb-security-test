@@ -134,6 +134,21 @@ import into t from '/file.csv'`
 	}
 }
 
+// test Change Pump or drainer status sql parser
+func TestChangeStmt(t *testing.T) {
+	sql := `change pump to node_state='paused' for node_id '127.0.0.1:8249';
+change drainer to node_state='paused' for node_id '127.0.0.1:8249';
+shutdown;`
+
+	p := parser.New()
+	stmts, _, err := p.Parse(sql, "", "")
+	require.NoError(t, err)
+	for _, stmt := range stmts {
+		stmt.Accept(visitor{})
+		stmt.Accept(visitor1{})
+	}
+}
+
 func TestSensitiveStatement(t *testing.T) {
 	positive := []ast.StmtNode{
 		&ast.SetPwdStmt{},
@@ -298,6 +313,17 @@ func TestTableOptimizerHintRestore(t *testing.T) {
 	runNodeRestoreTest(t, testCases, "select /*+ %s */ * from t1 join t2", extractNodeFunc)
 }
 
+func TestChangeStmtRestore(t *testing.T) {
+	testCases := []NodeRestoreTestCase{
+		{"CHANGE PUMP TO NODE_STATE ='paused' FOR NODE_ID '127.0.0.1:9090'", "CHANGE PUMP TO NODE_STATE ='paused' FOR NODE_ID '127.0.0.1:9090'"},
+		{"CHANGE DRAINER TO NODE_STATE ='paused' FOR NODE_ID '127.0.0.1:9090'", "CHANGE DRAINER TO NODE_STATE ='paused' FOR NODE_ID '127.0.0.1:9090'"},
+	}
+	extractNodeFunc := func(node ast.Node) ast.Node {
+		return node.(*ast.ChangeStmt)
+	}
+	runNodeRestoreTest(t, testCases, "%s", extractNodeFunc)
+}
+
 func TestBRIESecureText(t *testing.T) {
 	testCases := []struct {
 		input   string
@@ -397,29 +423,4 @@ func TestRedactURL(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAddQueryWatchStmtRestore(t *testing.T) {
-	testCases := []NodeRestoreTestCase{
-		{
-			"QUERY WATCH ADD ACTION KILL SQL TEXT EXACT TO 'select * from test.t2'",
-			"QUERY WATCH ADD ACTION = KILL SQL TEXT EXACT TO _UTF8MB4'select * from test.t2'",
-		},
-		{
-			"QUERY WATCH ADD RESOURCE GROUP rg1 SQL TEXT SIMILAR TO 'select * from test.t2'",
-			"QUERY WATCH ADD RESOURCE GROUP `rg1` SQL TEXT SIMILAR TO _UTF8MB4'select * from test.t2'",
-		},
-		{
-			"QUERY WATCH ADD RESOURCE GROUP rg1 ACTION COOLDOWN PLAN DIGEST 'd08bc323a934c39dc41948b0a073725be3398479b6fa4f6dd1db2a9b115f7f57'",
-			"QUERY WATCH ADD RESOURCE GROUP `rg1` ACTION = COOLDOWN PLAN DIGEST _UTF8MB4'd08bc323a934c39dc41948b0a073725be3398479b6fa4f6dd1db2a9b115f7f57'",
-		},
-		{
-			"QUERY WATCH ADD ACTION SWITCH_GROUP(rg1) SQL TEXT EXACT TO 'select * from test.t1'",
-			"QUERY WATCH ADD ACTION = SWITCH_GROUP(`rg1`) SQL TEXT EXACT TO _UTF8MB4'select * from test.t1'",
-		},
-	}
-	extractNodeFunc := func(node ast.Node) ast.Node {
-		return node.(*ast.AddQueryWatchStmt)
-	}
-	runNodeRestoreTest(t, testCases, "%s", extractNodeFunc)
 }

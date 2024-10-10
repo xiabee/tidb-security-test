@@ -15,8 +15,6 @@
 package chunk
 
 import (
-	"unsafe"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/memory"
@@ -34,9 +32,6 @@ type List struct {
 	memTracker  *memory.Tracker // track memory usage.
 	consumedIdx int             // chunk index in "chunks", has been consumed.
 }
-
-// RowPtrSize shows the size of RowPtr
-const RowPtrSize = int(unsafe.Sizeof(RowPtr{}))
 
 // RowPtr is used to get a row from a list.
 // It is only valid for the list that returns it.
@@ -82,7 +77,7 @@ func (l *List) FieldTypes() []*types.FieldType {
 	return l.fieldTypes
 }
 
-// NumRowsOfChunk returns the number of rows of a chunk in the DataInDiskByRows.
+// NumRowsOfChunk returns the number of rows of a chunk in the ListInDisk.
 func (l *List) NumRowsOfChunk(chkID int) int {
 	return l.chunks[chkID].NumRows()
 }

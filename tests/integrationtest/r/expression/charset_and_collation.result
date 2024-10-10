@@ -585,6 +585,7 @@ drop table if exists t;
 create table t(name char(255) primary key, b int, c int, index idx(name), unique index uidx(name));
 insert into t values("aaaa", 1, 1), ("bbb", 2, 2), ("ccc", 3, 3);
 admin check table t;
+
 drop table if exists t;
 set tidb_enable_clustered_index=ON;
 create table t(d double primary key, a int, name varchar(255), index idx(name(2)), index midx(a, name));
@@ -652,6 +653,7 @@ a	a
 A	A
 update t set a = 'B';
 admin check table t;
+
 drop table if exists t;
 set tidb_enable_clustered_index=ON;
 create table t(a int, b char(10) collate utf8mb4_bin, c char(10) collate utf8mb4_general_ci,d varchar(10) collate utf8mb4_bin, e varchar(10) collate utf8mb4_general_ci, f char(10) collate utf8mb4_unicode_ci, g varchar(10) collate utf8mb4_unicode_ci, primary key(a, b, c, d, e, f, g), key a(a), unique key ua(a), key b(b), unique key ub(b), key c(c), unique key uc(c),key d(d), unique key ud(d),key e(e), unique key ue(e), key f(f), key g(g), unique key uf(f), unique key ug(g));
@@ -742,9 +744,7 @@ select * from t use index(ue);
 a	b	c	d	e	f	g	h	i
 1	啊	啊	啊  	啊  	啊	啊  	🐸	🐸
 admin check table t;
-admin recover index t a;
-ADDED_COUNT	SCAN_COUNT
-0	1
+
 alter table t add column n char(10) COLLATE utf8mb4_unicode_ci;
 alter table t add index n(n);
 update t set n = '吧';
@@ -755,6 +755,7 @@ select * from t use index(n);
 a	b	c	d	e	f	g	h	i	n
 1	啊	啊	啊  	啊  	啊	啊  	🐸	🐸	吧
 admin check table t;
+
 drop table if exists t;
 create table t (a varchar(255) COLLATE utf8_general_ci primary key clustered, b int) partition by range columns(a) (partition p0 values less than ('0'), partition p1 values less than MAXVALUE);
 alter table t add index b(b);
@@ -766,6 +767,7 @@ select * from t use index();
 a	b
 0	1
 admin check table t;
+
 set tidb_enable_clustered_index=default;
 drop table if exists t;
 set tidb_enable_clustered_index=ON;
@@ -821,7 +823,7 @@ select /*+ inl_merge_join(t2) */ t1.b, t2.b from t1 join t2 where t1.b=t2.b;
 b	b
 a	A
 Level	Code	Message
-Warning	1815	The INDEX MERGE JOIN hint is deprecated for usage, try other hints.
+Warning	1815	Optimizer Hint /*+ INL_MERGE_JOIN(t2) */ is inapplicable
 drop table if exists a, b;
 create table a(i int, k varbinary(40), v int, primary key(i, k) clustered);
 create table b(i int, k varchar(40), v int, primary key(i, k) clustered);
@@ -878,6 +880,7 @@ select * from t use index(idx);
 k	v
 01233	1
 admin check table t;
+
 drop table if exists t;
 CREATE TABLE t (`COL1` tinyblob NOT NULL,  `COL2` binary(1) NOT NULL,  `COL3` bigint(11) NOT NULL,  PRIMARY KEY (`COL1`(5),`COL2`,`COL3`) /*T![clustered_index] CLUSTERED */);
 insert into t values(0x1E,0xEC,6966939640596047133);
@@ -1991,71 +1994,6 @@ LOCATE('bar' collate utf8mb4_0900_ai_ci, 'FOOBAR' collate utf8mb4_0900_ai_ci)
 select 'FOOBAR' collate utf8mb4_0900_ai_ci REGEXP 'foo.*' collate utf8mb4_0900_ai_ci;
 'FOOBAR' collate utf8mb4_0900_ai_ci REGEXP 'foo.*' collate utf8mb4_0900_ai_ci
 1
-set names utf8mb4 collate utf8mb4_0900_ai_ci;
-select reverse(cast('[]' as json)) between 'W' and 'm';
-reverse(cast('[]' as json)) between 'W' and 'm'
-1
-select lower(cast('[]' as json)) between 'W' and 'm';
-lower(cast('[]' as json)) between 'W' and 'm'
-1
-select upper(cast('[]' as json)) between 'W' and 'm';
-upper(cast('[]' as json)) between 'W' and 'm'
-1
-select substring_index(cast('[]' as json), '.', 1) between 'W' and 'm';
-substring_index(cast('[]' as json), '.', 1) between 'W' and 'm'
-1
-select trim(cast('[]' as json)) between 'W' and 'm';
-trim(cast('[]' as json)) between 'W' and 'm'
-1
-select quote(cast('[]' as json)) between "'W'" and "'m'";
-quote(cast('[]' as json)) between "'W'" and "'m'"
-1
-select concat(cast('[]' as json), '1') between 'W' and 'm';
-concat(cast('[]' as json), '1') between 'W' and 'm'
-1
-select concat('1', cast('[]' as json)) between '1W' and '1m';
-concat('1', cast('[]' as json)) between '1W' and '1m'
-1
-select concat_ws(cast('[]' as json), '1', '1') between '1W' and '1m';
-concat_ws(cast('[]' as json), '1', '1') between '1W' and '1m'
-1
-select concat_ws('1', cast('[]' as json)) between 'W' and 'm';
-concat_ws('1', cast('[]' as json)) between 'W' and 'm'
-1
-select elt(1, cast('[]' as json), '[]') between 'W' and 'm';
-elt(1, cast('[]' as json), '[]') between 'W' and 'm'
-1
-select elt(2, cast('[]' as json), '[]') between 'W' and 'm';
-elt(2, cast('[]' as json), '[]') between 'W' and 'm'
-1
-select make_set(1, cast('[]' as json), '[]') between 'W' and 'm';
-make_set(1, cast('[]' as json), '[]') between 'W' and 'm'
-1
-select make_set(2, cast('[]' as json), '[]') between 'W' and 'm';
-make_set(2, cast('[]' as json), '[]') between 'W' and 'm'
-1
-select replace(cast('[]' as json), '[]', '[]') between 'W' and 'm';
-replace(cast('[]' as json), '[]', '[]') between 'W' and 'm'
-1
-select replace('[]', '[]', cast('[]' as json)) between 'W' and 'm';
-replace('[]', '[]', cast('[]' as json)) between 'W' and 'm'
-0
-select insert(cast('[]' as json), 0, 100, '[]') between 'W' and 'm';
-insert(cast('[]' as json), 0, 100, '[]') between 'W' and 'm'
-1
-select insert('[]', 0, 100, cast('[]' as json)) between 'W' and 'm';
-insert('[]', 0, 100, cast('[]' as json)) between 'W' and 'm'
-0
-select substr(cast('[]' as json), 1) between 'W' and 'm';
-substr(cast('[]' as json), 1) between 'W' and 'm'
-1
-select repeat(cast('[]' as json), 10) between 'W' and 'm';
-repeat(cast('[]' as json), 10) between 'W' and 'm'
-1
-select export_set(3,cast('[]' as json),'2','-',8) between 'W' and 'm';
-export_set(3,cast('[]' as json),'2','-',8) between 'W' and 'm'
-1
-set names default;
 select cast(compress('b') as char);
 cast(compress('b') as char)
 NULL

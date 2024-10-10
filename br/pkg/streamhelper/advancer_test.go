@@ -19,7 +19,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper/config"
 	"github.com/pingcap/tidb/br/pkg/streamhelper/spans"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/util/redact"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
@@ -213,7 +212,7 @@ func TestGCServiceSafePoint(t *testing.T) {
 	req.Eventually(func() bool {
 		env.fakeCluster.mu.Lock()
 		defer env.fakeCluster.mu.Unlock()
-		return env.serviceGCSafePoint != 0 && env.serviceGCSafePointDeleted
+		return env.serviceGCSafePoint == 0
 	}, 3*time.Second, 100*time.Millisecond)
 }
 
@@ -274,20 +273,21 @@ func TestClearCache(t *testing.T) {
 		return nil
 	}
 	failedStoreID := uint64(0)
-	hasFailed := atomic.NewBool(false)
+	hasFailed := false
 	for _, s := range c.stores {
 		s.clientMu.Lock()
-		sid := s.GetID()
 		s.onGetRegionCheckpoint = func(glftrr *logbackup.GetLastFlushTSOfRegionRequest) error {
-			// mark one store failed is enough
-			if hasFailed.CompareAndSwap(false, true) {
-				// mark this store cache cleared
-				failedStoreID = sid
+			// mark this store cache cleared
+			failedStoreID = s.GetID()
+			if !hasFailed {
+				hasFailed = true
 				return errors.New("failed to get checkpoint")
 			}
 			return nil
 		}
 		s.clientMu.Unlock()
+		// mark one store failed is enough
+		break
 	}
 	env := newTestEnv(c, t)
 	adv := streamhelper.NewCheckpointAdvancer(env)
@@ -494,11 +494,11 @@ func TestEnableCheckPointLimit(t *testing.T) {
 		Ranges: rngs,
 	}
 	log.Info("Start Time:", zap.Uint64("StartTs", env.task.Info.StartTs))
-
 	adv := streamhelper.NewCheckpointAdvancer(env)
 	adv.UpdateConfigWith(func(c *config.Config) {
 		c.CheckPointLagLimit = 1 * time.Minute
 	})
+
 	c.advanceClusterTimeBy(1 * time.Minute)
 	c.advanceCheckpointBy(1 * time.Minute)
 	adv.StartTaskListener(ctx)
@@ -517,7 +517,6 @@ func TestCheckPointLagged(t *testing.T) {
 	c.splitAndScatter("01", "02", "022", "023", "033", "04", "043")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	env := newTestEnv(c, t)
 	rngs := env.ranges
 	if len(rngs) == 0 {
@@ -822,89 +821,4 @@ func TestSubscriptionPanic(t *testing.T) {
 	}
 	cancel()
 	wg.Wait()
-}
-
-func TestGCCheckpoint(t *testing.T) {
-	c := createFakeCluster(t, 4, false)
-	defer func() {
-		fmt.Println(c)
-	}()
-	c.splitAndScatter("01", "02", "022", "023", "033", "04", "043")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	env := newTestEnv(c, t)
-	rngs := env.ranges
-	if len(rngs) == 0 {
-		rngs = []kv.KeyRange{{}}
-	}
-	env.task = streamhelper.TaskEvent{
-		Type: streamhelper.EventAdd,
-		Name: "whole",
-		Info: &backup.StreamBackupTaskInfo{
-			Name:    "whole",
-			StartTs: oracle.GoTimeToTS(oracle.GetTimeFromTS(0)),
-		},
-		Ranges: rngs,
-	}
-	log.Info("Start Time:", zap.Uint64("StartTs", env.task.Info.StartTs))
-
-	adv := streamhelper.NewCheckpointAdvancer(env)
-	adv.StartTaskListener(ctx)
-	c.advanceClusterTimeBy(1 * time.Minute)
-	c.advanceCheckpointBy(1 * time.Minute)
-	env.PauseTask(ctx, "whole")
-	c.serviceGCSafePoint = oracle.GoTimeToTS(oracle.GetTimeFromTS(0).Add(2 * time.Minute))
-	env.ResumeTask(ctx)
-	require.ErrorContains(t, adv.OnTick(ctx), "greater than the target")
-}
-
-func TestRedactBackend(t *testing.T) {
-	info := new(backup.StreamBackupTaskInfo)
-	info.Name = "test"
-	info.Storage = &backup.StorageBackend{
-		Backend: &backup.StorageBackend_S3{
-			S3: &backup.S3{
-				Endpoint:        "http://",
-				Bucket:          "test",
-				Prefix:          "test",
-				AccessKey:       "12abCD!@#[]{}?/\\",
-				SecretAccessKey: "12abCD!@#[]{}?/\\",
-			},
-		},
-	}
-
-	redacted := redact.TaskInfoRedacted{Info: info}
-	require.Equal(t, "storage:<s3:<endpoint:\"http://\" bucket:\"test\" prefix:\"test\" access_key:\"[REDACTED]\" secret_access_key:\"[REDACTED]\" > > name:\"test\" ", redacted.String())
-
-	info.Storage = &backup.StorageBackend{
-		Backend: &backup.StorageBackend_Gcs{
-			Gcs: &backup.GCS{
-				Endpoint:        "http://",
-				Bucket:          "test",
-				Prefix:          "test",
-				CredentialsBlob: "12abCD!@#[]{}?/\\",
-			},
-		},
-	}
-	redacted = redact.TaskInfoRedacted{Info: info}
-	require.Equal(t, "storage:<gcs:<endpoint:\"http://\" bucket:\"test\" prefix:\"test\" CredentialsBlob:\"[REDACTED]\" > > name:\"test\" ", redacted.String())
-
-	info.Storage = &backup.StorageBackend{
-		Backend: &backup.StorageBackend_AzureBlobStorage{
-			AzureBlobStorage: &backup.AzureBlobStorage{
-				Endpoint:  "http://",
-				Bucket:    "test",
-				Prefix:    "test",
-				SharedKey: "12abCD!@#[]{}?/\\",
-				AccessSig: "12abCD!@#[]{}?/\\",
-				EncryptionKey: &backup.AzureCustomerKey{
-					EncryptionKey:       "12abCD!@#[]{}?/\\",
-					EncryptionKeySha256: "12abCD!@#[]{}?/\\",
-				},
-			},
-		},
-	}
-	redacted = redact.TaskInfoRedacted{Info: info}
-	require.Equal(t, "storage:<azure_blob_storage:<endpoint:\"http://\" bucket:\"test\" prefix:\"test\" shared_key:\"[REDACTED]\" access_sig:\"[REDACTED]\" encryption_key:<[REDACTED]> > > name:\"test\" ", redacted.String())
 }

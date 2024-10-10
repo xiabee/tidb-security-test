@@ -23,7 +23,7 @@ import (
 	"unsafe"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/types"
 	data "github.com/pingcap/tidb/pkg/types"
@@ -40,17 +40,16 @@ var (
 
 // First byte in the encoded value which specifies the encoding type.
 const (
-	NilFlag           byte = 0
-	BytesFlag         byte = 1
-	CompactBytesFlag  byte = 2
-	IntFlag           byte = 3
-	UintFlag          byte = 4
-	FloatFlag         byte = 5
-	DecimalFlag       byte = 6
-	VarintFlag        byte = 8
-	VaruintFlag       byte = 9
-	JSONFlag          byte = 10
-	VectorFloat32Flag byte = 20
+	NilFlag          byte = 0
+	BytesFlag        byte = 1
+	CompactBytesFlag byte = 2
+	IntFlag          byte = 3
+	UintFlag         byte = 4
+	FloatFlag        byte = 5
+	DecimalFlag      byte = 6
+	VarintFlag       byte = 8
+	VaruintFlag      byte = 9
+	JSONFlag         byte = 10
 )
 
 func bytesToU32Slice(b []byte) []uint32 {
@@ -347,12 +346,10 @@ func appendDatumForChecksum(loc *time.Location, buf []byte, dat *data.Datum, typ
 		out = binary.LittleEndian.AppendUint64(buf, dat.GetMysqlSet().Value)
 	case mysql.TypeBit:
 		// ticdc transforms a bit value as the following way, no need to handle truncate error here.
-		v, _ := dat.GetBinaryLiteral().ToInt(data.DefaultStmtNoWarningContext)
+		v, _ := dat.GetBinaryLiteral().ToInt(nil)
 		out = binary.LittleEndian.AppendUint64(buf, v)
 	case mysql.TypeJSON:
 		out = appendLengthValue(buf, []byte(dat.GetMysqlJSON().String()))
-	case mysql.TypeTiDBVectorFloat32:
-		out = dat.GetVectorFloat32().SerializeTo(buf)
 	case mysql.TypeNull, mysql.TypeGeometry:
 		out = buf
 	default:

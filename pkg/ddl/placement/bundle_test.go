@@ -21,11 +21,10 @@ import (
 	"testing"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/stretchr/testify/require"
-	pd "github.com/tikv/pd/client/http"
 )
 
 func TestEmpty(t *testing.T) {
@@ -38,7 +37,7 @@ func TestEmpty(t *testing.T) {
 	bundle = &Bundle{ID: GroupID(1), Override: true}
 	require.False(t, bundle.IsEmpty())
 
-	bundle = &Bundle{ID: GroupID(1), Rules: []*pd.Rule{{ID: "434"}}}
+	bundle = &Bundle{ID: GroupID(1), Rules: []*Rule{{ID: "434"}}}
 	require.False(t, bundle.IsEmpty())
 
 	bundle = &Bundle{ID: GroupID(1), Index: 1, Override: true}
@@ -46,14 +45,14 @@ func TestEmpty(t *testing.T) {
 }
 
 func TestCloneBundle(t *testing.T) {
-	bundle := &Bundle{ID: GroupID(1), Rules: []*pd.Rule{{ID: "434"}}}
+	bundle := &Bundle{ID: GroupID(1), Rules: []*Rule{{ID: "434"}}}
 
 	newBundle := bundle.Clone()
 	newBundle.ID = GroupID(2)
-	newBundle.Rules[0] = &pd.Rule{ID: "121"}
+	newBundle.Rules[0] = &Rule{ID: "121"}
 
-	require.Equal(t, &Bundle{ID: GroupID(1), Rules: []*pd.Rule{{ID: "434"}}}, bundle)
-	require.Equal(t, &Bundle{ID: GroupID(2), Rules: []*pd.Rule{{ID: "121"}}}, newBundle)
+	require.Equal(t, &Bundle{ID: GroupID(1), Rules: []*Rule{{ID: "434"}}}, bundle)
+	require.Equal(t, &Bundle{ID: GroupID(2), Rules: []*Rule{{ID: "121"}}}, newBundle)
 }
 
 func TestObjectID(t *testing.T) {
@@ -93,14 +92,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "only leader",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "12",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"bj"},
 							},
 						},
@@ -114,14 +113,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "no leader",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "12",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Voter,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"bj"},
 							},
 						},
@@ -135,14 +134,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "voter and leader",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "11",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"sh"},
 							},
 						},
@@ -150,11 +149,11 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 					},
 					{
 						ID:   "12",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Voter,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"bj"},
 							},
 						},
@@ -168,14 +167,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "wrong label key",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "11",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "fake",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"sh"},
 							},
 						},
@@ -189,14 +188,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "wrong operator",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "11",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.NotIn,
+								Op:     NotIn,
 								Values: []string{"sh"},
 							},
 						},
@@ -210,14 +209,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "leader have multi values",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "11",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"sh", "bj"},
 							},
 						},
@@ -231,14 +230,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "irrelvant rules",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "15",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    EngineLabelKey,
-								Op:     pd.NotIn,
+								Op:     NotIn,
 								Values: []string{EngineLabelTiFlash},
 							},
 						},
@@ -246,11 +245,11 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 					},
 					{
 						ID:   "14",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "disk",
-								Op:     pd.NotIn,
+								Op:     NotIn,
 								Values: []string{"ssd", "hdd"},
 							},
 						},
@@ -258,11 +257,11 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 					},
 					{
 						ID:   "13",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"bj"},
 							},
 						},
@@ -276,14 +275,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "multi leaders 1",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "16",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"sh"},
 							},
 						},
@@ -297,14 +296,14 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 			name: "multi leaders 2",
 			bundle: &Bundle{
 				ID: GroupID(1),
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "17",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"sh"},
 							},
 						},
@@ -312,11 +311,11 @@ func TestGetLeaderDCByBundle(t *testing.T) {
 					},
 					{
 						ID:   "18",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
+						Role: Leader,
+						Constraints: Constraints{
 							{
 								Key:    "zone",
-								Op:     pd.In,
+								Op:     In,
 								Values: []string{"bj"},
 							},
 						},
@@ -343,13 +342,13 @@ func TestString(t *testing.T) {
 		ID: GroupID(1),
 	}
 
-	rules1, err := newRules(pd.Voter, 3, `["+zone=sh", "+zone=sh"]`)
+	rules1, err := newRules(Voter, 3, `["+zone=sh", "+zone=sh"]`)
 	require.NoError(t, err)
-	rules2, err := newRules(pd.Voter, 4, `["-zone=sh", "+zone=bj"]`)
+	rules2, err := newRules(Voter, 4, `["-zone=sh", "+zone=bj"]`)
 	require.NoError(t, err)
 	bundle.Rules = append(rules1, rules2...)
 
-	require.Equal(t, "{\"group_id\":\"TiDB_DDL_1\",\"group_index\":0,\"group_override\":false,\"rules\":[{\"group_id\":\"\",\"id\":\"\",\"start_key\":\"\",\"end_key\":\"\",\"role\":\"voter\",\"is_witness\":false,\"count\":3,\"label_constraints\":[{\"key\":\"zone\",\"op\":\"in\",\"values\":[\"sh\"]}]},{\"group_id\":\"\",\"id\":\"\",\"start_key\":\"\",\"end_key\":\"\",\"role\":\"voter\",\"is_witness\":false,\"count\":4,\"label_constraints\":[{\"key\":\"zone\",\"op\":\"notIn\",\"values\":[\"sh\"]},{\"key\":\"zone\",\"op\":\"in\",\"values\":[\"bj\"]}]}]}", bundle.String())
+	require.Equal(t, "{\"group_id\":\"TiDB_DDL_1\",\"group_index\":0,\"group_override\":false,\"rules\":[{\"group_id\":\"\",\"id\":\"\",\"start_key\":\"\",\"end_key\":\"\",\"role\":\"voter\",\"count\":3,\"label_constraints\":[{\"key\":\"zone\",\"op\":\"in\",\"values\":[\"sh\"]}]},{\"group_id\":\"\",\"id\":\"\",\"start_key\":\"\",\"end_key\":\"\",\"role\":\"voter\",\"count\":4,\"label_constraints\":[{\"key\":\"zone\",\"op\":\"notIn\",\"values\":[\"sh\"]},{\"key\":\"zone\",\"op\":\"in\",\"values\":[\"bj\"]}]}]}", bundle.String())
 
 	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/placement/MockMarshalFailure", `return(true)`))
 	defer func() {
@@ -373,7 +372,7 @@ func TestNewBundleFromOptions(t *testing.T) {
 	type TestCase struct {
 		name   string
 		input  *model.PlacementSettings
-		output []*pd.Rule
+		output []*Rule
 		err    error
 	}
 	var tests []TestCase
@@ -381,8 +380,8 @@ func TestNewBundleFromOptions(t *testing.T) {
 	tests = append(tests, TestCase{
 		name:  "empty 1",
 		input: &model.PlacementSettings{},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 3, NewConstraintsDirect()),
+		output: []*Rule{
+			NewRule(Voter, 3, NewConstraintsDirect()),
 		},
 	})
 
@@ -406,12 +405,12 @@ func TestNewBundleFromOptions(t *testing.T) {
 			PrimaryRegion: "us",
 			Regions:       "us",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
 		},
 	})
@@ -423,14 +422,14 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Regions:       "us",
 			Schedule:      "majority_in_primary",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Voter, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 1, NewConstraintsDirect()),
+			NewRule(Voter, 1, NewConstraintsDirect()),
 		},
 	})
 
@@ -441,12 +440,12 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Regions:       "bj,sh,us",
 			Followers:     1,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "bj", "sh"),
+			NewRule(Voter, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "bj", "sh"),
 			)),
 		},
 	})
@@ -457,8 +456,8 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Followers: 2,
 			Schedule:  "even",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 3, NewConstraintsDirect()),
+		output: []*Rule{
+			NewRule(Voter, 3, NewConstraintsDirect()),
 		},
 	})
 
@@ -468,8 +467,8 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Followers: 2,
 			Schedule:  "majority_in_primary",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 3, NewConstraintsDirect()),
+		output: []*Rule{
+			NewRule(Voter, 3, NewConstraintsDirect()),
 		},
 	})
 
@@ -517,15 +516,15 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Regions:       "sh,us",
 			Followers:     5,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 3, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "sh"),
+			NewRule(Voter, 3, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "sh"),
 			)),
 		},
 	})
@@ -541,15 +540,15 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Followers:     4,
 			Schedule:      "majority_in_primary",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "sh"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "sh"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "sh"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "sh"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "bj"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "bj"),
 			)),
 		},
 	})
@@ -559,12 +558,12 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			Constraints: "[+region=us]",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
 		},
 	})
@@ -576,15 +575,15 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Followers:   2,
 			Learners:    2,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Voter, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
-			NewRule(pd.Learner, 2, NewConstraintsDirect(
-				NewConstraintDirect("region", pd.In, "us"),
+			NewRule(Learner, 2, NewConstraintsDirect(
+				NewConstraintDirect("region", In, "us"),
 			)),
 		},
 	})
@@ -594,9 +593,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			LeaderConstraints: "[+region=as]",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "as"))),
-			NewRule(pd.Voter, 2, NewConstraintsDirect()),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "as"))),
+			NewRule(Voter, 2, NewConstraintsDirect()),
 		},
 	})
 
@@ -606,9 +605,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 			LeaderConstraints: "[+region=as]",
 			Followers:         4,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "as"))),
-			NewRule(pd.Voter, 4, NewConstraintsDirect()),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "as"))),
+			NewRule(Voter, 4, NewConstraintsDirect()),
 		},
 	})
 	tests = append(tests, TestCase{
@@ -617,9 +616,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 			LeaderConstraints:   "[+region=as]",
 			FollowerConstraints: `{"+region=us": 2}`,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "as"))),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us"))),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "as"))),
+			NewRule(Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", In, "us"))),
 		},
 	})
 
@@ -629,9 +628,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 			LeaderConstraints:   "[+region=as]",
 			FollowerConstraints: "[-region=us]",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "as"))),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.NotIn, "us"))),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "as"))),
+			NewRule(Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", NotIn, "us"))),
 		},
 	})
 
@@ -650,9 +649,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Followers:           2,
 			FollowerConstraints: "[+region=bj]",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect()),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "bj"))),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect()),
+			NewRule(Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", In, "bj"))),
 		},
 	})
 
@@ -733,9 +732,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			FollowerConstraints: "{+disk=ssd: 1}",
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect()),
-			NewRule(pd.Voter, 1, NewConstraintsDirect(NewConstraintDirect("disk", pd.In, "ssd"))),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect()),
+			NewRule(Voter, 1, NewConstraintsDirect(NewConstraintDirect("disk", In, "ssd"))),
 		},
 	})
 
@@ -753,10 +752,10 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			LearnerConstraints: `{"+region=us": 2}`,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Leader, 1, NewConstraintsDirect()),
-			NewRule(pd.Voter, 2, NewConstraintsDirect()),
-			NewRule(pd.Learner, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us"))),
+		output: []*Rule{
+			NewRule(Leader, 1, NewConstraintsDirect()),
+			NewRule(Voter, 2, NewConstraintsDirect()),
+			NewRule(Learner, 2, NewConstraintsDirect(NewConstraintDirect("region", In, "us"))),
 		},
 	})
 
@@ -774,8 +773,8 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			Constraints: `{"+region=us": 3}`,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 3, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us"))),
+		output: []*Rule{
+			NewRule(Voter, 3, NewConstraintsDirect(NewConstraintDirect("region", In, "us"))),
 		},
 	})
 
@@ -784,10 +783,10 @@ func TestNewBundleFromOptions(t *testing.T) {
 		input: &model.PlacementSettings{
 			Constraints: `{ "+region=us-east-1":2, "+region=us-east-2": 2, "+region=us-west-1": 1}`,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us-east-1"))),
-			NewRule(pd.Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us-east-2"))),
-			NewRule(pd.Voter, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us-west-1"))),
+		output: []*Rule{
+			NewRule(Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", In, "us-east-1"))),
+			NewRule(Voter, 2, NewConstraintsDirect(NewConstraintDirect("region", In, "us-east-2"))),
+			NewRule(Voter, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "us-west-1"))),
 		},
 	})
 
@@ -797,9 +796,9 @@ func TestNewBundleFromOptions(t *testing.T) {
 			Constraints:        `{"+region=us-east": 3}`,
 			LearnerConstraints: `{"+region=us-west": 1}`,
 		},
-		output: []*pd.Rule{
-			NewRule(pd.Voter, 3, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us-east"))),
-			NewRule(pd.Learner, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, "us-west"))),
+		output: []*Rule{
+			NewRule(Voter, 3, NewConstraintsDirect(NewConstraintDirect("region", In, "us-east"))),
+			NewRule(Learner, 1, NewConstraintsDirect(NewConstraintDirect("region", In, "us-west"))),
 		},
 	})
 
@@ -820,7 +819,7 @@ func TestResetBundleWithSingleRule(t *testing.T) {
 		ID: GroupID(1),
 	}
 
-	rules, err := newRules(pd.Voter, 3, `["+zone=sh", "+zone=sh"]`)
+	rules, err := newRules(Voter, 3, `["+zone=sh", "+zone=sh"]`)
 	require.NoError(t, err)
 	bundle.Rules = rules
 
@@ -937,15 +936,15 @@ func TestTidy(t *testing.T) {
 		ID: GroupID(1),
 	}
 
-	rules0, err := newRules(pd.Voter, 1, `["+zone=sh", "+zone=sh"]`)
+	rules0, err := newRules(Voter, 1, `["+zone=sh", "+zone=sh"]`)
 	require.NoError(t, err)
 	require.Len(t, rules0, 1)
 	rules0[0].Count = 0 // test prune useless rules
 
-	rules1, err := newRules(pd.Voter, 4, `["-zone=sh", "+zone=bj"]`)
+	rules1, err := newRules(Voter, 4, `["-zone=sh", "+zone=bj"]`)
 	require.NoError(t, err)
 	require.Len(t, rules1, 1)
-	rules2, err := newRules(pd.Voter, 0, `{"-zone=sh,+zone=bj": 4}}`)
+	rules2, err := newRules(Voter, 0, `{"-zone=sh,+zone=bj": 4}}`)
 	require.NoError(t, err)
 	bundle.Rules = append(bundle.Rules, rules0...)
 	bundle.Rules = append(bundle.Rules, rules1...)
@@ -956,23 +955,23 @@ func TestTidy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, bundle.Rules, 1)
 	require.Equal(t, "0", bundle.Rules[0].ID)
-	require.Len(t, bundle.Rules[0].LabelConstraints, 3)
-	require.Equal(t, pd.LabelConstraint{
-		Op:     pd.NotIn,
+	require.Len(t, bundle.Rules[0].Constraints, 3)
+	require.Equal(t, Constraint{
+		Op:     NotIn,
 		Key:    EngineLabelKey,
 		Values: []string{EngineLabelTiFlash},
-	}, bundle.Rules[0].LabelConstraints[2])
+	}, bundle.Rules[0].Constraints[2])
 
 	// merge
-	rules3, err := newRules(pd.Follower, 4, "")
+	rules3, err := newRules(Follower, 4, "")
 	require.NoError(t, err)
 	require.Len(t, rules3, 1)
 
-	rules4, err := newRules(pd.Follower, 5, "")
+	rules4, err := newRules(Follower, 5, "")
 	require.NoError(t, err)
 	require.Len(t, rules4, 1)
 
-	rules0[0].Role = pd.Voter
+	rules0[0].Role = Voter
 	bundle.Rules = append(bundle.Rules, rules0...)
 	bundle.Rules = append(bundle.Rules, rules3...)
 	bundle.Rules = append(bundle.Rules, rules4...)
@@ -986,13 +985,13 @@ func TestTidy(t *testing.T) {
 		require.Equal(t, "0", bundle.Rules[0].ID)
 		require.Equal(t, "1", bundle.Rules[1].ID)
 		require.Equal(t, 9, bundle.Rules[1].Count)
-		require.Equal(t, []pd.LabelConstraint{
+		require.Equal(t, Constraints{
 			{
-				Op:     pd.NotIn,
+				Op:     NotIn,
 				Key:    EngineLabelKey,
 				Values: []string{EngineLabelTiFlash},
 			},
-		}, bundle.Rules[1].LabelConstraints)
+		}, bundle.Rules[1].Constraints)
 		require.Equal(t, []string{"zone", "host"}, bundle.Rules[1].LocationLabels)
 	}
 	err = bundle.Tidy()
@@ -1010,8 +1009,8 @@ func TestTidy(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, bundle, bundle2)
 
-	bundle.Rules[1].LabelConstraints = append(bundle.Rules[1].LabelConstraints, pd.LabelConstraint{
-		Op:     pd.In,
+	bundle.Rules[1].Constraints = append(bundle.Rules[1].Constraints, Constraint{
+		Op:     In,
 		Key:    EngineLabelKey,
 		Values: []string{EngineLabelTiFlash},
 	})
@@ -1027,40 +1026,40 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Empty bundle",
 			bundle: Bundle{
-				Rules: []*pd.Rule{},
+				Rules: []*Rule{},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{},
+				Rules: []*Rule{},
 			},
 		},
 		{
 			name: "Rules with empty constraints are merged",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
-						ID:               "1",
-						Role:             pd.Leader,
-						Count:            1,
-						LabelConstraints: []pd.LabelConstraint{},
-						LocationLabels:   []string{"region"},
+						ID:             "1",
+						Role:           Leader,
+						Count:          1,
+						Constraints:    Constraints{},
+						LocationLabels: []string{"region"},
 					},
 					{
-						ID:               "2",
-						Role:             pd.Voter,
-						Count:            2,
-						LabelConstraints: []pd.LabelConstraint{},
-						LocationLabels:   []string{"region"},
+						ID:             "2",
+						Role:           Voter,
+						Count:          2,
+						Constraints:    Constraints{},
+						LocationLabels: []string{"region"},
 					},
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
-						ID:               "0",
-						Role:             pd.Voter,
-						Count:            3,
-						LabelConstraints: []pd.LabelConstraint{},
-						LocationLabels:   []string{"region"},
+						ID:             "0",
+						Role:           Voter,
+						Count:          3,
+						Constraints:    Constraints{},
+						LocationLabels: []string{"region"},
 					},
 				},
 			},
@@ -1068,21 +1067,21 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints are merged, Leader + Follower",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          2,
 						LocationLabels: []string{"region"},
@@ -1090,12 +1089,12 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          3,
 						LocationLabels: []string{"region"},
@@ -1106,21 +1105,21 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints are merged, Leader + Voter",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          2,
 						LocationLabels: []string{"region"},
@@ -1128,12 +1127,12 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          3,
 						LocationLabels: []string{"region"},
@@ -1144,30 +1143,30 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints and role are merged,  Leader + Follower + Voter",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1175,12 +1174,12 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          3,
 						LocationLabels: []string{"region"},
@@ -1191,39 +1190,39 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints and role are merged,  Leader + Follower + Voter + Learner",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "4",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          2,
 						LocationLabels: []string{"region"},
@@ -1231,21 +1230,21 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          3,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          2,
 						LocationLabels: []string{"region"},
@@ -1256,39 +1255,39 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints and role are merged,  Leader + Follower + Learner | Follower",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "4",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1296,30 +1295,30 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          2,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1330,39 +1329,39 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with same constraints and role are merged,  Leader + Follower + Learner | Voter",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "4",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1370,39 +1369,39 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "1",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Learner,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Learner,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "3",
-						Role: pd.Voter,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Voter,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1413,21 +1412,21 @@ func TestTidy2(t *testing.T) {
 		{
 			name: "Rules with different constraints are kept separate",
 			bundle: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "1",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "2",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1435,21 +1434,21 @@ func TestTidy2(t *testing.T) {
 				},
 			},
 			expected: Bundle{
-				Rules: []*pd.Rule{
+				Rules: []*Rule{
 					{
 						ID:   "0",
-						Role: pd.Leader,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"1"}},
+						Role: Leader,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"1"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
 					},
 					{
 						ID:   "1",
-						Role: pd.Follower,
-						LabelConstraints: []pd.LabelConstraint{
-							{Op: pd.In, Key: "rack", Values: []string{"2"}},
+						Role: Follower,
+						Constraints: Constraints{
+							{Op: In, Key: "rack", Values: []string{"2"}},
 						},
 						Count:          1,
 						LocationLabels: []string{"region"},
@@ -1469,8 +1468,8 @@ func TestTidy2(t *testing.T) {
 			for i, rule := range tt.bundle.Rules {
 				expectedRule := tt.expected.Rules[i]
 				// Tiflash is always excluded from the constraints.
-				AddConstraint(&expectedRule.LabelConstraints, pd.LabelConstraint{
-					Op:     pd.NotIn,
+				expectedRule.Constraints.Add(Constraint{
+					Op:     NotIn,
 					Key:    EngineLabelKey,
 					Values: []string{EngineLabelTiFlash},
 				})

@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/influxdata/tdigest"
-	"github.com/pingcap/kvproto/pkg/resource_manager"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/tikv/client-go/v2/util"
 	"go.uber.org/zap"
@@ -236,10 +235,10 @@ func (d ExecDetails) String() string {
 				", "+commitDetails.Mu.SlowestPrewrite.ExecDetails.String()+"}")
 		}
 		if commitDetails.Mu.CommitPrimary.ReqTotalTime > 0 {
-			parts = append(parts, CommitPrimaryRPCDetailStr+": {total:"+strconv.FormatFloat(commitDetails.Mu.CommitPrimary.ReqTotalTime.Seconds(), 'f', 3, 64)+
-				"s, region_id: "+strconv.FormatUint(commitDetails.Mu.CommitPrimary.Region, 10)+
-				", store: "+commitDetails.Mu.CommitPrimary.StoreAddr+
-				", "+commitDetails.Mu.CommitPrimary.ExecDetails.String()+"}")
+			parts = append(parts, CommitPrimaryRPCDetailStr+": {total:"+strconv.FormatFloat(commitDetails.Mu.SlowestPrewrite.ReqTotalTime.Seconds(), 'f', 3, 64)+
+				"s, region_id: "+strconv.FormatUint(commitDetails.Mu.SlowestPrewrite.Region, 10)+
+				", store: "+commitDetails.Mu.SlowestPrewrite.StoreAddr+
+				", "+commitDetails.Mu.SlowestPrewrite.ExecDetails.String()+"}")
 		}
 		commitDetails.Mu.Unlock()
 		resolveLockTime := atomic.LoadInt64(&commitDetails.ResolveLock.ResolveLockTime)
@@ -349,10 +348,10 @@ func (d ExecDetails) ToZapFields() (fields []zap.Field) {
 				", "+commitDetails.Mu.SlowestPrewrite.ExecDetails.String()+"}"))
 		}
 		if commitDetails.Mu.CommitPrimary.ReqTotalTime > 0 {
-			fields = append(fields, zap.String(CommitPrimaryRPCDetailStr, "{total:"+strconv.FormatFloat(commitDetails.Mu.CommitPrimary.ReqTotalTime.Seconds(), 'f', 3, 64)+
-				"s, region_id: "+strconv.FormatUint(commitDetails.Mu.CommitPrimary.Region, 10)+
-				", store: "+commitDetails.Mu.CommitPrimary.StoreAddr+
-				", "+commitDetails.Mu.CommitPrimary.ExecDetails.String()+"}"))
+			fields = append(fields, zap.String(CommitPrimaryRPCDetailStr, "{total:"+strconv.FormatFloat(commitDetails.Mu.SlowestPrewrite.ReqTotalTime.Seconds(), 'f', 3, 64)+
+				"s, region_id: "+strconv.FormatUint(commitDetails.Mu.SlowestPrewrite.Region, 10)+
+				", store: "+commitDetails.Mu.SlowestPrewrite.StoreAddr+
+				", "+commitDetails.Mu.SlowestPrewrite.ExecDetails.String()+"}"))
 		}
 		commitDetails.Mu.Unlock()
 		resolveLockTime := atomic.LoadInt64(&commitDetails.ResolveLock.ResolveLockTime)
@@ -376,174 +375,6 @@ func (d ExecDetails) ToZapFields() (fields []zap.Field) {
 			fields = append(fields, zap.Int("txn_retry", commitDetails.TxnRetry))
 		}
 	}
-	return fields
-}
-
-// SyncExecDetails is a synced version of `ExecDetails` and its `P90Summary`
-type SyncExecDetails struct {
-	mu sync.Mutex
-
-	execDetails    ExecDetails
-	detailsSummary P90Summary
-}
-
-// MergeExecDetails merges a single region execution details into self, used to print
-// the information in slow query log.
-func (s *SyncExecDetails) MergeExecDetails(details *ExecDetails, commitDetails *util.CommitDetails) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if details != nil {
-		s.execDetails.CopTime += details.CopTime
-		s.execDetails.BackoffTime += details.BackoffTime
-		s.execDetails.RequestCount++
-		s.mergeScanDetail(details.ScanDetail)
-		s.mergeTimeDetail(details.TimeDetail)
-		detail := &DetailsNeedP90{
-			BackoffSleep:  details.BackoffSleep,
-			BackoffTimes:  details.BackoffTimes,
-			CalleeAddress: details.CalleeAddress,
-			TimeDetail:    details.TimeDetail,
-		}
-		s.detailsSummary.Merge(detail)
-	}
-	if commitDetails != nil {
-		if s.execDetails.CommitDetail == nil {
-			s.execDetails.CommitDetail = commitDetails
-		} else {
-			s.execDetails.CommitDetail.Merge(commitDetails)
-		}
-	}
-}
-
-// mergeScanDetail merges scan details into self.
-func (s *SyncExecDetails) mergeScanDetail(scanDetail *util.ScanDetail) {
-	// Currently TiFlash cop task does not fill scanDetail, so need to skip it if scanDetail is nil
-	if scanDetail == nil {
-		return
-	}
-	if s.execDetails.ScanDetail == nil {
-		s.execDetails.ScanDetail = &util.ScanDetail{}
-	}
-	s.execDetails.ScanDetail.Merge(scanDetail)
-}
-
-// MergeTimeDetail merges time details into self.
-func (s *SyncExecDetails) mergeTimeDetail(timeDetail util.TimeDetail) {
-	s.execDetails.TimeDetail.ProcessTime += timeDetail.ProcessTime
-	s.execDetails.TimeDetail.WaitTime += timeDetail.WaitTime
-}
-
-// MergeLockKeysExecDetails merges lock keys execution details into self.
-func (s *SyncExecDetails) MergeLockKeysExecDetails(lockKeys *util.LockKeysDetails) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.execDetails.LockKeysDetail == nil {
-		s.execDetails.LockKeysDetail = lockKeys
-	} else {
-		s.execDetails.LockKeysDetail.Merge(lockKeys)
-	}
-}
-
-// Reset resets the content inside
-func (s *SyncExecDetails) Reset() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.execDetails = ExecDetails{}
-	s.detailsSummary.Reset()
-}
-
-// GetExecDetails returns the exec details inside.
-// It's actually not safe, because the `ExecDetails` still contains some reference, which is not protected after returning
-// outside.
-func (s *SyncExecDetails) GetExecDetails() ExecDetails {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.execDetails
-}
-
-// CopTasksDetails returns some useful information of cop-tasks during execution.
-func (s *SyncExecDetails) CopTasksDetails() CopTasksDetails {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := s.detailsSummary.NumCopTasks
-	d := CopTasksDetails{NumCopTasks: n}
-	if n == 0 {
-		return d
-	}
-	d.AvgProcessTime = s.execDetails.TimeDetail.ProcessTime / time.Duration(n)
-	d.AvgWaitTime = s.execDetails.TimeDetail.WaitTime / time.Duration(n)
-
-	d.P90ProcessTime = time.Duration((s.detailsSummary.ProcessTimePercentile.GetPercentile(0.9)))
-	d.MaxProcessTime = s.detailsSummary.ProcessTimePercentile.GetMax().D
-	d.MaxProcessAddress = s.detailsSummary.ProcessTimePercentile.GetMax().Addr
-
-	d.P90WaitTime = time.Duration((s.detailsSummary.WaitTimePercentile.GetPercentile(0.9)))
-	d.MaxWaitTime = s.detailsSummary.WaitTimePercentile.GetMax().D
-	d.MaxWaitAddress = s.detailsSummary.WaitTimePercentile.GetMax().Addr
-
-	if len(s.detailsSummary.BackoffInfo) > 0 {
-		d.MaxBackoffTime = make(map[string]time.Duration)
-		d.AvgBackoffTime = make(map[string]time.Duration)
-		d.P90BackoffTime = make(map[string]time.Duration)
-		d.TotBackoffTime = make(map[string]time.Duration)
-		d.TotBackoffTimes = make(map[string]int)
-		d.MaxBackoffAddress = make(map[string]string)
-	}
-	for backoff, items := range s.detailsSummary.BackoffInfo {
-		if items == nil {
-			continue
-		}
-		n := items.ReqTimes
-		d.MaxBackoffAddress[backoff] = items.BackoffPercentile.GetMax().Addr
-		d.MaxBackoffTime[backoff] = items.BackoffPercentile.GetMax().D
-		d.P90BackoffTime[backoff] = time.Duration(items.BackoffPercentile.GetPercentile(0.9))
-
-		d.AvgBackoffTime[backoff] = items.TotBackoffTime / time.Duration(n)
-		d.TotBackoffTime[backoff] = items.TotBackoffTime
-		d.TotBackoffTimes[backoff] = items.TotBackoffTimes
-	}
-	return d
-}
-
-// CopTasksDetails collects some useful information of cop-tasks during execution.
-type CopTasksDetails struct {
-	NumCopTasks int
-
-	AvgProcessTime    time.Duration
-	P90ProcessTime    time.Duration
-	MaxProcessAddress string
-	MaxProcessTime    time.Duration
-
-	AvgWaitTime    time.Duration
-	P90WaitTime    time.Duration
-	MaxWaitAddress string
-	MaxWaitTime    time.Duration
-
-	MaxBackoffTime    map[string]time.Duration
-	MaxBackoffAddress map[string]string
-	AvgBackoffTime    map[string]time.Duration
-	P90BackoffTime    map[string]time.Duration
-	TotBackoffTime    map[string]time.Duration
-	TotBackoffTimes   map[string]int
-}
-
-// ToZapFields wraps the CopTasksDetails as zap.Fileds.
-func (d *CopTasksDetails) ToZapFields() (fields []zap.Field) {
-	if d.NumCopTasks == 0 {
-		return
-	}
-	fields = make([]zap.Field, 0, 10)
-	fields = append(fields, zap.Int("num_cop_tasks", d.NumCopTasks))
-	fields = append(fields, zap.String("process_avg_time", strconv.FormatFloat(d.AvgProcessTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("process_p90_time", strconv.FormatFloat(d.P90ProcessTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("process_max_time", strconv.FormatFloat(d.MaxProcessTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("process_max_addr", d.MaxProcessAddress))
-	fields = append(fields, zap.String("wait_avg_time", strconv.FormatFloat(d.AvgWaitTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("wait_p90_time", strconv.FormatFloat(d.P90WaitTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("wait_max_time", strconv.FormatFloat(d.MaxWaitTime.Seconds(), 'f', -1, 64)+"s"))
-	fields = append(fields, zap.String("wait_max_addr", d.MaxWaitAddress))
 	return fields
 }
 
@@ -733,7 +564,6 @@ type CopRuntimeStats struct {
 	// executed on each instance.
 	stats      map[string]*basicCopRuntimeStats
 	scanDetail *util.ScanDetail
-	timeDetail *util.TimeDetail
 	// do not use kv.StoreType because it will meet cycle import error
 	storeType string
 	sync.Mutex
@@ -783,16 +613,6 @@ func (crs *CopRuntimeStats) RecordOneCopTask(address string, summary *tipb.Execu
 				minRemoteStreamMs:         summary.GetTiflashScanContext().GetMinRemoteStreamMs(),
 				maxRemoteStreamMs:         summary.GetTiflashScanContext().GetMaxRemoteStreamMs(),
 				regionsOfInstance:         make(map[string]uint64),
-
-				totalVectorIdxLoadFromS3:           summary.GetTiflashScanContext().GetTotalVectorIdxLoadFromS3(),
-				totalVectorIdxLoadFromDisk:         summary.GetTiflashScanContext().GetTotalVectorIdxLoadFromDisk(),
-				totalVectorIdxLoadFromCache:        summary.GetTiflashScanContext().GetTotalVectorIdxLoadFromCache(),
-				totalVectorIdxLoadTimeMs:           summary.GetTiflashScanContext().GetTotalVectorIdxLoadTimeMs(),
-				totalVectorIdxSearchTimeMs:         summary.GetTiflashScanContext().GetTotalVectorIdxSearchTimeMs(),
-				totalVectorIdxSearchVisitedNodes:   summary.GetTiflashScanContext().GetTotalVectorIdxSearchVisitedNodes(),
-				totalVectorIdxSearchDiscardedNodes: summary.GetTiflashScanContext().GetTotalVectorIdxSearchDiscardedNodes(),
-				totalVectorIdxReadVecTimeMs:        summary.GetTiflashScanContext().GetTotalVectorIdxReadVecTimeMs(),
-				totalVectorIdxReadOthersTimeMs:     summary.GetTiflashScanContext().GetTotalVectorIdxReadOthersTimeMs(),
 			}}, threads: int32(summary.GetConcurrency()),
 		totalTasks: 1,
 	}
@@ -811,14 +631,6 @@ func (crs *CopRuntimeStats) GetActRows() (totalRows int64) {
 		totalRows += instanceStats.rows.Load()
 	}
 	return totalRows
-}
-
-// GetTasks return total tasks of CopRuntimeStats
-func (crs *CopRuntimeStats) GetTasks() (totalTasks int32) {
-	for _, instanceStats := range crs.stats {
-		totalTasks += instanceStats.totalTasks
-	}
-	return totalTasks
 }
 
 // MergeBasicStats traverses basicCopRuntimeStats in the CopRuntimeStats and collects some useful information.
@@ -870,20 +682,11 @@ func (crs *CopRuntimeStats) String() string {
 			buf.WriteString("}")
 		}
 	}
-	if !isTiFlashCop {
-		if crs.scanDetail != nil {
-			detail := crs.scanDetail.String()
-			if detail != "" {
-				buf.WriteString(", ")
-				buf.WriteString(detail)
-			}
-		}
-		if crs.timeDetail != nil {
-			timeDetailStr := crs.timeDetail.String()
-			if timeDetailStr != "" {
-				buf.WriteString(", ")
-				buf.WriteString(timeDetailStr)
-			}
+	if !isTiFlashCop && crs.scanDetail != nil {
+		detail := crs.scanDetail.String()
+		if detail != "" {
+			buf.WriteString(", ")
+			buf.WriteString(detail)
 		}
 	}
 	return buf.String()
@@ -970,16 +773,6 @@ type TiFlashScanContext struct {
 	minRemoteStreamMs         uint64
 	maxRemoteStreamMs         uint64
 	regionsOfInstance         map[string]uint64
-
-	totalVectorIdxLoadFromS3           uint64
-	totalVectorIdxLoadFromDisk         uint64
-	totalVectorIdxLoadFromCache        uint64
-	totalVectorIdxLoadTimeMs           uint64
-	totalVectorIdxSearchTimeMs         uint64
-	totalVectorIdxSearchVisitedNodes   uint64
-	totalVectorIdxSearchDiscardedNodes uint64
-	totalVectorIdxReadVecTimeMs        uint64
-	totalVectorIdxReadOthersTimeMs     uint64
 }
 
 // Clone implements the deep copy of * TiFlashshScanContext
@@ -1015,16 +808,6 @@ func (context *TiFlashScanContext) Clone() TiFlashScanContext {
 		minRemoteStreamMs:         context.minRemoteStreamMs,
 		maxRemoteStreamMs:         context.maxRemoteStreamMs,
 		regionsOfInstance:         make(map[string]uint64),
-
-		totalVectorIdxLoadFromS3:           context.totalVectorIdxLoadFromS3,
-		totalVectorIdxLoadFromDisk:         context.totalVectorIdxLoadFromDisk,
-		totalVectorIdxLoadFromCache:        context.totalVectorIdxLoadFromCache,
-		totalVectorIdxLoadTimeMs:           context.totalVectorIdxLoadTimeMs,
-		totalVectorIdxSearchTimeMs:         context.totalVectorIdxSearchTimeMs,
-		totalVectorIdxSearchVisitedNodes:   context.totalVectorIdxSearchVisitedNodes,
-		totalVectorIdxSearchDiscardedNodes: context.totalVectorIdxSearchDiscardedNodes,
-		totalVectorIdxReadVecTimeMs:        context.totalVectorIdxReadVecTimeMs,
-		totalVectorIdxReadOthersTimeMs:     context.totalVectorIdxReadOthersTimeMs,
 	}
 	for k, v := range context.regionsOfInstance {
 		newContext.regionsOfInstance[k] = v
@@ -1033,15 +816,6 @@ func (context *TiFlashScanContext) Clone() TiFlashScanContext {
 }
 
 func (context *TiFlashScanContext) String() string {
-	var output []string
-	if context.totalVectorIdxLoadFromS3+context.totalVectorIdxLoadFromDisk+context.totalVectorIdxLoadFromCache > 0 {
-		var items []string
-		items = append(items, fmt.Sprintf("load:{total:%dms,from_s3:%d,from_disk:%d,from_cache:%d}", context.totalVectorIdxLoadTimeMs, context.totalVectorIdxLoadFromS3, context.totalVectorIdxLoadFromDisk, context.totalVectorIdxLoadFromCache))
-		items = append(items, fmt.Sprintf("search:{total:%dms,visited_nodes:%d,discarded_nodes:%d}", context.totalVectorIdxSearchTimeMs, context.totalVectorIdxSearchVisitedNodes, context.totalVectorIdxSearchDiscardedNodes))
-		items = append(items, fmt.Sprintf("read:{vec_total:%dms,others_total:%dms}", context.totalVectorIdxReadVecTimeMs, context.totalVectorIdxReadOthersTimeMs))
-		output = append(output, "vector_idx:{"+strings.Join(items, ",")+"}")
-	}
-
 	regionBalanceInfo := "none"
 	if len(context.regionsOfInstance) > 0 {
 		maxNum := uint64(0)
@@ -1070,9 +844,8 @@ func (context *TiFlashScanContext) String() string {
 	if context.minRemoteStreamMs != 0 || context.maxRemoteStreamMs != 0 {
 		remoteStreamInfo = fmt.Sprintf("min_remote_stream:%dms, max_remote_stream:%dms, ", context.minRemoteStreamMs, context.maxRemoteStreamMs)
 	}
-
 	// note: "tot" is short for "total"
-	output = append(output, fmt.Sprintf("tiflash_scan:{"+
+	return fmt.Sprintf("tiflash_scan:{"+
 		"mvcc_input_rows:%d, "+
 		"mvcc_input_bytes:%d, "+
 		"mvcc_output_rows:%d, "+
@@ -1129,9 +902,7 @@ func (context *TiFlashScanContext) String() string {
 		context.totalDmfileRsCheckMs,
 		context.totalDmfileReadMs,
 		dmfileDisaggInfo,
-	))
-
-	return strings.Join(output, ", ")
+	)
 }
 
 // Merge make sum to merge the information in TiFlashScanContext
@@ -1161,16 +932,6 @@ func (context *TiFlashScanContext) Merge(other TiFlashScanContext) {
 	context.totalBuildBitmapMs += other.totalBuildBitmapMs
 	context.totalBuildInputStreamMs += other.totalBuildInputStreamMs
 	context.staleReadRegions += other.staleReadRegions
-
-	context.totalVectorIdxLoadFromS3 += other.totalVectorIdxLoadFromS3
-	context.totalVectorIdxLoadFromDisk += other.totalVectorIdxLoadFromDisk
-	context.totalVectorIdxLoadFromCache += other.totalVectorIdxLoadFromCache
-	context.totalVectorIdxLoadTimeMs += other.totalVectorIdxLoadTimeMs
-	context.totalVectorIdxSearchTimeMs += other.totalVectorIdxSearchTimeMs
-	context.totalVectorIdxSearchVisitedNodes += other.totalVectorIdxSearchVisitedNodes
-	context.totalVectorIdxSearchDiscardedNodes += other.totalVectorIdxSearchDiscardedNodes
-	context.totalVectorIdxReadVecTimeMs += other.totalVectorIdxReadVecTimeMs
-	context.totalVectorIdxReadOthersTimeMs += other.totalVectorIdxReadOthersTimeMs
 
 	if context.minLocalStreamMs == 0 || other.minLocalStreamMs < context.minLocalStreamMs {
 		context.minLocalStreamMs = other.minLocalStreamMs
@@ -1202,10 +963,7 @@ func (context *TiFlashScanContext) Empty() bool {
 		context.dmfileLmFilterScannedRows == 0 &&
 		context.dmfileLmFilterSkippedRows == 0 &&
 		context.localRegions == 0 &&
-		context.remoteRegions == 0 &&
-		context.totalVectorIdxLoadFromDisk == 0 &&
-		context.totalVectorIdxLoadFromCache == 0 &&
-		context.totalVectorIdxLoadFromS3 == 0
+		context.remoteRegions == 0
 	return res
 }
 
@@ -1356,7 +1114,6 @@ func NewRuntimeStatsColl(reuse *RuntimeStatsColl) *RuntimeStatsColl {
 // RegisterStats register execStat for a executor.
 func (e *RuntimeStatsColl) RegisterStats(planID int, info RuntimeStats) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	stats, ok := e.rootStats[planID]
 	if !ok {
 		stats = NewRootRuntimeStats()
@@ -1374,6 +1131,7 @@ func (e *RuntimeStatsColl) RegisterStats(planID int, info RuntimeStats) {
 	if !found {
 		stats.groupRss = append(stats.groupRss, info.Clone())
 	}
+	e.mu.Unlock()
 }
 
 // GetBasicRuntimeStats gets basicRuntimeStats for a executor.
@@ -1423,7 +1181,6 @@ func (e *RuntimeStatsColl) GetOrCreateCopStats(planID int, storeType string) *Co
 		copStats = &CopRuntimeStats{
 			stats:      make(map[string]*basicCopRuntimeStats),
 			scanDetail: &util.ScanDetail{},
-			timeDetail: &util.TimeDetail{},
 			storeType:  storeType,
 		}
 		e.copStats[planID] = copStats
@@ -1457,14 +1214,6 @@ func (e *RuntimeStatsColl) RecordOneCopTask(planID int, storeType string, addres
 func (e *RuntimeStatsColl) RecordScanDetail(planID int, storeType string, detail *util.ScanDetail) {
 	copStats := e.GetOrCreateCopStats(planID, storeType)
 	copStats.scanDetail.Merge(detail)
-}
-
-// RecordTimeDetail records a specific cop tasks's time detail.
-func (e *RuntimeStatsColl) RecordTimeDetail(planID int, storeType string, detail *util.TimeDetail) {
-	copStats := e.GetOrCreateCopStats(planID, storeType)
-	if detail != nil {
-		copStats.timeDetail.Merge(detail)
-	}
 }
 
 // ExistsRootStats checks if the planID exists in the rootStats collection.
@@ -1813,55 +1562,4 @@ func getUnit(d time.Duration) time.Duration {
 		return time.Microsecond
 	}
 	return time.Nanosecond
-}
-
-// MergeTiFlashRUConsumption merge execution summaries from selectResponse into ruDetails.
-func MergeTiFlashRUConsumption(executionSummaries []*tipb.ExecutorExecutionSummary, ruDetails *util.RUDetails) error {
-	newRUDetails := util.NewRUDetails()
-	for _, summary := range executionSummaries {
-		if summary != nil && summary.GetRuConsumption() != nil {
-			tiflashRU := new(resource_manager.Consumption)
-			if err := tiflashRU.Unmarshal(summary.GetRuConsumption()); err != nil {
-				return err
-			}
-			newRUDetails.Update(tiflashRU, 0)
-		}
-	}
-	ruDetails.Merge(newRUDetails)
-	return nil
-}
-
-// RURuntimeStats is a wrapper of util.RUDetails,
-// which implements the RuntimeStats interface.
-type RURuntimeStats struct {
-	*util.RUDetails
-}
-
-// String implements the RuntimeStats interface.
-func (e *RURuntimeStats) String() string {
-	if e.RUDetails != nil {
-		return fmt.Sprintf("RU:%f", e.RRU()+e.WRU())
-	}
-	return ""
-}
-
-// Clone implements the RuntimeStats interface.
-func (e *RURuntimeStats) Clone() RuntimeStats {
-	return &RURuntimeStats{RUDetails: e.RUDetails.Clone()}
-}
-
-// Merge implements the RuntimeStats interface.
-func (e *RURuntimeStats) Merge(other RuntimeStats) {
-	if tmp, ok := other.(*RURuntimeStats); ok {
-		if e.RUDetails != nil {
-			e.RUDetails.Merge(tmp.RUDetails)
-		} else {
-			e.RUDetails = tmp.RUDetails.Clone()
-		}
-	}
-}
-
-// Tp implements the RuntimeStats interface.
-func (*RURuntimeStats) Tp() int {
-	return TpRURuntimeStats
 }

@@ -91,15 +91,6 @@ type RetryState struct {
 	nextBackoff time.Duration
 }
 
-// InitialRetryState make the initial state for retrying.
-func InitialRetryState(maxRetryTimes int, initialBackoff, maxBackoff time.Duration) RetryState {
-	return RetryState{
-		maxRetry:    maxRetryTimes,
-		maxBackoff:  maxBackoff,
-		nextBackoff: initialBackoff,
-	}
-}
-
 // Whether in the current state we can retry.
 func (rs *RetryState) ShouldRetry() bool {
 	return rs.retryTimes < rs.maxRetry
@@ -108,9 +99,6 @@ func (rs *RetryState) ShouldRetry() bool {
 // Get the exponential backoff durion and transform the state.
 func (rs *RetryState) ExponentialBackoff() time.Duration {
 	rs.retryTimes++
-	failpoint.Inject("set-import-attempt-to-one", func(_ failpoint.Value) {
-		rs.retryTimes = rs.maxRetry
-	})
 	backoff := rs.nextBackoff
 	rs.nextBackoff *= 2
 	if rs.nextBackoff > rs.maxBackoff {
@@ -123,15 +111,39 @@ func (rs *RetryState) GiveUp() {
 	rs.retryTimes = rs.maxRetry
 }
 
+// InitialRetryState make the initial state for retrying.
+func InitialRetryState(maxRetryTimes int, initialBackoff, maxBackoff time.Duration) RetryState {
+	return RetryState{
+		maxRetry:    maxRetryTimes,
+		maxBackoff:  maxBackoff,
+		nextBackoff: initialBackoff,
+	}
+}
+
+// RecordRetry simply record retry times, and no backoff
+func (rs *RetryState) RecordRetry() {
+	rs.retryTimes++
+}
+
 // ReduceRetry reduces retry times for 1.
 func (rs *RetryState) ReduceRetry() {
 	rs.retryTimes--
+}
+
+// RetryTimes returns the retry times.
+// usage: unit test.
+func (rs *RetryState) RetryTimes() int {
+	return rs.retryTimes
 }
 
 // Attempt implements the `Backoffer`.
 // TODO: Maybe use this to replace the `exponentialBackoffer` (which is nearly homomorphic to this)?
 func (rs *RetryState) Attempt() int {
 	return rs.maxRetry - rs.retryTimes
+}
+
+func (rs *RetryState) StopRetry() {
+	rs.retryTimes = rs.maxRetry
 }
 
 // NextBackoff implements the `Backoffer`.
@@ -175,8 +187,8 @@ func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 	// we don't care storeID here.
 	errs := multierr.Errors(err)
 	lastErr := errs[len(errs)-1]
-	res := HandleUnknownBackupError(lastErr.Error(), 0, bo.errContext)
-	if res.Strategy == StrategyRetry {
+	res := bo.errContext.HandleErrorMsg(lastErr.Error(), 0)
+	if res.Strategy == RetryStrategy {
 		bo.delayTime = 2 * bo.delayTime
 		bo.attempt--
 	} else {
@@ -210,11 +222,6 @@ func (bo *importerBackoffer) NextBackoff(err error) time.Duration {
 			}
 		}
 	}
-	failpoint.Inject("set-import-attempt-to-one", func(_ failpoint.Value) {
-		if bo.attempt > 1 {
-			bo.attempt = 1
-		}
-	})
 	if bo.delayTime > bo.maxDelayTime {
 		return bo.maxDelayTime
 	}
@@ -286,46 +293,5 @@ func (bo *pdReqBackoffer) NextBackoff(err error) time.Duration {
 }
 
 func (bo *pdReqBackoffer) Attempt() int {
-	return bo.attempt
-}
-
-type DiskCheckBackoffer struct {
-	attempt      int
-	delayTime    time.Duration
-	maxDelayTime time.Duration
-}
-
-func NewDiskCheckBackoffer() Backoffer {
-	return &DiskCheckBackoffer{
-		attempt:      resetTSRetryTime,
-		delayTime:    resetTSWaitInterval,
-		maxDelayTime: resetTSMaxWaitInterval,
-	}
-}
-
-func (bo *DiskCheckBackoffer) NextBackoff(err error) time.Duration {
-	e := errors.Cause(err)
-	switch e { // nolint:errorlint
-	case nil, context.Canceled, context.DeadlineExceeded, berrors.ErrKVDiskFull:
-		bo.delayTime = 0
-		bo.attempt = 0
-	case berrors.ErrPDInvalidResponse:
-		bo.delayTime = 2 * bo.delayTime
-		bo.attempt--
-	default:
-		bo.delayTime = 2 * bo.delayTime
-		if bo.attempt > 5 {
-			bo.attempt = 5
-		}
-		bo.attempt--
-	}
-
-	if bo.delayTime > bo.maxDelayTime {
-		return bo.maxDelayTime
-	}
-	return bo.delayTime
-}
-
-func (bo *DiskCheckBackoffer) Attempt() int {
 	return bo.attempt
 }

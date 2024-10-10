@@ -19,8 +19,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	pd "github.com/tikv/pd/client"
 )
@@ -41,9 +39,6 @@ func (do *Domain) initDomainSysVars() {
 
 	setGlobalResourceControlFunc := do.setGlobalResourceControl
 	variable.SetGlobalResourceControl.Store(&setGlobalResourceControlFunc)
-	variable.SetLowResolutionTSOUpdateInterval = do.setLowResolutionTSOUpdateInterval
-
-	variable.ChangeSchemaCacheSize = do.changeSchemaCacheSize
 }
 
 // setStatsCacheCapacity sets statsCache cap
@@ -55,57 +50,29 @@ func (do *Domain) setStatsCacheCapacity(c int64) {
 	do.StatsHandle().SetStatsCacheCapacity(c)
 }
 
-func (do *Domain) setPDClientDynamicOption(name, sVal string) error {
+func (do *Domain) setPDClientDynamicOption(name, sVal string) {
 	switch name {
 	case variable.TiDBTSOClientBatchMaxWaitTime:
 		val, err := strconv.ParseFloat(sVal, 64)
 		if err != nil {
-			return err
+			break
 		}
 		err = do.updatePDClient(pd.MaxTSOBatchWaitInterval, time.Duration(float64(time.Millisecond)*val))
 		if err != nil {
-			return err
+			break
 		}
 		variable.MaxTSOBatchWaitInterval.Store(val)
 	case variable.TiDBEnableTSOFollowerProxy:
 		val := variable.TiDBOptOn(sVal)
 		err := do.updatePDClient(pd.EnableTSOFollowerProxy, val)
 		if err != nil {
-			return err
+			break
 		}
 		variable.EnableTSOFollowerProxy.Store(val)
-	case variable.PDEnableFollowerHandleRegion:
-		val := variable.TiDBOptOn(sVal)
-		// Note: EnableFollowerHandle is only used for region API now.
-		// If pd support more APIs in follower, the pd option may be changed.
-		err := do.updatePDClient(pd.EnableFollowerHandle, val)
-		if err != nil {
-			return err
-		}
-		variable.EnablePDFollowerHandleRegion.Store(val)
-	case variable.TiDBTSOClientRPCMode:
-		var concurrency int
-
-		switch sVal {
-		case variable.TSOClientRPCModeDefault:
-			concurrency = 1
-		case variable.TSOClientRPCModeParallel:
-			concurrency = 2
-		case variable.TSOClientRPCModeParallelFast:
-			concurrency = 4
-		default:
-			return variable.ErrWrongValueForVar.GenWithStackByArgs(name, sVal)
-		}
-
-		err := do.updatePDClient(pd.TSOClientRPCConcurrency, concurrency)
-		if err != nil {
-			return err
-		}
 	}
-	return nil
 }
 
-func (*Domain) setGlobalResourceControl(enable bool) {
+func (do *Domain) setGlobalResourceControl(enable bool) {
 	if enable {
 		variable.EnableGlobalResourceControlFunc()
 	} else {
@@ -113,12 +80,8 @@ func (*Domain) setGlobalResourceControl(enable bool) {
 	}
 }
 
-func (do *Domain) setLowResolutionTSOUpdateInterval(interval time.Duration) error {
-	return do.store.GetOracle().SetLowResolutionTimestampUpdateInterval(interval)
-}
-
 // updatePDClient is used to set the dynamic option into the PD client.
-func (do *Domain) updatePDClient(option pd.DynamicOption, val any) error {
+func (do *Domain) updatePDClient(option pd.DynamicOption, val interface{}) error {
 	store, ok := do.store.(interface{ GetPDClient() pd.Client })
 	if !ok {
 		return nil
@@ -136,16 +99,4 @@ func (do *Domain) setExternalTimestamp(ctx context.Context, ts uint64) error {
 
 func (do *Domain) getExternalTimestamp(ctx context.Context) (uint64, error) {
 	return do.store.GetOracle().GetExternalTimestamp(ctx)
-}
-
-func (do *Domain) changeSchemaCacheSize(ctx context.Context, size uint64) error {
-	err := kv.RunInNewTxn(kv.WithInternalSourceType(ctx, kv.InternalTxnDDL), do.store, true, func(_ context.Context, txn kv.Transaction) error {
-		t := meta.NewMutator(txn)
-		return t.SetSchemaCacheSize(size)
-	})
-	if err != nil {
-		return err
-	}
-	do.infoCache.Data.SetCacheCapacity(size)
-	return nil
 }

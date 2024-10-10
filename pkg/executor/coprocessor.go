@@ -24,8 +24,8 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/auth"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/privilege"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -76,13 +76,13 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 		return h.buildErrorResponse(err)
 	}
 
-	err = exec.Open(ctx, e)
+	err = e.Open(ctx)
 	if err != nil {
 		return h.buildErrorResponse(err)
 	}
 
 	chk := exec.TryNewCacheChunk(e)
-	tps := e.RetFieldTypes()
+	tps := e.Base().RetFieldTypes()
 	var totalChunks, partChunks []tipb.Chunk
 	memTracker := h.sctx.GetSessionVars().StmtCtx.MemTracker
 	for {
@@ -103,7 +103,7 @@ func (h *CoprocessorDAGHandler) HandleRequest(ctx context.Context, req *coproces
 		}
 		totalChunks = append(totalChunks, partChunks...)
 	}
-	if err := exec.Close(e); err != nil {
+	if err := e.Close(); err != nil {
 		return h.buildErrorResponse(err)
 	}
 	return h.buildUnaryResponse(totalChunks)
@@ -119,13 +119,13 @@ func (h *CoprocessorDAGHandler) HandleStreamRequest(ctx context.Context, req *co
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
-	err = exec.Open(ctx, e)
+	err = e.Open(ctx)
 	if err != nil {
 		return stream.Send(h.buildErrorResponse(err))
 	}
 
 	chk := exec.TryNewCacheChunk(e)
-	tps := e.RetFieldTypes()
+	tps := e.Base().RetFieldTypes()
 	for {
 		chk.Reset()
 		if err = exec.Next(ctx, e, chk); err != nil {
@@ -182,25 +182,25 @@ func (h *CoprocessorDAGHandler) buildDAGExecutor(req *coprocessor.Request) (exec
 	}
 
 	stmtCtx := h.sctx.GetSessionVars().StmtCtx
-
+	stmtCtx.SetFlagsFromPBFlag(dagReq.Flags)
 	tz, err := timeutil.ConstructTimeZone(dagReq.TimeZoneName, int(dagReq.TimeZoneOffset))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	h.sctx.GetSessionVars().TimeZone = tz
-	stmtCtx.InitFromPBFlagAndTz(dagReq.Flags, tz)
 
+	stmtCtx.SetTimeZone(tz)
+	h.sctx.GetSessionVars().TimeZone = tz
 	h.dagReq = dagReq
 	is := h.sctx.GetInfoSchema().(infoschema.InfoSchema)
 	// Build physical plan.
-	bp := core.NewPBPlanBuilder(h.sctx.GetPlanCtx(), is, req.Ranges)
+	bp := core.NewPBPlanBuilder(h.sctx, is, req.Ranges)
 	plan, err := bp.Build(dagReq.Executors)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 	plan = core.InjectExtraProjection(plan)
 	// Build executor.
-	b := newExecutorBuilder(h.sctx, is)
+	b := newExecutorBuilder(h.sctx, is, nil)
 	return b.build(plan), nil
 }
 
@@ -256,7 +256,7 @@ func (h *CoprocessorDAGHandler) buildStreamResponse(chunk *tipb.Chunk) *coproces
 
 func (*CoprocessorDAGHandler) buildErrorResponse(err error) *coprocessor.Response {
 	return &coprocessor.Response{
-		OtherError: errors.ErrorStack(err),
+		OtherError: err.Error(),
 	}
 }
 
@@ -277,13 +277,11 @@ func (h *CoprocessorDAGHandler) encodeDefault(chk *chunk.Chunk, tps []*types.Fie
 	stmtCtx := h.sctx.GetSessionVars().StmtCtx
 	requestedRow := make([]byte, 0)
 	chunks := []tipb.Chunk{}
-	errCtx := stmtCtx.ErrCtx()
 	for i := 0; i < chk.NumRows(); i++ {
 		requestedRow = requestedRow[:0]
 		row := chk.GetRow(i)
 		for _, ordinal := range colOrdinal {
-			data, err := codec.EncodeValue(stmtCtx.TimeZone(), nil, row.GetDatum(int(ordinal), tps[ordinal]))
-			err = errCtx.HandleError(err)
+			data, err := codec.EncodeValue(stmtCtx, nil, row.GetDatum(int(ordinal), tps[ordinal]))
 			if err != nil {
 				return nil, err
 			}

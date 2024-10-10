@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build ignore
-
 package main
 
 import (
@@ -35,7 +33,7 @@ func main() {
 
 	// Extract the current work directory
 	cwd := os.Args[0]
-	cwd = cwd[:len(cwd)-len(filepath.Join("tools", "bin", "xprog"))]
+	cwd = cwd[:len(cwd)-len("tools/bin/xprog")]
 
 	testBinaryPath := filepath.Clean(os.Args[1])
 	dir, _ := filepath.Split(testBinaryPath)
@@ -43,7 +41,7 @@ func main() {
 	// Extract the package info from /tmp/go-build2662369829/b1382/importcfg.link
 	pkg := getPackageInfo(dir)
 
-	var prefix = filepath.Join("github.com", "pingcap", "tidb")
+	const prefix = "github.com/pingcap/tidb/"
 	if !strings.HasPrefix(pkg, prefix) {
 		os.Exit(-3)
 	}

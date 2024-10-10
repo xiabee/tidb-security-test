@@ -134,17 +134,15 @@ func TestGetCollationByName(t *testing.T) {
 func TestValidCustomCharset(t *testing.T) {
 	AddCharset(&Charset{"custom", "custom_collation", make(map[string]*Collation), "Custom", 4})
 	defer RemoveCharset("custom")
-	AddCollation(&Collation{99999, "custom", "custom_collation", true, 8, PadNone})
+	AddCollation(&Collation{99999, "custom", "custom_collation", true})
 
 	tests := []struct {
 		cs   string
 		co   string
 		succ bool
-		l    int
-		p    string
 	}{
-		{"custom", "custom_collation", true, 8, PadNone},
-		{"utf8", "utf8_invalid_ci", false, 1, PadNone},
+		{"custom", "custom_collation", true},
+		{"utf8", "utf8_invalid_ci", false},
 	}
 	for _, tt := range tests {
 		testValidCharset(t, tt.cs, tt.co, tt.succ)

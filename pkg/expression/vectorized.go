@@ -16,11 +16,12 @@ package expression
 
 import (
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 )
 
-func genVecFromConstExpr(ctx EvalContext, expr Expression, targetType types.EvalType, input *chunk.Chunk, result *chunk.Column) error {
+func genVecFromConstExpr(ctx sessionctx.Context, expr Expression, targetType types.EvalType, input *chunk.Chunk, result *chunk.Column) error {
 	n := 1
 	if input != nil {
 		n = input.NumRows()
@@ -115,21 +116,6 @@ func genVecFromConstExpr(ctx EvalContext, expr Expression, targetType types.Eval
 				result.AppendJSON(v)
 			}
 		}
-	case types.ETVectorFloat32:
-		result.ReserveVectorFloat32(n)
-		v, isNull, err := expr.EvalVectorFloat32(ctx, chunk.Row{})
-		if err != nil {
-			return err
-		}
-		if isNull {
-			for i := 0; i < n; i++ {
-				result.AppendNull()
-			}
-		} else {
-			for i := 0; i < n; i++ {
-				result.AppendVectorFloat32(v)
-			}
-		}
 	case types.ETString:
 		result.ReserveString(n)
 		v, isNull, err := expr.EvalString(ctx, chunk.Row{})
@@ -146,7 +132,7 @@ func genVecFromConstExpr(ctx EvalContext, expr Expression, targetType types.Eval
 			}
 		}
 	default:
-		return errors.Errorf("unsupported type %s during evaluation", targetType)
+		return errors.Errorf("unsupported Constant type for vectorized evaluation")
 	}
 	return nil
 }

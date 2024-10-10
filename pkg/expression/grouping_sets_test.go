@@ -17,11 +17,10 @@ package expression
 import (
 	"testing"
 
-	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/expression/exprstatic"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
 	"go.opencensus.io/stats/view"
 )
@@ -116,25 +115,25 @@ func TestGroupSetsTargetOneCompoundArgs(t *testing.T) {
 	require.Equal(t, offset, 0) // default
 
 	// mock normal agg count(d+1)
-	normalAggArgs = newFunctionWithMockCtx(ast.Plus, d, newLonglong(1))
+	normalAggArgs = newFunction(ast.Plus, d, newLonglong(1))
 	offset = newGroupingSets.TargetOne([]Expression{normalAggArgs})
 	require.NotEqual(t, offset, -1)
 	require.Equal(t, offset, 0) // default
 
 	// mock normal agg count(d+c)
-	normalAggArgs = newFunctionWithMockCtx(ast.Plus, d, c)
+	normalAggArgs = newFunction(ast.Plus, d, c)
 	offset = newGroupingSets.TargetOne([]Expression{normalAggArgs})
 	require.NotEqual(t, offset, -1)
 	require.Equal(t, offset, 1) // only {c} can supply d and c
 
 	// mock normal agg count(d+a)
-	normalAggArgs = newFunctionWithMockCtx(ast.Plus, d, a)
+	normalAggArgs = newFunction(ast.Plus, d, a)
 	offset = newGroupingSets.TargetOne([]Expression{normalAggArgs})
 	require.NotEqual(t, offset, -1)
 	require.Equal(t, offset, 0) // only {a,b} can supply d and a
 
 	// mock normal agg count(d+a+c)
-	normalAggArgs = newFunctionWithMockCtx(ast.Plus, d, newFunctionWithMockCtx(ast.Plus, a, c))
+	normalAggArgs = newFunction(ast.Plus, d, newFunction(ast.Plus, a, c))
 	offset = newGroupingSets.TargetOne([]Expression{normalAggArgs})
 	require.Equal(t, offset, -1) // couldn't find a group that supply d, a and c simultaneously.
 }
@@ -312,8 +311,6 @@ func TestGroupingSetsMergeUnitTest(t *testing.T) {
 
 func TestDistinctGroupingSets(t *testing.T) {
 	defer view.Stop()
-	ctx := exprstatic.NewEvalContext()
-
 	// premise: every grouping item in grouping sets should be a col.
 	a := &Column{
 		UniqueID: 1,
@@ -330,7 +327,8 @@ func TestDistinctGroupingSets(t *testing.T) {
 	// case1: non-duplicated case.
 	// raw rollup expressions: [a,b,c,d]
 	rawRollupExprs := []Expression{a, b, c, d}
-	deduplicateExprs, pos := DeduplicateGbyExpression(rawRollupExprs)
+	mockCtx := mock.NewContext()
+	deduplicateExprs, pos := DeduplicateGbyExpression(mockCtx, rawRollupExprs)
 
 	// nothing to deduplicate.
 	require.Equal(t, len(rawRollupExprs), len(deduplicateExprs))
@@ -354,11 +352,11 @@ func TestDistinctGroupingSets(t *testing.T) {
 
 	// case2: duplicated case.
 	rawRollupExprs = []Expression{a, b, b, c}
-	deduplicateExprs, pos = DeduplicateGbyExpression(rawRollupExprs)
+	deduplicateExprs, pos = DeduplicateGbyExpression(mockCtx, rawRollupExprs)
 	require.Equal(t, len(deduplicateExprs), 3)
-	require.Equal(t, deduplicateExprs[0].StringWithCtx(ctx, errors.RedactLogDisable), "Column#1")
-	require.Equal(t, deduplicateExprs[1].StringWithCtx(ctx, errors.RedactLogDisable), "Column#2")
-	require.Equal(t, deduplicateExprs[2].StringWithCtx(ctx, errors.RedactLogDisable), "Column#3")
+	require.Equal(t, deduplicateExprs[0].String(), "Column#1")
+	require.Equal(t, deduplicateExprs[1].String(), "Column#2")
+	require.Equal(t, deduplicateExprs[2].String(), "Column#3")
 	deduplicateColumns := make([]*Column, 0, len(deduplicateExprs))
 	for _, one := range deduplicateExprs {
 		deduplicateColumns = append(deduplicateColumns, one.(*Column))
@@ -376,10 +374,10 @@ func TestDistinctGroupingSets(t *testing.T) {
 	// so that why restore gby expression according to their pos is necessary.
 	restoreGbyExpressions := RestoreGbyExpression(deduplicateColumns, pos)
 	require.Equal(t, len(restoreGbyExpressions), 4)
-	require.Equal(t, restoreGbyExpressions[0].StringWithCtx(ctx, errors.RedactLogDisable), "Column#1")
-	require.Equal(t, restoreGbyExpressions[1].StringWithCtx(ctx, errors.RedactLogDisable), "Column#2")
-	require.Equal(t, restoreGbyExpressions[2].StringWithCtx(ctx, errors.RedactLogDisable), "Column#2")
-	require.Equal(t, restoreGbyExpressions[3].StringWithCtx(ctx, errors.RedactLogDisable), "Column#3")
+	require.Equal(t, restoreGbyExpressions[0].String(), "Column#1")
+	require.Equal(t, restoreGbyExpressions[1].String(), "Column#2")
+	require.Equal(t, restoreGbyExpressions[2].String(), "Column#2")
+	require.Equal(t, restoreGbyExpressions[3].String(), "Column#3")
 
 	// rollup grouping sets (build grouping sets on the restored gby expression, because all the
 	// complicated expressions have been projected as simple columns at this time).

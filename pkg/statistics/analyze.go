@@ -74,9 +74,6 @@ func (a *AnalyzeResult) DestroyAndPutToPool() {
 	for _, f := range a.Fms {
 		f.DestroyAndPutToPool()
 	}
-	for _, h := range a.Hist {
-		h.DestroyAndPutToPool()
-	}
 }
 
 // AnalyzeResults represents the analyze results of a task.
@@ -88,7 +85,6 @@ type AnalyzeResults struct {
 	TableID  AnalyzeTableID
 	Count    int64
 	StatsVer int
-	// Snapshot is the snapshot timestamp when we start the analysis job.
 	Snapshot uint64
 	// BaseCount is the original count in mysql.stats_meta at the beginning of analyze.
 	BaseCount int64
@@ -109,10 +105,7 @@ type AnalyzeResults struct {
 	// take care of those table-level fields.
 	// In conclusion, when saving the analyze result for mv index, we need to store the index stats, as for the
 	// table-level fields, we only need to update the version.
-	//
-	// The global index has only one key range, so an independent task is used to process it.
-	// Global index needs to update only the version at the table-level fields, just like mv index.
-	ForMVIndexOrGlobalIndex bool
+	ForMVIndex bool
 }
 
 // DestroyAndPutToPool destroys the result and put it to the pool.

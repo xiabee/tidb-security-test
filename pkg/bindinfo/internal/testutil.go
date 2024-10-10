@@ -19,7 +19,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/testkit"
 	utilparser "github.com/pingcap/tidb/pkg/util/parser"
 	"github.com/stretchr/testify/require"
@@ -32,10 +31,10 @@ func UtilCleanBindingEnv(tk *testkit.TestKit, dom *domain.Domain) {
 }
 
 // UtilNormalizeWithDefaultDB normalizes the SQL and returns the normalized SQL and its digest.
-func UtilNormalizeWithDefaultDB(t *testing.T, sql string) (stmt ast.StmtNode, normalized, digest string) {
+func UtilNormalizeWithDefaultDB(t *testing.T, sql string) (normalized, digest string) {
 	testParser := parser.New()
 	stmt, err := testParser.ParseOneStmt(sql, "", "")
 	require.NoError(t, err)
 	normalized, digestResult := parser.NormalizeDigestForBinding(utilparser.RestoreWithDefaultDB(stmt, "test", ""))
-	return stmt, normalized, digestResult.String()
+	return normalized, digestResult.String()
 }

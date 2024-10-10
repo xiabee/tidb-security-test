@@ -29,12 +29,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	perrors "github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/benchdaily"
@@ -45,7 +45,7 @@ import (
 )
 
 type benchHelper struct {
-	ctx   *mock.Context
+	ctx   sessionctx.Context
 	exprs []Expression
 
 	inputTypes  []*types.FieldType
@@ -102,55 +102,59 @@ func (h *benchHelper) init() {
 	}
 
 	h.exprs = make([]Expression, 0, 10)
-	expr, err := NewFunction(h.ctx, ast.Substr, h.inputTypes[3], []Expression{cols[3], cols[2]}...)
-	if err != nil {
+	if expr, err := NewFunction(h.ctx, ast.Substr, h.inputTypes[3], []Expression{cols[3], cols[2]}...); err != nil {
 		panic("create SUBSTR function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
 	}
-	h.exprs = append(h.exprs, expr)
-	expr1, err := NewFunction(h.ctx, ast.Plus, h.inputTypes[0], []Expression{cols[1], cols[2]}...)
-	if err != nil {
+
+	if expr, err := NewFunction(h.ctx, ast.Plus, h.inputTypes[0], []Expression{cols[1], cols[2]}...); err != nil {
 		panic("create PLUS function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
 	}
-	h.exprs = append(h.exprs, expr1)
-	expr2, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[11], cols[8]}...)
-	if err != nil {
-		panic("create GT function failed.")
-	}
-	h.exprs = append(h.exprs, expr2)
-	expr3, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[19], cols[10]}...)
-	if err != nil {
-		panic("create GT function failed.")
-	}
-	h.exprs = append(h.exprs, expr3)
-	expr4, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[17], cols[4]}...)
-	if err != nil {
-		panic("create GT function failed.")
-	}
-	h.exprs = append(h.exprs, expr4)
-	expr5, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[18], cols[5]}...)
-	if err != nil {
-		panic("create GT function failed.")
-	}
-	h.exprs = append(h.exprs, expr5)
 
-	expr6, err := NewFunction(h.ctx, ast.LE, h.inputTypes[2], []Expression{cols[19], cols[4]}...)
-	if err != nil {
+	if expr, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[11], cols[8]}...); err != nil {
+		panic("create GT function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
+	}
+
+	if expr, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[19], cols[10]}...); err != nil {
+		panic("create GT function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
+	}
+
+	if expr, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[17], cols[4]}...); err != nil {
+		panic("create GT function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
+	}
+
+	if expr, err := NewFunction(h.ctx, ast.GT, h.inputTypes[2], []Expression{cols[18], cols[5]}...); err != nil {
+		panic("create GT function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
+	}
+
+	if expr, err := NewFunction(h.ctx, ast.LE, h.inputTypes[2], []Expression{cols[19], cols[4]}...); err != nil {
 		panic("create LE function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
 	}
-	h.exprs = append(h.exprs, expr6)
 
-	expr7, err := NewFunction(h.ctx, ast.EQ, h.inputTypes[2], []Expression{cols[20], cols[3]}...)
-	if err != nil {
+	if expr, err := NewFunction(h.ctx, ast.EQ, h.inputTypes[2], []Expression{cols[20], cols[3]}...); err != nil {
 		panic("create EQ function failed.")
+	} else {
+		h.exprs = append(h.exprs, expr)
 	}
-	h.exprs = append(h.exprs, expr7)
-
 	h.exprs = append(h.exprs, cols[2])
 	h.exprs = append(h.exprs, cols[2])
 
 	h.outputTypes = make([]*types.FieldType, 0, len(h.exprs))
 	for i := 0; i < len(h.exprs); i++ {
-		h.outputTypes = append(h.outputTypes, h.exprs[i].GetType(h.ctx))
+		h.outputTypes = append(h.outputTypes, h.exprs[i].GetType())
 	}
 
 	h.outputChunk = chunk.NewChunkWithCapacity(h.outputTypes, numRows)
@@ -161,11 +165,10 @@ func BenchmarkVectorizedExecute(b *testing.B) {
 	h.init()
 	inputIter := chunk.NewIterator4Chunk(h.inputChunk)
 
-	evalCtx := h.ctx.GetEvalCtx()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		h.outputChunk.Reset()
-		if err := VectorizedExecute(evalCtx, h.exprs, inputIter, h.outputChunk); err != nil {
+		if err := VectorizedExecute(h.ctx, h.exprs, inputIter, h.outputChunk); err != nil {
 			panic("errors happened during \"VectorizedExecute\"")
 		}
 	}
@@ -191,7 +194,7 @@ func getRandomTime(r *rand.Rand) types.CoreTime {
 
 // dataGenerator is used to generate data for test.
 type dataGenerator interface {
-	gen() any
+	gen() interface{}
 }
 
 type defaultRandGen struct {
@@ -234,7 +237,7 @@ func newDefaultGener(nullRation float64, eType types.EvalType) *defaultGener {
 	}
 }
 
-func (g *defaultGener) gen() any {
+func (g *defaultGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -293,7 +296,7 @@ func (g *defaultGener) gen() any {
 // charInt64Gener is used to generate int which is equal to char's ascii
 type charInt64Gener struct{}
 
-func (g *charInt64Gener) gen() any {
+func (g *charInt64Gener) gen() interface{} {
 	nanosecond := time.Now().Nanosecond()
 	nanosecond = nanosecond % 1024
 	return int64(nanosecond)
@@ -309,7 +312,7 @@ func newSelectStringGener(candidates []string) *selectStringGener {
 	return &selectStringGener{candidates, newDefaultRandGen()}
 }
 
-func (g *selectStringGener) gen() any {
+func (g *selectStringGener) gen() interface{} {
 	if len(g.candidates) == 0 {
 		return nil
 	}
@@ -326,7 +329,7 @@ func newSelectRealGener(candidates []float64) *selectRealGener {
 	return &selectRealGener{candidates, newDefaultRandGen()}
 }
 
-func (g *selectRealGener) gen() any {
+func (g *selectRealGener) gen() interface{} {
 	if len(g.candidates) == 0 {
 		return nil
 	}
@@ -337,7 +340,7 @@ type constJSONGener struct {
 	jsonStr string
 }
 
-func (g *constJSONGener) gen() any {
+func (g *constJSONGener) gen() interface{} {
 	j := new(types.BinaryJSON)
 	if err := j.UnmarshalJSON([]byte(g.jsonStr)); err != nil {
 		panic(err)
@@ -354,7 +357,7 @@ func newDecimalJSONGener(nullRation float64) *decimalJSONGener {
 	return &decimalJSONGener{nullRation, newDefaultRandGen()}
 }
 
-func (g *decimalJSONGener) gen() any {
+func (g *decimalJSONGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -379,35 +382,12 @@ func newJSONStringGener() *jsonStringGener {
 	return &jsonStringGener{newDefaultRandGen()}
 }
 
-func (g *jsonStringGener) gen() any {
+func (g *jsonStringGener) gen() interface{} {
 	j := new(types.BinaryJSON)
 	if err := j.UnmarshalJSON([]byte(fmt.Sprintf(`{"key":%v}`, g.randGen.Int()))); err != nil {
 		panic(err)
 	}
 	return j.String()
-}
-
-type vectorFloat32RandGener struct {
-	dimension int
-	randGen   *defaultRandGen
-}
-
-// create a vectorfloat32 randomly with dimension. if dimension = -1, return nil vectorfloat32
-func newVectorFloat32RandGener(dimension int) *vectorFloat32RandGener {
-	return &vectorFloat32RandGener{dimension, newDefaultRandGen()}
-}
-
-func (g *vectorFloat32RandGener) gen() any {
-	if g.dimension == -1 {
-		return nil
-	}
-	var values []float32
-	for i := 0; i < g.dimension; i++ {
-		values = append(values, g.randGen.Float32())
-	}
-	vec := types.InitVectorFloat32(g.dimension)
-	copy(vec.Elements(), values)
-	return vec
 }
 
 type decimalStringGener struct {
@@ -418,7 +398,7 @@ func newDecimalStringGener() *decimalStringGener {
 	return &decimalStringGener{newDefaultRandGen()}
 }
 
-func (g *decimalStringGener) gen() any {
+func (g *decimalStringGener) gen() interface{} {
 	tempDecimal := new(types.MyDecimal)
 	if err := tempDecimal.FromFloat64(g.randGen.Float64()); err != nil {
 		panic(err)
@@ -434,7 +414,7 @@ func newRealStringGener() *realStringGener {
 	return &realStringGener{newDefaultRandGen()}
 }
 
-func (g *realStringGener) gen() any {
+func (g *realStringGener) gen() interface{} {
 	return fmt.Sprintf("%f", g.randGen.Float64())
 }
 
@@ -446,7 +426,7 @@ func newJSONTimeGener() *jsonTimeGener {
 	return &jsonTimeGener{newDefaultRandGen()}
 }
 
-func (g *jsonTimeGener) gen() any {
+func (g *jsonTimeGener) gen() interface{} {
 	tm := types.NewTime(getRandomTime(g.randGen.Rand), mysql.TypeDatetime, types.DefaultFsp)
 	return types.CreateBinaryJSON(tm)
 }
@@ -460,7 +440,7 @@ func newRangeDurationGener(nullRation float64) *rangeDurationGener {
 	return &rangeDurationGener{nullRation, newDefaultRandGen()}
 }
 
-func (g *rangeDurationGener) gen() any {
+func (g *rangeDurationGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -479,7 +459,7 @@ func newTimeFormatGener(nullRation float64) *timeFormatGener {
 	return &timeFormatGener{nullRation, newDefaultRandGen()}
 }
 
-func (g *timeFormatGener) gen() any {
+func (g *timeFormatGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -512,7 +492,7 @@ func newRangeRealGener(begin, end, nullRation float64) *rangeRealGener {
 	return &rangeRealGener{begin, end, nullRation, newDefaultRandGen()}
 }
 
-func (g *rangeRealGener) gen() any {
+func (g *rangeRealGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -536,7 +516,7 @@ func newRangeDecimalGener(begin, end, nullRation float64) *rangeDecimalGener {
 	return &rangeDecimalGener{begin, end, nullRation, newDefaultRandGen()}
 }
 
-func (g *rangeDecimalGener) gen() any {
+func (g *rangeDecimalGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -563,7 +543,7 @@ func newRangeInt64Gener(begin, end int) *rangeInt64Gener {
 	return &rangeInt64Gener{begin, end, newDefaultRandGen()}
 }
 
-func (rig *rangeInt64Gener) gen() any {
+func (rig *rangeInt64Gener) gen() interface{} {
 	return int64(rig.randGen.Intn(rig.end-rig.begin) + rig.begin)
 }
 
@@ -572,7 +552,7 @@ type numStrGener struct {
 	rangeInt64Gener
 }
 
-func (g *numStrGener) gen() any {
+func (g *numStrGener) gen() interface{} {
 	return fmt.Sprintf("%v", g.rangeInt64Gener.gen())
 }
 
@@ -581,7 +561,7 @@ type ipv6StrGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv6StrGener) gen() any {
+func (g *ipv6StrGener) gen() interface{} {
 	var ip net.IP = make([]byte, net.IPv6len)
 	for i := range ip {
 		ip[i] = uint8(g.randGen.Intn(256))
@@ -594,7 +574,7 @@ type ipv4StrGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv4StrGener) gen() any {
+func (g *ipv4StrGener) gen() interface{} {
 	var ip net.IP = make([]byte, net.IPv4len)
 	for i := range ip {
 		ip[i] = uint8(g.randGen.Intn(256))
@@ -607,7 +587,7 @@ type ipv6ByteGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv6ByteGener) gen() any {
+func (g *ipv6ByteGener) gen() interface{} {
 	var ip = make([]byte, net.IPv6len)
 	for i := range ip {
 		ip[i] = uint8(g.randGen.Intn(256))
@@ -620,7 +600,7 @@ type ipv4ByteGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv4ByteGener) gen() any {
+func (g *ipv4ByteGener) gen() interface{} {
 	var ip = make([]byte, net.IPv4len)
 	for i := range ip {
 		ip[i] = uint8(g.randGen.Intn(256))
@@ -633,7 +613,7 @@ type ipv4CompatByteGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv4CompatByteGener) gen() any {
+func (g *ipv4CompatByteGener) gen() interface{} {
 	var ip = make([]byte, net.IPv6len)
 	for i := range ip {
 		if i < 12 {
@@ -650,7 +630,7 @@ type ipv4MappedByteGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *ipv4MappedByteGener) gen() any {
+func (g *ipv4MappedByteGener) gen() interface{} {
 	var ip = []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0, 0, 0}
 	for i := 12; i < 16; i++ {
 		ip[i] = uint8(g.randGen.Intn(256)) // reset the last 4 bytes
@@ -663,7 +643,7 @@ type uuidStrGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *uuidStrGener) gen() any {
+func (g *uuidStrGener) gen() interface{} {
 	u, _ := uuid.NewUUID()
 	return u.String()
 }
@@ -673,7 +653,7 @@ type uuidBinGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *uuidBinGener) gen() any {
+func (g *uuidBinGener) gen() interface{} {
 	u, _ := uuid.NewUUID()
 	bin, _ := u.MarshalBinary()
 	return string(bin)
@@ -690,7 +670,7 @@ func newRandLenStrGener(lenBegin, lenEnd int) *randLenStrGener {
 	return &randLenStrGener{lenBegin, lenEnd, newDefaultRandGen()}
 }
 
-func (g *randLenStrGener) gen() any {
+func (g *randLenStrGener) gen() interface{} {
 	n := g.randGen.Intn(g.lenEnd-g.lenBegin) + g.lenBegin
 	buf := make([]byte, n)
 	for i := range buf {
@@ -716,7 +696,7 @@ func newRandHexStrGener(lenBegin, lenEnd int) *randHexStrGener {
 	return &randHexStrGener{lenBegin, lenEnd, newDefaultRandGen()}
 }
 
-func (g *randHexStrGener) gen() any {
+func (g *randHexStrGener) gen() interface{} {
 	n := g.randGen.Intn(g.lenEnd-g.lenBegin) + g.lenBegin
 	buf := make([]byte, n)
 	for i := range buf {
@@ -739,7 +719,7 @@ type dateGener struct {
 	randGen *defaultRandGen
 }
 
-func (g dateGener) gen() any {
+func (g dateGener) gen() interface{} {
 	year := 1970 + g.randGen.Intn(100)
 	month := g.randGen.Intn(10) + 1
 	day := g.randGen.Intn(20) + 1
@@ -757,7 +737,7 @@ type dateTimeGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *dateTimeGener) gen() any {
+func (g *dateTimeGener) gen() interface{} {
 	if g.Year == 0 {
 		g.Year = 1970 + g.randGen.Intn(100)
 	}
@@ -788,7 +768,7 @@ type dateTimeStrGener struct {
 	randGen *defaultRandGen
 }
 
-func (g *dateTimeStrGener) gen() any {
+func (g *dateTimeStrGener) gen() interface{} {
 	if g.Year == 0 {
 		g.Year = 1970 + g.randGen.Intn(100)
 	}
@@ -823,7 +803,7 @@ type dateStrGener struct {
 	randGen    *defaultRandGen
 }
 
-func (g *dateStrGener) gen() any {
+func (g *dateStrGener) gen() interface{} {
 	if g.NullRation > 1e-6 && g.randGen.Float64() < g.NullRation {
 		return nil
 	}
@@ -848,7 +828,7 @@ type dateOrDatetimeStrGener struct {
 	dateTimeStrGener
 }
 
-func (g dateOrDatetimeStrGener) gen() any {
+func (g dateOrDatetimeStrGener) gen() interface{} {
 	if g.dateRatio > 1e-6 && g.dateStrGener.randGen.Float64() < g.dateRatio {
 		return g.dateStrGener.gen()
 	}
@@ -862,7 +842,7 @@ type timeStrGener struct {
 	randGen    *defaultRandGen
 }
 
-func (g *timeStrGener) gen() any {
+func (g *timeStrGener) gen() interface{} {
 	if g.nullRation > 1e-6 && g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -878,7 +858,7 @@ type dateIntGener struct {
 	dateGener
 }
 
-func (g dateIntGener) gen() any {
+func (g dateIntGener) gen() interface{} {
 	t := g.dateGener.gen().(types.Time)
 	num, err := t.ToNumber().ToInt()
 	if err != nil {
@@ -892,7 +872,7 @@ type dateTimeIntGener struct {
 	dateTimeGener
 }
 
-func (g dateTimeIntGener) gen() any {
+func (g dateTimeIntGener) gen() interface{} {
 	t := g.dateTimeGener.gen().(types.Time)
 	num, err := t.ToNumber().ToInt()
 	if err != nil {
@@ -908,7 +888,7 @@ type dateOrDatetimeIntGener struct {
 	dateTimeIntGener
 }
 
-func (g dateOrDatetimeIntGener) gen() any {
+func (g dateOrDatetimeIntGener) gen() interface{} {
 	if g.dateRatio > 1e-6 && g.dateGener.randGen.Float64() < g.dateRatio {
 		return g.dateIntGener.gen()
 	}
@@ -923,7 +903,7 @@ type dateRealGener struct {
 	dateGener
 }
 
-func (g dateRealGener) gen() any {
+func (g dateRealGener) gen() interface{} {
 	t := g.dateGener.gen().(types.Time)
 	num, err := t.ToNumber().ToFloat64()
 	if err != nil {
@@ -945,7 +925,7 @@ type dateTimeRealGener struct {
 	dateTimeGener
 }
 
-func (g dateTimeRealGener) gen() any {
+func (g dateTimeRealGener) gen() interface{} {
 	t := g.dateTimeGener.gen().(types.Time)
 	tmp, err := t.ToNumber().ToInt()
 	if err != nil {
@@ -971,7 +951,7 @@ type dateOrDatetimeRealGener struct {
 	dateTimeRealGener
 }
 
-func (g dateOrDatetimeRealGener) gen() any {
+func (g dateOrDatetimeRealGener) gen() interface{} {
 	if g.dateRatio > 1e-6 && g.dateGener.randGen.Float64() < g.dateRatio {
 		return g.dateRealGener.gen()
 	}
@@ -986,7 +966,7 @@ type dateDecimalGener struct {
 	dateGener
 }
 
-func (g dateDecimalGener) gen() any {
+func (g dateDecimalGener) gen() interface{} {
 	t := g.dateGener.gen().(types.Time)
 	intPart := t.ToNumber()
 
@@ -1015,7 +995,7 @@ type dateTimeDecimalGener struct {
 	dateTimeGener
 }
 
-func (g dateTimeDecimalGener) gen() any {
+func (g dateTimeDecimalGener) gen() interface{} {
 	t := g.dateTimeGener.gen().(types.Time)
 	num := t.ToNumber()
 	// Not using `num`'s fractional part so that we can:
@@ -1053,7 +1033,7 @@ type dateOrDatetimeDecimalGener struct {
 	dateTimeDecimalGener
 }
 
-func (g dateOrDatetimeDecimalGener) gen() any {
+func (g dateOrDatetimeDecimalGener) gen() interface{} {
 	if g.dateRatio > 1e-6 && g.dateGener.randGen.Float64() < g.dateRatio {
 		return g.dateDecimalGener.gen()
 	}
@@ -1066,7 +1046,7 @@ type constStrGener struct {
 	s string
 }
 
-func (g *constStrGener) gen() any {
+func (g *constStrGener) gen() interface{} {
 	return g.s
 }
 
@@ -1078,7 +1058,7 @@ func newRandDurInt() *randDurInt {
 	return &randDurInt{newDefaultRandGen()}
 }
 
-func (g *randDurInt) gen() any {
+func (g *randDurInt) gen() interface{} {
 	return int64(g.randGen.Intn(types.TimeMaxHour)*10000 + g.randGen.Intn(60)*100 + g.randGen.Intn(60))
 }
 
@@ -1090,7 +1070,7 @@ func newRandDurReal() *randDurReal {
 	return &randDurReal{newDefaultRandGen()}
 }
 
-func (g *randDurReal) gen() any {
+func (g *randDurReal) gen() interface{} {
 	return float64(g.randGen.Intn(types.TimeMaxHour)*10000 + g.randGen.Intn(60)*100 + g.randGen.Intn(60))
 }
 
@@ -1102,7 +1082,7 @@ func newRandDurDecimal() *randDurDecimal {
 	return &randDurDecimal{newDefaultRandGen()}
 }
 
-func (g *randDurDecimal) gen() any {
+func (g *randDurDecimal) gen() interface{} {
 	d := new(types.MyDecimal)
 	return d.FromFloat64(float64(g.randGen.Intn(types.TimeMaxHour)*10000 + g.randGen.Intn(60)*100 + g.randGen.Intn(60)))
 }
@@ -1117,7 +1097,7 @@ func newLocationGener(nullRation float64) *locationGener {
 	return &locationGener{nullRation, newDefaultRandGen()}
 }
 
-func (g *locationGener) gen() any {
+func (g *locationGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -1147,7 +1127,7 @@ func newFormatGener(nullRation float64) *formatGener {
 	return &formatGener{nullRation, newDefaultRandGen()}
 }
 
-func (g *formatGener) gen() any {
+func (g *formatGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -1175,7 +1155,7 @@ func newNullWrappedGener(nullRation float64, inner dataGenerator) *nullWrappedGe
 	return &nullWrappedGener{nullRation, inner, newDefaultRandGen()}
 }
 
-func (g *nullWrappedGener) gen() any {
+func (g *nullWrappedGener) gen() interface{} {
 	if g.randGen.Float64() < g.nullRation {
 		return nil
 	}
@@ -1247,8 +1227,6 @@ func fillColumnWithGener(eType types.EvalType, chk *chunk.Chunk, colIdx int, gen
 			col.AppendJSON(v.(types.BinaryJSON))
 		case types.ETString:
 			col.AppendString(v.(string))
-		case types.ETVectorFloat32:
-			col.AppendVectorFloat32(v.(types.VectorFloat32))
 		}
 	}
 }
@@ -1285,14 +1263,12 @@ func eType2FieldType(eType types.EvalType) *types.FieldType {
 		return types.NewFieldType(mysql.TypeJSON)
 	case types.ETString:
 		return types.NewFieldType(mysql.TypeVarString)
-	case types.ETVectorFloat32:
-		return types.NewFieldType(mysql.TypeTiDBVectorFloat32)
 	default:
 		panic(fmt.Sprintf("EvalType=%v is not supported.", eType))
 	}
 }
 
-func genVecExprBenchCase(ctx BuildContext, funcName string, testCase vecExprBenchCase) (expr Expression, fts []*types.FieldType, input *chunk.Chunk, output *chunk.Chunk) {
+func genVecExprBenchCase(ctx sessionctx.Context, funcName string, testCase vecExprBenchCase) (expr Expression, fts []*types.FieldType, input *chunk.Chunk, output *chunk.Chunk) {
 	fts = make([]*types.FieldType, len(testCase.childrenTypes))
 	for i := range fts {
 		if i < len(testCase.childrenFieldTypes) && testCase.childrenFieldTypes[i] != nil {
@@ -1321,14 +1297,14 @@ func genVecExprBenchCase(ctx BuildContext, funcName string, testCase vecExprBenc
 		panic(err)
 	}
 
-	output = chunk.New([]*types.FieldType{eType2FieldType(expr.GetType(ctx.GetEvalCtx()).EvalType())}, testCase.chunkSize, testCase.chunkSize)
+	output = chunk.New([]*types.FieldType{eType2FieldType(expr.GetType().EvalType())}, testCase.chunkSize, testCase.chunkSize)
 	return expr, fts, input, output
 }
 
 // testVectorizedEvalOneVec is used to verify that the vectorized
 // expression is evaluated correctly during projection
 func testVectorizedEvalOneVec(t *testing.T, vecExprCases vecExprBenchCases) {
-	ctx := createContext(t)
+	ctx := mock.NewContext()
 	for funcName, testCases := range vecExprCases {
 		for _, testCase := range testCases {
 			expr, fts, input, output := genVecExprBenchCase(ctx, funcName, testCase)
@@ -1341,7 +1317,7 @@ func testVectorizedEvalOneVec(t *testing.T, vecExprCases vecExprBenchCases) {
 			require.NoErrorf(t, evalOneColumn(ctx, expr, it, output2, 0), "func: %v, case: %+v", funcName, testCase)
 
 			c1, c2 := output.Column(0), output2.Column(0)
-			switch expr.GetType(ctx).EvalType() {
+			switch expr.GetType().EvalType() {
 			case types.ETInt:
 				for i := 0; i < input.NumRows(); i++ {
 					require.Equal(t, c1.IsNull(i), c2.IsNull(i), commentf(i))
@@ -1399,11 +1375,11 @@ func testVectorizedEvalOneVec(t *testing.T, vecExprCases vecExprBenchCases) {
 // benchmarkVectorizedEvalOneVec is used to get the effect of
 // using the vectorized expression evaluations during projection
 func benchmarkVectorizedEvalOneVec(b *testing.B, vecExprCases vecExprBenchCases) {
-	ctx := createContext(b)
+	ctx := mock.NewContext()
 	for funcName, testCases := range vecExprCases {
 		for _, testCase := range testCases {
 			expr, _, input, output := genVecExprBenchCase(ctx, funcName, testCase)
-			exprName := expr.StringWithCtx(ctx, perrors.RedactLogDisable)
+			exprName := expr.String()
 			if sf, ok := expr.(*ScalarFunction); ok {
 				exprName = fmt.Sprintf("%v", reflect.TypeOf(sf.Function))
 				tmp := strings.Split(exprName, ".")
@@ -1431,7 +1407,7 @@ func benchmarkVectorizedEvalOneVec(b *testing.B, vecExprCases vecExprBenchCases)
 	}
 }
 
-func genVecBuiltinFuncBenchCase(ctx BuildContext, funcName string, testCase vecExprBenchCase) (baseFunc builtinFunc, fts []*types.FieldType, input *chunk.Chunk, result *chunk.Column) {
+func genVecBuiltinFuncBenchCase(ctx sessionctx.Context, funcName string, testCase vecExprBenchCase) (baseFunc builtinFunc, fts []*types.FieldType, input *chunk.Chunk, result *chunk.Column) {
 	childrenNumber := len(testCase.childrenTypes)
 	fts = make([]*types.FieldType, childrenNumber)
 	for i := range fts {
@@ -1464,11 +1440,11 @@ func genVecBuiltinFuncBenchCase(ctx BuildContext, funcName string, testCase vecE
 		tp := eType2FieldType(testCase.retEvalType)
 		switch testCase.retEvalType {
 		case types.ETInt:
-			fc = &castAsIntFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsIntFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDecimal:
-			fc = &castAsDecimalFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsDecimalFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETReal:
-			fc = &castAsRealFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsRealFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDatetime, types.ETTimestamp:
 			fc = &castAsTimeFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETDuration:
@@ -1476,7 +1452,7 @@ func genVecBuiltinFuncBenchCase(ctx BuildContext, funcName string, testCase vecE
 		case types.ETJson:
 			fc = &castAsJSONFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		case types.ETString:
-			fc = &castAsStringFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp, false}
+			fc = &castAsStringFunctionClass{baseFunctionClass{ast.Cast, 1, 1}, tp}
 		}
 		baseFunc, err = fc.getFunction(ctx, cols)
 	} else if funcName == ast.GetVar {
@@ -1537,7 +1513,7 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 	}
 	for funcName, testCases := range vecExprCases {
 		for _, testCase := range testCases {
-			ctx := createContext(t)
+			ctx := mock.NewContext()
 			if testCase.aesModes == "" {
 				testCase.aesModes = "aes-128-ecb"
 			}
@@ -1586,14 +1562,14 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 			var vecWarnCnt uint16
 			switch testCase.retEvalType {
 			case types.ETInt:
-				err := baseFunc.vecEvalInt(ctx, input, output)
+				err := baseFunc.vecEvalInt(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				i64s := output.Int64s()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalInt(ctx, row)
+					val, isNull, err := baseFunc.evalInt(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1602,14 +1578,14 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETReal:
-				err := baseFunc.vecEvalReal(ctx, input, output)
+				err := baseFunc.vecEvalReal(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				f64s := output.Float64s()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalReal(ctx, row)
+					val, isNull, err := baseFunc.evalReal(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1618,14 +1594,14 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETDecimal:
-				err := baseFunc.vecEvalDecimal(ctx, input, output)
+				err := baseFunc.vecEvalDecimal(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				d64s := output.Decimals()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalDecimal(ctx, row)
+					val, isNull, err := baseFunc.evalDecimal(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1634,14 +1610,14 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETDatetime, types.ETTimestamp:
-				err := baseFunc.vecEvalTime(ctx, input, output)
+				err := baseFunc.vecEvalTime(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				t64s := output.Times()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalTime(ctx, row)
+					val, isNull, err := baseFunc.evalTime(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1650,14 +1626,14 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETDuration:
-				err := baseFunc.vecEvalDuration(ctx, input, output)
+				err := baseFunc.vecEvalDuration(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				d64s := output.GoDurations()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalDuration(ctx, row)
+					val, isNull, err := baseFunc.evalDuration(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1666,13 +1642,13 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETJson:
-				err := baseFunc.vecEvalJSON(ctx, input, output)
+				err := baseFunc.vecEvalJSON(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalJSON(ctx, row)
+					val, isNull, err := baseFunc.evalJSON(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
@@ -1682,32 +1658,17 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 					i++
 				}
 			case types.ETString:
-				err := baseFunc.vecEvalString(ctx, input, output)
+				err := baseFunc.vecEvalString(input, output)
 				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
 				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
 				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalString(ctx, row)
+					val, isNull, err := baseFunc.evalString(row)
 					require.NoErrorf(t, err, commentf(i))
 					require.Equal(t, output.IsNull(i), isNull, commentf(i))
 					if !isNull {
 						require.Equal(t, output.GetString(i), val, commentf(i))
-					}
-					i++
-				}
-			case types.ETVectorFloat32:
-				err := baseFunc.vecEvalVectorFloat32(ctx, input, output)
-				require.NoErrorf(t, err, "func: %v, case: %+v", baseFuncName, testCase)
-				// do not forget to call ResizeXXX/ReserveXXX
-				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
-				vecWarnCnt = ctx.GetSessionVars().StmtCtx.WarningCount()
-				for row := it.Begin(); row != it.End(); row = it.Next() {
-					val, isNull, err := baseFunc.evalVectorFloat32(ctx, row)
-					require.NoErrorf(t, err, commentf(i))
-					require.Equal(t, output.IsNull(i), isNull, commentf(i))
-					if !isNull {
-						require.Equal(t, output.GetVectorFloat32(i).Compare(val), 0, commentf(i))
 					}
 					i++
 				}
@@ -1718,13 +1679,6 @@ func testVectorizedBuiltinFunc(t *testing.T, vecExprCases vecExprBenchCases) {
 			// check warnings
 			totalWarns := ctx.GetSessionVars().StmtCtx.WarningCount()
 			require.Equal(t, totalWarns, 2*vecWarnCnt)
-
-			if _, ok := baseFunc.(*builtinAddSubDateAsStringSig); ok {
-				// skip check warnings for `builtinAddSubDateAsStringSig` for issue https://github.com/pingcap/tidb/issues/50197
-				// TODO: fix this issue
-				continue
-			}
-
 			warns := ctx.GetSessionVars().StmtCtx.GetWarnings()
 			for i := 0; i < int(vecWarnCnt); i++ {
 				require.True(t, terror.ErrorEqual(warns[i].Err, warns[i+int(vecWarnCnt)].Err))
@@ -1751,7 +1705,7 @@ func testVectorizedBuiltinFuncForRand(t *testing.T, vecExprCases vecExprBenchCas
 			require.Truef(t, baseFunc.vectorized(), "func: %v", baseFuncName)
 			switch testCase.retEvalType {
 			case types.ETReal:
-				err := baseFunc.vecEvalReal(ctx, input, output)
+				err := baseFunc.vecEvalReal(input, output)
 				require.NoError(t, err)
 				// do not forget to call ResizeXXX/ReserveXXX
 				require.Equal(t, input.NumRows(), getColumnLen(output, testCase.retEvalType))
@@ -1825,49 +1779,43 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 				switch testCase.retEvalType {
 				case types.ETInt:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalInt(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalInt(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETReal:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalReal(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalReal(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETDecimal:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalDecimal(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalDecimal(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETDatetime, types.ETTimestamp:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalTime(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalTime(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETDuration:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalDuration(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalDuration(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETJson:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalJSON(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalJSON(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
 				case types.ETString:
 					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalString(ctx, input, output); err != nil {
-							b.Fatal(err)
-						}
-					}
-				case types.ETVectorFloat32:
-					for i := 0; i < b.N; i++ {
-						if err := baseFunc.vecEvalVectorFloat32(ctx, input, output); err != nil {
+						if err := baseFunc.vecEvalString(input, output); err != nil {
 							b.Fatal(err)
 						}
 					}
@@ -1883,7 +1831,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalInt(ctx, row)
+							v, isNull, err := baseFunc.evalInt(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1898,7 +1846,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalReal(ctx, row)
+							v, isNull, err := baseFunc.evalReal(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1913,7 +1861,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalDecimal(ctx, row)
+							v, isNull, err := baseFunc.evalDecimal(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1928,7 +1876,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalTime(ctx, row)
+							v, isNull, err := baseFunc.evalTime(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1943,7 +1891,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalDuration(ctx, row)
+							v, isNull, err := baseFunc.evalDuration(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1958,7 +1906,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalJSON(ctx, row)
+							v, isNull, err := baseFunc.evalJSON(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1973,7 +1921,7 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 					for i := 0; i < b.N; i++ {
 						output.Reset(testCase.retEvalType)
 						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalString(ctx, row)
+							v, isNull, err := baseFunc.evalString(row)
 							if err != nil {
 								b.Fatal(err)
 							}
@@ -1981,21 +1929,6 @@ func benchmarkVectorizedBuiltinFunc(b *testing.B, vecExprCases vecExprBenchCases
 								output.AppendNull()
 							} else {
 								output.AppendString(v)
-							}
-						}
-					}
-				case types.ETVectorFloat32:
-					for i := 0; i < b.N; i++ {
-						output.Reset(testCase.retEvalType)
-						for row := it.Begin(); row != it.End(); row = it.Next() {
-							v, isNull, err := baseFunc.evalVectorFloat32(ctx, row)
-							if err != nil {
-								b.Fatal(err)
-							}
-							if isNull {
-								output.AppendNull()
-							} else {
-								output.AppendVectorFloat32(v)
 							}
 						}
 					}
@@ -2077,7 +2010,6 @@ func BenchmarkVecEvalBool(b *testing.B) {
 	nulls := make([]bool, 0, 1024)
 	eTypes := []types.EvalType{types.ETInt, types.ETReal, types.ETDecimal, types.ETString, types.ETTimestamp, types.ETDatetime, types.ETDuration}
 	tNames := []string{"int", "real", "decimal", "string", "timestamp", "datetime", "duration"}
-	vecEnabled := ctx.GetSessionVars().EnableVectorizedExpression
 	for numCols := 1; numCols <= 2; numCols++ {
 		typeCombination := make([]types.EvalType, numCols)
 		var combFunc func(nCols int)
@@ -2095,7 +2027,7 @@ func BenchmarkVecEvalBool(b *testing.B) {
 				b.Run("Vec-"+name, func(b *testing.B) {
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						_, _, err := VecEvalBool(ctx, vecEnabled, exprs, input, selected, nulls)
+						_, _, err := VecEvalBool(ctx, exprs, input, selected, nulls)
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -2149,7 +2081,7 @@ func BenchmarkRowBasedFilterAndVectorizedFilter(b *testing.B) {
 				b.Run("Vec-"+name, func(b *testing.B) {
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						_, _, err := vectorizedFilter(ctx, ctx.GetSessionVars().EnableVectorizedExpression, exprs, it, selected, nulls)
+						_, _, err := vectorizedFilter(ctx, exprs, it, selected, nulls)
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -2184,7 +2116,7 @@ func BenchmarkRowBasedFilterAndVectorizedFilter(b *testing.B) {
 	b.Run("Vec-special case", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, _, err := vectorizedFilter(ctx, ctx.GetSessionVars().EnableVectorizedExpression, []Expression{expr}, it, selected, nulls)
+			_, _, err := vectorizedFilter(ctx, []Expression{expr}, it, selected, nulls)
 			if err != nil {
 				panic(err)
 			}

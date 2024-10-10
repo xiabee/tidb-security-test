@@ -17,7 +17,7 @@
 set -eux
 
 # restart service without tiflash
-source $UTILS_DIR/run_services
+source $( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../_utils/run_services
 start_services --no-tiflash
 
 BACKUP_DIR=$TEST_DIR/"txn_backup"
@@ -97,22 +97,12 @@ run_test() {
     # delete data in range[start-key, end-key)
     clean "hello" "world" 
     # Ensure the data is deleted
-    retry_cnt=0
-    while true; do
-        checksum_new=$(checksum "hello" "world")
+    checksum_new=$(checksum "hello" "world")
 
-        if [ "$checksum_new" != "$checksum_empty" ]; then
-            echo "failed to delete data in range after backup; retry_cnt = $retry_cnt"
-            retry_cnt=$((retry_cnt+1))
-            if [ "$retry_cnt" -gt 50 ]; then
-                fail_and_exit
-            fi
-            sleep 1
-            continue
-        fi
-
-        break
-    done
+    if [ "$checksum_new" != "$checksum_empty" ];then
+        echo "failed to delete data in range after backup"
+        fail_and_exit
+    fi
 
     # restore rawkv
     echo "restore start..."

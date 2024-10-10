@@ -4,6 +4,7 @@ package utils
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 
 	"github.com/docker/go-units"
@@ -22,8 +23,30 @@ const (
 )
 
 var (
+	// check sql.DB and sql.Conn implement QueryExecutor and DBExecutor
+	_ DBExecutor = &sql.DB{}
+	_ DBExecutor = &sql.Conn{}
+
 	logBackupTaskCount = atomic.NewInt32(0)
 )
+
+// QueryExecutor is a interface for exec query
+type QueryExecutor interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+// StmtExecutor define both query and exec methods
+type StmtExecutor interface {
+	QueryExecutor
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
+// DBExecutor is a interface for statements and txn
+type DBExecutor interface {
+	StmtExecutor
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
 
 func GetRegionSplitInfo(ctx sqlexec.RestrictedSQLExecutor) (uint64, int64) {
 	return GetSplitSize(ctx), GetSplitKeys(ctx)
@@ -110,10 +133,7 @@ func GetGcRatio(ctx sqlexec.RestrictedSQLExecutor) (string, error) {
 	return d.ToString()
 }
 
-const (
-	DefaultGcRatioVal  = "1.1"
-	DisabledGcRatioVal = "-1.0"
-)
+const DefaultGcRatioVal = "1.1"
 
 func SetGcRatio(ctx sqlexec.RestrictedSQLExecutor, ratio string) error {
 	_, _, err := ctx.ExecRestrictedSQL(

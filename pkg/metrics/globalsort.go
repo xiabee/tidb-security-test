@@ -27,8 +27,6 @@ var (
 	GlobalSortReadFromCloudStorageRate *prometheus.HistogramVec
 	// GlobalSortIngestWorkerCnt records the working number of ingest workers.
 	GlobalSortIngestWorkerCnt *prometheus.GaugeVec
-	// GlobalSortUploadWorkerCount is the gauge of active parallel upload worker count.
-	GlobalSortUploadWorkerCount prometheus.Gauge
 )
 
 // InitGlobalSortMetrics initializes defines global sort metrics.
@@ -71,13 +69,4 @@ func InitGlobalSortMetrics() {
 		Name:      "ingest_worker_cnt",
 		Help:      "ingest worker cnt",
 	}, []string{LblType})
-
-	GlobalSortUploadWorkerCount = NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "tidb",
-			Subsystem: "global_sort",
-			Name:      "upload_worker_cnt",
-			Help:      "Gauge of active parallel upload worker count.",
-		},
-	)
 }

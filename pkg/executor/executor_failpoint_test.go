@@ -35,7 +35,6 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
 	"github.com/pingcap/tidb/pkg/util/deadlockhistory"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,7 +209,7 @@ func TestSplitRegionTimeout(t *testing.T) {
 
 	// Test pre-split with timeout.
 	tk.MustExec("drop table if exists t")
-	tk.MustExec("set @@session.tidb_scatter_region='table';")
+	tk.MustExec("set @@global.tidb_scatter_region=1;")
 	require.NoError(t, failpoint.Enable("tikvclient/mockScatterRegionTimeout", `return(true)`))
 	atomic.StoreUint32(&ddl.EnableSplitTableRegion, 1)
 	start := time.Now()
@@ -237,7 +236,7 @@ func TestTSOFail(t *testing.T) {
 }
 
 func TestKillTableReader(t *testing.T) {
-	var retry = "tikvclient/mockRetrySendReqToRegion"
+	var retry = "github.com/tikv/client-go/v2/locate/mockRetrySendReqToRegion"
 	defer func() {
 		require.NoError(t, failpoint.Disable(retry))
 	}()
@@ -249,18 +248,18 @@ func TestKillTableReader(t *testing.T) {
 	tk.MustExec("create table t (a int)")
 	tk.MustExec("insert into t values (1),(2),(3)")
 	tk.MustExec("set @@tidb_distsql_scan_concurrency=1")
-	tk.Session().GetSessionVars().SQLKiller.Reset()
+	atomic.StoreUint32(&tk.Session().GetSessionVars().Killed, 0)
 	require.NoError(t, failpoint.Enable(retry, `return(true)`))
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		time.Sleep(300 * time.Millisecond)
-		tk.Session().GetSessionVars().SQLKiller.SendKillSignal(sqlkiller.QueryInterrupted)
+		time.Sleep(1 * time.Second)
+		err := tk.QueryToErr("select * from t")
+		require.Error(t, err)
+		require.Equal(t, int(exeerrors.ErrQueryInterrupted.Code()), int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code))
 	}()
-	err := tk.QueryToErr("select * from t")
-	require.Error(t, err)
-	require.Equal(t, int(exeerrors.ErrQueryInterrupted.Code()), int(terror.ToSQLError(errors.Cause(err).(*terror.Error)).Code))
+	atomic.StoreUint32(&tk.Session().GetSessionVars().Killed, 1)
 	wg.Wait()
 }
 
@@ -276,12 +275,11 @@ func TestCollectCopRuntimeStats(t *testing.T) {
 	rows := tk.MustQuery("explain analyze select * from t1").Rows()
 	require.Len(t, rows, 2)
 	explain := fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*num_rpc:.*, .*regionMiss:.*", explain)
+	require.Regexp(t, ".*rpc_num: .*, .*regionMiss:.*", explain)
 	require.NoError(t, failpoint.Disable("tikvclient/tikvStoreRespResult"))
 }
 
 func TestCoprocessorOOMTiCase(t *testing.T) {
-	t.Skip("skip")
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
@@ -343,27 +341,24 @@ func TestCoprocessorOOMTiCase(t *testing.T) {
 	f()
 	err = failpoint.Disable("github.com/pingcap/tidb/pkg/store/copr/ticase-4169")
 	require.NoError(t, err)
-	/*
-		// ticase-4170, trigger oom action twice after iterator receiving all the data.
-		err = failpoint.Enable("github.com/pingcap/tidb/pkg/store/copr/ticase-4170", `return(true)`)
-		require.NoError(t, err)
-		f()
-		err = failpoint.Disable("github.com/pingcap/tidb/pkg/store/copr/ticase-4170")
-		require.NoError(t, err)
-		// ticase-4171, trigger oom before reading or consuming any data
-		err = failpoint.Enable("github.com/pingcap/tidb/pkg/store/copr/ticase-4171", `return(true)`)
-		require.NoError(t, err)
-		f()
-		err = failpoint.Disable("github.com/pingcap/tidb/pkg/store/copr/ticase-4171")
-		require.NoError(t, err)
-
-	*/
+	// ticase-4170, trigger oom action twice after iterator receiving all the data.
+	err = failpoint.Enable("github.com/pingcap/tidb/pkg/store/copr/ticase-4170", `return(true)`)
+	require.NoError(t, err)
+	f()
+	err = failpoint.Disable("github.com/pingcap/tidb/pkg/store/copr/ticase-4170")
+	require.NoError(t, err)
+	// ticase-4171, trigger oom before reading or consuming any data
+	err = failpoint.Enable("github.com/pingcap/tidb/pkg/store/copr/ticase-4171", `return(true)`)
+	require.NoError(t, err)
+	f()
+	err = failpoint.Disable("github.com/pingcap/tidb/pkg/store/copr/ticase-4171")
+	require.NoError(t, err)
 }
 
 func TestIssue21441(t *testing.T) {
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/union/issue21441", `return`))
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/issue21441", `return`))
 	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/union/issue21441"))
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/issue21441"))
 	}()
 
 	store := testkit.CreateMockStore(t)
@@ -591,7 +586,7 @@ func TestTiKVClientReadTimeout(t *testing.T) {
 	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t where b > 1").Rows()
 	require.Len(t, rows, 3)
 	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .*num_rpc:2.*", explain)
+	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 2.*", explain)
 
 	// Test for stale read.
 	tk.MustExec("set @a=now(6);")
@@ -599,7 +594,7 @@ func TestTiKVClientReadTimeout(t *testing.T) {
 	rows = tk.MustQuery("explain analyze select /*+ set_var(tikv_client_read_timeout=1) */ * from t as of timestamp(@a) where b > 1").Rows()
 	require.Len(t, rows, 3)
 	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .*num_rpc:2.*", explain)
+	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 2.*", explain)
 
 	// Test for tikv_client_read_timeout session variable.
 	tk.MustExec("set @@tikv_client_read_timeout=1;")
@@ -619,7 +614,7 @@ func TestTiKVClientReadTimeout(t *testing.T) {
 	rows = tk.MustQuery("explain analyze select * from t where b > 1").Rows()
 	require.Len(t, rows, 3)
 	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .*num_rpc:2.*", explain)
+	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 2.*", explain)
 
 	// Test for stale read.
 	tk.MustExec("set @a=now(6);")
@@ -627,7 +622,7 @@ func TestTiKVClientReadTimeout(t *testing.T) {
 	rows = tk.MustQuery("explain analyze select * from t as of timestamp(@a) where b > 1").Rows()
 	require.Len(t, rows, 3)
 	explain = fmt.Sprintf("%v", rows[0])
-	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .*num_rpc:2.*", explain)
+	require.Regexp(t, ".*TableReader.* root  time:.*, loops:.* cop_task: {num: 1, .* rpc_num: 2.*", explain)
 }
 
 func TestGetMvccByEncodedKeyRegionError(t *testing.T) {
@@ -636,7 +631,7 @@ func TestGetMvccByEncodedKeyRegionError(t *testing.T) {
 	h := helper.NewHelper(store.(helper.Storage))
 	txn, err := store.Begin()
 	require.NoError(t, err)
-	m := meta.NewMutator(txn)
+	m := meta.NewMeta(txn)
 	schemaVersion := tk.Session().GetDomainInfoSchema().SchemaMetaVersion()
 	key := m.EncodeSchemaDiffKey(schemaVersion)
 
@@ -679,41 +674,4 @@ func TestShuffleExit(t *testing.T) {
 	}()
 	err := tk.QueryToErr("SELECT SUM(i) OVER W FROM t1 WINDOW w AS (PARTITION BY j ORDER BY i) ORDER BY 1+SUM(i) OVER w;")
 	require.ErrorContains(t, err, "ShuffleExec.Next error")
-}
-
-func TestHandleForeignKeyCascadePanic(t *testing.T) {
-	// Test no goroutine leak.
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2;")
-	tk.MustExec("create table t1 (id int key, a int, index (a));")
-	tk.MustExec("create table t2 (id int key, a int, index (a), constraint fk_1 foreign key (a) references t1(a));")
-	tk.MustExec("alter table t2 drop foreign key fk_1;")
-	tk.MustExec("alter table t2 add constraint fk_1 foreign key (a) references t1(a) on delete set null;")
-	tk.MustExec("replace into t1 values (1, 1);")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/handleForeignKeyCascadeError", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/handleForeignKeyCascadeError"))
-	}()
-	err := tk.ExecToErr("replace into t1 values (1, 2);")
-	require.ErrorContains(t, err, "handleForeignKeyCascadeError")
-}
-
-func TestBuildProjectionForIndexJoinPanic(t *testing.T) {
-	// Test no goroutine leak.
-	store := testkit.CreateMockStore(t)
-	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("use test")
-	tk.MustExec("drop table if exists t1, t2;")
-	tk.MustExec("create table t1(a int, b varchar(8));")
-	tk.MustExec("insert into t1 values(1,'1');")
-	tk.MustExec("create table t2(a int , b varchar(8) GENERATED ALWAYS AS (c) VIRTUAL, c varchar(8), PRIMARY KEY (a));")
-	tk.MustExec("insert into t2(a) values(1);")
-	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/executor/buildProjectionForIndexJoinPanic", "return(true)"))
-	defer func() {
-		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/executor/buildProjectionForIndexJoinPanic"))
-	}()
-	err := tk.QueryToErr("select /*+ tidb_inlj(t2) */ t2.b, t1.b from t1 join t2 ON t2.a=t1.a;")
-	require.ErrorContains(t, err, "buildProjectionForIndexJoinPanic")
 }

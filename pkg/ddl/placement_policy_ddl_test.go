@@ -15,17 +15,14 @@ package ddl_test
 
 import (
 	"context"
-	"math"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/stretchr/testify/require"
@@ -33,7 +30,7 @@ import (
 
 func testPlacementPolicyInfo(t *testing.T, store kv.Storage, name string, settings *model.PlacementSettings) *model.PolicyInfo {
 	policy := &model.PolicyInfo{
-		Name:              pmodel.NewCIStr(name),
+		Name:              model.NewCIStr(name),
 		PlacementSettings: settings,
 	}
 	genIDs, err := genGlobalIDs(store, 1)
@@ -42,19 +39,15 @@ func testPlacementPolicyInfo(t *testing.T, store kv.Storage, name string, settin
 	return policy
 }
 
-func testCreatePlacementPolicy(t *testing.T, ctx sessionctx.Context, d ddl.ExecutorForTest, policyInfo *model.PolicyInfo) *model.Job {
+func testCreatePlacementPolicy(t *testing.T, ctx sessionctx.Context, d ddl.DDL, policyInfo *model.PolicyInfo) *model.Job {
 	job := &model.Job{
-		Version:    model.GetJobVerInUse(),
 		SchemaName: policyInfo.Name.L,
 		Type:       model.ActionCreatePlacementPolicy,
 		BinlogInfo: &model.HistoryInfo{},
+		Args:       []interface{}{policyInfo},
 	}
-	args := &model.PlacementPolicyArgs{
-		Policy: policyInfo,
-	}
-
 	ctx.SetValue(sessionctx.QueryString, "skip")
-	err := d.DoDDLJobWrapper(ctx, ddl.NewJobWrapperWithArgs(job, args, false))
+	err := d.DoDDLJob(ctx, job)
 	require.NoError(t, err)
 
 	v := getSchemaVer(t, ctx)
@@ -66,7 +59,7 @@ func testCreatePlacementPolicy(t *testing.T, ctx sessionctx.Context, d ddl.Execu
 
 func TestPlacementPolicyInUse(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t)
-	d := dom.DDLExecutor().(ddl.ExecutorForTest)
+	d := dom.DDL()
 
 	sctx := testkit.NewTestKit(t, store).Session()
 
@@ -97,21 +90,21 @@ func TestPlacementPolicyInUse(t *testing.T) {
 	t1.PlacementPolicyRef = &model.PolicyRefInfo{ID: p1.ID, Name: p1.Name}
 	testCreateTable(t, sctx, d, db1, t1)
 	t1.State = model.StatePublic
-	db1.Deprecated.Tables = append(db1.Deprecated.Tables, t1)
+	db1.Tables = append(db1.Tables, t1)
 
 	t2, err := testTableInfo(store, "t2", 1)
 	require.NoError(t, err)
 	t2.PlacementPolicyRef = &model.PolicyRefInfo{ID: p1.ID, Name: p1.Name}
 	testCreateTable(t, sctx, d, db2, t2)
 	t2.State = model.StatePublic
-	db2.Deprecated.Tables = append(db2.Deprecated.Tables, t2)
+	db2.Tables = append(db2.Tables, t2)
 
 	t3, err := testTableInfo(store, "t3", 1)
 	require.NoError(t, err)
 	t3.PlacementPolicyRef = &model.PolicyRefInfo{ID: p2.ID, Name: p2.Name}
 	testCreateTable(t, sctx, d, db1, t3)
 	t3.State = model.StatePublic
-	db1.Deprecated.Tables = append(db1.Deprecated.Tables, t3)
+	db1.Tables = append(db1.Tables, t3)
 
 	dbP, err := testSchemaInfo(store, "db_p")
 	require.NoError(t, err)
@@ -123,23 +116,22 @@ func TestPlacementPolicyInUse(t *testing.T) {
 	t4.Partition.Definitions[0].PlacementPolicyRef = &model.PolicyRefInfo{ID: p5.ID, Name: p5.Name}
 	testCreateTable(t, sctx, d, db1, t4)
 	t4.State = model.StatePublic
-	db1.Deprecated.Tables = append(db1.Deprecated.Tables, t4)
+	db1.Tables = append(db1.Tables, t4)
 
-	builder := infoschema.NewBuilder(dom, nil, infoschema.NewData(), variable.SchemaCacheSize.Load() > 0)
-	err = builder.InitWithDBInfos(
+	builder, err := infoschema.NewBuilder(dom, nil).InitWithDBInfos(
 		[]*model.DBInfo{db1, db2, dbP},
 		[]*model.PolicyInfo{p1, p2, p3, p4, p5},
 		nil,
 		1,
 	)
 	require.NoError(t, err)
-	is := builder.Build(math.MaxUint64)
+	is := builder.Build()
 
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
 	for _, policy := range []*model.PolicyInfo{p1, p2, p4, p5} {
 		require.True(t, dbterror.ErrPlacementPolicyInUse.Equal(ddl.CheckPlacementPolicyNotInUseFromInfoSchema(is, policy)))
 		require.NoError(t, kv.RunInNewTxn(ctx, sctx.GetStore(), false, func(ctx context.Context, txn kv.Transaction) error {
-			m := meta.NewMutator(txn)
+			m := meta.NewMeta(txn)
 			require.True(t, dbterror.ErrPlacementPolicyInUse.Equal(ddl.CheckPlacementPolicyNotInUseFromMeta(m, policy)))
 			return nil
 		}))
@@ -147,7 +139,7 @@ func TestPlacementPolicyInUse(t *testing.T) {
 
 	require.NoError(t, ddl.CheckPlacementPolicyNotInUseFromInfoSchema(is, p3))
 	require.NoError(t, kv.RunInNewTxn(ctx, sctx.GetStore(), false, func(ctx context.Context, txn kv.Transaction) error {
-		m := meta.NewMutator(txn)
+		m := meta.NewMeta(txn)
 		require.NoError(t, ddl.CheckPlacementPolicyNotInUseFromMeta(m, p3))
 		return nil
 	}))
@@ -161,12 +153,12 @@ func testTableInfoWithPartition(t *testing.T, store kv.Storage, name string, num
 	require.NoError(t, err)
 	pid := genIDs[0]
 	tblInfo.Partition = &model.PartitionInfo{
-		Type:   pmodel.PartitionTypeRange,
+		Type:   model.PartitionTypeRange,
 		Expr:   tblInfo.Columns[0].Name.L,
 		Enable: true,
 		Definitions: []model.PartitionDefinition{{
 			ID:       pid,
-			Name:     pmodel.NewCIStr("p0"),
+			Name:     model.NewCIStr("p0"),
 			LessThan: []string{"maxvalue"},
 		}},
 	}

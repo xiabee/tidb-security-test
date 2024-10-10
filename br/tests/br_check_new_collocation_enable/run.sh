@@ -18,7 +18,7 @@ set -eu
 DB="$TEST_NAME"
 
 cur=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
-source $UTILS_DIR/run_services
+source $cur/../_utils/run_services
 
 PROGRESS_FILE="$TEST_DIR/progress_unit_file"
 rm -rf $PROGRESS_FILE

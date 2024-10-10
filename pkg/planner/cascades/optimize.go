@@ -19,11 +19,10 @@ import (
 	"math"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/memo"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/planner/property"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 )
 
 // DefaultOptimizer is the optimizer which contains all of the default
@@ -33,7 +32,7 @@ var DefaultOptimizer = NewOptimizer()
 // Optimizer is the struct for cascades optimizer.
 type Optimizer struct {
 	transformationRuleBatches []TransformationRuleBatch
-	implementationRuleMap     map[pattern.Operand][]ImplementationRule
+	implementationRuleMap     map[memo.Operand][]ImplementationRule
 }
 
 // NewOptimizer returns a cascades optimizer with default transformation
@@ -52,15 +51,15 @@ func (opt *Optimizer) ResetTransformationRules(ruleBatches ...TransformationRule
 }
 
 // ResetImplementationRules resets the implementationRuleMap of the optimizer, and returns the optimizer.
-func (opt *Optimizer) ResetImplementationRules(rules map[pattern.Operand][]ImplementationRule) *Optimizer {
+func (opt *Optimizer) ResetImplementationRules(rules map[memo.Operand][]ImplementationRule) *Optimizer {
 	opt.implementationRuleMap = rules
 	return opt
 }
 
 // GetImplementationRules gets all the candidate implementation rules of the optimizer
 // for the logical plan node.
-func (opt *Optimizer) GetImplementationRules(node base.LogicalPlan) []ImplementationRule {
-	return opt.implementationRuleMap[pattern.GetOperand(node)]
+func (opt *Optimizer) GetImplementationRules(node plannercore.LogicalPlan) []ImplementationRule {
+	return opt.implementationRuleMap[memo.GetOperand(node)]
 }
 
 // FindBestPlan is the optimization entrance of the cascades planner. The
@@ -98,7 +97,7 @@ func (opt *Optimizer) GetImplementationRules(node base.LogicalPlan) []Implementa
 // for each expression in each group under the required physical property. A
 // memo structure is used for a group to reduce the repeated search on the same
 // required physical property.
-func (opt *Optimizer) FindBestPlan(sctx base.PlanContext, logical base.LogicalPlan) (p base.PhysicalPlan, cost float64, err error) {
+func (opt *Optimizer) FindBestPlan(sctx sessionctx.Context, logical plannercore.LogicalPlan) (p plannercore.PhysicalPlan, cost float64, err error) {
 	logical, err = opt.onPhasePreprocessing(sctx, logical)
 	if err != nil {
 		return nil, 0, err
@@ -116,16 +115,15 @@ func (opt *Optimizer) FindBestPlan(sctx base.PlanContext, logical base.LogicalPl
 	return p, cost, err
 }
 
-func (*Optimizer) onPhasePreprocessing(_ base.PlanContext, plan base.LogicalPlan) (base.LogicalPlan, error) {
-	var err error
-	plan, err = plan.PruneColumns(plan.Schema().Columns, nil)
+func (*Optimizer) onPhasePreprocessing(_ sessionctx.Context, plan plannercore.LogicalPlan) (plannercore.LogicalPlan, error) {
+	plan, err := plan.PruneColumns(plan.Schema().Columns, nil)
 	if err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
-func (opt *Optimizer) onPhaseExploration(_ base.PlanContext, g *memo.Group) error {
+func (opt *Optimizer) onPhaseExploration(_ sessionctx.Context, g *memo.Group) error {
 	for round, ruleBatch := range opt.transformationRuleBatches {
 		for !g.Explored(round) {
 			err := opt.exploreGroup(g, round, ruleBatch)
@@ -173,7 +171,7 @@ func (opt *Optimizer) exploreGroup(g *memo.Group, round int, ruleBatch Transform
 // findMoreEquiv finds and applies the matched transformation rules.
 func (*Optimizer) findMoreEquiv(g *memo.Group, elem *list.Element, round int, ruleBatch TransformationRuleBatch) (eraseCur bool, err error) {
 	expr := elem.Value.(*memo.GroupExpr)
-	operand := pattern.GetOperand(expr.ExprNode)
+	operand := memo.GetOperand(expr.ExprNode)
 	for _, rule := range ruleBatch[operand] {
 		pattern := rule.GetPattern()
 		if !pattern.Operand.Match(operand) {
@@ -242,7 +240,7 @@ func (opt *Optimizer) fillGroupStats(g *memo.Group) (err error) {
 }
 
 // onPhaseImplementation starts implementation physical operators from given root Group.
-func (opt *Optimizer) onPhaseImplementation(_ base.PlanContext, g *memo.Group) (base.PhysicalPlan, float64, error) {
+func (opt *Optimizer) onPhaseImplementation(_ sessionctx.Context, g *memo.Group) (plannercore.PhysicalPlan, float64, error) {
 	prop := &property.PhysicalProperty{
 		ExpectedCnt: math.MaxFloat64,
 	}
@@ -253,7 +251,7 @@ func (opt *Optimizer) onPhaseImplementation(_ base.PlanContext, g *memo.Group) (
 		return nil, 0, err
 	}
 	if impl == nil {
-		return nil, 0, plannererrors.ErrInternal.GenWithStackByArgs("Can't find a proper physical plan for this query")
+		return nil, 0, plannercore.ErrInternal.GenWithStackByArgs("Can't find a proper physical plan for this query")
 	}
 	return impl.GetPlan(), impl.GetCost(), nil
 }

@@ -17,7 +17,6 @@ package optimizor
 import (
 	"archive/zip"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,8 +33,7 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/server/handler"
 	"github.com/pingcap/tidb/pkg/statistics/handle"
 	util2 "github.com/pingcap/tidb/pkg/statistics/handle/util"
@@ -308,7 +306,7 @@ func loadSchemaMeta(z *zip.Reader, is infoschema.InfoSchema) (map[int64]*tblInfo
 				s := strings.Split(row, ";")
 				databaseName := s[0]
 				tableName := s[1]
-				t, err := is.TableByName(context.Background(), pmodel.NewCIStr(databaseName), pmodel.NewCIStr(tableName))
+				t, err := is.TableByName(model.NewCIStr(databaseName), model.NewCIStr(tableName))
 				if err != nil {
 					return nil, err
 				}

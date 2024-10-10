@@ -19,26 +19,26 @@ import (
 	"reflect"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/ddl/util"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
-func onCreateSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+func onCreateSequence(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	schemaID := job.SchemaID
-	args, err := model.GetCreateTableArgs(job)
-	if err != nil {
+	tbInfo := &model.TableInfo{}
+	if err := job.DecodeArgs(tbInfo); err != nil {
 		// Invalid arguments, cancel this job.
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
 
-	tbInfo := args.TableInfo
 	tbInfo.State = model.StateNone
-	err = checkTableNotExists(jobCtx.infoCache, schemaID, tbInfo.Name.L)
+	err := checkTableNotExists(d, t, schemaID, tbInfo.Name.L)
 	if err != nil {
 		if infoschema.ErrDatabaseNotExists.Equal(err) || infoschema.ErrTableExists.Equal(err) {
 			job.State = model.JobStateCancelled
@@ -46,40 +46,42 @@ func onCreateSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 		return ver, errors.Trace(err)
 	}
 
-	err = createSequenceWithCheck(jobCtx.metaMut, job, tbInfo)
+	ver, err = updateSchemaVersion(d, t, job)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
 
-	ver, err = updateSchemaVersion(jobCtx, job)
-	if err != nil {
-		return ver, errors.Trace(err)
-	}
-	job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
-	return ver, nil
-}
-
-func createSequenceWithCheck(t *meta.Mutator, job *model.Job, tbInfo *model.TableInfo) error {
 	switch tbInfo.State {
-	case model.StateNone, model.StatePublic:
+	case model.StateNone:
 		// none -> public
 		tbInfo.State = model.StatePublic
 		tbInfo.UpdateTS = t.StartTS
-		err := checkTableInfoValid(tbInfo)
+		err = createSequenceWithCheck(t, job, schemaID, tbInfo)
 		if err != nil {
-			job.State = model.JobStateCancelled
-			return errors.Trace(err)
+			return ver, errors.Trace(err)
 		}
-		var sequenceBase int64
-		if tbInfo.Sequence.Increment >= 0 {
-			sequenceBase = tbInfo.Sequence.Start - 1
-		} else {
-			sequenceBase = tbInfo.Sequence.Start + 1
-		}
-		return t.CreateSequenceAndSetSeqValue(job.SchemaID, tbInfo, sequenceBase)
+		// Finish this job.
+		job.FinishTableJob(model.JobStateDone, model.StatePublic, ver, tbInfo)
+		asyncNotifyEvent(d, &util.Event{Tp: model.ActionCreateSequence, TableInfo: tbInfo})
+		return ver, nil
 	default:
-		return dbterror.ErrInvalidDDLState.GenWithStackByArgs("sequence", tbInfo.State)
+		return ver, dbterror.ErrInvalidDDLState.GenWithStackByArgs("sequence", tbInfo.State)
 	}
+}
+
+func createSequenceWithCheck(t *meta.Meta, job *model.Job, schemaID int64, tbInfo *model.TableInfo) error {
+	err := checkTableInfoValid(tbInfo)
+	if err != nil {
+		job.State = model.JobStateCancelled
+		return errors.Trace(err)
+	}
+	var sequenceBase int64
+	if tbInfo.Sequence.Increment >= 0 {
+		sequenceBase = tbInfo.Sequence.Start - 1
+	} else {
+		sequenceBase = tbInfo.Sequence.Start + 1
+	}
+	return t.CreateSequenceAndSetSeqValue(schemaID, tbInfo, sequenceBase)
 }
 
 func handleSequenceOptions(seqOptions []*ast.SequenceOption, sequenceInfo *model.SequenceInfo) {
@@ -130,7 +132,7 @@ func handleSequenceOptions(seqOptions []*ast.SequenceOption, sequenceInfo *model
 				sequenceInfo.MaxValue = model.DefaultNegativeSequenceMaxValue
 			}
 			if !startSetFlag {
-				sequenceInfo.Start = min(sequenceInfo.MaxValue, model.DefaultNegativeSequenceStartValue)
+				sequenceInfo.Start = mathutil.Min(sequenceInfo.MaxValue, model.DefaultNegativeSequenceStartValue)
 			}
 			if !minSetFlag {
 				sequenceInfo.MinValue = model.DefaultNegativeSequenceMinValue
@@ -232,18 +234,20 @@ func alterSequenceOptions(sequenceOptions []*ast.SequenceOption, ident ast.Ident
 	return false, 0, nil
 }
 
-func onAlterSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
+func onAlterSequence(d *ddlCtx, t *meta.Meta, job *model.Job) (ver int64, _ error) {
 	schemaID := job.SchemaID
-	args, err := model.GetAlterSequenceArgs(job)
-	if err != nil {
+	var (
+		sequenceOpts []*ast.SequenceOption
+		ident        ast.Ident
+	)
+	if err := job.DecodeArgs(&ident, &sequenceOpts); err != nil {
 		// Invalid arguments, cancel this job.
 		job.State = model.JobStateCancelled
 		return ver, errors.Trace(err)
 	}
-	ident, sequenceOpts := args.Ident, args.SeqOptions
 
 	// Get the old tableInfo.
-	tblInfo, err := checkTableExistAndCancelNonExistJob(jobCtx.metaMut, job, schemaID)
+	tblInfo, err := checkTableExistAndCancelNonExistJob(t, job, schemaID)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -269,7 +273,7 @@ func onAlterSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 	// to allocate sequence ids. Once the restart value is updated to kv here, the allocated ids in the upper layer won't
 	// guarantee to be consecutive and monotonous.
 	if restart {
-		err := restartSequenceValue(jobCtx.metaMut, schemaID, tblInfo, restartValue)
+		err := restartSequenceValue(t, schemaID, tblInfo, restartValue)
 		if err != nil {
 			return ver, errors.Trace(err)
 		}
@@ -278,7 +282,7 @@ func onAlterSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 	// Store the sequence info into kv.
 	// Set shouldUpdateVer always to be true even altering doesn't take effect, since some tools like drainer won't take
 	// care of SchemaVersion=0.
-	ver, err = updateVersionAndTableInfo(jobCtx, job, tblInfo, true)
+	ver, err = updateVersionAndTableInfo(d, t, job, tblInfo, true)
 	if err != nil {
 		return ver, errors.Trace(err)
 	}
@@ -289,7 +293,7 @@ func onAlterSequence(jobCtx *jobContext, job *model.Job) (ver int64, _ error) {
 
 // Like setval does, restart sequence value won't affect current the step frequency. It will look backward for
 // the first valid sequence valid rather than return the restart value directly.
-func restartSequenceValue(t *meta.Mutator, dbID int64, tblInfo *model.TableInfo, seqValue int64) error {
+func restartSequenceValue(t *meta.Meta, dbID int64, tblInfo *model.TableInfo, seqValue int64) error {
 	var sequenceBase int64
 	if tblInfo.Sequence.Increment >= 0 {
 		sequenceBase = seqValue - 1

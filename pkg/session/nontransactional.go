@@ -24,17 +24,14 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/errno"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/format"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/opcode"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	session_metrics "github.com/pingcap/tidb/pkg/session/metrics"
-	sessiontypes "github.com/pingcap/tidb/pkg/session/types"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/types"
@@ -43,8 +40,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/redact"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
@@ -66,16 +63,19 @@ type job struct {
 type statementBuildInfo struct {
 	stmt              *ast.NonTransactionalDMLStmt
 	shardColumnType   types.FieldType
-	shardColumnRefer  *resolve.ResultField
+	shardColumnRefer  *ast.ResultField
 	originalCondition ast.ExprNode
 }
 
-func (j job) String(redacted string) string {
-	return fmt.Sprintf("job id: %d, estimated size: %d, sql: %s", j.jobID, j.jobSize, redact.String(redacted, j.sql))
+func (j job) String(redacted bool) string {
+	if redacted {
+		return fmt.Sprintf("job id: %d, estimated size: %d", j.jobID, j.jobSize)
+	}
+	return fmt.Sprintf("job id: %d, estimated size: %d, sql: %s", j.jobID, j.jobSize, j.sql)
 }
 
 // HandleNonTransactionalDML is the entry point for a non-transactional DML statement
-func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Session) (sqlexec.RecordSet, error) {
+func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDMLStmt, se Session) (sqlexec.RecordSet, error) {
 	sessVars := se.GetSessionVars()
 	originalReadStaleness := se.GetSessionVars().ReadStaleness
 	// NT-DML is a write operation, and should not be affected by read_staleness that is supposed to affect only SELECT.
@@ -83,8 +83,7 @@ func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDM
 	defer func() {
 		sessVars.ReadStaleness = originalReadStaleness
 	}()
-	nodeW := resolve.NewNodeW(stmt)
-	err := core.Preprocess(ctx, se, nodeW)
+	err := core.Preprocess(ctx, se, stmt)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +91,7 @@ func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDM
 		return nil, err
 	}
 
-	tableName, selectSQL, shardColumnInfo, tableSources, err := buildSelectSQL(stmt, nodeW.GetResolveContext(), se)
+	tableName, selectSQL, shardColumnInfo, tableSources, err := buildSelectSQL(stmt, se)
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +115,7 @@ func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDM
 		return nil, err
 	}
 
-	tnW := nodeW.GetResolveContext().GetTableName(tableName)
-	splitStmts, err := runJobs(ctx, jobs, stmt, tnW, se, stmt.DMLStmt.WhereExpr())
+	splitStmts, err := runJobs(ctx, jobs, stmt, tableName, se, stmt.DMLStmt.WhereExpr())
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +130,7 @@ func HandleNonTransactionalDML(ctx context.Context, stmt *ast.NonTransactionalDM
 //
 // Note: this is not a comprehensive check.
 // We do this to help user prevent some easy mistakes, at an acceptable maintenance cost.
-func checkConstraintWithShardColumn(se sessiontypes.Session, stmt *ast.NonTransactionalDMLStmt,
+func checkConstraintWithShardColumn(se Session, stmt *ast.NonTransactionalDMLStmt,
 	tableName *ast.TableName, shardColumnInfo *model.ColumnInfo, tableSources []*ast.TableSource) error {
 	switch s := stmt.DMLStmt.(type) {
 	case *ast.UpdateStmt:
@@ -151,7 +149,7 @@ func checkConstraintWithShardColumn(se sessiontypes.Session, stmt *ast.NonTransa
 }
 
 // shard column should not be updated.
-func checkUpdateShardColumn(se sessiontypes.Session, assignments []*ast.Assignment, shardColumnInfo *model.ColumnInfo,
+func checkUpdateShardColumn(se Session, assignments []*ast.Assignment, shardColumnInfo *model.ColumnInfo,
 	tableName *ast.TableName, tableSources []*ast.TableSource, isUpdate bool) error {
 	// if the table has alias, the alias is used in assignments, and we should use aliased name to compare
 	aliasedShardColumnTableName := tableName.Name.L
@@ -181,7 +179,7 @@ func checkUpdateShardColumn(se sessiontypes.Session, assignments []*ast.Assignme
 	return nil
 }
 
-func checkConstraint(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Session) error {
+func checkConstraint(stmt *ast.NonTransactionalDMLStmt, se Session) error {
 	sessVars := se.GetSessionVars()
 	if !(sessVars.IsAutocommit() && !sessVars.InTxn()) {
 		return errors.Errorf("non-transactional DML can only run in auto-commit mode. auto-commit:%v, inTxn:%v",
@@ -259,13 +257,13 @@ func checkReadClauses(limit *ast.Limit, order *ast.OrderByClause) error {
 
 // single-threaded worker. work on the key range [start, end]
 func runJobs(ctx context.Context, jobs []job, stmt *ast.NonTransactionalDMLStmt,
-	tableName *resolve.TableNameW, se sessiontypes.Session, originalCondition ast.ExprNode) ([]string, error) {
+	tableName *ast.TableName, se Session, originalCondition ast.ExprNode) ([]string, error) {
 	// prepare for the construction of statement
-	var shardColumnRefer *resolve.ResultField
+	var shardColumnRefer *ast.ResultField
 	var shardColumnType types.FieldType
 	for _, col := range tableName.TableInfo.Columns {
 		if col.Name.L == stmt.ShardColumn.Name.L {
-			shardColumnRefer = &resolve.ResultField{
+			shardColumnRefer = &ast.ResultField{
 				Column: col,
 				Table:  tableName.TableInfo,
 				DBName: tableName.Schema,
@@ -301,7 +299,7 @@ func runJobs(ctx context.Context, jobs []job, stmt *ast.NonTransactionalDMLStmt,
 		// _tidb_rowid
 		if shardColumnRefer == nil {
 			shardColumnType = *types.NewFieldType(mysql.TypeLonglong)
-			shardColumnRefer = &resolve.ResultField{
+			shardColumnRefer = &ast.ResultField{
 				Column: model.NewExtraHandleColInfo(),
 				Table:  tableName.TableInfo,
 				DBName: tableName.Schema,
@@ -334,13 +332,14 @@ func runJobs(ctx context.Context, jobs []job, stmt *ast.NonTransactionalDMLStmt,
 	return splitStmts, nil
 }
 
-func doOneJob(ctx context.Context, job *job, totalJobCount int, options statementBuildInfo, se sessiontypes.Session, dryRun bool) string {
+func doOneJob(ctx context.Context, job *job, totalJobCount int, options statementBuildInfo, se Session, dryRun bool) string {
 	var whereCondition ast.ExprNode
 
 	if job.start.IsNull() {
 		isNullCondition := &ast.IsNullExpr{
 			Expr: &ast.ColumnNameExpr{
-				Name: options.stmt.ShardColumn,
+				Name:  options.stmt.ShardColumn,
+				Refer: options.shardColumnRefer,
 			},
 			Not: false,
 		}
@@ -355,7 +354,8 @@ func doOneJob(ctx context.Context, job *job, totalJobCount int, options statemen
 			leCondition := &ast.BinaryOperationExpr{
 				Op: opcode.LE,
 				L: &ast.ColumnNameExpr{
-					Name: options.stmt.ShardColumn,
+					Name:  options.stmt.ShardColumn,
+					Refer: options.shardColumnRefer,
 				},
 				R: right,
 			}
@@ -375,7 +375,8 @@ func doOneJob(ctx context.Context, job *job, totalJobCount int, options statemen
 		right.Datum = job.end
 		whereCondition = &ast.BetweenExpr{
 			Expr: &ast.ColumnNameExpr{
-				Name: options.stmt.ShardColumn,
+				Name:  options.stmt.ShardColumn,
+				Refer: options.shardColumnRefer,
 			},
 			Left:  left,
 			Right: right,
@@ -412,7 +413,12 @@ func doOneJob(ctx context.Context, job *job, totalJobCount int, options statemen
 	job.sql = dmlSQL
 	logutil.Logger(ctx).Info("start a Non-transactional DML",
 		zap.String("job", job.String(se.GetSessionVars().EnableRedactLog)), zap.Int("totalJobCount", totalJobCount))
-	dmlSQLInLog := parser.Normalize(dmlSQL, se.GetSessionVars().EnableRedactLog)
+	var dmlSQLInLog string
+	if se.GetSessionVars().EnableRedactLog {
+		dmlSQLInLog = parser.Normalize(dmlSQL)
+	} else {
+		dmlSQLInLog = dmlSQL
+	}
 
 	options.stmt.DMLStmt.SetText(nil, fmt.Sprintf("/* job %v/%v */ %s", job.jobID, totalJobCount, dmlSQL))
 	rs, err := se.ExecuteStmt(ctx, options.stmt.DMLStmt)
@@ -436,7 +442,7 @@ func doOneJob(ctx context.Context, job *job, totalJobCount int, options statemen
 	return ""
 }
 
-func buildShardJobs(ctx context.Context, stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Session,
+func buildShardJobs(ctx context.Context, stmt *ast.NonTransactionalDMLStmt, se Session,
 	selectSQL string, shardColumnInfo *model.ColumnInfo, memTracker *memory.Tracker) ([]job, error) {
 	var shardColumnCollate string
 	if shardColumnInfo != nil {
@@ -504,7 +510,7 @@ func buildShardJobs(ctx context.Context, stmt *ast.NonTransactionalDMLStmt, se s
 			}
 			newEnd := row.GetDatum(0, &rs.Fields()[0].Column.FieldType)
 			if currentSize >= batchSize {
-				cmp, err := newEnd.Compare(se.GetSessionVars().StmtCtx.TypeCtx(), &currentEnd, collate.GetCollator(shardColumnCollate))
+				cmp, err := newEnd.Compare(se.GetSessionVars().StmtCtx, &currentEnd, collate.GetCollator(shardColumnCollate))
 				if err != nil {
 					return nil, err
 				}
@@ -531,7 +537,7 @@ func appendNewJob(jobs []job, id int, start types.Datum, end types.Datum, size i
 	return jobs
 }
 
-func buildSelectSQL(stmt *ast.NonTransactionalDMLStmt, resolveCtx *resolve.Context, se sessiontypes.Session) (
+func buildSelectSQL(stmt *ast.NonTransactionalDMLStmt, se Session) (
 	*ast.TableName, string, *model.ColumnInfo, []*ast.TableSource, error) {
 	// only use the first table
 	join, ok := stmt.DMLStmt.TableRefsJoin()
@@ -572,13 +578,12 @@ func buildSelectSQL(stmt *ast.NonTransactionalDMLStmt, resolveCtx *resolve.Conte
 		sb.WriteString("TRUE")
 	}
 	// assure NULL values are placed first
-	tnW := resolveCtx.GetTableName(tableName)
 	selectSQL := fmt.Sprintf("SELECT `%s` FROM `%s`.`%s` WHERE %s ORDER BY IF(ISNULL(`%s`),0,1),`%s`",
-		stmt.ShardColumn.Name.O, tnW.DBInfo.Name.O, tableName.Name.O, sb.String(), stmt.ShardColumn.Name.O, stmt.ShardColumn.Name.O)
+		stmt.ShardColumn.Name.O, tableName.DBInfo.Name.O, tableName.Name.O, sb.String(), stmt.ShardColumn.Name.O, stmt.ShardColumn.Name.O)
 	return tableName, selectSQL, shardColumnInfo, tableSources, nil
 }
 
-func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Session, tableSources []*ast.TableSource,
+func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se Session, tableSources []*ast.TableSource,
 	leftMostTableName *ast.TableName, leftMostTableSource *ast.TableSource) (
 	*model.ColumnInfo, *ast.TableName, error) {
 	var indexed bool
@@ -587,7 +592,7 @@ func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Sessio
 
 	if len(tableSources) == 1 {
 		// single table
-		leftMostTable, err := domain.GetDomain(se).InfoSchema().TableByName(context.Background(), leftMostTableName.Schema, leftMostTableName.Name)
+		leftMostTable, err := domain.GetDomain(se).InfoSchema().TableByName(leftMostTableName.Schema, leftMostTableName.Name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -600,7 +605,7 @@ func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Sessio
 	} else {
 		// multi table join
 		if stmt.ShardColumn == nil {
-			leftMostTable, err := domain.GetDomain(se).InfoSchema().TableByName(context.Background(), leftMostTableName.Schema, leftMostTableName.Name)
+			leftMostTable, err := domain.GetDomain(se).InfoSchema().TableByName(leftMostTableName.Schema, leftMostTableName.Name)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -616,7 +621,7 @@ func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Sessio
 
 			// the specified table must be in the join
 			tableInJoin := false
-			var chosenTableName pmodel.CIStr
+			var chosenTableName model.CIStr
 			for _, tableSource := range tableSources {
 				tableSourceName := tableSource.Source.(*ast.TableName)
 				tableSourceFinalTableName := tableSource.AsName // precedence: alias name, then table name
@@ -638,7 +643,7 @@ func selectShardColumn(stmt *ast.NonTransactionalDMLStmt, se sessiontypes.Sessio
 					)
 			}
 
-			tbl, err := domain.GetDomain(se).InfoSchema().TableByName(context.Background(), specifiedDbName, chosenTableName)
+			tbl, err := domain.GetDomain(se).InfoSchema().TableByName(specifiedDbName, chosenTableName)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -688,7 +693,7 @@ func collectTableSourcesInJoin(node ast.ResultSetNode, tableSources []*ast.Table
 // it attempts to auto-select a shard column from handle if not specified, and fills back the corresponding info in the stmt,
 // making it transparent to following steps
 func selectShardColumnFromTheOnlyTable(stmt *ast.NonTransactionalDMLStmt, tableName *ast.TableName,
-	tableAsName pmodel.CIStr, tbl table.Table) (
+	tableAsName model.CIStr, tbl table.Table) (
 	indexed bool, shardColumnInfo *model.ColumnInfo, err error) {
 	if stmt.ShardColumn == nil {
 		return selectShardColumnAutomatically(stmt, tbl, tableName, tableAsName)
@@ -733,7 +738,7 @@ func selectShardColumnByGivenName(shardColumnName string, tbl table.Table) (
 }
 
 func selectShardColumnAutomatically(stmt *ast.NonTransactionalDMLStmt, tbl table.Table,
-	tableName *ast.TableName, tableAsName pmodel.CIStr) (bool, *model.ColumnInfo, error) {
+	tableName *ast.TableName, tableAsName model.CIStr) (bool, *model.ColumnInfo, error) {
 	// auto-detect shard column
 	var shardColumnInfo *model.ColumnInfo
 	tableInfo := tbl.Meta()
@@ -767,7 +772,7 @@ func selectShardColumnAutomatically(stmt *ast.NonTransactionalDMLStmt, tbl table
 	stmt.ShardColumn = &ast.ColumnName{
 		Schema: tableName.Schema,
 		Table:  outputTableName, // so that table alias works
-		Name:   pmodel.NewCIStr(shardColumnName),
+		Name:   model.NewCIStr(shardColumnName),
 	}
 	return true, shardColumnInfo, nil
 }
@@ -780,15 +785,15 @@ func buildDryRunResults(dryRunOption int, results []string, maxChunkSize int) (s
 		fieldName = "query statement"
 	}
 
-	resultFields := []*resolve.ResultField{{
+	resultFields := []*ast.ResultField{{
 		Column: &model.ColumnInfo{
 			FieldType: *types.NewFieldType(mysql.TypeString),
 		},
-		ColumnAsName: pmodel.NewCIStr(fieldName),
+		ColumnAsName: model.NewCIStr(fieldName),
 	}}
-	rows := make([][]any, 0, len(results))
+	rows := make([][]interface{}, 0, len(results))
 	for _, result := range results {
-		row := make([]any, 1)
+		row := make([]interface{}, 1)
 		row[0] = result
 		rows = append(rows, row)
 	}
@@ -799,7 +804,7 @@ func buildDryRunResults(dryRunOption int, results []string, maxChunkSize int) (s
 	}, nil
 }
 
-func buildExecuteResults(ctx context.Context, jobs []job, maxChunkSize int, redactLog string) (sqlexec.RecordSet, error) {
+func buildExecuteResults(ctx context.Context, jobs []job, maxChunkSize int, redactLog bool) (sqlexec.RecordSet, error) {
 	failedJobs := make([]job, 0)
 	for _, job := range jobs {
 		if job.err != nil {
@@ -807,22 +812,22 @@ func buildExecuteResults(ctx context.Context, jobs []job, maxChunkSize int, reda
 		}
 	}
 	if len(failedJobs) == 0 {
-		resultFields := []*resolve.ResultField{
+		resultFields := []*ast.ResultField{
 			{
 				Column: &model.ColumnInfo{
 					FieldType: *types.NewFieldType(mysql.TypeLong),
 				},
-				ColumnAsName: pmodel.NewCIStr("number of jobs"),
+				ColumnAsName: model.NewCIStr("number of jobs"),
 			},
 			{
 				Column: &model.ColumnInfo{
 					FieldType: *types.NewFieldType(mysql.TypeString),
 				},
-				ColumnAsName: pmodel.NewCIStr("job status"),
+				ColumnAsName: model.NewCIStr("job status"),
 			},
 		}
-		rows := make([][]any, 1)
-		row := make([]any, 2)
+		rows := make([][]interface{}, 1)
+		row := make([]interface{}, 2)
 		row[0] = len(jobs)
 		row[1] = "all succeeded"
 		rows[0] = row
@@ -845,5 +850,5 @@ func buildExecuteResults(ctx context.Context, jobs []job, maxChunkSize int, reda
 		zap.Int("num_failed_jobs", len(failedJobs)), zap.String("failed_jobs", errStr))
 
 	return nil, fmt.Errorf("%d/%d jobs failed in the non-transactional DML: %s, ...(more in logs)",
-		len(failedJobs), len(jobs), errStr[:min(500, len(errStr)-1)])
+		len(failedJobs), len(jobs), errStr[:mathutil.Min(500, len(errStr)-1)])
 }

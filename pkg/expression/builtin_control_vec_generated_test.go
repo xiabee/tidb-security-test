@@ -31,7 +31,7 @@ type controlIntGener struct {
 	defaultGener
 }
 
-func (g *controlIntGener) gen() any {
+func (g *controlIntGener) gen() interface{} {
 	if rand.Float64() < g.zeroRation {
 		return int64(0)
 	}

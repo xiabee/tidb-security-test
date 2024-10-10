@@ -191,7 +191,7 @@ func InferParamTypeFromDatum(d *Datum, tp *FieldType) {
 }
 
 // InferParamTypeFromUnderlyingValue is used for plan cache to infer the type of a parameter from its underlying value.
-func InferParamTypeFromUnderlyingValue(value any, tp *FieldType) {
+func InferParamTypeFromUnderlyingValue(value interface{}, tp *FieldType) {
 	switch value.(type) {
 	case nil:
 		tp.SetType(mysql.TypeVarString)
@@ -218,7 +218,7 @@ func hasVariantFieldLength(tp *FieldType) bool {
 }
 
 // DefaultTypeForValue returns the default FieldType for the value.
-func DefaultTypeForValue(value any, tp *FieldType, char string, collate string) {
+func DefaultTypeForValue(value interface{}, tp *FieldType, char string, collate string) {
 	if value != nil {
 		tp.AddFlag(mysql.NotNullFlag)
 	}
@@ -337,11 +337,6 @@ func DefaultTypeForValue(value any, tp *FieldType, char string, collate string) 
 		tp.SetDecimal(0)
 		tp.SetCharset(charset.CharsetUTF8MB4)
 		tp.SetCollate(charset.CollationUTF8MB4)
-	case VectorFloat32:
-		tp.SetType(mysql.TypeTiDBVectorFloat32)
-		tp.SetFlen(UnspecifiedLength)
-		tp.SetDecimal(0)
-		SetBinChsClnFlag(tp)
 	default:
 		tp.SetType(mysql.TypeUnspecified)
 		tp.SetFlen(UnspecifiedLength)
@@ -394,46 +389,22 @@ func mergeTypeFlag(a, b uint) uint {
 	return a & (b&mysql.NotNullFlag | ^mysql.NotNullFlag) & (b&mysql.UnsignedFlag | ^mysql.UnsignedFlag)
 }
 
-var (
-	fieldTypeIndexes = map[byte]int{
-		mysql.TypeUnspecified:       0,
-		mysql.TypeTiny:              1,
-		mysql.TypeShort:             2,
-		mysql.TypeLong:              3,
-		mysql.TypeFloat:             4,
-		mysql.TypeDouble:            5,
-		mysql.TypeNull:              6,
-		mysql.TypeTimestamp:         7,
-		mysql.TypeLonglong:          8,
-		mysql.TypeInt24:             9,
-		mysql.TypeDate:              10,
-		mysql.TypeDuration:          11,
-		mysql.TypeDatetime:          12,
-		mysql.TypeYear:              13,
-		mysql.TypeNewDate:           14,
-		mysql.TypeVarchar:           15,
-		mysql.TypeBit:               16,
-		mysql.TypeJSON:              17,
-		mysql.TypeNewDecimal:        18,
-		mysql.TypeEnum:              19,
-		mysql.TypeSet:               20,
-		mysql.TypeTinyBlob:          21,
-		mysql.TypeMediumBlob:        22,
-		mysql.TypeLongBlob:          23,
-		mysql.TypeBlob:              24,
-		mysql.TypeVarString:         25,
-		mysql.TypeString:            26,
-		mysql.TypeGeometry:          27,
-		mysql.TypeTiDBVectorFloat32: 28,
-	}
-)
-
 func getFieldTypeIndex(tp byte) int {
-	return fieldTypeIndexes[tp]
+	itp := int(tp)
+	if itp < fieldTypeTearFrom {
+		return itp
+	}
+	return fieldTypeTearFrom + itp - fieldTypeTearTo - 1
 }
 
+const (
+	fieldTypeTearFrom = int(mysql.TypeBit) + 1
+	fieldTypeTearTo   = int(mysql.TypeJSON) - 1
+	fieldTypeNum      = fieldTypeTearFrom + (255 - fieldTypeTearTo)
+)
+
 // https://github.com/mysql/mysql-server/blob/8.0/sql/field.cc#L248
-var fieldTypeMergeRules = [29][29]byte{
+var fieldTypeMergeRules = [fieldTypeNum][fieldTypeNum]byte{
 	/* mysql.TypeUnspecified -> */
 	{
 		// mysql.TypeUnspecified  mysql.TypeTiny
@@ -466,8 +437,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeTiny -> */
 	{
@@ -501,8 +470,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeShort -> */
 	{
@@ -536,8 +503,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeLong -> */
 	{
@@ -571,8 +536,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeFloat -> */
 	{
@@ -606,8 +569,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeDouble -> */
 	{
@@ -641,8 +602,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeNull -> */
 	{
@@ -676,8 +635,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeGeometry,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeTiDBVectorFloat32,
 	},
 	/* mysql.TypeTimestamp -> */
 	{
@@ -711,8 +668,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeLonglong -> */
 	{
@@ -746,8 +701,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeInt24 -> */
 	{
@@ -781,8 +734,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeDate -> */
 	{
@@ -816,8 +767,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeTime -> */
 	{
@@ -851,8 +800,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeDatetime -> */
 	{
@@ -886,8 +833,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeYear -> */
 	{
@@ -921,8 +866,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeNewDate -> */
 	{
@@ -956,8 +899,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeVarchar -> */
 	{
@@ -991,8 +932,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeBit -> */
 	{
@@ -1026,8 +965,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeJSON -> */
 	{
@@ -1061,8 +998,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeLongBlob, mysql.TypeVarchar,
 		// mysql.TypeString       MYSQL_TYPE_GEOMETRY
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeNewDecimal -> */
 	{
@@ -1096,8 +1031,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeEnum -> */
 	{
@@ -1131,8 +1064,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeSet -> */
 	{
@@ -1166,8 +1097,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeTinyBlob -> */
 	{
@@ -1201,8 +1130,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeTinyBlob,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeTinyBlob, mysql.TypeTinyBlob,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeLongBlob,
 	},
 	/* mysql.TypeMediumBlob -> */
 	{
@@ -1236,8 +1163,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeMediumBlob, mysql.TypeMediumBlob,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeMediumBlob, mysql.TypeMediumBlob,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeLongBlob,
 	},
 	/* mysql.TypeLongBlob -> */
 	{
@@ -1271,8 +1196,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeLongBlob, mysql.TypeLongBlob,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeLongBlob, mysql.TypeLongBlob,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeLongBlob,
 	},
 	/* mysql.TypeBlob -> */
 	{
@@ -1306,8 +1229,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeBlob,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeBlob, mysql.TypeBlob,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeLongBlob,
 	},
 	/* mysql.TypeVarString -> */
 	{
@@ -1341,8 +1262,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
 	},
 	/* mysql.TypeString -> */
 	{
@@ -1376,8 +1295,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeString,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeString,
 	},
 	/* mysql.TypeGeometry -> */
 	{
@@ -1411,43 +1328,6 @@ var fieldTypeMergeRules = [29][29]byte{
 		mysql.TypeBlob, mysql.TypeVarchar,
 		// mysql.TypeString       mysql.TypeGeometry
 		mysql.TypeString, mysql.TypeGeometry,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeVarchar,
-	},
-	/* mysql.TypeTiDBVectorFloat32 -> */
-	{
-		// mysql.TypeUnspecified  mysql.TypeTiny
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeShort        mysql.TypeLong
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeNewFloat     mysql.TypeDouble
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeNull         mysql.TypeTimestamp
-		mysql.TypeTiDBVectorFloat32, mysql.TypeVarchar,
-		// mysql.TypeLongLONG     mysql.TypeInt24
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeDate         MYSQL_TYPE_TIME
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeDatetime     MYSQL_TYPE_YEAR
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeNewDate      mysql.TypeVarchar
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeBit          <16>-<244>
-		mysql.TypeVarchar,
-		// mysql.TypeJSON
-		mysql.TypeVarchar,
-		// mysql.TypeNewDecimal   MYSQL_TYPE_ENUM
-		mysql.TypeVarchar, mysql.TypeVarchar,
-		// mysql.TypeSet          mysql.TypeTinyBlob
-		mysql.TypeVarchar, mysql.TypeLongBlob,
-		// mysql.TypeMediumBlob  mysql.TypeLongBlob
-		mysql.TypeLongBlob, mysql.TypeLongBlob,
-		// mysql.TypeBlob         mysql.TypeVarString
-		mysql.TypeLongBlob, mysql.TypeVarchar,
-		// mysql.TypeString       MYSQL_TYPE_GEOMETRY
-		mysql.TypeString, mysql.TypeVarchar,
-		// mysql.TypeTiDBVectorFloat32
-		mysql.TypeTiDBVectorFloat32,
 	},
 }
 
@@ -1578,11 +1458,6 @@ func checkTypeChangeSupported(origin *FieldType, to *FieldType) bool {
 		origin.GetType() == mysql.TypeNewDecimal || origin.GetType() == mysql.TypeFloat || origin.GetType() == mysql.TypeDouble) &&
 		(IsTypeTime(to.GetType())) {
 		// TODO: Currently enum/set/bit/decimal/float/double cast to date/datetime/timestamp type are not support yet, should fix here after supported.
-		return false
-	}
-
-	if origin.GetType() == mysql.TypeTiDBVectorFloat32 || to.GetType() == mysql.TypeTiDBVectorFloat32 {
-		// TODO: Vector type not supported.
 		return false
 	}
 

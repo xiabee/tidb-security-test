@@ -44,12 +44,13 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
+	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/param"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/parser/terror"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/server/internal/dump"
 	"github.com/pingcap/tidb/pkg/server/internal/parse"
@@ -61,7 +62,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/redact"
 	"github.com/pingcap/tidb/pkg/util/topsql"
 	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
 	"github.com/tikv/client-go/v2/util"
@@ -180,7 +180,7 @@ func (cc *clientConn) handleStmtExecute(ctx context.Context, data []byte) (err e
 	)
 	cc.initInputEncoder(ctx)
 	numParams := stmt.NumParams()
-	args := make([]param.BinaryParam, numParams)
+	args := make([]expression.Expression, numParams)
 	if numParams > 0 {
 		nullBitmapLen := (numParams + 7) >> 3
 		if len(data) < (pos + nullBitmapLen + 1) {
@@ -206,7 +206,7 @@ func (cc *clientConn) handleStmtExecute(ctx context.Context, data []byte) (err e
 			paramValues = data[pos+1:]
 		}
 
-		err = parseBinaryParams(args, stmt.BoundParams(), nullBitmaps, stmt.GetParamsType(), paramValues, cc.inputDecoder)
+		err = parse.ExecArgs(cc.ctx.GetSessionVars().StmtCtx, args, stmt.BoundParams(), nullBitmaps, stmt.GetParamsType(), paramValues, cc.inputDecoder)
 		// This `.Reset` resets the arguments, so it's fine to just ignore the error (and the it'll be reset again in the following routine)
 		errReset := stmt.Reset()
 		if errReset != nil {
@@ -227,7 +227,7 @@ func (cc *clientConn) handleStmtExecute(ctx context.Context, data []byte) (err e
 	return err
 }
 
-func (cc *clientConn) executePlanCacheStmt(ctx context.Context, stmt any, args []param.BinaryParam, useCursor bool) (err error) {
+func (cc *clientConn) executePlanCacheStmt(ctx context.Context, stmt interface{}, args []expression.Expression, useCursor bool) (err error) {
 	ctx = context.WithValue(ctx, execdetails.StmtExecDetailKey, &execdetails.StmtExecDetails{})
 	ctx = context.WithValue(ctx, util.ExecDetailsKey, &util.ExecDetails{})
 	ctx = context.WithValue(ctx, util.RUDetailsCtxKey, util.NewRUDetails())
@@ -263,7 +263,7 @@ func (cc *clientConn) executePlanCacheStmt(ctx context.Context, stmt any, args [
 
 // The first return value indicates whether the call of executePreparedStmtAndWriteResult has no side effect and can be retried.
 // Currently the first return value is used to fallback to TiKV when TiFlash is down.
-func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stmt PreparedStatement, args []param.BinaryParam, useCursor bool) (bool, error) {
+func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stmt PreparedStatement, args []expression.Expression, useCursor bool) (bool, error) {
 	vars := (&cc.ctx).GetSessionVars()
 	prepStmt, err := vars.GetPreparedStmtByID(uint32(stmt.ID()))
 	if err != nil {
@@ -276,8 +276,8 @@ func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stm
 
 	// first, try to clear the left cursor if there is one
 	if useCursor && stmt.GetCursorActive() {
-		if stmt.GetResultSet() != nil && stmt.GetResultSet().GetRowIterator() != nil {
-			stmt.GetResultSet().GetRowIterator().Close()
+		if stmt.GetResultSet() != nil && stmt.GetResultSet().GetRowContainerReader() != nil {
+			stmt.GetResultSet().GetRowContainerReader().Close()
 		}
 		if stmt.GetRowContainer() != nil {
 			stmt.GetRowContainer().GetMemTracker().Detach()
@@ -304,13 +304,8 @@ func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stm
 	}
 	execStmt.SetText(charset.EncodingUTF8Impl, sql)
 	rs, err := (&cc.ctx).ExecuteStmt(ctx, execStmt)
-	var lazy bool
 	if rs != nil {
-		defer func() {
-			if !lazy {
-				rs.Close()
-			}
-		}()
+		defer terror.Call(rs.Close)
 	}
 	if err != nil {
 		// If error is returned during the planner phase or the executor.Open
@@ -336,143 +331,97 @@ func (cc *clientConn) executePreparedStmtAndWriteResult(ctx context.Context, stm
 	// we should hold the ResultSet in PreparedStatement for next stmt_fetch, and only send back ColumnInfo.
 	// Tell the client cursor exists in server by setting proper serverStatus.
 	if useCursor {
-		lazy, err = cc.executeWithCursor(ctx, stmt, rs)
-		return false, err
+		crs := resultset.WrapWithCursor(rs)
+
+		cc.initResultEncoder(ctx)
+		defer cc.rsEncoder.Clean()
+		// fetch all results of the resultSet, and stored them locally, so that the future `FETCH` command can read
+		// the rows directly to avoid running executor and accessing shared params/variables in the session
+		// NOTE: chunk should not be allocated from the connection allocator, which will reset after executing this command
+		// but the rows are still needed in the following FETCH command.
+
+		// create the row container to manage spill
+		// this `rowContainer` will be released when the statement (or the connection) is closed.
+		rowContainer := chunk.NewRowContainer(crs.FieldTypes(), vars.MaxChunkSize)
+		rowContainer.GetMemTracker().AttachTo(vars.MemTracker)
+		rowContainer.GetMemTracker().SetLabel(memory.LabelForCursorFetch)
+		rowContainer.GetDiskTracker().AttachTo(vars.DiskTracker)
+		rowContainer.GetDiskTracker().SetLabel(memory.LabelForCursorFetch)
+		if variable.EnableTmpStorageOnOOM.Load() {
+			failpoint.Inject("testCursorFetchSpill", func(val failpoint.Value) {
+				if val, ok := val.(bool); val && ok {
+					actionSpill := rowContainer.ActionSpillForTest()
+					defer actionSpill.WaitForTest()
+				}
+			})
+			action := memory.NewActionWithPriority(rowContainer.ActionSpill(), memory.DefCursorFetchSpillPriority)
+			vars.MemTracker.FallbackOldAndSetNewAction(action)
+		}
+		defer func() {
+			if err != nil {
+				rowContainer.GetMemTracker().Detach()
+				rowContainer.GetDiskTracker().Detach()
+				errCloseRowContainer := rowContainer.Close()
+				if errCloseRowContainer != nil {
+					logutil.Logger(ctx).Error("Fail to close rowContainer in error handler. May cause resource leak",
+						zap.NamedError("original-error", err), zap.NamedError("close-error", errCloseRowContainer))
+				}
+			}
+		}()
+
+		for {
+			chk := crs.NewChunk(nil)
+
+			if err = crs.Next(ctx, chk); err != nil {
+				return false, err
+			}
+			rowCount := chk.NumRows()
+			if rowCount == 0 {
+				break
+			}
+
+			err = rowContainer.Add(chk)
+			if err != nil {
+				return false, err
+			}
+		}
+
+		reader := chunk.NewRowContainerReader(rowContainer)
+		crs.StoreRowContainerReader(reader)
+		stmt.StoreResultSet(crs)
+		stmt.StoreRowContainer(rowContainer)
+		if cl, ok := crs.(resultset.FetchNotifier); ok {
+			cl.OnFetchReturned()
+		}
+		stmt.SetCursorActive(true)
+		defer func() {
+			if err != nil {
+				reader.Close()
+
+				// the resultSet and rowContainer have been closed in former "defer" statement.
+				stmt.StoreResultSet(nil)
+				stmt.StoreRowContainer(nil)
+				stmt.SetCursorActive(false)
+			}
+		}()
+
+		if err = cc.writeColumnInfo(crs.Columns()); err != nil {
+			return false, err
+		}
+
+		// explicitly flush columnInfo to client.
+		err = cc.writeEOF(ctx, cc.ctx.Status())
+		if err != nil {
+			return false, err
+		}
+
+		return false, cc.flush(ctx)
 	}
 	retryable, err := cc.writeResultSet(ctx, rs, true, cc.ctx.Status(), 0)
 	if err != nil {
 		return retryable, errors.Annotate(err, cc.preparedStmt2String(uint32(stmt.ID())))
 	}
 	return false, nil
-}
-
-func (cc *clientConn) executeWithCursor(ctx context.Context, stmt PreparedStatement, rs resultset.ResultSet) (lazy bool, err error) {
-	vars := (&cc.ctx).GetSessionVars()
-	if vars.EnableLazyCursorFetch {
-		// try to execute with lazy cursor fetch
-		ok, err := cc.executeWithLazyCursor(ctx, stmt, rs)
-
-		// if `ok` is false, should try to execute without lazy cursor fetch
-		if ok {
-			return true, err
-		}
-	}
-
-	failpoint.Inject("avoidEagerCursorFetch", func() {
-		failpoint.Return(false, errors.New("failpoint avoids eager cursor fetch"))
-	})
-	cc.initResultEncoder(ctx)
-	defer cc.rsEncoder.Clean()
-	// fetch all results of the resultSet, and stored them locally, so that the future `FETCH` command can read
-	// the rows directly to avoid running executor and accessing shared params/variables in the session
-	// NOTE: chunk should not be allocated from the connection allocator, which will reset after executing this command
-	// but the rows are still needed in the following FETCH command.
-
-	// create the row container to manage spill
-	// this `rowContainer` will be released when the statement (or the connection) is closed.
-	rowContainer := chunk.NewRowContainer(rs.FieldTypes(), vars.MaxChunkSize)
-	rowContainer.GetMemTracker().AttachTo(vars.MemTracker)
-	rowContainer.GetMemTracker().SetLabel(memory.LabelForCursorFetch)
-	rowContainer.GetDiskTracker().AttachTo(vars.DiskTracker)
-	rowContainer.GetDiskTracker().SetLabel(memory.LabelForCursorFetch)
-	if variable.EnableTmpStorageOnOOM.Load() {
-		failpoint.Inject("testCursorFetchSpill", func(val failpoint.Value) {
-			if val, ok := val.(bool); val && ok {
-				actionSpill := rowContainer.ActionSpillForTest()
-				defer actionSpill.WaitForTest()
-			}
-		})
-		action := memory.NewActionWithPriority(rowContainer.ActionSpill(), memory.DefCursorFetchSpillPriority)
-		vars.MemTracker.FallbackOldAndSetNewAction(action)
-	}
-	defer func() {
-		if err != nil {
-			rowContainer.GetMemTracker().Detach()
-			rowContainer.GetDiskTracker().Detach()
-			errCloseRowContainer := rowContainer.Close()
-			if errCloseRowContainer != nil {
-				logutil.Logger(ctx).Error("Fail to close rowContainer in error handler. May cause resource leak",
-					zap.NamedError("original-error", err), zap.NamedError("close-error", errCloseRowContainer))
-			}
-		}
-	}()
-
-	for {
-		chk := rs.NewChunk(nil)
-
-		if err = rs.Next(ctx, chk); err != nil {
-			return false, err
-		}
-		rowCount := chk.NumRows()
-		if rowCount == 0 {
-			break
-		}
-
-		err = rowContainer.Add(chk)
-		if err != nil {
-			return false, err
-		}
-	}
-
-	reader := chunk.NewRowContainerReader(rowContainer)
-	defer func() {
-		if err != nil {
-			reader.Close()
-		}
-	}()
-	crs := resultset.WrapWithRowContainerCursor(rs, reader)
-	if cl, ok := crs.(resultset.FetchNotifier); ok {
-		cl.OnFetchReturned()
-	}
-	stmt.StoreRowContainer(rowContainer)
-
-	err = cc.writeExecuteResultWithCursor(ctx, stmt, crs)
-	return false, err
-}
-
-// executeWithLazyCursor tries to detach the `ResultSet` and make it suitable to execute lazily.
-// Be careful that the return value `(bool, error)` has different meaning with other similar functions. The first `bool` represent whether
-// the `ResultSet` is suitable for lazy execution. If the return value is `(false, _)`, the `rs` in argument can still be used. If the
-// first return value is `true` and `err` is not nil, the `rs` cannot be used anymore and should return the error to the upper layer.
-func (cc *clientConn) executeWithLazyCursor(ctx context.Context, stmt PreparedStatement, rs resultset.ResultSet) (ok bool, err error) {
-	drs, ok, err := rs.TryDetach()
-	if !ok || err != nil {
-		return false, err
-	}
-
-	vars := (&cc.ctx).GetSessionVars()
-	crs := resultset.WrapWithLazyCursor(drs, vars.InitChunkSize, vars.MaxChunkSize)
-	err = cc.writeExecuteResultWithCursor(ctx, stmt, crs)
-	return true, err
-}
-
-// writeExecuteResultWithCursor will store the `ResultSet` in `stmt` and send the column info to the client. The logic is shared between
-// lazy cursor fetch and normal(eager) cursor fetch.
-func (cc *clientConn) writeExecuteResultWithCursor(ctx context.Context, stmt PreparedStatement, rs resultset.CursorResultSet) error {
-	var err error
-
-	stmt.StoreResultSet(rs)
-	stmt.SetCursorActive(true)
-	defer func() {
-		if err != nil {
-			// the resultSet and rowContainer have been closed in former "defer" statement.
-			stmt.StoreResultSet(nil)
-			stmt.StoreRowContainer(nil)
-			stmt.SetCursorActive(false)
-		}
-	}()
-
-	if err = cc.writeColumnInfo(rs.Columns()); err != nil {
-		return err
-	}
-
-	// explicitly flush columnInfo to client.
-	err = cc.writeEOF(ctx, cc.ctx.Status())
-	if err != nil {
-		return err
-	}
-
-	return cc.flush(ctx)
 }
 
 func (cc *clientConn) handleStmtFetch(ctx context.Context, data []byte) (err error) {
@@ -527,7 +476,7 @@ func (cc *clientConn) handleStmtFetch(ctx context.Context, data []byte) (err err
 
 	_, err = cc.writeResultSet(ctx, rs, true, cc.ctx.Status(), int(fetchSize))
 	// if the iterator reached the end before writing result, we could say the `FETCH` command will send EOF
-	if rs.GetRowIterator().Current(ctx) == rs.GetRowIterator().End() {
+	if rs.GetRowContainerReader().Current() == rs.GetRowContainerReader().End() {
 		// also reset the statement when the cursor reaches the end
 		// don't overwrite the `err` in outer scope, to avoid redundant `Reset()` in `defer` statement (though, it's not
 		// a big problem, as the `Reset()` function call is idempotent.)
@@ -632,11 +581,10 @@ func (cc *clientConn) preparedStmt2String(stmtID uint32) string {
 	if sv == nil {
 		return ""
 	}
-	sql := parser.Normalize(cc.preparedStmt2StringNoArgs(stmtID), sv.EnableRedactLog)
-	if m := sv.EnableRedactLog; m != errors.RedactLogEnable {
-		sql += redact.String(sv.EnableRedactLog, sv.PlanCacheParams.String())
+	if sv.EnableRedactLog {
+		return parser.Normalize(cc.preparedStmt2StringNoArgs(stmtID))
 	}
-	return sql
+	return cc.preparedStmt2StringNoArgs(stmtID) + sv.PlanCacheParams.String()
 }
 
 func (cc *clientConn) preparedStmt2StringNoArgs(stmtID uint32) string {

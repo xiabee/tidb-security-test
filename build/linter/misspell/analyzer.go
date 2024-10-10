@@ -34,7 +34,6 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
 	util.SkipAnalyzer(Analyzer)
 }
 
@@ -44,13 +43,15 @@ type Misspell struct {
 	IgnoreWords []string `mapstructure:"ignore-words"`
 }
 
-func run(pass *analysis.Pass) (any, error) {
+func run(pass *analysis.Pass) (interface{}, error) {
 	r := misspell.Replacer{
 		Replacements: misspell.DictMain,
 	}
 
 	// Figure out regional variations
-	settings := &Misspell{}
+	settings := &Misspell{
+		Locale: "",
+	}
 
 	if len(settings.IgnoreWords) != 0 {
 		r.RemoveRule(settings.IgnoreWords)
@@ -84,8 +85,8 @@ func runOnFile(fileName string, r *misspell.Replacer, pass *analysis.Pass) error
 	// tool uses r.Replace by default.
 	_, diffs := r.Replace(string(fileContent))
 	for _, diff := range diffs {
-		pass.Reportf(token.Pos(tf.Base()+util.FindOffset(string(fileContent), diff.Line, diff.Column)),
-			"[%s] `%s` is a misspelling of `%s`", Name, diff.Original, diff.Corrected)
+		text := fmt.Sprintf("[%s] `%s` is a misspelling of `%s`", Name, diff.Original, diff.Corrected)
+		pass.Reportf(token.Pos(tf.Base()+util.FindOffset(string(fileContent), diff.Line, diff.Column)), text)
 	}
 	return nil
 }

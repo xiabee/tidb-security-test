@@ -20,8 +20,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	_ "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
@@ -39,13 +38,13 @@ import (
 
 func TestRowDecoder(t *testing.T) {
 	defer view.Stop()
-	c1 := &model.ColumnInfo{ID: 1, Name: pmodel.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
-	c2 := &model.ColumnInfo{ID: 2, Name: pmodel.NewCIStr("c2"), State: model.StatePublic, Offset: 1, FieldType: *types.NewFieldType(mysql.TypeVarchar)}
-	c3 := &model.ColumnInfo{ID: 3, Name: pmodel.NewCIStr("c3"), State: model.StatePublic, Offset: 2, FieldType: *types.NewFieldType(mysql.TypeNewDecimal)}
-	c4 := &model.ColumnInfo{ID: 4, Name: pmodel.NewCIStr("c4"), State: model.StatePublic, Offset: 3, FieldType: *types.NewFieldType(mysql.TypeTimestamp)}
-	c5 := &model.ColumnInfo{ID: 5, Name: pmodel.NewCIStr("c5"), State: model.StatePublic, Offset: 4, FieldType: *types.NewFieldType(mysql.TypeDuration), OriginDefaultValue: "02:00:02"}
-	c6 := &model.ColumnInfo{ID: 6, Name: pmodel.NewCIStr("c6"), State: model.StatePublic, Offset: 5, FieldType: *types.NewFieldType(mysql.TypeTimestamp), GeneratedExprString: "c4+c5"}
-	c7 := &model.ColumnInfo{ID: 7, Name: pmodel.NewCIStr("c7"), State: model.StatePublic, Offset: 6, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
+	c1 := &model.ColumnInfo{ID: 1, Name: model.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
+	c2 := &model.ColumnInfo{ID: 2, Name: model.NewCIStr("c2"), State: model.StatePublic, Offset: 1, FieldType: *types.NewFieldType(mysql.TypeVarchar)}
+	c3 := &model.ColumnInfo{ID: 3, Name: model.NewCIStr("c3"), State: model.StatePublic, Offset: 2, FieldType: *types.NewFieldType(mysql.TypeNewDecimal)}
+	c4 := &model.ColumnInfo{ID: 4, Name: model.NewCIStr("c4"), State: model.StatePublic, Offset: 3, FieldType: *types.NewFieldType(mysql.TypeTimestamp)}
+	c5 := &model.ColumnInfo{ID: 5, Name: model.NewCIStr("c5"), State: model.StatePublic, Offset: 4, FieldType: *types.NewFieldType(mysql.TypeDuration), OriginDefaultValue: "02:00:02"}
+	c6 := &model.ColumnInfo{ID: 6, Name: model.NewCIStr("c6"), State: model.StatePublic, Offset: 5, FieldType: *types.NewFieldType(mysql.TypeTimestamp), GeneratedExprString: "c4+c5"}
+	c7 := &model.ColumnInfo{ID: 7, Name: model.NewCIStr("c7"), State: model.StatePublic, Offset: 6, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
 	c7.AddFlag(mysql.PriKeyFlag)
 
 	cols := []*model.ColumnInfo{c1, c2, c3, c4, c5, c6, c7}
@@ -63,7 +62,7 @@ func TestRowDecoder(t *testing.T) {
 		}
 		decodeColsMap2[col.ID] = tpExpr
 		if col.GeneratedExprString != "" {
-			expr, err := expression.ParseSimpleExpr(ctx, col.GeneratedExprString, expression.WithTableInfo("", tblInfo), expression.WithCastExprTo(&col.FieldType))
+			expr, err := expression.ParseSimpleExprCastWithTableInfo(ctx, col.GeneratedExprString, tblInfo, &col.FieldType)
 			require.NoError(t, err)
 			tpExpr.GenExpr = expr
 		}
@@ -78,11 +77,11 @@ func TestRowDecoder(t *testing.T) {
 		Duration: time.Hour + time.Second,
 	})
 
-	time2, err := time1.Add(sc.TypeCtx(), d1.GetMysqlDuration())
+	time2, err := time1.Add(sc, d1.GetMysqlDuration())
 	require.Nil(t, err)
 	t2 := types.NewTimeDatum(time2)
 
-	time3, err := time1.Add(sc.TypeCtx(), types.Duration{Duration: time.Hour*2 + time.Second*2})
+	time3, err := time1.Add(sc, types.Duration{Duration: time.Hour*2 + time.Second*2})
 	require.Nil(t, err)
 	t3 := types.NewTimeDatum(time3)
 
@@ -113,7 +112,7 @@ func TestRowDecoder(t *testing.T) {
 		if i > 0 {
 			c7.AddFlag(mysql.UnsignedFlag)
 		}
-		bs, err := tablecodec.EncodeRow(sc.TimeZone(), row.input, row.cols, nil, nil, nil, &rd)
+		bs, err := tablecodec.EncodeRow(sc, row.input, row.cols, nil, nil, &rd)
 		require.NoError(t, err)
 		require.NotNil(t, bs)
 
@@ -126,7 +125,7 @@ func TestRowDecoder(t *testing.T) {
 		for i, col := range cols[:len(cols)-1] {
 			v, ok := r[col.ID]
 			if ok {
-				equal, err1 := v.Compare(sc.TypeCtx(), &row.output[i], collate.GetBinaryCollator())
+				equal, err1 := v.Compare(sc, &row.output[i], collate.GetBinaryCollator())
 				require.Nil(t, err1)
 				require.Equal(t, 0, equal)
 			} else {
@@ -140,7 +139,7 @@ func TestRowDecoder(t *testing.T) {
 		for k, v := range r2 {
 			v1, ok := r[k]
 			require.True(t, ok)
-			equal, err1 := v.Compare(sc.TypeCtx(), &v1, collate.GetBinaryCollator())
+			equal, err1 := v.Compare(sc, &v1, collate.GetBinaryCollator())
 			require.Nil(t, err1)
 			require.Equal(t, 0, equal)
 		}
@@ -149,14 +148,14 @@ func TestRowDecoder(t *testing.T) {
 
 func TestClusterIndexRowDecoder(t *testing.T) {
 	defer view.Stop()
-	c1 := &model.ColumnInfo{ID: 1, Name: pmodel.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
-	c2 := &model.ColumnInfo{ID: 2, Name: pmodel.NewCIStr("c2"), State: model.StatePublic, Offset: 1, FieldType: *types.NewFieldType(mysql.TypeVarchar)}
-	c3 := &model.ColumnInfo{ID: 3, Name: pmodel.NewCIStr("c3"), State: model.StatePublic, Offset: 2, FieldType: *types.NewFieldType(mysql.TypeNewDecimal)}
+	c1 := &model.ColumnInfo{ID: 1, Name: model.NewCIStr("c1"), State: model.StatePublic, Offset: 0, FieldType: *types.NewFieldType(mysql.TypeLonglong)}
+	c2 := &model.ColumnInfo{ID: 2, Name: model.NewCIStr("c2"), State: model.StatePublic, Offset: 1, FieldType: *types.NewFieldType(mysql.TypeVarchar)}
+	c3 := &model.ColumnInfo{ID: 3, Name: model.NewCIStr("c3"), State: model.StatePublic, Offset: 2, FieldType: *types.NewFieldType(mysql.TypeNewDecimal)}
 	c1.AddFlag(mysql.PriKeyFlag)
 	c2.AddFlag(mysql.PriKeyFlag)
-	pk := &model.IndexInfo{ID: 1, Name: pmodel.NewCIStr("primary"), State: model.StatePublic, Primary: true, Columns: []*model.IndexColumn{
-		{Name: pmodel.NewCIStr("c1"), Offset: 0},
-		{Name: pmodel.NewCIStr("c2"), Offset: 1},
+	pk := &model.IndexInfo{ID: 1, Name: model.NewCIStr("primary"), State: model.StatePublic, Primary: true, Columns: []*model.IndexColumn{
+		{Name: model.NewCIStr("c1"), Offset: 0},
+		{Name: model.NewCIStr("c2"), Offset: 1},
 	}}
 
 	cols := []*model.ColumnInfo{c1, c2, c3}
@@ -188,7 +187,7 @@ func TestClusterIndexRowDecoder(t *testing.T) {
 	}
 	rd := rowcodec.Encoder{Enable: true}
 	for _, row := range testRows {
-		bs, err := tablecodec.EncodeRow(sc.TimeZone(), row.input, row.cols, nil, nil, nil, &rd)
+		bs, err := tablecodec.EncodeRow(sc, row.input, row.cols, nil, nil, &rd)
 		require.NoError(t, err)
 		require.NotNil(t, bs)
 
@@ -198,7 +197,7 @@ func TestClusterIndexRowDecoder(t *testing.T) {
 		for i, col := range cols {
 			v, ok := r[col.ID]
 			require.True(t, ok)
-			equal, err1 := v.Compare(sc.TypeCtx(), &row.output[i], collate.GetBinaryCollator())
+			equal, err1 := v.Compare(sc, &row.output[i], collate.GetBinaryCollator())
 			require.Nil(t, err1)
 			require.Equal(t, 0, equal)
 		}

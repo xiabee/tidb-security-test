@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"fmt"
 	"runtime"
-	"strings"
 
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
@@ -17,21 +16,18 @@ import (
 
 // Version information.
 var (
-	ReleaseVersion        = getReleaseVersion()
-	BuildTS               = versioninfo.TiDBBuildTS
-	GitHash               = versioninfo.TiDBGitHash
-	GitBranch             = versioninfo.TiDBGitBranch
-	goVersion             = runtime.Version()
-	ReleaseVersionForTest = "nightly-dirty"
+	ReleaseVersion = getReleaseVersion()
+	BuildTS        = versioninfo.TiDBBuildTS
+	GitHash        = versioninfo.TiDBGitHash
+	GitBranch      = versioninfo.TiDBGitBranch
+	goVersion      = runtime.Version()
 )
 
 func getReleaseVersion() string {
-	if mysql.TiDBReleaseVersion != "None" && !strings.Contains(mysql.TiDBReleaseVersion, "this-is-a-placeholder") {
+	if mysql.TiDBReleaseVersion != "None" {
 		return mysql.TiDBReleaseVersion
 	}
-	// it's unreachable for normal path, only for realtikv tests
-	// we need to set the ReleaseVersion manually.
-	return ReleaseVersionForTest
+	return "v7.0.0-master"
 }
 
 // AppName is a name of a built binary.

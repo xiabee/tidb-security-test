@@ -31,7 +31,7 @@ import (
 	"strings"
 	"testing"
 
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +45,7 @@ func init() {
 type testCases struct {
 	Name       string
 	Cases      *json.RawMessage // For delayed parse.
-	decodedOut any              // For generate output.
+	decodedOut interface{}      // For generate output.
 }
 
 // TestData stores all the data of a test suite.
@@ -118,7 +118,7 @@ func OnRecord(updateFunc func()) {
 }
 
 // ConvertRowsToStrings converts [][]interface{} to []string.
-func ConvertRowsToStrings(rows [][]any) (rs []string) {
+func ConvertRowsToStrings(rows [][]interface{}) (rs []string) {
 	for _, row := range rows {
 		s := fmt.Sprintf("%v", row)
 		// Trim the leftmost `[` and rightmost `]`.
@@ -129,7 +129,7 @@ func ConvertRowsToStrings(rows [][]any) (rs []string) {
 }
 
 // ConvertSQLWarnToStrings converts []SQLWarn to []string.
-func ConvertSQLWarnToStrings(warns []contextutil.SQLWarn) (rs []string) {
+func ConvertSQLWarnToStrings(warns []stmtctx.SQLWarn) (rs []string) {
 	for _, warn := range warns {
 		rs = append(rs, fmt.Sprint(warn.Err.Error()))
 	}
@@ -137,7 +137,7 @@ func ConvertSQLWarnToStrings(warns []contextutil.SQLWarn) (rs []string) {
 }
 
 // LoadTestCases Loads the test cases for a test function.
-func (td *TestData) LoadTestCases(t *testing.T, in any, out any) {
+func (td *TestData) LoadTestCases(t *testing.T, in interface{}, out interface{}) {
 	// Extract caller's name.
 	pc, _, _, ok := runtime.Caller(1)
 	require.True(t, ok)
@@ -164,7 +164,7 @@ func (td *TestData) LoadTestCases(t *testing.T, in any, out any) {
 }
 
 // LoadTestCasesByName loads the test cases for a test function by its name.
-func (td *TestData) LoadTestCasesByName(caseName string, t *testing.T, in any, out any) {
+func (td *TestData) LoadTestCasesByName(caseName string, t *testing.T, in interface{}, out interface{}) {
 	casesIdx, ok := td.funcMap[caseName]
 	require.Truef(t, ok, "Case name: %s", caseName)
 	require.NoError(t, json.Unmarshal(*td.input[casesIdx].Cases, in))

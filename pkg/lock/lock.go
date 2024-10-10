@@ -15,20 +15,19 @@
 package lock
 
 import (
-	stdctx "context"
 	"errors"
 
 	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/lock/context"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/util"
 )
 
 // Checker uses to check tables lock.
 type Checker struct {
-	ctx context.TableLockReadContext
+	ctx sessionctx.Context
 	is  infoschema.InfoSchema
 }
 
@@ -36,7 +35,7 @@ type Checker struct {
 var ErrLockedTableDropped = errors.New("other table can be accessed after locked table dropped")
 
 // NewChecker return new lock Checker.
-func NewChecker(ctx context.TableLockReadContext, is infoschema.InfoSchema) *Checker {
+func NewChecker(ctx sessionctx.Context, is infoschema.InfoSchema) *Checker {
 	return &Checker{ctx: ctx, is: is}
 }
 
@@ -67,7 +66,7 @@ func (c *Checker) CheckTableLock(db, table string, privilege mysql.PrivilegeType
 		return nil
 	}
 	// TODO: try to remove this get for speed up.
-	tb, err := c.is.TableByName(stdctx.Background(), model.NewCIStr(db), model.NewCIStr(table))
+	tb, err := c.is.TableByName(model.NewCIStr(db), model.NewCIStr(table))
 	// Ignore this error for "drop table if not exists t1" when t1 doesn't exists.
 	if infoschema.ErrTableNotExists.Equal(err) {
 		return nil
@@ -141,13 +140,11 @@ func (c *Checker) CheckLockInDB(db string, privilege mysql.PrivilegeType) error 
 	if privilege == mysql.CreatePriv {
 		return nil
 	}
-	rs := c.is.ListTablesWithSpecialAttribute(infoschema.TableLockAttribute)
-	for _, schema := range rs {
-		for _, tbl := range schema.TableInfos {
-			err := c.CheckTableLock(db, tbl.Name.L, privilege, false)
-			if err != nil {
-				return err
-			}
+	tables := c.is.SchemaTables(model.NewCIStr(db))
+	for _, tbl := range tables {
+		err := c.CheckTableLock(db, tbl.Meta().Name.L, privilege, false)
+		if err != nil {
+			return err
 		}
 	}
 	return nil

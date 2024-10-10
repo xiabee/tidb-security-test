@@ -15,36 +15,30 @@
 package autoanalyze
 
 import (
-	"context"
 	"fmt"
+	"math"
 	"math/rand"
-	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/metrics"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/sysproctrack"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/statistics"
-	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze/exec"
-	"github.com/pingcap/tidb/pkg/statistics/handle/autoanalyze/refresher"
 	"github.com/pingcap/tidb/pkg/statistics/handle/lockstats"
 	statslogutil "github.com/pingcap/tidb/pkg/statistics/handle/logutil"
-	statstypes "github.com/pingcap/tidb/pkg/statistics/handle/types"
 	statsutil "github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/intest"
+	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/sqlescape"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	"go.uber.org/zap"
 )
@@ -52,27 +46,12 @@ import (
 // statsAnalyze implements util.StatsAnalyze.
 // statsAnalyze is used to handle auto-analyze and manage analyze jobs.
 type statsAnalyze struct {
-	statsHandle statstypes.StatsHandle
-	// sysProcTracker is used to track sys process like analyze
-	sysProcTracker sysproctrack.Tracker
-	// refresher is used to refresh the analyze job queue and analyze the highest priority tables.
-	// It is only used when auto-analyze priority queue is enabled.
-	refresher *refresher.Refresher
+	statsHandle statsutil.StatsHandle
 }
 
 // NewStatsAnalyze creates a new StatsAnalyze.
-func NewStatsAnalyze(
-	statsHandle statstypes.StatsHandle,
-	sysProcTracker sysproctrack.Tracker,
-) statstypes.StatsAnalyze {
-	// Usually, we should only create the refresher when auto-analyze priority queue is enabled.
-	// But to allow users to enable auto-analyze priority queue on the fly, we need to create the refresher here.
-	r := refresher.NewRefresher(statsHandle, sysProcTracker)
-	return &statsAnalyze{
-		statsHandle:    statsHandle,
-		sysProcTracker: sysProcTracker,
-		refresher:      r,
-	}
+func NewStatsAnalyze(statsHandle statsutil.StatsHandle) statsutil.StatsAnalyze {
+	return &statsAnalyze{statsHandle: statsHandle}
 }
 
 // InsertAnalyzeJob inserts the analyze job to the storage.
@@ -80,36 +59,6 @@ func (sa *statsAnalyze) InsertAnalyzeJob(job *statistics.AnalyzeJob, instance st
 	return statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
 		return insertAnalyzeJob(sctx, job, instance, procID)
 	})
-}
-
-func (sa *statsAnalyze) StartAnalyzeJob(job *statistics.AnalyzeJob) {
-	err := statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		startAnalyzeJob(sctx, job)
-		return nil
-	})
-	if err != nil {
-		statslogutil.StatsLogger().Warn("failed to start analyze job", zap.Error(err))
-	}
-}
-
-func (sa *statsAnalyze) UpdateAnalyzeJobProgress(job *statistics.AnalyzeJob, rowCount int64) {
-	err := statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		updateAnalyzeJobProgress(sctx, job, rowCount)
-		return nil
-	})
-	if err != nil {
-		statslogutil.StatsLogger().Warn("failed to update analyze job progress", zap.Error(err))
-	}
-}
-
-func (sa *statsAnalyze) FinishAnalyzeJob(job *statistics.AnalyzeJob, failReason error, analyzeType statistics.JobType) {
-	err := statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		finishAnalyzeJob(sctx, job, failReason, analyzeType)
-		return nil
-	})
-	if err != nil {
-		statslogutil.StatsLogger().Warn("failed to finish analyze job", zap.Error(err))
-	}
 }
 
 // DeleteAnalyzeJobs deletes the analyze jobs whose update time is earlier than updateTime.
@@ -120,176 +69,12 @@ func (sa *statsAnalyze) DeleteAnalyzeJobs(updateTime time.Time) error {
 	})
 }
 
-// CleanupCorruptedAnalyzeJobsOnCurrentInstance cleans up the potentially corrupted analyze job.
-// It only cleans up the jobs that are associated with the current instance.
-func (sa *statsAnalyze) CleanupCorruptedAnalyzeJobsOnCurrentInstance(currentRunningProcessIDs map[uint64]struct{}) error {
-	return statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		return CleanupCorruptedAnalyzeJobsOnCurrentInstance(sctx, currentRunningProcessIDs)
-	}, statsutil.FlagWrapTxn)
-}
-
-// CleanupCorruptedAnalyzeJobsOnDeadInstances removes analyze jobs that may have been corrupted.
-// Specifically, it removes jobs associated with instances that no longer exist in the cluster.
-func (sa *statsAnalyze) CleanupCorruptedAnalyzeJobsOnDeadInstances() error {
-	return statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		return CleanupCorruptedAnalyzeJobsOnDeadInstances(sctx)
-	}, statsutil.FlagWrapTxn)
-}
-
-// SelectAnalyzeJobsOnCurrentInstanceSQL is the SQL to select the analyze jobs whose
-// state is `pending` or `running` and the update time is more than 10 minutes ago
-// and the instance is current instance.
-const SelectAnalyzeJobsOnCurrentInstanceSQL = `SELECT id, process_id
-		FROM mysql.analyze_jobs
-		WHERE instance = %?
-		AND state IN ('pending', 'running')
-		AND update_time < CONVERT_TZ(%?, '+00:00', @@TIME_ZONE)`
-
-// SelectAnalyzeJobsSQL is the SQL to select the analyze jobs whose
-// state is `pending` or `running` and the update time is more than 10 minutes ago.
-const SelectAnalyzeJobsSQL = `SELECT id, instance
-		FROM mysql.analyze_jobs
-		WHERE state IN ('pending', 'running')
-		AND update_time < CONVERT_TZ(%?, '+00:00', @@TIME_ZONE)`
-
-// BatchUpdateAnalyzeJobSQL is the SQL to update the analyze jobs to `failed` state.
-const BatchUpdateAnalyzeJobSQL = `UPDATE mysql.analyze_jobs
-            SET state = 'failed',
-            fail_reason = 'The TiDB Server has either shut down or the analyze query was terminated during the analyze job execution',
-            process_id = NULL
-            WHERE id IN (%?)`
-
-func tenMinutesAgo() string {
-	return time.Now().Add(-10 * time.Minute).UTC().Format(types.TimeFormat)
-}
-
-// CleanupCorruptedAnalyzeJobsOnCurrentInstance cleans up the potentially corrupted analyze job from current instance.
-// Exported for testing.
-func CleanupCorruptedAnalyzeJobsOnCurrentInstance(
-	sctx sessionctx.Context,
-	currentRunningProcessIDs map[uint64]struct{},
-) error {
-	serverInfo, err := infosync.GetServerInfo()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	instance := net.JoinHostPort(serverInfo.IP, strconv.Itoa(int(serverInfo.Port)))
-	// Get all the analyze jobs whose state is `pending` or `running` and the update time is more than 10 minutes ago
-	// and the instance is current instance.
-	rows, _, err := statsutil.ExecRows(
-		sctx,
-		SelectAnalyzeJobsOnCurrentInstanceSQL,
-		instance,
-		tenMinutesAgo(),
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	jobIDs := make([]string, 0, len(rows))
-	for _, row := range rows {
-		// The process ID is typically non-null for running or pending jobs.
-		// However, in rare cases(I don't which case), it may be null. Therefore, it's necessary to check its value.
-		if !row.IsNull(1) {
-			processID := row.GetUint64(1)
-			// If the process id is not in currentRunningProcessIDs, we need to clean up the job.
-			// They don't belong to current instance any more.
-			if _, ok := currentRunningProcessIDs[processID]; !ok {
-				jobID := row.GetUint64(0)
-				jobIDs = append(jobIDs, strconv.FormatUint(jobID, 10))
-			}
-		}
-	}
-
-	// Do a batch update to clean up the jobs.
-	if len(jobIDs) > 0 {
-		_, _, err = statsutil.ExecRows(
-			sctx,
-			BatchUpdateAnalyzeJobSQL,
-			jobIDs,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		statslogutil.StatsLogger().Info(
-			"clean up the potentially corrupted analyze jobs from current instance",
-			zap.Strings("jobIDs", jobIDs),
-		)
-	}
-
-	return nil
-}
-
-// CleanupCorruptedAnalyzeJobsOnDeadInstances cleans up the potentially corrupted analyze job from dead instances.
-func CleanupCorruptedAnalyzeJobsOnDeadInstances(
-	sctx sessionctx.Context,
-) error {
-	rows, _, err := statsutil.ExecRows(
-		sctx,
-		SelectAnalyzeJobsSQL,
-		tenMinutesAgo(),
-	)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if len(rows) == 0 {
+// HandleAutoAnalyze analyzes the newly created table or index.
+func (sa *statsAnalyze) HandleAutoAnalyze(is infoschema.InfoSchema) (analyzed bool) {
+	_ = statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
+		analyzed = HandleAutoAnalyze(sctx, sa.statsHandle, is)
 		return nil
-	}
-
-	// Get all the instances from etcd.
-	serverInfo, err := infosync.GetAllServerInfo(context.Background())
-	if err != nil {
-		return errors.Trace(err)
-	}
-	instances := make(map[string]struct{}, len(serverInfo))
-	for _, info := range serverInfo {
-		instance := net.JoinHostPort(info.IP, strconv.Itoa(int(info.Port)))
-		instances[instance] = struct{}{}
-	}
-
-	jobIDs := make([]string, 0, len(rows))
-	for _, row := range rows {
-		// If the instance is not in instances, we need to clean up the job.
-		// It means the instance is down or the instance is not in the cluster any more.
-		instance := row.GetString(1)
-		if _, ok := instances[instance]; !ok {
-			jobID := row.GetUint64(0)
-			jobIDs = append(jobIDs, strconv.FormatUint(jobID, 10))
-		}
-	}
-
-	// Do a batch update to clean up the jobs.
-	if len(jobIDs) > 0 {
-		_, _, err = statsutil.ExecRows(
-			sctx,
-			BatchUpdateAnalyzeJobSQL,
-			jobIDs,
-		)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		statslogutil.StatsLogger().Info(
-			"clean up the potentially corrupted analyze jobs from dead instances",
-			zap.Strings("jobIDs", jobIDs),
-		)
-	}
-
-	return nil
-}
-
-// HandleAutoAnalyze analyzes the outdated tables. (The change percent of the table exceeds the threshold)
-// It also analyzes newly created tables and newly added indexes.
-func (sa *statsAnalyze) HandleAutoAnalyze() (analyzed bool) {
-	if err := statsutil.CallWithSCtx(sa.statsHandle.SPool(), func(sctx sessionctx.Context) error {
-		analyzed = sa.handleAutoAnalyze(sctx)
-		// During the test, we need to wait for the auto analyze job to be finished.
-		if intest.InTest {
-			sa.refresher.WaitAutoAnalyzeFinishedForTest()
-		}
-		return nil
-	}); err != nil {
-		statslogutil.StatsLogger().Error("Failed to handle auto analyze", zap.Error(err))
-	}
+	})
 	return
 }
 
@@ -309,7 +94,46 @@ func (sa *statsAnalyze) CheckAnalyzeVersion(tblInfo *model.TableInfo, physicalID
 	return statistics.CheckAnalyzeVerOnTable(tbl, version)
 }
 
-func (sa *statsAnalyze) handleAutoAnalyze(sctx sessionctx.Context) bool {
+func parseAutoAnalyzeRatio(ratio string) float64 {
+	autoAnalyzeRatio, err := strconv.ParseFloat(ratio, 64)
+	if err != nil {
+		return variable.DefAutoAnalyzeRatio
+	}
+	return math.Max(autoAnalyzeRatio, 0)
+}
+
+func parseAnalyzePeriod(start, end string) (time.Time, time.Time, error) {
+	if start == "" {
+		start = variable.DefAutoAnalyzeStartTime
+	}
+	if end == "" {
+		end = variable.DefAutoAnalyzeEndTime
+	}
+	s, err := time.ParseInLocation(variable.FullDayTimeFormat, start, time.UTC)
+	if err != nil {
+		return s, s, errors.Trace(err)
+	}
+	e, err := time.ParseInLocation(variable.FullDayTimeFormat, end, time.UTC)
+	return s, e, err
+}
+
+func getAutoAnalyzeParameters(sctx sessionctx.Context) map[string]string {
+	sql := "select variable_name, variable_value from mysql.global_variables where variable_name in (%?, %?, %?)"
+	rows, _, err := statsutil.ExecWithOpts(sctx, nil, sql, variable.TiDBAutoAnalyzeRatio, variable.TiDBAutoAnalyzeStartTime, variable.TiDBAutoAnalyzeEndTime)
+	if err != nil {
+		return map[string]string{}
+	}
+	parameters := make(map[string]string, len(rows))
+	for _, row := range rows {
+		parameters[row.GetString(0)] = row.GetString(1)
+	}
+	return parameters
+}
+
+// HandleAutoAnalyze analyzes the newly created table or index.
+func HandleAutoAnalyze(sctx sessionctx.Context,
+	statsHandle statsutil.StatsHandle,
+	is infoschema.InfoSchema) (analyzed bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			statslogutil.StatsLogger().Error(
@@ -319,64 +143,31 @@ func (sa *statsAnalyze) handleAutoAnalyze(sctx sessionctx.Context) bool {
 			)
 		}
 	}()
-	if variable.EnableAutoAnalyzePriorityQueue.Load() {
-		err := sa.refresher.RebuildTableAnalysisJobQueue()
-		if err != nil {
-			statslogutil.StatsLogger().Error("rebuild table analysis job queue failed", zap.Error(err))
-			return false
-		}
-		return sa.refresher.AnalyzeHighestPriorityTables()
-	}
 
-	parameters := exec.GetAutoAnalyzeParameters(sctx)
-	autoAnalyzeRatio := exec.ParseAutoAnalyzeRatio(parameters[variable.TiDBAutoAnalyzeRatio])
-	start, end, ok := checkAutoAnalyzeWindow(parameters)
-	if !ok {
-		return false
-	}
-
-	pruneMode := variable.PartitionPruneMode(sctx.GetSessionVars().PartitionPruneMode.Load())
-
-	return RandomPickOneTableAndTryAutoAnalyze(
-		sctx,
-		sa.statsHandle,
-		sa.sysProcTracker,
-		autoAnalyzeRatio,
-		pruneMode,
-		start,
-		end,
-	)
-}
-
-// Close closes the auto-analyze worker.
-func (sa *statsAnalyze) Close() {
-	sa.refresher.Close()
-}
-
-// CheckAutoAnalyzeWindow determine the time window for auto-analysis and verify if the current time falls within this range.
-// parameters is a map of auto analyze parameters. it is from GetAutoAnalyzeParameters.
-func CheckAutoAnalyzeWindow(sctx sessionctx.Context) bool {
-	parameters := exec.GetAutoAnalyzeParameters(sctx)
-	_, _, ok := checkAutoAnalyzeWindow(parameters)
-	return ok
-}
-
-func checkAutoAnalyzeWindow(parameters map[string]string) (time.Time, time.Time, bool) {
-	start, end, err := exec.ParseAutoAnalysisWindow(
-		parameters[variable.TiDBAutoAnalyzeStartTime],
-		parameters[variable.TiDBAutoAnalyzeEndTime],
-	)
+	parameters := getAutoAnalyzeParameters(sctx)
+	autoAnalyzeRatio := parseAutoAnalyzeRatio(parameters[variable.TiDBAutoAnalyzeRatio])
+	start, end, err := parseAnalyzePeriod(parameters[variable.TiDBAutoAnalyzeStartTime], parameters[variable.TiDBAutoAnalyzeEndTime])
 	if err != nil {
 		statslogutil.StatsLogger().Error(
 			"parse auto analyze period failed",
 			zap.Error(err),
 		)
-		return start, end, false
+		return false
 	}
 	if !timeutil.WithinDayTimePeriod(start, end, time.Now()) {
-		return start, end, false
+		return false
 	}
-	return start, end, true
+
+	pruneMode := variable.PartitionPruneMode(sctx.GetSessionVars().PartitionPruneMode.Load())
+	return RandomPickOneTableAndTryAutoAnalyze(
+		sctx,
+		statsHandle,
+		is,
+		autoAnalyzeRatio,
+		pruneMode,
+		start,
+		end,
+	)
 }
 
 // RandomPickOneTableAndTryAutoAnalyze randomly picks one table and tries to analyze it.
@@ -387,14 +178,13 @@ func checkAutoAnalyzeWindow(parameters map[string]string) (time.Time, time.Time,
 // Exposed solely for testing.
 func RandomPickOneTableAndTryAutoAnalyze(
 	sctx sessionctx.Context,
-	statsHandle statstypes.StatsHandle,
-	sysProcTracker sysproctrack.Tracker,
+	statsHandle statsutil.StatsHandle,
+	is infoschema.InfoSchema,
 	autoAnalyzeRatio float64,
 	pruneMode variable.PartitionPruneMode,
 	start, end time.Time,
 ) bool {
-	is := sctx.GetDomainInfoSchema().(infoschema.InfoSchema)
-	dbs := infoschema.AllSchemaNames(is)
+	dbs := is.AllSchemaNames()
 	// Shuffle the database and table slice to randomize the order of analyzing tables.
 	rd := rand.New(rand.NewSource(time.Now().UnixNano())) // #nosec G404
 	rd.Shuffle(len(dbs), func(i, j int) {
@@ -417,8 +207,7 @@ func RandomPickOneTableAndTryAutoAnalyze(
 			continue
 		}
 
-		tbls, err := is.SchemaTableInfos(context.Background(), pmodel.NewCIStr(db))
-		terror.Log(err)
+		tbls := is.SchemaTables(model.NewCIStr(db))
 		// We shuffle dbs and tbls so that the order of iterating tables is random. If the order is fixed and the auto
 		// analyze job of one table fails for some reason, it may always analyze the same table and fail again and again
 		// when the HandleAutoAnalyze is triggered. Randomizing the order can avoid the problem.
@@ -428,7 +217,7 @@ func RandomPickOneTableAndTryAutoAnalyze(
 		})
 
 		// We need to check every partition of every table to see if it needs to be analyzed.
-		for _, tblInfo := range tbls {
+		for _, tbl := range tbls {
 			// Sometimes the tables are too many. Auto-analyze will take too much time on it.
 			// so we need to check the available time.
 			if !timeutil.WithinDayTimePeriod(start, end, time.Now()) {
@@ -436,10 +225,10 @@ func RandomPickOneTableAndTryAutoAnalyze(
 			}
 			// If table locked, skip analyze all partitions of the table.
 			// FIXME: This check is not accurate, because other nodes may change the table lock status at any time.
-			if _, ok := lockedTables[tblInfo.ID]; ok {
+			if _, ok := lockedTables[tbl.Meta().ID]; ok {
 				continue
 			}
-
+			tblInfo := tbl.Meta()
 			if tblInfo.IsView() {
 				continue
 			}
@@ -447,9 +236,9 @@ func RandomPickOneTableAndTryAutoAnalyze(
 			pi := tblInfo.GetPartitionInfo()
 			// No partitions, analyze the whole table.
 			if pi == nil {
-				statsTbl := statsHandle.GetTableStatsForAutoAnalyze(tblInfo)
+				statsTbl := statsHandle.GetTableStats(tblInfo)
 				sql := "analyze table %n.%n"
-				analyzed := tryAutoAnalyzeTable(sctx, statsHandle, sysProcTracker, tblInfo, statsTbl, autoAnalyzeRatio, sql, db, tblInfo.Name.O)
+				analyzed := autoAnalyzeTable(sctx, statsHandle, tblInfo, statsTbl, autoAnalyzeRatio, sql, db, tblInfo.Name.O)
 				if analyzed {
 					// analyze one table at a time to let it get the freshest parameters.
 					// others will be analyzed next round which is just 3s later.
@@ -458,24 +247,14 @@ func RandomPickOneTableAndTryAutoAnalyze(
 				continue
 			}
 			// Only analyze the partition that has not been locked.
-			partitionDefs := make([]model.PartitionDefinition, 0, len(pi.Definitions))
+			var partitionDefs []model.PartitionDefinition
 			for _, def := range pi.Definitions {
 				if _, ok := lockedTables[def.ID]; !ok {
 					partitionDefs = append(partitionDefs, def)
 				}
 			}
-			partitionStats := getPartitionStats(statsHandle, tblInfo, partitionDefs)
 			if pruneMode == variable.Dynamic {
-				analyzed := tryAutoAnalyzePartitionTableInDynamicMode(
-					sctx,
-					statsHandle,
-					sysProcTracker,
-					tblInfo,
-					partitionDefs,
-					partitionStats,
-					db,
-					autoAnalyzeRatio,
-				)
+				analyzed := autoAnalyzePartitionTableInDynamicMode(sctx, statsHandle, tblInfo, partitionDefs, db, autoAnalyzeRatio)
 				if analyzed {
 					return true
 				}
@@ -483,8 +262,8 @@ func RandomPickOneTableAndTryAutoAnalyze(
 			}
 			for _, def := range partitionDefs {
 				sql := "analyze table %n.%n partition %n"
-				statsTbl := partitionStats[def.ID]
-				analyzed := tryAutoAnalyzeTable(sctx, statsHandle, sysProcTracker, tblInfo, statsTbl, autoAnalyzeRatio, sql, db, tblInfo.Name.O, def.Name.O)
+				statsTbl := statsHandle.GetPartitionStats(tblInfo, def.ID)
+				analyzed := autoAnalyzeTable(sctx, statsHandle, tblInfo, statsTbl, autoAnalyzeRatio, sql, db, tblInfo.Name.O, def.Name.O)
 				if analyzed {
 					return true
 				}
@@ -495,45 +274,18 @@ func RandomPickOneTableAndTryAutoAnalyze(
 	return false
 }
 
-func getPartitionStats(
-	statsHandle statstypes.StatsHandle,
-	tblInfo *model.TableInfo,
-	defs []model.PartitionDefinition,
-) map[int64]*statistics.Table {
-	partitionStats := make(map[int64]*statistics.Table, len(defs))
+// AutoAnalyzeMinCnt means if the count of table is less than this value, we needn't do auto analyze.
+var AutoAnalyzeMinCnt int64 = 1000
 
-	for _, def := range defs {
-		partitionStats[def.ID] = statsHandle.GetPartitionStatsForAutoAnalyze(tblInfo, def.ID)
-	}
-
-	return partitionStats
-}
-
-// Determine whether the table and index require analysis.
-func tryAutoAnalyzeTable(
-	sctx sessionctx.Context,
-	statsHandle statstypes.StatsHandle,
-	sysProcTracker sysproctrack.Tracker,
-	tblInfo *model.TableInfo,
-	statsTbl *statistics.Table,
-	ratio float64,
-	sql string,
-	params ...any,
-) bool {
-	// 1. If the statistics are either not loaded or are classified as pseudo, there is no need for analyze
-	//    Pseudo statistics can be created by the optimizer, so we need to double check it.
-	// 2. If the table is too small, we don't want to waste time to analyze it.
-	//    Leave the opportunity to other bigger tables.
-	if statsTbl == nil || statsTbl.Pseudo || statsTbl.RealtimeCount < statistics.AutoAnalyzeMinCnt {
+func autoAnalyzeTable(sctx sessionctx.Context,
+	statsHandle statsutil.StatsHandle,
+	tblInfo *model.TableInfo, statsTbl *statistics.Table,
+	ratio float64, sql string, params ...interface{}) bool {
+	if statsTbl.Pseudo || statsTbl.RealtimeCount < AutoAnalyzeMinCnt {
 		return false
 	}
-
-	// Check if the table needs to analyze.
-	if needAnalyze, reason := NeedAnalyzeTable(
-		statsTbl,
-		ratio,
-	); needAnalyze {
-		escaped, err := sqlescape.EscapeSQL(sql, params...)
+	if needAnalyze, reason := NeedAnalyzeTable(statsTbl, 20*statsHandle.Lease(), ratio); needAnalyze {
+		escaped, err := sqlexec.EscapeSQL(sql, params...)
 		if err != nil {
 			return false
 		}
@@ -545,17 +297,14 @@ func tryAutoAnalyzeTable(
 
 		tableStatsVer := sctx.GetSessionVars().AnalyzeVersion
 		statistics.CheckAnalyzeVerOnTable(statsTbl, &tableStatsVer)
-		exec.AutoAnalyze(sctx, statsHandle, sysProcTracker, tableStatsVer, sql, params...)
-
+		execAutoAnalyze(sctx, statsHandle, tableStatsVer, sql, params...)
 		return true
 	}
-
-	// Whether the table needs to analyze or not, we need to check the indices of the table.
 	for _, idx := range tblInfo.Indices {
-		if idxStats := statsTbl.GetIdx(idx.ID); idxStats == nil && !statsTbl.ColAndIdxExistenceMap.HasAnalyzed(idx.ID, true) && idx.State == model.StatePublic {
+		if _, ok := statsTbl.Indices[idx.ID]; !ok && idx.State == model.StatePublic {
 			sqlWithIdx := sql + " index %n"
 			paramsWithIdx := append(params, idx.Name.O)
-			escaped, err := sqlescape.EscapeSQL(sqlWithIdx, paramsWithIdx...)
+			escaped, err := sqlexec.EscapeSQL(sqlWithIdx, paramsWithIdx...)
 			if err != nil {
 				return false
 			}
@@ -566,7 +315,7 @@ func tryAutoAnalyzeTable(
 			)
 			tableStatsVer := sctx.GetSessionVars().AnalyzeVersion
 			statistics.CheckAnalyzeVerOnTable(statsTbl, &tableStatsVer)
-			exec.AutoAnalyze(sctx, statsHandle, sysProcTracker, tableStatsVer, sqlWithIdx, paramsWithIdx...)
+			execAutoAnalyze(sctx, statsHandle, tableStatsVer, sqlWithIdx, paramsWithIdx...)
 			return true
 		}
 	}
@@ -574,14 +323,15 @@ func tryAutoAnalyzeTable(
 }
 
 // NeedAnalyzeTable checks if we need to analyze the table:
-//  1. If the table has never been analyzed, we need to analyze it.
+//  1. If the table has never been analyzed, we need to analyze it when it has
+//     not been modified for a while.
 //  2. If the table had been analyzed before, we need to analyze it when
 //     "tbl.ModifyCount/tbl.Count > autoAnalyzeRatio" and the current time is
 //     between `start` and `end`.
 //
 // Exposed for test.
-func NeedAnalyzeTable(tbl *statistics.Table, autoAnalyzeRatio float64) (bool, string) {
-	analyzed := tbl.IsAnalyzed()
+func NeedAnalyzeTable(tbl *statistics.Table, _ time.Duration, autoAnalyzeRatio float64) (bool, string) {
+	analyzed := TableAnalyzed(tbl)
 	if !analyzed {
 		return true, "table unanalyzed"
 	}
@@ -600,46 +350,45 @@ func NeedAnalyzeTable(tbl *statistics.Table, autoAnalyzeRatio float64) (bool, st
 	return true, fmt.Sprintf("too many modifications(%v/%v>%v)", tbl.ModifyCount, tblCnt, autoAnalyzeRatio)
 }
 
-// It is very similar to tryAutoAnalyzeTable, but it commits the analyze job in batch for partitions.
-func tryAutoAnalyzePartitionTableInDynamicMode(
-	sctx sessionctx.Context,
-	statsHandle statstypes.StatsHandle,
-	sysProcTracker sysproctrack.Tracker,
-	tblInfo *model.TableInfo,
-	partitionDefs []model.PartitionDefinition,
-	partitionStats map[int64]*statistics.Table,
-	db string,
-	ratio float64,
-) bool {
+// TableAnalyzed checks if the table is analyzed.
+// Exposed for test.
+func TableAnalyzed(tbl *statistics.Table) bool {
+	for _, col := range tbl.Columns {
+		if col.IsAnalyzed() {
+			return true
+		}
+	}
+	for _, idx := range tbl.Indices {
+		if idx.IsAnalyzed() {
+			return true
+		}
+	}
+	return false
+}
+
+func autoAnalyzePartitionTableInDynamicMode(sctx sessionctx.Context,
+	statsHandle statsutil.StatsHandle,
+	tblInfo *model.TableInfo, partitionDefs []model.PartitionDefinition,
+	db string, ratio float64) bool {
 	tableStatsVer := sctx.GetSessionVars().AnalyzeVersion
 	analyzePartitionBatchSize := int(variable.AutoAnalyzePartitionBatchSize.Load())
-	needAnalyzePartitionNames := make([]any, 0, len(partitionDefs))
-
+	partitionNames := make([]interface{}, 0, len(partitionDefs))
 	for _, def := range partitionDefs {
-		partitionStats := partitionStats[def.ID]
-		// 1. If the statistics are either not loaded or are classified as pseudo, there is no need for analyze.
-		//	  Pseudo statistics can be created by the optimizer, so we need to double check it.
-		// 2. If the table is too small, we don't want to waste time to analyze it.
-		//    Leave the opportunity to other bigger tables.
-		if partitionStats == nil || partitionStats.Pseudo || partitionStats.RealtimeCount < statistics.AutoAnalyzeMinCnt {
+		partitionStatsTbl := statsHandle.GetPartitionStats(tblInfo, def.ID)
+		if partitionStatsTbl.Pseudo || partitionStatsTbl.RealtimeCount < AutoAnalyzeMinCnt {
 			continue
 		}
-		if needAnalyze, reason := NeedAnalyzeTable(
-			partitionStats,
-			ratio,
-		); needAnalyze {
-			needAnalyzePartitionNames = append(needAnalyzePartitionNames, def.Name.O)
+		if needAnalyze, reason := NeedAnalyzeTable(partitionStatsTbl, 20*statsHandle.Lease(), ratio); needAnalyze {
+			partitionNames = append(partitionNames, def.Name.O)
 			statslogutil.StatsLogger().Info(
 				"need to auto analyze",
 				zap.String("database", db),
 				zap.String("table", tblInfo.Name.String()),
 				zap.String("partition", def.Name.O),
-				zap.String("reason", reason),
-			)
-			statistics.CheckAnalyzeVerOnTable(partitionStats, &tableStatsVer)
+				zap.String("reason", reason))
+			statistics.CheckAnalyzeVerOnTable(partitionStatsTbl, &tableStatsVer)
 		}
 	}
-
 	getSQL := func(prefix, suffix string, numPartitions int) string {
 		var sqlBuilder strings.Builder
 		sqlBuilder.WriteString(prefix)
@@ -652,86 +401,112 @@ func tryAutoAnalyzePartitionTableInDynamicMode(
 		sqlBuilder.WriteString(suffix)
 		return sqlBuilder.String()
 	}
-
-	if len(needAnalyzePartitionNames) > 0 {
+	if len(partitionNames) > 0 {
 		statslogutil.StatsLogger().Info("start to auto analyze",
 			zap.String("database", db),
 			zap.String("table", tblInfo.Name.String()),
-			zap.Any("partitions", needAnalyzePartitionNames),
-			zap.Int("analyze partition batch size", analyzePartitionBatchSize),
-		)
-
+			zap.Any("partitions", partitionNames),
+			zap.Int("analyze partition batch size", analyzePartitionBatchSize))
 		statsTbl := statsHandle.GetTableStats(tblInfo)
 		statistics.CheckAnalyzeVerOnTable(statsTbl, &tableStatsVer)
-		for i := 0; i < len(needAnalyzePartitionNames); i += analyzePartitionBatchSize {
+		for i := 0; i < len(partitionNames); i += analyzePartitionBatchSize {
 			start := i
 			end := start + analyzePartitionBatchSize
-			if end >= len(needAnalyzePartitionNames) {
-				end = len(needAnalyzePartitionNames)
+			if end >= len(partitionNames) {
+				end = len(partitionNames)
 			}
-
-			// Do batch analyze for partitions.
 			sql := getSQL("analyze table %n.%n partition", "", end-start)
-			params := append([]any{db, tblInfo.Name.O}, needAnalyzePartitionNames[start:end]...)
-
+			params := append([]interface{}{db, tblInfo.Name.O}, partitionNames[start:end]...)
 			statslogutil.StatsLogger().Info(
 				"auto analyze triggered",
 				zap.String("database", db),
 				zap.String("table", tblInfo.Name.String()),
-				zap.Any("partitions", needAnalyzePartitionNames[start:end]),
-			)
-			exec.AutoAnalyze(sctx, statsHandle, sysProcTracker, tableStatsVer, sql, params...)
+				zap.Any("partitions", partitionNames[start:end]))
+			execAutoAnalyze(sctx, statsHandle, tableStatsVer, sql, params...)
 		}
-
 		return true
 	}
-	// Check if any index of the table needs to analyze.
 	for _, idx := range tblInfo.Indices {
-		if idx.State != model.StatePublic || statsutil.IsSpecialGlobalIndex(idx, tblInfo) {
+		if idx.State != model.StatePublic {
 			continue
 		}
-		// Collect all the partition names that need to analyze.
 		for _, def := range partitionDefs {
-			partitionStats := partitionStats[def.ID]
-			// 1. If the statistics are either not loaded or are classified as pseudo, there is no need for analyze.
-			//    Pseudo statistics can be created by the optimizer, so we need to double check it.
-			if partitionStats == nil || partitionStats.Pseudo {
-				continue
-			}
-			// 2. If the index is not analyzed, we need to analyze it.
-			if !partitionStats.ColAndIdxExistenceMap.HasAnalyzed(idx.ID, true) {
-				needAnalyzePartitionNames = append(needAnalyzePartitionNames, def.Name.O)
-				statistics.CheckAnalyzeVerOnTable(partitionStats, &tableStatsVer)
+			partitionStatsTbl := statsHandle.GetPartitionStats(tblInfo, def.ID)
+			if _, ok := partitionStatsTbl.Indices[idx.ID]; !ok {
+				partitionNames = append(partitionNames, def.Name.O)
+				statistics.CheckAnalyzeVerOnTable(partitionStatsTbl, &tableStatsVer)
 			}
 		}
-		if len(needAnalyzePartitionNames) > 0 {
+		if len(partitionNames) > 0 {
 			statsTbl := statsHandle.GetTableStats(tblInfo)
 			statistics.CheckAnalyzeVerOnTable(statsTbl, &tableStatsVer)
-
-			for i := 0; i < len(needAnalyzePartitionNames); i += analyzePartitionBatchSize {
+			for i := 0; i < len(partitionNames); i += analyzePartitionBatchSize {
 				start := i
 				end := start + analyzePartitionBatchSize
-				if end >= len(needAnalyzePartitionNames) {
-					end = len(needAnalyzePartitionNames)
+				if end >= len(partitionNames) {
+					end = len(partitionNames)
 				}
-
 				sql := getSQL("analyze table %n.%n partition", " index %n", end-start)
-				params := append([]any{db, tblInfo.Name.O}, needAnalyzePartitionNames[start:end]...)
+				params := append([]interface{}{db, tblInfo.Name.O}, partitionNames[start:end]...)
 				params = append(params, idx.Name.O)
 				statslogutil.StatsLogger().Info("auto analyze for unanalyzed",
 					zap.String("database", db),
 					zap.String("table", tblInfo.Name.String()),
 					zap.String("index", idx.Name.String()),
-					zap.Any("partitions", needAnalyzePartitionNames[start:end]),
-				)
-				exec.AutoAnalyze(sctx, statsHandle, sysProcTracker, tableStatsVer, sql, params...)
+					zap.Any("partitions", partitionNames[start:end]))
+				execAutoAnalyze(sctx, statsHandle, tableStatsVer, sql, params...)
 			}
-
 			return true
 		}
 	}
-
 	return false
+}
+
+var execOptionForAnalyze = map[int]sqlexec.OptionFuncAlias{
+	statistics.Version0: sqlexec.ExecOptionAnalyzeVer1,
+	statistics.Version1: sqlexec.ExecOptionAnalyzeVer1,
+	statistics.Version2: sqlexec.ExecOptionAnalyzeVer2,
+}
+
+func execAutoAnalyze(sctx sessionctx.Context,
+	statsHandle statsutil.StatsHandle,
+	statsVer int,
+	sql string, params ...interface{}) {
+	startTime := time.Now()
+	_, _, err := execAnalyzeStmt(sctx, statsHandle, statsVer, sql, params...)
+	dur := time.Since(startTime)
+	metrics.AutoAnalyzeHistogram.Observe(dur.Seconds())
+	if err != nil {
+		escaped, err1 := sqlexec.EscapeSQL(sql, params...)
+		if err1 != nil {
+			escaped = ""
+		}
+		statslogutil.StatsLogger().Error(
+			"auto analyze failed",
+			zap.String("sql", escaped),
+			zap.Duration("cost_time", dur),
+			zap.Error(err),
+		)
+		metrics.AutoAnalyzeCounter.WithLabelValues("failed").Inc()
+	} else {
+		metrics.AutoAnalyzeCounter.WithLabelValues("succ").Inc()
+	}
+}
+
+func execAnalyzeStmt(sctx sessionctx.Context,
+	statsHandle statsutil.StatsHandle,
+	statsVer int,
+	sql string, params ...interface{}) ([]chunk.Row, []*ast.ResultField, error) {
+	pruneMode := sctx.GetSessionVars().PartitionPruneMode.Load()
+	analyzeSnapshot := sctx.GetSessionVars().EnableAnalyzeSnapshot
+	optFuncs := []sqlexec.OptionFuncAlias{
+		execOptionForAnalyze[statsVer],
+		sqlexec.GetAnalyzeSnapshotOption(analyzeSnapshot),
+		sqlexec.GetPartitionPruneModeOption(pruneMode),
+		sqlexec.ExecOptionUseCurSession,
+		sqlexec.ExecOptionWithSysProcTrack(statsHandle.AutoAnalyzeProcID(), statsHandle.SysProcTracker().Track, statsHandle.SysProcTracker().UnTrack),
+	}
+	return statsutil.ExecWithOpts(sctx, optFuncs, sql, params...)
 }
 
 // insertAnalyzeJob inserts analyze job into mysql.analyze_jobs and gets job ID for further updating job.
@@ -765,112 +540,4 @@ func insertAnalyzeJob(sctx sessionctx.Context, job *statistics.AnalyzeJob, insta
 		}
 	})
 	return nil
-}
-
-// startAnalyzeJob marks the state of the analyze job as running and sets the start time.
-func startAnalyzeJob(sctx sessionctx.Context, job *statistics.AnalyzeJob) {
-	if job == nil || job.ID == nil {
-		return
-	}
-	job.StartTime = time.Now()
-	job.Progress.SetLastDumpTime(job.StartTime)
-	const sql = "UPDATE mysql.analyze_jobs SET start_time = CONVERT_TZ(%?, '+00:00', @@TIME_ZONE), state = %? WHERE id = %?"
-	_, _, err := statsutil.ExecRows(sctx, sql, job.StartTime.UTC().Format(types.TimeFormat), statistics.AnalyzeRunning, *job.ID)
-	if err != nil {
-		statslogutil.StatsLogger().Warn("failed to update analyze job", zap.String("update", fmt.Sprintf("%s->%s", statistics.AnalyzePending, statistics.AnalyzeRunning)), zap.Error(err))
-	}
-	failpoint.Inject("DebugAnalyzeJobOperations", func(val failpoint.Value) {
-		if val.(bool) {
-			logutil.BgLogger().Info("StartAnalyzeJob",
-				zap.Time("start_time", job.StartTime),
-				zap.Uint64("job id", *job.ID),
-			)
-		}
-	})
-}
-
-// updateAnalyzeJobProgress updates count of the processed rows when increment reaches a threshold.
-func updateAnalyzeJobProgress(sctx sessionctx.Context, job *statistics.AnalyzeJob, rowCount int64) {
-	if job == nil || job.ID == nil {
-		return
-	}
-	delta := job.Progress.Update(rowCount)
-	if delta == 0 {
-		return
-	}
-	const sql = "UPDATE mysql.analyze_jobs SET processed_rows = processed_rows + %? WHERE id = %?"
-	_, _, err := statsutil.ExecRows(sctx, sql, delta, *job.ID)
-	if err != nil {
-		statslogutil.StatsLogger().Warn("failed to update analyze job", zap.String("update", fmt.Sprintf("process %v rows", delta)), zap.Error(err))
-	}
-	failpoint.Inject("DebugAnalyzeJobOperations", func(val failpoint.Value) {
-		if val.(bool) {
-			logutil.BgLogger().Info("UpdateAnalyzeJobProgress",
-				zap.Int64("increase processed_rows", delta),
-				zap.Uint64("job id", *job.ID),
-			)
-		}
-	})
-}
-
-// finishAnalyzeJob finishes an analyze or merge job
-func finishAnalyzeJob(sctx sessionctx.Context, job *statistics.AnalyzeJob, analyzeErr error, analyzeType statistics.JobType) {
-	if job == nil || job.ID == nil {
-		return
-	}
-
-	job.EndTime = time.Now()
-	var sql string
-	var args []any
-
-	// process_id is used to see which process is running the analyze job and kill the analyze job. After the analyze job
-	// is finished(or failed), process_id is useless and we set it to NULL to avoid `kill tidb process_id` wrongly.
-	if analyzeErr != nil {
-		failReason := analyzeErr.Error()
-		const textMaxLength = 65535
-		if len(failReason) > textMaxLength {
-			failReason = failReason[:textMaxLength]
-		}
-
-		if analyzeType == statistics.TableAnalysisJob {
-			sql = "UPDATE mysql.analyze_jobs SET processed_rows = processed_rows + %?, end_time = CONVERT_TZ(%?, '+00:00', @@TIME_ZONE), state = %?, fail_reason = %?, process_id = NULL WHERE id = %?"
-			args = []any{job.Progress.GetDeltaCount(), job.EndTime.UTC().Format(types.TimeFormat), statistics.AnalyzeFailed, failReason, *job.ID}
-		} else {
-			sql = "UPDATE mysql.analyze_jobs SET end_time = CONVERT_TZ(%?, '+00:00', @@TIME_ZONE), state = %?, fail_reason = %?, process_id = NULL WHERE id = %?"
-			args = []any{job.EndTime.UTC().Format(types.TimeFormat), statistics.AnalyzeFailed, failReason, *job.ID}
-		}
-	} else {
-		if analyzeType == statistics.TableAnalysisJob {
-			sql = "UPDATE mysql.analyze_jobs SET processed_rows = processed_rows + %?, end_time = CONVERT_TZ(%?, '+00:00', @@TIME_ZONE), state = %?, process_id = NULL WHERE id = %?"
-			args = []any{job.Progress.GetDeltaCount(), job.EndTime.UTC().Format(types.TimeFormat), statistics.AnalyzeFinished, *job.ID}
-		} else {
-			sql = "UPDATE mysql.analyze_jobs SET end_time = CONVERT_TZ(%?, '+00:00', @@TIME_ZONE), state = %?, process_id = NULL WHERE id = %?"
-			args = []any{job.EndTime.UTC().Format(types.TimeFormat), statistics.AnalyzeFinished, *job.ID}
-		}
-	}
-
-	_, _, err := statsutil.ExecRows(sctx, sql, args...)
-	if err != nil {
-		state := statistics.AnalyzeFinished
-		if analyzeErr != nil {
-			state = statistics.AnalyzeFailed
-		}
-		logutil.BgLogger().Warn("failed to update analyze job", zap.String("update", fmt.Sprintf("%s->%s", statistics.AnalyzeRunning, state)), zap.Error(err))
-	}
-
-	failpoint.Inject("DebugAnalyzeJobOperations", func(val failpoint.Value) {
-		if val.(bool) {
-			logger := logutil.BgLogger().With(
-				zap.Time("end_time", job.EndTime),
-				zap.Uint64("job id", *job.ID),
-			)
-			if analyzeType == statistics.TableAnalysisJob {
-				logger = logger.With(zap.Int64("increase processed_rows", job.Progress.GetDeltaCount()))
-			}
-			if analyzeErr != nil {
-				logger = logger.With(zap.Error(analyzeErr))
-			}
-			logger.Info("FinishAnalyzeJob")
-		}
-	})
 }

@@ -20,12 +20,12 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/expression"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewGroupExpr(t *testing.T) {
-	p := &logicalop.LogicalLimit{}
+	p := &plannercore.LogicalLimit{}
 	expr := NewGroupExpr(p)
 	require.Equal(t, p, expr.ExprNode)
 	require.Nil(t, expr.Children)
@@ -33,7 +33,7 @@ func TestNewGroupExpr(t *testing.T) {
 }
 
 func TestGroupExprFingerprint(t *testing.T) {
-	p := &logicalop.LogicalLimit{Count: 3}
+	p := &plannercore.LogicalLimit{Count: 3}
 	expr := NewGroupExpr(p)
 	childGroup := NewGroupWithSchema(nil, expression.NewSchema())
 	expr.SetChildren(childGroup)

@@ -20,13 +20,13 @@ type clearFuncBuilder struct {
 
 // DoWithCollectClear executes a function and collect it clear function
 func (b *clearFuncBuilder) DoWithCollectClear(fn func() (func(), error)) error {
-	clearFunc, err := fn()
+	clear, err := fn()
 	if err != nil {
 		return err
 	}
 
-	if clearFunc != nil {
-		b.clears = append(b.clears, clearFunc)
+	if clear != nil {
+		b.clears = append(b.clears, clear)
 	}
 
 	return nil

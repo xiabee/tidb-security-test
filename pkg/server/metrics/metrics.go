@@ -17,9 +17,9 @@ package metrics
 import (
 	"strconv"
 
+	"github.com/pingcap/tidb/pkg/domain/resourcegroup"
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/resourcegroup"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -35,8 +35,13 @@ var (
 	ConnIdleDurationHistogramNotInTxn prometheus.Observer
 	ConnIdleDurationHistogramInTxn    prometheus.Observer
 
-	InPacketBytes  prometheus.Counter
-	OutPacketBytes prometheus.Counter
+	AffectedRowsCounterInsert  prometheus.Counter
+	AffectedRowsCounterUpdate  prometheus.Counter
+	AffectedRowsCounterDelete  prometheus.Counter
+	AffectedRowsCounterReplace prometheus.Counter
+
+	ReadPacketBytes  prometheus.Counter
+	WritePacketBytes prometheus.Counter
 )
 
 func init() {
@@ -116,6 +121,11 @@ func InitMetricsVars() {
 	ConnIdleDurationHistogramNotInTxn = metrics.ConnIdleDurationHistogram.WithLabelValues("0")
 	ConnIdleDurationHistogramInTxn = metrics.ConnIdleDurationHistogram.WithLabelValues("1")
 
-	InPacketBytes = metrics.PacketIOCounter.WithLabelValues("In")
-	OutPacketBytes = metrics.PacketIOCounter.WithLabelValues("Out")
+	AffectedRowsCounterInsert = metrics.AffectedRowsCounter.WithLabelValues("Insert")
+	AffectedRowsCounterUpdate = metrics.AffectedRowsCounter.WithLabelValues("Update")
+	AffectedRowsCounterDelete = metrics.AffectedRowsCounter.WithLabelValues("Delete")
+	AffectedRowsCounterReplace = metrics.AffectedRowsCounter.WithLabelValues("Replace")
+
+	ReadPacketBytes = metrics.PacketIOCounter.WithLabelValues("read")
+	WritePacketBytes = metrics.PacketIOCounter.WithLabelValues("write")
 }

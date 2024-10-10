@@ -27,7 +27,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	derr "github.com/pingcap/tidb/pkg/store/driver/error"
 	"github.com/pingcap/tidb/pkg/table/tables"
@@ -39,8 +39,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// genKeyExistsError is the fallback path when can't extract key columns for
-// kv.GenKeyExistsErr.
 func genKeyExistsError(name string, value string, err error) error {
 	if err != nil {
 		logutil.BgLogger().Info("extractKeyExistsErr meets error", zap.Error(err))
@@ -60,10 +58,10 @@ func ExtractKeyExistsErrFromHandle(key kv.Key, value []byte, tblInfo *model.Tabl
 		if pkInfo := tblInfo.GetPkColInfo(); pkInfo != nil {
 			if mysql.HasUnsignedFlag(pkInfo.GetFlag()) {
 				handleStr := strconv.FormatUint(uint64(handle.IntValue()), 10)
-				return kv.GenKeyExistsErr([]string{handleStr}, name)
+				return genKeyExistsError(name, handleStr, nil)
 			}
 		}
-		return kv.GenKeyExistsErr([]string{handle.String()}, name)
+		return genKeyExistsError(name, handle.String(), nil)
 	}
 
 	if len(value) == 0 {
@@ -109,7 +107,7 @@ func ExtractKeyExistsErrFromHandle(key kv.Key, value []byte, tblInfo *model.Tabl
 		}
 		valueStr = append(valueStr, str)
 	}
-	return kv.GenKeyExistsErr(valueStr, name)
+	return genKeyExistsError(name, strings.Join(valueStr, "-"), nil)
 }
 
 // ExtractKeyExistsErrFromIndex returns a ErrKeyExists error from a index key.

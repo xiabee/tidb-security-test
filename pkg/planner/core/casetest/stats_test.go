@@ -21,9 +21,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
@@ -58,40 +55,39 @@ func TestGroupNDVs(t *testing.T) {
 		stmt, err := p.ParseOneStmt(tt, "", "")
 		require.NoError(t, err, comment)
 		ret := &core.PreprocessorReturn{}
-		nodeW := resolve.NewNodeW(stmt)
-		err = core.Preprocess(context.Background(), tk.Session(), nodeW, core.WithPreprocessorReturn(ret))
+		err = core.Preprocess(context.Background(), tk.Session(), stmt, core.WithPreprocessorReturn(ret))
 		require.NoError(t, err)
 		tk.Session().GetSessionVars().PlanColumnID.Store(0)
-		builder, _ := core.NewPlanBuilder().Init(tk.Session().GetPlanCtx(), ret.InfoSchema, hint.NewQBHintHandler(nil))
-		p, err := builder.Build(ctx, nodeW)
+		builder, _ := core.NewPlanBuilder().Init(tk.Session(), ret.InfoSchema, &hint.BlockHintProcessor{})
+		p, err := builder.Build(ctx, stmt)
 		require.NoError(t, err, comment)
-		p, err = core.LogicalOptimizeTest(ctx, builder.GetOptFlag(), p.(base.LogicalPlan))
+		p, err = core.LogicalOptimizeTest(ctx, builder.GetOptFlag(), p.(core.LogicalPlan))
 		require.NoError(t, err, comment)
-		lp := p.(base.LogicalPlan)
+		lp := p.(core.LogicalPlan)
 		_, err = core.RecursiveDeriveStats4Test(lp)
 		require.NoError(t, err, comment)
-		var agg *logicalop.LogicalAggregation
-		var join *logicalop.LogicalJoin
-		stack := make([]base.LogicalPlan, 0, 2)
+		var agg *core.LogicalAggregation
+		var join *core.LogicalJoin
+		stack := make([]core.LogicalPlan, 0, 2)
 		traversed := false
 		for !traversed {
 			switch v := lp.(type) {
-			case *logicalop.LogicalAggregation:
+			case *core.LogicalAggregation:
 				agg = v
 				lp = lp.Children()[0]
-			case *logicalop.LogicalJoin:
+			case *core.LogicalJoin:
 				join = v
 				lp = v.Children()[0]
 				stack = append(stack, v.Children()[1])
-			case *logicalop.LogicalApply:
+			case *core.LogicalApply:
 				lp = lp.Children()[0]
 				stack = append(stack, v.Children()[1])
-			case *logicalop.LogicalUnionAll:
+			case *core.LogicalUnionAll:
 				lp = lp.Children()[0]
 				for i := 1; i < len(v.Children()); i++ {
 					stack = append(stack, v.Children()[i])
 				}
-			case *logicalop.DataSource:
+			case *core.DataSource:
 				if len(stack) == 0 {
 					traversed = true
 				} else {

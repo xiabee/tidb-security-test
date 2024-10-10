@@ -33,8 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/ttl/client"
 	"github.com/pingcap/tidb/pkg/ttl/metrics"
 	"github.com/pingcap/tidb/pkg/ttl/session"
-	"github.com/pingcap/tidb/pkg/util"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -68,16 +66,16 @@ const ttlTableStatusGCWithIDTemplate = ttlTableStatusGCWithoutIDTemplate + ` AND
 
 const timeFormat = time.DateTime
 
-func insertNewTableIntoStatusSQL(tableID int64, parentTableID int64) (string, []any) {
-	return insertNewTableIntoStatusTemplate, []any{tableID, parentTableID}
+func insertNewTableIntoStatusSQL(tableID int64, parentTableID int64) (string, []interface{}) {
+	return insertNewTableIntoStatusTemplate, []interface{}{tableID, parentTableID}
 }
 
-func setTableStatusOwnerSQL(uuid string, tableID int64, jobStart time.Time, now time.Time, currentJobTTLExpire time.Time, id string) (string, []any) {
-	return setTableStatusOwnerTemplate, []any{uuid, id, jobStart.Format(timeFormat), now.Format(timeFormat), currentJobTTLExpire.Format(timeFormat), now.Format(timeFormat), tableID}
+func setTableStatusOwnerSQL(uuid string, tableID int64, jobStart time.Time, now time.Time, currentJobTTLExpire time.Time, id string) (string, []interface{}) {
+	return setTableStatusOwnerTemplate, []interface{}{uuid, id, jobStart.Format(timeFormat), now.Format(timeFormat), currentJobTTLExpire.Format(timeFormat), now.Format(timeFormat), tableID}
 }
 
-func updateHeartBeatSQL(tableID int64, now time.Time, id string) (string, []any) {
-	return updateHeartBeatTemplate, []any{now.Format(timeFormat), tableID, id}
+func updateHeartBeatSQL(tableID int64, now time.Time, id string) (string, []interface{}) {
+	return updateHeartBeatTemplate, []interface{}{now.Format(timeFormat), tableID, id}
 }
 
 func gcTTLTableStatusGCSQL(existIDs []int64) string {
@@ -98,7 +96,7 @@ type JobManager struct {
 	// `scanWorkers` and `delWorkers` can be modified by setting variables at any time
 	baseWorker
 
-	sessPool util.SessionPool
+	sessPool sessionPool
 
 	// id is the ddl id of this instance
 	id string
@@ -126,7 +124,7 @@ type JobManager struct {
 }
 
 // NewJobManager creates a new ttl job manager
-func NewJobManager(id string, sessPool util.SessionPool, store kv.Storage, etcdCli *clientv3.Client, leaderFunc func() bool) (manager *JobManager) {
+func NewJobManager(id string, sessPool sessionPool, store kv.Storage, etcdCli *clientv3.Client, leaderFunc func() bool) (manager *JobManager) {
 	manager = &JobManager{}
 	manager.id = id
 	manager.store = store
@@ -203,7 +201,7 @@ func (m *JobManager) jobLoop() error {
 		case <-m.ctx.Done():
 			return nil
 		case <-timerTicker:
-			m.onTimerTick(se, timerRT, timerSyncer, now)
+			m.onTimerTick(se, timerRT, timerSyncer, time.Now())
 		case jobReq := <-jobRequestCh:
 			m.handleSubmitJobRequest(se, jobReq)
 		case <-infoSchemaCacheUpdateTicker:
@@ -329,7 +327,7 @@ func (m *JobManager) handleSubmitJobRequest(se session.Session, jobReq *SubmitTT
 		return
 	}
 
-	_, err := m.lockNewJob(m.ctx, se, tbl, se.Now(), jobReq.RequestID, false)
+	_, err := m.lockNewJob(m.ctx, se, tbl, time.Now(), jobReq.RequestID, false)
 	jobReq.RespCh <- err
 }
 
@@ -361,13 +359,7 @@ func (m *JobManager) triggerTTLJob(requestID string, cmd *client.TriggerNewTTLJo
 		return
 	}
 
-	tz, err := se.GlobalTimeZone(m.ctx)
-	if err != nil {
-		responseErr(err)
-		return
-	}
-
-	if !timeutil.WithinDayTimePeriod(variable.TTLJobScheduleWindowStartTime.Load(), variable.TTLJobScheduleWindowEndTime.Load(), se.Now().In(tz)) {
+	if !timeutil.WithinDayTimePeriod(variable.TTLJobScheduleWindowStartTime.Load(), variable.TTLJobScheduleWindowEndTime.Load(), time.Now()) {
 		responseErr(errors.New("not in TTL job window"))
 		return
 	}
@@ -566,30 +558,12 @@ j:
 }
 
 func (m *JobManager) rescheduleJobs(se session.Session, now time.Time) {
-	tz, err := se.GlobalTimeZone(m.ctx)
-	if err != nil {
-		terror.Log(err)
-	} else {
-		now = now.In(tz)
-	}
-
-	cancelJobs := false
-	cancelReason := ""
-	switch {
-	case !variable.EnableTTLJob.Load():
-		cancelJobs = true
-		cancelReason = "tidb_ttl_job_enable turned off"
-	case !timeutil.WithinDayTimePeriod(variable.TTLJobScheduleWindowStartTime.Load(), variable.TTLJobScheduleWindowEndTime.Load(), now):
-		cancelJobs = true
-		cancelReason = "out of TTL job schedule window"
-	}
-
-	if cancelJobs {
+	if !variable.EnableTTLJob.Load() || !timeutil.WithinDayTimePeriod(variable.TTLJobScheduleWindowStartTime.Load(), variable.TTLJobScheduleWindowEndTime.Load(), now) {
 		if len(m.runningJobs) > 0 {
 			for _, job := range m.runningJobs {
-				logutil.Logger(m.ctx).Info(fmt.Sprintf("cancel job because %s", cancelReason), zap.String("jobID", job.id))
+				logutil.Logger(m.ctx).Info("cancel job because tidb_ttl_job_enable turned off", zap.String("jobID", job.id))
 
-				summary, err := summarizeErr(errors.New(cancelReason))
+				summary, err := summarizeErr(errors.New("ttl job is disabled"))
 				if err != nil {
 					logutil.Logger(m.ctx).Info("fail to summarize job", zap.Error(err))
 				}
@@ -731,7 +705,6 @@ func (m *JobManager) lockHBTimeoutJob(ctx context.Context, se session.Session, t
 		jobID = tableStatus.CurrentJobID
 		jobStart = tableStatus.CurrentJobStartTime
 		expireTime = tableStatus.CurrentJobTTLExpire
-		intest.Assert(se.GetSessionVars().TimeZone.String() == now.Location().String())
 		sql, args := setTableStatusOwnerSQL(tableStatus.CurrentJobID, table.ID, jobStart, now, expireTime, m.id)
 		if _, err = se.ExecuteSQL(ctx, sql, args...); err != nil {
 			return errors.Wrapf(err, "execute sql: %s", sql)
@@ -763,9 +736,6 @@ func (m *JobManager) lockNewJob(ctx context.Context, se session.Session, table *
 		if err != nil {
 			return err
 		}
-
-		intest.Assert(se.GetSessionVars().TimeZone.String() == now.Location().String())
-		intest.Assert(se.GetSessionVars().TimeZone.String() == expireTime.Location().String())
 
 		sql, args := setTableStatusOwnerSQL(jobID, table.ID, now, now, expireTime, m.id)
 		_, err = se.ExecuteSQL(ctx, sql, args...)
@@ -889,7 +859,6 @@ func (m *JobManager) updateHeartBeat(ctx context.Context, se session.Session, no
 			continue
 		}
 
-		intest.Assert(se.GetSessionVars().TimeZone.String() == now.Location().String())
 		sql, args := updateHeartBeatSQL(job.tbl.ID, now, m.id)
 		_, err := se.ExecuteSQL(ctx, sql, args...)
 		if err != nil {
@@ -1075,14 +1044,18 @@ GROUP BY
 	}
 
 	noRecordTables := make([]string, 0)
-	ch := is.ListTablesWithSpecialAttribute(infoschema.TTLAttribute)
-	for _, v := range ch {
-		for _, tblInfo := range v.TableInfos {
+	for _, db := range is.AllSchemas() {
+		for _, tbl := range is.SchemaTables(db.Name) {
+			tblInfo := tbl.Meta()
+			if tblInfo.TTLInfo == nil {
+				continue
+			}
+
 			interval, err := tblInfo.TTLInfo.GetJobInterval()
 			if err != nil {
 				logutil.Logger(ctx).Error("failed to get table's job interval",
 					zap.Error(err),
-					zap.String("db", v.DBName.O),
+					zap.String("db", db.Name.String()),
 					zap.String("table", tblInfo.Name.String()),
 				)
 				interval = time.Hour
@@ -1142,12 +1115,12 @@ type SubmitTTLManagerJobRequest struct {
 
 type managerJobAdapter struct {
 	store     kv.Storage
-	sessPool  util.SessionPool
+	sessPool  sessionPool
 	requestCh chan<- *SubmitTTLManagerJobRequest
 }
 
 // NewManagerJobAdapter creates a managerJobAdapter
-func NewManagerJobAdapter(store kv.Storage, sessPool util.SessionPool, requestCh chan<- *SubmitTTLManagerJobRequest) TTLJobAdapter {
+func NewManagerJobAdapter(store kv.Storage, sessPool sessionPool, requestCh chan<- *SubmitTTLManagerJobRequest) TTLJobAdapter {
 	return &managerJobAdapter{store: store, sessPool: sessPool, requestCh: requestCh}
 }
 
@@ -1160,7 +1133,7 @@ func (a *managerJobAdapter) CanSubmitJob(tableID, physicalID int64) bool {
 	defer se.Close()
 
 	is := se.GetDomainInfoSchema().(infoschema.InfoSchema)
-	tbl, ok := is.TableByID(context.Background(), tableID)
+	tbl, ok := is.TableByID(tableID)
 	if !ok {
 		return false
 	}
@@ -1285,18 +1258,4 @@ func (a *managerJobAdapter) GetJob(ctx context.Context, tableID, physicalID int6
 	}
 
 	return &jobTrace, nil
-}
-
-func (a *managerJobAdapter) Now() (time.Time, error) {
-	se, err := getSession(a.sessPool)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	tz, err := se.GlobalTimeZone(context.TODO())
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return se.Now().In(tz), nil
 }

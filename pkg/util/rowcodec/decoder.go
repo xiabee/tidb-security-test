@@ -21,7 +21,7 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
@@ -172,12 +172,6 @@ func (decoder *DatumMapDecoder) decodeColDatum(col *ColInfo, colData []byte) (ty
 		j.TypeCode = colData[0]
 		j.Value = colData[1:]
 		d.SetMysqlJSON(j)
-	case mysql.TypeTiDBVectorFloat32:
-		v, _, err := types.ZeroCopyDeserializeVectorFloat32(colData)
-		if err != nil {
-			return d, err
-		}
-		d.SetVectorFloat32(v)
 	default:
 		return d, errors.Errorf("unknown type %d", col.Ft.GetType())
 	}
@@ -217,7 +211,11 @@ func (decoder *ChunkDecoder) DecodeToChunk(rowData []byte, handle kv.Handle, chk
 			continue
 		}
 		if col.ID == model.ExtraRowChecksumID {
-			chk.AppendNull(colIdx)
+			if v := decoder.row.getChecksumInfo(); len(v) > 0 {
+				chk.AppendString(colIdx, v)
+			} else {
+				chk.AppendNull(colIdx)
+			}
 			continue
 		}
 
@@ -357,12 +355,6 @@ func (decoder *ChunkDecoder) decodeColToChunk(colIdx int, col *ColInfo, colData 
 		j.TypeCode = colData[0]
 		j.Value = colData[1:]
 		chk.AppendJSON(colIdx, j)
-	case mysql.TypeTiDBVectorFloat32:
-		v, _, err := types.ZeroCopyDeserializeVectorFloat32(colData)
-		if err != nil {
-			return err
-		}
-		chk.AppendVectorFloat32(colIdx, v)
 	default:
 		return errors.Errorf("unknown type %d", col.Ft.GetType())
 	}
@@ -397,7 +389,7 @@ func (decoder *BytesDecoder) decodeToBytesInternal(outputOffset map[int64]int, h
 	values := make([][]byte, len(outputOffset))
 	for i := range decoder.columns {
 		col := &decoder.columns[i]
-		tp := fieldType2Flag(col.Ft.ArrayType().GetType(), col.Ft.GetFlag()&mysql.UnsignedFlag == 0)
+		tp := fieldType2Flag(col.Ft.GetType(), col.Ft.GetFlag()&mysql.UnsignedFlag == 0)
 		colID := col.ID
 		offset := outputOffset[colID]
 		idx, isNil, notFound := r.findColID(colID)
@@ -523,8 +515,6 @@ func fieldType2Flag(tp byte, signed bool) (flag byte) {
 		flag = UintFlag
 	case mysql.TypeJSON:
 		flag = JSONFlag
-	case mysql.TypeTiDBVectorFloat32:
-		flag = VectorFloat32Flag
 	case mysql.TypeNull:
 		flag = NilFlag
 	default:

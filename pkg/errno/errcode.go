@@ -1072,6 +1072,7 @@ const (
 	ErrLoadDataInvalidURI                  = 8158
 	ErrLoadDataCantAccess                  = 8159
 	ErrLoadDataCantRead                    = 8160
+	ErrLoadDataPhysicalImportTableNotEmpty = 8161
 	ErrLoadDataWrongFormatConfig           = 8162
 	ErrUnknownOption                       = 8163
 	ErrInvalidOptionVal                    = 8164
@@ -1082,9 +1083,6 @@ const (
 	ErrLoadDataLocalUnsupportedOption      = 8172
 	ErrLoadDataPreCheckFailed              = 8173
 	ErrBRJobNotFound                       = 8174
-	ErrMemoryExceedForQuery                = 8175
-	ErrMemoryExceedForInstance             = 8176
-	ErrDeleteNotFoundColumn                = 8177
 
 	// Error codes used by TiDB ddl package
 	ErrUnsupportedDDLOperation            = 8200
@@ -1139,11 +1137,6 @@ const (
 	ErrCannotPauseDDLJob  = 8260
 	ErrCannotResumeDDLJob = 8261
 	ErrPausedDDLJob       = 8262
-	ErrBDRRestrictedDDL   = 8263
-
-	ErrGlobalIndexNotExplicitlySet = 8264
-
-	ErrWarnGlobalIndexNeedManuallyAnalyze = 8265
 
 	// Resource group errors.
 	ErrResourceGroupExists                    = 8248
@@ -1170,5 +1163,4 @@ const (
 	ErrTiKVMaxTimestampNotSynced = 9011
 	ErrTiFlashServerTimeout      = 9012
 	ErrTiFlashServerBusy         = 9013
-	ErrTiFlashBackfillIndex      = 9014
 )

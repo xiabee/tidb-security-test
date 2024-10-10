@@ -17,7 +17,7 @@
 set -eux
 
 cur=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
-source $UTILS_DIR/run_services
+source $cur/../_utils/run_services
 
 DB="$TEST_NAME"
 

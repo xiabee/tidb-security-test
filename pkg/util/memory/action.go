@@ -15,13 +15,13 @@
 package memory
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/sqlkiller"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +63,21 @@ func (a *actionWithPriority) GetPriority() int64 {
 	return a.priority
 }
 
+// ActionInvoker indicates the invoker of the Action.
+type ActionInvoker byte
+
+const (
+	// SingleQuery indicates the Action is invoked by a tidb_mem_quota_query.
+	SingleQuery ActionInvoker = iota
+	// Instance indicates the Action is invoked by a tidb_server_memory_limit.
+	Instance
+)
+
+// ActionCareInvoker is the interface for the Actions which need to be aware of the invoker.
+type ActionCareInvoker interface {
+	SetInvoker(invoker ActionInvoker)
+}
+
 // BaseOOMAction manages the fallback action for all Action.
 type BaseOOMAction struct {
 	fallbackAction ActionOnExceed
@@ -91,13 +106,6 @@ func (b *BaseOOMAction) GetFallback() ActionOnExceed {
 		b.SetFallback(b.fallbackAction.GetFallback())
 	}
 	return b.fallbackAction
-}
-
-// TriggerFallBackAction triggers the fallback action of the current action
-func (b *BaseOOMAction) TriggerFallBackAction(tracker *Tracker) {
-	if fallback := b.GetFallback(); fallback != nil {
-		fallback.Action(tracker)
-	}
 }
 
 // Default OOM Action priority.
@@ -147,12 +155,12 @@ func (*LogOnExceed) GetPriority() int64 {
 
 // PanicOnExceed panics when memory usage exceeds memory quota.
 type PanicOnExceed struct {
-	Killer  *sqlkiller.SQLKiller
 	logHook func(uint64)
 	BaseOOMAction
-	ConnID uint64
-	mutex  sync.Mutex // For synchronization.
-	acted  bool
+	ConnID  uint64
+	mutex   sync.Mutex // For synchronization.
+	acted   bool
+	invoker ActionInvoker
 }
 
 // SetLogHook sets a hook for PanicOnExceed.
@@ -175,10 +183,10 @@ func (a *PanicOnExceed) Action(t *Tracker) {
 		}
 	}
 	a.acted = true
-	a.Killer.SendKillSignal(sqlkiller.QueryMemoryExceeded)
-	if err := a.Killer.HandleSignal(); err != nil {
-		panic(err)
+	if a.invoker == SingleQuery {
+		panic(PanicMemoryExceedWarnMsg + WarnMsgSuffixForSingleQuery + fmt.Sprintf("[conn=%d]", a.ConnID))
 	}
+	panic(PanicMemoryExceedWarnMsg + WarnMsgSuffixForInstance + fmt.Sprintf("[conn=%d]", a.ConnID))
 }
 
 // GetPriority get the priority of the Action
@@ -186,6 +194,20 @@ func (*PanicOnExceed) GetPriority() int64 {
 	return DefPanicPriority
 }
 
+// SetInvoker sets the invoker of the Action.
+func (a *PanicOnExceed) SetInvoker(invoker ActionInvoker) {
+	a.invoker = invoker
+}
+
 var (
 	errMemExceedThreshold = dbterror.ClassUtil.NewStd(errno.ErrMemExceedThreshold)
+)
+
+const (
+	// PanicMemoryExceedWarnMsg represents the panic message when out of memory quota.
+	PanicMemoryExceedWarnMsg string = "Your query has been cancelled due to exceeding the allowed memory limit"
+	// WarnMsgSuffixForSingleQuery represents the suffix of the warning message when out of memory quota for a single query.
+	WarnMsgSuffixForSingleQuery string = " for a single SQL query. Please try narrowing your query scope or increase the tidb_mem_quota_query limit and try again."
+	// WarnMsgSuffixForInstance represents the suffix of the warning message when out of memory quota for the tidb-server instance.
+	WarnMsgSuffixForInstance string = " for the tidb-server instance and this query is currently using the most memory. Please try narrowing your query scope or increase the tidb_server_memory_limit and try again."
 )

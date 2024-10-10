@@ -19,7 +19,6 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/pingcap/tidb/build/linter/util"
 	"golang.org/x/tools/go/analysis"
 )
 
@@ -54,9 +53,4 @@ var Analyzer = &analysis.Analyzer{
 
 func isTestFile(file *token.File) bool {
 	return strings.HasSuffix(file.Name(), "_test.go")
-}
-
-func init() {
-	util.SkipAnalyzerByConfig(Analyzer)
-	util.SkipAnalyzer(Analyzer)
 }

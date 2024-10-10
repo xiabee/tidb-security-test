@@ -57,13 +57,11 @@ const (
 
 // For query string
 const (
-	TableIDQuery  = "table_id"
-	TableIDsQuery = "table_ids"
-	IDNameOnly    = "id_name_only"
-	Limit         = "limit"
-	JobID         = "start_job_id"
-	Operation     = "op"
-	Seconds       = "seconds"
+	TableIDQuery = "table_id"
+	Limit        = "limit"
+	JobID        = "start_job_id"
+	Operation    = "op"
+	Seconds      = "seconds"
 )
 
 const (
@@ -81,7 +79,7 @@ func WriteError(w http.ResponseWriter, err error) {
 }
 
 // WriteData writes data to response.
-func WriteData(w http.ResponseWriter, data any) {
+func WriteData(w http.ResponseWriter, data interface{}) {
 	js, err := json.MarshalIndent(data, "", " ")
 	if err != nil {
 		WriteError(w, err)

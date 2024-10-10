@@ -15,12 +15,12 @@
 package chunk
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
-	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/disk"
@@ -30,12 +30,9 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
-// ErrCannotAddBecauseSorted indicate that the SortPartition is sorted and prohibit inserting data.
-var ErrCannotAddBecauseSorted = errors.New("can not add because sorted")
-
 type rowContainerRecord struct {
 	inMemory *List
-	inDisk   *DataInDiskByRows
+	inDisk   *ListInDisk
 	// spillError stores the error when spilling.
 	spillError error
 }
@@ -155,7 +152,7 @@ func (c *RowContainer) spillToDisk(preSpillError error) {
 	var err error
 	memory.QueryForceDisk.Add(1)
 	n := c.m.records.inMemory.NumChunks()
-	c.m.records.inDisk = NewDataInDiskByRows(c.m.records.inMemory.FieldTypes())
+	c.m.records.inDisk = NewListInDisk(c.m.records.inMemory.FieldTypes())
 	c.m.records.inDisk.diskTracker.AttachTo(c.diskTracker)
 	defer func() {
 		if r := recover(); r != nil {
@@ -180,7 +177,6 @@ func (c *RowContainer) spillToDisk(preSpillError error) {
 			c.m.records.spillError = err
 			return
 		}
-		c.m.records.inMemory.GetMemTracker().HandleKillSignal()
 	}
 	c.m.records.inMemory.Clear()
 }
@@ -225,7 +221,7 @@ func (c *RowContainer) NumRow() int {
 	return c.m.records.inMemory.Len()
 }
 
-// NumRowsOfChunk returns the number of rows of a chunk in the DataInDiskByRows.
+// NumRowsOfChunk returns the number of rows of a chunk in the ListInDisk.
 func (c *RowContainer) NumRowsOfChunk(chkID int) int {
 	c.m.RLock()
 	defer c.m.RUnlock()
@@ -487,6 +483,9 @@ func (a *baseSpillDiskAction) WaitForTest() {
 	a.testWg.Wait()
 }
 
+// ErrCannotAddBecauseSorted indicate that the SortedRowContainer is sorted and prohibit inserting data.
+var ErrCannotAddBecauseSorted = errors.New("can not add because sorted")
+
 // SortedRowContainer provides a place for many rows, so many that we might want to sort and spill them into disk.
 type SortedRowContainer struct {
 	*RowContainer
@@ -577,11 +576,7 @@ func (c *SortedRowContainer) Sort() (ret error) {
 	ret = nil
 	defer func() {
 		if r := recover(); r != nil {
-			if err, ok := r.(error); ok {
-				ret = err
-			} else {
-				ret = fmt.Errorf("%v", r)
-			}
+			ret = fmt.Errorf("%v", r)
 		}
 	}()
 	if c.ptrM.rowPtrs != nil {

@@ -16,10 +16,6 @@ package core
 
 import (
 	"context"
-
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
-	"github.com/pingcap/tidb/pkg/planner/util/optimizetrace"
 )
 
 // For normal rollup Expand construction, its logical Expand should be bound
@@ -52,11 +48,10 @@ import (
 // to achieve this similar effect, put it in the last logical optimizing phase is much
 // more reasonable.
 
-// ResolveExpand generating Expand projection list when all the logical optimization is done.
-type ResolveExpand struct {
+// resolveExpand generating Expand projection list when all the logical optimization is done.
+type resolveExpand struct {
 }
 
-// Optimize implements the base.LogicalOptRule.<0th> interface.
 // By now, rollup syntax will build a LogicalExpand from bottom up. In LogicalExpand itself, its schema out should be 3 parts:
 //
 // +---------------------------------------------------------------------+
@@ -77,7 +72,7 @@ type ResolveExpand struct {
 //	                              (upper required)   (grouping sets columns appended)
 //
 // Expand operator itself is kind like a projection, while difference is that it has a multi projection list, named as leveled projection.
-func (*ResolveExpand) Optimize(_ context.Context, p base.LogicalPlan, opt *optimizetrace.LogicalOptimizeOp) (base.LogicalPlan, bool, error) {
+func (*resolveExpand) optimize(_ context.Context, p LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, bool, error) {
 	planChanged := false
 	// As you see, Expand's leveled projection should be built after all column-prune is done. So we just make generating-leveled-projection
 	// as the last rule of logical optimization, which is more clear. (spark has column prune action before building expand)
@@ -85,12 +80,11 @@ func (*ResolveExpand) Optimize(_ context.Context, p base.LogicalPlan, opt *optim
 	return newLogicalPlan, planChanged, err
 }
 
-// Name implements the base.LogicalOptRule.<1st> interface.
-func (*ResolveExpand) Name() string {
+func (*resolveExpand) name() string {
 	return "resolve_expand"
 }
 
-func genExpand(p base.LogicalPlan, opt *optimizetrace.LogicalOptimizeOp) (base.LogicalPlan, error) {
+func genExpand(p LogicalPlan, opt *logicalOptimizeOp) (LogicalPlan, error) {
 	for i, child := range p.Children() {
 		np, err := genExpand(child, opt)
 		if err != nil {
@@ -98,7 +92,7 @@ func genExpand(p base.LogicalPlan, opt *optimizetrace.LogicalOptimizeOp) (base.L
 		}
 		p.Children()[i] = np
 	}
-	if expand, ok := p.(*logicalop.LogicalExpand); ok {
+	if expand, ok := p.(*LogicalExpand); ok {
 		expand.GenLevelProjections()
 	}
 	return p, nil

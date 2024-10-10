@@ -212,24 +212,7 @@ func TestIssue53951(t *testing.T) {
 	tk.MustExec(`start transaction;`)
 	tk.MustExec(`update gholla_dummy2 set deleted_at = NOW(), mark=2 where account_id = 'ABC' and metastore_id = 'ABC' and id = 'ABC';`)
 	tk.MustQuery(`select
-  /*+ INL_JOIN(g1) */
-  g1.account_id,
-  g2.mark
-from
-  gholla_dummy1 g1 FORCE INDEX(isDeleted_accountId_metastoreId)
-STRAIGHT_JOIN
-  gholla_dummy2 g2 FORCE INDEX (PRIMARY)
-ON
-  g1.account_id = g2.account_id AND
-  g1.metastore_id = g2.metastore_id AND
-  g1.id = g2.id
-WHERE
-  g1.account_id = 'ABC' AND
-  g1.metastore_id = 'ABC' AND
-  g1.is_deleted = FALSE AND
-  g2.is_deleted = FALSE;`).Check(testkit.Rows()) // empty result, no error
-	tk.MustQuery(`select
-  /*+ INL_JOIN(g2) */
+  /*+ INL_JOIN(g1, g2) */
   g1.account_id,
   g2.mark
 from
@@ -260,7 +243,7 @@ func TestIssue28073(t *testing.T) {
 
 	tk.MustExec("begin")
 	tk.MustExec("insert into t2 (c_int, c_str) values (2, 'romantic grothendieck')")
-	tk.MustQuery("select * from t2 use index(primary) left join t1  use index(primary) on t1.c_int = t2.c_int for update").Sort().Check(
+	tk.MustQuery("select * from t2 left join t1 on t1.c_int = t2.c_int for update").Sort().Check(
 		testkit.Rows(
 			"1 flamboyant mcclintock 1 flamboyant mcclintock",
 			"2 romantic grothendieck <nil> <nil>",
@@ -383,7 +366,6 @@ c6 datetime);`)
 		tk.MustQuery("select * from t_us where c1 = '12345'").Check(testkit.Rows())
 	}
 	b.StopTimer()
-	tk.MustExec("rollback")
 }
 
 func BenchmarkUnionScanIndexReadDescRead(b *testing.B) {
@@ -403,10 +385,9 @@ func BenchmarkUnionScanIndexReadDescRead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// indexReader
-		tk.MustQuery("select b from t use index(k) where b > 50 order by b desc")
+		tk.MustExec("select b from t use index(k) where b > 50 order by b desc")
 	}
 	b.StopTimer()
-	tk.MustExec("rollback")
 }
 
 func BenchmarkUnionScanTableReadDescRead(b *testing.B) {
@@ -426,10 +407,9 @@ func BenchmarkUnionScanTableReadDescRead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// tableReader
-		tk.MustQuery("select * from t where a > 50 order by a desc")
+		tk.MustExec("select * from t where a > 50 order by a desc")
 	}
 	b.StopTimer()
-	tk.MustExec("rollback")
 }
 
 func BenchmarkUnionScanIndexLookUpDescRead(b *testing.B) {
@@ -449,17 +429,14 @@ func BenchmarkUnionScanIndexLookUpDescRead(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// indexLookUp
-		tk.MustQuery("select * from t use index(k) where b > 50 order by b desc")
+		tk.MustExec("select * from t use index(k) where b > 50 order by b desc")
 	}
 	b.StopTimer()
-	tk.MustExec("rollback")
 }
 
 func TestBenchDaily(t *testing.T) {
 	benchdaily.Run(
 		executor.BenchmarkReadLastLinesOfHugeLine,
-		executor.BenchmarkCompleteInsertErr,
-		executor.BenchmarkCompleteLoadErr,
 		BenchmarkUnionScanRead,
 		BenchmarkUnionScanIndexReadDescRead,
 		BenchmarkUnionScanTableReadDescRead,

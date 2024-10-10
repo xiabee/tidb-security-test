@@ -20,25 +20,22 @@ import (
 
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/planner/memo"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGroupStringer(t *testing.T) {
 	optimizer := NewOptimizer()
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandSelection: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandSelection: {
 			NewRulePushSelDownTiKVSingleGather(),
 			NewRulePushSelDownTableScan(),
 		},
-		pattern.OperandDataSource: {
+		memo.OperandDataSource: {
 			NewRuleEnumeratePaths(),
 		},
 	})
@@ -64,11 +61,10 @@ func TestGroupStringer(t *testing.T) {
 		stmt, err := p.ParseOneStmt(sql, "", "")
 		require.NoError(t, err)
 
-		nodeW := resolve.NewNodeW(stmt)
-		plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+		plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 		require.NoError(t, err)
 
-		logic, ok := plan.(base.LogicalPlan)
+		logic, ok := plan.(plannercore.LogicalPlan)
 		require.True(t, ok)
 
 		logic, err = optimizer.onPhasePreprocessing(ctx, logic)
@@ -80,8 +76,8 @@ func TestGroupStringer(t *testing.T) {
 		group.BuildKeyInfo()
 		testdata.OnRecord(func() {
 			output[i].SQL = sql
-			output[i].Result = ToString(ctx.GetEvalCtx(), group)
+			output[i].Result = ToString(group)
 		})
-		require.Equalf(t, output[i].Result, ToString(ctx.GetEvalCtx(), group), "case:%v, sql:%s", i, sql)
+		require.Equalf(t, output[i].Result, ToString(group), "case:%v, sql:%s", i, sql)
 	}
 }

@@ -26,21 +26,17 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser"
-	"github.com/pingcap/tidb/pkg/resourcegroup"
+	"github.com/pingcap/tidb/pkg/domain/resourcegroup"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/resourcegrouptag"
 	"github.com/pingcap/tidb/pkg/util/tiflash"
 	"github.com/pingcap/tidb/pkg/util/trxevents"
-	"github.com/pingcap/tipb/go-tipb"
 	tikvstore "github.com/tikv/client-go/v2/kv"
 	"github.com/tikv/client-go/v2/oracle"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.uber.org/atomic"
 )
 
@@ -56,7 +52,7 @@ const UnCommitIndexKVFlag byte = '1'
 // Those limits is enforced to make sure the transaction can be well handled by TiKV.
 var (
 	// TxnEntrySizeLimit is limit of single entry size (len(key) + len(value)).
-	TxnEntrySizeLimit = atomic.NewUint64(config.DefTxnEntrySizeLimit)
+	TxnEntrySizeLimit uint64 = config.DefTxnEntrySizeLimit
 	// TxnTotalSizeLimit is limit of the sum of all entry size.
 	TxnTotalSizeLimit = atomic.NewUint64(config.DefTxnTotalSizeLimit)
 )
@@ -191,12 +187,6 @@ type MemBuffer interface {
 
 	// RemoveFromBuffer removes the entry from the buffer. It's used for testing.
 	RemoveFromBuffer(Key)
-
-	// GetLocal checks if the key exists in the buffer in local memory.
-	GetLocal(context.Context, []byte) ([]byte, error)
-
-	// BatchGet gets values from the memory buffer.
-	BatchGet(ctx context.Context, keys [][]byte) (map[string][]byte, error)
 }
 
 // FindKeysInStage returns all keys in the given stage that satisfies the given condition.
@@ -225,10 +215,10 @@ type Transaction interface {
 	Mem() uint64
 	// SetMemoryFootprintChangeHook sets the hook that will be called when the memory footprint changes.
 	SetMemoryFootprintChangeHook(func(uint64))
-	// MemHookSet returns whether the memory footprint change hook is set.
-	MemHookSet() bool
 	// Len returns the number of entries in the DB.
 	Len() int
+	// Reset reset the Transaction to initial states.
+	Reset()
 	// Commit commits the transaction operations to KV store.
 	Commit(context.Context) error
 	// Rollback undoes the transaction operations to KV store.
@@ -244,9 +234,9 @@ type Transaction interface {
 	LockKeysFunc(ctx context.Context, lockCtx *LockCtx, fn func(), keys ...Key) error
 	// SetOption sets an option with a value, when val is nil, uses the default
 	// value of this option.
-	SetOption(opt int, val any)
+	SetOption(opt int, val interface{})
 	// GetOption returns the option
-	GetOption(opt int) any
+	GetOption(opt int) interface{}
 	// IsReadOnly checks if the transaction has only performed read operations.
 	IsReadOnly() bool
 	// StartTS returns the transaction start timestamp.
@@ -259,9 +249,9 @@ type Transaction interface {
 	// GetSnapshot returns the Snapshot binding to this transaction.
 	GetSnapshot() Snapshot
 	// SetVars sets variables to the transaction.
-	SetVars(vars any)
+	SetVars(vars interface{})
 	// GetVars gets variables from the transaction.
-	GetVars() any
+	GetVars() interface{}
 	// BatchGet gets kv from the memory buffer of statement and transaction, and the kv storage.
 	// Do not use len(value) == 0 or value == nil to represent non-exist.
 	// If a key doesn't exist, there shouldn't be any corresponding entry in the result map.
@@ -287,10 +277,6 @@ type Transaction interface {
 
 	// UpdateMemBufferFlags updates the flags of a node in the mem buffer.
 	UpdateMemBufferFlags(key []byte, flags ...FlagsOp)
-	// IsPipelined returns whether the transaction is used for pipelined DML.
-	IsPipelined() bool
-	// MayFlush flush the pipelined memdb if the keys or size exceeds threshold, no effect for standard DML.
-	MayFlush() error
 }
 
 // AssertionProto is an interface defined for the assertion protocol.
@@ -313,7 +299,7 @@ type FairLockingController interface {
 // Client is used to send request to KV layer.
 type Client interface {
 	// Send sends request to KV layer, returns a Response.
-	Send(ctx context.Context, req *Request, vars any, option *ClientSendOption) Response
+	Send(ctx context.Context, req *Request, vars interface{}, option *ClientSendOption) Response
 
 	// IsRequestTypeSupported checks if reqType and subType is supported.
 	IsRequestTypeSupported(reqType, subType int64) bool
@@ -386,8 +372,8 @@ func NewPartitionedKeyRanges(ranges [][]KeyRange) *KeyRanges {
 	return NewPartitionedKeyRangesWithHints(ranges, nil)
 }
 
-// NewNonPartitionedKeyRanges constructs a new RequestRange for a non-partitioned table.
-func NewNonPartitionedKeyRanges(ranges []KeyRange) *KeyRanges {
+// NewNonParitionedKeyRanges constructs a new RequestRange for a non partitioned table.
+func NewNonParitionedKeyRanges(ranges []KeyRange) *KeyRanges {
 	return NewNonParitionedKeyRangesWithHint(ranges, nil)
 }
 
@@ -579,7 +565,7 @@ type Request struct {
 	// MatchStoreLabels indicates the labels the store should be matched
 	MatchStoreLabels []*metapb.StoreLabel
 	// ResourceGroupTagger indicates the kv request task group tagger.
-	ResourceGroupTagger *ResourceGroupTagBuilder
+	ResourceGroupTagger tikvrpc.ResourceGroupTagger
 	// Paging indicates whether the request is a paging request.
 	Paging struct {
 		Enable bool
@@ -601,12 +587,10 @@ type Request struct {
 	// TiKVClientReadTimeout is the timeout of kv read request
 	TiKVClientReadTimeout uint64
 
-	RunawayChecker resourcegroup.RunawayChecker
+	RunawayChecker *resourcegroup.RunawayChecker
 
 	// ConnID stores the session connection id.
 	ConnID uint64
-	// ConnAlias stores the session connection alias.
-	ConnAlias string
 }
 
 // CoprRequestAdjuster is used to check and adjust a copr request according to specific rules.
@@ -653,7 +637,7 @@ type Snapshot interface {
 	BatchGet(ctx context.Context, keys []Key) (map[string][]byte, error)
 	// SetOption sets an option with a value, when val is nil, uses the default
 	// value of this option. Only ReplicaRead is supported for snapshot
-	SetOption(opt int, val any)
+	SetOption(opt int, val interface{})
 }
 
 // SnapshotInterceptor is used to intercept snapshot's read operation
@@ -708,7 +692,7 @@ type Storage interface {
 	// Describe returns of brief introduction of the storage
 	Describe() string
 	// ShowStatus returns the specified status of the storage
-	ShowStatus(ctx context.Context, key string) (any, error)
+	ShowStatus(ctx context.Context, key string) (interface{}, error)
 	// GetMemCache return memory manager of the storage.
 	GetMemCache() MemManager
 	// GetMinSafeTS return the minimal SafeTS of the storage with given txnScope.
@@ -729,7 +713,6 @@ type EtcdBackend interface {
 // StorageWithPD is used to get pd client.
 type StorageWithPD interface {
 	GetPDClient() pd.Client
-	GetPDHTTPClient() pdhttp.Client
 }
 
 // FnKeyCmp is the function for iterator the keys
@@ -769,76 +752,3 @@ const (
 	// RCCheckTS stands for 'read consistency read with ts check'.
 	RCCheckTS
 )
-
-// ResourceGroupTagBuilder is used to build the resource group tag for a kv request.
-type ResourceGroupTagBuilder struct {
-	sqlDigest  *parser.Digest
-	planDigest *parser.Digest
-	accessKey  []byte
-}
-
-// NewResourceGroupTagBuilder creates a new ResourceGroupTagBuilder.
-func NewResourceGroupTagBuilder() *ResourceGroupTagBuilder {
-	return &ResourceGroupTagBuilder{}
-}
-
-// SetSQLDigest sets the sql digest for the request.
-func (b *ResourceGroupTagBuilder) SetSQLDigest(digest *parser.Digest) *ResourceGroupTagBuilder {
-	b.sqlDigest = digest
-	return b
-}
-
-// SetPlanDigest sets the plan digest for the request.
-func (b *ResourceGroupTagBuilder) SetPlanDigest(digest *parser.Digest) *ResourceGroupTagBuilder {
-	b.planDigest = digest
-	return b
-}
-
-// BuildProtoTagger sets the access key for the request.
-func (b *ResourceGroupTagBuilder) BuildProtoTagger() tikvrpc.ResourceGroupTagger {
-	return func(req *tikvrpc.Request) {
-		b.Build(req)
-	}
-}
-
-// EncodeTagWithKey encodes the resource group tag, returns the encoded bytes.
-func (b *ResourceGroupTagBuilder) EncodeTagWithKey(key []byte) []byte {
-	tag := &tipb.ResourceGroupTag{}
-	if b.sqlDigest != nil {
-		tag.SqlDigest = b.sqlDigest.Bytes()
-	}
-	if b.planDigest != nil {
-		tag.PlanDigest = b.planDigest.Bytes()
-	}
-	if len(key) > 0 {
-		tag.TableId = decodeTableID(key)
-		label := resourcegrouptag.GetResourceGroupLabelByKey(key)
-		tag.Label = &label
-	}
-	tagEncoded, err := tag.Marshal()
-	if err != nil {
-		return nil
-	}
-	return tagEncoded
-}
-
-// Build builds the resource group tag for the request.
-func (b *ResourceGroupTagBuilder) Build(req *tikvrpc.Request) {
-	if req == nil {
-		return
-	}
-	if encodedBytes := b.EncodeTagWithKey(resourcegrouptag.GetFirstKeyFromRequest(req)); len(encodedBytes) > 0 {
-		req.ResourceGroupTag = encodedBytes
-	}
-}
-
-// DecodeTableIDFunc is used to decode table id from key.
-var DecodeTableIDFunc func(Key) int64
-
-// avoid import cycle, not import tablecodec in kv package.
-func decodeTableID(key Key) int64 {
-	if DecodeTableIDFunc != nil {
-		return DecodeTableIDFunc(key)
-	}
-	return 0
-}

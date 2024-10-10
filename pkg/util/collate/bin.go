@@ -20,7 +20,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util/stringutil"
 )
 
-// binCollator match pattern in bytes
 type binCollator struct {
 }
 
@@ -44,20 +43,6 @@ func (*binCollator) Pattern() WildcardPattern {
 	return &binPattern{}
 }
 
-// Clone implements Collator interface.
-func (*binCollator) Clone() Collator {
-	return new(binCollator)
-}
-
-type derivedBinCollator struct {
-	binCollator
-}
-
-// Pattern implements Collator interface.
-func (*derivedBinCollator) Pattern() WildcardPattern {
-	return &derivedBinPattern{}
-}
-
 type binPaddingCollator struct {
 }
 
@@ -77,40 +62,20 @@ func (*binPaddingCollator) KeyWithoutTrimRightSpace(str string) []byte {
 // Pattern implements Collator interface.
 // Notice that trailing spaces are significant.
 func (*binPaddingCollator) Pattern() WildcardPattern {
-	return &derivedBinPattern{}
+	return &binPattern{}
 }
 
-// Clone implements Collator interface.
-func (*binPaddingCollator) Clone() Collator {
-	return new(binPaddingCollator)
-}
-
-type derivedBinPattern struct {
+type binPattern struct {
 	patChars []rune
 	patTypes []byte
 }
 
 // Compile implements WildcardPattern interface.
-func (p *derivedBinPattern) Compile(patternStr string, escape byte) {
+func (p *binPattern) Compile(patternStr string, escape byte) {
 	p.patChars, p.patTypes = stringutil.CompilePattern(patternStr, escape)
 }
 
 // DoMatch implements WildcardPattern interface.
-func (p *derivedBinPattern) DoMatch(str string) bool {
-	return stringutil.DoMatch(str, p.patChars, p.patTypes)
-}
-
-type binPattern struct {
-	patChars []byte
-	patTypes []byte
-}
-
-// Compile implements WildcardPattern interface.
-func (p *binPattern) Compile(patternStr string, escape byte) {
-	p.patChars, p.patTypes = stringutil.CompilePatternBinary(patternStr, escape)
-}
-
-// DoMatch implements WildcardPattern interface.
 func (p *binPattern) DoMatch(str string) bool {
-	return stringutil.DoMatchBinary(str, p.patChars, p.patTypes)
+	return stringutil.DoMatch(str, p.patChars, p.patTypes)
 }

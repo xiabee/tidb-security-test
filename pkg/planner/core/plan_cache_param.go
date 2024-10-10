@@ -29,22 +29,22 @@ import (
 )
 
 var (
-	paramReplacerPool = sync.Pool{New: func() any {
+	paramReplacerPool = sync.Pool{New: func() interface{} {
 		pr := new(paramReplacer)
 		pr.Reset()
 		return pr
 	}}
-	paramRestorerPool = sync.Pool{New: func() any {
+	paramRestorerPool = sync.Pool{New: func() interface{} {
 		pr := new(paramRestorer)
 		pr.Reset()
 		return pr
 	}}
-	paramCtxPool = sync.Pool{New: func() any {
+	paramCtxPool = sync.Pool{New: func() interface{} {
 		buf := new(bytes.Buffer)
 		restoreCtx := format.NewRestoreCtx(format.RestoreForNonPrepPlanCache|format.RestoreStringWithoutCharset|format.RestoreStringSingleQuotes|format.RestoreNameBackQuotes, buf)
 		return restoreCtx
 	}}
-	paramMakerPool = sync.Pool{New: func() any {
+	paramMakerPool = sync.Pool{New: func() interface{} {
 		return ast.NewParamMarkerExpr(0)
 	}}
 )
@@ -186,7 +186,7 @@ func Params2Expressions(params []types.Datum) []expression.Expression {
 	return exprs
 }
 
-var parserPool = &sync.Pool{New: func() any { return parser.New() }}
+var parserPool = &sync.Pool{New: func() interface{} { return parser.New() }}
 
 // ParseParameterizedSQL parse this parameterized SQL with the specified sctx.
 func ParseParameterizedSQL(sctx sessionctx.Context, paramSQL string) (ast.StmtNode, error) {

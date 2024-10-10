@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/binloginfo"
 	"github.com/pingcap/tidb/pkg/util/versioninfo"
 )
 
@@ -55,17 +56,23 @@ func (m *MockGlobalServerInfoManager) Delete(idx int) error {
 	return nil
 }
 
-// DeleteByExecID delete ServerInfo by execID.
-func (m *MockGlobalServerInfoManager) DeleteByExecID(execID string) {
+// DeleteByID delete ServerInfo by host:port.
+func (m *MockGlobalServerInfoManager) DeleteByID(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	idx := -1
 	for i := 0; i < len(m.infos); i++ {
 		name := fmt.Sprintf("%s:%d", m.infos[i].IP, m.infos[i].Port)
-		if name == execID {
-			m.infos = append(m.infos[:i], m.infos[i+1:]...)
+		if name == id {
+			idx = i
 			break
 		}
 	}
+	if idx == -1 {
+		return nil
+	}
+	m.infos = append(m.infos[:idx], m.infos[idx+1:]...)
+	return nil
 }
 
 // GetAllServerInfo return all serverInfo in a map.
@@ -90,6 +97,7 @@ func (m *MockGlobalServerInfoManager) getServerInfo(id string, serverIDGetter fu
 		Port:           m.mockServerPort,
 		StatusPort:     cfg.Status.StatusPort,
 		Lease:          cfg.Lease,
+		BinlogStatus:   binloginfo.GetStatus().String(),
 		StartTimestamp: time.Now().Unix(),
 		Labels:         cfg.Labels,
 		ServerIDGetter: serverIDGetter,

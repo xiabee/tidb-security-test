@@ -17,25 +17,23 @@ package builder
 import (
 	"github.com/pingcap/tidb/pkg/distsql"
 	"github.com/pingcap/tidb/pkg/kv"
-	plannercore "github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/planctx"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/timeutil"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
 // ConstructTreeBasedDistExec constructs tree based DAGRequest
-func ConstructTreeBasedDistExec(pctx *planctx.BuildPBContext, p plannercore.PhysicalPlan) ([]*tipb.Executor, error) {
-	execPB, err := p.ToPB(pctx, kv.TiFlash)
+func ConstructTreeBasedDistExec(sctx sessionctx.Context, p plannercore.PhysicalPlan) ([]*tipb.Executor, error) {
+	execPB, err := p.ToPB(sctx, kv.TiFlash)
 	return []*tipb.Executor{execPB}, err
 }
 
 // ConstructListBasedDistExec constructs list based DAGRequest
-func ConstructListBasedDistExec(pctx *planctx.BuildPBContext, plans []plannercore.PhysicalPlan) ([]*tipb.Executor, error) {
+func ConstructListBasedDistExec(sctx sessionctx.Context, plans []plannercore.PhysicalPlan) ([]*tipb.Executor, error) {
 	executors := make([]*tipb.Executor, 0, len(plans))
 	for _, p := range plans {
-		execPB, err := p.ToPB(pctx, kv.TiKV)
+		execPB, err := p.ToPB(sctx, kv.TiKV)
 		if err != nil {
 			return nil, err
 		}
@@ -54,18 +52,14 @@ func ConstructDAGReq(ctx sessionctx.Context, plans []plannercore.PhysicalPlan, s
 		dagReq.CollectExecutionSummaries = &collExec
 	}
 	dagReq.Flags = sc.PushDownFlags()
-	if ctx.GetSessionVars().GetDivPrecisionIncrement() != variable.DefDivPrecisionIncrement {
-		var divPrecIncr uint32 = uint32(ctx.GetSessionVars().GetDivPrecisionIncrement())
-		dagReq.DivPrecisionIncrement = &divPrecIncr
-	}
 	if storeType == kv.TiFlash {
 		var executors []*tipb.Executor
-		executors, err = ConstructTreeBasedDistExec(ctx.GetBuildPBCtx(), plans[0])
+		executors, err = ConstructTreeBasedDistExec(ctx, plans[0])
 		dagReq.RootExecutor = executors[0]
 	} else {
-		dagReq.Executors, err = ConstructListBasedDistExec(ctx.GetBuildPBCtx(), plans)
+		dagReq.Executors, err = ConstructListBasedDistExec(ctx, plans)
 	}
 
-	distsql.SetEncodeType(ctx.GetDistSQLCtx(), dagReq)
+	distsql.SetEncodeType(ctx, dagReq)
 	return dagReq, err
 }

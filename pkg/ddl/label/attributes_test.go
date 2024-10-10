@@ -18,21 +18,20 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	pd "github.com/tikv/pd/client/http"
 )
 
 func TestNewLabel(t *testing.T) {
 	type TestCase struct {
 		name  string
 		input string
-		label pd.RegionLabel
+		label Label
 	}
 
 	tests := []TestCase{
 		{
 			name:  "normal",
 			input: "merge_option=allow",
-			label: pd.RegionLabel{
+			label: Label{
 				Key:   "merge_option",
 				Value: "allow",
 			},
@@ -40,7 +39,7 @@ func TestNewLabel(t *testing.T) {
 		{
 			name:  "normal with space",
 			input: " merge_option=allow ",
-			label: pd.RegionLabel{
+			label: Label{
 				Key:   "merge_option",
 				Value: "allow",
 			},
@@ -59,7 +58,7 @@ func TestNewLabel(t *testing.T) {
 func TestRestoreLabel(t *testing.T) {
 	type TestCase struct {
 		name   string
-		input  pd.RegionLabel
+		input  Label
 		output string
 	}
 
@@ -84,7 +83,7 @@ func TestRestoreLabel(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			output := RestoreRegionLabel(&test.input)
+			output := test.input.Restore()
 			require.Equal(t, test.output, output)
 		})
 	}
@@ -125,8 +124,8 @@ func TestNewLabels(t *testing.T) {
 func TestAddLabels(t *testing.T) {
 	type TestCase struct {
 		name   string
-		labels []pd.RegionLabel
-		label  pd.RegionLabel
+		labels Labels
+		label  Label
 		err    bool
 	}
 
@@ -155,7 +154,7 @@ func TestAddLabels(t *testing.T) {
 		},
 		{
 			"duplicated attributes, skip",
-			append(labels, pd.RegionLabel{
+			append(labels, Label{
 				Key:   "merge_option",
 				Value: "allow",
 			}),
@@ -172,7 +171,7 @@ func TestAddLabels(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err = Add(&test.labels, test.label)
+			err = test.labels.Add(test.label)
 			if test.err {
 				require.Error(t, err)
 			} else {
@@ -186,7 +185,7 @@ func TestAddLabels(t *testing.T) {
 func TestRestoreLabels(t *testing.T) {
 	type TestCase struct {
 		name   string
-		input  []pd.RegionLabel
+		input  Labels
 		output string
 	}
 
@@ -204,29 +203,29 @@ func TestRestoreLabels(t *testing.T) {
 	tests := []TestCase{
 		{
 			"normal1",
-			[]pd.RegionLabel{},
+			Labels{},
 			"",
 		},
 		{
 			"normal2",
-			[]pd.RegionLabel{input1, input2},
+			Labels{input1, input2},
 			`"merge_option=allow","key=value"`,
 		},
 		{
 			"normal3",
-			[]pd.RegionLabel{input3, input4, input5},
+			Labels{input3, input4, input5},
 			"",
 		},
 		{
 			"normal4",
-			[]pd.RegionLabel{input1, input2, input3},
+			Labels{input1, input2, input3},
 			`"merge_option=allow","key=value"`,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			output := RestoreRegionLabels(&test.input)
+			output := test.input.Restore()
 			require.Equal(t, test.output, output)
 		})
 	}

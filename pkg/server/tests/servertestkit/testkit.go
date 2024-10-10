@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/errors"
+	"github.com/cockroachdb/errors"
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/kv"
@@ -37,6 +37,7 @@ import (
 	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
 	"github.com/stretchr/testify/require"
 	"go.opencensus.io/stats/view"
+	"go.uber.org/zap"
 )
 
 // TidbTestSuite is a test suite for tidb
@@ -78,7 +79,7 @@ func parseDuration(lease string) (time.Duration, error) {
 		dur, err = time.ParseDuration(lease + "s")
 	}
 	if err != nil || dur < 0 {
-		return 0, errors.Errorf("invalid lease duration: %s", lease)
+		return 0, errors.Newf("invalid lease duration", zap.String("lease", lease))
 	}
 	return dur, nil
 }
@@ -98,11 +99,9 @@ func CreateTidbTestSuiteWithCfg(t *testing.T, cfg *config.Config) *TidbTestSuite
 	ts.Domain, err = session.BootstrapSession(ts.Store)
 	require.NoError(t, err)
 	ts.Tidbdrv = srv.NewTiDBDriver(ts.Store)
-
 	srv.RunInGoTestChan = make(chan struct{})
 	server, err := srv.NewServer(cfg, ts.Tidbdrv)
 	require.NoError(t, err)
-
 	ts.Server = server
 	ts.Server.SetDomain(ts.Domain)
 	ts.Domain.InfoSyncer().SetSessionManager(ts.Server)

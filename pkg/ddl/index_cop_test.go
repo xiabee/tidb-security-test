@@ -15,7 +15,6 @@
 package ddl_test
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"testing"
@@ -23,8 +22,7 @@ import (
 	"github.com/pingcap/tidb/pkg/ddl"
 	"github.com/pingcap/tidb/pkg/ddl/copr"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/types"
@@ -38,20 +36,17 @@ func TestAddIndexFetchRowsFromCoprocessor(t *testing.T) {
 	tk.MustExec("use test")
 
 	testFetchRows := func(db, tb, idx string) ([]kv.Handle, [][]types.Datum) {
-		tbl, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr(db), pmodel.NewCIStr(tb))
+		tbl, err := dom.InfoSchema().TableByName(model.NewCIStr(db), model.NewCIStr(tb))
 		require.NoError(t, err)
 		tblInfo := tbl.Meta()
 		idxInfo := tblInfo.FindIndexByName(idx)
-
-		sctx := tk.Session()
-		copCtx, err := ddl.NewReorgCopContext(store, ddl.NewDDLReorgMeta(sctx), tblInfo, []*model.IndexInfo{idxInfo}, "")
+		copCtx, err := copr.NewCopContextSingleIndex(tblInfo, idxInfo, tk.Session(), "")
 		require.NoError(t, err)
-		require.IsType(t, copCtx, &copr.CopContextSingleIndex{})
 		startKey := tbl.RecordPrefix()
 		endKey := startKey.PrefixNext()
 		txn, err := store.Begin()
 		require.NoError(t, err)
-		copChunk, err := FetchChunk4Test(copCtx, tbl.(table.PhysicalTable), startKey, endKey, store, 10)
+		copChunk := ddl.FetchChunk4Test(copCtx, tbl.(table.PhysicalTable), startKey, endKey, store, 10)
 		require.NoError(t, err)
 		require.NoError(t, txn.Rollback())
 
@@ -62,7 +57,7 @@ func TestAddIndexFetchRowsFromCoprocessor(t *testing.T) {
 		idxDataBuf := make([]types.Datum, len(idxInfo.Columns))
 
 		for row := iter.Begin(); row != iter.End(); row = iter.Next() {
-			handle, idxDatum, err := ConvertRowToHandleAndIndexDatum(tk.Session().GetExprCtx().GetEvalCtx(), handleDataBuf, idxDataBuf, row, copCtx, idxInfo.ID)
+			handle, idxDatum, err := ddl.ConvertRowToHandleAndIndexDatum(handleDataBuf, idxDataBuf, row, copCtx, idxInfo.ID)
 			require.NoError(t, err)
 			handles = append(handles, handle)
 			copiedIdxDatum := make([]types.Datum, len(idxDatum))

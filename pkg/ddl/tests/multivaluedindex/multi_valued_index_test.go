@@ -15,7 +15,6 @@
 package multivaluedindex
 
 import (
-	"context"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/infoschema"
@@ -32,7 +31,7 @@ func TestCreateMultiValuedIndexHasBinaryCollation(t *testing.T) {
 	is := tk.Session().GetDomainInfoSchema().(infoschema.InfoSchema)
 	require.NotNil(t, is)
 
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 
 	foundIndex := false

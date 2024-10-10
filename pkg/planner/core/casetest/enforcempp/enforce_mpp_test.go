@@ -15,20 +15,18 @@
 package enforcempp
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/planner/util/coretestsdk"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/planner/core/internal"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/util/collate"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,11 +51,28 @@ func TestEnforceMPP(t *testing.T) {
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
-	db, exists := is.SchemaByName(pmodel.NewCIStr("test"))
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
 	require.True(t, exists)
-	coretestsdk.SetTiFlashReplica(t, dom, db.Name.L, "t")
-	coretestsdk.SetTiFlashReplica(t, dom, db.Name.L, "s")
-	coretestsdk.SetTiFlashReplica(t, dom, db.Name.L, "t3")
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+		if tblInfo.Name.L == "s" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+		if tblInfo.Name.L == "t3" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+	}
 
 	var input []string
 	var output []struct {
@@ -67,8 +82,8 @@ func TestEnforceMPP(t *testing.T) {
 	}
 	enforceMPPSuiteData := GetEnforceMPPSuiteData()
 	enforceMPPSuiteData.LoadTestCases(t, &input, &output)
-	filterWarnings := func(originalWarnings []contextutil.SQLWarn) []contextutil.SQLWarn {
-		warnings := make([]contextutil.SQLWarn, 0, 4)
+	filterWarnings := func(originalWarnings []stmtctx.SQLWarn) []stmtctx.SQLWarn {
+		warnings := make([]stmtctx.SQLWarn, 0, 4)
 		for _, warning := range originalWarnings {
 			// filter out warning about skyline pruning
 			if !strings.Contains(warning.Err.Error(), "remain after pruning paths for") {
@@ -131,18 +146,32 @@ func TestEnforceMPPWarning1(t *testing.T) {
 			// Create virtual tiflash replica info.
 			dom := domain.GetDomain(tk.Session())
 			is := dom.InfoSchema()
-			tblInfo, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
-			require.NoError(t, err)
-			tblInfo.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{
-				Count:     1,
-				Available: false,
+			db, exists := is.SchemaByName(model.NewCIStr("test"))
+			require.True(t, exists)
+			for _, tblInfo := range db.Tables {
+				if tblInfo.Name.L == "t" {
+					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+						Count:     1,
+						Available: false,
+					}
+				}
 			}
 			continue
 		}
 		if strings.HasPrefix(tt, "cmd: enable-replica") {
 			// Create virtual tiflash replica info.
 			dom := domain.GetDomain(tk.Session())
-			coretestsdk.SetTiFlashReplica(t, dom, "test", "t")
+			is := dom.InfoSchema()
+			db, exists := is.SchemaByName(model.NewCIStr("test"))
+			require.True(t, exists)
+			for _, tblInfo := range db.Tables {
+				if tblInfo.Name.L == "t" {
+					tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+						Count:     1,
+						Available: true,
+					}
+				}
+			}
 			continue
 		}
 		testdata.OnRecord(func() {
@@ -170,11 +199,15 @@ func TestEnforceMPPWarning2(t *testing.T) {
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
-	require.NoError(t, err)
-	tbl.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{
-		Count:     1,
-		Available: true,
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
 	}
 
 	var input []string
@@ -218,11 +251,15 @@ func TestEnforceMPPWarning3(t *testing.T) {
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
-	require.NoError(t, err)
-	tbl.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{
-		Count:     1,
-		Available: true,
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
 	}
 
 	var input []string
@@ -276,8 +313,17 @@ func TestEnforceMPPWarning4(t *testing.T) {
 
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "t")
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "s")
+	is := dom.InfoSchema()
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" || tblInfo.Name.L == "s" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+	}
 
 	var input []string
 	var output []struct {
@@ -328,9 +374,17 @@ func TestMPP2PhaseAggPushDown(t *testing.T) {
 
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "c")
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "o")
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "t")
+	is := dom.InfoSchema()
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "c" || tblInfo.Name.L == "o" || tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
+	}
 
 	var input []string
 	var output []struct {
@@ -375,11 +429,15 @@ func TestMPPSkewedGroupDistinctRewrite(t *testing.T) {
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
-	require.NoError(t, err)
-	tbl.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{
-		Count:     1,
-		Available: true,
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
 	}
 
 	var input []string
@@ -423,11 +481,15 @@ func TestMPPSingleDistinct3Stage(t *testing.T) {
 	// Create virtual tiflash replica info.
 	dom := domain.GetDomain(tk.Session())
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
-	require.NoError(t, err)
-	tbl.Meta().TiFlashReplica = &model.TiFlashReplicaInfo{
-		Count:     1,
-		Available: true,
+	db, exists := is.SchemaByName(model.NewCIStr("test"))
+	require.True(t, exists)
+	for _, tblInfo := range db.Tables {
+		if tblInfo.Name.L == "t" {
+			tblInfo.TiFlashReplica = &model.TiFlashReplicaInfo{
+				Count:     1,
+				Available: true,
+			}
+		}
 	}
 
 	var input []string
@@ -461,7 +523,7 @@ func TestMPPSingleDistinct3Stage(t *testing.T) {
 //
 //	since it doesn't change the schema out (index ref is still the right), so by now it's fine. SEE case: EXPLAIN select count(distinct a), count(distinct b), sum(c) from t.
 func TestMPPMultiDistinct3Stage(t *testing.T) {
-	store := testkit.CreateMockStore(t, coretestsdk.WithMockTiFlash(2))
+	store := testkit.CreateMockStore(t, internal.WithMockTiFlash(2))
 	tk := testkit.NewTestKit(t, store)
 
 	// test table
@@ -470,7 +532,7 @@ func TestMPPMultiDistinct3Stage(t *testing.T) {
 	tk.MustExec("create table t(a int, b int, c int, d int);")
 	tk.MustExec("alter table t set tiflash replica 1")
 	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 	tk.MustExec("set @@session.tidb_opt_enable_three_stage_multi_distinct_agg=1")
 	defer tk.MustExec("set @@session.tidb_opt_enable_three_stage_multi_distinct_agg=0")
@@ -479,7 +541,16 @@ func TestMPPMultiDistinct3Stage(t *testing.T) {
 	tk.MustExec("set @@session.tidb_allow_mpp=ON;")
 	// todo: current mock regionCache won't scale the regions among tiFlash nodes. The under layer still collect data from only one of the nodes.
 	tk.MustExec("split table t BETWEEN (0) AND (5000) REGIONS 5;")
-	tk.MustExec("insert into t values(1000, 1000, 1000, 1),(1000, 1000, 1000, 1),(2000, 2000, 2000, 1),(2000, 2000, 2000, 1),(3000, 3000, 3000, 1),(3000, 3000, 3000, 1),(4000, 4000, 4000, 1),(4000, 4000, 4000, 1),(5000, 5000, 5000, 1),(5000, 5000, 5000, 1)")
+	tk.MustExec("insert into t values(1000, 1000, 1000, 1)")
+	tk.MustExec("insert into t values(1000, 1000, 1000, 1)")
+	tk.MustExec("insert into t values(2000, 2000, 2000, 1)")
+	tk.MustExec("insert into t values(2000, 2000, 2000, 1)")
+	tk.MustExec("insert into t values(3000, 3000, 3000, 1)")
+	tk.MustExec("insert into t values(3000, 3000, 3000, 1)")
+	tk.MustExec("insert into t values(4000, 4000, 4000, 1)")
+	tk.MustExec("insert into t values(4000, 4000, 4000, 1)")
+	tk.MustExec("insert into t values(5000, 5000, 5000, 1)")
+	tk.MustExec("insert into t values(5000, 5000, 5000, 1)")
 
 	var input []string
 	var output []struct {
@@ -510,7 +581,7 @@ func TestMPPMultiDistinct3Stage(t *testing.T) {
 
 // Test null-aware semi join push down for MPP mode
 func TestMPPNullAwareSemiJoinPushDown(t *testing.T) {
-	store := testkit.CreateMockStore(t, coretestsdk.WithMockTiFlash(2))
+	store := testkit.CreateMockStore(t, internal.WithMockTiFlash(2))
 	tk := testkit.NewTestKit(t, store)
 
 	// test table
@@ -523,11 +594,11 @@ func TestMPPNullAwareSemiJoinPushDown(t *testing.T) {
 	tk.MustExec("alter table s set tiflash replica 1")
 
 	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	tb = external.GetTableByName(t, tk, "test", "s")
-	err = domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	var input []string
@@ -558,7 +629,7 @@ func TestMPPNullAwareSemiJoinPushDown(t *testing.T) {
 }
 
 func TestMPPSharedCTEScan(t *testing.T) {
-	store := testkit.CreateMockStore(t, coretestsdk.WithMockTiFlash(2))
+	store := testkit.CreateMockStore(t, internal.WithMockTiFlash(2))
 	tk := testkit.NewTestKit(t, store)
 
 	// test table
@@ -571,11 +642,11 @@ func TestMPPSharedCTEScan(t *testing.T) {
 	tk.MustExec("alter table s set tiflash replica 1")
 
 	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	tb = external.GetTableByName(t, tk, "test", "s")
-	err = domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	var input []string
@@ -606,7 +677,7 @@ func TestMPPSharedCTEScan(t *testing.T) {
 }
 
 func TestRollupMPP(t *testing.T) {
-	store := testkit.CreateMockStore(t, coretestsdk.WithMockTiFlash(2))
+	store := testkit.CreateMockStore(t, internal.WithMockTiFlash(2))
 	tk := testkit.NewTestKit(t, store)
 
 	tk.MustExec("use test")
@@ -620,15 +691,15 @@ func TestRollupMPP(t *testing.T) {
 	tk.MustExec("alter table sales set tiflash replica 1")
 
 	tb := external.GetTableByName(t, tk, "test", "t")
-	err := domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err := domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	tb = external.GetTableByName(t, tk, "test", "s")
-	err = domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	tb = external.GetTableByName(t, tk, "test", "sales")
-	err = domain.GetDomain(tk.Session()).DDLExecutor().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
+	err = domain.GetDomain(tk.Session()).DDL().UpdateTableReplicaInfo(tk.Session(), tb.Meta().ID, true)
 	require.NoError(t, err)
 
 	// error test

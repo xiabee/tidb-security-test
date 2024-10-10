@@ -5,6 +5,7 @@ package conn
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -20,7 +21,6 @@ import (
 	logbackup "github.com/pingcap/kvproto/pkg/logbackuppb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
-	kvconfig "github.com/pingcap/tidb/br/pkg/config"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
@@ -49,11 +49,6 @@ const (
 
 	// DefaultMergeRegionKeyCount is the default region key count, 960000.
 	DefaultMergeRegionKeyCount uint64 = 960000
-
-	// DefaultImportNumGoroutines is the default number of threads for import.
-	// use 128 as default value, which is 8 times of the default value of tidb.
-	// we think is proper for IO-bound cases.
-	DefaultImportNumGoroutines uint = 128
 )
 
 type VersionCheckerType int
@@ -63,8 +58,6 @@ const (
 	NormalVersionChecker VersionCheckerType = iota
 	// version checker for PiTR
 	StreamVersionChecker
-	// no check
-	NoVersionChecker
 )
 
 // Mgr manages connections to a TiDB cluster.
@@ -93,23 +86,17 @@ func GetAllTiKVStoresWithRetry(ctx context.Context,
 				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-error injected.")
 				if val.(bool) {
 					err = status.Error(codes.Unknown, "Retryable error")
-					failpoint.Return(err)
+				} else {
+					err = context.Canceled
 				}
 			})
 
-			failpoint.Inject("hint-GetAllTiKVStores-grpc-cancel", func(val failpoint.Value) {
-				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-grpc-cancel injected.")
+			failpoint.Inject("hint-GetAllTiKVStores-cancel", func(val failpoint.Value) {
+				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-cancel injected.")
 				if val.(bool) {
 					err = status.Error(codes.Canceled, "Cancel Retry")
-					failpoint.Return(err)
-				}
-			})
-
-			failpoint.Inject("hint-GetAllTiKVStores-ctx-cancel", func(val failpoint.Value) {
-				logutil.CL(ctx).Debug("failpoint hint-GetAllTiKVStores-ctx-cancel injected.")
-				if val.(bool) {
+				} else {
 					err = context.Canceled
-					failpoint.Return(err)
 				}
 			})
 
@@ -149,7 +136,7 @@ func checkStoresAlive(ctx context.Context,
 func NewMgr(
 	ctx context.Context,
 	g glue.Glue,
-	pdAddrs []string,
+	pdAddrs string,
 	tlsConf *tls.Config,
 	securityOption pd.SecurityOption,
 	keepalive keepalive.ClientParameters,
@@ -164,7 +151,7 @@ func NewMgr(
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
-	log.Info("new mgr", zap.Strings("pdAddrs", pdAddrs))
+	log.Info("new mgr", zap.String("pdAddrs", pdAddrs))
 
 	controller, err := pdutil.NewPdController(ctx, pdAddrs, tlsConf, securityOption)
 	if err != nil {
@@ -172,18 +159,17 @@ func NewMgr(
 		return nil, errors.Trace(err)
 	}
 	if checkRequirements {
-		var versionErr error
+		var checker version.VerChecker
 		switch versionCheckerType {
 		case NormalVersionChecker:
-			versionErr = version.CheckClusterVersion(ctx, controller.GetPDClient(), version.CheckVersionForBR)
+			checker = version.CheckVersionForBR
 		case StreamVersionChecker:
-			versionErr = version.CheckClusterVersion(ctx, controller.GetPDClient(), version.CheckVersionForBRPiTR)
-		case NoVersionChecker:
-			versionErr = nil
+			checker = version.CheckVersionForBRPiTR
 		default:
 			return nil, errors.Errorf("unknown command type, comman code is %d", versionCheckerType)
 		}
-		if versionErr != nil {
+		err = version.CheckClusterVersion(ctx, controller.GetPDClient(), checker)
+		if err != nil {
 			return nil, errors.Annotate(err, "running BR in incompatible version of cluster, "+
 				"if you believe it's OK, use --check-requirements=false to skip.")
 		}
@@ -195,10 +181,7 @@ func NewMgr(
 	}
 
 	// Disable GC because TiDB enables GC already.
-	path := fmt.Sprintf(
-		"tikv://%s?disableGC=true&keyspaceName=%s",
-		strings.Join(pdAddrs, ","), config.GetGlobalKeyspaceName(),
-	)
+	path := fmt.Sprintf("tikv://%s?disableGC=true&keyspaceName=%s", pdAddrs, config.GetGlobalKeyspaceName())
 	storage, err := g.Open(path, securityOption)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -299,8 +282,8 @@ func (mgr *Mgr) Close() {
 	mgr.PdController.Close()
 }
 
-// GetCurrentTsFromPD gets current ts from PD.
-func (mgr *Mgr) GetCurrentTsFromPD(ctx context.Context) (uint64, error) {
+// GetTS gets current ts from pd.
+func (mgr *Mgr) GetTS(ctx context.Context) (uint64, error) {
 	p, l, err := mgr.GetPDClient().GetTS(ctx)
 	if err != nil {
 		return 0, errors.Trace(err)
@@ -309,72 +292,66 @@ func (mgr *Mgr) GetCurrentTsFromPD(ctx context.Context) (uint64, error) {
 	return oracle.ComposeTS(p, l), nil
 }
 
-// ProcessTiKVConfigs handle the tikv config for region split size, region split keys, and import goroutines in place.
-// It retrieves the config from all alive tikv stores and returns the minimum values.
-// If retrieving the config fails, it returns the default config values.
-func (mgr *Mgr) ProcessTiKVConfigs(ctx context.Context, cfg *kvconfig.KVConfig, client *http.Client) {
-	mergeRegionSize := cfg.MergeRegionSize
-	mergeRegionKeyCount := cfg.MergeRegionKeyCount
-	importGoroutines := cfg.ImportGoroutines
-
-	if mergeRegionSize.Modified && mergeRegionKeyCount.Modified && importGoroutines.Modified {
-		log.Info("no need to retrieve the config from tikv if user has set the config")
-		return
+// GetMergeRegionSizeAndCount returns the tikv config
+// `coprocessor.region-split-size` and `coprocessor.region-split-key`.
+// returns the default config when failed.
+func (mgr *Mgr) GetMergeRegionSizeAndCount(ctx context.Context, client *http.Client) (uint64, uint64) {
+	regionSplitSize := DefaultMergeRegionSizeBytes
+	regionSplitKeys := DefaultMergeRegionKeyCount
+	type coprocessor struct {
+		RegionSplitKeys uint64 `json:"region-split-keys"`
+		RegionSplitSize string `json:"region-split-size"`
 	}
 
+	type config struct {
+		Cop coprocessor `json:"coprocessor"`
+	}
 	err := mgr.GetConfigFromTiKV(ctx, client, func(resp *http.Response) error {
-		respBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return err
+		c := &config{}
+		e := json.NewDecoder(resp.Body).Decode(c)
+		if e != nil {
+			return e
 		}
-		if !mergeRegionSize.Modified || !mergeRegionKeyCount.Modified {
-			size, keys, e := kvconfig.ParseMergeRegionSizeFromConfig(respBytes)
-			if e != nil {
-				log.Warn("Failed to parse region split size and keys from config", logutil.ShortError(e))
-				return e
-			}
-			if mergeRegionKeyCount.Value == DefaultMergeRegionKeyCount || keys < mergeRegionKeyCount.Value {
-				mergeRegionSize.Value = size
-				mergeRegionKeyCount.Value = keys
-			}
+		rs, e := units.RAMInBytes(c.Cop.RegionSplitSize)
+		if e != nil {
+			return e
 		}
-		if !importGoroutines.Modified {
-			threads, e := kvconfig.ParseImportThreadsFromConfig(respBytes)
-			if e != nil {
-				log.Warn("Failed to parse import num-threads from config", logutil.ShortError(e))
-				return e
-			}
-			// We use 8 times the default value because it's an IO-bound case.
-			if importGoroutines.Value == DefaultImportNumGoroutines || (threads > 0 && threads*8 < importGoroutines.Value) {
-				importGoroutines.Value = threads * 8
-			}
+		urs := uint64(rs)
+		if regionSplitSize == DefaultMergeRegionSizeBytes || urs < regionSplitSize {
+			regionSplitSize = urs
+			regionSplitKeys = c.Cop.RegionSplitKeys
 		}
-		// replace the value
-		cfg.MergeRegionSize = mergeRegionSize
-		cfg.MergeRegionKeyCount = mergeRegionKeyCount
-		cfg.ImportGoroutines = importGoroutines
 		return nil
 	})
-
 	if err != nil {
-		log.Warn("Failed to get config from TiKV; using default", logutil.ShortError(err))
+		log.Warn("meet error when getting config from TiKV; using default", logutil.ShortError(err))
+		return DefaultMergeRegionSizeBytes, DefaultMergeRegionKeyCount
 	}
+	return regionSplitSize, regionSplitKeys
 }
 
 // IsLogBackupEnabled is used for br to check whether tikv has enabled log backup.
 func (mgr *Mgr) IsLogBackupEnabled(ctx context.Context, client *http.Client) (bool, error) {
 	logbackupEnable := true
+	type logbackup struct {
+		Enable bool `json:"enable"`
+	}
+	type config struct {
+		LogBackup logbackup `json:"log-backup"`
+	}
 	err := mgr.GetConfigFromTiKV(ctx, client, func(resp *http.Response) error {
 		respBytes, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}
-		enable, err := kvconfig.ParseLogBackupEnableFromConfig(respBytes)
+
+		var c config
+		err = json.Unmarshal(respBytes, &c)
 		if err != nil {
 			log.Warn("Failed to parse log-backup enable from config", logutil.ShortError(err))
 			return err
 		}
-		logbackupEnable = logbackupEnable && enable
+		logbackupEnable = logbackupEnable && c.LogBackup.Enable
 		return nil
 	})
 	return logbackupEnable, errors.Trace(err)
@@ -409,11 +386,11 @@ func (mgr *Mgr) GetConfigFromTiKV(ctx context.Context, cli *http.Client, fn func
 			if e != nil {
 				return e
 			}
-			defer resp.Body.Close()
 			err = fn(resp)
 			if err != nil {
 				return err
 			}
+			_ = resp.Body.Close()
 			return nil
 		}, utils.NewPDReqBackoffer())
 		if err != nil {

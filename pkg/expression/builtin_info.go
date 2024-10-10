@@ -20,25 +20,22 @@ package expression
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/kvproto/pkg/kvrpcpb"
-	"github.com/pingcap/tidb/pkg/expression/expropt"
-	infoschema "github.com/pingcap/tidb/pkg/infoschema/context"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/privilege"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
-	"github.com/pingcap/tidb/pkg/store/helper"
-	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
+	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
 	"github.com/pingcap/tidb/pkg/util/printer"
 	"github.com/pingcap/tipb/go-tipb"
@@ -62,9 +59,6 @@ var (
 	_ functionClass = &tidbVersionFunctionClass{}
 	_ functionClass = &tidbIsDDLOwnerFunctionClass{}
 	_ functionClass = &tidbDecodePlanFunctionClass{}
-	_ functionClass = &tidbMVCCInfoFunctionClass{}
-	_ functionClass = &tidbEncodeRecordKeyClass{}
-	_ functionClass = &tidbEncodeIndexKeyClass{}
 	_ functionClass = &tidbDecodeKeyFunctionClass{}
 	_ functionClass = &tidbDecodeSQLDigestsFunctionClass{}
 	_ functionClass = &nextValFunctionClass{}
@@ -86,9 +80,6 @@ var (
 	_ builtinFunc = &builtinVersionSig{}
 	_ builtinFunc = &builtinTiDBVersionSig{}
 	_ builtinFunc = &builtinRowCountSig{}
-	_ builtinFunc = &builtinTiDBMVCCInfoSig{}
-	_ builtinFunc = &builtinTiDBEncodeRecordKeySig{}
-	_ builtinFunc = &builtinTiDBEncodeIndexKeySig{}
 	_ builtinFunc = &builtinTiDBDecodeKeySig{}
 	_ builtinFunc = &builtinTiDBDecodeSQLDigestsSig{}
 	_ builtinFunc = &builtinNextValSig{}
@@ -102,7 +93,7 @@ type databaseFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *databaseFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *databaseFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -127,8 +118,8 @@ func (b *builtinDatabaseSig) Clone() builtinFunc {
 
 // evalString evals a builtinDatabaseSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html
-func (b *builtinDatabaseSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	currentDB := ctx.CurrentDB()
+func (b *builtinDatabaseSig) evalString(row chunk.Row) (string, bool, error) {
+	currentDB := b.ctx.GetSessionVars().CurrentDB
 	return currentDB, currentDB == "", nil
 }
 
@@ -136,7 +127,7 @@ type foundRowsFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *foundRowsFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *foundRowsFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -145,13 +136,12 @@ func (c *foundRowsFunctionClass) getFunction(ctx BuildContext, args []Expression
 		return nil, err
 	}
 	bf.tp.AddFlag(mysql.UnsignedFlag)
-	sig := &builtinFoundRowsSig{baseBuiltinFunc: bf}
+	sig := &builtinFoundRowsSig{bf}
 	return sig, nil
 }
 
 type builtinFoundRowsSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinFoundRowsSig) Clone() builtinFunc {
@@ -160,18 +150,11 @@ func (b *builtinFoundRowsSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinFoundRowsSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
 // evalInt evals a builtinFoundRowsSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_found-rows
 // TODO: SQL_CALC_FOUND_ROWS and LIMIT not support for now, We will finish in another PR.
-func (b *builtinFoundRowsSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
-	data, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return 0, true, err
-	}
+func (b *builtinFoundRowsSig) evalInt(row chunk.Row) (int64, bool, error) {
+	data := b.ctx.GetSessionVars()
 	if data == nil {
 		return 0, true, errors.Errorf("Missing session variable when eval builtin")
 	}
@@ -182,7 +165,7 @@ type currentUserFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *currentUserFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *currentUserFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -191,13 +174,12 @@ func (c *currentUserFunctionClass) getFunction(ctx BuildContext, args []Expressi
 		return nil, err
 	}
 	bf.tp.SetFlen(64)
-	sig := &builtinCurrentUserSig{baseBuiltinFunc: bf}
+	sig := &builtinCurrentUserSig{bf}
 	return sig, nil
 }
 
 type builtinCurrentUserSig struct {
 	baseBuiltinFunc
-	expropt.CurrentUserPropReader
 }
 
 func (b *builtinCurrentUserSig) Clone() builtinFunc {
@@ -206,29 +188,21 @@ func (b *builtinCurrentUserSig) Clone() builtinFunc {
 	return newSig
 }
 
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinCurrentUserSig) RequiredOptionalEvalProps() (set OptionalEvalPropKeySet) {
-	return b.CurrentUserPropReader.RequiredOptionalEvalProps()
-}
-
 // evalString evals a builtinCurrentUserSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_current-user
-func (b *builtinCurrentUserSig) evalString(ctx EvalContext, _ chunk.Row) (string, bool, error) {
-	user, err := b.CurrentUser(ctx)
-	if err != nil {
-		return "", true, err
-	}
-	if user == nil {
+func (b *builtinCurrentUserSig) evalString(row chunk.Row) (string, bool, error) {
+	data := b.ctx.GetSessionVars()
+	if data == nil || data.User == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
 	}
-	return user.String(), false, nil
+	return data.User.String(), false, nil
 }
 
 type currentRoleFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *currentRoleFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *currentRoleFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -237,13 +211,12 @@ func (c *currentRoleFunctionClass) getFunction(ctx BuildContext, args []Expressi
 		return nil, err
 	}
 	bf.tp.SetFlen(64)
-	sig := &builtinCurrentRoleSig{baseBuiltinFunc: bf}
+	sig := &builtinCurrentRoleSig{bf}
 	return sig, nil
 }
 
 type builtinCurrentRoleSig struct {
 	baseBuiltinFunc
-	expropt.CurrentUserPropReader
 }
 
 func (b *builtinCurrentRoleSig) Clone() builtinFunc {
@@ -252,32 +225,24 @@ func (b *builtinCurrentRoleSig) Clone() builtinFunc {
 	return newSig
 }
 
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinCurrentRoleSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.CurrentUserPropReader.RequiredOptionalEvalProps()
-}
-
 // evalString evals a builtinCurrentUserSig.
 // See https://dev.mysql.com/doc/refman/8.0/en/information-functions.html#function_current-role
-func (b *builtinCurrentRoleSig) evalString(ctx EvalContext, row chunk.Row) (res string, isNull bool, err error) {
-	roles, err := b.ActiveRoles(ctx)
-	if err != nil {
-		return "", true, err
-	}
-	if roles == nil {
+func (b *builtinCurrentRoleSig) evalString(row chunk.Row) (res string, isNull bool, err error) {
+	data := b.ctx.GetSessionVars()
+	if data == nil || data.ActiveRoles == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
 	}
-	if len(roles) == 0 {
+	if len(data.ActiveRoles) == 0 {
 		return "NONE", false, nil
 	}
 	sortedRes := make([]string, 0, 10)
-	for _, r := range roles {
+	for _, r := range data.ActiveRoles {
 		sortedRes = append(sortedRes, r.String())
 	}
 	slices.Sort(sortedRes)
 	for i, r := range sortedRes {
 		res += r
-		if i != len(roles)-1 {
+		if i != len(data.ActiveRoles)-1 {
 			res += ","
 		}
 	}
@@ -288,7 +253,7 @@ type currentResourceGroupFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *currentResourceGroupFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *currentResourceGroupFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -297,13 +262,12 @@ func (c *currentResourceGroupFunctionClass) getFunction(ctx BuildContext, args [
 		return nil, err
 	}
 	bf.tp.SetFlen(64)
-	sig := &builtinCurrentResourceGroupSig{baseBuiltinFunc: bf}
+	sig := &builtinCurrentResourceGroupSig{bf}
 	return sig, nil
 }
 
 type builtinCurrentResourceGroupSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinCurrentResourceGroupSig) Clone() builtinFunc {
@@ -312,15 +276,8 @@ func (b *builtinCurrentResourceGroupSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinCurrentResourceGroupSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
-func (b *builtinCurrentResourceGroupSig) evalString(ctx EvalContext, row chunk.Row) (val string, isNull bool, err error) {
-	data, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return "", true, err
-	}
+func (b *builtinCurrentResourceGroupSig) evalString(row chunk.Row) (res string, isNull bool, err error) {
+	data := b.ctx.GetSessionVars()
 	if data == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
 	}
@@ -344,7 +301,7 @@ type userFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *userFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *userFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -353,13 +310,12 @@ func (c *userFunctionClass) getFunction(ctx BuildContext, args []Expression) (bu
 		return nil, err
 	}
 	bf.tp.SetFlen(64)
-	sig := &builtinUserSig{baseBuiltinFunc: bf}
+	sig := &builtinUserSig{bf}
 	return sig, nil
 }
 
 type builtinUserSig struct {
 	baseBuiltinFunc
-	expropt.CurrentUserPropReader
 }
 
 func (b *builtinUserSig) Clone() builtinFunc {
@@ -368,29 +324,21 @@ func (b *builtinUserSig) Clone() builtinFunc {
 	return newSig
 }
 
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinUserSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.CurrentUserPropReader.RequiredOptionalEvalProps()
-}
-
 // evalString evals a builtinUserSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_user
-func (b *builtinUserSig) evalString(ctx EvalContext, _ chunk.Row) (string, bool, error) {
-	user, err := b.CurrentUser(ctx)
-	if err != nil {
-		return "", true, err
-	}
-	if user == nil {
+func (b *builtinUserSig) evalString(row chunk.Row) (string, bool, error) {
+	data := b.ctx.GetSessionVars()
+	if data == nil || data.User == nil {
 		return "", true, errors.Errorf("Missing session variable when eval builtin")
 	}
-	return user.LoginString(), false, nil
+	return data.User.LoginString(), false, nil
 }
 
 type connectionIDFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *connectionIDFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *connectionIDFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -399,13 +347,12 @@ func (c *connectionIDFunctionClass) getFunction(ctx BuildContext, args []Express
 		return nil, err
 	}
 	bf.tp.AddFlag(mysql.UnsignedFlag)
-	sig := &builtinConnectionIDSig{baseBuiltinFunc: bf}
+	sig := &builtinConnectionIDSig{bf}
 	return sig, nil
 }
 
 type builtinConnectionIDSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinConnectionIDSig) Clone() builtinFunc {
@@ -414,16 +361,8 @@ func (b *builtinConnectionIDSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinConnectionIDSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
-func (b *builtinConnectionIDSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
-	data, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return 0, true, err
-	}
-
+func (b *builtinConnectionIDSig) evalInt(_ chunk.Row) (int64, bool, error) {
+	data := b.ctx.GetSessionVars()
 	if data == nil {
 		return 0, true, errors.Errorf("Missing session variable `builtinConnectionIDSig.evalInt`")
 	}
@@ -434,7 +373,7 @@ type lastInsertIDFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *lastInsertIDFunctionClass) getFunction(ctx BuildContext, args []Expression) (sig builtinFunc, err error) {
+func (c *lastInsertIDFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (sig builtinFunc, err error) {
 	if err = c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -450,10 +389,10 @@ func (c *lastInsertIDFunctionClass) getFunction(ctx BuildContext, args []Express
 	bf.tp.AddFlag(mysql.UnsignedFlag)
 
 	if len(args) == 1 {
-		sig = &builtinLastInsertIDWithIDSig{baseBuiltinFunc: bf}
+		sig = &builtinLastInsertIDWithIDSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_LastInsertIDWithID)
 	} else {
-		sig = &builtinLastInsertIDSig{baseBuiltinFunc: bf}
+		sig = &builtinLastInsertIDSig{bf}
 		sig.setPbCode(tipb.ScalarFuncSig_LastInsertID)
 	}
 	return sig, err
@@ -461,7 +400,6 @@ func (c *lastInsertIDFunctionClass) getFunction(ctx BuildContext, args []Express
 
 type builtinLastInsertIDSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinLastInsertIDSig) Clone() builtinFunc {
@@ -470,24 +408,15 @@ func (b *builtinLastInsertIDSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinLastInsertIDSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
 // evalInt evals LAST_INSERT_ID().
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_last-insert-id.
-func (b *builtinLastInsertIDSig) evalInt(ctx EvalContext, row chunk.Row) (res int64, isNull bool, err error) {
-	vars, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return 0, true, err
-	}
-	res = int64(vars.StmtCtx.PrevLastInsertID)
+func (b *builtinLastInsertIDSig) evalInt(row chunk.Row) (res int64, isNull bool, err error) {
+	res = int64(b.ctx.GetSessionVars().StmtCtx.PrevLastInsertID)
 	return res, false, nil
 }
 
 type builtinLastInsertIDWithIDSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinLastInsertIDWithIDSig) Clone() builtinFunc {
@@ -496,24 +425,15 @@ func (b *builtinLastInsertIDWithIDSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinLastInsertIDWithIDSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
 // evalInt evals LAST_INSERT_ID(expr).
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_last-insert-id.
-func (b *builtinLastInsertIDWithIDSig) evalInt(ctx EvalContext, row chunk.Row) (res int64, isNull bool, err error) {
-	vars, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return 0, true, err
-	}
-
-	res, isNull, err = b.args[0].EvalInt(ctx, row)
+func (b *builtinLastInsertIDWithIDSig) evalInt(row chunk.Row) (res int64, isNull bool, err error) {
+	res, isNull, err = b.args[0].EvalInt(b.ctx, row)
 	if isNull || err != nil {
 		return res, isNull, err
 	}
 
-	vars.SetLastInsertID(uint64(res))
+	b.ctx.GetSessionVars().SetLastInsertID(uint64(res))
 	return res, false, nil
 }
 
@@ -521,7 +441,7 @@ type versionFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *versionFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *versionFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -546,7 +466,7 @@ func (b *builtinVersionSig) Clone() builtinFunc {
 
 // evalString evals a builtinVersionSig.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_version
-func (b *builtinVersionSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
+func (b *builtinVersionSig) evalString(row chunk.Row) (string, bool, error) {
 	return mysql.ServerVersion, false, nil
 }
 
@@ -554,7 +474,7 @@ type tidbVersionFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbVersionFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbVersionFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -579,7 +499,7 @@ func (b *builtinTiDBVersionSig) Clone() builtinFunc {
 
 // evalString evals a builtinTiDBVersionSig.
 // This will show git hash and build time for tidb-server.
-func (b *builtinTiDBVersionSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
+func (b *builtinTiDBVersionSig) evalString(_ chunk.Row) (string, bool, error) {
 	return printer.GetTiDBInfo(), false, nil
 }
 
@@ -587,7 +507,7 @@ type tidbIsDDLOwnerFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbIsDDLOwnerFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbIsDDLOwnerFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -595,13 +515,12 @@ func (c *tidbIsDDLOwnerFunctionClass) getFunction(ctx BuildContext, args []Expre
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinTiDBIsDDLOwnerSig{baseBuiltinFunc: bf}
+	sig := &builtinTiDBIsDDLOwnerSig{bf}
 	return sig, nil
 }
 
 type builtinTiDBIsDDLOwnerSig struct {
 	baseBuiltinFunc
-	expropt.DDLOwnerPropReader
 }
 
 func (b *builtinTiDBIsDDLOwnerSig) Clone() builtinFunc {
@@ -610,18 +529,9 @@ func (b *builtinTiDBIsDDLOwnerSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinTiDBIsDDLOwnerSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.DDLOwnerPropReader.RequiredOptionalEvalProps()
-}
-
 // evalInt evals a builtinTiDBIsDDLOwnerSig.
-func (b *builtinTiDBIsDDLOwnerSig) evalInt(ctx EvalContext, row chunk.Row) (res int64, isNull bool, err error) {
-	isOwner, err := b.IsDDLOwner(ctx)
-	if err != nil {
-		return 0, true, err
-	}
-
-	if isOwner {
+func (b *builtinTiDBIsDDLOwnerSig) evalInt(_ chunk.Row) (res int64, isNull bool, err error) {
+	if b.ctx.IsDDLOwner() {
 		res = 1
 	}
 
@@ -632,20 +542,20 @@ type benchmarkFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *benchmarkFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *benchmarkFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
 
 	// Syntax: BENCHMARK(loop_count, expression)
 	// Define with same eval type of input arg to avoid unnecessary cast function.
-	sameEvalType := args[1].GetType(ctx.GetEvalCtx()).EvalType()
+	sameEvalType := args[1].GetType().EvalType()
 	// constLoopCount is used by VecEvalInt
 	// since non-constant loop count would be different between rows, and cannot be vectorized.
 	var constLoopCount int64
 	con, ok := args[0].(*Constant)
 	if ok && con.Value.Kind() == types.KindInt64 {
-		if lc, isNull, err := con.EvalInt(ctx.GetEvalCtx(), chunk.Row{}); err == nil && !isNull {
+		if lc, isNull, err := con.EvalInt(ctx, chunk.Row{}); err == nil && !isNull {
 			constLoopCount = lc
 		}
 	}
@@ -670,7 +580,7 @@ func (b *builtinBenchmarkSig) Clone() builtinFunc {
 
 // evalInt evals a builtinBenchmarkSig. It will execute expression repeatedly count times.
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_benchmark
-func (b *builtinBenchmarkSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
+func (b *builtinBenchmarkSig) evalInt(row chunk.Row) (int64, bool, error) {
 	// Get loop count.
 	var loopCount int64
 	var isNull bool
@@ -678,7 +588,7 @@ func (b *builtinBenchmarkSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bo
 	if b.constLoopCount > 0 {
 		loopCount = b.constLoopCount
 	} else {
-		loopCount, isNull, err = b.args[0].EvalInt(ctx, row)
+		loopCount, isNull, err = b.args[0].EvalInt(b.ctx, row)
 		if isNull || err != nil {
 			return 0, isNull, err
 		}
@@ -694,8 +604,8 @@ func (b *builtinBenchmarkSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bo
 	// BENCHMARK() will pass-through the eval error,
 	// behavior observed on MySQL 5.7.24.
 	var i int64
-	arg := b.args[1]
-	switch evalType := arg.GetType(ctx).EvalType(); evalType {
+	arg, ctx := b.args[1], b.ctx
+	switch evalType := arg.GetType().EvalType(); evalType {
 	case types.ETInt:
 		for ; i < loopCount; i++ {
 			_, isNull, err = arg.EvalInt(ctx, row)
@@ -746,7 +656,7 @@ func (b *builtinBenchmarkSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bo
 			}
 		}
 	default: // Should never go into here.
-		return 0, true, errors.Errorf("%s is not supported for BENCHMARK()", evalType)
+		return 0, true, errors.Errorf("EvalType %v not implemented for builtin BENCHMARK()", evalType)
 	}
 
 	// Return value of BENCHMARK() is always 0.
@@ -757,19 +667,19 @@ type charsetFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *charsetFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *charsetFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
 	argsTps := make([]types.EvalType, 0, len(args))
 	for _, arg := range args {
-		argsTps = append(argsTps, arg.GetType(ctx.GetEvalCtx()).EvalType())
+		argsTps = append(argsTps, arg.GetType().EvalType())
 	}
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, argsTps...)
 	if err != nil {
 		return nil, err
 	}
-	charset, collate := ctx.GetCharsetInfo()
+	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
 	bf.tp.SetFlen(64)
@@ -787,19 +697,19 @@ func (b *builtinCharsetSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinCharsetSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	return b.args[0].GetType(ctx).GetCharset(), false, nil
+func (b *builtinCharsetSig) evalString(_ chunk.Row) (string, bool, error) {
+	return b.args[0].GetType().GetCharset(), false, nil
 }
 
 type coercibilityFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *coercibilityFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *coercibilityFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETInt, args[0].GetType(ctx.GetEvalCtx()).EvalType())
+	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETInt, args[0].GetType().EvalType())
 	if err != nil {
 		return nil, err
 	}
@@ -812,7 +722,7 @@ type builtinCoercibilitySig struct {
 	baseBuiltinFunc
 }
 
-func (c *builtinCoercibilitySig) evalInt(ctx EvalContext, row chunk.Row) (val int64, isNull bool, err error) {
+func (c *builtinCoercibilitySig) evalInt(_ chunk.Row) (res int64, isNull bool, err error) {
 	return int64(c.args[0].Coercibility()), false, nil
 }
 
@@ -826,19 +736,19 @@ type collationFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *collationFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *collationFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
 	argsTps := make([]types.EvalType, 0, len(args))
 	for _, arg := range args {
-		argsTps = append(argsTps, arg.GetType(ctx.GetEvalCtx()).EvalType())
+		argsTps = append(argsTps, arg.GetType().EvalType())
 	}
 	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, argsTps...)
 	if err != nil {
 		return nil, err
 	}
-	charset, collate := ctx.GetCharsetInfo()
+	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
 	bf.tp.SetFlen(64)
@@ -856,15 +766,15 @@ func (b *builtinCollationSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinCollationSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	return b.args[0].GetType(ctx).GetCollate(), false, nil
+func (b *builtinCollationSig) evalString(_ chunk.Row) (string, bool, error) {
+	return b.args[0].GetType().GetCollate(), false, nil
 }
 
 type rowCountFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *rowCountFunctionClass) getFunction(ctx BuildContext, args []Expression) (sig builtinFunc, err error) {
+func (c *rowCountFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (sig builtinFunc, err error) {
 	if err = c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -872,14 +782,13 @@ func (c *rowCountFunctionClass) getFunction(ctx BuildContext, args []Expression)
 	if err != nil {
 		return nil, err
 	}
-	sig = &builtinRowCountSig{baseBuiltinFunc: bf}
+	sig = &builtinRowCountSig{bf}
 	sig.setPbCode(tipb.ScalarFuncSig_RowCount)
 	return sig, nil
 }
 
 type builtinRowCountSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
 }
 
 func (b *builtinRowCountSig) Clone() builtinFunc {
@@ -888,236 +797,18 @@ func (b *builtinRowCountSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinRowCountSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
 // evalInt evals ROW_COUNT().
 // See https://dev.mysql.com/doc/refman/5.7/en/information-functions.html#function_row-count.
-func (b *builtinRowCountSig) evalInt(ctx EvalContext, row chunk.Row) (res int64, isNull bool, err error) {
-	vars, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return 0, true, err
-	}
-	res = vars.StmtCtx.PrevAffectedRows
+func (b *builtinRowCountSig) evalInt(_ chunk.Row) (res int64, isNull bool, err error) {
+	res = b.ctx.GetSessionVars().StmtCtx.PrevAffectedRows
 	return res, false, nil
-}
-
-type tidbMVCCInfoFunctionClass struct {
-	baseFunctionClass
-}
-
-func (c *tidbMVCCInfoFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, types.ETString)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinTiDBMVCCInfoSig{baseBuiltinFunc: bf}
-	return sig, nil
-}
-
-type builtinTiDBMVCCInfoSig struct {
-	baseBuiltinFunc
-	expropt.KVStorePropReader
-}
-
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinTiDBMVCCInfoSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.KVStorePropReader.RequiredOptionalEvalProps()
-}
-
-func (b *builtinTiDBMVCCInfoSig) Clone() builtinFunc {
-	newSig := &builtinTiDBMVCCInfoSig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// evalString evals a builtinTiDBMVCCInfoSig.
-func (b *builtinTiDBMVCCInfoSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	if !ctx.RequestVerification("", "", "", mysql.SuperPriv) {
-		return "", false, plannererrors.ErrSpecificAccessDenied.FastGenByArgs("SUPER")
-	}
-	s, isNull, err := b.args[0].EvalString(ctx, row)
-	if isNull || err != nil {
-		return "", isNull, err
-	}
-	encodedKey, err := hex.DecodeString(s)
-	if err != nil {
-		return "", false, err
-	}
-	store, err := b.GetKVStore(ctx)
-	if err != nil {
-		return "", isNull, err
-	}
-	hStore, ok := store.(helper.Storage)
-	if !ok {
-		return "", isNull, errors.New("storage is not a helper.Storage")
-	}
-	h := helper.NewHelper(hStore)
-	resp, err := h.GetMvccByEncodedKey(encodedKey)
-	if err != nil {
-		return "", false, err
-	}
-	type mvccInfoResult struct {
-		Key  string                        `json:"key"`
-		Resp *kvrpcpb.MvccGetByKeyResponse `json:"mvcc"`
-	}
-	mvccInfo := []*mvccInfoResult{{s, resp}}
-	if tablecodec.IsIndexKey(encodedKey) && !tablecodec.IsTempIndexKey(encodedKey) {
-		tablecodec.IndexKey2TempIndexKey(encodedKey)
-		hexStr := hex.EncodeToString(encodedKey)
-		res, err := h.GetMvccByEncodedKey(encodedKey)
-		if err != nil {
-			return "", false, err
-		}
-		if res.Info != nil && (len(res.Info.Writes) > 0 || len(res.Info.Values) > 0 || res.Info.Lock != nil) {
-			mvccInfo = append(mvccInfo, &mvccInfoResult{hexStr, res})
-		}
-	}
-	js, err := json.Marshal(mvccInfo)
-	if err != nil {
-		return "", false, err
-	}
-	return string(js), false, nil
-}
-
-type tidbEncodeRecordKeyClass struct {
-	baseFunctionClass
-}
-
-func (c *tidbEncodeRecordKeyClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	evalTps := make([]types.EvalType, 0, len(args))
-	evalTps = append(evalTps, types.ETString, types.ETString)
-	for _, arg := range args[2:] {
-		evalTps = append(evalTps, arg.GetType(ctx.GetEvalCtx()).EvalType())
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, evalTps...)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinTiDBEncodeRecordKeySig{baseBuiltinFunc: bf}
-	return sig, nil
-}
-
-type builtinTiDBEncodeRecordKeySig struct {
-	baseBuiltinFunc
-	expropt.InfoSchemaPropReader
-	expropt.SessionVarsPropReader
-}
-
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinTiDBEncodeRecordKeySig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.InfoSchemaPropReader.RequiredOptionalEvalProps() |
-		b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
-func (b *builtinTiDBEncodeRecordKeySig) Clone() builtinFunc {
-	newSig := &builtinTiDBEncodeRecordKeySig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// evalString evals a builtinTiDBEncodeRecordKeySig.
-func (b *builtinTiDBEncodeRecordKeySig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	is, err := b.GetDomainInfoSchema(ctx)
-	if err != nil {
-		return "", true, err
-	}
-	if EncodeRecordKeyFromRow == nil {
-		return "", false, errors.New("EncodeRecordKeyFromRow is not initialized")
-	}
-	recordKey, isNull, err := EncodeRecordKeyFromRow(ctx, is, b.args, row)
-	if isNull || err != nil {
-		if errors.ErrorEqual(err, plannererrors.ErrSpecificAccessDenied) {
-			sv, err2 := b.GetSessionVars(ctx)
-			if err2 != nil {
-				return "", isNull, err
-			}
-			tblName, isNull, err2 := b.args[1].EvalString(ctx, row)
-			if err2 != nil || isNull {
-				return "", isNull, err
-			}
-			return "", isNull, plannererrors.ErrTableaccessDenied.FastGenByArgs("SELECT", sv.User.AuthUsername, sv.User.AuthHostname, tblName)
-		}
-		return "", isNull, err
-	}
-	return hex.EncodeToString(recordKey), false, nil
-}
-
-type tidbEncodeIndexKeyClass struct {
-	baseFunctionClass
-}
-
-func (c *tidbEncodeIndexKeyClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
-	if err := c.verifyArgs(args); err != nil {
-		return nil, err
-	}
-	evalTps := make([]types.EvalType, 0, len(args))
-	evalTps = append(evalTps, types.ETString, types.ETString, types.ETString)
-	for _, arg := range args[3:] {
-		evalTps = append(evalTps, arg.GetType(ctx.GetEvalCtx()).EvalType())
-	}
-	bf, err := newBaseBuiltinFuncWithTp(ctx, c.funcName, args, types.ETString, evalTps...)
-	if err != nil {
-		return nil, err
-	}
-	sig := &builtinTiDBEncodeIndexKeySig{baseBuiltinFunc: bf}
-	return sig, nil
-}
-
-type builtinTiDBEncodeIndexKeySig struct {
-	baseBuiltinFunc
-	expropt.InfoSchemaPropReader
-	expropt.SessionVarsPropReader
-}
-
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinTiDBEncodeIndexKeySig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.InfoSchemaPropReader.RequiredOptionalEvalProps() |
-		b.SessionVarsPropReader.RequiredOptionalEvalProps()
-}
-
-func (b *builtinTiDBEncodeIndexKeySig) Clone() builtinFunc {
-	newSig := &builtinTiDBEncodeIndexKeySig{}
-	newSig.cloneFrom(&b.baseBuiltinFunc)
-	return newSig
-}
-
-// evalString evals a builtinTiDBEncodeIndexKeySig.
-func (b *builtinTiDBEncodeIndexKeySig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	is, err := b.GetDomainInfoSchema(ctx)
-	if err != nil {
-		return "", true, err
-	}
-	if EncodeIndexKeyFromRow == nil {
-		return "", false, errors.New("EncodeIndexKeyFromRow is not initialized")
-	}
-	idxKey, isNull, err := EncodeIndexKeyFromRow(ctx, is, b.args, row)
-	if isNull || err != nil {
-		if errors.ErrorEqual(err, plannererrors.ErrSpecificAccessDenied) {
-			sv, err2 := b.GetSessionVars(ctx)
-			if err2 != nil {
-				return "", isNull, err
-			}
-			tblName, isNull, err2 := b.args[1].EvalString(ctx, row)
-			if err2 != nil || isNull {
-				return "", isNull, err
-			}
-			return "", isNull, plannererrors.ErrTableaccessDenied.FastGenByArgs("SELECT", sv.User.AuthUsername, sv.User.AuthHostname, tblName)
-		}
-		return "", isNull, err
-	}
-	return hex.EncodeToString(idxKey), false, nil
 }
 
 type tidbDecodeKeyFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbDecodeKeyFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbDecodeKeyFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1125,27 +816,12 @@ func (c *tidbDecodeKeyFunctionClass) getFunction(ctx BuildContext, args []Expres
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinTiDBDecodeKeySig{baseBuiltinFunc: bf}
+	sig := &builtinTiDBDecodeKeySig{bf}
 	return sig, nil
 }
 
-// DecodeKeyFromString is used to decode key by expressions
-var DecodeKeyFromString func(types.Context, infoschema.MetaOnlyInfoSchema, string) string
-
-// EncodeRecordKeyFromRow is used to encode record key by expressions.
-var EncodeRecordKeyFromRow func(ctx EvalContext, is infoschema.MetaOnlyInfoSchema, args []Expression, row chunk.Row) ([]byte, bool, error)
-
-// EncodeIndexKeyFromRow is used to encode index key by expressions.
-var EncodeIndexKeyFromRow func(ctx EvalContext, is infoschema.MetaOnlyInfoSchema, args []Expression, row chunk.Row) ([]byte, bool, error)
-
 type builtinTiDBDecodeKeySig struct {
 	baseBuiltinFunc
-	expropt.InfoSchemaPropReader
-}
-
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinTiDBDecodeKeySig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.InfoSchemaPropReader.RequiredOptionalEvalProps()
 }
 
 func (b *builtinTiDBDecodeKeySig) Clone() builtinFunc {
@@ -1155,32 +831,40 @@ func (b *builtinTiDBDecodeKeySig) Clone() builtinFunc {
 }
 
 // evalInt evals a builtinTiDBDecodeKeySig.
-func (b *builtinTiDBDecodeKeySig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	s, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinTiDBDecodeKeySig) evalString(row chunk.Row) (string, bool, error) {
+	s, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return "", isNull, err
 	}
-	is, err := b.GetDomainInfoSchema(ctx)
-	if err != nil {
-		return "", true, err
+	decode := func(ctx sessionctx.Context, s string) string { return s }
+	if fn := b.ctx.Value(TiDBDecodeKeyFunctionKey); fn != nil {
+		decode = fn.(func(ctx sessionctx.Context, s string) string)
 	}
-
-	if fn := DecodeKeyFromString; fn != nil {
-		s = fn(ctx.TypeCtx(), is, s)
-	}
-	return s, false, nil
+	return decode(b.ctx, s), false, nil
 }
+
+// TiDBDecodeKeyFunctionKeyType is used to identify the decoder function in context.
+type TiDBDecodeKeyFunctionKeyType int
+
+// String() implements Stringer.
+func (k TiDBDecodeKeyFunctionKeyType) String() string {
+	return "tidb_decode_key"
+}
+
+// TiDBDecodeKeyFunctionKey is used to identify the decoder function in context.
+const TiDBDecodeKeyFunctionKey TiDBDecodeKeyFunctionKeyType = 0
 
 type tidbDecodeSQLDigestsFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbDecodeSQLDigestsFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbDecodeSQLDigestsFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
 
-	if !ctx.GetEvalCtx().RequestVerification("", "", "", mysql.ProcessPriv) {
+	pm := privilege.GetPrivilegeManager(ctx)
+	if pm != nil && !pm.RequestVerification(ctx.GetSessionVars().ActiveRoles, "", "", "", mysql.ProcessPriv) {
 		return nil, errSpecificAccessDenied.GenWithStackByArgs("PROCESS")
 	}
 
@@ -1194,20 +878,12 @@ func (c *tidbDecodeSQLDigestsFunctionClass) getFunction(ctx BuildContext, args [
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinTiDBDecodeSQLDigestsSig{baseBuiltinFunc: bf}
+	sig := &builtinTiDBDecodeSQLDigestsSig{bf}
 	return sig, nil
 }
 
 type builtinTiDBDecodeSQLDigestsSig struct {
 	baseBuiltinFunc
-	expropt.SessionVarsPropReader
-	expropt.SQLExecutorPropReader
-}
-
-// RequiredOptionalEvalProps implements the RequireOptionalEvalProps interface.
-func (b *builtinTiDBDecodeSQLDigestsSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SessionVarsPropReader.RequiredOptionalEvalProps() |
-		b.SQLExecutorPropReader.RequiredOptionalEvalProps()
 }
 
 func (b *builtinTiDBDecodeSQLDigestsSig) Clone() builtinFunc {
@@ -1216,9 +892,9 @@ func (b *builtinTiDBDecodeSQLDigestsSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinTiDBDecodeSQLDigestsSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
+func (b *builtinTiDBDecodeSQLDigestsSig) evalString(row chunk.Row) (string, bool, error) {
 	args := b.getArgs()
-	digestsStr, isNull, err := args[0].EvalString(ctx, row)
+	digestsStr, isNull, err := args[0].EvalString(b.ctx, row)
 	if err != nil {
 		return "", true, err
 	}
@@ -1228,7 +904,7 @@ func (b *builtinTiDBDecodeSQLDigestsSig) evalString(ctx EvalContext, row chunk.R
 
 	stmtTruncateLength := int64(0)
 	if len(args) > 1 {
-		stmtTruncateLength, isNull, err = args[1].EvalInt(ctx, row)
+		stmtTruncateLength, isNull, err = args[1].EvalInt(b.ctx, row)
 		if err != nil {
 			return "", true, err
 		}
@@ -1237,15 +913,14 @@ func (b *builtinTiDBDecodeSQLDigestsSig) evalString(ctx EvalContext, row chunk.R
 		}
 	}
 
-	var digests []any
+	var digests []interface{}
 	err = json.Unmarshal([]byte(digestsStr), &digests)
 	if err != nil {
 		const errMsgMaxLength = 32
 		if len(digestsStr) > errMsgMaxLength {
 			digestsStr = digestsStr[:errMsgMaxLength] + "..."
 		}
-		tc := typeCtx(ctx)
-		tc.AppendWarning(errIncorrectArgs.FastGen("The argument can't be unmarshalled as JSON array: '%s'", digestsStr))
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errIncorrectArgs.GenWithStack("The argument can't be unmarshalled as JSON array: '%s'", digestsStr))
 		return "", true, nil
 	}
 
@@ -1260,38 +935,26 @@ func (b *builtinTiDBDecodeSQLDigestsSig) evalString(ctx EvalContext, row chunk.R
 		}
 	}
 
-	vars, err := b.GetSessionVars(ctx)
-	if err != nil {
-		return "", true, err
-	}
-
 	// Querying may take some time and it takes a context.Context as argument, which is not available here.
 	// We simply create a context with a timeout here.
-	timeout := time.Duration(vars.GetMaxExecutionTime()) * time.Millisecond
+	timeout := time.Duration(b.ctx.GetSessionVars().MaxExecutionTime) * time.Millisecond
 	if timeout == 0 || timeout > 20*time.Second {
 		timeout = 20 * time.Second
 	}
-	goCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
-	exec, err := b.GetSQLExecutor(ctx)
-	if err != nil {
-		return "", true, err
-	}
-
-	err = retriever.RetrieveGlobal(goCtx, exec)
+	err = retriever.RetrieveGlobal(ctx, b.ctx)
 	if err != nil {
 		if errors.Cause(err) == context.DeadlineExceeded || errors.Cause(err) == context.Canceled {
 			return "", true, errUnknown.GenWithStack("Retrieving cancelled internally with error: %v", err)
 		}
 
-		tc := typeCtx(ctx)
-		tc.AppendWarning(errUnknown.FastGen("Retrieving statements information failed with error: %v", err))
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errUnknown.GenWithStack("Retrieving statements information failed with error: %v", err))
 		return "", true, nil
 	}
 
 	// Collect the result.
-	result := make([]any, len(digests))
+	result := make([]interface{}, len(digests))
 	for i, item := range digests {
 		if item == nil {
 			continue
@@ -1309,8 +972,7 @@ func (b *builtinTiDBDecodeSQLDigestsSig) evalString(ctx EvalContext, row chunk.R
 
 	resultStr, err := json.Marshal(result)
 	if err != nil {
-		tc := typeCtx(ctx)
-		tc.AppendWarning(errUnknown.FastGen("Marshalling result as JSON failed with error: %v", err))
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(errUnknown.GenWithStack("Marshalling result as JSON failed with error: %v", err))
 		return "", true, nil
 	}
 
@@ -1321,7 +983,7 @@ type tidbEncodeSQLDigestFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbEncodeSQLDigestFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbEncodeSQLDigestFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1345,8 +1007,8 @@ func (b *builtinTiDBEncodeSQLDigestSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinTiDBEncodeSQLDigestSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	orgSQLStr, isNull, err := b.getArgs()[0].EvalString(ctx, row)
+func (b *builtinTiDBEncodeSQLDigestSig) evalString(row chunk.Row) (string, bool, error) {
+	orgSQLStr, isNull, err := b.getArgs()[0].EvalString(b.ctx, row)
 	if err != nil {
 		return "", true, err
 	}
@@ -1360,7 +1022,7 @@ type tidbDecodePlanFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *tidbDecodePlanFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *tidbDecodePlanFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1386,8 +1048,8 @@ func (b *builtinTiDBDecodePlanSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinTiDBDecodePlanSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	planString, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinTiDBDecodePlanSig) evalString(row chunk.Row) (string, bool, error) {
+	planString, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return "", isNull, err
 	}
@@ -1408,15 +1070,14 @@ func (b *builtinTiDBDecodeBinaryPlanSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinTiDBDecodeBinaryPlanSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	planString, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinTiDBDecodeBinaryPlanSig) evalString(row chunk.Row) (string, bool, error) {
+	planString, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return "", isNull, err
 	}
 	planTree, err := plancodec.DecodeBinaryPlan(planString)
 	if err != nil {
-		tc := typeCtx(ctx)
-		tc.AppendWarning(err)
+		b.ctx.GetSessionVars().StmtCtx.AppendWarning(err)
 		return "", false, nil
 	}
 	return planTree, false, nil
@@ -1426,7 +1087,7 @@ type nextValFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *nextValFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *nextValFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1434,20 +1095,13 @@ func (c *nextValFunctionClass) getFunction(ctx BuildContext, args []Expression) 
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinNextValSig{baseBuiltinFunc: bf}
+	sig := &builtinNextValSig{bf}
 	bf.tp.SetFlen(10)
 	return sig, nil
 }
 
 type builtinNextValSig struct {
 	baseBuiltinFunc
-	expropt.SequenceOperatorPropReader
-	expropt.SessionVarsPropReader
-}
-
-func (b *builtinNextValSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SequenceOperatorPropReader.RequiredOptionalEvalProps() |
-		b.SessionVarsPropReader.RequiredOptionalEvalProps()
 }
 
 func (b *builtinNextValSig) Clone() builtinFunc {
@@ -1456,36 +1110,32 @@ func (b *builtinNextValSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinNextValSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
-	sequenceName, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinNextValSig) evalInt(row chunk.Row) (int64, bool, error) {
+	sequenceName, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return 0, isNull, err
 	}
 	db, seq := getSchemaAndSequence(sequenceName)
 	if len(db) == 0 {
-		db = ctx.CurrentDB()
+		db = b.ctx.GetSessionVars().CurrentDB
 	}
 	// Check the tableName valid.
-	sequence, err := b.GetSequenceOperator(ctx, db, seq)
-	if err != nil {
-		return 0, false, err
-	}
-	// Get session vars
-	vars, err := b.GetSessionVars(ctx)
+	sequence, err := util.GetSequenceByName(b.ctx.GetInfoSchema(), model.NewCIStr(db), model.NewCIStr(seq))
 	if err != nil {
 		return 0, false, err
 	}
 	// Do the privilege check.
-	user := vars.User
-	if !ctx.RequestVerification(db, seq, "", mysql.InsertPriv) {
+	checker := privilege.GetPrivilegeManager(b.ctx)
+	user := b.ctx.GetSessionVars().User
+	if checker != nil && !checker.RequestVerification(b.ctx.GetSessionVars().ActiveRoles, db, seq, "", mysql.InsertPriv) {
 		return 0, false, errSequenceAccessDenied.GenWithStackByArgs("INSERT", user.AuthUsername, user.AuthHostname, seq)
 	}
-	nextVal, err := sequence.GetSequenceNextVal()
+	nextVal, err := sequence.GetSequenceNextVal(b.ctx, db, seq)
 	if err != nil {
 		return 0, false, err
 	}
 	// update the sequenceState.
-	vars.SequenceState.UpdateState(sequence.GetSequenceID(), nextVal)
+	b.ctx.GetSessionVars().SequenceState.UpdateState(sequence.GetSequenceID(), nextVal)
 	return nextVal, false, nil
 }
 
@@ -1493,7 +1143,7 @@ type lastValFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *lastValFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *lastValFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1501,20 +1151,13 @@ func (c *lastValFunctionClass) getFunction(ctx BuildContext, args []Expression) 
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinLastValSig{baseBuiltinFunc: bf}
+	sig := &builtinLastValSig{bf}
 	bf.tp.SetFlen(10)
 	return sig, nil
 }
 
 type builtinLastValSig struct {
 	baseBuiltinFunc
-	expropt.SequenceOperatorPropReader
-	expropt.SessionVarsPropReader
-}
-
-func (b *builtinLastValSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SequenceOperatorPropReader.RequiredOptionalEvalProps() |
-		b.SessionVarsPropReader.RequiredOptionalEvalProps()
 }
 
 func (b *builtinLastValSig) Clone() builtinFunc {
@@ -1523,38 +1166,34 @@ func (b *builtinLastValSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinLastValSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
-	sequenceName, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinLastValSig) evalInt(row chunk.Row) (int64, bool, error) {
+	sequenceName, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return 0, isNull, err
 	}
 	db, seq := getSchemaAndSequence(sequenceName)
 	if len(db) == 0 {
-		db = ctx.CurrentDB()
+		db = b.ctx.GetSessionVars().CurrentDB
 	}
 	// Check the tableName valid.
-	sequence, err := b.GetSequenceOperator(ctx, db, seq)
-	if err != nil {
-		return 0, false, err
-	}
-	// Get session vars
-	vars, err := b.GetSessionVars(ctx)
+	sequence, err := util.GetSequenceByName(b.ctx.GetInfoSchema(), model.NewCIStr(db), model.NewCIStr(seq))
 	if err != nil {
 		return 0, false, err
 	}
 	// Do the privilege check.
-	user := vars.User
-	if !ctx.RequestVerification(db, seq, "", mysql.SelectPriv) {
+	checker := privilege.GetPrivilegeManager(b.ctx)
+	user := b.ctx.GetSessionVars().User
+	if checker != nil && !checker.RequestVerification(b.ctx.GetSessionVars().ActiveRoles, db, seq, "", mysql.SelectPriv) {
 		return 0, false, errSequenceAccessDenied.GenWithStackByArgs("SELECT", user.AuthUsername, user.AuthHostname, seq)
 	}
-	return vars.SequenceState.GetLastValue(sequence.GetSequenceID())
+	return b.ctx.GetSessionVars().SequenceState.GetLastValue(sequence.GetSequenceID())
 }
 
 type setValFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *setValFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *setValFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1562,20 +1201,13 @@ func (c *setValFunctionClass) getFunction(ctx BuildContext, args []Expression) (
 	if err != nil {
 		return nil, err
 	}
-	sig := &builtinSetValSig{baseBuiltinFunc: bf}
-	bf.tp.SetFlen(args[1].GetType(ctx.GetEvalCtx()).GetFlen())
+	sig := &builtinSetValSig{bf}
+	bf.tp.SetFlen(args[1].GetType().GetFlen())
 	return sig, nil
 }
 
 type builtinSetValSig struct {
 	baseBuiltinFunc
-	expropt.SequenceOperatorPropReader
-	expropt.SessionVarsPropReader
-}
-
-func (b *builtinSetValSig) RequiredOptionalEvalProps() OptionalEvalPropKeySet {
-	return b.SequenceOperatorPropReader.RequiredOptionalEvalProps() |
-		b.SessionVarsPropReader.RequiredOptionalEvalProps()
 }
 
 func (b *builtinSetValSig) Clone() builtinFunc {
@@ -1584,35 +1216,31 @@ func (b *builtinSetValSig) Clone() builtinFunc {
 	return newSig
 }
 
-func (b *builtinSetValSig) evalInt(ctx EvalContext, row chunk.Row) (int64, bool, error) {
-	sequenceName, isNull, err := b.args[0].EvalString(ctx, row)
+func (b *builtinSetValSig) evalInt(row chunk.Row) (int64, bool, error) {
+	sequenceName, isNull, err := b.args[0].EvalString(b.ctx, row)
 	if isNull || err != nil {
 		return 0, isNull, err
 	}
 	db, seq := getSchemaAndSequence(sequenceName)
 	if len(db) == 0 {
-		db = ctx.CurrentDB()
+		db = b.ctx.GetSessionVars().CurrentDB
 	}
 	// Check the tableName valid.
-	sequence, err := b.GetSequenceOperator(ctx, db, seq)
-	if err != nil {
-		return 0, false, err
-	}
-	// Get session vars
-	vars, err := b.GetSessionVars(ctx)
+	sequence, err := util.GetSequenceByName(b.ctx.GetInfoSchema(), model.NewCIStr(db), model.NewCIStr(seq))
 	if err != nil {
 		return 0, false, err
 	}
 	// Do the privilege check.
-	user := vars.User
-	if !ctx.RequestVerification(db, seq, "", mysql.InsertPriv) {
+	checker := privilege.GetPrivilegeManager(b.ctx)
+	user := b.ctx.GetSessionVars().User
+	if checker != nil && !checker.RequestVerification(b.ctx.GetSessionVars().ActiveRoles, db, seq, "", mysql.InsertPriv) {
 		return 0, false, errSequenceAccessDenied.GenWithStackByArgs("INSERT", user.AuthUsername, user.AuthHostname, seq)
 	}
-	setValue, isNull, err := b.args[1].EvalInt(ctx, row)
+	setValue, isNull, err := b.args[1].EvalInt(b.ctx, row)
 	if isNull || err != nil {
 		return 0, isNull, err
 	}
-	return sequence.SetSequenceVal(setValue)
+	return sequence.SetSequenceVal(b.ctx, setValue, db, seq)
 }
 
 func getSchemaAndSequence(sequenceName string) (string, string) {
@@ -1627,7 +1255,7 @@ type formatBytesFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *formatBytesFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *formatBytesFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1635,7 +1263,7 @@ func (c *formatBytesFunctionClass) getFunction(ctx BuildContext, args []Expressi
 	if err != nil {
 		return nil, err
 	}
-	charset, collate := ctx.GetCharsetInfo()
+	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
 	sig := &builtinFormatBytesSig{bf}
@@ -1654,8 +1282,8 @@ func (b *builtinFormatBytesSig) Clone() builtinFunc {
 
 // formatBytes evals a builtinFormatBytesSig.
 // See https://dev.mysql.com/doc/refman/8.0/en/performance-schema-functions.html#function_format-bytes
-func (b *builtinFormatBytesSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	val, isNull, err := b.args[0].EvalReal(ctx, row)
+func (b *builtinFormatBytesSig) evalString(row chunk.Row) (string, bool, error) {
+	val, isNull, err := b.args[0].EvalReal(b.ctx, row)
 	if isNull || err != nil {
 		return "", isNull, err
 	}
@@ -1666,7 +1294,7 @@ type formatNanoTimeFunctionClass struct {
 	baseFunctionClass
 }
 
-func (c *formatNanoTimeFunctionClass) getFunction(ctx BuildContext, args []Expression) (builtinFunc, error) {
+func (c *formatNanoTimeFunctionClass) getFunction(ctx sessionctx.Context, args []Expression) (builtinFunc, error) {
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
@@ -1674,7 +1302,7 @@ func (c *formatNanoTimeFunctionClass) getFunction(ctx BuildContext, args []Expre
 	if err != nil {
 		return nil, err
 	}
-	charset, collate := ctx.GetCharsetInfo()
+	charset, collate := ctx.GetSessionVars().GetCharsetInfo()
 	bf.tp.SetCharset(charset)
 	bf.tp.SetCollate(collate)
 	sig := &builtinFormatNanoTimeSig{bf}
@@ -1693,8 +1321,8 @@ func (b *builtinFormatNanoTimeSig) Clone() builtinFunc {
 
 // formatNanoTime evals a builtinFormatNanoTimeSig, as time unit in TiDB is always nanosecond, not picosecond.
 // See https://dev.mysql.com/doc/refman/8.0/en/performance-schema-functions.html#function_format-pico-time
-func (b *builtinFormatNanoTimeSig) evalString(ctx EvalContext, row chunk.Row) (string, bool, error) {
-	val, isNull, err := b.args[0].EvalReal(ctx, row)
+func (b *builtinFormatNanoTimeSig) evalString(row chunk.Row) (string, bool, error) {
+	val, isNull, err := b.args[0].EvalReal(b.ctx, row)
 	if isNull || err != nil {
 		return "", isNull, err
 	}

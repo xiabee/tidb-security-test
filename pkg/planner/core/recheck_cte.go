@@ -14,40 +14,36 @@
 
 package core
 
-import (
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
-	"github.com/pingcap/tidb/pkg/util/intset"
-)
+import "github.com/pingcap/tidb/pkg/util/intset"
 
 // RecheckCTE fills the IsOuterMostCTE field for CTEs.
 // It's a temp solution to before we fully use the Sequence to optimize the CTEs.
 // This func checks whether the CTE is referenced only by the main query or not.
-func RecheckCTE(p base.LogicalPlan) {
+func RecheckCTE(p LogicalPlan) {
 	visited := intset.NewFastIntSet()
 	findCTEs(p, &visited, true)
 }
 
 func findCTEs(
-	p base.LogicalPlan,
+	p LogicalPlan,
 	visited *intset.FastIntSet,
 	isRootTree bool,
 ) {
-	if cteReader, ok := p.(*logicalop.LogicalCTE); ok {
-		cte := cteReader.Cte
+	if cteReader, ok := p.(*LogicalCTE); ok {
+		cte := cteReader.cte
 		if !isRootTree {
 			// Set it to false since it's referenced by other CTEs.
-			cte.IsOuterMostCTE = false
+			cte.isOuterMostCTE = false
 		}
 		if visited.Has(cte.IDForStorage) {
 			return
 		}
 		visited.Insert(cte.IDForStorage)
 		// Set it when we meet it first time.
-		cte.IsOuterMostCTE = isRootTree
-		findCTEs(cte.SeedPartLogicalPlan, visited, false)
-		if cte.RecursivePartLogicalPlan != nil {
-			findCTEs(cte.RecursivePartLogicalPlan, visited, false)
+		cte.isOuterMostCTE = isRootTree
+		findCTEs(cte.seedPartLogicalPlan, visited, false)
+		if cte.recursivePartLogicalPlan != nil {
+			findCTEs(cte.recursivePartLogicalPlan, visited, false)
 		}
 		return
 	}

@@ -23,14 +23,11 @@ import (
 
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/resourcegroup"
-	"github.com/pingcap/tidb/pkg/session/cursor"
 	"github.com/pingcap/tidb/pkg/session/txninfo"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/util/disk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/memory"
-	"github.com/pingcap/tidb/pkg/util/ppcpuusage"
 	"github.com/tikv/client-go/v2/oracle"
 )
 
@@ -43,20 +40,16 @@ type OOMAlarmVariablesInfo struct {
 
 // ProcessInfo is a struct used for show processlist statement.
 type ProcessInfo struct {
-	Time                time.Time
-	ExpensiveLogTime    time.Time
-	ExpensiveTxnLogTime time.Time
-	CurTxnCreateTime    time.Time
-	Plan                any
-	CursorTracker       cursor.Tracker
-	StmtCtx             *stmtctx.StatementContext
-	// SQLCPUUsage should be set nil for sleep command
-	SQLCPUUsage           *ppcpuusage.SQLCPUUsages
+	Time                  time.Time
+	ExpensiveLogTime      time.Time
+	ExpensiveTxnLogTime   time.Time
+	CurTxnCreateTime      time.Time
+	Plan                  interface{}
+	StmtCtx               *stmtctx.StatementContext
 	RefCountOfStmtCtx     *stmtctx.ReferenceCount
 	MemTracker            *memory.Tracker
 	DiskTracker           *disk.Tracker
-	RunawayChecker        resourcegroup.RunawayChecker
-	StatsInfo             func(any) map[string]uint64
+	StatsInfo             func(interface{}) map[string]uint64
 	RuntimeStatsColl      *execdetails.RuntimeStatsColl
 	User                  string
 	Digest                string
@@ -66,7 +59,6 @@ type ProcessInfo struct {
 	Port                  string
 	ResourceGroupName     string
 	SessionAlias          string
-	RedactSQL             string
 	IndexNames            []string
 	TableIDs              []int64
 	PlanExplainRows       [][]string
@@ -78,17 +70,12 @@ type ProcessInfo struct {
 	MaxExecutionTime uint64
 	State            uint16
 	Command          byte
-}
-
-// Clone return a shallow clone copy of this processInfo.
-func (pi *ProcessInfo) Clone() *ProcessInfo {
-	cp := *pi
-	return &cp
+	RedactSQL        bool
 }
 
 // ToRowForShow returns []interface{} for the row data of "SHOW [FULL] PROCESSLIST".
-func (pi *ProcessInfo) ToRowForShow(full bool) []any {
-	var info any
+func (pi *ProcessInfo) ToRowForShow(full bool) []interface{} {
+	var info interface{}
 	if len(pi.Info) > 0 {
 		if full {
 			info = pi.Info
@@ -97,7 +84,7 @@ func (pi *ProcessInfo) ToRowForShow(full bool) []any {
 		}
 	}
 	t := uint64(time.Since(pi.Time) / time.Second)
-	var db any
+	var db interface{}
 	if len(pi.DB) > 0 {
 		db = pi.DB
 	}
@@ -107,7 +94,7 @@ func (pi *ProcessInfo) ToRowForShow(full bool) []any {
 	} else {
 		host = pi.Host
 	}
-	return []any{
+	return []interface{}{
 		pi.ID,
 		pi.User,
 		host,
@@ -134,7 +121,7 @@ func (pi *ProcessInfo) txnStartTs(tz *time.Location) (txnStart string) {
 
 // ToRow returns []interface{} for the row data of
 // "SELECT * FROM INFORMATION_SCHEMA.PROCESSLIST".
-func (pi *ProcessInfo) ToRow(tz *time.Location) []any {
+func (pi *ProcessInfo) ToRow(tz *time.Location) []interface{} {
 	bytesConsumed := int64(0)
 	diskConsumed := int64(0)
 	if pi.StmtCtx != nil {
@@ -145,17 +132,7 @@ func (pi *ProcessInfo) ToRow(tz *time.Location) []any {
 			diskConsumed = pi.DiskTracker.BytesConsumed()
 		}
 	}
-
-	var affectedRows any
-	var cpuUsages ppcpuusage.CPUUsages
-	if pi.StmtCtx != nil {
-		affectedRows = pi.StmtCtx.AffectedRows()
-	}
-	if pi.SQLCPUUsage != nil {
-		cpuUsages = pi.SQLCPUUsage.GetCPUUsages()
-	}
-	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed,
-		pi.txnStartTs(tz), pi.ResourceGroupName, pi.SessionAlias, affectedRows, cpuUsages.TidbCPUTime.Nanoseconds(), cpuUsages.TikvCPUTime.Nanoseconds())
+	return append(pi.ToRowForShow(true), pi.Digest, bytesConsumed, diskConsumed, pi.txnStartTs(tz), pi.ResourceGroupName, pi.SessionAlias)
 }
 
 // ascServerStatus is a slice of all defined server status in ascending order.
@@ -212,14 +189,16 @@ type SessionManager interface {
 	ShowProcessList() map[uint64]*ProcessInfo
 	ShowTxnList() []*txninfo.TxnInfo
 	GetProcessInfo(id uint64) (*ProcessInfo, bool)
-	Kill(connectionID uint64, query bool, maxExecutionTime bool, runaway bool)
+	Kill(connectionID uint64, query bool, maxExecutionTime bool)
 	KillAllConnections()
 	UpdateTLSConfig(cfg *tls.Config)
 	ServerID() uint64
+	// GetAutoAnalyzeProcID returns processID for auto analyze
+	GetAutoAnalyzeProcID() uint64
 	// StoreInternalSession puts the internal session pointer to the map in the SessionManager.
-	StoreInternalSession(se any)
+	StoreInternalSession(se interface{})
 	// DeleteInternalSession deletes the internal session pointer from the map in the SessionManager.
-	DeleteInternalSession(se any)
+	DeleteInternalSession(se interface{})
 	// GetInternalSessionStartTSList gets all startTS of every transactions running in the current internal sessions.
 	GetInternalSessionStartTSList() []uint64
 	// CheckOldRunningTxn checks if there is an old transaction running in the current sessions

@@ -15,30 +15,32 @@
 package core
 
 import (
-	"fmt"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/expression/aggregation"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
-	util2 "github.com/pingcap/tidb/pkg/planner/util"
-	"github.com/pingcap/tidb/pkg/sessionctx/variable"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table/tables"
+	"github.com/pingcap/tidb/pkg/telemetry"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/ranger"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalExpand) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *basePhysicalPlan) ToPB(_ sessionctx.Context, _ kv.StoreType) (*tipb.Executor, error) {
+	return nil, errors.Errorf("plan %s fails converts to PB", p.Plan.ExplainID())
+}
+
+// ToPB implements PhysicalPlan ToPB interface.
+func (p *PhysicalExpand) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
 	if len(p.LevelExprs) > 0 {
 		return p.toPBV2(ctx, storeType)
 	}
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	groupingSetsPB, err := p.GroupingSets.ToPB(ctx.GetExprCtx().GetEvalCtx(), client)
+	groupingSetsPB, err := p.GroupingSets.ToPB(sc, client)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +50,7 @@ func (p *PhysicalExpand) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) 
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		expand.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		expand.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -57,12 +59,12 @@ func (p *PhysicalExpand) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) 
 	return &tipb.Executor{Tp: tipb.ExecType_TypeExpand, Expand: expand, ExecutorId: &executorID}, nil
 }
 
-func (p *PhysicalExpand) toPBV2(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalExpand) toPBV2(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	projExprsPB := make([]*tipb.ExprSlice, 0, len(p.LevelExprs))
-	evalCtx := ctx.GetExprCtx().GetEvalCtx()
 	for _, exprs := range p.LevelExprs {
-		expressionsPB, err := expression.ExpressionsToPBList(evalCtx, exprs, client)
+		expressionsPB, err := expression.ExpressionsToPBList(sc, exprs, client)
 		if err != nil {
 			return nil, err
 		}
@@ -75,7 +77,7 @@ func (p *PhysicalExpand) toPBV2(ctx *base.BuildPBContext, storeType kv.StoreType
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		expand2.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		expand2.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -85,18 +87,18 @@ func (p *PhysicalExpand) toPBV2(ctx *base.BuildPBContext, storeType kv.StoreType
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalHashAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalHashAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	groupByExprs, err := expression.ExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), p.GroupByItems, client)
+	groupByExprs, err := expression.ExpressionsToPBList(sc, p.GroupByItems, client)
 	if err != nil {
 		return nil, err
 	}
 	aggExec := &tipb.Aggregation{
 		GroupBy: groupByExprs,
 	}
-	pushDownCtx := util2.GetPushDownCtx(p.SCtx())
 	for _, aggFunc := range p.AggFuncs {
-		agg, err := aggregation.AggFuncToPBExpr(pushDownCtx, aggFunc, storeType)
+		agg, err := aggregation.AggFuncToPBExpr(ctx, client, aggFunc, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -105,39 +107,26 @@ func (p *PhysicalHashAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType)
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		aggExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		aggExec.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		executorID = p.ExplainID().String()
-		// If p.tiflashPreAggMode is empty, means no need to consider preagg mode.
-		// For example it's the the second stage of hashagg.
-		if len(p.tiflashPreAggMode) != 0 {
-			if preAggModeVal, ok := variable.ToTiPBTiFlashPreAggMode(p.tiflashPreAggMode); !ok {
-				err = fmt.Errorf("unexpected tiflash pre agg mode: %v", p.tiflashPreAggMode)
-			} else {
-				aggExec.PreAggMode = &preAggModeVal
-			}
-			if err != nil {
-				return nil, err
-			}
-		}
 	}
 	return &tipb.Executor{
 		Tp:                            tipb.ExecType_TypeAggregation,
 		Aggregation:                   aggExec,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: p.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalStreamAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalStreamAgg) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	evalCtx := ctx.GetExprCtx().GetEvalCtx()
-	pushDownCtx := util2.GetPushDownCtxFromBuildPBContext(ctx)
-	groupByExprs, err := expression.ExpressionsToPBList(evalCtx, p.GroupByItems, client)
+	groupByExprs, err := expression.ExpressionsToPBList(sc, p.GroupByItems, client)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +134,7 @@ func (p *PhysicalStreamAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 		GroupBy: groupByExprs,
 	}
 	for _, aggFunc := range p.AggFuncs {
-		agg, err := aggregation.AggFuncToPBExpr(pushDownCtx, aggFunc, storeType)
+		agg, err := aggregation.AggFuncToPBExpr(ctx, client, aggFunc, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -154,7 +143,7 @@ func (p *PhysicalStreamAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		aggExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		aggExec.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -164,9 +153,10 @@ func (p *PhysicalStreamAgg) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalSelection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalSelection) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	conditions, err := expression.ExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), p.Conditions, client)
+	conditions, err := expression.ExpressionsToPBList(sc, p.Conditions, client)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +166,7 @@ func (p *PhysicalSelection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		selExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		selExec.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -186,9 +176,10 @@ func (p *PhysicalSelection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalProjection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalProjection) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
-	exprs, err := expression.ProjectionExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), p.Exprs, client)
+	exprs, err := expression.ExpressionsToPBList(sc, p.Exprs, client)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +190,7 @@ func (p *PhysicalProjection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTy
 	if !(storeType == kv.TiFlash || storeType == kv.TiKV) {
 		return nil, errors.Errorf("the projection can only be pushed down to TiFlash or TiKV now, not %s", storeType.Name())
 	}
-	projExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+	projExec.Child, err = p.children[0].ToPB(ctx, storeType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -208,22 +199,22 @@ func (p *PhysicalProjection) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTy
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalTopN) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalTopN) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	topNExec := &tipb.TopN{
 		Limit: p.Count,
 	}
-	evalCtx := ctx.GetExprCtx().GetEvalCtx()
 	for _, item := range p.ByItems {
-		topNExec.OrderBy = append(topNExec.OrderBy, expression.SortByItemToPB(evalCtx, client, item.Expr, item.Desc))
+		topNExec.OrderBy = append(topNExec.OrderBy, expression.SortByItemToPB(sc, client, item.Expr, item.Desc))
 	}
 	for _, item := range p.PartitionBy {
-		topNExec.PartitionBy = append(topNExec.PartitionBy, expression.SortByItemToPB(evalCtx, client, item.Col.Clone(), item.Desc))
+		topNExec.PartitionBy = append(topNExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	executorID := ""
 	if storeType == kv.TiFlash {
 		var err error
-		topNExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		topNExec.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -233,18 +224,19 @@ func (p *PhysicalTopN) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalLimit) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalLimit) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 	limitExec := &tipb.Limit{
 		Limit: p.Count,
 	}
 	executorID := ""
 	for _, item := range p.PartitionBy {
-		limitExec.PartitionBy = append(limitExec.PartitionBy, expression.SortByItemToPB(ctx.GetExprCtx().GetEvalCtx(), client, item.Col.Clone(), item.Desc))
+		limitExec.PartitionBy = append(limitExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	if storeType == kv.TiFlash {
 		var err error
-		limitExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+		limitExec.Child, err = p.children[0].ToPB(ctx, storeType)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -254,19 +246,20 @@ func (p *PhysicalLimit) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalTableScan) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalTableScan) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
 	if storeType == kv.TiFlash && p.Table.GetPartitionInfo() != nil && p.IsMPPOrBatchCop && p.SCtx().GetSessionVars().StmtCtx.UseDynamicPartitionPrune() {
 		return p.partitionTableScanToPBForFlash(ctx)
 	}
-	tsExec := tables.BuildTableScanFromInfos(p.Table, p.Columns, p.StoreType == kv.TiFlash)
+	tsExec := tables.BuildTableScanFromInfos(p.Table, p.Columns)
 	tsExec.Desc = p.Desc
 	keepOrder := p.KeepOrder
 	tsExec.KeepOrder = &keepOrder
-	tsExec.IsFastScan = &(ctx.TiFlashFastScan)
+	tsExec.IsFastScan = &(ctx.GetSessionVars().TiFlashFastScan)
 
 	if len(p.LateMaterializationFilterCondition) > 0 {
+		sc := ctx.GetSessionVars().StmtCtx
 		client := ctx.GetClient()
-		conditions, err := expression.ExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), p.LateMaterializationFilterCondition, client)
+		conditions, err := expression.ExpressionsToPBList(sc, p.LateMaterializationFilterCondition, client)
 		if err != nil {
 			return nil, err
 		}
@@ -274,7 +267,7 @@ func (p *PhysicalTableScan) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 	}
 
 	var err error
-	tsExec.RuntimeFilterList, err = RuntimeFilterListToPB(ctx, p.runtimeFilterList, ctx.GetClient())
+	tsExec.RuntimeFilterList, err = RuntimeFilterListToPB(p.runtimeFilterList, ctx.GetSessionVars().StmtCtx, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -286,17 +279,27 @@ func (p *PhysicalTableScan) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 	executorID := ""
 	if storeType == kv.TiFlash {
 		executorID = p.ExplainID().String()
+
+		telemetry.CurrentTiflashTableScanCount.Inc()
+		if *(tsExec.IsFastScan) {
+			telemetry.CurrentTiflashTableScanWithFastScanCount.Inc()
+		}
 	}
-	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), tsExec.Columns, p.Columns)
+	err = tables.SetPBColumnsDefaultValue(ctx, tsExec.Columns, p.Columns)
 	return &tipb.Executor{Tp: tipb.ExecType_TypeTableScan, TblScan: tsExec, ExecutorId: &executorID}, err
 }
 
-func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx *base.BuildPBContext) (*tipb.Executor, error) {
-	ptsExec := tables.BuildPartitionTableScanFromInfos(p.Table, p.Columns, ctx.TiFlashFastScan)
+func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx sessionctx.Context) (*tipb.Executor, error) {
+	ptsExec := tables.BuildPartitionTableScanFromInfos(p.Table, p.Columns, ctx.GetSessionVars().TiFlashFastScan)
+	telemetry.CurrentTiflashTableScanCount.Inc()
+	if *(ptsExec.IsFastScan) {
+		telemetry.CurrentTiflashTableScanWithFastScanCount.Inc()
+	}
 
 	if len(p.LateMaterializationFilterCondition) > 0 {
+		sc := ctx.GetSessionVars().StmtCtx
 		client := ctx.GetClient()
-		conditions, err := expression.ExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), p.LateMaterializationFilterCondition, client)
+		conditions, err := expression.ExpressionsToPBList(sc, p.LateMaterializationFilterCondition, client)
 		if err != nil {
 			return nil, err
 		}
@@ -305,7 +308,7 @@ func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx *base.BuildPBCont
 
 	// set runtime filter
 	var err error
-	ptsExec.RuntimeFilterList, err = RuntimeFilterListToPB(ctx, p.runtimeFilterList, ctx.GetClient())
+	ptsExec.RuntimeFilterList, err = RuntimeFilterListToPB(p.runtimeFilterList, ctx.GetSessionVars().StmtCtx, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -313,7 +316,7 @@ func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx *base.BuildPBCont
 
 	ptsExec.Desc = p.Desc
 	executorID := p.ExplainID().String()
-	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), ptsExec.Columns, p.Columns)
+	err = tables.SetPBColumnsDefaultValue(ctx, ptsExec.Columns, p.Columns)
 	return &tipb.Executor{Tp: tipb.ExecType_TypePartitionTableScan, PartitionTableScan: ptsExec, ExecutorId: &executorID}, err
 }
 
@@ -355,7 +358,7 @@ func FindColumnInfoByID(colInfos []*model.ColumnInfo, id int64) *model.ColumnInf
 }
 
 // ToPB generates the pb structure.
-func (e *PhysicalExchangeSender) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (e *PhysicalExchangeSender) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
 	child, err := e.Children()[0].ToPB(ctx, kv.TiFlash)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -405,7 +408,7 @@ func (e *PhysicalExchangeSender) ToPB(ctx *base.BuildPBContext, storeType kv.Sto
 		}
 		allFieldTypes = append(allFieldTypes, pbType)
 	}
-	hashColPb, err := expression.ExpressionsToPBList(ctx.GetExprCtx().GetEvalCtx(), hashCols, ctx.GetClient())
+	hashColPb, err := expression.ExpressionsToPBList(ctx.GetSessionVars().StmtCtx, hashCols, ctx.GetClient())
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -425,12 +428,12 @@ func (e *PhysicalExchangeSender) ToPB(ctx *base.BuildPBContext, storeType kv.Sto
 		ExchangeSender:                ecExec,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: e.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }
 
 // ToPB generates the pb structure.
-func (e *PhysicalExchangeReceiver) ToPB(ctx *base.BuildPBContext, _ kv.StoreType) (*tipb.Executor, error) {
+func (e *PhysicalExchangeReceiver) ToPB(ctx sessionctx.Context, _ kv.StoreType) (*tipb.Executor, error) {
 	encodedTask := make([][]byte, 0, len(e.Tasks))
 
 	for _, task := range e.Tasks {
@@ -464,12 +467,12 @@ func (e *PhysicalExchangeReceiver) ToPB(ctx *base.BuildPBContext, _ kv.StoreType
 		ExchangeReceiver:              ecExec,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: e.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalIndexScan) ToPB(_ *base.BuildPBContext, _ kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalIndexScan) ToPB(_ sessionctx.Context, _ kv.StoreType) (*tipb.Executor, error) {
 	columns := make([]*model.ColumnInfo, 0, p.schema.Len())
 	tableColumns := p.Table.Cols()
 	for _, col := range p.schema.Columns {
@@ -477,20 +480,22 @@ func (p *PhysicalIndexScan) ToPB(_ *base.BuildPBContext, _ kv.StoreType) (*tipb.
 			columns = append(columns, model.NewExtraHandleColInfo())
 		} else if col.ID == model.ExtraPhysTblID {
 			columns = append(columns, model.NewExtraPhysTblIDColInfo())
+		} else if col.ID == model.ExtraPidColID {
+			columns = append(columns, model.NewExtraPartitionIDColInfo())
 		} else {
 			columns = append(columns, FindColumnInfoByID(tableColumns, col.ID))
 		}
 	}
-	var pkColIDs []int64
+	var pkColIds []int64
 	if p.NeedCommonHandle {
-		pkColIDs = tables.TryGetCommonPkColumnIds(p.Table)
+		pkColIds = tables.TryGetCommonPkColumnIds(p.Table)
 	}
 	idxExec := &tipb.IndexScan{
 		TableId:          p.Table.ID,
 		IndexId:          p.Index.ID,
-		Columns:          util.ColumnsToProto(columns, p.Table.PKIsHandle, true, false),
+		Columns:          util.ColumnsToProto(columns, p.Table.PKIsHandle, true),
 		Desc:             p.Desc,
-		PrimaryColumnIds: pkColIDs,
+		PrimaryColumnIds: pkColIds,
 	}
 	if p.isPartition {
 		idxExec.TableId = p.physicalTableID
@@ -501,7 +506,8 @@ func (p *PhysicalIndexScan) ToPB(_ *base.BuildPBContext, _ kv.StoreType) (*tipb.
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalHashJoin) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	if len(p.LeftJoinKeys) > 0 && len(p.LeftNAJoinKeys) > 0 {
@@ -527,30 +533,29 @@ func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType
 		rightKeys = append(rightKeys, rightKey)
 	}
 
-	lChildren, err := p.Children()[0].ToPB(ctx, storeType)
+	lChildren, err := p.children[0].ToPB(ctx, storeType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	rChildren, err := p.Children()[1].ToPB(ctx, storeType)
+	rChildren, err := p.children[1].ToPB(ctx, storeType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
 
-	evalCtx := ctx.GetExprCtx().GetEvalCtx()
-	left, err := expression.ExpressionsToPBList(evalCtx, leftKeys, client)
+	left, err := expression.ExpressionsToPBList(sc, leftKeys, client)
 	if err != nil {
 		return nil, err
 	}
-	right, err := expression.ExpressionsToPBList(evalCtx, rightKeys, client)
+	right, err := expression.ExpressionsToPBList(sc, rightKeys, client)
 	if err != nil {
 		return nil, err
 	}
 
-	leftConditions, err := expression.ExpressionsToPBList(evalCtx, p.LeftConditions, client)
+	leftConditions, err := expression.ExpressionsToPBList(sc, p.LeftConditions, client)
 	if err != nil {
 		return nil, err
 	}
-	rightConditions, err := expression.ExpressionsToPBList(evalCtx, p.RightConditions, client)
+	rightConditions, err := expression.ExpressionsToPBList(sc, p.RightConditions, client)
 	if err != nil {
 		return nil, err
 	}
@@ -559,7 +564,7 @@ func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType
 	var otherEqConditionsFromIn expression.CNFExprs
 	/// For anti join, equal conditions from `in` clause requires additional processing,
 	/// for example, treat `null` as true.
-	if p.JoinType == logicalop.AntiSemiJoin || p.JoinType == logicalop.AntiLeftOuterSemiJoin || p.JoinType == logicalop.LeftOuterSemiJoin {
+	if p.JoinType == AntiSemiJoin || p.JoinType == AntiLeftOuterSemiJoin || p.JoinType == LeftOuterSemiJoin {
 		for _, condition := range p.OtherConditions {
 			if expression.IsEQCondFromIn(condition) {
 				otherEqConditionsFromIn = append(otherEqConditionsFromIn, condition)
@@ -570,28 +575,28 @@ func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType
 	} else {
 		otherConditionsInJoin = p.OtherConditions
 	}
-	otherConditions, err := expression.ExpressionsToPBList(evalCtx, otherConditionsInJoin, client)
+	otherConditions, err := expression.ExpressionsToPBList(sc, otherConditionsInJoin, client)
 	if err != nil {
 		return nil, err
 	}
-	otherEqConditions, err := expression.ExpressionsToPBList(evalCtx, otherEqConditionsFromIn, client)
+	otherEqConditions, err := expression.ExpressionsToPBList(sc, otherEqConditionsFromIn, client)
 	if err != nil {
 		return nil, err
 	}
 
 	pbJoinType := tipb.JoinType_TypeInnerJoin
 	switch p.JoinType {
-	case logicalop.LeftOuterJoin:
+	case LeftOuterJoin:
 		pbJoinType = tipb.JoinType_TypeLeftOuterJoin
-	case logicalop.RightOuterJoin:
+	case RightOuterJoin:
 		pbJoinType = tipb.JoinType_TypeRightOuterJoin
-	case logicalop.SemiJoin:
+	case SemiJoin:
 		pbJoinType = tipb.JoinType_TypeSemiJoin
-	case logicalop.AntiSemiJoin:
+	case AntiSemiJoin:
 		pbJoinType = tipb.JoinType_TypeAntiSemiJoin
-	case logicalop.LeftOuterSemiJoin:
+	case LeftOuterSemiJoin:
 		pbJoinType = tipb.JoinType_TypeLeftOuterSemiJoin
-	case logicalop.AntiLeftOuterSemiJoin:
+	case AntiLeftOuterSemiJoin:
 		pbJoinType = tipb.JoinType_TypeAntiLeftOuterSemiJoin
 	}
 
@@ -617,7 +622,7 @@ func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType
 	}
 
 	// runtime filter
-	rfListPB, err := RuntimeFilterListToPB(ctx, p.runtimeFilterList, client)
+	rfListPB, err := RuntimeFilterListToPB(p.runtimeFilterList, sc, client)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -644,26 +649,48 @@ func (p *PhysicalHashJoin) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType
 		Join:                          join,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: p.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }
 
+// ToPB converts FrameBound to tipb structure.
+func (fb *FrameBound) ToPB(ctx sessionctx.Context) (*tipb.WindowFrameBound, error) {
+	pbBound := &tipb.WindowFrameBound{
+		Type:      tipb.WindowBoundType(fb.Type),
+		Unbounded: fb.UnBounded,
+	}
+	offset := fb.Num
+	pbBound.Offset = &offset
+
+	if fb.IsExplicitRange {
+		rangeFrame, err := expression.ExpressionsToPBList(ctx.GetSessionVars().StmtCtx, fb.CalcFuncs, ctx.GetClient())
+		if err != nil {
+			return nil, err
+		}
+
+		pbBound.FrameRange = rangeFrame[0]
+		pbBound.CmpDataType = &fb.CmpDataType
+	}
+
+	return pbBound, nil
+}
+
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalWindow) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalWindow) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	windowExec := &tipb.Window{}
 
 	windowExec.FuncDesc = make([]*tipb.Expr, 0, len(p.WindowFuncDescs))
-	evalCtx := ctx.GetExprCtx().GetEvalCtx()
 	for _, desc := range p.WindowFuncDescs {
-		windowExec.FuncDesc = append(windowExec.FuncDesc, aggregation.WindowFuncToPBExpr(evalCtx, client, desc))
+		windowExec.FuncDesc = append(windowExec.FuncDesc, aggregation.WindowFuncToPBExpr(ctx, client, desc))
 	}
 	for _, item := range p.PartitionBy {
-		windowExec.PartitionBy = append(windowExec.PartitionBy, expression.SortByItemToPB(evalCtx, client, item.Col.Clone(), item.Desc))
+		windowExec.PartitionBy = append(windowExec.PartitionBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 	for _, item := range p.OrderBy {
-		windowExec.OrderBy = append(windowExec.OrderBy, expression.SortByItemToPB(evalCtx, client, item.Col.Clone(), item.Desc))
+		windowExec.OrderBy = append(windowExec.OrderBy, expression.SortByItemToPB(sc, client, item.Col.Clone(), item.Desc))
 	}
 
 	if p.Frame != nil {
@@ -687,7 +714,7 @@ func (p *PhysicalWindow) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) 
 	}
 
 	var err error
-	windowExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+	windowExec.Child, err = p.children[0].ToPB(ctx, storeType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -697,27 +724,28 @@ func (p *PhysicalWindow) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) 
 		Window:                        windowExec,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: p.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }
 
 // ToPB implements PhysicalPlan ToPB interface.
-func (p *PhysicalSort) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*tipb.Executor, error) {
+func (p *PhysicalSort) ToPB(ctx sessionctx.Context, storeType kv.StoreType) (*tipb.Executor, error) {
 	if !p.IsPartialSort {
 		return nil, errors.Errorf("sort %s can't convert to pb, because it isn't a partial sort", p.Plan.ExplainID())
 	}
 
+	sc := ctx.GetSessionVars().StmtCtx
 	client := ctx.GetClient()
 
 	sortExec := &tipb.Sort{}
 	for _, item := range p.ByItems {
-		sortExec.ByItems = append(sortExec.ByItems, expression.SortByItemToPB(ctx.GetExprCtx().GetEvalCtx(), client, item.Expr, item.Desc))
+		sortExec.ByItems = append(sortExec.ByItems, expression.SortByItemToPB(sc, client, item.Expr, item.Desc))
 	}
 	isPartialSort := p.IsPartialSort
 	sortExec.IsPartialSort = &isPartialSort
 
 	var err error
-	sortExec.Child, err = p.Children()[0].ToPB(ctx, storeType)
+	sortExec.Child, err = p.children[0].ToPB(ctx, storeType)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -727,6 +755,6 @@ func (p *PhysicalSort) ToPB(ctx *base.BuildPBContext, storeType kv.StoreType) (*
 		Sort:                          sortExec,
 		ExecutorId:                    &executorID,
 		FineGrainedShuffleStreamCount: p.TiFlashFineGrainedShuffleStreamCount,
-		FineGrainedShuffleBatchSize:   ctx.TiFlashFineGrainedShuffleBatchSize,
+		FineGrainedShuffleBatchSize:   ctx.GetSessionVars().TiFlashFineGrainedShuffleBatchSize,
 	}, nil
 }

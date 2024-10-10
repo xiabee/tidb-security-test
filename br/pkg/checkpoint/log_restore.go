@@ -21,12 +21,11 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
-	"github.com/pingcap/tidb/br/pkg/glue"
-	"github.com/pingcap/tidb/pkg/domain"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/util/sqlexec"
+	"github.com/pingcap/tidb/br/pkg/storage"
+	"github.com/pingcap/tidb/pkg/parser/model"
+	"go.uber.org/zap"
 )
 
 type LogRestoreKeyType = string
@@ -99,40 +98,31 @@ func valueMarshalerForLogRestore(group *RangeGroup[LogRestoreKeyType, LogRestore
 	})
 }
 
-func newTableCheckpointStorage(se glue.Session, checkpointDBName string) *tableCheckpointStorage {
-	return &tableCheckpointStorage{
-		se:               se,
-		checkpointDBName: checkpointDBName,
-	}
-}
-
 // only for test
 func StartCheckpointLogRestoreRunnerForTest(
 	ctx context.Context,
-	se glue.Session,
+	storage storage.ExternalStorage,
+	cipher *backuppb.CipherInfo,
 	tick time.Duration,
+	taskName string,
 ) (*CheckpointRunner[LogRestoreKeyType, LogRestoreValueType], error) {
 	runner := newCheckpointRunner[LogRestoreKeyType, LogRestoreValueType](
-		newTableCheckpointStorage(se, LogRestoreCheckpointDatabaseName),
-		nil, valueMarshalerForLogRestore)
+		ctx, storage, cipher, nil, flushPositionForRestore(taskName), valueMarshalerForLogRestore)
 
-	runner.startCheckpointMainLoop(ctx, tick, tick, 0, defaultRetryDuration)
+	runner.startCheckpointMainLoop(ctx, tick, tick, 0)
 	return runner, nil
 }
 
-// Notice that the session is owned by the checkpoint runner, and it will be also closed by it.
-func StartCheckpointRunnerForLogRestore(
-	ctx context.Context,
-	se glue.Session,
+func StartCheckpointRunnerForLogRestore(ctx context.Context,
+	storage storage.ExternalStorage,
+	cipher *backuppb.CipherInfo,
+	taskName string,
 ) (*CheckpointRunner[LogRestoreKeyType, LogRestoreValueType], error) {
 	runner := newCheckpointRunner[LogRestoreKeyType, LogRestoreValueType](
-		newTableCheckpointStorage(se, LogRestoreCheckpointDatabaseName),
-		nil, valueMarshalerForLogRestore)
+		ctx, storage, cipher, nil, flushPositionForRestore(taskName), valueMarshalerForLogRestore)
 
 	// for restore, no need to set lock
-	runner.startCheckpointMainLoop(
-		ctx,
-		defaultTickDurationForFlush, defaultTickDurationForChecksum, 0, defaultRetryDuration)
+	runner.startCheckpointMainLoop(ctx, defaultTickDurationForFlush, defaultTckDurationForChecksum, 0)
 	return runner, nil
 }
 
@@ -156,53 +146,17 @@ func AppendRangeForLogRestore(
 	})
 }
 
-// load the whole checkpoint range data and retrieve the metadata of restored ranges
-// and return the total time cost in the past executions
-func LoadCheckpointDataForLogRestore[K KeyType, V ValueType](
-	ctx context.Context,
-	execCtx sqlexec.RestrictedSQLExecutor,
-	fn func(K, V),
-) (time.Duration, error) {
-	return selectCheckpointData(ctx, execCtx, LogRestoreCheckpointDatabaseName, fn)
+const (
+	CheckpointTaskInfoForLogRestorePathFormat = CheckpointDir + "/restore-%d/taskInfo.meta"
+	CheckpointIngestIndexRepairSQLPathFormat  = CheckpointDir + "/restore-%s/ingest-repair.meta"
+)
+
+func getCheckpointTaskInfoPathByID(clusterID uint64) string {
+	return fmt.Sprintf(CheckpointTaskInfoForLogRestorePathFormat, clusterID)
 }
 
-type CheckpointMetadataForLogRestore struct {
-	UpstreamClusterID uint64 `json:"upstream-cluster-id"`
-	RestoredTS        uint64 `json:"restored-ts"`
-	StartTS           uint64 `json:"start-ts"`
-	RewriteTS         uint64 `json:"rewrite-ts"`
-	GcRatio           string `json:"gc-ratio"`
-	// tiflash recorder items with snapshot restore records
-	TiFlashItems map[int64]model.TiFlashReplicaInfo `json:"tiflash-recorder,omitempty"`
-}
-
-func LoadCheckpointMetadataForLogRestore(
-	ctx context.Context,
-	execCtx sqlexec.RestrictedSQLExecutor,
-) (*CheckpointMetadataForLogRestore, error) {
-	m := &CheckpointMetadataForLogRestore{}
-	err := selectCheckpointMeta(ctx, execCtx, LogRestoreCheckpointDatabaseName, checkpointMetaTableName, m)
-	return m, err
-}
-
-func SaveCheckpointMetadataForLogRestore(
-	ctx context.Context,
-	se glue.Session,
-	meta *CheckpointMetadataForLogRestore,
-) error {
-	err := initCheckpointTable(ctx, se, LogRestoreCheckpointDatabaseName, []string{checkpointDataTableName})
-	if err != nil {
-		return errors.Trace(err)
-	}
-	return insertCheckpointMeta(ctx, se, LogRestoreCheckpointDatabaseName, checkpointMetaTableName, meta)
-}
-
-func ExistsLogRestoreCheckpointMetadata(
-	ctx context.Context,
-	dom *domain.Domain,
-) bool {
-	return dom.InfoSchema().
-		TableExists(pmodel.NewCIStr(LogRestoreCheckpointDatabaseName), pmodel.NewCIStr(checkpointMetaTableName))
+func getCheckpointIngestIndexRepairPathByTaskName(taskName string) string {
+	return fmt.Sprintf(CheckpointIngestIndexRepairSQLPathFormat, taskName)
 }
 
 // A progress type for snapshot + log restore.
@@ -236,85 +190,69 @@ const (
 	InLogRestoreAndIdMapPersist
 )
 
-type CheckpointProgress struct {
-	Progress RestoreProgress `json:"progress"`
-}
-
-func LoadCheckpointProgress(
-	ctx context.Context,
-	execCtx sqlexec.RestrictedSQLExecutor,
-) (*CheckpointProgress, error) {
-	m := &CheckpointProgress{}
-	err := selectCheckpointMeta(ctx, execCtx, LogRestoreCheckpointDatabaseName, checkpointProgressTableName, m)
-	return m, errors.Trace(err)
-}
-
-func SaveCheckpointProgress(
-	ctx context.Context,
-	se glue.Session,
-	meta *CheckpointProgress,
-) error {
-	return insertCheckpointMeta(ctx, se, LogRestoreCheckpointDatabaseName, checkpointProgressTableName, meta)
-}
-
-func ExistsCheckpointProgress(
-	ctx context.Context,
-	dom *domain.Domain,
-) bool {
-	return dom.InfoSchema().
-		TableExists(pmodel.NewCIStr(LogRestoreCheckpointDatabaseName), pmodel.NewCIStr(checkpointProgressTableName))
-}
-
 // CheckpointTaskInfo is unique information within the same cluster id. It represents the last
 // restore task executed for this cluster.
 type CheckpointTaskInfoForLogRestore struct {
-	Metadata            *CheckpointMetadataForLogRestore
-	HasSnapshotMetadata bool
 	// the progress for this task
-	Progress RestoreProgress
+	Progress RestoreProgress `json:"progress"`
+	// a task marker to distinguish the different tasks
+	StartTS   uint64 `json:"start-ts"`
+	RestoreTS uint64 `json:"restore-ts"`
+	// updated in the progress of `InLogRestoreAndIdMapPersist`
+	RewriteTS uint64 `json:"rewrite-ts"`
+	// tiflash recorder items with snapshot restore records
+	TiFlashItems map[int64]model.TiFlashReplicaInfo `json:"tiflash-recorder,omitempty"`
 }
 
-func TryToGetCheckpointTaskInfo(
+func LoadCheckpointTaskInfoForLogRestore(
 	ctx context.Context,
-	dom *domain.Domain,
-	execCtx sqlexec.RestrictedSQLExecutor,
+	s storage.ExternalStorage,
+	clusterID uint64,
 ) (*CheckpointTaskInfoForLogRestore, error) {
-	var (
-		metadata *CheckpointMetadataForLogRestore
-		progress RestoreProgress
-		err      error
-	)
-	// get the progress
-	if ExistsCheckpointProgress(ctx, dom) {
-		checkpointProgress, err := LoadCheckpointProgress(ctx, execCtx)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		progress = checkpointProgress.Progress
-	}
-	// get the checkpoint metadata
-	if ExistsLogRestoreCheckpointMetadata(ctx, dom) {
-		metadata, err = LoadCheckpointMetadataForLogRestore(ctx, execCtx)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-	}
-	hasSnapshotMetadata := ExistsSnapshotRestoreCheckpoint(ctx, dom)
+	m := &CheckpointTaskInfoForLogRestore{}
+	err := loadCheckpointMeta(ctx, s, getCheckpointTaskInfoPathByID(clusterID), m)
+	return m, err
+}
 
-	return &CheckpointTaskInfoForLogRestore{
-		Metadata:            metadata,
-		HasSnapshotMetadata: hasSnapshotMetadata,
-		Progress:            progress,
-	}, nil
+func SaveCheckpointTaskInfoForLogRestore(
+	ctx context.Context,
+	s storage.ExternalStorage,
+	meta *CheckpointTaskInfoForLogRestore,
+	clusterID uint64,
+) error {
+	return saveCheckpointMetadata(ctx, s, meta, getCheckpointTaskInfoPathByID(clusterID))
+}
+
+func ExistsCheckpointTaskInfo(
+	ctx context.Context,
+	s storage.ExternalStorage,
+	clusterID uint64,
+) (bool, error) {
+	return s.FileExists(ctx, getCheckpointTaskInfoPathByID(clusterID))
+}
+
+func removeCheckpointTaskInfoForLogRestore(ctx context.Context, s storage.ExternalStorage, clusterID uint64) error {
+	fileName := getCheckpointTaskInfoPathByID(clusterID)
+	exists, err := s.FileExists(ctx, fileName)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	if !exists {
+		log.Warn("the task info file doesn't exist", zap.String("file", fileName))
+		return nil
+	}
+
+	return s.DeleteFile(ctx, fileName)
 }
 
 type CheckpointIngestIndexRepairSQL struct {
-	IndexID    int64        `json:"index-id"`
-	SchemaName pmodel.CIStr `json:"schema-name"`
-	TableName  pmodel.CIStr `json:"table-name"`
-	IndexName  string       `json:"index-name"`
-	AddSQL     string       `json:"add-sql"`
-	AddArgs    []any        `json:"add-args"`
+	IndexID    int64         `json:"index-id"`
+	SchemaName model.CIStr   `json:"schema-name"`
+	TableName  model.CIStr   `json:"table-name"`
+	IndexName  string        `json:"index-name"`
+	AddSQL     string        `json:"add-sql"`
+	AddArgs    []interface{} `json:"add-args"`
 }
 
 type CheckpointIngestIndexRepairSQLs struct {
@@ -323,27 +261,44 @@ type CheckpointIngestIndexRepairSQLs struct {
 
 func LoadCheckpointIngestIndexRepairSQLs(
 	ctx context.Context,
-	execCtx sqlexec.RestrictedSQLExecutor,
+	s storage.ExternalStorage,
+	taskName string,
 ) (*CheckpointIngestIndexRepairSQLs, error) {
 	m := &CheckpointIngestIndexRepairSQLs{}
-	err := selectCheckpointMeta(ctx, execCtx, LogRestoreCheckpointDatabaseName, checkpointIngestTableName, m)
-	return m, errors.Trace(err)
+	err := loadCheckpointMeta(ctx, s, getCheckpointIngestIndexRepairPathByTaskName(taskName), m)
+	return m, err
 }
 
-func ExistsCheckpointIngestIndexRepairSQLs(ctx context.Context, dom *domain.Domain) bool {
-	return dom.InfoSchema().
-		TableExists(pmodel.NewCIStr(LogRestoreCheckpointDatabaseName), pmodel.NewCIStr(checkpointIngestTableName))
+func ExistsCheckpointIngestIndexRepairSQLs(
+	ctx context.Context,
+	s storage.ExternalStorage,
+	taskName string,
+) (bool, error) {
+	return s.FileExists(ctx, getCheckpointIngestIndexRepairPathByTaskName(taskName))
 }
 
 func SaveCheckpointIngestIndexRepairSQLs(
 	ctx context.Context,
-	se glue.Session,
+	s storage.ExternalStorage,
 	meta *CheckpointIngestIndexRepairSQLs,
+	taskName string,
 ) error {
-	return insertCheckpointMeta(ctx, se, LogRestoreCheckpointDatabaseName, checkpointIngestTableName, meta)
+	return saveCheckpointMetadata(ctx, s, meta, getCheckpointIngestIndexRepairPathByTaskName(taskName))
 }
 
-func RemoveCheckpointDataForLogRestore(ctx context.Context, dom *domain.Domain, se glue.Session) error {
-	return dropCheckpointTables(ctx, dom, se, LogRestoreCheckpointDatabaseName,
-		[]string{checkpointDataTableName, checkpointMetaTableName, checkpointProgressTableName, checkpointIngestTableName})
+func RemoveCheckpointDataForLogRestore(
+	ctx context.Context,
+	s storage.ExternalStorage,
+	taskName string,
+	clusterID uint64,
+) error {
+	if err := removeCheckpointTaskInfoForLogRestore(ctx, s, clusterID); err != nil {
+		return errors.Annotatef(err,
+			"failed to remove the task info file: clusterId is %d, taskName is %s",
+			clusterID,
+			taskName,
+		)
+	}
+	prefix := fmt.Sprintf(CheckpointRestoreDirFormat, taskName)
+	return removeCheckpointData(ctx, s, prefix)
 }

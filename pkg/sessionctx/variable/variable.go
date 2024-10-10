@@ -68,8 +68,6 @@ const (
 	Warn = "WARN"
 	// IntOnly means enable for int type
 	IntOnly = "INT_ONLY"
-	// Marker is a special log redact behavior
-	Marker = "MARKER"
 
 	// AssertionStrictStr is a choice of variable TiDBTxnAssertionLevel that means full assertions should be performed,
 	// even if the performance might be slowed down.
@@ -83,18 +81,6 @@ const (
 	OOMActionCancel = "CANCEL"
 	// OOMActionLog constants represents the valid action configurations for OOMAction "LOG".
 	OOMActionLog = "LOG"
-
-	// TSOClientRPCModeDefault is a choice of variable TiDBTSOClientRPCMode. In this mode, the TSO client sends batched
-	// TSO requests serially.
-	TSOClientRPCModeDefault = "DEFAULT"
-	// TSOClientRPCModeParallel is a choice of variable TiDBTSOClientRPCMode. In this mode, the TSO client tries to
-	// keep approximately 2 batched TSO requests running in parallel. This option tries to reduce the batch-waiting time
-	// by half, at the expense of about twice the amount of TSO RPC calls.
-	TSOClientRPCModeParallel = "PARALLEL"
-	// TSOClientRPCModeParallelFast is a choice of variable TiDBTSOClientRPCMode. In this mode, the TSO client tries to
-	// keep approximately 4 batched TSO requests running in parallel. This option tries to reduce the batch-waiting time
-	// by 3/4, at the expense of about 4 times the amount of TSO RPC calls.
-	TSOClientRPCModeParallelFast = "PARALLEL-FAST"
 )
 
 // Global config name list.
@@ -154,10 +140,10 @@ type SysVar struct {
 	SetSession func(*SessionVars, string) error
 	// SetGlobal is called after validation
 	SetGlobal func(context.Context, *SessionVars, string) error
-	// IsHintUpdatableVerified indicate whether we've confirmed that SET_VAR() hint is worked for this hint.
-	IsHintUpdatableVerified bool
+	// IsHintUpdatableVerfied indicate whether we've confirmed that SET_VAR() hint is worked for this hint.
+	IsHintUpdatableVerfied bool
 	// Deprecated: Hidden previously meant that the variable still responds to SET but doesn't show up in SHOW VARIABLES
-	// However, this feature is no longer used. All variables are visible.
+	// However, this feature is no longer used. All variables are visble.
 	Hidden bool
 	// Aliases is a list of sysvars that should also be updated when this sysvar is updated.
 	// Updating aliases calls the SET function of the aliases, but does not update their aliases (preventing SET recursion)
@@ -225,6 +211,9 @@ func (sv *SysVar) GetSessionFromHook(s *SessionVars) (string, error) {
 		ok  bool
 		val string
 	)
+	if val, ok = s.stmtVars[sv.Name]; ok {
+		return val, nil
+	}
 	if val, ok = s.systems[sv.Name]; !ok {
 		return val, errors.New("sysvar has not yet loaded")
 	}
@@ -413,11 +402,11 @@ func (sv *SysVar) checkDurationSystemVar(value string, vars *SessionVars) (strin
 	}
 	// Check for min/max violations
 	if int64(d) < sv.MinValue {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return time.Duration(sv.MinValue).String(), nil
 	}
 	if uint64(d) > sv.MaxValue {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return time.Duration(sv.MaxValue).String(), nil
 	}
 	// return a string representation of the duration
@@ -436,7 +425,7 @@ func (sv *SysVar) checkUInt64SystemVar(value string, vars *SessionVars) (string,
 		if err != nil {
 			return value, ErrWrongTypeForVar.GenWithStackByArgs(sv.Name)
 		}
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatInt(sv.MinValue, 10), nil
 	}
 	val, err := strconv.ParseUint(value, 10, 64)
@@ -444,11 +433,11 @@ func (sv *SysVar) checkUInt64SystemVar(value string, vars *SessionVars) (string,
 		return value, ErrWrongTypeForVar.GenWithStackByArgs(sv.Name)
 	}
 	if val < uint64(sv.MinValue) {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatInt(sv.MinValue, 10), nil
 	}
 	if val > sv.MaxValue {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatUint(sv.MaxValue, 10), nil
 	}
 	return value, nil
@@ -463,11 +452,11 @@ func (sv *SysVar) checkInt64SystemVar(value string, vars *SessionVars) (string, 
 		return value, ErrWrongTypeForVar.GenWithStackByArgs(sv.Name)
 	}
 	if val < sv.MinValue {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatInt(sv.MinValue, 10), nil
 	}
 	if val > int64(sv.MaxValue) {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatUint(sv.MaxValue, 10), nil
 	}
 	return value, nil
@@ -495,11 +484,11 @@ func (sv *SysVar) checkFloatSystemVar(value string, vars *SessionVars) (string, 
 		return value, ErrWrongTypeForVar.GenWithStackByArgs(sv.Name)
 	}
 	if val < float64(sv.MinValue) {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatInt(sv.MinValue, 10), nil
 	}
 	if val > float64(sv.MaxValue) {
-		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.FastGenByArgs(sv.Name, value))
+		vars.StmtCtx.AppendWarning(ErrTruncatedWrongValue.GenWithStackByArgs(sv.Name, value))
 		return strconv.FormatUint(sv.MaxValue, 10), nil
 	}
 	return value, nil

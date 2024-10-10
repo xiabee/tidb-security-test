@@ -94,8 +94,3 @@ func TestSQLMode(t *testing.T) {
 		require.Equal(t, ca.value, int(ca.code))
 	}
 }
-
-func TestVersionSeparator(t *testing.T) {
-	// DO NOT change the value of VersionSeparator.
-	require.Equal(t, "-TiDB-", VersionSeparator)
-}

@@ -22,11 +22,11 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/ttl/cache"
 	"github.com/pingcap/tidb/pkg/ttl/session"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"go.uber.org/zap"
 )
 
+const updateJobCurrentStatusTemplate = "UPDATE mysql.tidb_ttl_table_status SET current_job_status = %? WHERE table_id = %? AND current_job_status = %? AND current_job_id = %?"
 const finishJobTemplate = `UPDATE mysql.tidb_ttl_table_status
 	SET last_job_id = current_job_id,
 		last_job_start_time = current_job_start_time,
@@ -67,21 +67,25 @@ const finishJobHistoryTemplate = `UPDATE mysql.tidb_ttl_job_history
 	    status = %?
 	WHERE job_id = %?`
 
-func finishJobSQL(tableID int64, finishTime time.Time, summary string, jobID string) (string, []any) {
-	return finishJobTemplate, []any{finishTime.Format(timeFormat), summary, tableID, jobID}
+func updateJobCurrentStatusSQL(tableID int64, oldStatus cache.JobStatus, newStatus cache.JobStatus, jobID string) (string, []interface{}) {
+	return updateJobCurrentStatusTemplate, []interface{}{string(newStatus), tableID, string(oldStatus), jobID}
 }
 
-func removeTaskForJob(jobID string) (string, []any) {
-	return removeTaskForJobTemplate, []any{jobID}
+func finishJobSQL(tableID int64, finishTime time.Time, summary string, jobID string) (string, []interface{}) {
+	return finishJobTemplate, []interface{}{finishTime.Format(timeFormat), summary, tableID, jobID}
 }
 
-func createJobHistorySQL(jobID string, tbl *cache.PhysicalTable, expire time.Time, now time.Time) (string, []any) {
-	var partitionName any
+func removeTaskForJob(jobID string) (string, []interface{}) {
+	return removeTaskForJobTemplate, []interface{}{jobID}
+}
+
+func createJobHistorySQL(jobID string, tbl *cache.PhysicalTable, expire time.Time, now time.Time) (string, []interface{}) {
+	var partitionName interface{}
 	if tbl.Partition.O != "" {
 		partitionName = tbl.Partition.O
 	}
 
-	return createJobHistoryRowTemplate, []any{
+	return createJobHistoryRowTemplate, []interface{}{
 		jobID,
 		tbl.ID,
 		tbl.TableInfo.ID,
@@ -94,8 +98,8 @@ func createJobHistorySQL(jobID string, tbl *cache.PhysicalTable, expire time.Tim
 	}
 }
 
-func finishJobHistorySQL(jobID string, finishTime time.Time, summary *TTLSummary) (string, []any) {
-	return finishJobHistoryTemplate, []any{
+func finishJobHistorySQL(jobID string, finishTime time.Time, summary *TTLSummary) (string, []interface{}) {
+	return finishJobHistoryTemplate, []interface{}{
 		finishTime.Format(timeFormat),
 		summary.SummaryText,
 		summary.TotalRows,
@@ -123,7 +127,6 @@ type ttlJob struct {
 
 // finish turns current job into last job, and update the error message and statistics summary
 func (job *ttlJob) finish(se session.Session, now time.Time, summary *TTLSummary) {
-	intest.Assert(se.GetSessionVars().Location().String() == now.Location().String())
 	// at this time, the job.ctx may have been canceled (to cancel this job)
 	// even when it's canceled, we'll need to update the states, so use another context
 	err := se.RunInTxn(context.TODO(), func() error {

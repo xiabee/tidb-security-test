@@ -5,13 +5,13 @@ package iter
 import (
 	"context"
 
-	"github.com/pingcap/tidb/pkg/util"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"golang.org/x/sync/errgroup"
 )
 
 type chunkMappingCfg struct {
 	chunkSize uint
-	quota     *util.WorkerPool
+	quota     *utils.WorkerPool
 }
 
 type chunkMapping[T, R any] struct {
@@ -30,6 +30,7 @@ func (m *chunkMapping[T, R]) fillChunk(ctx context.Context) IterResult[fromSlice
 	}
 	r := make([]R, len(s.Item))
 	for i := 0; i < len(s.Item); i++ {
+		i := i
 		m.quota.ApplyOnErrorGroup(eg, func() error {
 			var err error
 			r[i], err = m.mapper(cx, s.Item[i])

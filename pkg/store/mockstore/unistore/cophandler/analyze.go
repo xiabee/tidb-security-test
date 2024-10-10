@@ -27,11 +27,10 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/charset"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
-	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/store/mockstore/unistore/tikv/dbreader"
@@ -89,14 +88,11 @@ func handleAnalyzeIndexReq(dbReader *dbreader.DBReader, rans []kv.KeyRange, anal
 	if analyzeReq.IdxReq.Version != nil {
 		statsVer = *analyzeReq.IdxReq.Version
 	}
-
-	tz := time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset))
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	sc := sctx.GetSessionVars().StmtCtx
+	sctx := flagsToStatementContext(analyzeReq.Flags)
 	processor := &analyzeIndexProcessor{
 		sctx:         sctx,
 		colLen:       int(analyzeReq.IdxReq.NumColumns),
-		statsBuilder: statistics.NewSortedBuilder(sc, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), int(statsVer)),
+		statsBuilder: statistics.NewSortedBuilder(sctx, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), int(statsVer)),
 		statsVer:     statsVer,
 	}
 	if analyzeReq.IdxReq.TopNSize != nil {
@@ -144,13 +140,9 @@ func handleAnalyzeCommonHandleReq(dbReader *dbreader.DBReader, rans []kv.KeyRang
 	if analyzeReq.IdxReq.Version != nil {
 		statsVer = int(*analyzeReq.IdxReq.Version)
 	}
-
-	tz := time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset))
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	sc := sctx.GetSessionVars().StmtCtx
 	processor := &analyzeCommonHandleProcessor{
 		colLen:       int(analyzeReq.IdxReq.NumColumns),
-		statsBuilder: statistics.NewSortedBuilder(sc, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), statsVer),
+		statsBuilder: statistics.NewSortedBuilder(flagsToStatementContext(analyzeReq.Flags), analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), statsVer),
 	}
 	if analyzeReq.IdxReq.CmsketchDepth != nil && analyzeReq.IdxReq.CmsketchWidth != nil {
 		processor.cms = statistics.NewCMSketch(*analyzeReq.IdxReq.CmsketchDepth, *analyzeReq.IdxReq.CmsketchWidth)
@@ -176,7 +168,7 @@ func handleAnalyzeCommonHandleReq(dbReader *dbreader.DBReader, rans []kv.KeyRang
 type analyzeIndexProcessor struct {
 	skipVal
 
-	sctx         sessionctx.Context
+	sctx         *stmtctx.StatementContext
 	colLen       int
 	statsBuilder *statistics.SortedBuilder
 	cms          *statistics.CMSketch
@@ -204,7 +196,7 @@ func (p *analyzeIndexProcessor) Process(key, _ []byte) error {
 	}
 
 	if p.fms != nil {
-		if err := p.fms.InsertValue(p.sctx.GetSessionVars().StmtCtx, types.NewBytesDatum(safeCopy(p.rowBuf))); err != nil {
+		if err := p.fms.InsertValue(p.sctx, types.NewBytesDatum(safeCopy(p.rowBuf))); err != nil {
 			return err
 		}
 	}
@@ -270,19 +262,19 @@ type analyzeColumnsExec struct {
 	decoder *rowcodec.ChunkDecoder
 	req     *chunk.Chunk
 	evalCtx *evalContext
-	fields  []*resolve.ResultField
+	fields  []*ast.ResultField
 }
 
 func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange, analyzeReq *tipb.AnalyzeReq, startTS uint64) (*analyzeColumnsExec, *statistics.SampleBuilder, int64, error) {
-	tz := time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset))
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	evalCtx := &evalContext{sctx: sctx}
+	sc := flagsToStatementContext(analyzeReq.Flags)
+	sc.SetTimeZone(time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset)))
+	evalCtx := &evalContext{sc: sc}
 	columns := analyzeReq.ColReq.ColumnsInfo
 	evalCtx.setColumnInfo(columns)
 	if len(analyzeReq.ColReq.PrimaryColumnIds) > 0 {
 		evalCtx.primaryCols = analyzeReq.ColReq.PrimaryColumnIds
 	}
-	decoder, err := newRowDecoder(evalCtx.columnInfos, evalCtx.fieldTps, evalCtx.primaryCols, sctx.GetSessionVars().StmtCtx.TimeZone())
+	decoder, err := newRowDecoder(evalCtx.columnInfos, evalCtx.fieldTps, evalCtx.primaryCols, evalCtx.sc.TimeZone())
 	if err != nil {
 		return nil, nil, -1, err
 	}
@@ -297,9 +289,9 @@ func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange
 		decoder: decoder,
 		evalCtx: evalCtx,
 	}
-	e.fields = make([]*resolve.ResultField, len(columns))
+	e.fields = make([]*ast.ResultField, len(columns))
 	for i := range e.fields {
-		rf := new(resolve.ResultField)
+		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
 		ft := types.FieldType{}
 		ft.SetType(mysql.TypeBlob)
@@ -328,7 +320,7 @@ func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange
 	}
 	colReq := analyzeReq.ColReq
 	builder := statistics.SampleBuilder{
-		Sc:              sctx.GetSessionVars().StmtCtx,
+		Sc:              sc,
 		ColLen:          numCols,
 		MaxBucketSize:   colReq.BucketSize,
 		MaxFMSketchSize: colReq.SketchSize,
@@ -341,7 +333,7 @@ func buildBaseAnalyzeColumnsExec(dbReader *dbreader.DBReader, rans []kv.KeyRange
 		statsVer = int(*analyzeReq.ColReq.Version)
 	}
 	if pkID != -1 {
-		builder.PkBuilder = statistics.NewSortedBuilder(builder.Sc, builder.MaxBucketSize, pkID, types.NewFieldType(mysql.TypeBlob), statsVer)
+		builder.PkBuilder = statistics.NewSortedBuilder(sc, builder.MaxBucketSize, pkID, types.NewFieldType(mysql.TypeBlob), statsVer)
 	}
 	if colReq.CmsketchWidth != nil && colReq.CmsketchDepth != nil {
 		builder.CMSketchWidth = *colReq.CmsketchWidth
@@ -380,16 +372,15 @@ func handleAnalyzeFullSamplingReq(
 	analyzeReq *tipb.AnalyzeReq,
 	startTS uint64,
 ) (*coprocessor.Response, error) {
-	tz := time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset))
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	evalCtx := &evalContext{sctx: sctx}
+	sc := flagsToStatementContext(analyzeReq.Flags)
+	sc.SetTimeZone(time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset)))
+	evalCtx := &evalContext{sc: sc}
 	columns := analyzeReq.ColReq.ColumnsInfo
 	evalCtx.setColumnInfo(columns)
 	if len(analyzeReq.ColReq.PrimaryColumnIds) > 0 {
 		evalCtx.primaryCols = analyzeReq.ColReq.PrimaryColumnIds
 	}
-	loc := sctx.GetSessionVars().StmtCtx.TimeZone()
-	decoder, err := newRowDecoder(evalCtx.columnInfos, evalCtx.fieldTps, evalCtx.primaryCols, loc)
+	decoder, err := newRowDecoder(evalCtx.columnInfos, evalCtx.fieldTps, evalCtx.primaryCols, evalCtx.sc.TimeZone())
 	if err != nil {
 		return nil, err
 	}
@@ -404,9 +395,9 @@ func handleAnalyzeFullSamplingReq(
 		decoder: decoder,
 		evalCtx: evalCtx,
 	}
-	e.fields = make([]*resolve.ResultField, len(columns))
+	e.fields = make([]*ast.ResultField, len(columns))
 	for i := range e.fields {
-		rf := new(resolve.ResultField)
+		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
 		ft := types.FieldType{}
 		ft.SetType(mysql.TypeBlob)
@@ -436,7 +427,7 @@ func handleAnalyzeFullSamplingReq(
 	colReq := analyzeReq.ColReq
 	/* #nosec G404 */
 	builder := &statistics.RowSampleBuilder{
-		Sc:              sctx.GetSessionVars().StmtCtx,
+		Sc:              sc,
 		RecordSet:       e,
 		ColsFieldType:   fts,
 		Collators:       collators,
@@ -460,7 +451,7 @@ func handleAnalyzeFullSamplingReq(
 }
 
 // Fields implements the sqlexec.RecordSet Fields interface.
-func (e *analyzeColumnsExec) Fields() []*resolve.ResultField {
+func (e *analyzeColumnsExec) Fields() []*ast.ResultField {
 	return e.fields
 }
 
@@ -493,7 +484,6 @@ func (e *analyzeColumnsExec) Process(key, value []byte) error {
 		return errors.Trace(err)
 	}
 	row := e.chk.GetRow(0)
-	sc := e.evalCtx.sctx.GetSessionVars().StmtCtx
 	for i, tp := range e.evalCtx.fieldTps {
 		d := row.GetDatum(i, tp)
 		if d.IsNull() {
@@ -501,8 +491,7 @@ func (e *analyzeColumnsExec) Process(key, value []byte) error {
 			continue
 		}
 
-		value, err := tablecodec.EncodeValue(sc.TimeZone(), nil, d)
-		err = sc.HandleError(err)
+		value, err := tablecodec.EncodeValue(e.evalCtx.sc, nil, d)
 		if err != nil {
 			return err
 		}
@@ -538,14 +527,12 @@ func handleAnalyzeMixedReq(dbReader *dbreader.DBReader, rans []kv.KeyRange, anal
 	if err != nil {
 		return nil, err
 	}
-	tz := time.FixedZone("UTC", int(analyzeReq.TimeZoneOffset))
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	sc := sctx.GetSessionVars().StmtCtx
+	sctx := flagsToStatementContext(analyzeReq.Flags)
 	e := &analyzeMixedExec{
-		sctx:               sctx.GetSessionVars().StmtCtx,
+		sctx:               sctx,
 		analyzeColumnsExec: *colExec,
 		colLen:             int(analyzeReq.IdxReq.NumColumns),
-		statsBuilder:       statistics.NewSortedBuilder(sc, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), int(statsVer)),
+		statsBuilder:       statistics.NewSortedBuilder(sctx, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), int(statsVer)),
 		statsVer:           statsVer,
 	}
 	builder.RecordSet = e

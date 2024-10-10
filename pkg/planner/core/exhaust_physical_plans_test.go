@@ -16,7 +16,6 @@ package core
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/domain"
@@ -25,36 +24,34 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/charset"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/pingcap/tidb/pkg/planner/util"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/types"
-	contextutil "github.com/pingcap/tidb/pkg/util/context"
 	"github.com/pingcap/tidb/pkg/util/ranger"
 	"github.com/stretchr/testify/require"
 )
 
-func rewriteSimpleExpr(ctx expression.BuildContext, str string, schema *expression.Schema, names types.NameSlice) ([]expression.Expression, error) {
+func rewriteSimpleExpr(ctx sessionctx.Context, str string, schema *expression.Schema, names types.NameSlice) ([]expression.Expression, error) {
 	if str == "" {
 		return nil, nil
 	}
-	filter, err := expression.ParseSimpleExpr(ctx, str, expression.WithInputSchemaAndNames(schema, names, nil))
+	filters, err := expression.ParseSimpleExprsWithNames(ctx, str, schema, names)
 	if err != nil {
 		return nil, err
 	}
-	if sf, ok := filter.(*expression.ScalarFunction); ok && sf.FuncName.L == ast.LogicAnd {
-		return expression.FlattenCNFConditions(sf), nil
+	if sf, ok := filters[0].(*expression.ScalarFunction); ok && sf.FuncName.L == ast.LogicAnd {
+		filters = expression.FlattenCNFConditions(sf)
 	}
-	return []expression.Expression{filter}, nil
+	return filters, nil
 }
 
 type indexJoinContext struct {
-	dataSourceNode *logicalop.DataSource
+	dataSourceNode *DataSource
 	dsNames        types.NameSlice
 	path           *util.AccessPath
-	joinNode       *logicalop.LogicalJoin
+	joinNode       *LogicalJoin
 	joinColNames   types.NameSlice
 }
 
@@ -65,8 +62,8 @@ func prepareForAnalyzeLookUpFilters() *indexJoinContext {
 		do.StatsHandle().Close()
 	}()
 	ctx.GetSessionVars().PlanID.Store(-1)
-	joinNode := logicalop.LogicalJoin{}.Init(ctx.GetPlanCtx(), 0)
-	dataSourceNode := logicalop.DataSource{}.Init(ctx.GetPlanCtx(), 0)
+	joinNode := LogicalJoin{}.Init(ctx, 0)
+	dataSourceNode := DataSource{}.Init(ctx, 0)
 	dsSchema := expression.NewSchema()
 	var dsNames types.NameSlice
 	dsSchema.Append(&expression.Column{
@@ -114,7 +111,7 @@ func prepareForAnalyzeLookUpFilters() *indexJoinContext {
 		TblName: model.NewCIStr("t"),
 		DBName:  model.NewCIStr("test"),
 	})
-	dataSourceNode.SetSchema(dsSchema)
+	dataSourceNode.schema = dsSchema
 	dataSourceNode.SetStats(&property.StatsInfo{StatsVersion: statistics.PseudoVersion})
 	path := &util.AccessPath{
 		IdxCols:    append(make([]*expression.Column, 0, 5), dsSchema.Columns...),
@@ -185,48 +182,38 @@ type indexJoinTestCase struct {
 	compareFilters string
 }
 
-func testAnalyzeLookUpFilters(t *testing.T, testCtx *indexJoinContext, testCase *indexJoinTestCase, msgAndArgs ...any) *indexJoinPathResult {
+func testAnalyzeLookUpFilters(t *testing.T, testCtx *indexJoinContext, testCase *indexJoinTestCase, msgAndArgs ...interface{}) *indexJoinBuildHelper {
 	ctx := testCtx.dataSourceNode.SCtx()
 	ctx.GetSessionVars().RangeMaxSize = testCase.rangeMaxSize
 	dataSourceNode := testCtx.dataSourceNode
 	joinNode := testCtx.joinNode
-	pushed, err := rewriteSimpleExpr(ctx.GetExprCtx(), testCase.pushedDownConds, dataSourceNode.Schema(), testCtx.dsNames)
+	pushed, err := rewriteSimpleExpr(ctx, testCase.pushedDownConds, dataSourceNode.schema, testCtx.dsNames)
 	require.NoError(t, err)
-	dataSourceNode.PushedDownConds = pushed
-	others, err := rewriteSimpleExpr(ctx.GetExprCtx(), testCase.otherConds, joinNode.Schema(), testCtx.joinColNames)
+	dataSourceNode.pushedDownConds = pushed
+	others, err := rewriteSimpleExpr(ctx, testCase.otherConds, joinNode.schema, testCtx.joinColNames)
 	require.NoError(t, err)
 	joinNode.OtherConditions = others
-	indexJoinInfo := &indexJoinPathInfo{
-		joinOtherConditions:   others,
-		outerJoinKeys:         testCase.innerKeys,
-		innerJoinKeys:         testCase.innerKeys,
-		innerStats:            dataSourceNode.StatsInfo(),
-		innerSchema:           dataSourceNode.Schema(),
-		innerPushedConditions: dataSourceNode.PushedDownConds}
-	result, _, err := indexJoinPathBuild(ctx, testCtx.path, indexJoinInfo, testCase.rebuildMode)
-	if result == nil {
-		result = &indexJoinPathResult{}
-	}
-	if result.chosenRanges == nil {
-		result.chosenRanges = ranger.Ranges{}
+	helper := &indexJoinBuildHelper{join: joinNode, lastColManager: nil, innerPlan: dataSourceNode}
+	_, err = helper.analyzeLookUpFilters(testCtx.path, dataSourceNode, testCase.innerKeys, testCase.innerKeys, testCase.rebuildMode)
+	if helper.chosenRanges == nil {
+		helper.chosenRanges = ranger.Ranges{}
 	}
 	require.NoError(t, err)
 	if testCase.rebuildMode {
-		require.Equal(t, testCase.ranges, fmt.Sprintf("%v", result.chosenRanges.Range()), msgAndArgs)
+		require.Equal(t, testCase.ranges, fmt.Sprintf("%v", helper.chosenRanges.Range()), msgAndArgs)
 	} else {
-		ectx := ctx.GetExprCtx().GetEvalCtx()
-		require.Equal(t, testCase.accesses, expression.StringifyExpressionsWithCtx(ectx, result.chosenAccess), msgAndArgs)
-		require.Equal(t, testCase.ranges, fmt.Sprintf("%v", result.chosenRanges.Range()), msgAndArgs)
-		require.Equal(t, testCase.idxOff2KeyOff, fmt.Sprintf("%v", result.idxOff2KeyOff), msgAndArgs)
-		require.Equal(t, testCase.remained, expression.StringifyExpressionsWithCtx(ectx, result.chosenRemained), msgAndArgs)
-		require.Equal(t, testCase.compareFilters, fmt.Sprintf("%v", result.lastColManager), msgAndArgs)
+		require.Equal(t, testCase.accesses, fmt.Sprintf("%v", helper.chosenAccess), msgAndArgs)
+		require.Equal(t, testCase.ranges, fmt.Sprintf("%v", helper.chosenRanges.Range()), msgAndArgs)
+		require.Equal(t, testCase.idxOff2KeyOff, fmt.Sprintf("%v", helper.idxOff2KeyOff), msgAndArgs)
+		require.Equal(t, testCase.remained, fmt.Sprintf("%v", helper.chosenRemained), msgAndArgs)
+		require.Equal(t, testCase.compareFilters, fmt.Sprintf("%v", helper.lastColManager), msgAndArgs)
 	}
-	return result
+	return helper
 }
 
 func TestIndexJoinAnalyzeLookUpFilters(t *testing.T) {
 	indexJoinCtx := prepareForAnalyzeLookUpFilters()
-	dsSchema := indexJoinCtx.dataSourceNode.Schema()
+	dsSchema := indexJoinCtx.dataSourceNode.schema
 	tests := []indexJoinTestCase{
 		// Join key not continuous and no pushed filter to match.
 		{
@@ -353,22 +340,15 @@ func TestIndexJoinAnalyzeLookUpFilters(t *testing.T) {
 	}
 }
 
-func checkRangeFallbackAndReset(t *testing.T, ctx base.PlanContext, expectedRangeFallback bool) {
-	stmtCtx := ctx.GetSessionVars().StmtCtx
-	hasRangeFallbackWarn := false
-	for _, warn := range stmtCtx.GetWarnings() {
-		hasRangeFallbackWarn = hasRangeFallbackWarn || strings.Contains(warn.Err.Error(), "'tidb_opt_range_max_size' exceeded when building ranges")
-	}
-	require.Equal(t, expectedRangeFallback, hasRangeFallbackWarn)
-	stmtCtx.PlanCacheTracker = contextutil.NewPlanCacheTracker(stmtCtx)
-	stmtCtx.RangeFallbackHandler = contextutil.NewRangeFallbackHandler(&stmtCtx.PlanCacheTracker, stmtCtx)
-	stmtCtx.SetWarnings(nil)
+func checkRangeFallbackAndReset(t *testing.T, ctx sessionctx.Context, expectedRangeFallback bool) {
+	require.Equal(t, expectedRangeFallback, ctx.GetSessionVars().StmtCtx.RangeFallback)
+	ctx.GetSessionVars().StmtCtx.RangeFallback = false
 }
 
 func TestRangeFallbackForAnalyzeLookUpFilters(t *testing.T) {
 	ijCtx := prepareForAnalyzeLookUpFilters()
 	ctx := ijCtx.dataSourceNode.SCtx()
-	dsSchema := ijCtx.dataSourceNode.Schema()
+	dsSchema := ijCtx.dataSourceNode.schema
 
 	type testOutput struct {
 		ranges         string

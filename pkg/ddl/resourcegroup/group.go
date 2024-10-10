@@ -16,8 +16,7 @@ package resourcegroup
 
 import (
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 )
 
 // MaxGroupNameLength is max length of the name of a resource group
@@ -38,40 +37,28 @@ func NewGroupFromOptions(groupName string, options *model.ResourceGroupSettings)
 
 	group.Priority = uint32(options.Priority)
 	if options.Runaway != nil {
-		if options.Runaway.ExecElapsedTimeMs == 0 && options.Runaway.ProcessedKeys == 0 && options.Runaway.RequestUnit == 0 {
-			return nil, ErrResourceGroupRunawayRuleIsEmpty
-		}
 		runaway := &rmpb.RunawaySettings{
 			Rule: &rmpb.RunawayRule{},
 		}
-		// Update the rule settings.
+		if options.Runaway.ExecElapsedTimeMs == 0 {
+			return nil, ErrInvalidResourceGroupRunawayExecElapsedTime
+		}
 		runaway.Rule.ExecElapsedTimeMs = options.Runaway.ExecElapsedTimeMs
-		runaway.Rule.ProcessedKeys = options.Runaway.ProcessedKeys
-		runaway.Rule.RequestUnit = options.Runaway.RequestUnit
-		// Update the action settings.
-		if options.Runaway.Action == pmodel.RunawayActionNone {
+		if options.Runaway.Action == model.RunawayActionNone {
 			return nil, ErrUnknownResourceGroupRunawayAction
 		}
 		runaway.Action = rmpb.RunawayAction(options.Runaway.Action)
-		if options.Runaway.Action == pmodel.RunawayActionSwitchGroup && len(options.Runaway.SwitchGroupName) == 0 {
-			return nil, ErrUnknownResourceGroupRunawaySwitchGroupName
-		}
-		// TODO: validate the switch group name to ensure it exists.
-		runaway.SwitchGroupName = options.Runaway.SwitchGroupName
-		// Update the watch settings.
-		if options.Runaway.WatchType != pmodel.WatchNone {
+		if options.Runaway.WatchType != model.WatchNone {
 			runaway.Watch = &rmpb.RunawayWatch{}
 			runaway.Watch.Type = rmpb.RunawayWatchType(options.Runaway.WatchType)
 			runaway.Watch.LastingDurationMs = options.Runaway.WatchDurationMs
 		}
-
 		group.RunawaySettings = runaway
 	}
 
 	if options.Background != nil {
 		group.BackgroundSettings = &rmpb.BackgroundSettings{
-			JobTypes:         options.Background.JobTypes,
-			UtilizationLimit: options.Background.ResourceUtilLimit,
+			JobTypes: options.Background.JobTypes,
 		}
 	}
 

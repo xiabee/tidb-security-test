@@ -9,7 +9,6 @@ import (
 
 	backup "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
-	kvconfig "github.com/pingcap/tidb/br/pkg/config"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/config"
@@ -185,7 +184,6 @@ func expectedDefaultConfig() Config {
 		GRPCKeepaliveTime:         10000000000,
 		GRPCKeepaliveTimeout:      3000000000,
 		CipherInfo:                backup.CipherInfo{CipherType: 1},
-		LogBackupCipherInfo:       backup.CipherInfo{CipherType: 1},
 		MetadataDownloadBatchSize: 0x80,
 	}
 }
@@ -209,15 +207,12 @@ func expectedDefaultRestoreConfig() RestoreConfig {
 	return RestoreConfig{
 		Config: defaultConfig,
 		RestoreCommonConfig: RestoreCommonConfig{Online: false,
-			Granularity:               "fine-grained",
-			MergeSmallRegionSizeBytes: kvconfig.ConfigTerm[uint64]{Value: 0x6000000},
-			MergeSmallRegionKeyCount:  kvconfig.ConfigTerm[uint64]{Value: 0xea600},
-			WithSysTable:              true,
+			MergeSmallRegionSizeBytes: 0x6000000,
+			MergeSmallRegionKeyCount:  0xea600,
+			WithSysTable:              false,
 			ResetSysUsers:             []string{"cloud_admin", "root"}},
 		NoSchema:            false,
-		LoadStats:           true,
 		PDConcurrency:       0x1,
-		StatsConcurrency:    0xc,
 		BatchFlushInterval:  16000000000,
 		DdlBatchSize:        0x80,
 		WithPlacementPolicy: "STRICT",
@@ -241,133 +236,4 @@ func TestDefaultRestore(t *testing.T) {
 	def := DefaultRestoreConfig()
 	defaultConfig := expectedDefaultRestoreConfig()
 	require.Equal(t, defaultConfig, def)
-}
-
-func TestParseAndValidateMasterKeyInfo(t *testing.T) {
-	tests := []struct {
-		name         string
-		input        string
-		expectedKeys []*encryptionpb.MasterKey
-		expectError  bool
-	}{
-		{
-			name:         "Empty input",
-			input:        "",
-			expectedKeys: nil,
-			expectError:  false,
-		},
-		{
-			name:  "Single local config",
-			input: "local:///path/to/key",
-			expectedKeys: []*encryptionpb.MasterKey{
-				{
-					Backend: &encryptionpb.MasterKey_File{
-						File: &encryptionpb.MasterKeyFile{Path: "/path/to/key"},
-					},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name:  "Single AWS config",
-			input: "aws-kms:///key-id?AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE&AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY&REGION=us-west-2",
-			expectedKeys: []*encryptionpb.MasterKey{
-				{
-					Backend: &encryptionpb.MasterKey_Kms{
-						Kms: &encryptionpb.MasterKeyKms{
-							Vendor: "aws",
-							KeyId:  "key-id",
-							Region: "us-west-2",
-						},
-					},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name:  "Single Azure config",
-			input: "azure-kms:///key-name/key-version?AZURE_TENANT_ID=tenant-id&AZURE_CLIENT_ID=client-id&AZURE_CLIENT_SECRET=client-secret&AZURE_VAULT_NAME=vault-name",
-			expectedKeys: []*encryptionpb.MasterKey{
-				{
-					Backend: &encryptionpb.MasterKey_Kms{
-						Kms: &encryptionpb.MasterKeyKms{
-							Vendor: "azure",
-							KeyId:  "key-name/key-version",
-							AzureKms: &encryptionpb.AzureKms{
-								TenantId:     "tenant-id",
-								ClientId:     "client-id",
-								ClientSecret: "client-secret",
-								KeyVaultUrl:  "vault-name",
-							},
-						},
-					},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name:  "Single GCP config",
-			input: "gcp-kms:///projects/project-id/locations/global/keyRings/ring-name/cryptoKeys/key-name?CREDENTIALS=credentials",
-			expectedKeys: []*encryptionpb.MasterKey{
-				{
-					Backend: &encryptionpb.MasterKey_Kms{
-						Kms: &encryptionpb.MasterKeyKms{
-							Vendor: "gcp",
-							KeyId:  "projects/project-id/locations/global/keyRings/ring-name/cryptoKeys/key-name",
-							GcpKms: &encryptionpb.GcpKms{
-								Credential: "credentials",
-							},
-						},
-					},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name: "Multiple configs",
-			input: "local:///path/to/key," +
-				"aws-kms:///key-id?AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE&AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY&REGION=us-west-2",
-			expectedKeys: []*encryptionpb.MasterKey{
-				{
-					Backend: &encryptionpb.MasterKey_File{
-						File: &encryptionpb.MasterKeyFile{Path: "/path/to/key"},
-					},
-				},
-				{
-					Backend: &encryptionpb.MasterKey_Kms{
-						Kms: &encryptionpb.MasterKeyKms{
-							Vendor: "aws",
-							KeyId:  "key-id",
-							Region: "us-west-2",
-						},
-					},
-				},
-			},
-			expectError: false,
-		},
-		{
-			name:         "Invalid config",
-			input:        "invalid:///config",
-			expectedKeys: nil,
-			expectError:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{}
-			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
-			flags.String(flagMasterKeyConfig, tt.input, "")
-			flags.String(flagMasterKeyCipherType, "aes256-ctr", "")
-
-			err := cfg.parseAndValidateMasterKeyInfo(false, flags)
-
-			if tt.expectError {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tt.expectedKeys, cfg.MasterKeyConfig.MasterKeys)
-			}
-		})
-	}
 }

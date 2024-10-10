@@ -28,6 +28,7 @@ import (
 	derr "github.com/pingcap/tidb/pkg/store/driver/error"
 	"github.com/pingcap/tidb/pkg/store/driver/options"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"github.com/tikv/client-go/v2/metrics"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/zap"
@@ -47,7 +48,7 @@ func NewRegionCache(rc *tikv.RegionCache) *RegionCache {
 func (c *RegionCache) SplitRegionRanges(bo *Backoffer, keyRanges []kv.KeyRange, limit int) ([]kv.KeyRange, error) {
 	ranges := NewKeyRanges(keyRanges)
 
-	locations, err := c.SplitKeyRangesByLocations(bo, ranges, limit, true, false)
+	locations, err := c.SplitKeyRangesByLocationsWithoutBuckets(bo, ranges, limit)
 	if err != nil {
 		return nil, derr.ToTiDBErr(err)
 	}
@@ -60,7 +61,7 @@ func (c *RegionCache) SplitRegionRanges(bo *Backoffer, keyRanges []kv.KeyRange, 
 	return ret, nil
 }
 
-// LocationKeyRanges wraps a real Location in PD and its logical ranges info.
+// LocationKeyRanges wrapps a real Location in PD and its logical ranges info.
 type LocationKeyRanges struct {
 	// Location is the real location in PD.
 	Location *tikv.KeyLocation
@@ -166,28 +167,79 @@ func (c *RegionCache) splitKeyRangesByLocation(loc *tikv.KeyLocation, ranges *Ke
 // UnspecifiedLimit means no limit.
 const UnspecifiedLimit = -1
 
-// SplitKeyRangesByLocations splits the KeyRanges by logical info in the cache.
+// SplitKeyRangesByLocationsWithBuckets splits the KeyRanges by logical info in the cache.
+// The buckets in the returned LocationKeyRanges are not empty if the region is split by bucket.
+func (c *RegionCache) SplitKeyRangesByLocationsWithBuckets(bo *Backoffer, ranges *KeyRanges, limit int) ([]*LocationKeyRanges, error) {
+	res := make([]*LocationKeyRanges, 0)
+	for ranges.Len() > 0 {
+		if limit != UnspecifiedLimit && len(res) >= limit {
+			break
+		}
+		loc, err := c.LocateKey(bo.TiKVBackoffer(), ranges.At(0).StartKey)
+		if err != nil {
+			return res, derr.ToTiDBErr(err)
+		}
+
+		isBreak := false
+		res, ranges, isBreak = c.splitKeyRangesByLocation(loc, ranges, res)
+		if isBreak {
+			break
+		}
+	}
+
+	return res, nil
+}
+
+// Currently, LocationKeyRanges returned by `locateKeyRange` doesn't contains buckets,
+// because of https://github.com/tikv/client-go/blob/09ecb550d383c1b048119b586fb5cda658312262/internal/locate/region_cache.go#L1550-L1551.
+func (c *RegionCache) locateKeyRange(bo *tikv.Backoffer, startKey, endKey []byte) ([]*tikv.KeyLocation, error) {
+	var res []*tikv.KeyLocation
+	for {
+		// 1. find location from cache
+		for {
+			loc := c.TryLocateKey(startKey)
+			if loc == nil {
+				break
+			}
+			res = append(res, loc)
+			if loc.Contains(endKey) || bytes.Equal(loc.EndKey, endKey) {
+				return res, nil
+			}
+			startKey = loc.EndKey
+		}
+		// 2. load remaining regions from pd client
+		batchRegions, err := c.BatchLoadRegionsWithKeyRange(bo, startKey, endKey, 128)
+		if err != nil {
+			return nil, err
+		}
+		if len(batchRegions) == 0 {
+			// should never happen
+			break
+		}
+		for _, r := range batchRegions {
+			res = append(res, &tikv.KeyLocation{
+				Region:   r.VerID(),
+				StartKey: r.StartKey(),
+				EndKey:   r.EndKey(),
+				Buckets:  nil,
+			})
+		}
+		endRegion := batchRegions[len(batchRegions)-1]
+		if endRegion.ContainsByEnd(endKey) {
+			break
+		}
+		startKey = endRegion.EndKey()
+	}
+	return res, nil
+}
+
+// SplitKeyRangesByLocationsWithoutBuckets splits the KeyRanges by logical info in the cache.
 // The buckets in the returned LocationKeyRanges are empty, regardless of whether the region is split by bucket.
-func (c *RegionCache) SplitKeyRangesByLocations(bo *Backoffer, ranges *KeyRanges, limit int, needLeader, buckets bool) ([]*LocationKeyRanges, error) {
+func (c *RegionCache) SplitKeyRangesByLocationsWithoutBuckets(bo *Backoffer, ranges *KeyRanges, limit int) ([]*LocationKeyRanges, error) {
 	if limit == 0 || ranges.Len() <= 0 {
 		return nil, nil
 	}
-
-	kvRanges := make([]tikv.KeyRange, 0, ranges.Len())
-	for i := 0; i < ranges.Len(); i++ {
-		kvRanges = append(kvRanges, tikv.KeyRange{
-			StartKey: ranges.At(i).StartKey,
-			EndKey:   ranges.At(i).EndKey,
-		})
-	}
-	opts := make([]tikv.BatchLocateKeyRangesOpt, 0, 2)
-	if needLeader {
-		opts = append(opts, tikv.WithNeedRegionHasLeaderPeer())
-	}
-	if buckets {
-		opts = append(opts, tikv.WithNeedBuckets())
-	}
-	locs, err := c.BatchLocateKeyRanges(bo.TiKVBackoffer(), kvRanges, opts...)
+	locs, err := c.locateKeyRange(bo.TiKVBackoffer(), ranges.RefAt(0).StartKey, ranges.RefAt(ranges.Len()-1).EndKey)
 	if err != nil {
 		return nil, derr.ToTiDBErr(err)
 	}
@@ -231,7 +283,7 @@ func (c *RegionCache) SplitKeyRangesByLocations(bo *Backoffer, ranges *KeyRanges
 //
 // TODO(youjiali1995): Try to do it in one round and reduce allocations if bucket is not enabled.
 func (c *RegionCache) SplitKeyRangesByBuckets(bo *Backoffer, ranges *KeyRanges) ([]*LocationKeyRanges, error) {
-	locs, err := c.SplitKeyRangesByLocations(bo, ranges, UnspecifiedLimit, false, true)
+	locs, err := c.SplitKeyRangesByLocationsWithBuckets(bo, ranges, UnspecifiedLimit)
 	if err != nil {
 		return nil, derr.ToTiDBErr(err)
 	}
@@ -249,7 +301,7 @@ func (c *RegionCache) OnSendFailForBatchRegions(bo *Backoffer, store *tikv.Store
 		logutil.Logger(bo.GetCtx()).Info("Should not reach here, OnSendFailForBatchRegions only support TiFlash")
 		return
 	}
-	logutil.Logger(bo.GetCtx()).Info("Send fail for " + strconv.Itoa(len(regionInfos)) + " regions, will switch region peer for these regions. Only first " + strconv.Itoa(min(10, len(regionInfos))) + " regions will be logged if the log level is higher than Debug")
+	logutil.Logger(bo.GetCtx()).Info("Send fail for " + strconv.Itoa(len(regionInfos)) + " regions, will switch region peer for these regions. Only first " + strconv.Itoa(mathutil.Min(10, len(regionInfos))) + " regions will be logged if the log level is higher than Debug")
 	for index, ri := range regionInfos {
 		if ri.Meta == nil {
 			continue

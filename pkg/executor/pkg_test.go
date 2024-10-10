@@ -20,12 +20,10 @@ import (
 	"testing"
 
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
-	"github.com/pingcap/tidb/pkg/executor/internal/testutil"
-	"github.com/pingcap/tidb/pkg/executor/join"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
+	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -39,46 +37,46 @@ func TestNestedLoopApply(t *testing.T) {
 	col1 := &expression.Column{Index: 1, RetType: types.NewFieldType(mysql.TypeLong)}
 	con := &expression.Constant{Value: types.NewDatum(6), RetType: types.NewFieldType(mysql.TypeLong)}
 	outerSchema := expression.NewSchema(col0)
-	outerExec := testutil.BuildMockDataSource(testutil.MockDataSourceParameters{
-		DataSchema: outerSchema,
-		Rows:       6,
-		Ctx:        sctx,
-		GenDataFunc: func(row int, typ *types.FieldType) any {
+	outerExec := buildMockDataSource(mockDataSourceParameters{
+		schema: outerSchema,
+		rows:   6,
+		ctx:    sctx,
+		genDataFunc: func(row int, typ *types.FieldType) interface{} {
 			return int64(row + 1)
 		},
 	})
-	outerExec.PrepareChunks()
+	outerExec.prepareChunks()
 
 	innerSchema := expression.NewSchema(col1)
-	innerExec := testutil.BuildMockDataSource(testutil.MockDataSourceParameters{
-		DataSchema: innerSchema,
-		Rows:       6,
-		Ctx:        sctx,
-		GenDataFunc: func(row int, typ *types.FieldType) any {
+	innerExec := buildMockDataSource(mockDataSourceParameters{
+		schema: innerSchema,
+		rows:   6,
+		ctx:    sctx,
+		genDataFunc: func(row int, typ *types.FieldType) interface{} {
 			return int64(row + 1)
 		},
 	})
-	innerExec.PrepareChunks()
+	innerExec.prepareChunks()
 
 	outerFilter := expression.NewFunctionInternal(sctx, ast.LT, types.NewFieldType(mysql.TypeTiny), col0, con)
 	innerFilter := outerFilter.Clone()
 	otherFilter := expression.NewFunctionInternal(sctx, ast.EQ, types.NewFieldType(mysql.TypeTiny), col0, col1)
-	joiner := join.NewJoiner(sctx, logicalop.InnerJoin, false,
+	joiner := newJoiner(sctx, plannercore.InnerJoin, false,
 		make([]types.Datum, innerExec.Schema().Len()), []expression.Expression{otherFilter},
 		exec.RetTypes(outerExec), exec.RetTypes(innerExec), nil, false)
 	joinSchema := expression.NewSchema(col0, col1)
-	join := &join.NestedLoopApplyExec{
+	join := &NestedLoopApplyExec{
 		BaseExecutor: exec.NewBaseExecutor(sctx, joinSchema, 0),
-		OuterExec:    outerExec,
-		InnerExec:    innerExec,
-		OuterFilter:  []expression.Expression{outerFilter},
-		InnerFilter:  []expression.Expression{innerFilter},
-		Joiner:       joiner,
-		Sctx:         sctx,
+		outerExec:    outerExec,
+		innerExec:    innerExec,
+		outerFilter:  []expression.Expression{outerFilter},
+		innerFilter:  []expression.Expression{innerFilter},
+		joiner:       joiner,
+		ctx:          sctx,
 	}
-	join.InnerList = chunk.NewList(exec.RetTypes(innerExec), innerExec.InitCap(), innerExec.MaxChunkSize())
-	join.InnerChunk = exec.NewFirstChunk(innerExec)
-	join.OuterChunk = exec.NewFirstChunk(outerExec)
+	join.innerList = chunk.NewList(exec.RetTypes(innerExec), innerExec.InitCap(), innerExec.MaxChunkSize())
+	join.innerChunk = exec.NewFirstChunk(innerExec)
+	join.outerChunk = exec.NewFirstChunk(outerExec)
 	joinChk := exec.NewFirstChunk(join)
 	it := chunk.NewIterator4Chunk(joinChk)
 	for rowIdx := 1; ; {

@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,7 +29,6 @@ type testState struct {
 }
 
 func TestFinalizer(t *testing.T) {
-	require.True(t, intest.InTest)
 	debug.SetGCPercent(1000)
 	maxCount := int32(8)
 	state := &testState{}

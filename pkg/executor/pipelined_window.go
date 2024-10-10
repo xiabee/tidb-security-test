@@ -23,9 +23,10 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/vecgroupchecker"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/mathutil"
 )
 
 type dataInfo struct {
@@ -41,8 +42,8 @@ type PipelinedWindowExec struct {
 	windowFuncs        []aggfuncs.AggFunc
 	slidingWindowFuncs []aggfuncs.SlidingWindowAggFunc
 	partialResults     []aggfuncs.PartialResult
-	start              *logicalop.FrameBound
-	end                *logicalop.FrameBound
+	start              *core.FrameBound
+	end                *core.FrameBound
 	groupChecker       *vecgroupchecker.VecGroupChecker
 
 	// childResult stores the child chunk. Note that even if remaining is 0, e.rows might still references rows in data[0].chk after returned it to upper executor, since there is no guarantee what the upper executor will do to the returned chunk, it might destroy the data (as in the benchmark test, it reused the chunk to pull data, and it will be chk.Reset(), causing panicking). So dataIdx, accumulated and dropped are added to ensure that chunk will only be returned if there is no row reference.
@@ -84,10 +85,19 @@ func (e *PipelinedWindowExec) Close() error {
 
 // Open implements the Executor Open interface
 func (e *PipelinedWindowExec) Open(ctx context.Context) (err error) {
-	e.done, e.newPartition, e.whole, e.initializedSlidingWindow = false, false, false, false
-	e.dataIdx, e.curRowIdx, e.dropped, e.rowToConsume, e.accumulated = 0, 0, 0, 0, 0
-	e.lastStartRow, e.lastEndRow, e.stagedStartRow, e.stagedEndRow, e.rowStart, e.rowCnt = 0, 0, 0, 0, 0, 0
-	e.rows, e.data = make([]chunk.Row, 0), make([]dataInfo, 0)
+	e.rowToConsume = 0
+	e.done = false
+	e.accumulated = 0
+	e.dropped = 0
+	e.data = make([]dataInfo, 0)
+	e.dataIdx = 0
+	e.slidingWindowFuncs = make([]aggfuncs.SlidingWindowAggFunc, len(e.windowFuncs))
+	for i, windowFunc := range e.windowFuncs {
+		if slidingWindowAggFunc, ok := windowFunc.(aggfuncs.SlidingWindowAggFunc); ok {
+			e.slidingWindowFuncs[i] = slidingWindowAggFunc
+		}
+	}
+	e.rows = make([]chunk.Row, 0)
 	return e.BaseExecutor.Open(ctx)
 }
 
@@ -209,7 +219,7 @@ func (e *PipelinedWindowExec) fetchChild(ctx context.Context) (eof bool, err err
 	}
 
 	// TODO: reuse chunks
-	resultChk := e.AllocPool.Alloc(e.RetFieldTypes(), 0, numRows)
+	resultChk := e.Ctx().GetSessionVars().GetNewChunkWithCapacity(e.RetFieldTypes(), 0, numRows, e.AllocPool)
 	err = e.copyChk(childResult, resultChk)
 	if err != nil {
 		return false, err
@@ -250,11 +260,11 @@ func (e *PipelinedWindowExec) getStart(ctx sessionctx.Context) (uint64, error) {
 	}
 	if e.isRangeFrame {
 		var start uint64
-		for start = max(e.lastStartRow, e.stagedStartRow); start < e.rowCnt; start++ {
+		for start = mathutil.Max(e.lastStartRow, e.stagedStartRow); start < e.rowCnt; start++ {
 			var res int64
 			var err error
 			for i := range e.orderByCols {
-				res, _, err = e.start.CmpFuncs[i](ctx.GetExprCtx().GetEvalCtx(), e.start.CompareCols[i], e.start.CalcFuncs[i], e.getRow(start), e.getRow(e.curRowIdx))
+				res, _, err = e.start.CmpFuncs[i](ctx, e.start.CompareCols[i], e.start.CalcFuncs[i], e.getRow(start), e.getRow(e.curRowIdx))
 				if err != nil {
 					return 0, err
 				}
@@ -290,11 +300,11 @@ func (e *PipelinedWindowExec) getEnd(ctx sessionctx.Context) (uint64, error) {
 	}
 	if e.isRangeFrame {
 		var end uint64
-		for end = max(e.lastEndRow, e.stagedEndRow); end < e.rowCnt; end++ {
+		for end = mathutil.Max(e.lastEndRow, e.stagedEndRow); end < e.rowCnt; end++ {
 			var res int64
 			var err error
 			for i := range e.orderByCols {
-				res, _, err = e.end.CmpFuncs[i](ctx.GetExprCtx().GetEvalCtx(), e.end.CalcFuncs[i], e.end.CompareCols[i], e.getRow(e.curRowIdx), e.getRow(end))
+				res, _, err = e.end.CmpFuncs[i](ctx, e.end.CalcFuncs[i], e.end.CompareCols[i], e.getRow(e.curRowIdx), e.getRow(end))
 				if err != nil {
 					return 0, err
 				}
@@ -360,7 +370,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 				if !e.emptyFrame {
 					wf.ResetPartialResult(e.partialResults[i])
 				}
-				err = wf.AppendFinalResult2Chunk(ctx.GetExprCtx().GetEvalCtx(), e.partialResults[i], chk)
+				err = wf.AppendFinalResult2Chunk(ctx, e.partialResults[i], chk)
 				if err != nil {
 					return
 				}
@@ -375,7 +385,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 				slidingWindowAggFunc := e.slidingWindowFuncs[i]
 				if e.lastStartRow != start || e.lastEndRow != end {
 					if slidingWindowAggFunc != nil && e.initializedSlidingWindow {
-						err = slidingWindowAggFunc.Slide(ctx.GetExprCtx().GetEvalCtx(), e.getRow, e.lastStartRow, e.lastEndRow, start-e.lastStartRow, end-e.lastEndRow, e.partialResults[i])
+						err = slidingWindowAggFunc.Slide(ctx, e.getRow, e.lastStartRow, e.lastEndRow, start-e.lastStartRow, end-e.lastEndRow, e.partialResults[i])
 					} else {
 						// For MinMaxSlidingWindowAggFuncs, it needs the absolute value of each start of window, to compare
 						// whether elements inside deque are out of current window.
@@ -385,13 +395,13 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 						}
 						// TODO(zhifeng): track memory usage here
 						wf.ResetPartialResult(e.partialResults[i])
-						_, err = wf.UpdatePartialResult(ctx.GetExprCtx().GetEvalCtx(), e.getRows(start, end), e.partialResults[i])
+						_, err = wf.UpdatePartialResult(ctx, e.getRows(start, end), e.partialResults[i])
 					}
 				}
 				if err != nil {
 					return
 				}
-				err = wf.AppendFinalResult2Chunk(ctx.GetExprCtx().GetEvalCtx(), e.partialResults[i], chk)
+				err = wf.AppendFinalResult2Chunk(ctx, e.partialResults[i], chk)
 				if err != nil {
 					return
 				}
@@ -404,7 +414,7 @@ func (e *PipelinedWindowExec) produce(ctx sessionctx.Context, chk *chunk.Chunk, 
 		produced++
 		remained--
 	}
-	extend := min(e.curRowIdx, e.lastEndRow, e.lastStartRow)
+	extend := mathutil.Min(e.curRowIdx, e.lastEndRow, e.lastStartRow)
 	if extend > e.rowStart {
 		numDrop := extend - e.rowStart
 		e.dropped += numDrop

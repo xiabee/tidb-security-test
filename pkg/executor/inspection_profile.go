@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 )
 
 const (
@@ -166,7 +167,7 @@ func (n *metricNode) getLabelValue(label string) *metricValue {
 }
 
 func (n *metricNode) queryRowsByLabel(pb *profileBuilder, query string, handleRowFn func(label string, v float64)) error {
-	exec := pb.sctx.GetRestrictedSQLExecutor()
+	exec := pb.sctx.(sqlexec.RestrictedSQLExecutor)
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
 	rows, _, err := exec.ExecRestrictedSQL(ctx, nil, query)
 	if err != nil {
@@ -409,27 +410,27 @@ func (pb *profileBuilder) GetMaxNodeValue(root *metricNode) (float64, error) {
 	if err != nil {
 		return 0.0, err
 	}
-	maxv := value.getValue(pb.valueTP)
+	max := value.getValue(pb.valueTP)
 	for _, v := range n.labelValue {
-		if v.getValue(pb.valueTP) > maxv {
-			maxv = v.getValue(pb.valueTP)
+		if v.getValue(pb.valueTP) > max {
+			max = v.getValue(pb.valueTP)
 		}
 	}
 	for _, child := range n.children {
 		childMax, err := pb.GetMaxNodeValue(child)
 		if err != nil {
-			return maxv, err
+			return max, err
 		}
-		if childMax > maxv {
-			maxv = childMax
+		if childMax > max {
+			max = childMax
 		}
 		for _, v := range n.labelValue {
-			if v.getValue(pb.valueTP) > maxv {
-				maxv = v.getValue(pb.valueTP)
+			if v.getValue(pb.valueTP) > max {
+				max = v.getValue(pb.valueTP)
 			}
 		}
 	}
-	return maxv, nil
+	return max, nil
 }
 
 func (pb *profileBuilder) traversal(n *metricNode) error {

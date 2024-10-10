@@ -15,7 +15,6 @@
 package optimizor
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -68,7 +67,7 @@ func (sh StatsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr(params[handler.DBName]), model.NewCIStr(params[handler.TableName]))
+	tbl, err := is.TableByName(model.NewCIStr(params[handler.DBName]), model.NewCIStr(params[handler.TableName]))
 	if err != nil {
 		handler.WriteError(w, err)
 	} else {
@@ -112,7 +111,7 @@ func (sh StatsHistoryHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	}
 
 	se.GetSessionVars().StmtCtx.SetTimeZone(time.Local)
-	t, err := types.ParseTime(se.GetSessionVars().StmtCtx.TypeCtx(), params[handler.Snapshot], mysql.TypeTimestamp, 6)
+	t, err := types.ParseTime(se.GetSessionVars().StmtCtx, params[handler.Snapshot], mysql.TypeTimestamp, 6, nil)
 	if err != nil {
 		handler.WriteError(w, err)
 		return
@@ -127,7 +126,7 @@ func (sh StatsHistoryHandler) ServeHTTP(w http.ResponseWriter, req *http.Request
 	if err != nil {
 		logutil.BgLogger().Info("fail to get snapshot TableInfo in historical stats API, switch to use latest infoschema", zap.Error(err))
 		is := sh.do.InfoSchema()
-		tbl, err = is.TableByName(context.Background(), model.NewCIStr(params[handler.DBName]), model.NewCIStr(params[handler.TableName]))
+		tbl, err = is.TableByName(model.NewCIStr(params[handler.DBName]), model.NewCIStr(params[handler.TableName]))
 		if err != nil {
 			handler.WriteError(w, err)
 			return
@@ -148,5 +147,5 @@ func getSnapshotTableInfo(dom *domain.Domain, snapshot uint64, dbName, tblName s
 	if err != nil {
 		return nil, err
 	}
-	return is.TableByName(context.Background(), model.NewCIStr(dbName), model.NewCIStr(tblName))
+	return is.TableByName(model.NewCIStr(dbName), model.NewCIStr(tblName))
 }

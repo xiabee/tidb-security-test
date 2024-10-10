@@ -21,8 +21,11 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/parser/auth"
+	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/benchdaily"
+	"github.com/stretchr/testify/require"
 )
 
 func TestListPartitionOrderLimit(t *testing.T) {
@@ -32,6 +35,7 @@ func TestListPartitionOrderLimit(t *testing.T) {
 	tk.MustExec("create database list_partition_order_limit")
 	tk.MustExec("use list_partition_order_limit")
 	tk.MustExec("drop table if exists tlist")
+	tk.MustExec(`set tidb_enable_list_partition = 1`)
 	tk.MustExec(`create table tlist (a int, b int) partition by list(a) (` +
 		` partition p0 values in ` + genListPartition(0, 20) +
 		`, partition p1 values in ` + genListPartition(20, 40) +
@@ -89,6 +93,7 @@ func TestListPartitionAgg(t *testing.T) {
 	tk.MustExec("create database list_partition_agg")
 	tk.MustExec("use list_partition_agg")
 	tk.MustExec("drop table if exists tlist")
+	tk.MustExec(`set tidb_enable_list_partition = 1`)
 	tk.MustExec(`create table tlist (a int, b int) partition by list(a) (` +
 		` partition p0 values in ` + genListPartition(0, 20) +
 		`, partition p1 values in ` + genListPartition(20, 40) +
@@ -139,6 +144,44 @@ func TestListPartitionAgg(t *testing.T) {
 	}
 }
 
+func TestListPartitionPrivilege(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+
+	tk := testkit.NewTestKit(t, store)
+
+	se, err := session.CreateSession4Test(store)
+	require.NoError(t, err)
+	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "root", Hostname: "%"}, nil, nil, nil))
+	tk.SetSession(se)
+	tk.MustExec("create database list_partition_pri")
+	tk.MustExec("use list_partition_pri")
+	tk.MustExec("drop table if exists tlist")
+	tk.MustExec(`set tidb_enable_list_partition = 1`)
+	tk.MustExec(`create table tlist (a int) partition by list (a) (partition p0 values in (0), partition p1 values in (1))`)
+
+	tk.MustExec(`create user 'priv_test'@'%'`)
+	tk.MustExec(`grant select on list_partition_pri.tlist to 'priv_test'`)
+
+	tk1 := testkit.NewTestKit(t, store)
+	se, err = session.CreateSession4Test(store)
+	require.NoError(t, err)
+	require.NoError(t, se.Auth(&auth.UserIdentity{Username: "priv_test", Hostname: "%"}, nil, nil, nil))
+	tk1.SetSession(se)
+	tk1.MustExec(`use list_partition_pri`)
+	err = tk1.ExecToErr(`alter table tlist truncate partition p0`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "denied")
+	err = tk1.ExecToErr(`alter table tlist drop partition p0`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "denied")
+	err = tk1.ExecToErr(`alter table tlist add partition (partition p2 values in (2))`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "denied")
+	err = tk1.ExecToErr(`insert into tlist values (1)`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "denied")
+}
+
 func TestListPartitionView(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 
@@ -146,6 +189,7 @@ func TestListPartitionView(t *testing.T) {
 	tk.MustExec("create database list_partition_view")
 	tk.MustExec("use list_partition_view")
 	tk.MustExec("drop table if exists tlist")
+	tk.MustExec(`set tidb_enable_list_partition = 1`)
 
 	tk.MustExec(`create table tlist (a int, b int) partition by list (a) (
     partition p0 values in (0, 1, 2, 3, 4),
@@ -188,6 +232,7 @@ func TestListPartitionRandomTransaction(t *testing.T) {
 	tk.MustExec("create database list_partition_random_tran")
 	tk.MustExec("use list_partition_random_tran")
 	tk.MustExec("drop table if exists tlist")
+	tk.MustExec(`set tidb_enable_list_partition = 1`)
 
 	tk.MustExec(`create table tlist (a int, b int) partition by list(a) (` +
 		` partition p0 values in ` + genListPartition(0, 20) +

@@ -26,16 +26,24 @@ import (
 	"strings"
 
 	"github.com/pingcap/failpoint"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
-	pd "github.com/tikv/pd/client/http"
 	"gopkg.in/yaml.v2"
 )
 
+// Refer to https://github.com/tikv/pd/issues/2701 .
+// IMO, it is indeed not bad to have a copy of definition.
+// After all, placement rules are communicated using an HTTP API. Loose
+//  coupling is a good feature.
+
 // Bundle is a group of all rules and configurations. It is used to support rule cache.
-// Alias `pd.GroupBundle` is to wrap more methods.
-type Bundle pd.GroupBundle
+type Bundle struct {
+	ID       string  `json:"group_id"`
+	Index    int     `json:"group_index"`
+	Override bool    `json:"group_override"`
+	Rules    []*Rule `json:"rules"`
+}
 
 // NewBundle will create a bundle with the provided ID.
 // Note that you should never pass negative id.
@@ -62,7 +70,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 	explicitFollowerCount := options.Followers
 	explicitLearnerCount := options.Learners
 
-	rules := []*pd.Rule{}
+	rules := []*Rule{}
 	commonConstraints, err := NewConstraintsFromYaml([]byte(constraints))
 	if err != nil {
 		// If it's not in array format, attempt to parse it as a dictionary for more detailed definitions.
@@ -70,7 +78,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 		// replicas that should act as voters.
 		// For example: CONSTRAINTS='{ "+region=us-east-1":2, "+region=us-east-2": 2, "+region=us-west-1": 1}'
 		normalReplicasRules, err := NewRuleBuilder().
-			SetRole(pd.Voter).
+			SetRole(Voter).
 			SetConstraintStr(constraints).
 			BuildRulesWithDictConstraintsOnly()
 		if err != nil {
@@ -84,7 +92,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 		return nil, fmt.Errorf("%w: 'LeaderConstraints' should be [constraint1, ...] or any yaml compatible array representation", err)
 	}
 	for _, cnst := range commonConstraints {
-		if err := AddConstraint(&leaderConstraints, cnst); err != nil {
+		if err := leaderConstraints.Add(cnst); err != nil {
 			return nil, fmt.Errorf("%w: LeaderConstraints conflicts with Constraints", err)
 		}
 	}
@@ -93,7 +101,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 		followerReplicas = explicitFollowerCount
 	}
 	if !needCreateDefault {
-		if len(leaderConst) == 0 {
+		if len(leaderConstraints) == 0 {
 			leaderReplicas = 0
 		}
 		if len(followerConstraints) == 0 {
@@ -107,7 +115,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 	// create leader rule.
 	// if no constraints, we need create default leader rule.
 	if leaderReplicas > 0 {
-		leaderRule := NewRule(pd.Leader, leaderReplicas, leaderConstraints)
+		leaderRule := NewRule(Leader, leaderReplicas, leaderConstraints)
 		rules = append(rules, leaderRule)
 	}
 
@@ -115,7 +123,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 	// if no constraints, we need create default follower rules.
 	if followerReplicas > 0 {
 		builder := NewRuleBuilder().
-			SetRole(pd.Voter).
+			SetRole(Voter).
 			SetReplicasNum(followerReplicas).
 			SetSkipCheckReplicasConsistent(needCreateDefault && (explicitFollowerCount == 0)).
 			SetConstraintStr(followerConstraints)
@@ -125,7 +133,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 		}
 		for _, followerRule := range followerRules {
 			for _, cnst := range commonConstraints {
-				if err := AddConstraint(&followerRule.LabelConstraints, cnst); err != nil {
+				if err := followerRule.Constraints.Add(cnst); err != nil {
 					return nil, fmt.Errorf("%w: FollowerConstraints conflicts with Constraints", err)
 				}
 			}
@@ -135,7 +143,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 
 	// create learner rules.
 	builder := NewRuleBuilder().
-		SetRole(pd.Learner).
+		SetRole(Learner).
 		SetReplicasNum(explicitLearnerCount).
 		SetConstraintStr(learnerConstraints)
 	learnerRules, err := builder.BuildRules()
@@ -144,7 +152,7 @@ func NewBundleFromConstraintsOptions(options *model.PlacementSettings) (*Bundle,
 	}
 	for _, rule := range learnerRules {
 		for _, cnst := range commonConstraints {
-			if err := AddConstraint(&rule.LabelConstraints, cnst); err != nil {
+			if err := rule.Constraints.Add(cnst); err != nil {
 				return nil, fmt.Errorf("%w: LearnerConstraints conflicts with Constraints", err)
 			}
 		}
@@ -186,7 +194,7 @@ func NewBundleFromSugarOptions(options *model.PlacementSettings) (*Bundle, error
 	}
 	schedule := options.Schedule
 
-	var rules []*pd.Rule
+	var rules []*Rule
 
 	locationLabels, err := newLocationLabelsFromSurvivalPreferences(options.SurvivalPreferences)
 	if err != nil {
@@ -195,7 +203,7 @@ func NewBundleFromSugarOptions(options *model.PlacementSettings) (*Bundle, error
 
 	// in case empty primaryRegion and regions, just return an empty bundle
 	if primaryRegion == "" && len(regions) == 0 {
-		rules = append(rules, NewRule(pd.Voter, followers+1, NewConstraintsDirect()))
+		rules = append(rules, NewRule(Voter, followers+1, NewConstraintsDirect()))
 		for _, rule := range rules {
 			rule.LocationLabels = locationLabels
 		}
@@ -222,17 +230,17 @@ func NewBundleFromSugarOptions(options *model.PlacementSettings) (*Bundle, error
 		return nil, fmt.Errorf("%w: unsupported schedule %s", ErrInvalidPlacementOptions, schedule)
 	}
 
-	rules = append(rules, NewRule(pd.Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, primaryRegion))))
+	rules = append(rules, NewRule(Leader, 1, NewConstraintsDirect(NewConstraintDirect("region", In, primaryRegion))))
 	if primaryCount > 1 {
-		rules = append(rules, NewRule(pd.Voter, primaryCount-1, NewConstraintsDirect(NewConstraintDirect("region", pd.In, primaryRegion))))
+		rules = append(rules, NewRule(Voter, primaryCount-1, NewConstraintsDirect(NewConstraintDirect("region", In, primaryRegion))))
 	}
 	if cnt := followers + 1 - primaryCount; cnt > 0 {
 		// delete primary from regions
 		regions = regions[:primaryIndex+copy(regions[primaryIndex:], regions[primaryIndex+1:])]
 		if len(regions) > 0 {
-			rules = append(rules, NewRule(pd.Voter, cnt, NewConstraintsDirect(NewConstraintDirect("region", pd.In, regions...))))
+			rules = append(rules, NewRule(Voter, cnt, NewConstraintsDirect(NewConstraintDirect("region", In, regions...))))
 		} else {
-			rules = append(rules, NewRule(pd.Voter, cnt, NewConstraintsDirect()))
+			rules = append(rules, NewRule(Voter, cnt, NewConstraintsDirect()))
 		}
 	}
 
@@ -324,8 +332,8 @@ func (b *Bundle) Tidy() error {
 		// refer to tidb#22065.
 		// add -engine=tiflash to every rule to avoid schedules to tiflash instances.
 		// placement rules in SQL is not compatible with `set tiflash replica` yet
-		err := AddConstraint(&rule.LabelConstraints, pd.LabelConstraint{
-			Op:     pd.NotIn,
+		err := rule.Constraints.Add(Constraint{
+			Op:     NotIn,
 			Key:    EngineLabelKey,
 			Values: []string{EngineLabelTiFlash},
 		})
@@ -340,10 +348,10 @@ func (b *Bundle) Tidy() error {
 	groups := make(map[string]*constraintsGroup)
 	finalRules := tempRules[:0]
 	for _, rule := range tempRules {
-		key := ConstraintsFingerPrint(&rule.LabelConstraints)
+		key := rule.Constraints.FingerPrint()
 		existing, ok := groups[key]
 		if !ok {
-			groups[key] = &constraintsGroup{rules: []*pd.Rule{rule}}
+			groups[key] = &constraintsGroup{rules: []*Rule{rule}}
 			continue
 		}
 		existing.rules = append(existing.rules, rule)
@@ -367,7 +375,7 @@ func (b *Bundle) Tidy() error {
 
 // constraintsGroup is a group of rules with the same constraints.
 type constraintsGroup struct {
-	rules []*pd.Rule
+	rules []*Rule
 	// canBecameLeader means the group has leader/voter role,
 	// it's valid if it has leader.
 	canBecameLeader bool
@@ -403,16 +411,16 @@ func transformableLeaderConstraint(groups map[string]*constraintsGroup) error {
 // MergeRulesByRole merges the rules with the same role.
 func (c *constraintsGroup) MergeRulesByRole() {
 	// Create a map to store rules by role
-	rulesByRole := make(map[pd.PeerRoleType][]*pd.Rule)
+	rulesByRole := make(map[PeerRoleType][]*Rule)
 
 	// Iterate through each rule
 	for _, rule := range c.rules {
 		// Add the rule to the map based on its role
 		rulesByRole[rule.Role] = append(rulesByRole[rule.Role], rule)
-		if rule.Role == pd.Leader || rule.Role == pd.Voter {
+		if rule.Role == Leader || rule.Role == Voter {
 			c.canBecameLeader = true
 		}
-		if rule.Role == pd.Leader {
+		if rule.Role == Leader {
 			c.isLeaderGroup = true
 		}
 	}
@@ -441,11 +449,11 @@ func (c *constraintsGroup) MergeTransformableRoles() {
 	if len(c.rules) == 0 || len(c.rules) == 1 {
 		return
 	}
-	var mergedRule *pd.Rule
-	newRules := make([]*pd.Rule, 0, len(c.rules))
+	var mergedRule *Rule
+	newRules := make([]*Rule, 0, len(c.rules))
 	for _, rule := range c.rules {
 		// Learner is not transformable, it should be promote by PD.
-		if rule.Role == pd.Learner {
+		if rule.Role == Learner {
 			newRules = append(newRules, rule)
 			continue
 		}
@@ -459,7 +467,7 @@ func (c *constraintsGroup) MergeTransformableRoles() {
 		}
 	}
 	if mergedRule != nil {
-		mergedRule.Role = pd.Voter
+		mergedRule.Role = Voter
 		newRules = append(newRules, mergedRule)
 	}
 	c.rules = newRules
@@ -489,7 +497,7 @@ func (b *Bundle) RebuildForRange(rangeName string, policyName string) *Bundle {
 
 	startKey, endKey := GetRangeStartAndEndKeyHex(b.ID)
 	b.Override = true
-	newRules := make([]*pd.Rule, 0, len(rule))
+	newRules := make([]*Rule, 0, len(rule))
 	for i, r := range b.Rules {
 		cp := r.Clone()
 		cp.ID = fmt.Sprintf("%s_rule_%d", strings.ToLower(policyName), i)
@@ -506,7 +514,7 @@ func (b *Bundle) RebuildForRange(rangeName string, policyName string) *Bundle {
 // Reset resets the bundle ID and keyrange of all rules.
 func (b *Bundle) Reset(ruleIndex int, newIDs []int64) *Bundle {
 	// eliminate the redundant rules.
-	var basicRules []*pd.Rule
+	var basicRules []*Rule
 	if len(b.Rules) != 0 {
 		// Make priority for rules with RuleIndexTable cause of duplication rules existence with RuleIndexPartition.
 		// If RuleIndexTable doesn't exist, bundle itself is a independent series of rules for a partition.
@@ -524,7 +532,7 @@ func (b *Bundle) Reset(ruleIndex int, newIDs []int64) *Bundle {
 	b.ID = GroupID(newIDs[0])
 	b.Index = ruleIndex
 	b.Override = true
-	newRules := make([]*pd.Rule, 0, len(basicRules)*len(newIDs))
+	newRules := make([]*Rule, 0, len(basicRules)*len(newIDs))
 	for i, newID := range newIDs {
 		// rule.id should be distinguished with each other, otherwise it will be de-duplicated in pd http api.
 		var ruleID string
@@ -564,7 +572,7 @@ func (b *Bundle) Clone() *Bundle {
 	newBundle := &Bundle{}
 	*newBundle = *b
 	if len(b.Rules) > 0 {
-		newBundle.Rules = make([]*pd.Rule, 0, len(b.Rules))
+		newBundle.Rules = make([]*Rule, 0, len(b.Rules))
 		for i := range b.Rules {
 			newBundle.Rules = append(newBundle.Rules, b.Rules[i].Clone())
 		}
@@ -593,10 +601,10 @@ func (b *Bundle) ObjectID() (int64, error) {
 	return id, nil
 }
 
-func isValidLeaderRule(rule *pd.Rule, dcLabelKey string) bool {
-	if rule.Role == pd.Leader && rule.Count == 1 {
-		for _, con := range rule.LabelConstraints {
-			if con.Op == pd.In && con.Key == dcLabelKey && len(con.Values) == 1 {
+func isValidLeaderRule(rule *Rule, dcLabelKey string) bool {
+	if rule.Role == Leader && rule.Count == 1 {
+		for _, con := range rule.Constraints {
+			if con.Op == In && con.Key == dcLabelKey && len(con.Values) == 1 {
 				return true
 			}
 		}
@@ -608,7 +616,7 @@ func isValidLeaderRule(rule *pd.Rule, dcLabelKey string) bool {
 func (b *Bundle) GetLeaderDC(dcLabelKey string) (string, bool) {
 	for _, rule := range b.Rules {
 		if isValidLeaderRule(rule, dcLabelKey) {
-			return rule.LabelConstraints[0].Values[0], true
+			return rule.Constraints[0].Values[0], true
 		}
 	}
 	return "", false

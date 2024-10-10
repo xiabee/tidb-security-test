@@ -17,8 +17,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strconv"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -27,8 +25,7 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -40,10 +37,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil/consistency"
 	"github.com/pingcap/tidb/pkg/util/rowcodec"
-	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/txnkv/txnsnapshot"
 )
 
@@ -54,15 +49,6 @@ func (b *executorBuilder) buildPointGet(p *plannercore.PointGetPlan) exec.Execut
 		return nil
 	}
 
-	if p.PrunePartitions(b.ctx) {
-		// no matching partitions
-		return &TableDualExec{
-			BaseExecutorV2: exec.NewBaseExecutorV2(b.ctx.GetSessionVars(), p.Schema(), p.ID()),
-			numDualRows:    0,
-			numReturned:    0,
-		}
-	}
-
 	if p.Lock && !b.inSelectLockStmt {
 		b.inSelectLockStmt = true
 		defer func() {
@@ -71,16 +57,14 @@ func (b *executorBuilder) buildPointGet(p *plannercore.PointGetPlan) exec.Execut
 	}
 
 	e := &PointGetExecutor{
-		BaseExecutor:       exec.NewBaseExecutor(b.ctx, p.Schema(), p.ID()),
-		indexUsageReporter: b.buildIndexUsageReporter(p),
-		txnScope:           b.txnScope,
-		readReplicaScope:   b.readReplicaScope,
-		isStaleness:        b.isStaleness,
-		partitionNames:     p.PartitionNames,
+		BaseExecutor:     exec.NewBaseExecutor(b.ctx, p.Schema(), p.ID()),
+		txnScope:         b.txnScope,
+		readReplicaScope: b.readReplicaScope,
+		isStaleness:      b.isStaleness,
 	}
 
-	e.SetInitCap(1)
-	e.SetMaxChunkSize(1)
+	e.Base().SetInitCap(1)
+	e.Base().SetMaxChunkSize(1)
 	e.Init(p)
 
 	e.snapshot, err = b.getSnapshot()
@@ -132,13 +116,11 @@ func (b *executorBuilder) buildPointGet(p *plannercore.PointGetPlan) exec.Execut
 // PointGetExecutor executes point select query.
 type PointGetExecutor struct {
 	exec.BaseExecutor
-	indexUsageReporter *exec.IndexUsageReporter
 
 	tblInfo          *model.TableInfo
 	handle           kv.Handle
 	idxInfo          *model.IndexInfo
-	partitionDefIdx  *int
-	partitionNames   []pmodel.CIStr
+	partInfo         *model.PartitionDefinition
 	idxKey           kv.Key
 	handleVal        []byte
 	idxVals          []types.Datum
@@ -163,40 +145,6 @@ type PointGetExecutor struct {
 	stats *runtimeStatsWithSnapshot
 }
 
-// GetPhysID returns the physical id used, either the table's id or a partition's ID
-func GetPhysID(tblInfo *model.TableInfo, idx *int) int64 {
-	if idx != nil {
-		if *idx < 0 {
-			intest.Assert(false)
-		} else {
-			if pi := tblInfo.GetPartitionInfo(); pi != nil {
-				return pi.Definitions[*idx].ID
-			}
-		}
-	}
-	return tblInfo.ID
-}
-
-func matchPartitionNames(pid int64, partitionNames []pmodel.CIStr, pi *model.PartitionInfo) bool {
-	if len(partitionNames) == 0 {
-		return true
-	}
-	defs := pi.Definitions
-	for i := range defs {
-		// TODO: create a map from id to partition definition index
-		if defs[i].ID == pid {
-			for _, name := range partitionNames {
-				if defs[i].Name.L == name.L {
-					return true
-				}
-			}
-			// Only one partition can match pid
-			return false
-		}
-	}
-	return false
-}
-
 // Init set fields needed for PointGetExecutor reuse, this does NOT change baseExecutor field
 func (e *PointGetExecutor) Init(p *plannercore.PointGetPlan) {
 	decoder := NewRowDecoder(e.Ctx(), p.Schema(), p.TblInfo)
@@ -214,14 +162,9 @@ func (e *PointGetExecutor) Init(p *plannercore.PointGetPlan) {
 		e.lockWaitTime = 0
 	}
 	e.rowDecoder = decoder
-	e.partitionDefIdx = p.PartitionIdx
+	e.partInfo = p.PartitionInfo
 	e.columns = p.Columns
 	e.buildVirtualColumnInfo()
-
-	// It's necessary to at least reset the `runtimeStats` of the `BaseExecutor`.
-	// As the `StmtCtx` may have changed, a new index usage reporter should also be created.
-	e.BaseExecutor = exec.NewBaseExecutor(e.Ctx(), p.Schema(), p.ID())
-	e.indexUsageReporter = buildIndexUsageReporter(e.Ctx(), p)
 }
 
 // buildVirtualColumnInfo saves virtual column indices and sort them in definition order
@@ -252,27 +195,17 @@ func (e *PointGetExecutor) Open(context.Context) error {
 // Close implements the Executor interface.
 func (e *PointGetExecutor) Close() error {
 	if e.stats != nil {
-		defer func() {
-			sc := e.Ctx().GetSessionVars().StmtCtx
-			sc.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
-			timeDetail := e.stats.SnapshotRuntimeStats.GetTimeDetail()
-			if timeDetail != nil {
-				e.Ctx().GetSessionVars().SQLCPUUsages.MergeTikvCPUTime(timeDetail.ProcessTime)
-			}
-		}()
+		defer e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), e.stats)
 	}
 	if e.RuntimeStats() != nil && e.snapshot != nil {
 		e.snapshot.SetOption(kv.CollectRuntimeStats, nil)
 	}
-	if e.indexUsageReporter != nil {
-		tableID := e.tblInfo.ID
-		physicalTableID := GetPhysID(e.tblInfo, e.partitionDefIdx)
-		kvReqTotal := e.stats.SnapshotRuntimeStats.GetCmdRPCCount(tikvrpc.CmdGet)
-		if e.idxInfo != nil {
-			e.indexUsageReporter.ReportPointGetIndexUsage(tableID, physicalTableID, e.idxInfo.ID, e.ID(), kvReqTotal)
-		} else {
-			e.indexUsageReporter.ReportPointGetIndexUsageForHandle(e.tblInfo, physicalTableID, e.ID(), kvReqTotal)
+	if e.idxInfo != nil && e.tblInfo != nil {
+		actRows := int64(0)
+		if e.RuntimeStats() != nil {
+			actRows = e.RuntimeStats().GetActRows()
 		}
+		e.Ctx().StoreIndexUsage(e.tblInfo.ID, e.idxInfo.ID, actRows)
 	}
 	e.done = false
 	return nil
@@ -286,14 +219,19 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 	}
 	e.done = true
 
+	var tblID int64
 	var err error
-	tblID := GetPhysID(e.tblInfo, e.partitionDefIdx)
+	if e.partInfo != nil {
+		tblID = e.partInfo.ID
+	} else {
+		tblID = e.tblInfo.ID
+	}
 	if e.lock {
 		e.UpdateDeltaForTableID(tblID)
 	}
 	if e.idxInfo != nil {
 		if isCommonHandleRead(e.tblInfo, e.idxInfo) {
-			handleBytes, err := plannercore.EncodeUniqueIndexValuesForKey(e.Ctx(), e.tblInfo, e.idxInfo, e.idxVals)
+			handleBytes, err := EncodeUniqueIndexValuesForKey(e.Ctx(), e.tblInfo, e.idxInfo, e.idxVals)
 			if err != nil {
 				if kv.ErrNotExist.Equal(err) {
 					return nil
@@ -305,7 +243,7 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 				return err
 			}
 		} else {
-			e.idxKey, err = plannercore.EncodeUniqueIndexKey(e.Ctx(), e.tblInfo, e.idxInfo, e.idxVals, tblID)
+			e.idxKey, err = EncodeUniqueIndexKey(e.Ctx(), e.tblInfo, e.idxInfo, e.idxVals, tblID)
 			if err != nil && !kv.ErrNotExist.Equal(err) {
 				return err
 			}
@@ -346,7 +284,7 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 			}
 
 			var iv kv.Handle
-			iv, err = tablecodec.DecodeHandleInIndexValue(e.handleVal)
+			iv, err = tablecodec.DecodeHandleInUniqueIndexValue(e.handleVal, e.tblInfo.IsCommonHandle)
 			if err != nil {
 				return err
 			}
@@ -365,16 +303,6 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 				// Wait `UPDATE` finished
 				failpoint.InjectContext(ctx, "pointGetRepeatableReadTest-step2", nil)
 			})
-			if e.idxInfo.Global {
-				_, pid, err := codec.DecodeInt(tablecodec.SplitIndexValue(e.handleVal).PartitionID)
-				if err != nil {
-					return err
-				}
-				tblID = pid
-				if !matchPartitionNames(tblID, e.partitionNames, e.tblInfo.GetPartitionInfo()) {
-					return nil
-				}
-			}
 		}
 	}
 
@@ -387,16 +315,15 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 		if e.idxInfo != nil && !isCommonHandleRead(e.tblInfo, e.idxInfo) &&
 			!e.Ctx().GetSessionVars().StmtCtx.WeakConsistency {
 			return (&consistency.Reporter{
-				HandleEncode: func(kv.Handle) kv.Key {
+				HandleEncode: func(handle kv.Handle) kv.Key {
 					return key
 				},
-				IndexEncode: func(*consistency.RecordData) kv.Key {
+				IndexEncode: func(idxRow *consistency.RecordData) kv.Key {
 					return e.idxKey
 				},
-				Tbl:             e.tblInfo,
-				Idx:             e.idxInfo,
-				EnableRedactLog: e.Ctx().GetSessionVars().EnableRedactLog,
-				Storage:         e.Ctx().GetStore(),
+				Tbl:  e.tblInfo,
+				Idx:  e.idxInfo,
+				Sctx: e.Ctx(),
 			}).ReportLookupInconsistent(ctx,
 				1, 0,
 				[]kv.Handle{e.handle},
@@ -406,119 +333,16 @@ func (e *PointGetExecutor) Next(ctx context.Context, req *chunk.Chunk) error {
 		}
 		return nil
 	}
-
-	sctx := e.BaseExecutor.Ctx()
-	schema := e.Schema()
-	err = DecodeRowValToChunk(sctx, schema, e.tblInfo, e.handle, val, req, e.rowDecoder)
-	if err != nil {
-		return err
-	}
-
-	err = fillRowChecksum(sctx, 0, 1, schema, e.tblInfo, [][]byte{val}, []kv.Handle{e.handle}, req, nil)
+	err = DecodeRowValToChunk(e.Base().Ctx(), e.Schema(), e.tblInfo, e.handle, val, req, e.rowDecoder)
 	if err != nil {
 		return err
 	}
 
 	err = table.FillVirtualColumnValue(e.virtualColumnRetFieldTypes, e.virtualColumnIndex,
-		schema.Columns, e.columns, sctx.GetExprCtx(), req)
+		e.Schema().Columns, e.columns, e.Ctx(), req)
 	if err != nil {
 		return err
 	}
-	return nil
-}
-
-func shouldFillRowChecksum(schema *expression.Schema) (int, bool) {
-	for idx, col := range schema.Columns {
-		if col.ID == model.ExtraRowChecksumID {
-			return idx, true
-		}
-	}
-	return 0, false
-}
-
-func fillRowChecksum(
-	sctx sessionctx.Context,
-	start, end int,
-	schema *expression.Schema, tblInfo *model.TableInfo,
-	values [][]byte, handles []kv.Handle,
-	req *chunk.Chunk, buf []byte,
-) error {
-	checksumColumnIndex, ok := shouldFillRowChecksum(schema)
-	if !ok {
-		return nil
-	}
-
-	var handleColIDs []int64
-	if tblInfo.PKIsHandle {
-		colInfo := tblInfo.GetPkColInfo()
-		handleColIDs = []int64{colInfo.ID}
-	} else if tblInfo.IsCommonHandle {
-		pkIdx := tables.FindPrimaryIndex(tblInfo)
-		for _, col := range pkIdx.Columns {
-			colInfo := tblInfo.Columns[col.Offset]
-			handleColIDs = append(handleColIDs, colInfo.ID)
-		}
-	}
-
-	columnFt := make(map[int64]*types.FieldType)
-	for idx := range tblInfo.Columns {
-		col := tblInfo.Columns[idx]
-		columnFt[col.ID] = &col.FieldType
-	}
-	tz := sctx.GetSessionVars().TimeZone
-	ft := []*types.FieldType{schema.Columns[checksumColumnIndex].GetType(sctx.GetExprCtx().GetEvalCtx())}
-	checksumCols := chunk.NewChunkWithCapacity(ft, req.Capacity())
-	for i := start; i < end; i++ {
-		handle, val := handles[i], values[i]
-		if !rowcodec.IsNewFormat(val) {
-			checksumCols.AppendNull(0)
-			continue
-		}
-		datums, err := tablecodec.DecodeRowWithMapNew(val, columnFt, tz, nil)
-		if err != nil {
-			return err
-		}
-		datums, err = tablecodec.DecodeHandleToDatumMap(handle, handleColIDs, columnFt, tz, datums)
-		if err != nil {
-			return err
-		}
-		for _, col := range tblInfo.Columns {
-			// cannot found from the datums, which means the data is not stored, this
-			// may happen after `add column` executed, filling with the default value.
-			_, ok := datums[col.ID]
-			if !ok {
-				colInfo := getColInfoByID(tblInfo, col.ID)
-				d, err := table.GetColOriginDefaultValue(sctx.GetExprCtx(), colInfo)
-				if err != nil {
-					return err
-				}
-				datums[col.ID] = d
-			}
-		}
-
-		colData := make([]rowcodec.ColData, len(tblInfo.Columns))
-		for idx, col := range tblInfo.Columns {
-			d := datums[col.ID]
-			data := rowcodec.ColData{
-				ColumnInfo: col,
-				Datum:      &d,
-			}
-			colData[idx] = data
-		}
-		row := rowcodec.RowData{
-			Cols: colData,
-			Data: buf,
-		}
-		if !sort.IsSorted(row) {
-			sort.Sort(row)
-		}
-		checksum, err := row.Checksum(tz)
-		if err != nil {
-			return err
-		}
-		checksumCols.AppendString(0, strconv.FormatUint(uint64(checksum), 10))
-	}
-	req.SetCol(checksumColumnIndex, checksumCols.Column(0))
 	return nil
 }
 
@@ -655,7 +479,7 @@ func (e *PointGetExecutor) get(ctx context.Context, key kv.Key) ([]byte, error) 
 	}
 
 	lock := e.tblInfo.Lock
-	if lock != nil && (lock.Tp == pmodel.TableLockRead || lock.Tp == pmodel.TableLockReadOnly) {
+	if lock != nil && (lock.Tp == model.TableLockRead || lock.Tp == model.TableLockReadOnly) {
 		if e.Ctx().GetSessionVars().EnablePointGetCache {
 			cacheDB := e.Ctx().GetStore().GetMemCache()
 			val, err = cacheDB.UnionGet(ctx, e.tblInfo.ID, e.snapshot, key)
@@ -674,13 +498,19 @@ func (e *PointGetExecutor) verifyTxnScope() error {
 		return nil
 	}
 
+	var tblID int64
+	var tblName string
 	var partName string
 	is := e.Ctx().GetInfoSchema().(infoschema.InfoSchema)
-	tblInfo, _ := is.TableByID(context.Background(), e.tblInfo.ID)
-	tblName := tblInfo.Meta().Name.String()
-	tblID := GetPhysID(tblInfo.Meta(), e.partitionDefIdx)
-	if tblID != tblInfo.Meta().ID {
-		partName = tblInfo.Meta().GetPartitionInfo().Definitions[*e.partitionDefIdx].Name.String()
+	if e.partInfo != nil {
+		tblID = e.partInfo.ID
+		tblInfo, _, partInfo := is.FindTableByPartitionID(tblID)
+		tblName = tblInfo.Meta().Name.String()
+		partName = partInfo.Name.String()
+	} else {
+		tblID = e.tblInfo.ID
+		tblInfo, _ := is.TableByID(tblID)
+		tblName = tblInfo.Meta().Name.String()
 	}
 	valid := distsql.VerifyTxnScope(e.txnScope, tblID, is)
 	if valid {
@@ -692,6 +522,62 @@ func (e *PointGetExecutor) verifyTxnScope() error {
 	}
 	return dbterror.ErrInvalidPlacementPolicyCheck.GenWithStackByArgs(
 		fmt.Sprintf("table %v can not be read by %v txn_scope", tblName, e.txnScope))
+}
+
+// EncodeUniqueIndexKey encodes a unique index key.
+func EncodeUniqueIndexKey(ctx sessionctx.Context, tblInfo *model.TableInfo, idxInfo *model.IndexInfo, idxVals []types.Datum, tID int64) (_ []byte, err error) {
+	encodedIdxVals, err := EncodeUniqueIndexValuesForKey(ctx, tblInfo, idxInfo, idxVals)
+	if err != nil {
+		return nil, err
+	}
+	return tablecodec.EncodeIndexSeekKey(tID, idxInfo.ID, encodedIdxVals), nil
+}
+
+// EncodeUniqueIndexValuesForKey encodes unique index values for a key.
+func EncodeUniqueIndexValuesForKey(ctx sessionctx.Context, tblInfo *model.TableInfo, idxInfo *model.IndexInfo, idxVals []types.Datum) (_ []byte, err error) {
+	sc := ctx.GetSessionVars().StmtCtx
+	for i := range idxVals {
+		colInfo := tblInfo.Columns[idxInfo.Columns[i].Offset]
+		// table.CastValue will append 0x0 if the string value's length is smaller than the BINARY column's length.
+		// So we don't use CastValue for string value for now.
+		// TODO: The first if branch should have been removed, because the functionality of set the collation of the datum
+		// have been moved to util/ranger (normal path) and getNameValuePairs/getPointGetValue (fast path). But this change
+		// will be cherry-picked to a hotfix, so we choose to be a bit conservative and keep this for now.
+		if colInfo.GetType() == mysql.TypeString || colInfo.GetType() == mysql.TypeVarString || colInfo.GetType() == mysql.TypeVarchar {
+			var str string
+			str, err = idxVals[i].ToString()
+			idxVals[i].SetString(str, idxVals[i].Collation())
+		} else if colInfo.GetType() == mysql.TypeEnum && (idxVals[i].Kind() == types.KindString || idxVals[i].Kind() == types.KindBytes || idxVals[i].Kind() == types.KindBinaryLiteral) {
+			var str string
+			var e types.Enum
+			str, err = idxVals[i].ToString()
+			if err != nil {
+				return nil, kv.ErrNotExist
+			}
+			e, err = types.ParseEnumName(colInfo.FieldType.GetElems(), str, colInfo.FieldType.GetCollate())
+			if err != nil {
+				return nil, kv.ErrNotExist
+			}
+			idxVals[i].SetMysqlEnum(e, colInfo.FieldType.GetCollate())
+		} else {
+			// If a truncated error or an overflow error is thrown when converting the type of `idxVal[i]` to
+			// the type of `colInfo`, the `idxVal` does not exist in the `idxInfo` for sure.
+			idxVals[i], err = table.CastValue(ctx, idxVals[i], colInfo, true, false)
+			if types.ErrOverflow.Equal(err) || types.ErrDataTooLong.Equal(err) ||
+				types.ErrTruncated.Equal(err) || types.ErrTruncatedWrongVal.Equal(err) {
+				return nil, kv.ErrNotExist
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	encodedIdxVals, err := codec.EncodeKey(sc, nil, idxVals...)
+	if err != nil {
+		return nil, err
+	}
+	return encodedIdxVals, nil
 }
 
 // DecodeRowValToChunk decodes row value into chunk checking row format used.
@@ -737,7 +623,7 @@ func decodeOldRowValToChunk(sctx sessionctx.Context, schema *expression.Schema, 
 		cutPos := colID2CutPos[col.ID]
 		if len(cutVals[cutPos]) == 0 {
 			colInfo := getColInfoByID(tblInfo, col.ID)
-			d, err1 := table.GetColOriginDefaultValue(sctx.GetExprCtx(), colInfo)
+			d, err1 := table.GetColOriginDefaultValue(sctx, colInfo)
 			if err1 != nil {
 				return err1
 			}

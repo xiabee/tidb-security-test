@@ -16,6 +16,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,8 +53,8 @@ type ExplainExec struct {
 
 // Open implements the Executor Open interface.
 func (e *ExplainExec) Open(ctx context.Context) error {
-	if e.explain.Analyze && e.analyzeExec != nil {
-		return exec.Open(ctx, e.analyzeExec)
+	if e.analyzeExec != nil {
+		return e.analyzeExec.Open(ctx)
 	}
 	return nil
 }
@@ -61,9 +62,9 @@ func (e *ExplainExec) Open(ctx context.Context) error {
 // Close implements the Executor Close interface.
 func (e *ExplainExec) Close() error {
 	e.rows = nil
-	if e.explain.Analyze && e.analyzeExec != nil && !e.executed {
+	if e.analyzeExec != nil && !e.executed {
 		// Open(), but Next() is not called.
-		return exec.Close(e.analyzeExec)
+		return e.analyzeExec.Close()
 	}
 	return nil
 }
@@ -83,7 +84,7 @@ func (e *ExplainExec) Next(ctx context.Context, req *chunk.Chunk) error {
 		return nil
 	}
 
-	numCurRows := min(req.Capacity(), len(e.rows)-e.cursor)
+	numCurRows := mathutil.Min(req.Capacity(), len(e.rows)-e.cursor)
 	for i := e.cursor; i < e.cursor+numCurRows; i++ {
 		for j := range e.rows[i] {
 			req.AppendString(j, e.rows[i][j])
@@ -94,9 +95,9 @@ func (e *ExplainExec) Next(ctx context.Context, req *chunk.Chunk) error {
 }
 
 func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
-	if e.explain.Analyze && e.analyzeExec != nil && !e.executed {
+	if e.analyzeExec != nil && !e.executed {
 		defer func() {
-			err1 := exec.Close(e.analyzeExec)
+			err1 := e.analyzeExec.Close()
 			if err1 != nil {
 				if err != nil {
 					err = errors.New(err.Error() + ", " + err1.Error())
@@ -133,21 +134,19 @@ func (e *ExplainExec) executeAnalyzeExec(ctx context.Context) (err error) {
 		}
 	}
 	// Register the RU runtime stats to the runtime stats collection after the analyze executor has been executed.
-	if e.explain.Analyze && e.analyzeExec != nil && e.executed {
+	if e.analyzeExec != nil && e.executed {
 		ruDetailsRaw := ctx.Value(clientutil.RUDetailsCtxKey)
 		if coll := e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl; coll != nil && ruDetailsRaw != nil {
 			ruDetails := ruDetailsRaw.(*clientutil.RUDetails)
-			coll.RegisterStats(e.explain.TargetPlan.ID(), &execdetails.RURuntimeStats{RUDetails: ruDetails})
+			coll.RegisterStats(e.explain.TargetPlan.ID(), &ruRuntimeStats{ruDetails})
 		}
 	}
 	return err
 }
 
 func (e *ExplainExec) generateExplainInfo(ctx context.Context) (rows [][]string, err error) {
-	if e.explain.Analyze {
-		if err = e.executeAnalyzeExec(ctx); err != nil {
-			return nil, err
-		}
+	if err = e.executeAnalyzeExec(ctx); err != nil {
+		return nil, err
 	}
 	if err = e.explain.RenderResult(); err != nil {
 		return nil, err
@@ -161,7 +160,7 @@ func (e *ExplainExec) generateExplainInfo(ctx context.Context) (rows [][]string,
 // Otherwise, in autocommit transaction, the table record change of analyze executor(insert/update/delete...)
 // will not be committed.
 func (e *ExplainExec) getAnalyzeExecToExecutedNoDelay() exec.Executor {
-	if e.explain.Analyze && e.analyzeExec != nil && !e.executed && e.analyzeExec.Schema().Len() == 0 {
+	if e.analyzeExec != nil && !e.executed && e.analyzeExec.Schema().Len() == 0 {
 		e.executed = true
 		return e.analyzeExec
 	}
@@ -221,8 +220,9 @@ func updateTriggerIntervalByHeapInUse(heapInUse uint64) (time.Duration, int) {
 		return 5 * time.Second, 6
 	} else if heapInUse < 40*size.GB {
 		return 15 * time.Second, 2
+	} else {
+		return 30 * time.Second, 1
 	}
-	return 30 * time.Second, 1
 }
 
 func (h *memoryDebugModeHandler) run() {
@@ -316,4 +316,39 @@ func getHeapProfile() (fileName string, err error) {
 		return "", err
 	}
 	return fileName, nil
+}
+
+// ruRuntimeStats is a wrapper of clientutil.RUDetails,
+// which implements the RuntimeStats interface.
+type ruRuntimeStats struct {
+	*clientutil.RUDetails
+}
+
+// String implements the RuntimeStats interface.
+func (e *ruRuntimeStats) String() string {
+	if e.RUDetails != nil {
+		return fmt.Sprintf("RU:%f", e.RRU()+e.WRU())
+	}
+	return ""
+}
+
+// Clone implements the RuntimeStats interface.
+func (e *ruRuntimeStats) Clone() execdetails.RuntimeStats {
+	return &ruRuntimeStats{RUDetails: e.RUDetails.Clone()}
+}
+
+// Merge implements the RuntimeStats interface.
+func (e *ruRuntimeStats) Merge(other execdetails.RuntimeStats) {
+	if tmp, ok := other.(*ruRuntimeStats); ok {
+		if e.RUDetails != nil {
+			e.RUDetails.Merge(tmp.RUDetails)
+		} else {
+			e.RUDetails = tmp.RUDetails.Clone()
+		}
+	}
+}
+
+// Tp implements the RuntimeStats interface.
+func (*ruRuntimeStats) Tp() int {
+	return execdetails.TpRURuntimeStats
 }

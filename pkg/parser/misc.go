@@ -29,17 +29,6 @@ func isIdentExtend(ch byte) bool {
 	return ch >= 0x80
 }
 
-// See https://dev.mysql.com/doc/refman/5.7/en/identifiers.html
-func isInCorrectIdentifierName(name string) bool {
-	if len(name) == 0 {
-		return true
-	}
-	if name[len(name)-1] == ' ' {
-		return true
-	}
-	return false
-}
-
 // Initialize a lookup table for isUserVarChar
 var isUserVarCharTable [256]bool
 
@@ -178,7 +167,6 @@ var tokenMap = map[string]int{
 	"AS":                       as,
 	"ASC":                      asc,
 	"ASCII":                    ascii,
-	"APPLY":                    apply,
 	"ATTRIBUTE":                attribute,
 	"ATTRIBUTES":               attributes,
 	"BATCH":                    batch,
@@ -196,7 +184,6 @@ var tokenMap = map[string]int{
 	"BACKEND":                  backend,
 	"BACKUP":                   backup,
 	"BACKUPS":                  backups,
-	"BDR":                      bdr,
 	"BEGIN":                    begin,
 	"BETWEEN":                  between,
 	"BERNOULLI":                bernoulli,
@@ -287,15 +274,6 @@ var tokenMap = map[string]int{
 	"CSV_NULL":                 csvNull,
 	"CSV_SEPARATOR":            csvSeparator,
 	"CSV_TRIM_LAST_SEPARATORS": csvTrimLastSeparators,
-	"WAIT_TIFLASH_READY":       waitTiflashReady,
-	"WITH_SYS_TABLE":           withSysTable,
-	"IGNORE_STATS":             ignoreStats,
-	"LOAD_STATS":               loadStats,
-	"CHECKSUM_CONCURRENCY":     checksumConcurrency,
-	"COMPRESSION_LEVEL":        compressionLevel,
-	"COMPRESSION_TYPE":         compressionType,
-	"ENCRYPTION_METHOD":        encryptionMethod,
-	"ENCRYPTION_KEYFILE":       encryptionKeyFile,
 	"CURDATE":                  curDate,
 	"CURRENT_DATE":             currentDate,
 	"CURRENT_ROLE":             currentRole,
@@ -345,6 +323,7 @@ var tokenMap = map[string]int{
 	"DO":                       do,
 	"DOT":                      dotType,
 	"DOUBLE":                   doubleType,
+	"DRAINER":                  drainer,
 	"DROP":                     drop,
 	"DRY":                      dry,
 	"DRYRUN":                   dryRun,
@@ -428,7 +407,6 @@ var tokenMap = map[string]int{
 	"HIGH_PRIORITY":            highPriority,
 	"HISTORY":                  history,
 	"HISTOGRAM":                histogram,
-	"HNSW":                     hnsw,
 	"HOSTS":                    hosts,
 	"HOUR_MICROSECOND":         hourMicrosecond,
 	"HOUR_MINUTE":              hourMinute,
@@ -516,7 +494,6 @@ var tokenMap = map[string]int{
 	"LOCATION":                 location,
 	"LOCK":                     lock,
 	"LOCKED":                   locked,
-	"LOG":                      log,
 	"LOGS":                     logs,
 	"LONG":                     long,
 	"LONGBLOB":                 longblobType,
@@ -633,11 +610,11 @@ var tokenMap = map[string]int{
 	"PRIVILEGES":               privileges,
 	"PROCEDURE":                procedure,
 	"PROCESS":                  process,
-	"PROCESSED_KEYS":           processedKeys,
 	"PROCESSLIST":              processlist,
 	"PROFILE":                  profile,
 	"PROFILES":                 profiles,
 	"PROXY":                    proxy,
+	"PUMP":                     pump,
 	"PURGE":                    purge,
 	"QUARTER":                  quarter,
 	"QUERIES":                  queries,
@@ -650,7 +627,6 @@ var tokenMap = map[string]int{
 	"REAL":                     realType,
 	"REBUILD":                  rebuild,
 	"RECENT":                   recent,
-	"RECOMMEND":                recommend,
 	"RECOVER":                  recover,
 	"RECURSIVE":                recursive,
 	"REDUNDANT":                redundant,
@@ -671,7 +647,6 @@ var tokenMap = map[string]int{
 	"REPLICA":                  replica,
 	"REPLICAS":                 replicas,
 	"REPLICATION":              replication,
-	"RU":                       ru,
 	"REQUIRE":                  require,
 	"REQUIRED":                 required,
 	"RESET":                    reset,
@@ -709,7 +684,6 @@ var tokenMap = map[string]int{
 	"SCHEMAS":                  databases,
 	"SECOND_MICROSECOND":       secondMicrosecond,
 	"SECOND":                   second,
-	"SECONDARY":                secondary,
 	"SECONDARY_ENGINE":         secondaryEngine,
 	"SECONDARY_LOAD":           secondaryLoad,
 	"SECONDARY_UNLOAD":         secondaryUnload,
@@ -802,7 +776,6 @@ var tokenMap = map[string]int{
 	"SURVIVAL_PREFERENCES":     survivalPreferences,
 	"SWAPS":                    swaps,
 	"SWITCHES":                 switchesSym,
-	"SWITCH_GROUP":             switchGroup,
 	"SYSTEM":                   system,
 	"SYSTEM_TIME":              systemTime,
 	"TARGET":                   target,
@@ -812,6 +785,8 @@ var tokenMap = map[string]int{
 	"TABLES":                   tables,
 	"TABLESAMPLE":              tableSample,
 	"TABLESPACE":               tablespace,
+	"TELEMETRY":                telemetry,
+	"TELEMETRY_ID":             telemetryID,
 	"TEMPORARY":                temporary,
 	"TEMPTABLE":                temptable,
 	"TERMINATED":               terminated,
@@ -869,7 +844,6 @@ var tokenMap = map[string]int{
 	"UNKNOWN":                  unknown,
 	"UNLOCK":                   unlock,
 	"UNLIMITED":                unlimited,
-	"UNSET":                    unset,
 	"UNSIGNED":                 unsigned,
 	"UNTIL":                    until,
 	"UNTIL_TS":                 untilTS,
@@ -881,7 +855,6 @@ var tokenMap = map[string]int{
 	"UTC_DATE":                 utcDate,
 	"UTC_TIME":                 utcTime,
 	"UTC_TIMESTAMP":            utcTimestamp,
-	"UTILIZATION_LIMIT":        utilizationLimit,
 	"VALIDATION":               validation,
 	"VALUE":                    value,
 	"VALUES":                   values,
@@ -893,7 +866,6 @@ var tokenMap = map[string]int{
 	"VARIABLES":                variables,
 	"VARIANCE":                 varPop,
 	"VARYING":                  varying,
-	"VECTOR":                   vectorType,
 	"VERBOSE":                  verboseType,
 	"VOTER":                    voter,
 	"VOTER_CONSTRAINTS":        voterConstraints,
@@ -924,7 +896,7 @@ var tokenMap = map[string]int{
 	"REUSE":                    reuse,
 }
 
-// See https://dev.mysql.com/doc/refman/8.0/en/function-resolution.html for details.
+// See https://dev.mysql.com/doc/refman/5.7/en/function-resolution.html for details.
 // ADDDATE, SESSION_USER, SUBDATE, and SYSTEM_USER are exceptions because they are actually recognized as
 // identifiers even in `create table adddate (a int)`.
 var btFuncTokenMap = map[string]int{
@@ -1030,7 +1002,6 @@ var hintTokenMap = map[string]int{
 	"SET_VAR":               hintSetVar,
 	"RESOURCE_GROUP":        hintResourceGroup,
 	"QB_NAME":               hintQBName,
-	"HYPO_INDEX":            hintHypoIndex,
 
 	// TiDB hint names
 	"AGG_TO_COP":              hintAggToCop,
@@ -1108,8 +1079,9 @@ func (s *Scanner) isTokenIdentifier(lit string, offset int) int {
 			continue
 		} else if s.r.s[idx] == '.' {
 			return 0
+		} else {
+			break
 		}
-		break
 	}
 
 	buf := &s.buf

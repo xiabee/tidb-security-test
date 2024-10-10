@@ -28,12 +28,11 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-	"github.com/tikv/client-go/v2/config"
 	pd "github.com/tikv/pd/client"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -91,13 +90,9 @@ const (
 	defaultGRPCKeepaliveTimeout = 3 * time.Second
 	defaultCloudAPIConcurrency  = 8
 
-	flagFullBackupCipherType    = "crypter.method"
-	flagFullBackupCipherKey     = "crypter.key"
-	flagFullBackupCipherKeyFile = "crypter.key-file"
-
-	flagLogBackupCipherType    = "log.crypter.method"
-	flagLogBackupCipherKey     = "log.crypter.key"
-	flagLogBackupCipherKeyFile = "log.crypter.key-file"
+	flagCipherType    = "crypter.method"
+	flagCipherKey     = "crypter.key"
+	flagCipherKeyFile = "crypter.key-file"
 
 	flagMetadataDownloadBatchSize    = "metadata-download-batch-size"
 	defaultMetadataDownloadBatchSize = 128
@@ -108,10 +103,6 @@ const (
 	crypterAES256KeyLen = 32
 
 	flagFullBackupType = "type"
-
-	masterKeysDelimiter     = ","
-	flagMasterKeyConfig     = "master-key"
-	flagMasterKeyCipherType = "master-key-crypter-method"
 )
 
 const (
@@ -166,15 +157,6 @@ func (tls *TLSConfig) ToPDSecurityOption() pd.SecurityOption {
 	securityOption.CertPath = tls.Cert
 	securityOption.KeyPath = tls.Key
 	return securityOption
-}
-
-// Convert the TLS config to the PD security option.
-func (tls *TLSConfig) ToKVSecurity() config.Security {
-	return config.Security{
-		ClusterSSLCA:   tls.CA,
-		ClusterSSLCert: tls.Cert,
-		ClusterSSLKey:  tls.Key,
-	}
 }
 
 // ParseFromFlags parses the TLS config from the flag set.
@@ -268,16 +250,7 @@ type Config struct {
 	// GrpcKeepaliveTimeout is the max time a grpc conn can keep idel before killed.
 	GRPCKeepaliveTimeout time.Duration `json:"grpc-keepalive-timeout" toml:"grpc-keepalive-timeout"`
 
-	// Plaintext data key mainly used for full/snapshot backup and restore.
 	CipherInfo backuppb.CipherInfo `json:"-" toml:"-"`
-
-	// Could be used in log backup and restore but not recommended in a serious environment since data key is stored
-	// in PD in plaintext.
-	LogBackupCipherInfo backuppb.CipherInfo `json:"-" toml:"-"`
-
-	// Master key based encryption for log restore.
-	// More than one can be specified for log restore if master key rotated during log backup.
-	MasterKeyConfig backuppb.MasterKeyConfig `json:"master-key-config" toml:"master-key-config"`
 
 	// whether there's explicit filter
 	ExplicitFilter bool `json:"-" toml:"-"`
@@ -327,34 +300,17 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 	flags.BoolP(flagSkipCheckPath, "", false, "Skip path verification")
 	_ = flags.MarkHidden(flagSkipCheckPath)
 
-	flags.String(flagFullBackupCipherType, "plaintext", "Encrypt/decrypt method, "+
+	flags.String(flagCipherType, "plaintext", "Encrypt/decrypt method, "+
 		"be one of plaintext|aes128-ctr|aes192-ctr|aes256-ctr case-insensitively, "+
 		"\"plaintext\" represents no encrypt/decrypt")
-	flags.String(flagFullBackupCipherKey, "",
+	flags.String(flagCipherKey, "",
 		"aes-crypter key, used to encrypt/decrypt the data "+
 			"by the hexadecimal string, eg: \"0123456789abcdef0123456789abcdef\"")
-	flags.String(flagFullBackupCipherKeyFile, "", "FilePath, its content is used as the cipher-key")
+	flags.String(flagCipherKeyFile, "", "FilePath, its content is used as the cipher-key")
 
 	flags.Uint(flagMetadataDownloadBatchSize, defaultMetadataDownloadBatchSize,
 		"the batch size of downloading metadata, such as log restore metadata for truncate or restore")
 
-	// log backup plaintext key flags
-	flags.String(flagLogBackupCipherType, "plaintext", "Encrypt/decrypt method, "+
-		"be one of plaintext|aes128-ctr|aes192-ctr|aes256-ctr case-insensitively, "+
-		"\"plaintext\" represents no encrypt/decrypt")
-	flags.String(flagLogBackupCipherKey, "",
-		"aes-crypter key, used to encrypt/decrypt the data "+
-			"by the hexadecimal string, eg: \"0123456789abcdef0123456789abcdef\"")
-	flags.String(flagLogBackupCipherKeyFile, "", "FilePath, its content is used as the cipher-key")
-
-	// master key config
-	flags.String(flagMasterKeyCipherType, "plaintext", "Encrypt/decrypt method, "+
-		"be one of plaintext|aes128-ctr|aes192-ctr|aes256-ctr case-insensitively, "+
-		"\"plaintext\" represents no encrypt/decrypt")
-	flags.String(flagMasterKeyConfig, "", "Master key config for point in time restore "+
-		"examples: \"local:///path/to/master/key/file,"+
-		"aws-kms:///{key-id}?AWS_ACCESS_KEY_ID={access-key}&AWS_SECRET_ACCESS_KEY={secret-key}&REGION={region},"+
-		"gcp-kms:///projects/{project-id}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key-name}?AUTH=specified&CREDENTIALS={credentials}\"")
 	_ = flags.MarkHidden(flagMetadataDownloadBatchSize)
 
 	storage.DefineFlags(flags)
@@ -363,20 +319,14 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 // HiddenFlagsForStream temporary hidden flags that stream cmd not support.
 func HiddenFlagsForStream(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagChecksum)
-	_ = flags.MarkHidden(flagLoadStats)
 	_ = flags.MarkHidden(flagChecksumConcurrency)
 	_ = flags.MarkHidden(flagRateLimit)
 	_ = flags.MarkHidden(flagRateLimitUnit)
 	_ = flags.MarkHidden(flagRemoveTiFlash)
-	_ = flags.MarkHidden(flagFullBackupCipherType)
-	_ = flags.MarkHidden(flagFullBackupCipherKey)
-	_ = flags.MarkHidden(flagFullBackupCipherKeyFile)
-	_ = flags.MarkHidden(flagLogBackupCipherType)
-	_ = flags.MarkHidden(flagLogBackupCipherKey)
-	_ = flags.MarkHidden(flagLogBackupCipherKeyFile)
+	_ = flags.MarkHidden(flagCipherType)
+	_ = flags.MarkHidden(flagCipherKey)
+	_ = flags.MarkHidden(flagCipherKeyFile)
 	_ = flags.MarkHidden(flagSwitchModeInterval)
-	_ = flags.MarkHidden(flagMasterKeyConfig)
-	_ = flags.MarkHidden(flagMasterKeyCipherType)
 
 	storage.HiddenFlagsForStream(flags)
 }
@@ -454,12 +404,12 @@ func parseCipherType(t string) (encryptionpb.EncryptionMethod, error) {
 func checkCipherKey(cipherKey, cipherKeyFile string) error {
 	if (len(cipherKey) == 0) == (len(cipherKeyFile) == 0) {
 		return errors.Annotate(berrors.ErrInvalidArgument,
-			"exactly one of cipher key or keyfile path should be provided")
+			"exactly one of --crypter.key or --crypter.key-file should be provided")
 	}
 	return nil
 }
 
-func GetCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
+func getCipherKeyContent(cipherKey, cipherKeyFile string) ([]byte, error) {
 	if err := checkCipherKey(cipherKey, cipherKeyFile); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -495,7 +445,7 @@ func checkCipherKeyMatch(cipher *backuppb.CipherInfo) bool {
 }
 
 func (cfg *Config) parseCipherInfo(flags *pflag.FlagSet) error {
-	crypterStr, err := flags.GetString(flagFullBackupCipherType)
+	crypterStr, err := flags.GetString(flagCipherType)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -509,17 +459,17 @@ func (cfg *Config) parseCipherInfo(flags *pflag.FlagSet) error {
 		return nil
 	}
 
-	key, err := flags.GetString(flagFullBackupCipherKey)
+	key, err := flags.GetString(flagCipherKey)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	keyFilePath, err := flags.GetString(flagFullBackupCipherKeyFile)
+	keyFilePath, err := flags.GetString(flagCipherKeyFile)
 	if err != nil {
 		return errors.Trace(err)
 	}
 
-	cfg.CipherInfo.CipherKey, err = GetCipherKeyContent(key, keyFilePath)
+	cfg.CipherInfo.CipherKey, err = getCipherKeyContent(key, keyFilePath)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -529,43 +479,6 @@ func (cfg *Config) parseCipherInfo(flags *pflag.FlagSet) error {
 	}
 
 	return nil
-}
-
-func (cfg *Config) parseLogBackupCipherInfo(flags *pflag.FlagSet) (bool, error) {
-	crypterStr, err := flags.GetString(flagLogBackupCipherType)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-
-	cfg.LogBackupCipherInfo.CipherType, err = parseCipherType(crypterStr)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-
-	if !utils.IsEffectiveEncryptionMethod(cfg.LogBackupCipherInfo.CipherType) {
-		return false, nil
-	}
-
-	key, err := flags.GetString(flagLogBackupCipherKey)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-
-	keyFilePath, err := flags.GetString(flagLogBackupCipherKeyFile)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-
-	cfg.LogBackupCipherInfo.CipherKey, err = GetCipherKeyContent(key, keyFilePath)
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-
-	if !checkCipherKeyMatch(&cfg.CipherInfo) {
-		return false, errors.Annotate(berrors.ErrInvalidArgument, "log backup encryption method and key length not match")
-	}
-
-	return true, nil
 }
 
 func (cfg *Config) normalizePDURLs() error {
@@ -694,17 +607,7 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		log.L().Info("--skip-check-path is deprecated, need explicitly set it anymore")
 	}
 
-	err = cfg.parseCipherInfo(flags)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	hasLogBackupPlaintextKey, err := cfg.parseLogBackupCipherInfo(flags)
-	if err != nil {
-		return errors.Trace(err)
-	}
-
-	if err = cfg.parseAndValidateMasterKeyInfo(hasLogBackupPlaintextKey, flags); err != nil {
+	if err = cfg.parseCipherInfo(flags); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -713,51 +616,6 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 	}
 
 	return cfg.normalizePDURLs()
-}
-
-func (cfg *Config) parseAndValidateMasterKeyInfo(hasPlaintextKey bool, flags *pflag.FlagSet) error {
-	masterKeyString, err := flags.GetString(flagMasterKeyConfig)
-	if err != nil {
-		return errors.Errorf("master key flag '%s' is not defined: %v", flagMasterKeyConfig, err)
-	}
-
-	if masterKeyString == "" {
-		return nil
-	}
-
-	if hasPlaintextKey {
-		return errors.Errorf("invalid argument: both plaintext data key encryption and master key based encryption are set at the same time")
-	}
-
-	encryptionMethodString, err := flags.GetString(flagMasterKeyCipherType)
-	if err != nil {
-		return errors.Errorf("encryption method flag '%s' is not defined: %v", flagMasterKeyCipherType, err)
-	}
-
-	encryptionMethod, err := parseCipherType(encryptionMethodString)
-	if err != nil {
-		return errors.Errorf("failed to parse encryption method: %v", err)
-	}
-
-	if !utils.IsEffectiveEncryptionMethod(encryptionMethod) {
-		return errors.Errorf("invalid encryption method: %s", encryptionMethodString)
-	}
-
-	masterKeyStrings := strings.Split(masterKeyString, masterKeysDelimiter)
-	cfg.MasterKeyConfig = backuppb.MasterKeyConfig{
-		EncryptionType: encryptionMethod,
-		MasterKeys:     make([]*encryptionpb.MasterKey, 0, len(masterKeyStrings)),
-	}
-
-	for _, keyString := range masterKeyStrings {
-		masterKey, err := validateAndParseMasterKeyString(strings.TrimSpace(keyString))
-		if err != nil {
-			return errors.Wrapf(err, "invalid master key configuration: %s", keyString)
-		}
-		cfg.MasterKeyConfig.MasterKeys = append(cfg.MasterKeyConfig.MasterKeys, &masterKey)
-	}
-
-	return nil
 }
 
 // NewMgr creates a new mgr at the given PD address.
@@ -773,7 +631,8 @@ func NewMgr(ctx context.Context,
 		tlsConf *tls.Config
 		err     error
 	)
-	if len(pds) == 0 {
+	pdAddress := strings.Join(pds, ",")
+	if len(pdAddress) == 0 {
 		return nil, errors.Annotate(berrors.ErrInvalidArgument, "pd address can not be empty")
 	}
 
@@ -790,7 +649,7 @@ func NewMgr(ctx context.Context,
 
 	// Is it necessary to remove `StoreBehavior`?
 	return conn.NewMgr(
-		ctx, g, pds, tlsConf, securityOption, keepalive, util.SkipTiFlash,
+		ctx, g, pdAddress, tlsConf, securityOption, keepalive, util.SkipTiFlash,
 		checkRequirements, needDomain, versionCheckerType,
 	)
 }
@@ -857,7 +716,7 @@ func ReadBackupMeta(
 	if cfg.CipherInfo.CipherType != encryptionpb.EncryptionMethod_PLAINTEXT {
 		iv = metaData[:metautil.CrypterIvLen]
 	}
-	decryptBackupMeta, err := utils.Decrypt(metaData[len(iv):], &cfg.CipherInfo, iv)
+	decryptBackupMeta, err := metautil.Decrypt(metaData[len(iv):], &cfg.CipherInfo, iv)
 	if err != nil {
 		return nil, nil, nil, errors.Annotate(err, "decrypt failed with wrong key")
 	}

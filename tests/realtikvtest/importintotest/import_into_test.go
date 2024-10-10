@@ -16,7 +16,6 @@ package importintotest
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -31,26 +30,25 @@ import (
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/lightning/backend/local"
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/mock"
 	"github.com/pingcap/tidb/br/pkg/mock/mocklocal"
 	"github.com/pingcap/tidb/br/pkg/utils"
-	"github.com/pingcap/tidb/pkg/disttask/framework/proto"
-	"github.com/pingcap/tidb/pkg/disttask/framework/scheduler"
+	"github.com/pingcap/tidb/pkg/disttask/framework/dispatcher"
 	"github.com/pingcap/tidb/pkg/disttask/framework/storage"
 	"github.com/pingcap/tidb/pkg/disttask/importinto"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/executor/importer"
-	"github.com/pingcap/tidb/pkg/lightning/backend/local"
 	"github.com/pingcap/tidb/pkg/parser/auth"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/util/dbterror/exeerrors"
-	"github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
 	"github.com/pingcap/tidb/pkg/util/sem"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/util"
-	pdhttp "github.com/tikv/pd/client/http"
+	pd "github.com/tikv/pd/client"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/atomic"
 	"go.uber.org/mock/gomock"
@@ -109,7 +107,7 @@ func (s *mockGCSSuite) TestImportIntoPrivilegePositiveCase() {
 	// requires FILE for server file
 	importFromServerSQL := fmt.Sprintf("IMPORT INTO t FROM '%s'", filePath)
 	// NOTE: we must use ExecToErr instead of QueryToErr here, because QueryToErr will cause the case fail always.
-	s.True(terror.ErrorEqual(s.tk.ExecToErr(importFromServerSQL), plannererrors.ErrSpecificAccessDenied))
+	s.True(terror.ErrorEqual(s.tk.ExecToErr(importFromServerSQL), core.ErrSpecificAccessDenied))
 
 	s.NoError(s.tk.Session().Auth(&auth.UserIdentity{Username: "root", Hostname: "localhost"}, nil, nil, nil))
 	s.tk.MustExec(`GRANT FILE on *.* to 'test_import_into'@'localhost'`)
@@ -145,39 +143,6 @@ func (s *mockGCSSuite) TestBasicImportInto() {
 			"6,test6,66"),
 	})
 	s.prepareAndUseDB("import_into")
-
-	s.tk.MustExec("drop table if exists t")
-	s.tk.MustExec("create table t (a bigint, b varchar(100), c int);")
-	s.tk.MustExec("set @v='test'")
-	// IMPORT INTO does not support column reference
-	sql := fmt.Sprintf(`IMPORT INTO t(a, @, c) SET b=a+1 FROM 'gs://test-multi-load/db.tbl.001.csv?endpoint=%s'
-		with thread=1`, gcsEndpoint)
-	err := s.tk.ExecToErr(sql)
-	require.ErrorContains(s.T(), err, "COLUMN reference is not supported in IMPORT INTO column assignment, index 0")
-	// IMPORT INTO does not support some functions
-	sql = fmt.Sprintf(`IMPORT INTO t(a, @, c) SET b=tidb_is_ddl_owner() FROM 'gs://test-multi-load/db.tbl.001.csv?endpoint=%s'
-		with thread=1`, gcsEndpoint)
-	err = s.tk.QueryToErr(sql)
-	require.ErrorContains(s.T(), err, "FUNCTION tidb_is_ddl_owner is not supported in IMPORT INTO column assignment, index 0")
-	// IMPORT INTO does not support reading session variables which are set outside this statement
-	s.tk.MustExec("drop table if exists t")
-	s.tk.MustExec("create table t (a bigint, b varchar(100), c int);")
-	s.tk.MustExec("set @v='test'")
-	sql = fmt.Sprintf(`IMPORT INTO t(a, @, c) SET b=@v FROM 'gs://test-multi-load/db.tbl.001.csv?endpoint=%s'
-		with thread=1`, gcsEndpoint)
-	err = s.tk.ExecToErr(sql)
-	require.ErrorContains(s.T(), err, "column assignment cannot use variables set outside IMPORT INTO statement, index 0")
-	sql = fmt.Sprintf(`IMPORT INTO t(a, @, c) SET b=getvar('v') FROM 'gs://test-multi-load/db.tbl.001.csv?endpoint=%s'
-		with thread=1`, gcsEndpoint)
-	err = s.tk.ExecToErr(sql)
-	require.ErrorContains(s.T(), err, "column assignment cannot use variables set outside IMPORT INTO statement, index 0")
-	// IMPORT INTO does not support subquery in SET
-	s.tk.MustExec("drop table if exists t")
-	s.tk.MustExec("create table t (a bigint, b varchar(100), c int);")
-	sql = fmt.Sprintf(`IMPORT INTO t(a, @, c) SET b=(SELECT 'subquery') FROM 'gs://test-multi-load/db.tbl.001.csv?endpoint=%s'
-		with thread=1`, gcsEndpoint)
-	err = s.tk.ExecToErr(sql)
-	require.ErrorContains(s.T(), err, "subquery is not supported in IMPORT INTO column assignment, index 0")
 
 	allData := []string{"1 test1 11", "2 test2 22", "3 test3 33", "4 test4 44", "5 test5 55", "6 test6 66"}
 	cases := []struct {
@@ -710,9 +675,7 @@ func (s *mockGCSSuite) TestMaxWriteSpeed() {
 	s.tk.MustQuery("SELECT count(1) FROM load_test_write_speed.t;").Check(testkit.Rows(
 		strconv.Itoa(lineCount),
 	))
-	// previous import might be slower depends on the environment, so we check using 4 seconds here.
-	// might be unstable.
-	require.Less(s.T(), duration+4, durationWithLimit)
+	require.Less(s.T(), duration+5, durationWithLimit)
 }
 
 func (s *mockGCSSuite) TestChecksumNotMatch() {
@@ -764,7 +727,7 @@ func (s *mockGCSSuite) TestChecksumNotMatch() {
 }
 
 func (s *mockGCSSuite) TestColumnsAndUserVars() {
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/framework/storage/testSetLastTaskID", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/framework/storage/testSetLastTaskID", "return(true)")
 	s.tk.MustExec("DROP DATABASE IF EXISTS load_data;")
 	s.tk.MustExec("CREATE DATABASE load_data;")
 	s.tk.MustExec(`CREATE TABLE load_data.cols_and_vars (a INT, b INT, c int);`)
@@ -805,28 +768,29 @@ func (s *mockGCSSuite) TestColumnsAndUserVars() {
 	taskManager := storage.NewTaskManager(pool)
 	ctx := context.Background()
 	ctx = util.WithInternalSourceType(ctx, "taskManager")
-	subtasks, err := taskManager.GetSubtasksWithHistory(ctx, storage.TestLastTaskID.Load(), proto.ImportStepImport)
+	subtasks, err := taskManager.GetSucceedSubtasksByStep(ctx, storage.TestLastTaskID.Load(), importinto.StepImport)
 	s.NoError(err)
 	s.Len(subtasks, 1)
 	serverInfo, err := infosync.GetServerInfo()
 	s.NoError(err)
 	for _, st := range subtasks {
-		s.Equal(net.JoinHostPort(serverInfo.IP, strconv.Itoa(int(serverInfo.Port))), st.ExecID)
+		s.Equal(net.JoinHostPort(serverInfo.IP, strconv.Itoa(int(serverInfo.Port))), st.SchedulerID)
 	}
 }
 
 func (s *mockGCSSuite) checkTaskMetaRedacted(jobID int64) {
-	taskManager, err := storage.GetTaskManager()
+	globalTaskManager, err := storage.GetTaskManager()
 	s.NoError(err)
 	taskKey := importinto.TaskKey(jobID)
+	s.NoError(err)
 	ctx := context.Background()
 	ctx = util.WithInternalSourceType(ctx, "taskManager")
-	task, err2 := taskManager.GetTaskByKeyWithHistory(ctx, taskKey)
+	globalTask, err2 := globalTaskManager.GetGlobalTaskByKeyWithHistory(ctx, taskKey)
 	s.NoError(err2)
-	s.Regexp(`[?&]access-key=xxxxxx`, string(task.Meta))
-	s.Contains(string(task.Meta), "secret-access-key=xxxxxx")
-	s.NotContains(string(task.Meta), "aaaaaa")
-	s.NotContains(string(task.Meta), "bbbbbb")
+	s.Regexp(`[?&]access-key=xxxxxx`, string(globalTask.Meta))
+	s.Contains(string(globalTask.Meta), "secret-access-key=xxxxxx")
+	s.NotContains(string(globalTask.Meta), "aaaaaa")
+	s.NotContains(string(globalTask.Meta), "bbbbbb")
 }
 
 func (s *mockGCSSuite) TestImportMode() {
@@ -846,7 +810,7 @@ func (s *mockGCSSuite) TestImportMode() {
 	switcher.EXPECT().ToImportMode(gomock.Any(), gomock.Any()).DoAndReturn(toImportModeFn).Times(1)
 	switcher.EXPECT().ToNormalMode(gomock.Any(), gomock.Any()).DoAndReturn(toNormalModeFn).Times(1)
 	backup := importer.NewTiKVModeSwitcher
-	importer.NewTiKVModeSwitcher = func(*tls.Config, pdhttp.Client, *zap.Logger) local.TiKVModeSwitcher {
+	importer.NewTiKVModeSwitcher = func(tls *common.TLS, pdCli pd.Client, logger *zap.Logger) local.TiKVModeSwitcher {
 		return switcher
 	}
 	s.T().Cleanup(func() {
@@ -863,8 +827,8 @@ func (s *mockGCSSuite) TestImportMode() {
 
 	// NOTE: this case only runs when current instance is TiDB owner, if you run it locally,
 	// better start a cluster without TiDB instance.
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/parser/ast/forceRedactURL", "return(true)")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/framework/scheduler/WaitCleanUpFinished", "return()")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/parser/ast/forceRedactURL", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/framework/dispatcher/WaitCleanUpFinished", "return()")
 	sql := fmt.Sprintf(`IMPORT INTO load_data.import_mode FROM 'gs://test-load/import_mode-*.tsv?access-key=aaaaaa&secret-access-key=bbbbbb&endpoint=%s'`, gcsEndpoint)
 	rows := s.tk.MustQuery(sql).Rows()
 	s.Len(rows, 1)
@@ -872,14 +836,14 @@ func (s *mockGCSSuite) TestImportMode() {
 	s.NoError(err)
 	s.tk.MustQuery("SELECT * FROM load_data.import_mode;").Sort().Check(testkit.Rows("1 11 111"))
 	s.Greater(intoNormalTime, intoImportTime)
-	<-scheduler.WaitCleanUpFinished
+	<-dispatcher.WaitCleanUpFinished
 	s.checkTaskMetaRedacted(int64(jobID))
 	// after import step, we should enter normal mode, i.e. we only call ToImportMode once
 	intoNormalTime, intoImportTime = time.Time{}, time.Time{}
 	switcher.EXPECT().ToImportMode(gomock.Any(), gomock.Any()).DoAndReturn(toImportModeFn).Times(1)
 	switcher.EXPECT().ToNormalMode(gomock.Any(), gomock.Any()).DoAndReturn(toNormalModeFn).Times(1)
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/clearLastSwitchTime", "return(true)")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforePostProcess", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/clearLastSwitchTime", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforePostProcess", "return(true)")
 	s.tk.MustExec("truncate table load_data.import_mode;")
 	sql = fmt.Sprintf(`IMPORT INTO load_data.import_mode FROM 'gs://test-load/import_mode-*.tsv?endpoint=%s'`, gcsEndpoint)
 	s.tk.MustQuery(sql)
@@ -888,7 +852,7 @@ func (s *mockGCSSuite) TestImportMode() {
 	s.Greater(intoNormalTime, intoImportTime)
 	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/importinto/clearLastSwitchTime"))
 	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforePostProcess"))
-	<-scheduler.WaitCleanUpFinished
+	<-dispatcher.WaitCleanUpFinished
 
 	// test disable_tikv_import_mode, should not call ToImportMode and ToNormalMode
 	s.tk.MustExec("truncate table load_data.import_mode;")
@@ -896,16 +860,16 @@ func (s *mockGCSSuite) TestImportMode() {
 	s.tk.MustQuery(sql)
 	s.tk.MustQuery("SELECT * FROM load_data.import_mode;").Sort().Check(testkit.Rows("1 11 111"))
 	s.tk.MustExec("truncate table load_data.import_mode;")
-	<-scheduler.WaitCleanUpFinished
+	<-dispatcher.WaitCleanUpFinished
 
 	// test with multirocksdb
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/ddl/util/IsRaftKv2", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/ddl/util/IsRaftKv2", "return(true)")
 	s.tk.MustExec("truncate table load_data.import_mode;")
 	sql = fmt.Sprintf(`IMPORT INTO load_data.import_mode FROM 'gs://test-load/import_mode-*.tsv?endpoint=%s'`, gcsEndpoint)
 	s.tk.MustQuery(sql)
 	s.tk.MustQuery("SELECT * FROM load_data.import_mode;").Sort().Check(testkit.Rows("1 11 111"))
 	s.tk.MustExec("truncate table load_data.import_mode;")
-	<-scheduler.WaitCleanUpFinished
+	<-dispatcher.WaitCleanUpFinished
 
 	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/util/IsRaftKv2"))
 
@@ -913,17 +877,17 @@ func (s *mockGCSSuite) TestImportMode() {
 	intoNormalTime, intoImportTime = time.Time{}, time.Time{}
 	switcher.EXPECT().ToImportMode(gomock.Any(), gomock.Any()).DoAndReturn(toImportModeFn).Times(1)
 	switcher.EXPECT().ToNormalMode(gomock.Any(), gomock.Any()).DoAndReturn(toNormalModeFn).Times(1)
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/beforeSortChunk", "sleep(3000)")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/errorWhenSortChunk", "return(true)")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/executor/importer/setLastImportJobID", `return(true)`)
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforeSortChunk", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/errorWhenSortChunk", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/executor/importer/setLastImportJobID", `return(true)`)
 
 	sql = fmt.Sprintf(`IMPORT INTO load_data.import_mode FROM 'gs://test-load/import_mode-*.tsv?access-key=aaaaaa&secret-access-key=bbbbbb&endpoint=%s'`, gcsEndpoint)
 	err = s.tk.QueryToErr(sql)
 	s.Error(err)
 	s.Greater(intoNormalTime, intoImportTime)
-	<-scheduler.WaitCleanUpFinished
+	<-dispatcher.WaitCleanUpFinished
 	s.checkTaskMetaRedacted(importer.TestLastImportJobID.Load())
-	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/framework/scheduler/WaitCleanUpFinished"))
+	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/framework/dispatcher/WaitCleanUpFinished"))
 }
 
 func (s *mockGCSSuite) TestRegisterTask() {
@@ -973,43 +937,44 @@ func (s *mockGCSSuite) TestRegisterTask() {
 	taskRegister.EXPECT().RegisterTaskOnce(gomock.Any()).DoAndReturn(mockedRegister).Times(1)
 	taskRegister.EXPECT().Close(gomock.Any()).DoAndReturn(mockedClose).Times(1)
 	s.tk.MustExec("truncate table load_data.register_task;")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/beforeSortChunk", "sleep(3000)")
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/errorWhenSortChunk", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforeSortChunk", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/errorWhenSortChunk", "return(true)")
 	err := s.tk.QueryToErr(sql)
 	s.Error(err)
 	s.Greater(unregisterTime, registerTime)
 
-	client, err := importer.GetEtcdClient()
-	s.NoError(err)
-	s.T().Cleanup(func() {
-		_ = client.Close()
-	})
-	var etcdKey string
 	importinto.NewTaskRegisterWithTTL = backup
-	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/importinto/beforeSortChunk"))
+	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/importinto/waitBeforeSortChunk"))
 	s.NoError(failpoint.Disable("github.com/pingcap/tidb/pkg/disttask/importinto/errorWhenSortChunk"))
-	testfailpoint.EnableCall(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/syncBeforeSortChunk",
-		func() {
-			// cannot run 2 import job to the same target table.
-			tk2 := testkit.NewTestKit(s.T(), s.store)
-			err = tk2.QueryToErr(sql)
-			s.ErrorIs(err, exeerrors.ErrLoadDataPreCheckFailed)
-			s.ErrorContains(err, "there is active job on the target table already")
-			etcdKey = fmt.Sprintf("/tidb/brie/import/import-into/%d", storage.TestLastTaskID.Load())
-			s.Eventually(func() bool {
-				resp, err2 := client.GetClient().Get(context.Background(), etcdKey)
-				s.NoError(err2)
-				return len(resp.Kvs) == 1
-			}, maxWaitTime, 300*time.Millisecond)
-		},
-	)
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/framework/storage/testSetLastTaskID", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/importinto/syncBeforeSortChunk", "return(true)")
+	s.enableFailpoint("github.com/pingcap/tidb/pkg/disttask/framework/storage/testSetLastTaskID", "return(true)")
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		s.tk.MustQuery(sql)
 	}()
+	// wait for the task to be registered
+	<-importinto.TestSyncChan
+	// cannot run 2 import job at the same time
+	tk2 := testkit.NewTestKit(s.T(), s.store)
+	err = tk2.QueryToErr(sql)
+	s.ErrorIs(err, exeerrors.ErrLoadDataPreCheckFailed)
+	s.ErrorContains(err, "there's pending or running jobs")
+
+	client, err := importer.GetEtcdClient()
+	s.NoError(err)
+	s.T().Cleanup(func() {
+		_ = client.Close()
+	})
+	etcdKey := fmt.Sprintf("/tidb/brie/import/import-into/%d", storage.TestLastTaskID.Load())
+	s.Eventually(func() bool {
+		resp, err2 := client.GetClient().Get(context.Background(), etcdKey)
+		s.NoError(err2)
+		return len(resp.Kvs) == 1
+	}, maxWaitTime, 300*time.Millisecond)
+	// continue the execution
+	importinto.TestSyncChan <- struct{}{}
 	wg.Wait()
 	s.tk.MustQuery("SELECT * FROM load_data.register_task;").Sort().Check(testkit.Rows("1 11 111"))
 
@@ -1222,20 +1187,4 @@ func (s *mockGCSSuite) TestZeroDateTime() {
 	s.tk.MustExec("truncate table import_into.zero_time_table")
 	err := s.tk.QueryToErr(sql)
 	s.ErrorContains(err, `Incorrect datetime value: '1990-01-00 00:00:00'`)
-}
-
-func (s *mockGCSSuite) TestBadCases() {
-	testfailpoint.Enable(s.T(), "github.com/pingcap/tidb/pkg/disttask/importinto/beforeSortChunk", `panic("mock panic")`)
-	s.tk.MustExec("DROP DATABASE IF EXISTS bad_cases;")
-	s.tk.MustExec("CREATE DATABASE bad_cases;")
-	s.tk.MustExec(`CREATE TABLE bad_cases.t (a INT, b INT, c INT);`)
-
-	s.server.CreateObject(fakestorage.Object{
-		ObjectAttrs: fakestorage.ObjectAttrs{BucketName: "test-load", Name: "bad-cases-1.csv"},
-		Content:     []byte("1,11,111\n2,22,222\n"),
-	})
-	sql := fmt.Sprintf(`IMPORT INTO bad_cases.t
-		FROM 'gs://test-load/bad-cases-1.csv?endpoint=%s'`, gcsEndpoint)
-	err := s.tk.QueryToErr(sql)
-	require.ErrorContains(s.T(), err, "panic occurred during import, please check log")
 }

@@ -17,7 +17,6 @@ package chunk
 import (
 	"fmt"
 	"math/bits"
-	"math/rand"
 	"reflect"
 	"time"
 	"unsafe"
@@ -25,10 +24,6 @@ import (
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/hack"
 )
-
-// For varLenColumn (e.g. varchar), the accurate length of an element is unknown.
-// Therefore, in the first executor.Next we use an experience value -- 8 (so it may make runtime.growslice)
-const estimatedElemLen = 8
 
 // AppendDuration appends a duration value into this Column.
 // Fsp is ignored.
@@ -54,12 +49,6 @@ func (c *Column) appendNameValue(name string, val uint64) {
 func (c *Column) AppendJSON(j types.BinaryJSON) {
 	c.data = append(c.data, j.TypeCode)
 	c.data = append(c.data, j.Value...)
-	c.finishAppendVar()
-}
-
-// AppendVectorFloat32 appends a VectorFloat32 value into this Column.
-func (c *Column) AppendVectorFloat32(v types.VectorFloat32) {
-	c.data = v.SerializeTo(c.data)
 	c.finishAppendVar()
 }
 
@@ -93,18 +82,6 @@ func (DefaultColumnAllocator) NewColumn(ft *types.FieldType, capacity int) *Colu
 	return newColumn(getFixedLen(ft), capacity)
 }
 
-// NewEmptyColumn creates a new column with nothing.
-func NewEmptyColumn(ft *types.FieldType) *Column {
-	elemLen := getFixedLen(ft)
-	col := Column{}
-	if elemLen != VarElemLen {
-		col.elemBuf = make([]byte, elemLen)
-	} else {
-		col.offsets = append(col.offsets, 0)
-	}
-	return &col
-}
-
 // NewColumn creates a new column with the specific type and capacity.
 func NewColumn(ft *types.FieldType, capacity int) *Column {
 	return newColumn(getFixedLen(ft), capacity)
@@ -112,7 +89,7 @@ func NewColumn(ft *types.FieldType, capacity int) *Column {
 
 func newColumn(ts, capacity int) *Column {
 	var col *Column
-	if ts == VarElemLen {
+	if ts == varElemLen {
 		col = newVarLenColumn(capacity)
 	} else {
 		col = newFixedLenColumn(ts, capacity)
@@ -124,37 +101,29 @@ func newColumn(ts, capacity int) *Column {
 func newFixedLenColumn(elemLen, capacity int) *Column {
 	return &Column{
 		elemBuf:    make([]byte, elemLen),
-		data:       make([]byte, 0, getDataMemCap(capacity, elemLen)),
-		nullBitmap: make([]byte, 0, getNullBitmapCap(capacity)),
+		data:       make([]byte, 0, capacity*elemLen),
+		nullBitmap: make([]byte, 0, (capacity+7)>>3),
 	}
 }
 
 // newVarLenColumn creates a variable length Column with initial data capacity.
 func newVarLenColumn(capacity int) *Column {
+	estimatedElemLen := 8
+	// For varLenColumn (e.g. varchar), the accurate length of an element is unknown.
+	// Therefore, in the first executor.Next we use an experience value -- 8 (so it may make runtime.growslice)
+
 	return &Column{
-		offsets:    make([]int64, 1, getOffsetsCap(capacity)),
-		data:       make([]byte, 0, getDataMemCap(estimatedElemLen, capacity)),
-		nullBitmap: make([]byte, 0, getNullBitmapCap(capacity)),
+		offsets:    make([]int64, 1, capacity+1),
+		data:       make([]byte, 0, capacity*estimatedElemLen),
+		nullBitmap: make([]byte, 0, (capacity+7)>>3),
 	}
-}
-
-func getDataMemCap(capacity int, elemLen int) int64 {
-	return int64(elemLen * capacity)
-}
-
-func getNullBitmapCap(capacity int) int64 {
-	return int64((capacity + 7) >> 3)
-}
-
-func getOffsetsCap(capacity int) int64 {
-	return int64(capacity + 1)
 }
 
 func (c *Column) typeSize() int {
 	if len(c.elemBuf) > 0 {
 		return len(c.elemBuf)
 	}
-	return VarElemLen
+	return varElemLen
 }
 
 func (c *Column) isFixed() bool {
@@ -179,16 +148,9 @@ func (c *Column) Reset(eType types.EvalType) {
 		c.ResizeGoDuration(0, false)
 	case types.ETJson:
 		c.ReserveJSON(0)
-	case types.ETVectorFloat32:
-		c.ReserveVectorFloat32(0)
 	default:
 		panic(fmt.Sprintf("invalid EvalType %v", eType))
 	}
-}
-
-// Rows returns the row number in current column
-func (c *Column) Rows() int {
-	return c.length
 }
 
 // reset resets the underlying data of this Column but doesn't modify its data type.
@@ -198,8 +160,6 @@ func (c *Column) reset() {
 	if len(c.offsets) > 0 {
 		// The first offset is always 0, it makes slicing the data easier, we need to keep it.
 		c.offsets = c.offsets[:1]
-	} else if !c.isFixed() {
-		c.offsets = append(c.offsets, 0)
 	}
 	c.data = c.data[:0]
 }
@@ -229,11 +189,6 @@ func (c *Column) CopyConstruct(dst *Column) *Column {
 	return newCol
 }
 
-// AppendNullBitmap append a null/notnull value to the column's null map
-func (c *Column) AppendNullBitmap(notNull bool) {
-	c.appendNullBitmap(notNull)
-}
-
 func (c *Column) appendNullBitmap(notNull bool) {
 	idx := c.length >> 3
 	if idx >= len(c.nullBitmap) {
@@ -243,30 +198,6 @@ func (c *Column) appendNullBitmap(notNull bool) {
 		pos := uint(c.length) & 7
 		c.nullBitmap[idx] |= byte(1 << pos)
 	}
-}
-
-// AppendCellNTimes append the pos-th Cell in source column to target column N times
-func (c *Column) AppendCellNTimes(src *Column, pos, times int) {
-	notNull := !src.IsNull(pos)
-	if times == 1 {
-		c.appendNullBitmap(notNull)
-	} else {
-		c.appendMultiSameNullBitmap(notNull, times)
-	}
-	if c.isFixed() {
-		elemLen := len(src.elemBuf)
-		offset := pos * elemLen
-		for i := 0; i < times; i++ {
-			c.data = append(c.data, src.data[offset:offset+elemLen]...)
-		}
-	} else {
-		start, end := src.offsets[pos], src.offsets[pos+1]
-		for i := 0; i < times; i++ {
-			c.data = append(c.data, src.data[start:end]...)
-			c.offsets = append(c.offsets, int64(len(c.data)))
-		}
-	}
-	c.length += times
 }
 
 // appendMultiSameNullBitmap appends multiple same bit value to `nullBitMap`.
@@ -292,22 +223,6 @@ func (c *Column) appendMultiSameNullBitmap(notNull bool, num int) {
 	numRedundantBits := uint(len(c.nullBitmap)*8 - c.length - num)
 	bitMask = byte(1<<(8-numRedundantBits)) - 1
 	c.nullBitmap[len(c.nullBitmap)-1] &= bitMask
-}
-
-// AppendNNulls append n nulls to the column
-func (c *Column) AppendNNulls(n int) {
-	c.appendMultiSameNullBitmap(false, n)
-	if c.isFixed() {
-		for i := 0; i < n; i++ {
-			c.data = append(c.data, c.elemBuf...)
-		}
-	} else {
-		currentLength := c.offsets[c.length]
-		for i := 0; i < n; i++ {
-			c.offsets = append(c.offsets, currentLength)
-		}
-	}
-	c.length += n
 }
 
 // AppendNull appends a null value into this Column.
@@ -566,11 +481,6 @@ func (c *Column) ReserveJSON(n int) {
 	c.reserve(n, 8)
 }
 
-// ReserveVectorFloat32 changes the column capacity to store n vectorFloat32 elements and set the length to zero.
-func (c *Column) ReserveVectorFloat32(n int) {
-	c.reserve(n, 8)
-}
-
 // ReserveSet changes the column capacity to store n set elements and set the length to zero.
 func (c *Column) ReserveSet(n int) {
 	c.reserve(n, 8)
@@ -671,16 +581,6 @@ func (c *Column) GetString(rowID int) string {
 func (c *Column) GetJSON(rowID int) types.BinaryJSON {
 	start := c.offsets[rowID]
 	return types.BinaryJSON{TypeCode: c.data[start], Value: c.data[start+1 : c.offsets[rowID+1]]}
-}
-
-// GetVectorFloat32 returns the VectorFloat32 in the specific row.
-func (c *Column) GetVectorFloat32(rowID int) types.VectorFloat32 {
-	data := c.data[c.offsets[rowID]:c.offsets[rowID+1]]
-	v, _, err := types.ZeroCopyDeserializeVectorFloat32(data)
-	if err != nil {
-		panic(err)
-	}
-	return v
 }
 
 // GetBytes returns the byte slice in the specific row.
@@ -860,14 +760,5 @@ func (c *Column) MergeNulls(cols ...*Column) {
 			// bit 0 is null, 1 is not null, so do AND operations here.
 			c.nullBitmap[i] &= col.nullBitmap[i]
 		}
-	}
-}
-
-// DestroyDataForTest destroies data in the column so that
-// we can test if data in column are deeply copied.
-func (c *Column) DestroyDataForTest() {
-	dataByteNum := len(c.data)
-	for i := 0; i < dataByteNum; i++ {
-		c.data[i] = byte(rand.Intn(256))
 	}
 }

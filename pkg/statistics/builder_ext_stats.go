@@ -20,10 +20,11 @@ import (
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"go.uber.org/zap"
 )
 
@@ -32,7 +33,10 @@ func BuildExtendedStats(sctx sessionctx.Context,
 	tableID int64, cols []*model.ColumnInfo, collectors []*SampleCollector) (*ExtendedStatsColl, error) {
 	const sql = "SELECT name, type, column_ids FROM mysql.stats_extended WHERE table_id = %? and status in (%?, %?)"
 
-	sqlExec := sctx.GetRestrictedSQLExecutor()
+	sqlExec, ok := sctx.(sqlexec.RestrictedSQLExecutor)
+	if !ok {
+		return nil, errors.Errorf("invalid sql executor")
+	}
 	rows, _, err := sqlExec.ExecRestrictedSQL(kv.WithInternalSourceType(context.Background(), kv.InternalTxnStats), nil, sql, tableID, ExtendedStatsAnalyzed, ExtendedStatsInited)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -101,7 +105,7 @@ func fillExtStatsCorrVals(sctx sessionctx.Context, item *ExtendedStatsItem, cols
 	sc := sctx.GetSessionVars().StmtCtx
 
 	var err error
-	err = sortSampleItems(sc, samplesX)
+	samplesX, err = SortSampleItems(sc, samplesX)
 	if err != nil {
 		return nil
 	}
@@ -114,9 +118,7 @@ func fillExtStatsCorrVals(sctx sessionctx.Context, item *ExtendedStatsItem, cols
 		itemY.Ordinal = i
 		samplesYInXOrder = append(samplesYInXOrder, itemY)
 	}
-	samplesYInYOrder := make([]*SampleItem, len(samplesYInXOrder))
-	copy(samplesYInYOrder, samplesYInXOrder)
-	err = sortSampleItems(sc, samplesYInYOrder)
+	samplesYInYOrder, err := SortSampleItems(sc, samplesYInXOrder)
 	if err != nil {
 		return nil
 	}

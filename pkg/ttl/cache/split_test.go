@@ -20,13 +20,11 @@ import (
 	"math"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/store/helper"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/testkit"
@@ -63,7 +61,7 @@ type mockPDClient struct {
 	regionsSorted bool
 }
 
-func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int, _ ...pd.GetRegionOption) ([]*pd.Region, error) {
+func (c *mockPDClient) ScanRegions(_ context.Context, key, endKey []byte, limit int) ([]*pd.Region, error) {
 	if len(c.regions) == 0 {
 		return []*pd.Region{newMockRegion(1, []byte{}, []byte{0xFF, 0xFF})}, nil
 	}
@@ -103,10 +101,6 @@ func (c *mockPDClient) GetStore(_ context.Context, storeID uint64) (*metapb.Stor
 		Id:      storeID,
 		Address: fmt.Sprintf("127.0.0.%d", storeID),
 	}, nil
-}
-
-func (c *mockPDClient) GetClusterID(_ context.Context) uint64 {
-	return 1
 }
 
 type mockTiKVStore struct {
@@ -215,7 +209,7 @@ func bytesHandle(t *testing.T, data []byte) kv.Handle {
 }
 
 func commonHandle(t *testing.T, d ...types.Datum) kv.Handle {
-	encoded, err := codec.EncodeKey(time.UTC, nil, d...)
+	encoded, err := codec.EncodeKey(nil, nil, d...)
 	require.NoError(t, err)
 	h, err := kv.NewCommonHandle(encoded)
 	require.NoError(t, err)
@@ -244,28 +238,28 @@ func createTTLTableWithSQL(t *testing.T, tk *testkit.TestKit, name string, sql s
 	tk.MustExec(sql)
 	is, ok := tk.Session().GetDomainInfoSchema().(infoschema.InfoSchema)
 	require.True(t, ok)
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr(name))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr(name))
 	require.NoError(t, err)
 	ttlTbl, err := cache.NewPhysicalTable(model.NewCIStr("test"), tbl.Meta(), model.NewCIStr(""))
 	require.NoError(t, err)
 	return ttlTbl
 }
 
-func checkRange(t *testing.T, r cache.ScanRange, start, end types.Datum, msgAndArgs ...any) {
+func checkRange(t *testing.T, r cache.ScanRange, start, end types.Datum) {
 	if start.IsNull() {
-		require.Nil(t, r.Start, msgAndArgs...)
+		require.Nil(t, r.Start)
 	} else {
-		require.Equal(t, 1, len(r.Start), msgAndArgs...)
-		require.Equal(t, start.Kind(), r.Start[0].Kind(), msgAndArgs...)
-		require.Equal(t, start.GetValue(), r.Start[0].GetValue(), msgAndArgs...)
+		require.Equal(t, 1, len(r.Start))
+		require.Equal(t, start.Kind(), r.Start[0].Kind())
+		require.Equal(t, start.GetValue(), r.Start[0].GetValue())
 	}
 
 	if end.IsNull() {
-		require.Nil(t, r.End, msgAndArgs...)
+		require.Nil(t, r.End)
 	} else {
-		require.Equal(t, 1, len(r.End), msgAndArgs...)
-		require.Equal(t, end.Kind(), r.End[0].Kind(), msgAndArgs...)
-		require.Equal(t, end.GetValue(), r.End[0].GetValue(), msgAndArgs...)
+		require.Equal(t, 1, len(r.End))
+		require.Equal(t, end.Kind(), r.End[0].Kind())
+		require.Equal(t, end.GetValue(), r.End[0].GetValue())
 	}
 }
 
@@ -517,135 +511,47 @@ func TestSplitTTLScanRangesWithBytes(t *testing.T) {
 		createTTLTable(t, tk, "t3", "varchar(32) CHARACTER SET BINARY"),
 		createTTLTable(t, tk, "t4", "bit(32)"),
 		create2PKTTLTable(t, tk, "t5", "binary(32)"),
-		createTTLTable(t, tk, "t6", "varbinary(32)"),
-		createTTLTable(t, tk, "t7", "char(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"),
-		createTTLTable(t, tk, "t8", "char(32) CHARACTER SET utf8 COLLATE utf8_bin"),
-		create2PKTTLTable(t, tk, "t9", "char(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"),
-	}
-
-	cases := []struct {
-		name           string
-		regionEdges    []kv.Handle
-		splitCnt       int
-		binaryExpected [][]types.Datum
-		stringExpected [][]types.Datum
-	}{
-		{
-			name: "2 regions with binary split",
-			regionEdges: []kv.Handle{
-				bytesHandle(t, []byte{1, 2, 3}),
-			},
-			splitCnt: 4,
-			binaryExpected: [][]types.Datum{
-				{types.Datum{}, types.NewBytesDatum([]byte{1, 2, 3})},
-				{types.NewBytesDatum([]byte{1, 2, 3}), types.Datum{}},
-			},
-			stringExpected: [][]types.Datum{
-				{types.Datum{}, types.Datum{}},
-			},
-		},
-		{
-			name: "6 regions with binary split",
-			regionEdges: []kv.Handle{
-				bytesHandle(t, []byte{1, 2, 3}),
-				bytesHandle(t, []byte{1, 2, 3, 4}),
-				bytesHandle(t, []byte{1, 2, 3, 4, 5}),
-				bytesHandle(t, []byte{1, 2, 4}),
-				bytesHandle(t, []byte{1, 2, 5}),
-			},
-			splitCnt: 4,
-			binaryExpected: [][]types.Datum{
-				{types.Datum{}, types.NewBytesDatum([]byte{1, 2, 3, 4})},
-				{types.NewBytesDatum([]byte{1, 2, 3, 4}), types.NewBytesDatum([]byte{1, 2, 4})},
-				{types.NewBytesDatum([]byte{1, 2, 4}), types.NewBytesDatum([]byte{1, 2, 5})},
-				{types.NewBytesDatum([]byte{1, 2, 5}), types.Datum{}},
-			},
-			stringExpected: [][]types.Datum{
-				{types.Datum{}, types.Datum{}},
-			},
-		},
-		{
-			name: "2 regions with utf8 split",
-			regionEdges: []kv.Handle{
-				bytesHandle(t, []byte("中文")),
-			},
-			splitCnt: 4,
-			binaryExpected: [][]types.Datum{
-				{types.Datum{}, types.NewBytesDatum([]byte("中文"))},
-				{types.NewBytesDatum([]byte("中文")), types.Datum{}},
-			},
-			stringExpected: [][]types.Datum{
-				{types.Datum{}, types.Datum{}},
-			},
-		},
-		{
-			name: "several regions with mixed split",
-			regionEdges: []kv.Handle{
-				bytesHandle(t, []byte("abc")),
-				bytesHandle(t, []byte("ab\x7f0")),
-				bytesHandle(t, []byte("ab\xff0")),
-				bytesHandle(t, []byte("ac\x001")),
-				bytesHandle(t, []byte("ad\x0a1")),
-				bytesHandle(t, []byte("ad23")),
-				bytesHandle(t, []byte("ad230\xff")),
-				bytesHandle(t, []byte("befh")),
-				bytesHandle(t, []byte("中文")),
-			},
-			splitCnt: 10,
-			binaryExpected: [][]types.Datum{
-				{types.Datum{}, types.NewBytesDatum([]byte("abc"))},
-				{types.NewBytesDatum([]byte("abc")), types.NewBytesDatum([]byte("ab\x7f0"))},
-				{types.NewBytesDatum([]byte("ab\x7f0")), types.NewBytesDatum([]byte("ab\xff0"))},
-				{types.NewBytesDatum([]byte("ab\xff0")), types.NewBytesDatum([]byte("ac\x001"))},
-				{types.NewBytesDatum([]byte("ac\x001")), types.NewBytesDatum([]byte("ad\x0a1"))},
-				{types.NewBytesDatum([]byte("ad\x0a1")), types.NewBytesDatum([]byte("ad23"))},
-				{types.NewBytesDatum([]byte("ad23")), types.NewBytesDatum([]byte("ad230\xff"))},
-				{types.NewBytesDatum([]byte("ad230\xff")), types.NewBytesDatum([]byte("befh"))},
-				{types.NewBytesDatum([]byte("befh")), types.NewBytesDatum([]byte("中文"))},
-				{types.NewBytesDatum([]byte("中文")), types.Datum{}},
-			},
-			stringExpected: [][]types.Datum{
-				{types.Datum{}, types.NewStringDatum("abc")},
-				{types.NewStringDatum("abc"), types.NewStringDatum("ac")},
-				{types.NewStringDatum("ac"), types.NewStringDatum("ad\n1")},
-				{types.NewStringDatum("ad\n1"), types.NewStringDatum("ad23")},
-				{types.NewStringDatum("ad23"), types.NewStringDatum("ad230")},
-				{types.NewStringDatum("ad230"), types.NewStringDatum("befh")},
-				{types.NewStringDatum("befh"), types.Datum{}},
-			},
-		},
 	}
 
 	tikvStore := newMockTiKVStore(t)
 	for _, tbl := range tbls {
-		for _, c := range cases {
-			tikvStore.clearRegions()
-			require.Greater(t, len(c.regionEdges), 0)
-			for i, edge := range c.regionEdges {
-				if i == 0 {
-					tikvStore.addRegionBeginWithTablePrefix(tbl.ID, edge)
-				} else {
-					tikvStore.addRegionWithTablePrefix(tbl.ID, c.regionEdges[i-1], edge)
-				}
-			}
-			tikvStore.addRegionEndWithTablePrefix(c.regionEdges[len(c.regionEdges)-1], tbl.ID)
-			ranges, err := tbl.SplitScanRanges(context.TODO(), tikvStore, c.splitCnt)
-			require.NoError(t, err)
+		// test only one region
+		tikvStore.clearRegions()
+		ranges, err := tbl.SplitScanRanges(context.TODO(), tikvStore, 4)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(ranges))
+		checkRange(t, ranges[0], types.Datum{}, types.Datum{})
 
-			keyTp := tbl.KeyColumnTypes[0]
-			var expected [][]types.Datum
-			if keyTp.GetType() == mysql.TypeBit || mysql.HasBinaryFlag(keyTp.GetFlag()) {
-				expected = c.binaryExpected
-			} else {
-				expected = c.stringExpected
-			}
+		// test share regions with other table
+		tikvStore.clearRegions()
+		tikvStore.addRegion(
+			tablecodec.GenTablePrefix(tbl.ID-1),
+			tablecodec.GenTablePrefix(tbl.ID+1),
+		)
+		ranges, err = tbl.SplitScanRanges(context.TODO(), tikvStore, 4)
+		require.NoError(t, err)
+		require.Equal(t, 1, len(ranges))
+		checkRange(t, ranges[0], types.Datum{}, types.Datum{})
 
-			require.Equal(t, len(expected), len(ranges), "tbl: %s, case: %s", tbl.Name, c.name)
-			for i, r := range ranges {
-				checkRange(t, r, expected[i][0], expected[i][1],
-					"tbl: %s, case: %s, i: %d", tbl.Name, c.name, i)
-			}
-		}
+		// test one table has multiple regions
+		tikvStore.clearRegions()
+		tikvStore.addRegionBeginWithTablePrefix(tbl.ID, bytesHandle(t, []byte{1, 2, 3}))
+		tikvStore.addRegionWithTablePrefix(
+			tbl.ID, bytesHandle(t, []byte{1, 2, 3}), bytesHandle(t, []byte{1, 2, 3, 4}))
+		tikvStore.addRegionWithTablePrefix(
+			tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4}), bytesHandle(t, []byte{1, 2, 3, 4, 5}))
+		tikvStore.addRegionWithTablePrefix(
+			tbl.ID, bytesHandle(t, []byte{1, 2, 3, 4, 5}), bytesHandle(t, []byte{1, 2, 4}))
+		tikvStore.addRegionWithTablePrefix(
+			tbl.ID, bytesHandle(t, []byte{1, 2, 4}), bytesHandle(t, []byte{1, 2, 5}))
+		tikvStore.addRegionEndWithTablePrefix(bytesHandle(t, []byte{1, 2, 5}), tbl.ID)
+		ranges, err = tbl.SplitScanRanges(context.TODO(), tikvStore, 4)
+		require.NoError(t, err)
+		require.Equal(t, 4, len(ranges))
+		checkRange(t, ranges[0], types.Datum{}, types.NewBytesDatum([]byte{1, 2, 3, 4}))
+		checkRange(t, ranges[1], types.NewBytesDatum([]byte{1, 2, 3, 4}), types.NewBytesDatum([]byte{1, 2, 4}))
+		checkRange(t, ranges[2], types.NewBytesDatum([]byte{1, 2, 4}), types.NewBytesDatum([]byte{1, 2, 5}))
+		checkRange(t, ranges[3], types.NewBytesDatum([]byte{1, 2, 5}), types.Datum{})
 	}
 }
 
@@ -654,12 +560,10 @@ func TestNoTTLSplitSupportTables(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 
 	tbls := []*cache.PhysicalTable{
-		createTTLTable(t, tk, "t1", "decimal(32, 2)"),
-		createTTLTable(t, tk, "t2", "date"),
-		createTTLTable(t, tk, "t3", "datetime"),
-		createTTLTable(t, tk, "t4", "timestamp"),
-		createTTLTable(t, tk, "t5", "varchar(32) character set utf8mb4 collate utf8mb4_general_ci"),
-		createTTLTable(t, tk, "t6", "varchar(32) character set utf8mb4 collate utf8mb4_0900_ai_ci"),
+		createTTLTable(t, tk, "t1", "char(32)  CHARACTER SET UTF8MB4"),
+		createTTLTable(t, tk, "t2", "varchar(32) CHARACTER SET UTF8MB4"),
+		createTTLTable(t, tk, "t4", "decimal(32, 2)"),
+		create2PKTTLTable(t, tk, "t5", "char(32)  CHARACTER SET UTF8MB4"),
 	}
 
 	tikvStore := newMockTiKVStore(t)
@@ -697,7 +601,7 @@ func TestNoTTLSplitSupportTables(t *testing.T) {
 func TestGetNextBytesHandleDatum(t *testing.T) {
 	tblID := int64(7)
 	buildHandleBytes := func(data []byte) []byte {
-		handleBytes, err := codec.EncodeKey(time.UTC, nil, types.NewBytesDatum(data))
+		handleBytes, err := codec.EncodeKey(nil, nil, types.NewBytesDatum(data))
 		require.NoError(t, err)
 		return handleBytes
 	}
@@ -712,7 +616,7 @@ func TestGetNextBytesHandleDatum(t *testing.T) {
 
 	binaryDataStartPos := len(tablecodec.GenTableRecordPrefix(tblID)) + 1
 	cases := []struct {
-		key    any
+		key    interface{}
 		result []byte
 		isNull bool
 	}{
@@ -918,55 +822,10 @@ func TestGetNextBytesHandleDatum(t *testing.T) {
 	}
 }
 
-func TestGetASCIIPrefixDatumFromBytes(t *testing.T) {
-	cases := []struct {
-		bytes    []byte
-		expected string
-	}{
-		{bytes: nil, expected: ""},
-		{bytes: []byte{}, expected: ""},
-		{bytes: []byte{0}, expected: ""},
-		{bytes: []byte{1}, expected: ""},
-		{bytes: []byte{8}, expected: ""},
-		{bytes: []byte{9}, expected: "\t"},
-		{bytes: []byte{10}, expected: "\n"},
-		{bytes: []byte{11}, expected: ""},
-		{bytes: []byte{12}, expected: ""},
-		{bytes: []byte{13}, expected: "\r"},
-		{bytes: []byte{14}, expected: ""},
-		{bytes: []byte{0x19}, expected: ""},
-		{bytes: []byte{0x20}, expected: " "},
-		{bytes: []byte{0x21}, expected: "!"},
-		{bytes: []byte{0x7D}, expected: "}"},
-		{bytes: []byte{0x7E}, expected: "~"},
-		{bytes: []byte{0x7F}, expected: ""},
-		{bytes: []byte{0xFF}, expected: ""},
-		{bytes: []byte{0x0, 'a', 'b'}, expected: ""},
-		{bytes: []byte{0xFF, 'a', 'b'}, expected: ""},
-		{bytes: []byte{'0', '1', 0x0, 'a', 'b'}, expected: "01"},
-		{bytes: []byte{'0', '1', 0x15, 'a', 'b'}, expected: "01"},
-		{bytes: []byte{'0', '1', 0xFF, 'a', 'b'}, expected: "01"},
-		{bytes: []byte{'a', 'b', 0x0}, expected: "ab"},
-		{bytes: []byte{'a', 'b', 0x15}, expected: "ab"},
-		{bytes: []byte{'a', 'b', 0xFF}, expected: "ab"},
-		{bytes: []byte("ab\rcd\tef\nAB!~GH()tt ;;"), expected: "ab\rcd\tef\nAB!~GH()tt ;;"},
-		{bytes: []byte("中文"), expected: ""},
-		{bytes: []byte("cn中文"), expected: "cn"},
-		{bytes: []byte("😀"), expected: ""},
-		{bytes: []byte("emoji😀"), expected: "emoji"},
-	}
-
-	for i, c := range cases {
-		d := cache.GetASCIIPrefixDatumFromBytes(c.bytes)
-		require.Equalf(t, types.KindString, d.Kind(), "i: %d", i)
-		require.Equalf(t, c.expected, d.GetString(), "i: %d, bs: %v", i, c.bytes)
-	}
-}
-
 func TestGetNextIntHandle(t *testing.T) {
 	tblID := int64(7)
 	cases := []struct {
-		key    any
+		key    interface{}
 		result int64
 		isNull bool
 	}{
@@ -1071,7 +930,7 @@ func TestGetNextIntHandle(t *testing.T) {
 
 func TestGetNextIntDatumFromCommonHandle(t *testing.T) {
 	encode := func(tblID int64, d ...types.Datum) kv.Key {
-		encoded, err := codec.EncodeKey(time.UTC, nil, d...)
+		encoded, err := codec.EncodeKey(nil, nil, d...)
 		require.NoError(t, err)
 		h, err := kv.NewCommonHandle(encoded)
 		require.NoError(t, err)

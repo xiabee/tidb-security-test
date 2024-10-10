@@ -21,9 +21,9 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/kvproto/pkg/coprocessor"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
@@ -83,14 +83,7 @@ func (h coprHandler) handleAnalyzeIndexReq(req *coprocessor.Request, analyzeReq 
 		execDetail:     new(execDetail),
 		hdStatus:       tablecodec.HandleNotNeeded,
 	}
-
-	tz, err := timeutil.ConstructTimeZone("", int(analyzeReq.TimeZoneOffset))
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-	sc := sctx.GetSessionVars().StmtCtx
-	statsBuilder := statistics.NewSortedBuilder(sc, analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), statistics.Version1)
+	statsBuilder := statistics.NewSortedBuilder(flagsToStatementContext(analyzeReq.Flags), analyzeReq.IdxReq.BucketSize, 0, types.NewFieldType(mysql.TypeBlob), statistics.Version1)
 	var cms *statistics.CMSketch
 	if analyzeReq.IdxReq.CmsketchDepth != nil && analyzeReq.IdxReq.CmsketchWidth != nil {
 		cms = statistics.NewCMSketch(*analyzeReq.IdxReq.CmsketchDepth, *analyzeReq.IdxReq.CmsketchWidth)
@@ -131,18 +124,18 @@ func (h coprHandler) handleAnalyzeIndexReq(req *coprocessor.Request, analyzeReq 
 
 type analyzeColumnsExec struct {
 	tblExec *tableScanExec
-	fields  []*resolve.ResultField
+	fields  []*ast.ResultField
 }
 
 func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeReq *tipb.AnalyzeReq) (_ *coprocessor.Response, err error) {
+	sc := flagsToStatementContext(analyzeReq.Flags)
 	tz, err := timeutil.ConstructTimeZone("", int(analyzeReq.TimeZoneOffset))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	sc.SetTimeZone(tz)
 
-	sctx := flagsAndTzToSessionContext(analyzeReq.Flags, tz)
-
-	evalCtx := &evalContext{sctx: sctx}
+	evalCtx := &evalContext{sc: sc}
 	columns := analyzeReq.ColReq.ColumnsInfo
 	evalCtx.setColumnInfo(columns)
 	ranges, err := h.extractKVRanges(req.Ranges, false)
@@ -186,9 +179,9 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 			rd:             rd,
 		},
 	}
-	e.fields = make([]*resolve.ResultField, len(columns))
+	e.fields = make([]*ast.ResultField, len(columns))
 	for i := range e.fields {
-		rf := new(resolve.ResultField)
+		rf := new(ast.ResultField)
 		rf.Column = new(model.ColumnInfo)
 		ft := types.FieldType{}
 		ft.SetType(mysql.TypeBlob)
@@ -217,7 +210,7 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 	}
 	colReq := analyzeReq.ColReq
 	builder := statistics.SampleBuilder{
-		Sc:              sctx.GetSessionVars().StmtCtx,
+		Sc:              sc,
 		RecordSet:       e,
 		ColLen:          numCols,
 		MaxBucketSize:   colReq.BucketSize,
@@ -227,7 +220,7 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 		ColsFieldType:   fts,
 	}
 	if pkID != -1 {
-		builder.PkBuilder = statistics.NewSortedBuilder(sctx.GetSessionVars().StmtCtx, builder.MaxBucketSize, pkID, types.NewFieldType(mysql.TypeBlob), statistics.Version1)
+		builder.PkBuilder = statistics.NewSortedBuilder(sc, builder.MaxBucketSize, pkID, types.NewFieldType(mysql.TypeBlob), statistics.Version1)
 	}
 	if colReq.CmsketchWidth != nil && colReq.CmsketchDepth != nil {
 		builder.CMSketchWidth = *colReq.CmsketchWidth
@@ -252,7 +245,7 @@ func (h coprHandler) handleAnalyzeColumnsReq(req *coprocessor.Request, analyzeRe
 }
 
 // Fields implements the sqlexec.RecordSet Fields interface.
-func (e *analyzeColumnsExec) Fields() []*resolve.ResultField {
+func (e *analyzeColumnsExec) Fields() []*ast.ResultField {
 	return e.fields
 }
 

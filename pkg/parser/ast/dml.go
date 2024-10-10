@@ -277,6 +277,9 @@ type TableName struct {
 	Schema model.CIStr
 	Name   model.CIStr
 
+	DBInfo    *model.DBInfo
+	TableInfo *model.TableInfo
+
 	IndexHints     []*IndexHint
 	PartitionNames []model.CIStr
 	TableSample    *TableSample
@@ -738,28 +741,6 @@ func (n *SelectField) Accept(v Visitor) (Node, bool) {
 		n.Expr = node.(ExprNode)
 	}
 	return v.Leave(n)
-}
-
-func (n *SelectField) Match(col *ColumnNameExpr, ignoreAsName bool) bool {
-	// if col specify a table name, resolve from table source directly.
-	if col.Name.Table.L == "" {
-		if n.AsName.L == "" || ignoreAsName {
-			if curCol, isCol := n.Expr.(*ColumnNameExpr); isCol {
-				return curCol.Name.Name.L == col.Name.Name.L
-			} else if _, isFunc := n.Expr.(*FuncCallExpr); isFunc {
-				// Fix issue 7331
-				// If there are some function calls in SelectField, we check if
-				// ColumnNameExpr in GroupByClause matches one of these function calls.
-				// Example: select concat(k1,k2) from t group by `concat(k1,k2)`,
-				// `concat(k1,k2)` matches with function call concat(k1, k2).
-				return strings.ToLower(n.Text()) == col.Name.Name.L
-			}
-			// a expression without as name can't be matched.
-			return false
-		}
-		return n.AsName.L == col.Name.Name.L
-	}
-	return false
 }
 
 // FieldList represents field list in select statement.
@@ -1273,7 +1254,7 @@ func (n *SelectStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("SQL_CALC_FOUND_ROWS ")
 		}
 
-		if len(n.TableHints) != 0 {
+		if n.TableHints != nil && len(n.TableHints) != 0 {
 			ctx.WritePlain("/*+ ")
 			for i, tableHint := range n.TableHints {
 				if i != 0 {
@@ -1472,7 +1453,7 @@ func (n *SelectStmt) Accept(v Visitor) (Node, bool) {
 		n.With = node.(*WithClause)
 	}
 
-	if len(n.TableHints) != 0 {
+	if n.TableHints != nil && len(n.TableHints) != 0 {
 		newHints := make([]*TableOptimizerHint, len(n.TableHints))
 		for i, hint := range n.TableHints {
 			node, ok := hint.Accept(v)
@@ -1884,7 +1865,6 @@ const (
 type LoadDataStmt struct {
 	dmlNode
 
-	LowPriority       bool
 	FileLocRef        FileLocRefTp
 	Path              string
 	Format            *string
@@ -1904,9 +1884,6 @@ type LoadDataStmt struct {
 // Restore implements Node interface.
 func (n *LoadDataStmt) Restore(ctx *format.RestoreCtx) error {
 	ctx.WriteKeyWord("LOAD DATA ")
-	if n.LowPriority {
-		ctx.WriteKeyWord("LOW_PRIORITY ")
-	}
 	switch n.FileLocRef {
 	case FileLocServerOrRemote:
 	case FileLocClient:
@@ -2131,7 +2108,6 @@ type ImportIntoStmt struct {
 	Path               string
 	Format             *string
 	Options            []*LoadDataOpt
-	Select             ResultSetNode
 }
 
 var _ SensitiveStmtNode = &ImportIntoStmt{}
@@ -2168,16 +2144,10 @@ func (n *ImportIntoStmt) Restore(ctx *format.RestoreCtx) error {
 		}
 	}
 	ctx.WriteKeyWord(" FROM ")
-	if n.Select != nil {
-		if err := n.Select.Restore(ctx); err != nil {
-			return errors.Annotate(err, "An error occurred while restore ImportIntoStmt.Select")
-		}
-	} else {
-		ctx.WriteString(n.Path)
-		if n.Format != nil {
-			ctx.WriteKeyWord(" FORMAT ")
-			ctx.WriteString(*n.Format)
-		}
+	ctx.WriteString(n.Path)
+	if n.Format != nil {
+		ctx.WriteKeyWord(" FORMAT ")
+		ctx.WriteString(*n.Format)
 	}
 
 	if len(n.Options) > 0 {
@@ -2223,13 +2193,6 @@ func (n *ImportIntoStmt) Accept(v Visitor) (Node, bool) {
 			return n, false
 		}
 		n.ColumnAssignments[i] = node.(*Assignment)
-	}
-	if n.Select != nil {
-		node, ok := n.Select.Accept(v)
-		if !ok {
-			return n, false
-		}
-		n.Select = node.(ResultSetNode)
 	}
 	return v.Leave(n)
 }
@@ -2309,7 +2272,7 @@ func (n *InsertStmt) Restore(ctx *format.RestoreCtx) error {
 		ctx.WriteKeyWord("INSERT ")
 	}
 
-	if len(n.TableHints) != 0 {
+	if n.TableHints != nil && len(n.TableHints) != 0 {
 		ctx.WritePlain("/*+ ")
 		for i, tableHint := range n.TableHints {
 			if i != 0 {
@@ -2546,7 +2509,7 @@ func (n *DeleteStmt) Restore(ctx *format.RestoreCtx) error {
 
 	ctx.WriteKeyWord("DELETE ")
 
-	if len(n.TableHints) != 0 {
+	if n.TableHints != nil && len(n.TableHints) != 0 {
 		ctx.WritePlain("/*+ ")
 		for i, tableHint := range n.TableHints {
 			if i != 0 {
@@ -2798,7 +2761,7 @@ func (n *UpdateStmt) Restore(ctx *format.RestoreCtx) error {
 
 	ctx.WriteKeyWord("UPDATE ")
 
-	if len(n.TableHints) != 0 {
+	if n.TableHints != nil && len(n.TableHints) != 0 {
 		ctx.WritePlain("/*+ ")
 		for i, tableHint := range n.TableHints {
 			if i != 0 {
@@ -3026,6 +2989,8 @@ const (
 	ShowErrors
 	ShowBindings
 	ShowBindingCacheStatus
+	ShowPumpStatus
+	ShowDrainerStatus
 	ShowOpenTables
 	ShowAnalyzeStatus
 	ShowRegions
@@ -3044,8 +3009,6 @@ const (
 	ShowCreateResourceGroup
 	ShowImportJobs
 	ShowCreateProcedure
-	ShowBinlogStatus
-	ShowReplicaStatus
 )
 
 const (
@@ -3135,8 +3098,6 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 
 	ctx.WriteKeyWord("SHOW ")
 	switch n.Tp {
-	case ShowBinlogStatus:
-		ctx.WriteKeyWord("BINARY LOG STATUS")
 	case ShowCreateTable:
 		ctx.WriteKeyWord("CREATE TABLE ")
 		if err := n.Table.Restore(ctx); err != nil {
@@ -3388,6 +3349,10 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("BINDINGS")
 		case ShowBindingCacheStatus:
 			ctx.WriteKeyWord("BINDING_CACHE STATUS")
+		case ShowPumpStatus:
+			ctx.WriteKeyWord("PUMP STATUS")
+		case ShowDrainerStatus:
+			ctx.WriteKeyWord("DRAINER STATUS")
 		case ShowAnalyzeStatus:
 			ctx.WriteKeyWord("ANALYZE STATUS")
 		case ShowRegions:
@@ -3423,8 +3388,6 @@ func (n *ShowStmt) Restore(ctx *format.RestoreCtx) error {
 			ctx.WriteKeyWord("PLACEMENT LABELS")
 		case ShowSessionStates:
 			ctx.WriteKeyWord("SESSION_STATES")
-		case ShowReplicaStatus:
-			ctx.WriteKeyWord("REPLICA STATUS")
 		default:
 			return errors.New("Unknown ShowStmt type")
 		}

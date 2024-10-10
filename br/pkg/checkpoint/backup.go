@@ -57,14 +57,14 @@ func StartCheckpointBackupRunnerForTest(
 	tick time.Duration,
 	timer GlobalTimer,
 ) (*CheckpointRunner[BackupKeyType, BackupValueType], error) {
-	checkpointStorage, err := newExternalCheckpointStorage(ctx, storage, timer)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
 	runner := newCheckpointRunner[BackupKeyType, BackupValueType](
-		checkpointStorage, cipher, valueMarshalerForBackup)
+		ctx, storage, cipher, timer, flushPositionForBackup(), valueMarshalerForBackup)
 
-	runner.startCheckpointMainLoop(ctx, tick, tick, tick, tick)
+	err := runner.initialLock(ctx)
+	if err != nil {
+		return nil, errors.Annotate(err, "Failed to initialize checkpoint lock.")
+	}
+	runner.startCheckpointMainLoop(ctx, tick, tick, tick)
 	return runner, nil
 }
 
@@ -74,19 +74,18 @@ func StartCheckpointRunnerForBackup(
 	cipher *backuppb.CipherInfo,
 	timer GlobalTimer,
 ) (*CheckpointRunner[BackupKeyType, BackupValueType], error) {
-	checkpointStorage, err := newExternalCheckpointStorage(ctx, storage, timer)
+	runner := newCheckpointRunner[BackupKeyType, BackupValueType](
+		ctx, storage, cipher, timer, flushPositionForBackup(), valueMarshalerForBackup)
+
+	err := runner.initialLock(ctx)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	runner := newCheckpointRunner[BackupKeyType, BackupValueType](
-		checkpointStorage, cipher, valueMarshalerForBackup)
-
 	runner.startCheckpointMainLoop(
 		ctx,
 		defaultTickDurationForFlush,
-		defaultTickDurationForChecksum,
+		defaultTckDurationForChecksum,
 		defaultTickDurationForLock,
-		defaultRetryDuration,
 	)
 	return runner, nil
 }

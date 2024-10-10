@@ -24,6 +24,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/metrics"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
@@ -40,7 +41,7 @@ var (
 
 type cachedTable struct {
 	TableCommon
-	cacheData atomic.Pointer[cacheData]
+	cacheData atomic.Value
 	totalSize int64
 	// StateRemote is not thread-safe, this tokenLimit is used to keep only one visitor.
 	tokenLimit
@@ -90,10 +91,11 @@ func newMemBuffer(store kv.Storage) (kv.MemBuffer, error) {
 }
 
 func (c *cachedTable) TryReadFromCache(ts uint64, leaseDuration time.Duration) (kv.MemBuffer, bool /*loading*/) {
-	data := c.cacheData.Load()
-	if data == nil {
+	tmp := c.cacheData.Load()
+	if tmp == nil {
 		return nil, false
 	}
+	data := tmp.(*cacheData)
 	if ts >= data.Start && ts < data.Lease {
 		leaseTime := oracle.GetTimeFromTS(data.Lease)
 		nowTime := oracle.GetTimeFromTS(ts)
@@ -119,7 +121,7 @@ func (c *cachedTable) TryReadFromCache(ts uint64, leaseDuration time.Duration) (
 // newCachedTable creates a new CachedTable Instance
 func newCachedTable(tbl *TableCommon) (table.Table, error) {
 	ret := &cachedTable{
-		TableCommon: tbl.Copy(),
+		TableCommon: *tbl,
 		tokenLimit:  make(chan StateRemote, 1),
 	}
 	return ret, nil
@@ -222,7 +224,7 @@ func (c *cachedTable) updateLockForRead(ctx context.Context, handle StateRemote,
 				return
 			}
 
-			tmp := c.cacheData.Load()
+			tmp := c.cacheData.Load().(*cacheData)
 			if tmp != nil && tmp.Start == ts {
 				c.cacheData.Store(&cacheData{
 					Start:     startTS,
@@ -239,34 +241,38 @@ func (c *cachedTable) updateLockForRead(ctx context.Context, handle StateRemote,
 const cachedTableSizeLimit = 64 * (1 << 20)
 
 // AddRecord implements the AddRecord method for the table.Table interface.
-func (c *cachedTable) AddRecord(sctx table.MutateContext, txn kv.Transaction, r []types.Datum, opts ...table.AddRecordOption) (recordID kv.Handle, err error) {
+func (c *cachedTable) AddRecord(sctx sessionctx.Context, r []types.Datum, opts ...table.AddRecordOption) (recordID kv.Handle, err error) {
 	if atomic.LoadInt64(&c.totalSize) > cachedTableSizeLimit {
 		return nil, table.ErrOptOnCacheTable.GenWithStackByArgs("table too large")
 	}
 	txnCtxAddCachedTable(sctx, c.Meta().ID, c)
-	return c.TableCommon.AddRecord(sctx, txn, r, opts...)
+	return c.TableCommon.AddRecord(sctx, r, opts...)
 }
 
-func txnCtxAddCachedTable(sctx table.MutateContext, tid int64, handle *cachedTable) {
-	if s, ok := sctx.GetCachedTableSupport(); ok {
-		s.AddCachedTableHandleToTxn(tid, handle)
+func txnCtxAddCachedTable(sctx sessionctx.Context, tid int64, handle *cachedTable) {
+	txnCtx := sctx.GetSessionVars().TxnCtx
+	if txnCtx.CachedTables == nil {
+		txnCtx.CachedTables = make(map[int64]interface{})
+	}
+	if _, ok := txnCtx.CachedTables[tid]; !ok {
+		txnCtx.CachedTables[tid] = handle
 	}
 }
 
 // UpdateRecord implements table.Table
-func (c *cachedTable) UpdateRecord(ctx table.MutateContext, txn kv.Transaction, h kv.Handle, oldData, newData []types.Datum, touched []bool, opts ...table.UpdateRecordOption) error {
+func (c *cachedTable) UpdateRecord(ctx context.Context, sctx sessionctx.Context, h kv.Handle, oldData, newData []types.Datum, touched []bool) error {
 	// Prevent furthur writing when the table is already too large.
 	if atomic.LoadInt64(&c.totalSize) > cachedTableSizeLimit {
 		return table.ErrOptOnCacheTable.GenWithStackByArgs("table too large")
 	}
-	txnCtxAddCachedTable(ctx, c.Meta().ID, c)
-	return c.TableCommon.UpdateRecord(ctx, txn, h, oldData, newData, touched, opts...)
+	txnCtxAddCachedTable(sctx, c.Meta().ID, c)
+	return c.TableCommon.UpdateRecord(ctx, sctx, h, oldData, newData, touched)
 }
 
 // RemoveRecord implements table.Table RemoveRecord interface.
-func (c *cachedTable) RemoveRecord(sctx table.MutateContext, txn kv.Transaction, h kv.Handle, r []types.Datum, opts ...table.RemoveRecordOption) error {
+func (c *cachedTable) RemoveRecord(sctx sessionctx.Context, h kv.Handle, r []types.Datum) error {
 	txnCtxAddCachedTable(sctx, c.Meta().ID, c)
-	return c.TableCommon.RemoveRecord(sctx, txn, h, r, opts...)
+	return c.TableCommon.RemoveRecord(sctx, h, r)
 }
 
 // TestMockRenewLeaseABA2 is used by test function TestRenewLeaseABAFailPoint.

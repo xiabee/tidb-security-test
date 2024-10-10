@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"github.com/pingcap/errors"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
-	"golang.org/x/term"
 )
 
 type logFunc func(msg string, fields ...zap.Field)
@@ -76,27 +74,14 @@ func (pp *ProgressPrinter) Close() {
 	}
 }
 
-// getTerminalOutput try to use os.Stderr as terminal output
-func getTerminalOutput() io.Writer {
-	output := os.Stdout
-	if term.IsTerminal(int(output.Fd())) {
-		return output
-	}
-	return nil
-}
-
 // goPrintProgress starts a gorouinte and prints progress.
 func (pp *ProgressPrinter) goPrintProgress(
 	ctx context.Context,
 	logFuncImpl logFunc,
 	testWriter io.Writer, // Only for tests
 ) {
-	var terminalOutput io.Writer
-	if !pp.redirectLog && testWriter == nil {
-		terminalOutput = getTerminalOutput()
-	}
 	bar := pb.New64(pp.total)
-	if terminalOutput == nil {
+	if pp.redirectLog || testWriter != nil {
 		tmpl := `{"P":"{{percent .}}","C":"{{counters . }}","E":"{{etime .}}","R":"{{rtime .}}","S":"{{speed .}}"}`
 		bar.SetTemplateString(tmpl)
 		bar.SetRefreshRate(2 * time.Minute)
@@ -113,7 +98,6 @@ func (pp *ProgressPrinter) goPrintProgress(
 		tmpl := `{{string . "barName" | green}} {{ bar . "<" "-" (cycle . "-" "\\" "|" "/" ) "." ">"}} {{percent .}}`
 		bar.SetTemplateString(tmpl)
 		bar.Set("barName", pp.name)
-		bar.SetWriter(terminalOutput)
 	}
 	if testWriter != nil {
 		bar.SetWriter(testWriter)

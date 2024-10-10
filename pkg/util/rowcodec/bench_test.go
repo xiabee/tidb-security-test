@@ -19,8 +19,9 @@ import (
 	"time"
 
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/meta/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/benchdaily"
@@ -57,7 +58,7 @@ func BenchmarkEncode(b *testing.B) {
 	var err error
 	for i := 0; i < b.N; i++ {
 		buf = buf[:0]
-		buf, err = xb.Encode(nil, colIDs, oldRow, nil, buf)
+		buf, err = xb.Encode(nil, colIDs, oldRow, buf)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -67,7 +68,7 @@ func BenchmarkEncode(b *testing.B) {
 func BenchmarkEncodeFromOldRow(b *testing.B) {
 	b.ReportAllocs()
 	oldRow := types.MakeDatums(1, "abc", 1.1)
-	oldRowData, err := tablecodec.EncodeOldRow(nil, oldRow, []int64{1, 2, 3}, nil, nil)
+	oldRowData, err := tablecodec.EncodeOldRow(stmtctx.NewStmtCtx(), oldRow, []int64{1, 2, 3}, nil, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func BenchmarkDecode(b *testing.B) {
 		types.NewFieldType(mysql.TypeDouble),
 	}
 	var xb rowcodec.Encoder
-	xRowData, err := xb.Encode(nil, colIDs, oldRow, nil, nil)
+	xRowData, err := xb.Encode(nil, colIDs, oldRow, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

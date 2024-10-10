@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pingcap/failpoint"
 	ingesttestutil "github.com/pingcap/tidb/pkg/ddl/ingest/testutil"
 	mysql "github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/server"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/stretchr/testify/require"
 )
 
@@ -938,7 +938,7 @@ func TestMDLPreparePlanCacheExecute(t *testing.T) {
 	tk.MustQuery("select @@last_plan_from_cache;").Check(testkit.Rows("0"))
 	tk.MustExec(`execute stmt_test_1 using @a, @b;`) // can't reuse the prior plan since this table becomes dirty.
 	tk.MustQuery("select @@last_plan_from_cache;").Check(testkit.Rows("0"))
-	tk.MustExec(`execute stmt_test_1 using @a, @b;`) // can't reuse the prior plan now.
+	tk.MustExec(`execute stmt_test_1 using @a, @b;`) // can reuse the prior plan now.
 	tk.MustQuery("select @@last_plan_from_cache;").Check(testkit.Rows("1"))
 	// The plan is from cache, the metadata lock should be added to block the DDL.
 	ch <- struct{}{}
@@ -1360,7 +1360,10 @@ func TestMDLUpdateEtcdFail(t *testing.T) {
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int);")
 
-	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/ddl/schemaver/mockUpdateMDLToETCDError", `3*return(true)`)
+	require.NoError(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockUpdateMDLToETCDError", `3*return(true)`))
+	defer func() {
+		require.NoError(t, failpoint.Disable("github.com/pingcap/tidb/pkg/ddl/mockUpdateMDLToETCDError"))
+	}()
 
 	tk.MustExec("alter table test.t add column c int")
 }

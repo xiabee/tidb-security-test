@@ -16,8 +16,6 @@ package memo
 
 import (
 	"container/list"
-
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 )
 
 // ExprIter enumerates all the equivalent expressions in the Group according to
@@ -34,7 +32,7 @@ type ExprIter struct {
 	// Pattern describes the node of pattern tree.
 	// The Operand type of the Group expression and the EngineType of the Group
 	// must be matched with it.
-	*pattern.Pattern
+	*Pattern
 
 	// Children is used to iterate the child expressions.
 	Children []*ExprIter
@@ -59,7 +57,7 @@ func (iter *ExprIter) Next() (found bool) {
 	}
 
 	// It's root node or leaf ANY node.
-	if iter.Group == nil || iter.Operand == pattern.OperandAny {
+	if iter.Group == nil || iter.Operand == OperandAny {
 		return false
 	}
 
@@ -67,7 +65,7 @@ func (iter *ExprIter) Next() (found bool) {
 	for elem := iter.Element.Next(); elem != nil; elem = elem.Next() {
 		expr := elem.Value.(*GroupExpr)
 
-		if !iter.Operand.Match(pattern.GetOperand(expr.ExprNode)) {
+		if !iter.Operand.Match(GetOperand(expr.ExprNode)) {
 			// All the Equivalents which have the same Operand are continuously
 			// stored in the list. Once the current equivalent can not Match
 			// the Operand, the rest can not, either.
@@ -116,7 +114,7 @@ func (iter *ExprIter) Reset() (findMatch bool) {
 	for elem := iter.Group.GetFirstElem(iter.Operand); elem != nil; elem = elem.Next() {
 		expr := elem.Value.(*GroupExpr)
 
-		if !iter.Pattern.Match(pattern.GetOperand(expr.ExprNode), expr.Group.EngineType) {
+		if !iter.Pattern.Match(GetOperand(expr.ExprNode), expr.Group.EngineType) {
 			break
 		}
 
@@ -163,9 +161,9 @@ func (iter *ExprIter) GetExpr() *GroupExpr {
 }
 
 // NewExprIterFromGroupElem creates the iterator on the Group Element.
-func NewExprIterFromGroupElem(elem *list.Element, p *pattern.Pattern) *ExprIter {
+func NewExprIterFromGroupElem(elem *list.Element, p *Pattern) *ExprIter {
 	expr := elem.Value.(*GroupExpr)
-	if !p.Match(pattern.GetOperand(expr.ExprNode), expr.Group.EngineType) {
+	if !p.Match(GetOperand(expr.ExprNode), expr.Group.EngineType) {
 		return nil
 	}
 	iter := newExprIterFromGroupExpr(expr, p)
@@ -176,7 +174,7 @@ func NewExprIterFromGroupElem(elem *list.Element, p *pattern.Pattern) *ExprIter 
 }
 
 // newExprIterFromGroupExpr creates the iterator on the Group expression.
-func newExprIterFromGroupExpr(expr *GroupExpr, p *pattern.Pattern) *ExprIter {
+func newExprIterFromGroupExpr(expr *GroupExpr, p *Pattern) *ExprIter {
 	if len(p.Children) != 0 && len(p.Children) != len(expr.Children) {
 		return nil
 	}
@@ -192,13 +190,13 @@ func newExprIterFromGroupExpr(expr *GroupExpr, p *pattern.Pattern) *ExprIter {
 }
 
 // newExprIterFromGroup creates the iterator on the Group.
-func newExprIterFromGroup(g *Group, p *pattern.Pattern) *ExprIter {
+func newExprIterFromGroup(g *Group, p *Pattern) *ExprIter {
 	if p.MatchOperandAny(g.EngineType) {
 		return &ExprIter{Group: g, Pattern: p, matched: true}
 	}
 	for elem := g.GetFirstElem(p.Operand); elem != nil; elem = elem.Next() {
 		expr := elem.Value.(*GroupExpr)
-		if !p.Match(pattern.GetOperand(expr.ExprNode), g.EngineType) {
+		if !p.Match(GetOperand(expr.ExprNode), g.EngineType) {
 			return nil
 		}
 		iter := newExprIterFromGroupExpr(expr, p)

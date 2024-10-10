@@ -21,8 +21,6 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/parser"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/hint"
@@ -135,8 +133,7 @@ func TestPlanCostDetail(t *testing.T) {
 func optimize(t *testing.T, sql string, p *parser.Parser, ctx sessionctx.Context, dom *domain.Domain) map[string]*tracing.PhysicalPlanCostDetail {
 	stmt, err := p.ParseOneStmt(sql, "", "")
 	require.NoError(t, err)
-	nodeW := resolve.NewNodeW(stmt)
-	err = plannercore.Preprocess(context.Background(), ctx, nodeW, plannercore.WithPreprocessorReturn(&plannercore.PreprocessorReturn{InfoSchema: dom.InfoSchema()}))
+	err = plannercore.Preprocess(context.Background(), ctx, stmt, plannercore.WithPreprocessorReturn(&plannercore.PreprocessorReturn{InfoSchema: dom.InfoSchema()}))
 	require.NoError(t, err)
 	sctx := plannercore.MockContext()
 	defer func() {
@@ -145,11 +142,11 @@ func optimize(t *testing.T, sql string, p *parser.Parser, ctx sessionctx.Context
 	sctx.GetSessionVars().StmtCtx.EnableOptimizeTrace = true
 	sctx.GetSessionVars().EnableNewCostInterface = true
 	sctx.GetSessionVars().CostModelVersion = 1
-	builder, _ := plannercore.NewPlanBuilder().Init(sctx, dom.InfoSchema(), hint.NewQBHintHandler(nil))
+	builder, _ := plannercore.NewPlanBuilder().Init(sctx, dom.InfoSchema(), &hint.BlockHintProcessor{})
 	domain.GetDomain(sctx).MockInfoCacheAndLoadInfoSchema(dom.InfoSchema())
-	plan, err := builder.Build(context.TODO(), nodeW)
+	plan, err := builder.Build(context.TODO(), stmt)
 	require.NoError(t, err)
-	_, _, err = plannercore.DoOptimize(context.TODO(), sctx, builder.GetOptFlag(), plan.(base.LogicalPlan))
+	_, _, err = plannercore.DoOptimize(context.TODO(), sctx, builder.GetOptFlag(), plan.(plannercore.LogicalPlan))
 	require.NoError(t, err)
 	return sctx.GetSessionVars().StmtCtx.OptimizeTracer.Physical.PhysicalPlanCostDetails
 }

@@ -27,22 +27,22 @@ import (
 	"github.com/pingcap/tidb/pkg/config"
 	"github.com/pingcap/tidb/pkg/ddl"
 	testddlutil "github.com/pingcap/tidb/pkg/ddl/testutil"
+	"github.com/pingcap/tidb/pkg/ddl/util/callback"
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser/auth"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessiontxn"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/external"
-	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/stretchr/testify/require"
@@ -106,7 +106,7 @@ func TestAddNotNullColumnWhileInsertOnDupUpdate(t *testing.T) {
 }
 
 func TestTransactionOnAddDropColumn(t *testing.T) {
-	store := testkit.CreateMockStore(t)
+	store, dom := testkit.CreateMockStoreAndDomain(t)
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("set @@global.tidb_max_delta_schema_count= 4096")
 	tk.MustExec("use test")
@@ -130,8 +130,11 @@ func TestTransactionOnAddDropColumn(t *testing.T) {
 		},
 	}
 
+	originHook := dom.DDL().GetHook()
+	defer dom.DDL().SetHook(originHook)
+	hook := &callback.TestDDLCallback{Do: dom}
 	var checkErr error
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore", func(job *model.Job) {
+	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if checkErr != nil {
 			return
 		}
@@ -149,7 +152,8 @@ func TestTransactionOnAddDropColumn(t *testing.T) {
 				}
 			}
 		}
-	})
+	}
+	dom.DDL().SetHook(hook)
 	done := make(chan error, 1)
 	// test transaction on add column.
 	go backgroundExec(store, "test", "alter table t1 add column c int not null after a", done)
@@ -311,20 +315,22 @@ func TestCreateTableWithInfo(t *testing.T) {
 	tk.MustExec("use test")
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
 
-	d := dom.DDLExecutor()
+	d := dom.DDL()
 	require.NotNil(t, d)
 	info := []*model.TableInfo{{
-		ID:   42042, // Note, we must ensure the table ID is globally unique!
-		Name: pmodel.NewCIStr("t"),
+		ID:   42,
+		Name: model.NewCIStr("t"),
 	}}
 
-	require.NoError(t, d.BatchCreateTableWithInfo(tk.Session(), pmodel.NewCIStr("test"), info, ddl.WithOnExist(ddl.OnExistError), ddl.WithIDAllocated(true)))
-	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 't'").Check(testkit.Rows("42042"))
+	require.NoError(t, d.BatchCreateTableWithInfo(tk.Session(), model.NewCIStr("test"), info, ddl.OnExistError, ddl.AllocTableIDIf(func(ti *model.TableInfo) bool {
+		return false
+	})))
+	tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 't'").Check(testkit.Rows("42"))
 	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnOthers)
 
 	var id int64
 	err := kv.RunInNewTxn(ctx, store, true, func(_ context.Context, txn kv.Transaction) error {
-		m := meta.NewMutator(txn)
+		m := meta.NewMeta(txn)
 		var err error
 		id, err = m.GenGlobalID()
 		return err
@@ -333,10 +339,12 @@ func TestCreateTableWithInfo(t *testing.T) {
 	require.NoError(t, err)
 	info = []*model.TableInfo{{
 		ID:   42,
-		Name: pmodel.NewCIStr("tt"),
+		Name: model.NewCIStr("tt"),
 	}}
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	require.NoError(t, d.BatchCreateTableWithInfo(tk.Session(), pmodel.NewCIStr("test"), info, ddl.WithOnExist(ddl.OnExistError)))
+	require.NoError(t, d.BatchCreateTableWithInfo(tk.Session(), model.NewCIStr("test"), info, ddl.OnExistError, ddl.AllocTableIDIf(func(ti *model.TableInfo) bool {
+		return true
+	})))
 	idGen, ok := tk.MustQuery("select tidb_table_id from information_schema.tables where table_name = 'tt'").Rows()[0][0].(string)
 	require.True(t, ok)
 	idGenNum, err := strconv.ParseInt(idGen, 10, 64)
@@ -352,21 +360,21 @@ func TestBatchCreateTable(t *testing.T) {
 	tk.MustExec("drop table if exists tables_2")
 	tk.MustExec("drop table if exists tables_3")
 
-	d := dom.DDLExecutor()
+	d := dom.DDL()
 	infos := []*model.TableInfo{}
 	infos = append(infos, &model.TableInfo{
-		Name: pmodel.NewCIStr("tables_1"),
+		Name: model.NewCIStr("tables_1"),
 	})
 	infos = append(infos, &model.TableInfo{
-		Name: pmodel.NewCIStr("tables_2"),
+		Name: model.NewCIStr("tables_2"),
 	})
 	infos = append(infos, &model.TableInfo{
-		Name: pmodel.NewCIStr("tables_3"),
+		Name: model.NewCIStr("tables_3"),
 	})
 
 	// correct name
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	err := d.BatchCreateTableWithInfo(tk.Session(), pmodel.NewCIStr("test"), infos, ddl.WithOnExist(ddl.OnExistError))
+	err := d.BatchCreateTableWithInfo(tk.Session(), model.NewCIStr("test"), infos, ddl.OnExistError)
 	require.NoError(t, err)
 
 	tk.MustQuery("show tables like '%tables_%'").Check(testkit.Rows("tables_1", "tables_2", "tables_3"))
@@ -379,23 +387,23 @@ func TestBatchCreateTable(t *testing.T) {
 	// c.Assert(job[6], Matches, "[^,]+,[^,]+,[^,]+")
 
 	// duplicated name
-	infos[1].Name = pmodel.NewCIStr("tables_1")
+	infos[1].Name = model.NewCIStr("tables_1")
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	err = d.BatchCreateTableWithInfo(tk.Session(), pmodel.NewCIStr("test"), infos, ddl.WithOnExist(ddl.OnExistError))
+	err = d.BatchCreateTableWithInfo(tk.Session(), model.NewCIStr("test"), infos, ddl.OnExistError)
 	require.True(t, terror.ErrorEqual(err, infoschema.ErrTableExists))
 
 	newinfo := &model.TableInfo{
-		Name: pmodel.NewCIStr("tables_4"),
+		Name: model.NewCIStr("tables_4"),
 	}
 	{
 		colNum := 2
 		cols := make([]*model.ColumnInfo, colNum)
-		viewCols := make([]pmodel.CIStr, colNum)
+		viewCols := make([]model.CIStr, colNum)
 		var stmtBuffer bytes.Buffer
 		stmtBuffer.WriteString("SELECT ")
 		for i := range cols {
 			col := &model.ColumnInfo{
-				Name:   pmodel.NewCIStr(fmt.Sprintf("c%d", i+1)),
+				Name:   model.NewCIStr(fmt.Sprintf("c%d", i+1)),
 				Offset: i,
 				State:  model.StatePublic,
 			}
@@ -405,12 +413,12 @@ func TestBatchCreateTable(t *testing.T) {
 		}
 		stmtBuffer.WriteString("1 FROM t")
 		newinfo.Columns = cols
-		newinfo.View = &model.ViewInfo{Cols: viewCols, Security: pmodel.SecurityDefiner, Algorithm: pmodel.AlgorithmMerge, SelectStmt: stmtBuffer.String(), CheckOption: pmodel.CheckOptionCascaded, Definer: &auth.UserIdentity{CurrentUser: true}}
+		newinfo.View = &model.ViewInfo{Cols: viewCols, Security: model.SecurityDefiner, Algorithm: model.AlgorithmMerge, SelectStmt: stmtBuffer.String(), CheckOption: model.CheckOptionCascaded, Definer: &auth.UserIdentity{CurrentUser: true}}
 	}
 
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
 	tk.Session().SetValue(sessionctx.QueryString, "skip")
-	err = d.BatchCreateTableWithInfo(tk.Session(), pmodel.NewCIStr("test"), []*model.TableInfo{newinfo}, ddl.WithOnExist(ddl.OnExistError))
+	err = d.BatchCreateTableWithInfo(tk.Session(), model.NewCIStr("test"), []*model.TableInfo{newinfo}, ddl.OnExistError)
 	require.NoError(t, err)
 }
 
@@ -427,12 +435,12 @@ func TestTableLock(t *testing.T) {
 	tk.MustExec("lock tables t1 write")
 	tk.MustExec("insert into t1 values(NULL)")
 	tk.MustExec("unlock tables")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
 
 	tk.MustExec("lock tables t1 write")
 	tk.MustExec("insert into t1 values(NULL)")
 	tk.MustExec("unlock tables")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
 
 	tk.MustExec("drop table if exists t1")
 
@@ -474,12 +482,12 @@ func TestTableLocksLostCommit(t *testing.T) {
 	tk.MustExec("unlock tables")
 }
 
-func checkTableLock(t *testing.T, tk *testkit.TestKit, dbName, tableName string, lockTp pmodel.TableLockType) {
+func checkTableLock(t *testing.T, tk *testkit.TestKit, dbName, tableName string, lockTp model.TableLockType) {
 	tb := external.GetTableByName(t, tk, dbName, tableName)
 	dom := domain.GetDomain(tk.Session())
 	err := dom.Reload()
 	require.NoError(t, err)
-	if lockTp != pmodel.TableLockNone {
+	if lockTp != model.TableLockNone {
 		require.NotNil(t, tb.Meta().Lock)
 		require.Equal(t, lockTp, tb.Meta().Lock.Tp)
 		require.Equal(t, model.TableLockStatePublic, tb.Meta().Lock.State)
@@ -555,31 +563,25 @@ func TestLockTables(t *testing.T) {
 
 	// Test lock 1 table.
 	tk.MustExec("lock tables t1 write")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
-	// still locked after truncate.
-	tk.MustExec("truncate table t1")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
-	// should unlock the new table id.
-	tk.MustExec("unlock tables")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
 	tk.MustExec("lock tables t1 read")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockRead)
+	checkTableLock(t, tk, "test", "t1", model.TableLockRead)
 	tk.MustExec("lock tables t1 write")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
 
 	// Test lock multi tables.
 	tk.MustExec("lock tables t1 write, t2 read")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockRead)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
+	checkTableLock(t, tk, "test", "t2", model.TableLockRead)
 	tk.MustExec("lock tables t1 read, t2 write")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockRead)
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockWrite)
+	checkTableLock(t, tk, "test", "t1", model.TableLockRead)
+	checkTableLock(t, tk, "test", "t2", model.TableLockWrite)
 	tk.MustExec("lock tables t2 write")
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockWrite)
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t2", model.TableLockWrite)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
 	tk.MustExec("lock tables t1 write")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
+	checkTableLock(t, tk, "test", "t2", model.TableLockNone)
 
 	tk2 := testkit.NewTestKit(t, store)
 	tk2.MustExec("use test")
@@ -634,6 +636,19 @@ func TestLockTables(t *testing.T) {
 	tk2.MustExec("lock tables t1 write")
 	tk.MustGetErrMsg("commit",
 		"previous statement: insert into t1 set a=1: [domain:8028]Information schema is changed during the execution of the statement(for example, table definition may be updated by other DDL ran in parallel). If you see this error often, try increasing `tidb_max_delta_schema_count`. [try again later]")
+
+	// Test lock table by other session in transaction and commit with retry.
+	tk.MustExec("unlock tables")
+	tk2.MustExec("unlock tables")
+	tk.MustExec("set @@session.tidb_disable_txn_auto_retry=0")
+	tk.MustExec("begin")
+	tk.MustExec("insert into t1 set a=1")
+	tk2.MustExec("lock tables t1 write")
+	tk.MustGetDBError("commit", infoschema.ErrTableLocked)
+
+	// Test for lock the same table multiple times.
+	tk2.MustExec("lock tables t1 write")
+	tk2.MustExec("lock tables t1 write, t2 read")
 
 	// Test lock tables and drop tables
 	tk.MustExec("unlock tables")
@@ -697,15 +712,15 @@ func TestLockTables(t *testing.T) {
 	tk.MustExec("lock table t1 write, t2 write")
 	tk2.MustGetDBError("lock tables t1 write, t2 read", infoschema.ErrTableLocked)
 	tk2.MustExec("admin cleanup table lock t1,t2")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
+	checkTableLock(t, tk, "test", "t2", model.TableLockNone)
 	// cleanup unlocked table.
 	tk2.MustExec("admin cleanup table lock t1,t2")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
-	checkTableLock(t, tk, "test", "t2", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
+	checkTableLock(t, tk, "test", "t2", model.TableLockNone)
 	tk2.MustExec("lock tables t1 write, t2 read")
-	checkTableLock(t, tk2, "test", "t1", pmodel.TableLockWrite)
-	checkTableLock(t, tk2, "test", "t2", pmodel.TableLockRead)
+	checkTableLock(t, tk2, "test", "t1", model.TableLockWrite)
+	checkTableLock(t, tk2, "test", "t2", model.TableLockRead)
 
 	tk.MustExec("unlock tables")
 	tk2.MustExec("unlock tables")
@@ -723,7 +738,7 @@ func TestTablesLockDelayClean(t *testing.T) {
 	tk.MustExec("create table t2 (a int)")
 
 	tk.MustExec("lock tables t1 write")
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.DelayCleanTableLock = 100
 	})
@@ -734,10 +749,10 @@ func TestTablesLockDelayClean(t *testing.T) {
 		tk.Session().Close()
 	})
 	time.Sleep(50 * time.Millisecond)
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockWrite)
+	checkTableLock(t, tk, "test", "t1", model.TableLockWrite)
 	wg.Wait()
 	require.True(t, time.Since(startTime).Seconds() > 0.1)
-	checkTableLock(t, tk, "test", "t1", pmodel.TableLockNone)
+	checkTableLock(t, tk, "test", "t1", model.TableLockNone)
 	config.UpdateGlobal(func(conf *config.Config) {
 		conf.DelayCleanTableLock = 0
 	})
@@ -751,12 +766,16 @@ func TestAddColumn2(t *testing.T) {
 	tk.MustExec("create table t1 (a int key, b int);")
 	defer tk.MustExec("drop table if exists t1, t2")
 
+	originHook := dom.DDL().GetHook()
+	defer dom.DDL().SetHook(originHook)
+	hook := &callback.TestDDLCallback{Do: dom}
 	var writeOnlyTable table.Table
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore", func(job *model.Job) {
+	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if job.SchemaState == model.StateWriteOnly {
-			writeOnlyTable, _ = dom.InfoSchema().TableByID(context.Background(), job.TableID)
+			writeOnlyTable, _ = dom.InfoSchema().TableByID(job.TableID)
 		}
-	})
+	}
+	dom.DDL().SetHook(hook)
 	done := make(chan error, 1)
 	// test transaction on add column.
 	go backgroundExec(store, "test", "alter table t1 add column c int not null", done)
@@ -769,14 +788,14 @@ func TestAddColumn2(t *testing.T) {
 	// mock for outdated tidb update record.
 	require.NotNil(t, writeOnlyTable)
 	ctx := context.Background()
-	txn, err := newTxn(tk.Session())
+	err = sessiontxn.NewTxn(ctx, tk.Session())
 	require.NoError(t, err)
 	oldRow, err := tables.RowWithCols(writeOnlyTable, tk.Session(), kv.IntHandle(1), writeOnlyTable.WritableCols())
 	require.NoError(t, err)
 	require.Equal(t, 3, len(oldRow))
-	err = writeOnlyTable.RemoveRecord(tk.Session().GetTableCtx(), txn, kv.IntHandle(1), oldRow)
+	err = writeOnlyTable.RemoveRecord(tk.Session(), kv.IntHandle(1), oldRow)
 	require.NoError(t, err)
-	_, err = writeOnlyTable.AddRecord(tk.Session().GetTableCtx(), txn, types.MakeDatums(oldRow[0].GetInt64(), 2, oldRow[2].GetInt64()), table.IsUpdate)
+	_, err = writeOnlyTable.AddRecord(tk.Session(), types.MakeDatums(oldRow[0].GetInt64(), 2, oldRow[2].GetInt64()), table.IsUpdate)
 	require.NoError(t, err)
 	tk.Session().StmtCommit(ctx)
 	err = tk.Session().CommitTxn(ctx)
@@ -787,26 +806,24 @@ func TestAddColumn2(t *testing.T) {
 	// Test for _tidb_rowid
 	var re *testkit.Result
 	tk.MustExec("create table t2 (a int);")
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore", func(job *model.Job) {
+	hook.OnJobRunBeforeExported = func(job *model.Job) {
 		if job.SchemaState != model.StateWriteOnly {
 			return
 		}
 		// allow write _tidb_rowid first
-		tk2 := testkit.NewTestKit(t, store)
-		tk2.MustExec("use test")
-		tk2.MustExec("set @@tidb_opt_write_row_id=1")
-		tk2.MustExec("begin")
-		tk2.MustExec("insert into t2 (a,_tidb_rowid) values (1,2);")
-		re = tk2.MustQuery(" select a,_tidb_rowid from t2;")
-		tk2.MustExec("commit")
-	})
+		tk.MustExec("set @@tidb_opt_write_row_id=1")
+		tk.MustExec("begin")
+		tk.MustExec("insert into t2 (a,_tidb_rowid) values (1,2);")
+		re = tk.MustQuery(" select a,_tidb_rowid from t2;")
+		tk.MustExec("commit")
+	}
+	dom.DDL().SetHook(hook)
 
 	go backgroundExec(store, "test", "alter table t2 add column b int not null default 3", done)
 	err = <-done
 	require.NoError(t, err)
 	re.Check(testkit.Rows("1 2"))
 	tk.MustQuery("select a,b,_tidb_rowid from t2").Check(testkit.Rows("1 3 2"))
-	testfailpoint.Disable(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore")
 }
 
 func TestDropTables(t *testing.T) {
@@ -840,28 +857,4 @@ func TestDropTables(t *testing.T) {
 
 	failedSQL = "show create table t1;"
 	tk.MustGetErrCode(failedSQL, errno.ErrNoSuchTable)
-}
-
-func TestCreateConstraintForTable(t *testing.T) {
-	store := testkit.CreateMockStore(t, mockstore.WithDDLChecker())
-
-	tk := testkit.NewTestKit(t, store)
-
-	tk.MustExec("use test")
-	tk.MustExec("DROP TABLE IF EXISTS t1, t2")
-	tk.MustExec("set @@global.tidb_enable_check_constraint = 1")
-	tk.MustExec("CREATE TABLE t1 (id INT PRIMARY KEY, CONSTRAINT c1 CHECK (id<50))")
-	failedSQL := "CREATE TABLE t2 (id INT PRIMARY KEY, CONSTRAINT c1 CHECK (id<50))"
-	tk.MustGetErrCode(failedSQL, errno.ErrCheckConstraintDupName)
-
-	tk.MustExec("CREATE TABLE t2 (id INT PRIMARY KEY)")
-	failedSQL = "ALTER TABLE t2 ADD CONSTRAINT c1 CHECK (id<50)"
-	tk.MustGetErrCode(failedSQL, errno.ErrCheckConstraintDupName)
-
-	tk.MustExec("DROP DATABASE IF EXISTS test2")
-	tk.MustExec("CREATE DATABASE test2")
-	tk.MustExec("CREATE TABLE test2.t1 (id INT PRIMARY KEY, CONSTRAINT c1 CHECK (id<50))")
-	rs, err := tk.Exec("SHOW TABLES FROM test2 LIKE 't1'")
-	require.NoError(t, err)
-	require.Equal(t, tk.ResultSetToResult(rs, "").Rows()[0][0], "t1")
 }

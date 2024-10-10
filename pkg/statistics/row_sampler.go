@@ -105,12 +105,12 @@ func (h WeightedRowSampleHeap) Less(i, j int) bool {
 }
 
 // Push implements the Heap interface.
-func (h *WeightedRowSampleHeap) Push(i any) {
+func (h *WeightedRowSampleHeap) Push(i interface{}) {
 	*h = append(*h, i.(*ReservoirRowSampleItem))
 }
 
 // Pop implements the Heap interface.
-func (h *WeightedRowSampleHeap) Pop() any {
+func (h *WeightedRowSampleHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
 	item := old[n-1]
@@ -195,8 +195,7 @@ func (s *RowSampleBuilder) Collect() (RowSampleCollector, error) {
 						return nil, err
 					}
 					decodedVal.SetBytesAsString(s.Collators[i].Key(decodedVal.GetString()), decodedVal.Collation(), uint32(decodedVal.Length()))
-					encodedKey, err := tablecodec.EncodeValue(s.Sc.TimeZone(), nil, decodedVal)
-					err = s.Sc.HandleError(err)
+					encodedKey, err := tablecodec.EncodeValue(s.Sc, nil, decodedVal)
 					if err != nil {
 						return nil, err
 					}
@@ -317,7 +316,9 @@ func (s *baseCollector) FromProto(pbCollector *tipb.RowSampleCollector, memTrack
 		rowLen := len(pbSample.Row)
 		data := make([]types.Datum, 0, rowLen)
 		for _, col := range pbSample.Row {
-			data = append(data, types.NewBytesDatum(col))
+			b := make([]byte, len(col))
+			copy(b, col)
+			data = append(data, types.NewBytesDatum(b))
 		}
 		// Directly copy the weight.
 		sampleItem := &ReservoirRowSampleItem{Columns: data, Weight: pbSample.Weight}

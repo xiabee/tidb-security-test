@@ -18,7 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"math"
+	"math/rand"
 	"net/url"
 	"strings"
 	"sync"
@@ -27,8 +27,8 @@ import (
 	"github.com/pingcap/errors"
 	deadlockpb "github.com/pingcap/kvproto/pkg/deadlock"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
+	"github.com/pingcap/tidb/pkg/executor/importer"
 	"github.com/pingcap/tidb/pkg/kv"
-	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/store/copr"
 	derr "github.com/pingcap/tidb/pkg/store/driver/error"
@@ -41,7 +41,6 @@ import (
 	"github.com/tikv/client-go/v2/tikvrpc"
 	"github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
-	pdhttp "github.com/tikv/pd/client/http"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -56,10 +55,13 @@ var mc storeCache
 
 func init() {
 	mc.cache = make(map[string]*tikvStore)
+	rand.Seed(time.Now().UnixNano())
 
 	// Setup the Hooks to dynamic control global resource controller.
 	variable.EnableGlobalResourceControlFunc = tikv.EnableResourceControl
 	variable.DisableGlobalResourceControlFunc = tikv.DisableResourceControl
+	// cannot use this package directly, it causes import cycle
+	importer.GetKVStore = getKVStore
 }
 
 // Option is a function that changes some config of Driver
@@ -160,9 +162,6 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		KeyPath:  d.security.ClusterSSLKey,
 	},
 		pd.WithGRPCDialOptions(
-			// keep the same with etcd, see
-			// https://github.com/etcd-io/etcd/blob/5704c6148d798ea444db26a966394406d8c10526/server/etcdserver/api/v3rpc/grpc.go#L34
-			grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(math.MaxInt32)),
 			grpc.WithKeepaliveParams(keepalive.ClientParameters{
 				Time:    time.Duration(d.tikvConfig.GrpcKeepAliveTime) * time.Second,
 				Timeout: time.Duration(d.tikvConfig.GrpcKeepAliveTimeout) * time.Second,
@@ -215,8 +214,7 @@ func (d TiKVDriver) OpenWithOptions(path string, options ...Option) (resStore kv
 		tikv.WithCodec(codec),
 	)
 
-	s, err = tikv.NewKVStore(uuid, pdClient, spkv, &injectTraceClient{Client: rpcClient},
-		tikv.WithPDHTTPClient("tikv-driver", etcdAddrs, pdhttp.WithTLSConfig(tlsConfig), pdhttp.WithMetrics(metrics.PDAPIRequestCounter, metrics.PDAPIExecutionHistogram)))
+	s, err = tikv.NewKVStore(uuid, pdClient, spkv, &injectTraceClient{Client: rpcClient}, tikv.WithPDHTTPClient(tlsConfig, etcdAddrs))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -381,7 +379,7 @@ func (s *tikvStore) CurrentVersion(txnScope string) (kv.Version, error) {
 }
 
 // ShowStatus returns the specified status of the storage
-func (s *tikvStore) ShowStatus(ctx context.Context, key string) (any, error) {
+func (s *tikvStore) ShowStatus(ctx context.Context, key string) (interface{}, error) {
 	return nil, kv.ErrNotImplemented
 }
 

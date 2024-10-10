@@ -21,7 +21,7 @@ import (
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
-	"github.com/pingcap/tidb/pkg/planner/planctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
 	"github.com/pingcap/tidb/pkg/statistics"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/ranger"
@@ -41,7 +41,7 @@ func PseudoAvgCountPerValue(t *statistics.Table) float64 {
 	return float64(t.RealtimeCount) / pseudoEqualRate
 }
 
-func pseudoSelectivity(sctx planctx.PlanContext, coll *statistics.HistColl, exprs []expression.Expression) float64 {
+func pseudoSelectivity(coll *statistics.HistColl, exprs []expression.Expression) float64 {
 	minFactor := selectionFactor
 	colExists := make(map[string]bool)
 	for _, expr := range exprs {
@@ -53,12 +53,11 @@ func pseudoSelectivity(sctx planctx.PlanContext, coll *statistics.HistColl, expr
 		if colID == unknownColumnID {
 			continue
 		}
-		statistics.ColumnStatsIsInvalid((*statistics.Column)(nil), sctx, coll, colID)
 		switch fun.FuncName.L {
 		case ast.EQ, ast.NullEQ, ast.In:
 			minFactor = math.Min(minFactor, 1.0/pseudoEqualRate)
-			col := coll.GetCol(colID)
-			if col == nil {
+			col, ok := coll.Columns[colID]
+			if !ok {
 				continue
 			}
 			colExists[col.Info.Name.L] = true
@@ -74,29 +73,20 @@ func pseudoSelectivity(sctx planctx.PlanContext, coll *statistics.HistColl, expr
 		return minFactor
 	}
 	// use the unique key info
-	hasUniqueKey := false
-	coll.ForEachIndexImmutable(func(_ int64, idx *statistics.Index) bool {
+	for _, idx := range coll.Indices {
+		if !idx.Info.Unique {
+			continue
+		}
 		unique := true
-		firstMatch := false
 		for _, col := range idx.Info.Columns {
 			if !colExists[col.Name.L] {
 				unique = false
 				break
 			}
-			firstMatch = true
 		}
-		if firstMatch {
-			// This might trigger the statistics load.
-			statistics.IndexStatsIsInvalid(sctx, (*statistics.Index)(nil), coll, idx.ID)
+		if unique {
+			return 1.0 / float64(coll.RealtimeCount)
 		}
-		if idx.Info.Unique && unique {
-			hasUniqueKey = true
-			return true
-		}
-		return false
-	})
-	if hasUniqueKey {
-		return 1.0 / float64(coll.RealtimeCount)
 	}
 	return minFactor
 }
@@ -173,7 +163,7 @@ func getPseudoRowCountByUnsignedIntRanges(intRanges []*ranger.Range, tableRowCou
 	return rowCount
 }
 
-func getPseudoRowCountByIndexRanges(tc types.Context, indexRanges []*ranger.Range,
+func getPseudoRowCountByIndexRanges(sc *stmtctx.StatementContext, indexRanges []*ranger.Range,
 	tableRowCount float64, colsLen int) (float64, error) {
 	if tableRowCount == 0 {
 		return 0, nil
@@ -181,7 +171,7 @@ func getPseudoRowCountByIndexRanges(tc types.Context, indexRanges []*ranger.Rang
 	var totalCount float64
 	for _, indexRange := range indexRanges {
 		count := tableRowCount
-		i, err := indexRange.PrefixEqualLen(tc)
+		i, err := indexRange.PrefixEqualLen(sc)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -192,7 +182,7 @@ func getPseudoRowCountByIndexRanges(tc types.Context, indexRanges []*ranger.Rang
 		if i >= len(indexRange.LowVal) {
 			i = len(indexRange.LowVal) - 1
 		}
-		rowCount, err := getPseudoRowCountByColumnRanges(tc, tableRowCount, []*ranger.Range{indexRange}, i)
+		rowCount, err := getPseudoRowCountByColumnRanges(sc, tableRowCount, []*ranger.Range{indexRange}, i)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -211,7 +201,7 @@ func getPseudoRowCountByIndexRanges(tc types.Context, indexRanges []*ranger.Rang
 }
 
 // getPseudoRowCountByColumnRanges calculate the row count by the ranges if there's no statistics information for this column.
-func getPseudoRowCountByColumnRanges(tc types.Context, tableRowCount float64, columnRanges []*ranger.Range, colIdx int) (float64, error) {
+func getPseudoRowCountByColumnRanges(sc *stmtctx.StatementContext, tableRowCount float64, columnRanges []*ranger.Range, colIdx int) (float64, error) {
 	var rowCount float64
 	for _, ran := range columnRanges {
 		if ran.LowVal[colIdx].Kind() == types.KindNull && ran.HighVal[colIdx].Kind() == types.KindMaxValue {
@@ -227,7 +217,7 @@ func getPseudoRowCountByColumnRanges(tc types.Context, tableRowCount float64, co
 		} else if ran.HighVal[colIdx].Kind() == types.KindMaxValue {
 			rowCount += tableRowCount / pseudoLessRate
 		} else {
-			compare, err := ran.LowVal[colIdx].Compare(tc, &ran.HighVal[colIdx], ran.Collators[colIdx])
+			compare, err := ran.LowVal[colIdx].Compare(sc, &ran.HighVal[colIdx], ran.Collators[colIdx])
 			if err != nil {
 				return 0, errors.Trace(err)
 			}

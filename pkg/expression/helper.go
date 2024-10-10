@@ -15,20 +15,20 @@
 package expression
 
 import (
+	"context"
 	"math"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/pingcap/failpoint"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/parser/terror"
+	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/types"
 	driver "github.com/pingcap/tidb/pkg/types/parser_driver"
-	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
-	"github.com/pingcap/tidb/pkg/util/timeutil"
+	"github.com/tikv/client-go/v2/oracle"
 	"go.uber.org/zap"
 )
 
@@ -60,7 +60,7 @@ func IsValidCurrentTimestampExpr(exprNode ast.ExprNode, fieldType *types.FieldTy
 }
 
 // GetTimeCurrentTimestamp is used for generating a timestamp for some special cases: cast null value to timestamp type with not null flag.
-func GetTimeCurrentTimestamp(ctx EvalContext, tp byte, fsp int) (d types.Datum, err error) {
+func GetTimeCurrentTimestamp(ctx sessionctx.Context, tp byte, fsp int) (d types.Datum, err error) {
 	var t types.Time
 	t, err = getTimeCurrentTimeStamp(ctx, tp, fsp)
 	if err != nil {
@@ -70,7 +70,7 @@ func GetTimeCurrentTimestamp(ctx EvalContext, tp byte, fsp int) (d types.Datum, 
 	return d, nil
 }
 
-func getTimeCurrentTimeStamp(ctx EvalContext, tp byte, fsp int) (t types.Time, err error) {
+func getTimeCurrentTimeStamp(ctx sessionctx.Context, tp byte, fsp int) (t types.Time, err error) {
 	value := types.NewTime(types.ZeroCoreTime, tp, fsp)
 	defaultTime, err := getStmtTimestamp(ctx)
 	if err != nil {
@@ -78,7 +78,7 @@ func getTimeCurrentTimeStamp(ctx EvalContext, tp byte, fsp int) (t types.Time, e
 	}
 	value.SetCoreTime(types.FromGoTime(defaultTime.Truncate(time.Duration(math.Pow10(9-fsp)) * time.Nanosecond)))
 	if tp == mysql.TypeTimestamp || tp == mysql.TypeDatetime || tp == mysql.TypeDate {
-		err = value.ConvertTimeZone(defaultTime.Location(), ctx.Location())
+		err = value.ConvertTimeZone(time.Local, ctx.GetSessionVars().Location())
 		if err != nil {
 			return value, err
 		}
@@ -87,33 +87,30 @@ func getTimeCurrentTimeStamp(ctx EvalContext, tp byte, fsp int) (t types.Time, e
 }
 
 // GetTimeValue gets the time value with type tp.
-func GetTimeValue(ctx BuildContext, v any, tp byte, fsp int, explicitTz *time.Location) (d types.Datum, err error) {
+func GetTimeValue(ctx sessionctx.Context, v interface{}, tp byte, fsp int, explicitTz *time.Location) (d types.Datum, err error) {
 	var value types.Time
-	tc := ctx.GetEvalCtx().TypeCtx()
-	if explicitTz != nil {
-		tc = tc.WithLocation(explicitTz)
-	}
 
+	sc := ctx.GetSessionVars().StmtCtx
 	switch x := v.(type) {
 	case string:
 		lowerX := strings.ToLower(x)
 		switch lowerX {
 		case ast.CurrentTimestamp:
-			if value, err = getTimeCurrentTimeStamp(ctx.GetEvalCtx(), tp, fsp); err != nil {
+			if value, err = getTimeCurrentTimeStamp(ctx, tp, fsp); err != nil {
 				return d, err
 			}
 		case ast.CurrentDate:
-			if value, err = getTimeCurrentTimeStamp(ctx.GetEvalCtx(), tp, fsp); err != nil {
+			if value, err = getTimeCurrentTimeStamp(ctx, tp, fsp); err != nil {
 				return d, err
 			}
 			yy, mm, dd := value.Year(), value.Month(), value.Day()
 			truncated := types.FromDate(yy, mm, dd, 0, 0, 0, 0)
 			value.SetCoreTime(truncated)
 		case types.ZeroDatetimeStr:
-			value, err = types.ParseTimeFromNum(tc, 0, tp, fsp)
+			value, err = types.ParseTimeFromNum(sc, 0, tp, fsp)
 			terror.Log(err)
 		default:
-			value, err = types.ParseTime(tc, x, tp, fsp)
+			value, err = types.ParseTime(sc, x, tp, fsp, explicitTz)
 			if err != nil {
 				return d, err
 			}
@@ -121,12 +118,12 @@ func GetTimeValue(ctx BuildContext, v any, tp byte, fsp int, explicitTz *time.Lo
 	case *driver.ValueExpr:
 		switch x.Kind() {
 		case types.KindString:
-			value, err = types.ParseTime(tc, x.GetString(), tp, fsp)
+			value, err = types.ParseTime(sc, x.GetString(), tp, fsp, nil)
 			if err != nil {
 				return d, err
 			}
 		case types.KindInt64:
-			value, err = types.ParseTimeFromNum(tc, x.GetInt64(), tp, fsp)
+			value, err = types.ParseTimeFromNum(sc, x.GetInt64(), tp, fsp)
 			if err != nil {
 				return d, err
 			}
@@ -143,17 +140,17 @@ func GetTimeValue(ctx BuildContext, v any, tp byte, fsp int, explicitTz *time.Lo
 		return d, errDefaultValue
 	case *ast.UnaryOperationExpr:
 		// support some expression, like `-1`
-		v, err := EvalSimpleAst(ctx, x)
+		v, err := EvalAstExpr(ctx, x)
 		if err != nil {
 			return d, err
 		}
 		ft := types.NewFieldType(mysql.TypeLonglong)
-		xval, err := v.ConvertTo(tc, ft)
+		xval, err := v.ConvertTo(ctx.GetSessionVars().StmtCtx, ft)
 		if err != nil {
 			return d, err
 		}
 
-		value, err = types.ParseTimeFromNum(tc, xval.GetInt64(), tp, fsp)
+		value, err = types.ParseTimeFromNum(sc, xval.GetInt64(), tp, fsp)
 		if err != nil {
 			return d, err
 		}
@@ -164,50 +161,39 @@ func GetTimeValue(ctx BuildContext, v any, tp byte, fsp int, explicitTz *time.Lo
 	return d, nil
 }
 
-// randomNowLocationForTest is only used for test
-var randomNowLocationForTest *time.Location
-var randomNowLocationForTestOnce sync.Once
-
-func pickRandomLocationForTest() *time.Location {
-	randomNowLocationForTestOnce.Do(func() {
-		names := []string{
-			"",
-			"UTC",
-			"Asia/Shanghai",
-			"America/Los_Angeles",
-			"Asia/Tokyo",
-			"Europe/Berlin",
-		}
-		name := names[int(time.Now().UnixMilli())%len(names)]
-		loc := time.Local
-		if name != "" {
-			var err error
-			loc, err = timeutil.LoadLocation(name)
-			terror.MustNil(err)
-		}
-		randomNowLocationForTest = loc
-		logutil.BgLogger().Info(
-			"set random timezone for getStmtTimestamp",
-			zap.String("timezone", loc.String()),
-		)
-	})
-	return randomNowLocationForTest
-}
-
 // if timestamp session variable set, use session variable as current time, otherwise use cached time
 // during one sql statement, the "current_time" should be the same
-func getStmtTimestamp(ctx EvalContext) (now time.Time, err error) {
-	if intest.InTest {
-		// When in a test, return the now with random location to make sure all outside code will
-		// respect the location of return value `now` instead of having a strong assumption what its location is.
-		defer func() {
-			now = now.In(pickRandomLocationForTest())
-		}()
-	}
-
+func getStmtTimestamp(ctx sessionctx.Context) (time.Time, error) {
 	failpoint.Inject("injectNow", func(val failpoint.Value) {
 		v := time.Unix(int64(val.(int)), 0)
 		failpoint.Return(v, nil)
 	})
-	return ctx.CurrentTime()
+
+	if ctx != nil {
+		staleTSO, err := ctx.GetSessionVars().StmtCtx.GetStaleTSO()
+		if staleTSO != 0 && err == nil {
+			return oracle.GetTimeFromTS(staleTSO), nil
+		} else if err != nil {
+			logutil.BgLogger().Error("get stale tso failed", zap.Error(err))
+		}
+	}
+
+	now := time.Now()
+
+	if ctx == nil {
+		return now, nil
+	}
+
+	sessionVars := ctx.GetSessionVars()
+	timestampStr, err := sessionVars.GetSessionOrGlobalSystemVar(context.Background(), "timestamp")
+	if err != nil {
+		return now, err
+	}
+
+	timestamp, err := types.StrToFloat(sessionVars.StmtCtx, timestampStr, false)
+	if err != nil {
+		return time.Time{}, err
+	}
+	seconds, fractionalSeconds := math.Modf(timestamp)
+	return time.Unix(int64(seconds), int64(fractionalSeconds*float64(time.Second))), nil
 }

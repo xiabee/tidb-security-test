@@ -17,7 +17,6 @@ package optimizor_test
 import (
 	"archive/zip"
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -43,7 +42,6 @@ import (
 	"github.com/pingcap/tidb/pkg/session"
 	util2 "github.com/pingcap/tidb/pkg/statistics/handle/util"
 	"github.com/pingcap/tidb/pkg/testkit"
-	"github.com/pingcap/tidb/pkg/util/replayer"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/oracle"
 )
@@ -114,7 +112,6 @@ func TestDumpPlanReplayerAPI(t *testing.T) {
 	defer server.Close()
 
 	filename, fileNameFromCapture := prepareData4PlanReplayer(t, client, dom)
-	defer os.RemoveAll(replayer.GetPlanReplayerDirName())
 
 	// 2. check the contents of the plan replayer zip files.
 
@@ -190,8 +187,8 @@ func TestDumpPlanReplayerAPI(t *testing.T) {
 	require.True(t, rows.Next(), "unexpected data")
 	var dbName, tableName string
 	var modifyCount, count int64
-	var other any
-	err = rows.Scan(&dbName, &tableName, &other, &other, &modifyCount, &count, &other)
+	var other interface{}
+	err = rows.Scan(&dbName, &tableName, &other, &other, &modifyCount, &count)
 	require.NoError(t, err)
 	require.Equal(t, "planReplayer", dbName)
 	require.Equal(t, "t", tableName)
@@ -247,177 +244,6 @@ func prepareData4PlanReplayer(t *testing.T, client *testserverclient.TestServerC
 	require.NoError(t, rows.Close())
 
 	return filename, filename3
-}
-
-func TestIssue56458(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	dom, err := session.GetDomain(store)
-	require.NoError(t, err)
-	// 1. setup and prepare plan replayer files by manual command and capture
-	server, client := prepareServerAndClientForTest(t, store, dom)
-	defer server.Close()
-
-	filename := prepareData4Issue56458(t, client, dom)
-	defer os.RemoveAll(replayer.GetPlanReplayerDirName())
-
-	// 2. check the contents of the plan replayer zip files.
-	var filesInReplayer []string
-	collectFileNameAndAssertFileSize := func(f *zip.File) {
-		// collect file name
-		filesInReplayer = append(filesInReplayer, f.Name)
-	}
-
-	// 2-1. check the plan replayer file from manual command
-	resp0, err := client.FetchStatus(filepath.Join("/plan_replayer/dump/", filename))
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, resp0.Body.Close())
-	}()
-	body, err := io.ReadAll(resp0.Body)
-	require.NoError(t, err)
-	forEachFileInZipBytes(t, body, collectFileNameAndAssertFileSize)
-	slices.Sort(filesInReplayer)
-	require.Equal(t, []string{
-		"config.toml",
-		"debug_trace/debug_trace0.json",
-		"explain.txt",
-		"global_bindings.sql",
-		"meta.txt",
-		"schema/planreplayer.t.schema.txt",
-		"schema/planreplayer.v.schema.txt",
-		"schema/schema_meta.txt",
-		"session_bindings.sql",
-		"sql/sql0.sql",
-		"sql_meta.toml",
-		"stats/planreplayer.t.json",
-		"stats/planreplayer.v.json",
-		"statsMem/planreplayer.t.txt",
-		"statsMem/planreplayer.v.txt",
-		"table_tiflash_replica.txt",
-		"variables.toml",
-	}, filesInReplayer)
-}
-
-func TestIssue43192(t *testing.T) {
-	store := testkit.CreateMockStore(t)
-	dom, err := session.GetDomain(store)
-	require.NoError(t, err)
-	// 1. setup and prepare plan replayer files by manual command and capture
-	server, client := prepareServerAndClientForTest(t, store, dom)
-	defer server.Close()
-
-	filename := prepareData4Issue43192(t, client, dom)
-	defer os.RemoveAll(replayer.GetPlanReplayerDirName())
-
-	// 2. check the contents of the plan replayer zip files.
-	var filesInReplayer []string
-	collectFileNameAndAssertFileSize := func(f *zip.File) {
-		// collect file name
-		filesInReplayer = append(filesInReplayer, f.Name)
-	}
-
-	// 2-1. check the plan replayer file from manual command
-	resp0, err := client.FetchStatus(filepath.Join("/plan_replayer/dump/", filename))
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, resp0.Body.Close())
-	}()
-	body, err := io.ReadAll(resp0.Body)
-	require.NoError(t, err)
-	forEachFileInZipBytes(t, body, collectFileNameAndAssertFileSize)
-	slices.Sort(filesInReplayer)
-	require.Equal(t, expectedFilesInReplayer, filesInReplayer)
-
-	// 3. check plan replayer load
-	// 3-1. write the plan replayer file from manual command to a file
-	path := "/tmp/plan_replayer.zip"
-	fp, err := os.Create(path)
-	require.NoError(t, err)
-	require.NotNil(t, fp)
-	defer func() {
-		require.NoError(t, fp.Close())
-		require.NoError(t, os.Remove(path))
-	}()
-
-	_, err = io.Copy(fp, bytes.NewReader(body))
-	require.NoError(t, err)
-	require.NoError(t, fp.Sync())
-
-	// 3-2. connect to tidb and use PLAN REPLAYER LOAD to load this file
-	db, err := sql.Open("mysql", client.GetDSN(func(config *mysql.Config) {
-		config.AllowAllFiles = true
-	}))
-	require.NoError(t, err, "Error connecting")
-	defer func() {
-		err := db.Close()
-		require.NoError(t, err)
-	}()
-	tk := testkit.NewDBTestKit(t, db)
-	tk.MustExec("use planReplayer")
-	tk.MustExec("drop table planReplayer.t")
-	tk.MustExec(`plan replayer load "/tmp/plan_replayer.zip"`)
-
-	// 3-3. check whether binding takes effect
-	tk.MustExec(`select a, b from t where a in (1, 2, 3)`)
-	rows := tk.MustQuery("select @@last_plan_from_binding")
-	require.True(t, rows.Next(), "unexpected data")
-	var count int64
-	err = rows.Scan(&count)
-	require.NoError(t, err)
-	require.Equal(t, int64(1), count)
-}
-
-func prepareData4Issue43192(t *testing.T, client *testserverclient.TestServerClient, dom *domain.Domain) string {
-	h := dom.StatsHandle()
-	db, err := sql.Open("mysql", client.GetDSN())
-	require.NoError(t, err, "Error connecting")
-	defer func() {
-		err := db.Close()
-		require.NoError(t, err)
-	}()
-	tk := testkit.NewDBTestKit(t, db)
-
-	tk.MustExec("create database planReplayer")
-	tk.MustExec("use planReplayer")
-	tk.MustExec("create table t(a int, b int, INDEX ia (a), INDEX ib (b));")
-	err = h.HandleDDLEvent(<-h.DDLEventCh())
-	require.NoError(t, err)
-	tk.MustExec("create global binding for select a, b from t where a in (1, 2, 3) using select a, b from t use index (ib) where a in (1, 2, 3)")
-	rows := tk.MustQuery("plan replayer dump explain select a, b from t where a in (1, 2, 3)")
-	require.True(t, rows.Next(), "unexpected data")
-	var filename string
-	require.NoError(t, rows.Scan(&filename))
-	require.NoError(t, rows.Close())
-	rows = tk.MustQuery("select @@tidb_last_plan_replayer_token")
-	require.True(t, rows.Next(), "unexpected data")
-	return filename
-}
-
-func prepareData4Issue56458(t *testing.T, client *testserverclient.TestServerClient, dom *domain.Domain) string {
-	h := dom.StatsHandle()
-	db, err := sql.Open("mysql", client.GetDSN())
-	require.NoError(t, err, "Error connecting")
-	defer func() {
-		err := db.Close()
-		require.NoError(t, err)
-	}()
-	tk := testkit.NewDBTestKit(t, db)
-
-	tk.MustExec("create database planReplayer")
-	tk.MustExec("use planReplayer")
-	tk.MustExec("CREATE TABLE v(id INT PRIMARY KEY AUTO_INCREMENT);")
-	tk.MustExec("create table t(a int, b int, INDEX ia (a), INDEX ib (b), author_id int, FOREIGN KEY (author_id) REFERENCES v(id) ON DELETE CASCADE);")
-	err = h.HandleDDLEvent(<-h.DDLEventCh())
-	require.NoError(t, err)
-	tk.MustExec("create global binding for select a, b from t where a in (1, 2, 3) using select a, b from t use index (ib) where a in (1, 2, 3)")
-	rows := tk.MustQuery("plan replayer dump explain select a, b from t where a in (1, 2, 3)")
-	require.True(t, rows.Next(), "unexpected data")
-	var filename string
-	require.NoError(t, rows.Scan(&filename))
-	require.NoError(t, rows.Close())
-	rows = tk.MustQuery("select @@tidb_last_plan_replayer_token")
-	require.True(t, rows.Next(), "unexpected data")
-	return filename
 }
 
 func forEachFileInZipBytes(t *testing.T, b []byte, fn func(file *zip.File)) {
@@ -511,15 +337,13 @@ func TestDumpPlanReplayerAPIWithHistoryStats(t *testing.T) {
 
 	// time1, ts1: before everything starts
 	tk := testkit.NewTestKit(t, store)
-	tk.MustExec("set global tidb_enable_historical_stats = 1")
-	defer tk.MustExec("set global tidb_enable_historical_stats = 0")
 	time1 := time.Now()
 	ts1 := oracle.GoTimeToTS(time1)
 
 	tk.MustExec("use test")
 	tk.MustExec("create table t(a int, b int, c int, index ia(a))")
 	is := dom.InfoSchema()
-	tbl, err := is.TableByName(context.Background(), model.NewCIStr("test"), model.NewCIStr("t"))
+	tbl, err := is.TableByName(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 	tblInfo := tbl.Meta()
 

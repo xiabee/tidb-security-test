@@ -14,10 +14,7 @@
 
 package planner
 
-import (
-	"github.com/pingcap/tidb/pkg/config"
-	"github.com/pingcap/tidb/pkg/disttask/framework/storage"
-)
+import "github.com/pingcap/tidb/pkg/disttask/framework/storage"
 
 // Planner represents a distribute plan planner.
 type Planner struct{}
@@ -29,7 +26,7 @@ func NewPlanner() *Planner {
 
 // Run runs the distribute plan.
 func (*Planner) Run(planCtx PlanCtx, plan LogicalPlan) (int64, error) {
-	taskManager, err := storage.GetTaskManager()
+	globalTaskManager, err := storage.GetTaskManager()
 	if err != nil {
 		return 0, err
 	}
@@ -39,13 +36,12 @@ func (*Planner) Run(planCtx PlanCtx, plan LogicalPlan) (int64, error) {
 		return 0, err
 	}
 
-	return taskManager.CreateTaskWithSession(
+	return globalTaskManager.AddGlobalTaskWithSession(
 		planCtx.Ctx,
 		planCtx.SessionCtx,
 		planCtx.TaskKey,
 		planCtx.TaskType,
 		planCtx.ThreadCnt,
-		config.GetGlobalConfig().Instance.TiDBServiceScope,
 		taskMeta,
 	)
 }

@@ -16,15 +16,20 @@ package expression
 
 import (
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
+	"github.com/pingcap/tidb/pkg/sessionctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/stmtctx"
+	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/pingcap/tidb/pkg/util/collate"
+	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/pingcap/tipb/go-tipb"
 )
 
@@ -36,13 +41,17 @@ func PbTypeToFieldType(tp *tipb.FieldType) *types.FieldType {
 	return ft
 }
 
-func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (f builtinFunc, e error) {
+func getSignatureByPB(ctx sessionctx.Context, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (f builtinFunc, e error) {
 	fieldTp := PbTypeToFieldType(tp)
-	base, err := newBaseBuiltinFuncWithFieldType(fieldTp, args)
+	base, err := newBaseBuiltinFuncWithFieldType(ctx, fieldTp, args)
 	if err != nil {
 		return nil, err
 	}
-	maxAllowedPacket := ctx.GetEvalCtx().GetMaxAllowedPacket()
+	valStr, _ := ctx.GetSessionVars().GetSystemVar(variable.MaxAllowedPacket)
+	maxAllowedPacket, err := strconv.ParseUint(valStr, 10, 64)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
 	switch sigCode {
 	case tipb.ScalarFuncSig_CastIntAsInt:
 		f = &builtinCastIntAsIntSig{newBaseBuiltinCastFunc(base, false)}
@@ -497,12 +506,12 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 	case tipb.ScalarFuncSig_BitCount:
 		f = &builtinBitCountSig{base}
 	case tipb.ScalarFuncSig_GetParamString:
-		f = &builtinGetParamStringSig{baseBuiltinFunc: base}
+		f = &builtinGetParamStringSig{base}
 	case tipb.ScalarFuncSig_GetVar:
-		f = &builtinGetStringVarSig{baseBuiltinFunc: base}
+		f = &builtinGetStringVarSig{base}
 	// case tipb.ScalarFuncSig_RowSig:
 	case tipb.ScalarFuncSig_SetVar:
-		f = &builtinSetStringVarSig{baseBuiltinFunc: base}
+		f = &builtinSetStringVarSig{base}
 	// case tipb.ScalarFuncSig_ValuesDecimal:
 	// 	f = &builtinValuesDecimalSig{base}
 	// case tipb.ScalarFuncSig_ValuesDuration:
@@ -596,29 +605,29 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 	case tipb.ScalarFuncSig_Database:
 		f = &builtinDatabaseSig{base}
 	case tipb.ScalarFuncSig_FoundRows:
-		f = &builtinFoundRowsSig{baseBuiltinFunc: base}
+		f = &builtinFoundRowsSig{base}
 	case tipb.ScalarFuncSig_CurrentUser:
-		f = &builtinCurrentUserSig{baseBuiltinFunc: base}
+		f = &builtinCurrentUserSig{base}
 	case tipb.ScalarFuncSig_User:
-		f = &builtinUserSig{baseBuiltinFunc: base}
+		f = &builtinUserSig{base}
 	case tipb.ScalarFuncSig_ConnectionID:
-		f = &builtinConnectionIDSig{baseBuiltinFunc: base}
+		f = &builtinConnectionIDSig{base}
 	case tipb.ScalarFuncSig_LastInsertID:
-		f = &builtinLastInsertIDSig{baseBuiltinFunc: base}
+		f = &builtinLastInsertIDSig{base}
 	case tipb.ScalarFuncSig_LastInsertIDWithID:
-		f = &builtinLastInsertIDWithIDSig{baseBuiltinFunc: base}
+		f = &builtinLastInsertIDWithIDSig{base}
 	case tipb.ScalarFuncSig_Version:
 		f = &builtinVersionSig{base}
 	case tipb.ScalarFuncSig_TiDBVersion:
 		f = &builtinTiDBVersionSig{base}
 	case tipb.ScalarFuncSig_RowCount:
-		f = &builtinRowCountSig{baseBuiltinFunc: base}
+		f = &builtinRowCountSig{base}
 	case tipb.ScalarFuncSig_Sleep:
-		f = &builtinSleepSig{baseBuiltinFunc: base}
+		f = &builtinSleepSig{base}
 	case tipb.ScalarFuncSig_Lock:
-		f = &builtinLockSig{baseBuiltinFunc: base}
+		f = &builtinLockSig{base}
 	case tipb.ScalarFuncSig_ReleaseLock:
-		f = &builtinReleaseLockSig{baseBuiltinFunc: base}
+		f = &builtinReleaseLockSig{base}
 	case tipb.ScalarFuncSig_DecimalAnyValue:
 		f = &builtinDecimalAnyValueSig{base}
 	case tipb.ScalarFuncSig_DurationAnyValue:
@@ -652,21 +661,21 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 	case tipb.ScalarFuncSig_UUID:
 		f = &builtinUUIDSig{base}
 	case tipb.ScalarFuncSig_LikeSig:
-		f = &builtinLikeSig{baseBuiltinFunc: base}
+		f = &builtinLikeSig{base, nil, false, sync.Once{}}
 	case tipb.ScalarFuncSig_IlikeSig:
-		f = &builtinIlikeSig{baseBuiltinFunc: base}
+		f = &builtinIlikeSig{base, nil, false, sync.Once{}}
 	case tipb.ScalarFuncSig_RegexpSig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpUTF8Sig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpLikeSig:
-		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpLikeFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpSubstrSig:
-		f = &builtinRegexpSubstrFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpSubstrFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpInStrSig:
-		f = &builtinRegexpInStrFuncSig{regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpInStrFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}}
 	case tipb.ScalarFuncSig_RegexpReplaceSig:
-		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig: regexpBaseFuncSig{baseBuiltinFunc: base}}
+		f = &builtinRegexpReplaceFuncSig{regexpBaseFuncSig{base, regexpMemorizedSig{nil, nil}, sync.Once{}}, make([]Instruction, 0), nil, sync.Once{}, false}
 	case tipb.ScalarFuncSig_JsonExtractSig:
 		f = &builtinJSONExtractSig{base}
 	case tipb.ScalarFuncSig_JsonUnquoteSig:
@@ -695,8 +704,7 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 		f = &builtinJSONArrayAppendSig{base}
 	case tipb.ScalarFuncSig_JsonArrayInsertSig:
 		f = &builtinJSONArrayInsertSig{base}
-	case tipb.ScalarFuncSig_JsonMergePatchSig:
-		f = &builtinJSONMergePatchSig{base}
+	// case tipb.ScalarFuncSig_JsonMergePatchSig:
 	case tipb.ScalarFuncSig_JsonMergePreserveSig:
 		f = &builtinJSONMergeSig{base}
 	case tipb.ScalarFuncSig_JsonContainsPathSig:
@@ -906,70 +914,34 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 		f = &builtinExtractDatetimeSig{base}
 	case tipb.ScalarFuncSig_ExtractDuration:
 		f = &builtinExtractDurationSig{base}
-	case tipb.ScalarFuncSig_AddDateStringString,
-		tipb.ScalarFuncSig_AddDateStringInt,
-		tipb.ScalarFuncSig_AddDateStringReal,
-		tipb.ScalarFuncSig_AddDateStringDecimal,
-		tipb.ScalarFuncSig_AddDateIntString,
-		tipb.ScalarFuncSig_AddDateIntInt,
-		tipb.ScalarFuncSig_AddDateIntReal,
-		tipb.ScalarFuncSig_AddDateIntDecimal,
-		tipb.ScalarFuncSig_AddDateRealString,
-		tipb.ScalarFuncSig_AddDateRealInt,
-		tipb.ScalarFuncSig_AddDateRealReal,
-		tipb.ScalarFuncSig_AddDateRealDecimal,
-		tipb.ScalarFuncSig_AddDateDecimalString,
-		tipb.ScalarFuncSig_AddDateDecimalInt,
-		tipb.ScalarFuncSig_AddDateDecimalReal,
-		tipb.ScalarFuncSig_AddDateDecimalDecimal,
-		tipb.ScalarFuncSig_AddDateDatetimeString,
-		tipb.ScalarFuncSig_AddDateDatetimeInt,
-		tipb.ScalarFuncSig_AddDateDatetimeReal,
-		tipb.ScalarFuncSig_AddDateDatetimeDecimal,
-		tipb.ScalarFuncSig_AddDateDurationString,
-		tipb.ScalarFuncSig_AddDateDurationInt,
-		tipb.ScalarFuncSig_AddDateDurationReal,
-		tipb.ScalarFuncSig_AddDateDurationDecimal,
-		tipb.ScalarFuncSig_AddDateDurationStringDatetime,
-		tipb.ScalarFuncSig_AddDateDurationIntDatetime,
-		tipb.ScalarFuncSig_AddDateDurationRealDatetime,
-		tipb.ScalarFuncSig_AddDateDurationDecimalDatetime:
-		f, e = (&addSubDateFunctionClass{baseFunctionClass{ast.AddDate, 3, 3}, addTime, addDuration, setAdd}).getFunction(ctx, args)
-		if e != nil {
-			return f, e
-		}
-	case tipb.ScalarFuncSig_SubDateStringString,
-		tipb.ScalarFuncSig_SubDateStringInt,
-		tipb.ScalarFuncSig_SubDateStringReal,
-		tipb.ScalarFuncSig_SubDateStringDecimal,
-		tipb.ScalarFuncSig_SubDateIntString,
-		tipb.ScalarFuncSig_SubDateIntInt,
-		tipb.ScalarFuncSig_SubDateIntReal,
-		tipb.ScalarFuncSig_SubDateIntDecimal,
-		tipb.ScalarFuncSig_SubDateRealString,
-		tipb.ScalarFuncSig_SubDateRealInt,
-		tipb.ScalarFuncSig_SubDateRealReal,
-		tipb.ScalarFuncSig_SubDateRealDecimal,
-		tipb.ScalarFuncSig_SubDateDecimalString,
-		tipb.ScalarFuncSig_SubDateDecimalInt,
-		tipb.ScalarFuncSig_SubDateDecimalReal,
-		tipb.ScalarFuncSig_SubDateDecimalDecimal,
-		tipb.ScalarFuncSig_SubDateDatetimeString,
-		tipb.ScalarFuncSig_SubDateDatetimeInt,
-		tipb.ScalarFuncSig_SubDateDatetimeReal,
-		tipb.ScalarFuncSig_SubDateDatetimeDecimal,
-		tipb.ScalarFuncSig_SubDateDurationString,
-		tipb.ScalarFuncSig_SubDateDurationInt,
-		tipb.ScalarFuncSig_SubDateDurationReal,
-		tipb.ScalarFuncSig_SubDateDurationDecimal,
-		tipb.ScalarFuncSig_SubDateDurationStringDatetime,
-		tipb.ScalarFuncSig_SubDateDurationIntDatetime,
-		tipb.ScalarFuncSig_SubDateDurationRealDatetime,
-		tipb.ScalarFuncSig_SubDateDurationDecimalDatetime:
-		f, e = (&addSubDateFunctionClass{baseFunctionClass{ast.SubDate, 3, 3}, subTime, subDuration, setSub}).getFunction(ctx, args)
-		if e != nil {
-			return f, e
-		}
+	// case tipb.ScalarFuncSig_AddDateStringString:
+	// 	f = &builtinAddDateStringStringSig{base}
+	// case tipb.ScalarFuncSig_AddDateStringInt:
+	// 	f = &builtinAddDateStringIntSig{base}
+	// case tipb.ScalarFuncSig_AddDateStringDecimal:
+	// 	f = &builtinAddDateStringDecimalSig{base}
+	// case tipb.ScalarFuncSig_AddDateIntString:
+	// 	f = &builtinAddDateIntStringSig{base}
+	// case tipb.ScalarFuncSig_AddDateIntInt:
+	// 	f = &builtinAddDateIntIntSig{base}
+	// case tipb.ScalarFuncSig_AddDateDatetimeString:
+	// 	f = &builtinAddDateDatetimeStringSig{base}
+	// case tipb.ScalarFuncSig_AddDateDatetimeInt:
+	// 	f = &builtinAddDateDatetimeIntSig{base}
+	// case tipb.ScalarFuncSig_SubDateStringString:
+	// 	f = &builtinSubDateStringStringSig{base}
+	// case tipb.ScalarFuncSig_SubDateStringInt:
+	// 	f = &builtinSubDateStringIntSig{base}
+	// case tipb.ScalarFuncSig_SubDateStringDecimal:
+	// 	f = &builtinSubDateStringDecimalSig{base}
+	// case tipb.ScalarFuncSig_SubDateIntString:
+	// 	f = &builtinSubDateIntStringSig{base}
+	// case tipb.ScalarFuncSig_SubDateIntInt:
+	// 	f = &builtinSubDateIntIntSig{base}
+	// case tipb.ScalarFuncSig_SubDateDatetimeString:
+	// 	f = &builtinSubDateDatetimeStringSig{base}
+	// case tipb.ScalarFuncSig_SubDateDatetimeInt:
+	// 	f = &builtinSubDateDatetimeIntSig{base}
 	case tipb.ScalarFuncSig_FromDays:
 		f = &builtinFromDaysSig{base}
 	case tipb.ScalarFuncSig_TimeFormat:
@@ -1113,42 +1085,7 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 	case tipb.ScalarFuncSig_FromBinary:
 		// TODO: set the `cannotConvertStringAsWarning` accordingly
 		f = &builtinInternalFromBinarySig{base, false}
-	case tipb.ScalarFuncSig_CastVectorFloat32AsString:
-		f = &builtinCastVectorFloat32AsStringSig{base}
-	case tipb.ScalarFuncSig_CastVectorFloat32AsVectorFloat32:
-		f = &builtinCastVectorFloat32AsVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_LTVectorFloat32:
-		f = &builtinLTVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_LEVectorFloat32:
-		f = &builtinLEVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_GTVectorFloat32:
-		f = &builtinGTVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_GEVectorFloat32:
-		f = &builtinGEVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_NEVectorFloat32:
-		f = &builtinNEVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_EQVectorFloat32:
-		f = &builtinEQVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_NullEQVectorFloat32:
-		f = &builtinNullEQVectorFloat32Sig{base}
-	case tipb.ScalarFuncSig_VectorFloat32AnyValue:
-		f = &builtinVectorFloat32AnyValueSig{base}
-	case tipb.ScalarFuncSig_VectorFloat32IsNull:
-		f = &builtinVectorFloat32IsNullSig{base}
-	case tipb.ScalarFuncSig_VecAsTextSig:
-		f = &builtinVecAsTextSig{base}
-	case tipb.ScalarFuncSig_VecDimsSig:
-		f = &builtinVecDimsSig{base}
-	case tipb.ScalarFuncSig_VecL1DistanceSig:
-		f = &builtinVecL1DistanceSig{base}
-	case tipb.ScalarFuncSig_VecL2DistanceSig:
-		f = &builtinVecL2DistanceSig{base}
-	case tipb.ScalarFuncSig_VecNegativeInnerProductSig:
-		f = &builtinVecNegativeInnerProductSig{base}
-	case tipb.ScalarFuncSig_VecCosineDistanceSig:
-		f = &builtinVecCosineDistanceSig{base}
-	case tipb.ScalarFuncSig_VecL2NormSig:
-		f = &builtinVecL2NormSig{base}
+
 	default:
 		e = ErrFunctionNotExists.GenWithStackByArgs("FUNCTION", sigCode)
 		return nil, e
@@ -1157,7 +1094,9 @@ func getSignatureByPB(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.Fie
 	return f, nil
 }
 
-func newDistSQLFunctionBySig(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (Expression, error) {
+func newDistSQLFunctionBySig(sc *stmtctx.StatementContext, sigCode tipb.ScalarFuncSig, tp *tipb.FieldType, args []Expression) (Expression, error) {
+	ctx := mock.NewContext()
+	ctx.GetSessionVars().StmtCtx = sc
 	f, err := getSignatureByPB(ctx, sigCode, tp, args)
 	if err != nil {
 		return nil, err
@@ -1170,10 +1109,10 @@ func newDistSQLFunctionBySig(ctx BuildContext, sigCode tipb.ScalarFuncSig, tp *t
 }
 
 // PBToExprs converts pb structures to expressions.
-func PBToExprs(ctx BuildContext, pbExprs []*tipb.Expr, fieldTps []*types.FieldType) ([]Expression, error) {
+func PBToExprs(pbExprs []*tipb.Expr, fieldTps []*types.FieldType, sc *stmtctx.StatementContext) ([]Expression, error) {
 	exprs := make([]Expression, 0, len(pbExprs))
 	for _, expr := range pbExprs {
-		e, err := PBToExpr(ctx, expr, fieldTps)
+		e, err := PBToExpr(expr, fieldTps, sc)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1186,8 +1125,7 @@ func PBToExprs(ctx BuildContext, pbExprs []*tipb.Expr, fieldTps []*types.FieldTy
 }
 
 // PBToExpr converts pb structure to expression.
-func PBToExpr(ctx BuildContext, expr *tipb.Expr, tps []*types.FieldType) (Expression, error) {
-	evalCtx := ctx.GetEvalCtx()
+func PBToExpr(expr *tipb.Expr, tps []*types.FieldType, sc *stmtctx.StatementContext) (Expression, error) {
 	switch expr.Tp {
 	case tipb.ExprType_ColumnRef:
 		_, offset, err := codec.DecodeInt(expr.Val)
@@ -1212,17 +1150,15 @@ func PBToExpr(ctx BuildContext, expr *tipb.Expr, tps []*types.FieldType) (Expres
 	case tipb.ExprType_Float64:
 		return convertFloat(expr.Val, false)
 	case tipb.ExprType_MysqlDecimal:
-		return convertDecimal(expr.Val, expr.FieldType)
+		return convertDecimal(expr.Val)
 	case tipb.ExprType_MysqlDuration:
 		return convertDuration(expr.Val)
 	case tipb.ExprType_MysqlTime:
-		return convertTime(expr.Val, expr.FieldType, evalCtx.Location())
+		return convertTime(expr.Val, expr.FieldType, sc.TimeZone())
 	case tipb.ExprType_MysqlJson:
 		return convertJSON(expr.Val)
 	case tipb.ExprType_MysqlEnum:
 		return convertEnum(expr.Val, expr.FieldType)
-	case tipb.ExprType_TiDBVectorFloat32:
-		return convertVectorFloat32(expr.Val)
 	}
 	if expr.Tp != tipb.ExprType_ScalarFunc {
 		panic("should be a tipb.ExprType_ScalarFunc")
@@ -1241,13 +1177,13 @@ func PBToExpr(ctx BuildContext, expr *tipb.Expr, tps []*types.FieldType) (Expres
 			args = append(args, results...)
 			continue
 		}
-		arg, err := PBToExpr(ctx, child, tps)
+		arg, err := PBToExpr(child, tps, sc)
 		if err != nil {
 			return nil, err
 		}
 		args = append(args, arg)
 	}
-	sf, err := newDistSQLFunctionBySig(ctx, expr.Sig, expr.FieldType, args)
+	sf, err := newDistSQLFunctionBySig(sc, expr.Sig, expr.FieldType, args)
 	if err != nil {
 		return nil, err
 	}
@@ -1332,8 +1268,7 @@ func convertFloat(val []byte, f32 bool) (*Constant, error) {
 	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeDouble)}, nil
 }
 
-func convertDecimal(val []byte, ftPB *tipb.FieldType) (*Constant, error) {
-	ft := PbTypeToFieldType(ftPB)
+func convertDecimal(val []byte) (*Constant, error) {
 	_, dec, precision, frac, err := codec.DecodeDecimal(val)
 	var d types.Datum
 	d.SetMysqlDecimal(dec)
@@ -1342,7 +1277,7 @@ func convertDecimal(val []byte, ftPB *tipb.FieldType) (*Constant, error) {
 	if err != nil {
 		return nil, errors.Errorf("invalid decimal % x", val)
 	}
-	return &Constant{Value: d, RetType: ft}, nil
+	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeNewDecimal)}, nil
 }
 
 func convertDuration(val []byte) (*Constant, error) {
@@ -1365,16 +1300,6 @@ func convertJSON(val []byte) (*Constant, error) {
 		return nil, errors.Errorf("invalid Datum.Kind() %d", d.Kind())
 	}
 	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeJSON)}, nil
-}
-
-func convertVectorFloat32(val []byte) (*Constant, error) {
-	v, _, err := types.ZeroCopyDeserializeVectorFloat32(val)
-	if err != nil {
-		return nil, errors.Errorf("invalid VectorFloat32 %x", val)
-	}
-	var d types.Datum
-	d.SetVectorFloat32(v)
-	return &Constant{Value: d, RetType: types.NewFieldType(mysql.TypeTiDBVectorFloat32)}, nil
 }
 
 func convertEnum(val []byte, tp *tipb.FieldType) (*Constant, error) {

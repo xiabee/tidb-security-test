@@ -38,10 +38,8 @@ func TestMain(m *testing.M) {
 	registerHook()
 	opts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
-		goleak.IgnoreTopFunction("github.com/bazelbuild/rules_go/go/tools/bzltestutil.RegisterTimeoutHandler.func1"),
 		goleak.IgnoreTopFunction("github.com/lestrrat-go/httprc.runFetchWorker"),
 		goleak.IgnoreTopFunction("go.etcd.io/etcd/client/pkg/v3/logutil.(*MergeLogger).outputLoop"),
-		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
 	}
 	goleak.VerifyTestMain(m, opts...)
 }
@@ -57,9 +55,12 @@ func TestMemTracker4UpdateExec(t *testing.T) {
 
 	oom.SetTracker("")
 	oom.ClearMessageFilter()
-	oom.AddMessageFilter("expensive_query during bootstrap phase")
+	oom.AddMessageFilter(
+		"expensive_query during bootstrap phase",
+		"schemaLeaseChecker is not set for this transaction")
 
 	tk.MustExec("insert into t_MemTracker4UpdateExec values (1,1,1), (2,2,2), (3,3,3)")
+	require.Equal(t, "schemaLeaseChecker is not set for this transaction", oom.GetTracker())
 
 	tk.Session().GetSessionVars().MemQuotaQuery = 244
 	tk.MustExec("update t_MemTracker4UpdateExec set a = 4")
@@ -79,9 +80,12 @@ func TestMemTracker4InsertAndReplaceExec(t *testing.T) {
 	log.SetLevel(zap.InfoLevel)
 
 	oom.SetTracker("")
-	oom.AddMessageFilter("expensive_query during bootstrap phase")
+	oom.AddMessageFilter(
+		"schemaLeaseChecker is not set for this transaction",
+		"expensive_query during bootstrap phase")
 
 	tk.MustExec("insert into t_MemTracker4InsertAndReplaceExec values (1,1,1), (2,2,2), (3,3,3)")
+	require.Equal(t, "schemaLeaseChecker is not set for this transaction", oom.GetTracker())
 	tk.Session().GetSessionVars().MemQuotaQuery = 1
 	oom.ClearMessageFilter()
 	oom.AddMessageFilter("expensive_query during bootstrap phase")
@@ -157,8 +161,8 @@ func TestMemTracker4DeleteExec(t *testing.T) {
 	tk := testkit.NewTestKit(t, store)
 	tk.MustExec("use test")
 	tk.MustExec("set tidb_cost_model_version=1")
-	tk.MustExec("create table MemTracker4DeleteExec1 (id int, a int, b int, index idx_a(a), index idx_b(b))")
-	tk.MustExec("create table MemTracker4DeleteExec2 (id int, a int, b int, index idx_a(a), index idx_b(b))")
+	tk.MustExec("create table MemTracker4DeleteExec1 (id int, a int, b int, index idx_a(`a`))")
+	tk.MustExec("create table MemTracker4DeleteExec2 (id int, a int, b int, index idx_a(`a`))")
 
 	// delete from single table
 	log.SetLevel(zap.InfoLevel)

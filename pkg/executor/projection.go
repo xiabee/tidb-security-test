@@ -26,7 +26,6 @@ import (
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/execdetails"
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -55,28 +54,10 @@ type projectionOutput struct {
 	done chan error
 }
 
-// projectionExecutorContext is the execution context for the `ProjectionExec`
-type projectionExecutorContext struct {
-	stmtMemTracker             *memory.Tracker
-	stmtRuntimeStatsColl       *execdetails.RuntimeStatsColl
-	evalCtx                    expression.EvalContext
-	enableVectorizedExpression bool
-}
-
-func newProjectionExecutorContext(sctx sessionctx.Context) projectionExecutorContext {
-	return projectionExecutorContext{
-		stmtMemTracker:             sctx.GetSessionVars().StmtCtx.MemTracker,
-		stmtRuntimeStatsColl:       sctx.GetSessionVars().StmtCtx.RuntimeStatsColl,
-		evalCtx:                    sctx.GetExprCtx().GetEvalCtx(),
-		enableVectorizedExpression: sctx.GetSessionVars().EnableVectorizedExpression,
-	}
-}
-
 // ProjectionExec implements the physical Projection Operator:
 // https://en.wikipedia.org/wiki/Projection_(relational_algebra)
 type ProjectionExec struct {
-	projectionExecutorContext
-	exec.BaseExecutorV2
+	exec.BaseExecutor
 
 	evaluatorSuit *expression.EvaluatorSuite
 
@@ -95,7 +76,7 @@ type ProjectionExec struct {
 	parentReqRows int64
 
 	memTracker *memory.Tracker
-	wg         *sync.WaitGroup
+	wg         sync.WaitGroup
 
 	calculateNoDelay bool
 	prepared         bool
@@ -103,7 +84,7 @@ type ProjectionExec struct {
 
 // Open implements the Executor Open interface.
 func (e *ProjectionExec) Open(ctx context.Context) error {
-	if err := e.BaseExecutorV2.Open(ctx); err != nil {
+	if err := e.BaseExecutor.Open(ctx); err != nil {
 		return err
 	}
 	failpoint.Inject("mockProjectionExecBaseExecutorOpenReturnedError", func(val failpoint.Value) {
@@ -123,7 +104,7 @@ func (e *ProjectionExec) open(_ context.Context) error {
 	} else {
 		e.memTracker = memory.NewTracker(e.ID(), -1)
 	}
-	e.memTracker.AttachTo(e.stmtMemTracker)
+	e.memTracker.AttachTo(e.Ctx().GetSessionVars().StmtCtx.MemTracker)
 
 	// For now a Projection can not be executed vectorially only because it
 	// contains "SetVar" or "GetVar" functions, in this scenario this
@@ -136,8 +117,6 @@ func (e *ProjectionExec) open(_ context.Context) error {
 		e.childResult = exec.TryNewCacheChunk(e.Children(0))
 		e.memTracker.Consume(e.childResult.MemoryUsage())
 	}
-
-	e.wg = &sync.WaitGroup{}
 
 	return nil
 }
@@ -152,7 +131,7 @@ func (e *ProjectionExec) open(_ context.Context) error {
 //
 // 1. "projectionInputFetcher" gets its input and output resources from its
 // "inputCh" and "outputCh" channel, once the input and output resources are
-// obtained, it fetches child's result into "input.chk" and:
+// abtained, it fetches child's result into "input.chk" and:
 //   a. Dispatches this input to the worker specified in "input.targetWorker"
 //   b. Dispatches this output to the main thread: "ProjectionExec.Next"
 //   c. Dispatches this output to the worker specified in "input.targetWorker"
@@ -224,7 +203,7 @@ func (e *ProjectionExec) unParallelExecute(ctx context.Context, chk *chunk.Chunk
 	if e.childResult.NumRows() == 0 {
 		return nil
 	}
-	err = e.evaluatorSuit.Run(e.evalCtx, e.enableVectorizedExpression, e.childResult, chk)
+	err = e.evaluatorSuit.Run(e.Ctx(), e.childResult, chk)
 	return err
 }
 
@@ -271,7 +250,7 @@ func (e *ProjectionExec) prepare(ctx context.Context) {
 	for i := int64(0); i < e.numWorkers; i++ {
 		e.workers = append(e.workers, &projectionWorker{
 			proj:            e,
-			ctx:             e.projectionExecutorContext,
+			sctx:            e.Ctx(),
 			evaluatorSuit:   e.evaluatorSuit,
 			globalFinishCh:  e.finishCh,
 			inputGiveBackCh: e.fetcher.inputCh,
@@ -344,16 +323,16 @@ func (e *ProjectionExec) Close() error {
 			e.drainOutputCh(w.outputCh)
 		}
 	}
-	if e.BaseExecutorV2.RuntimeStats() != nil {
+	if e.BaseExecutor.RuntimeStats() != nil {
 		runtimeStats := &execdetails.RuntimeStatsWithConcurrencyInfo{}
 		if e.isUnparallelExec() {
 			runtimeStats.SetConcurrencyInfo(execdetails.NewConcurrencyInfo("Concurrency", 0))
 		} else {
 			runtimeStats.SetConcurrencyInfo(execdetails.NewConcurrencyInfo("Concurrency", int(e.numWorkers)))
 		}
-		e.stmtRuntimeStatsColl.RegisterStats(e.ID(), runtimeStats)
+		e.Ctx().GetSessionVars().StmtCtx.RuntimeStatsColl.RegisterStats(e.ID(), runtimeStats)
 	}
-	return e.BaseExecutorV2.Close()
+	return e.BaseExecutor.Close()
 }
 
 type projectionInputFetcher struct {
@@ -423,7 +402,7 @@ func (f *projectionInputFetcher) run(ctx context.Context) {
 
 type projectionWorker struct {
 	proj            *ProjectionExec
-	ctx             projectionExecutorContext
+	sctx            sessionctx.Context
 	evaluatorSuit   *expression.EvaluatorSuite
 	globalFinishCh  <-chan struct{}
 	inputGiveBackCh chan<- *projectionInput
@@ -468,7 +447,7 @@ func (w *projectionWorker) run(ctx context.Context) {
 		}
 
 		mSize := output.chk.MemoryUsage() + input.chk.MemoryUsage()
-		err := w.evaluatorSuit.Run(w.ctx.evalCtx, w.ctx.enableVectorizedExpression, input.chk, output.chk)
+		err := w.evaluatorSuit.Run(w.sctx, input.chk, output.chk)
 		failpoint.Inject("ConsumeRandomPanic", nil)
 		w.proj.memTracker.Consume(output.chk.MemoryUsage() + input.chk.MemoryUsage() - mSize)
 		output.done <- err
@@ -481,9 +460,9 @@ func (w *projectionWorker) run(ctx context.Context) {
 	}
 }
 
-func recoveryProjection(output *projectionOutput, r any) {
+func recoveryProjection(output *projectionOutput, r interface{}) {
 	if output != nil {
-		output.done <- util.GetRecoverError(r)
+		output.done <- errors.Errorf("%v", r)
 	}
 	logutil.BgLogger().Error("projection executor panicked", zap.String("error", fmt.Sprintf("%v", r)), zap.Stack("stack"))
 }

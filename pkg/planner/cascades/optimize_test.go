@@ -22,14 +22,10 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/infoschema"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
-	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
 	"github.com/pingcap/tidb/pkg/planner/memo"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
 	"github.com/pingcap/tidb/pkg/planner/property"
 	"github.com/stretchr/testify/require"
 )
@@ -45,11 +41,11 @@ func TestImplGroupZeroCost(t *testing.T) {
 
 	stmt, err := p.ParseOneStmt("select t1.a, t2.a from t as t1 left join t as t2 on t1.a = t2.a where t1.a < 1.0", "", "")
 	require.NoError(t, err)
-	nodeW := resolve.NewNodeW(stmt)
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 	require.NoError(t, err)
 
-	logic, ok := plan.(base.LogicalPlan)
+	logic, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	rootGroup := memo.Convert2Group(logic)
@@ -73,11 +69,10 @@ func TestInitGroupSchema(t *testing.T) {
 	stmt, err := p.ParseOneStmt("select a from t", "", "")
 	require.NoError(t, err)
 
-	nodeW := resolve.NewNodeW(stmt)
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 	require.NoError(t, err)
 
-	logic, ok := plan.(base.LogicalPlan)
+	logic, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	g := memo.Convert2Group(logic)
@@ -99,11 +94,10 @@ func TestFillGroupStats(t *testing.T) {
 	stmt, err := p.ParseOneStmt("select * from t t1 join t t2 on t1.a = t2.a", "", "")
 	require.NoError(t, err)
 
-	nodeW := resolve.NewNodeW(stmt)
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 	require.NoError(t, err)
 
-	logic, ok := plan.(base.LogicalPlan)
+	logic, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	rootGroup := memo.Convert2Group(logic)
@@ -122,8 +116,8 @@ func TestPreparePossibleProperties(t *testing.T) {
 	domain.GetDomain(ctx).MockInfoCacheAndLoadInfoSchema(is)
 	optimizer := NewOptimizer()
 
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandDataSource: {
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandDataSource: {
 			NewRuleEnumeratePaths(),
 		},
 	})
@@ -134,18 +128,17 @@ func TestPreparePossibleProperties(t *testing.T) {
 	stmt, err := p.ParseOneStmt("select f, sum(a) from t group by f", "", "")
 	require.NoError(t, err)
 
-	nodeW := resolve.NewNodeW(stmt)
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 	require.NoError(t, err)
 
-	logic, ok := plan.(base.LogicalPlan)
+	logic, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
-	logic, err = optimizer.onPhasePreprocessing(ctx.GetPlanCtx(), logic)
+	logic, err = optimizer.onPhasePreprocessing(ctx, logic)
 	require.NoError(t, err)
 
 	// collect the target columns: f, a
-	ds, ok := logic.Children()[0].Children()[0].(*logicalop.DataSource)
+	ds, ok := logic.Children()[0].Children()[0].(*plannercore.DataSource)
 	require.True(t, ok)
 
 	var columnF, columnA *expression.Column
@@ -159,11 +152,11 @@ func TestPreparePossibleProperties(t *testing.T) {
 	require.NotNil(t, columnF)
 	require.NotNil(t, columnA)
 
-	agg, ok := logic.Children()[0].(*logicalop.LogicalAggregation)
+	agg, ok := logic.Children()[0].(*plannercore.LogicalAggregation)
 	require.True(t, ok)
 
 	group := memo.Convert2Group(agg)
-	require.NoError(t, optimizer.onPhaseExploration(ctx.GetPlanCtx(), group))
+	require.NoError(t, optimizer.onPhaseExploration(ctx, group))
 
 	// The memo looks like this:
 	// Group#0 Schema:[Column#13,test.t.f]
@@ -182,7 +175,7 @@ func TestPreparePossibleProperties(t *testing.T) {
 	aggProp := preparePossibleProperties(group, propMap)
 	// We only have one prop for Group0 : f
 	require.Len(t, aggProp, 1)
-	require.True(t, aggProp[0][0].EqualColumn(columnF))
+	require.True(t, aggProp[0][0].Equal(nil, columnF))
 
 	gatherGroup := group.Equivalents.Front().Value.(*memo.GroupExpr).Children[0]
 	gatherProp, ok := propMap[gatherGroup]
@@ -191,7 +184,7 @@ func TestPreparePossibleProperties(t *testing.T) {
 	require.Len(t, gatherProp, 2)
 	for _, prop := range gatherProp {
 		require.Len(t, prop, 1)
-		require.True(t, prop[0].EqualColumn(columnA) || prop[0].EqualColumn(columnF))
+		require.True(t, prop[0].Equal(nil, columnA) || prop[0].Equal(nil, columnF))
 	}
 }
 
@@ -219,9 +212,9 @@ func TestAppliedRuleSet(t *testing.T) {
 	optimizer := NewOptimizer()
 
 	rule := fakeTransformation{}
-	rule.pattern = pattern.NewPattern(pattern.OperandProjection, pattern.EngineAll)
-	optimizer.ResetTransformationRules(map[pattern.Operand][]Transformation{
-		pattern.OperandProjection: {
+	rule.pattern = memo.NewPattern(memo.OperandProjection, memo.EngineAll)
+	optimizer.ResetTransformationRules(map[memo.Operand][]Transformation{
+		memo.OperandProjection: {
 			&rule,
 		},
 	})
@@ -232,14 +225,13 @@ func TestAppliedRuleSet(t *testing.T) {
 	stmt, err := p.ParseOneStmt("select 1", "", "")
 	require.NoError(t, err)
 
-	nodeW := resolve.NewNodeW(stmt)
-	plan, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, nodeW, is)
+	plan, _, err := plannercore.BuildLogicalPlanForTest(context.Background(), ctx, stmt, is)
 	require.NoError(t, err)
 
-	logic, ok := plan.(base.LogicalPlan)
+	logic, ok := plan.(plannercore.LogicalPlan)
 	require.True(t, ok)
 
 	group := memo.Convert2Group(logic)
-	require.NoError(t, optimizer.onPhaseExploration(ctx.GetPlanCtx(), group))
+	require.NoError(t, optimizer.onPhaseExploration(ctx, group))
 	require.Equal(t, 1, rule.appliedTimes)
 }

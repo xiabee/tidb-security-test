@@ -19,7 +19,7 @@ func newSimpleRowReceiver(length int) *simpleRowReceiver {
 	return &simpleRowReceiver{data: make([]string, length)}
 }
 
-func (s *simpleRowReceiver) BindAddress(args []any) {
+func (s *simpleRowReceiver) BindAddress(args []interface{}) {
 	for i := range args {
 		args[i] = &s.data[i]
 	}

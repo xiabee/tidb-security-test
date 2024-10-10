@@ -55,9 +55,6 @@ type TopSQLReporter interface {
 	// isLarge indicates the size of normalizedPlan is big.
 	RegisterPlan(planDigest []byte, normalizedPlan string, isLarge bool)
 
-	// BindProcessCPUTimeUpdater is used to pass ProcessCPUTimeUpdater
-	BindProcessCPUTimeUpdater(updater collector.ProcessCPUTimeUpdater)
-
 	// Close uses to close and release the reporter resource.
 	Close()
 }
@@ -129,11 +126,6 @@ func (tsr *RemoteTopSQLReporter) Collect(data []collector.SQLCPUTimeRecord) {
 		// ignore if chan blocked
 		reporter_metrics.IgnoreCollectChannelFullCounter.Inc()
 	}
-}
-
-// BindProcessCPUTimeUpdater implements TopSQLReporter.
-func (tsr *RemoteTopSQLReporter) BindProcessCPUTimeUpdater(updater collector.ProcessCPUTimeUpdater) {
-	tsr.sqlCPUCollector.SetProcessCPUUpdater(updater)
 }
 
 // CollectStmtStatsMap implements stmtstats.Collector.

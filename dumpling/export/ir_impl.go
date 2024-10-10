@@ -17,14 +17,14 @@ import (
 type rowIter struct {
 	rows    *sql.Rows
 	hasNext bool
-	args    []any
+	args    []interface{}
 }
 
 func newRowIter(rows *sql.Rows, argLen int) *rowIter {
 	r := &rowIter{
 		rows:    rows,
 		hasNext: false,
-		args:    make([]any, argLen),
+		args:    make([]interface{}, argLen),
 	}
 	r.hasNext = r.rows.Next()
 	return r
@@ -59,7 +59,7 @@ type multiQueriesChunkIter struct {
 	hasNext bool
 	id      int
 	queries []string
-	args    []any
+	args    []interface{}
 	err     error
 }
 
@@ -69,7 +69,7 @@ func newMultiQueryChunkIter(tctx *tcontext.Context, conn *sql.Conn, queries []st
 		conn:    conn,
 		queries: queries,
 		id:      0,
-		args:    make([]any, argLen),
+		args:    make([]interface{}, argLen),
 	}
 	r.nextRows()
 	return r

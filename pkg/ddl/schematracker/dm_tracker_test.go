@@ -28,11 +28,9 @@ import (
 	"github.com/pingcap/tidb/pkg/executor"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/autoid"
-	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
-	"github.com/pingcap/tidb/pkg/planner/core/resolve"
+	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/mock"
@@ -88,10 +86,6 @@ func TestCreateTableLongIndex(t *testing.T) {
 	tracker := schematracker.NewSchemaTracker(2)
 	tracker.CreateTestDB(nil)
 	execCreate(t, tracker, sql)
-	sql2 := "create table test.t2 (c1 int, c2 blob, c3 varchar(64), unique index idx_c2(c2(555555)));"
-	execCreate(t, tracker, sql2)
-	sql3 := "create table test.t3 (c1 int, c2 blob, c3 varchar(64), index idx_c2_c3(c3, c2(555555)));"
-	execCreate(t, tracker, sql3)
 }
 
 func execAlter(t *testing.T, tracker schematracker.SchemaTracker, sql string) {
@@ -105,7 +99,7 @@ func execAlter(t *testing.T, tracker schematracker.SchemaTracker, sql string) {
 }
 
 func mustTableByName(t *testing.T, tracker schematracker.SchemaTracker, schema, table string) *model.TableInfo {
-	tblInfo, err := tracker.TableByName(context.Background(), pmodel.NewCIStr(schema), pmodel.NewCIStr(table))
+	tblInfo, err := tracker.TableByName(model.NewCIStr(schema), model.NewCIStr(table))
 	require.NoError(t, err)
 	return tblInfo
 }
@@ -202,7 +196,7 @@ func TestIndexLength(t *testing.T) {
 		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
 	checkShowCreateTable(t, tblInfo, expected)
 
-	err := tracker.DeleteTable(pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
+	err := tracker.DeleteTable(model.NewCIStr("test"), model.NewCIStr("t"))
 	require.NoError(t, err)
 
 	sql = "create table test.t(a text, b text charset ascii, c blob);"
@@ -216,24 +210,6 @@ func TestIndexLength(t *testing.T) {
 	execAlter(t, tracker, sql)
 
 	tblInfo = mustTableByName(t, tracker, "test", "t")
-	checkShowCreateTable(t, tblInfo, expected)
-}
-
-func TestCreateTableWithIndex(t *testing.T) {
-	// See issue 56045
-	sql := "create table test.t(col_1 json, KEY idx_1 ((cast(col_1 as char(64) array))))"
-	tracker := schematracker.NewSchemaTracker(2)
-	tracker.CreateTestDB(nil)
-	execCreate(t, tracker, sql)
-
-	sql = "alter table test.t rename index idx_1 to idx_1_1"
-	execAlter(t, tracker, sql)
-
-	tblInfo := mustTableByName(t, tracker, "test", "t")
-	expected := "CREATE TABLE `t` (\n" +
-		"  `col_1` json DEFAULT NULL,\n" +
-		"  KEY `idx_1_1` ((cast(`col_1` as char(64) array)))\n" +
-		") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin"
 	checkShowCreateTable(t, tblInfo, expected)
 }
 
@@ -498,20 +474,16 @@ type mockRestrictedSQLExecutor struct {
 	sessionctx.Context
 }
 
-func (m mockRestrictedSQLExecutor) ParseWithParams(ctx context.Context, sql string, args ...any) (ast.StmtNode, error) {
+func (m mockRestrictedSQLExecutor) ParseWithParams(ctx context.Context, sql string, args ...interface{}) (ast.StmtNode, error) {
 	return nil, nil
 }
 
-func (m mockRestrictedSQLExecutor) ExecRestrictedStmt(ctx context.Context, stmt ast.StmtNode, opts ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*resolve.ResultField, error) {
+func (m mockRestrictedSQLExecutor) ExecRestrictedStmt(ctx context.Context, stmt ast.StmtNode, opts ...sqlexec.OptionFuncAlias) ([]chunk.Row, []*ast.ResultField, error) {
 	return nil, nil, nil
 }
 
-func (m mockRestrictedSQLExecutor) ExecRestrictedSQL(ctx context.Context, opts []sqlexec.OptionFuncAlias, sql string, args ...any) ([]chunk.Row, []*resolve.ResultField, error) {
+func (m mockRestrictedSQLExecutor) ExecRestrictedSQL(ctx context.Context, opts []sqlexec.OptionFuncAlias, sql string, args ...interface{}) ([]chunk.Row, []*ast.ResultField, error) {
 	return nil, nil, nil
-}
-
-func (m mockRestrictedSQLExecutor) GetRestrictedSQLExecutor() sqlexec.RestrictedSQLExecutor {
-	return m
 }
 
 func TestModifyFromNullToNotNull(t *testing.T) {

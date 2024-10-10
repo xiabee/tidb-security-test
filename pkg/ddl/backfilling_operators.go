@@ -35,8 +35,8 @@ import (
 	"github.com/pingcap/tidb/pkg/disttask/operator"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/lightning/backend/external"
+	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/metrics"
-	"github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/pingcap/tidb/pkg/resourcemanager/pool/workerpool"
 	"github.com/pingcap/tidb/pkg/resourcemanager/util"
@@ -44,7 +44,6 @@ import (
 	"github.com/pingcap/tidb/pkg/table"
 	"github.com/pingcap/tidb/pkg/table/tables"
 	"github.com/pingcap/tidb/pkg/tablecodec"
-	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	"github.com/pingcap/tidb/pkg/util/intest"
@@ -84,33 +83,33 @@ type OperatorCtx struct {
 }
 
 // NewDistTaskOperatorCtx is used for adding index with dist framework.
-func NewDistTaskOperatorCtx(ctx context.Context, taskID, subtaskID int64) *OperatorCtx {
+func NewDistTaskOperatorCtx(
+	ctx context.Context,
+	taskID, subtaskID int64,
+) (*OperatorCtx, context.CancelFunc) {
 	opCtx, cancel := context.WithCancel(ctx)
-	opCtx = logutil.WithFields(opCtx, zap.Int64("task-id", taskID), zap.Int64("subtask-id", subtaskID))
+	opCtx = logutil.WithFields(opCtx,
+		zap.Int64("task-id", taskID),
+		zap.Int64("subtask-id", subtaskID))
 	return &OperatorCtx{
 		Context: opCtx,
 		cancel:  cancel,
-	}
+	}, cancel
 }
 
 // NewLocalOperatorCtx is used for adding index with local ingest mode.
-func NewLocalOperatorCtx(ctx context.Context, jobID int64) *OperatorCtx {
+func NewLocalOperatorCtx(ctx context.Context, jobID int64) (*OperatorCtx, context.CancelFunc) {
 	opCtx, cancel := context.WithCancel(ctx)
 	opCtx = logutil.WithFields(opCtx, zap.Int64("jobID", jobID))
 	return &OperatorCtx{
 		Context: opCtx,
 		cancel:  cancel,
-	}
+	}, cancel
 }
 
 func (ctx *OperatorCtx) onError(err error) {
 	tracedErr := errors.Trace(err)
-	ctx.cancel()
 	ctx.err.CompareAndSwap(nil, &tracedErr)
-}
-
-// Cancel cancels the pipeline.
-func (ctx *OperatorCtx) Cancel() {
 	ctx.cancel()
 }
 
@@ -277,6 +276,15 @@ type TableScanTask struct {
 	ID    int
 	Start kv.Key
 	End   kv.Key
+
+	ctx *OperatorCtx
+}
+
+// RecoverArgs implements workerpool.TaskMayPanic interface.
+func (t TableScanTask) RecoverArgs() (metricsLabel string, funcInfo string, recoverFn func(), quit bool) {
+	return metrics.LblAddIndex, "RecoverArgs", func() {
+		t.ctx.onError(dbterror.ErrReorgPanic)
+	}, false
 }
 
 // String implement fmt.Stringer interface.
@@ -291,11 +299,19 @@ type IndexRecordChunk struct {
 	Chunk *chunk.Chunk
 	Err   error
 	Done  bool
+	ctx   *OperatorCtx
+}
+
+// RecoverArgs implements workerpool.TaskMayPanic interface.
+func (t IndexRecordChunk) RecoverArgs() (metricsLabel string, funcInfo string, recoverFn func(), quit bool) {
+	return metrics.LblAddIndex, "RecoverArgs", func() {
+		t.ctx.onError(dbterror.ErrReorgPanic)
+	}, false
 }
 
 // TableScanTaskSource produces TableScanTask by splitting table records into ranges.
 type TableScanTaskSource struct {
-	ctx context.Context
+	ctx *OperatorCtx
 
 	errGroup errgroup.Group
 	sink     operator.DataChannel[TableScanTask]
@@ -311,7 +327,7 @@ type TableScanTaskSource struct {
 
 // NewTableScanTaskSource creates a new TableScanTaskSource.
 func NewTableScanTaskSource(
-	ctx context.Context,
+	ctx *OperatorCtx,
 	store kv.Storage,
 	physicalTable table.PhysicalTable,
 	startKey kv.Key,
@@ -430,6 +446,7 @@ func (src *TableScanTaskSource) getBatchTableScanTask(
 			ID:    taskID,
 			Start: startKey,
 			End:   endKey,
+			ctx:   src.ctx,
 		}
 		batchTasks = append(batchTasks, task)
 	}
@@ -493,10 +510,6 @@ type tableScanWorker struct {
 }
 
 func (w *tableScanWorker) HandleTask(task TableScanTask, sender func(IndexRecordChunk)) {
-	defer tidbutil.Recover(metrics.LblAddIndex, "handleTableScanTaskWithRecover", func() {
-		w.ctx.onError(dbterror.ErrReorgPanic)
-	}, false)
-
 	failpoint.Inject("injectPanicForTableScan", func() {
 		panic("mock panic")
 	})
@@ -544,7 +557,7 @@ func (w *tableScanWorker) scanRecords(task TableScanTask, sender func(IndexRecor
 				terror.Call(rs.Close)
 				return err
 			}
-			idxResult = IndexRecordChunk{ID: task.ID, Chunk: srcChk, Done: done}
+			idxResult = IndexRecordChunk{ID: task.ID, Chunk: srcChk, Done: done, ctx: w.ctx}
 			if w.cpMgr != nil {
 				w.cpMgr.UpdateTotalKeys(task.ID, srcChk.NumRows(), done)
 			}
@@ -720,9 +733,6 @@ type indexIngestExternalWorker struct {
 }
 
 func (w *indexIngestExternalWorker) HandleTask(ck IndexRecordChunk, send func(IndexWriteResult)) {
-	defer tidbutil.Recover(metrics.LblAddIndex, "indexIngestExternalWorkerRecover", func() {
-		w.ctx.onError(dbterror.ErrReorgPanic)
-	}, false)
 	defer func() {
 		if ck.Chunk != nil {
 			w.srcChunkPool <- ck.Chunk
@@ -745,9 +755,6 @@ type indexIngestLocalWorker struct {
 }
 
 func (w *indexIngestLocalWorker) HandleTask(ck IndexRecordChunk, send func(IndexWriteResult)) {
-	defer tidbutil.Recover(metrics.LblAddIndex, "indexIngestLocalWorkerRecover", func() {
-		w.ctx.onError(dbterror.ErrReorgPanic)
-	}, false)
 	defer func() {
 		if ck.Chunk != nil {
 			w.srcChunkPool <- ck.Chunk
@@ -762,7 +769,7 @@ func (w *indexIngestLocalWorker) HandleTask(ck IndexRecordChunk, send func(Index
 		return
 	}
 	w.rowCntListener.Written(rs.Added)
-	flushed, imported, err := w.backendCtx.Flush(ingest.FlushModeAuto)
+	flushed, imported, err := w.backendCtx.Flush(w.ctx, ingest.FlushModeAuto)
 	if err != nil {
 		w.ctx.onError(err)
 		return
@@ -942,7 +949,7 @@ func (s *indexWriteResultSink) flush() error {
 	failpoint.Inject("mockFlushError", func(_ failpoint.Value) {
 		failpoint.Return(errors.New("mock flush error"))
 	})
-	flushed, imported, err := s.backendCtx.Flush(ingest.FlushModeForceFlushAndImport)
+	flushed, imported, err := s.backendCtx.Flush(s.ctx, ingest.FlushModeForceFlushAndImport)
 	if s.cpMgr != nil {
 		// Try to advance watermark even if there is an error.
 		s.cpMgr.AdvanceWatermark(flushed, imported)
